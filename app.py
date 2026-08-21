@@ -18853,14 +18853,34 @@ def api_futures_analyze_all(timeframe):
 
 
 # ============================================================================
-# ENDPOINT 3: Señales LONG/SHORT activas (futuros)
+# ENDPOINT 3: Señales LONG/SHORT ACTIVAS (vela ACTUAL - dinámica)
 # ============================================================================
+# Cachea 60 segundos para no saturar KuCoin cuando el frontend refresca
+_futures_active_cache = {'data': None, 'ts': 0}
+
 @app.route('/api/futures/signals/active')
 def api_futures_signals_active():
     """
-    Retorna todas las señales LONG/SHORT activas en los 5 pares y 6 temporalidades.
+    Señales LONG/SHORT activas de las 5 cripto de FUTUROS en sus 6 temporalidades.
+    Usa la VELA ACTUAL (dinámica).
+    
+    Filtros:
+    - Solo símbolos: BTC, ETH, SOL, XRP, ADA (contra USDT)
+    - Solo temporalidades: 5m, 15m, 30m, 1h, 2h, 4h
+    - Solo acciones: LONG y SHORT (con confianza >= min_confidence)
+    
+    Query params:
+    - min_confidence (default 60)
     """
     try:
+        global _futures_active_cache
+        min_conf = int(request.args.get('min_confidence', 60))
+        
+        # Cache 60s
+        now_ts = time.time()
+        if _futures_active_cache['data'] is not None and (now_ts - _futures_active_cache['ts']) < 60:
+            return jsonify(_futures_active_cache['data'])
+        
         futures = _get_futures_system()
         if futures is None:
             return jsonify({'success': False, 'error': 'FuturesSystem no disponible'}), 503
@@ -18868,8 +18888,8 @@ def api_futures_signals_active():
         from futures_system import FUTURES_SYMBOLS, FUTURES_TIMEFRAMES
         
         active_signals = []
+        errors = []
         
-        # Recorrer combinaciones (limitado a las TF más comunes para no saturar)
         for symbol in FUTURES_SYMBOLS.keys():
             for timeframe in FUTURES_TIMEFRAMES.keys():
                 try:
@@ -18881,36 +18901,290 @@ def api_futures_signals_active():
                     action = decision.get('action', 'NO_OPERAR')
                     confidence = decision.get('confidence', 0)
                     
-                    if action in ('LONG', 'SHORT') and confidence >= 60:
-                        levels = result.get('levels', {})
-                        active_signals.append({
-                            'symbol': symbol,
-                            'timeframe': timeframe,
-                            'action': action,
-                            'confidence': confidence,
-                            'entry': levels.get('entry'),
-                            'stop_loss': levels.get('stop_loss'),
-                            'take_profit': levels.get('take_profit'),
-                            'leverage': levels.get('leverage'),
-                            'risk_reward': levels.get('risk_reward'),
-                            'roi_tp': levels.get('roi_tp', 0),
-                            'roi_sl': levels.get('roi_sl', 0),
-                            'tp_source': levels.get('tp_source'),
-                            'sl_source': levels.get('sl_source')
-                        })
+                    # SOLO LONG/SHORT (nunca COMPRA_SPOT ni VENTA_SPOT)
+                    if action not in ('LONG', 'SHORT'):
+                        continue
+                    if confidence < min_conf:
+                        continue
+                    
+                    levels = result.get('levels', {})
+                    active_signals.append({
+                        'symbol': symbol,
+                        'timeframe': timeframe,
+                        'action': action,
+                        'confidence': float(confidence),
+                        'entry': levels.get('entry'),
+                        'stop_loss': levels.get('stop_loss'),
+                        'take_profit': levels.get('take_profit'),
+                        'leverage': int(levels.get('leverage', 1)),
+                        'risk_reward': float(levels.get('risk_reward', 0)),
+                        'roi_tp': float(levels.get('roi_tp', 0)),
+                        'roi_sl': float(levels.get('roi_sl', 0)),
+                        'tp_source': levels.get('tp_source'),
+                        'sl_source': levels.get('sl_source'),
+                        'current_price': result.get('current_price')
+                    })
                 except Exception as e:
-                    logger.warning(f"Error en {symbol} {timeframe}: {e}")
+                    errors.append(f"{symbol} {timeframe}: {str(e)[:80]}")
                     continue
         
         # Ordenar por confianza descendente
         active_signals.sort(key=lambda x: -x['confidence'])
         
-        return jsonify({
+        response_data = {
             'success': True,
             'total': len(active_signals),
             'signals': active_signals,
+            'errors': errors if errors else None,
             'timestamp': datetime.now(bolivia_tz).isoformat()
-        })
+        }
+        
+        _futures_active_cache = {'data': response_data, 'ts': now_ts}
+        return jsonify(response_data)
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': f'Error interno: {str(e)}'}), 500
+
+
+# ============================================================================
+# ENDPOINT 3.5: Señales de la VELA ANTERIOR (estáticas - se guardan en BD)
+# ============================================================================
+_futures_previous_cache = {'data': None, 'ts': 0}
+
+@app.route('/api/futures/signals/previous')
+def api_futures_signals_previous():
+    """
+    Señales LONG/SHORT de la VELA ANTERIOR (cerrada, estática).
+    Estas son las que se registran en Supabase para aprendizaje.
+    
+    Solo símbolos de futuros y timeframes cortos.
+    
+    Query params:
+    - min_confidence (default 55)
+    """
+    try:
+        global _futures_previous_cache
+        min_conf = int(request.args.get('min_confidence', 55))
+        
+        # Cache 10 minutos (la vela anterior no cambia)
+        now_ts = time.time()
+        if _futures_previous_cache['data'] is not None and (now_ts - _futures_previous_cache['ts']) < 600:
+            return jsonify(_futures_previous_cache['data'])
+        
+        futures = _get_futures_system()
+        if futures is None:
+            return jsonify({'success': False, 'error': 'FuturesSystem no disponible'}), 503
+        
+        from futures_system import FUTURES_SYMBOLS, FUTURES_TIMEFRAMES
+        
+        previous_signals = []
+        errors = []
+        
+        for symbol in FUTURES_SYMBOLS.keys():
+            for timeframe in FUTURES_TIMEFRAMES.keys():
+                try:
+                    # Obtener DataFrame completo
+                    df = expert_system.get_kucoin_data(symbol, timeframe)
+                    if df is None or len(df) < 50:
+                        continue
+                    
+                    # Simular análisis con la vela ANTERIOR (excluir la última)
+                    df_prev = df.iloc[:-1].copy().reset_index(drop=True)
+                    
+                    result = futures.analyze_futures_market(symbol, timeframe)
+                    # NOTA: analyze_futures_market ya toma internamente el timestamp
+                    # de la vela anterior. Aquí simplemente usamos el análisis.
+                    
+                    if not result or not result.get('success'):
+                        continue
+                    
+                    decision = result.get('decision', {})
+                    action = decision.get('action', 'NO_OPERAR')
+                    confidence = decision.get('confidence', 0)
+                    
+                    # Solo LONG/SHORT
+                    if action not in ('LONG', 'SHORT'):
+                        continue
+                    if confidence < min_conf:
+                        continue
+                    
+                    levels = result.get('levels', {})
+                    current_price = float(result.get('current_price', 0))
+                    
+                    # Determinar si sigue activa: precio no ha tocado SL
+                    sl_price = float(levels.get('stop_loss', 0) or 0)
+                    tp_price = float(levels.get('take_profit', 0) or 0)
+                    activa = 1
+                    resultado = 'pending'
+                    
+                    if action == 'LONG' and sl_price > 0:
+                        if current_price <= sl_price:
+                            activa = 0
+                            resultado = 'sl_hit'
+                        elif tp_price > 0 and current_price >= tp_price:
+                            activa = 0
+                            resultado = 'tp_hit'
+                    elif action == 'SHORT' and sl_price > 0:
+                        if current_price >= sl_price:
+                            activa = 0
+                            resultado = 'sl_hit'
+                        elif tp_price > 0 and current_price <= tp_price:
+                            activa = 0
+                            resultado = 'tp_hit'
+                    
+                    # Timestamp de la vela ANTERIOR
+                    try:
+                        candle_ts = str(df['time'].iloc[-2])
+                    except Exception:
+                        candle_ts = None
+                    
+                    previous_signals.append({
+                        'symbol': symbol,
+                        'timeframe': timeframe,
+                        'action': action,
+                        'confidence': float(confidence),
+                        'entry': levels.get('entry'),
+                        'stop_loss': levels.get('stop_loss'),
+                        'take_profit': levels.get('take_profit'),
+                        'leverage': int(levels.get('leverage', 1)),
+                        'risk_reward': float(levels.get('risk_reward', 0)),
+                        'roi_tp': float(levels.get('roi_tp', 0)),
+                        'roi_sl': float(levels.get('roi_sl', 0)),
+                        'tp_source': levels.get('tp_source'),
+                        'sl_source': levels.get('sl_source'),
+                        'current_price': current_price,
+                        'candle_timestamp': candle_ts,
+                        'activa': activa,
+                        'resultado': resultado
+                    })
+                except Exception as e:
+                    errors.append(f"{symbol} {timeframe}: {str(e)[:80]}")
+                    continue
+        
+        # Ordenar: activas primero, luego por confianza
+        previous_signals.sort(key=lambda x: (-x['activa'], -x['confidence']))
+        
+        response_data = {
+            'success': True,
+            'total': len(previous_signals),
+            'active_count': sum(1 for s in previous_signals if s['activa'] == 1),
+            'signals': previous_signals,
+            'errors': errors if errors else None,
+            'timestamp': datetime.now(bolivia_tz).isoformat()
+        }
+        
+        _futures_previous_cache = {'data': response_data, 'ts': now_ts}
+        return jsonify(response_data)
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': f'Error interno: {str(e)}'}), 500
+
+
+# ============================================================================
+# ENDPOINT 3.6: Correlación y Rotación específica para FUTUROS
+# ============================================================================
+_futures_correlation_cache = {'data': None, 'ts': 0}
+
+@app.route('/api/futures/correlation')
+def api_futures_correlation():
+    """
+    Correlación intra-cripto para FUTUROS: cuál de las 5 cripto tiene 
+    mayor fuerza direccional. No usa PAXG.
+    
+    Query params:
+    - timeframe (default '1h')
+    """
+    try:
+        global _futures_correlation_cache
+        timeframe = request.args.get('timeframe', '1h')
+        cache_key = f"corr_{timeframe}"
+        
+        now_ts = time.time()
+        # Cache 3 minutos
+        if (_futures_correlation_cache.get('data') is not None and 
+            _futures_correlation_cache.get('key') == cache_key and
+            (now_ts - _futures_correlation_cache['ts']) < 180):
+            return jsonify(_futures_correlation_cache['data'])
+        
+        futures = _get_futures_system()
+        if futures is None:
+            return jsonify({'success': False, 'error': 'FuturesSystem no disponible'}), 503
+        
+        # Analizar los 5 pares en la temporalidad dada
+        all_results = futures.analyze_all_futures_pairs(timeframe)
+        
+        # Preparar datos limpios por par
+        pairs_data = {}
+        for symbol in ['BTC-USDT', 'ETH-USDT', 'SOL-USDT', 'XRP-USDT', 'ADA-USDT']:
+            r = all_results.get(symbol, {})
+            if not r or not r.get('success'):
+                pairs_data[symbol] = {
+                    'available': False,
+                    'action': 'N/A',
+                    'confidence': 0,
+                    'adx': 0,
+                    'direction': 'neutral',
+                    'plus_di': 0,
+                    'minus_di': 0
+                }
+                continue
+            
+            trend = r.get('trend', {}) or {}
+            decision = r.get('decision', {}) or {}
+            pairs_data[symbol] = {
+                'available': True,
+                'action': decision.get('action', 'NO_OPERAR'),
+                'confidence': float(decision.get('confidence', 0)),
+                'adx': float(trend.get('adx', 0)),
+                'direction': trend.get('direction', 'neutral'),
+                'plus_di': float(trend.get('plus_di', 0)),
+                'minus_di': float(trend.get('minus_di', 0))
+            }
+        
+        # Correlación intra-cripto
+        correlation = all_results.get('_correlation', {})
+        
+        # Determinar rankings de fuerza (para saber qué cripto se moverá más)
+        # Fuerza direccional = ADX × signo del direction
+        ranking = []
+        for symbol, d in pairs_data.items():
+            if not d['available']:
+                continue
+            sign = 1 if d['direction'] == 'bullish' else (-1 if d['direction'] == 'bearish' else 0)
+            strength = d['adx'] * sign
+            ranking.append({
+                'symbol': symbol,
+                'direction': d['direction'],
+                'adx': d['adx'],
+                'strength_score': strength,
+                'action': d['action'],
+                'confidence': d['confidence']
+            })
+        
+        # Ordenar por strength_score (más alcista arriba, más bajista abajo)
+        ranking.sort(key=lambda x: -x['strength_score'])
+        
+        # Top LONG y Top SHORT
+        top_long = [r for r in ranking if r['direction'] == 'bullish' and r['adx'] >= 20][:3]
+        top_short = [r for r in ranking if r['direction'] == 'bearish' and r['adx'] >= 20][:3]
+        
+        response_data = {
+            'success': True,
+            'timeframe': timeframe,
+            'pairs': pairs_data,
+            'correlation': correlation,
+            'ranking': ranking,
+            'top_long_candidates': top_long,
+            'top_short_candidates': top_short,
+            'timestamp': datetime.now(bolivia_tz).isoformat()
+        }
+        
+        _futures_correlation_cache = {'data': response_data, 'ts': now_ts, 'key': cache_key}
+        return jsonify(response_data)
         
     except Exception as e:
         import traceback
