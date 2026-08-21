@@ -173,6 +173,10 @@
                 CRYPTO TRADER ANALYST PRO
             </a>
             <div class="navbar-nav ms-auto">
+                <!-- NUEVO BOTÓN: FUTUROS (Fase 6) -->
+                <a class="nav-link text-warning fw-bold" href="#" data-bs-toggle="modal" data-bs-target="#futuresModal" id="btn-open-futures">
+                    <i class="fas fa-rocket me-1"></i>🚀 FUTUROS
+                </a>
                 <a class="nav-link" href="/manual">
                     <i class="fas fa-book me-1"></i>Manual del Sistema
                 </a>
@@ -1497,6 +1501,174 @@
         </div>
     </div>
 
+    <!-- ============================================================================ -->
+    <!-- MODAL FUTUROS (Fase 6) - Sistema de análisis para futuros LONG/SHORT         -->
+    <!-- ============================================================================ -->
+    <div class="modal fade" id="futuresModal" tabindex="-1" data-bs-backdrop="static">
+        <div class="modal-dialog modal-fullscreen">
+            <div class="modal-content bg-dark text-white">
+                <!-- Header del modal -->
+                <div class="modal-header bg-warning bg-opacity-25 border-warning">
+                    <h4 class="modal-title">
+                        <i class="fas fa-rocket me-2 text-warning"></i>
+                        🚀 SISTEMA DE FUTUROS - Trading Apalancado
+                    </h4>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                
+                <!-- Body del modal -->
+                <div class="modal-body">
+                    <div class="container-fluid">
+                        <!-- Selectores + Botón analizar -->
+                        <div class="row mb-3">
+                            <div class="col-md-3">
+                                <label class="form-label small">Criptomoneda</label>
+                                <select class="form-select bg-dark text-white" id="fut-symbol-select">
+                                    <option value="BTC-USDT" selected>BTC/USDT</option>
+                                    <option value="ETH-USDT">ETH/USDT</option>
+                                    <option value="SOL-USDT">SOL/USDT</option>
+                                    <option value="XRP-USDT">XRP/USDT</option>
+                                    <option value="ADA-USDT">ADA/USDT</option>
+                                </select>
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label small">Temporalidad</label>
+                                <select class="form-select bg-dark text-white" id="fut-timeframe-select">
+                                    <option value="5m">5 Minutos (Scalping)</option>
+                                    <option value="15m">15 Minutos (Scalping)</option>
+                                    <option value="30m">30 Minutos (Intraday)</option>
+                                    <option value="1h" selected>1 Hora (Intraday)</option>
+                                    <option value="2h">2 Horas (Intraday)</option>
+                                    <option value="4h">4 Horas (Intraday)</option>
+                                </select>
+                            </div>
+                            <div class="col-md-3 d-flex align-items-end">
+                                <button class="btn btn-warning w-100" id="btn-analyze-futures" onclick="window.analyzeFutures()">
+                                    <i class="fas fa-brain me-1"></i>Analizar Futuros
+                                </button>
+                            </div>
+                            <div class="col-md-3 d-flex align-items-end">
+                                <button class="btn btn-outline-info w-100" id="btn-analyze-all-futures" onclick="window.analyzeAllFuturesInTF()">
+                                    <i class="fas fa-list me-1"></i>Ver los 5 Pares
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <!-- ============ FILA PRINCIPAL: RECOMENDACIÓN + ESTRATEGIAS ============ -->
+                        <div class="row">
+                            <!-- Columna izquierda: Recomendación con niveles -->
+                            <div class="col-lg-8">
+                                <!-- Recomendación grande -->
+                                <div class="card bg-dark border-warning mb-3">
+                                    <div class="card-header bg-warning bg-opacity-25">
+                                        <h5 class="mb-0">
+                                            <i class="fas fa-bullseye me-2"></i>
+                                            RECOMENDACIÓN DE FUTUROS
+                                        </h5>
+                                    </div>
+                                    <div class="card-body" id="fut-recommendation-body">
+                                        <div class="text-center py-4">
+                                            <p class="text-muted">Selecciona un par y temporalidad, luego haz clic en "Analizar Futuros"</p>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <!-- Niveles Entry/SL/TP + Apalancamiento -->
+                                <div class="card bg-dark border-secondary mb-3">
+                                    <div class="card-header">
+                                        <h6 class="mb-0"><i class="fas fa-chart-line me-2"></i>Niveles de Operación</h6>
+                                    </div>
+                                    <div class="card-body" id="fut-levels-body">
+                                        <div class="text-muted text-center py-3">Sin datos aún</div>
+                                    </div>
+                                </div>
+                                
+                                <!-- Mensaje/Justificación completa -->
+                                <div class="card bg-dark border-info">
+                                    <div class="card-header">
+                                        <h6 class="mb-0"><i class="fas fa-file-alt me-2"></i>Justificación del Sistema</h6>
+                                    </div>
+                                    <div class="card-body">
+                                        <div id="fut-message-body" style="max-height: 300px; overflow-y: auto;">
+                                            <div class="text-muted text-center py-3">Sin análisis aún</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- Columna derecha: ReviewTrader + Señales activas -->
+                            <div class="col-lg-4">
+                                <!-- Panel de ReviewTrader -->
+                                <div class="card bg-dark border-info mb-3">
+                                    <div class="card-header bg-info bg-opacity-25">
+                                        <h6 class="mb-0">
+                                            <i class="fas fa-graduation-cap me-2"></i>
+                                            🎓 TRADER DE REVISIÓN
+                                        </h6>
+                                    </div>
+                                    <div class="card-body" id="fut-review-body">
+                                        <div class="text-muted small text-center py-3">
+                                            Sin recomendaciones aún.<br>
+                                            El ReviewTrader necesita señales previas para aprender.
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <!-- Panel de estrategias globales -->
+                                <div class="card bg-dark border-primary mb-3">
+                                    <div class="card-header bg-primary bg-opacity-25">
+                                        <h6 class="mb-0">
+                                            <i class="fas fa-globe me-2"></i>
+                                            Estrategias Globales
+                                        </h6>
+                                    </div>
+                                    <div class="card-body" id="fut-global-body">
+                                        <div class="text-muted small text-center py-3">
+                                            Sin datos aún.
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <!-- Panel de acciones extra -->
+                                <div class="card bg-dark border-secondary">
+                                    <div class="card-header">
+                                        <h6 class="mb-0"><i class="fas fa-cogs me-2"></i>Acciones</h6>
+                                    </div>
+                                    <div class="card-body">
+                                        <button class="btn btn-sm btn-outline-warning w-100 mb-2" onclick="window.showFuturesActiveSignals()">
+                                            <i class="fas fa-bell me-1"></i>Ver Señales Activas
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-info w-100 mb-2" onclick="window.showReviewGlobalStats()">
+                                            <i class="fas fa-chart-bar me-1"></i>Stats Globales del Sistema
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-success w-100" onclick="window.runReviewNow()">
+                                            <i class="fas fa-sync-alt me-1"></i>Ejecutar Review Manualmente
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Área de datos adicionales (se llena dinámicamente) -->
+                        <div id="fut-extra-content" class="row mt-3"></div>
+                    </div>
+                </div>
+                
+                <!-- Footer -->
+                <div class="modal-footer">
+                    <small class="text-muted me-auto">
+                        <i class="fas fa-info-circle me-1"></i>
+                        Sistema de análisis para futuros. Las señales usan la vela ANTERIOR (cerrada).
+                    </small>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cerrar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- ============================================================================ -->
+    <!-- FIN MODAL FUTUROS                                                             -->
+    <!-- ============================================================================ -->
+
     <!-- Toast Container -->
     <div id="toast-container" class="toast-container position-fixed bottom-0 end-0 p-3"></div>
 
@@ -1504,6 +1676,8 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
     <script src="{{ url_for('static', filename='script.js') }}"></script>
+    <!-- Script de Futuros (Fase 6) -->
+    <script src="{{ url_for('static', filename='futures.js') }}"></script>
     
     <script>
         // ============ VARIABLES GLOBALES (UNA SOLA DECLARACIÓN) ============
