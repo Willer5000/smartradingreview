@@ -94,7 +94,11 @@ class TradingExpertSystem:
         self.justification_bank = self._initialize_justification_bank()
         
         # ============ INSTANCIA DEL MAPA DE CALOR DE LIQUIDACIONES ============
-        self.liquidation_heatmaps = {'4h': {}, '12h': {}, '1D': {}, '1W': {}}
+        # Soporta TF de spot Y futuros
+        self.liquidation_heatmaps = {
+            '5m': {}, '15m': {}, '30m': {}, '1h': {}, '2h': {},
+            '4h': {}, '12h': {}, '1D': {}, '1W': {}
+        }
         
         # ============ NUEVO: SISTEMA DE ZONAS DINÁMICAS ============
         self.dynamic_zones = {'4h': {}, '12h': {}, '1D': {}, '1W': {}}
@@ -13003,9 +13007,12 @@ class TradingExpertSystem:
             # ============ MAPA DE CALOR DE LIQUIDACIONES ============
             print(f"📊 Calculando capa de liquidaciones para {timeframe}...")
             
-            # Inicializar estructura si no existe
+            # Inicializar estructura si no existe (con soporte para TF de futuros y spot)
             if not hasattr(self, 'liquidation_heatmaps'):
-                self.liquidation_heatmaps = {'4h': {}, '12h': {}, '1D': {}, '1W': {}}
+                self.liquidation_heatmaps = {
+                    '5m': {}, '15m': {}, '30m': {}, '1h': {}, '2h': {},
+                    '4h': {}, '12h': {}, '1D': {}, '1W': {}
+                }
                 print("   ✅ Estructura liquidation_heatmaps inicializada")
             
             # Verificar que la temporalidad existe
@@ -15462,30 +15469,29 @@ class LiquidationHeatmap:
         self.max_bins_per_side = max_bins_per_side
         
         # ============ APALANCAMIENTOS POR TEMPORALIDAD ============
-        if timeframe == '4h':
-            self.leverages = [50, 25, 20, 15, 10]
-            self.min_volume = 0.1
-            self.step_multiplier = 1.0
-            self.disp_pct = 0.20
-            self.tolerance_pct = 1.0
-        elif timeframe == '12h':
-            self.leverages = [25, 20, 15, 10, 5]
-            self.min_volume = 0.2
-            self.step_multiplier = 1.3
-            self.disp_pct = 0.25
-            self.tolerance_pct = 1.5
-        elif timeframe == '1D':
-            self.leverages = [20, 15, 10, 7, 5]
-            self.min_volume = 0.3
-            self.step_multiplier = 1.6
-            self.disp_pct = 0.30
-            self.tolerance_pct = 2.0
-        elif timeframe == '1W':
-            self.leverages = [10, 7, 5, 3, 2]
-            self.min_volume = 0.5
-            self.step_multiplier = 2.0
-            self.disp_pct = 0.35
-            self.tolerance_pct = 3.0
+        # Mapa completo con soporte para TF cortas (futuros) y largas (spot)
+        tf_config = {
+            # Temporalidades cortas (futuros) - más liquidaciones agresivas
+            '5m':  {'leverages': [75, 50, 25, 20, 15], 'min_volume': 0.05, 'step_multiplier': 0.7, 'disp_pct': 0.10, 'tolerance_pct': 0.5},
+            '15m': {'leverages': [50, 25, 20, 15, 10], 'min_volume': 0.08, 'step_multiplier': 0.8, 'disp_pct': 0.15, 'tolerance_pct': 0.7},
+            '30m': {'leverages': [50, 25, 20, 15, 10], 'min_volume': 0.09, 'step_multiplier': 0.9, 'disp_pct': 0.18, 'tolerance_pct': 0.9},
+            '1h':  {'leverages': [50, 25, 20, 15, 10], 'min_volume': 0.10, 'step_multiplier': 1.0, 'disp_pct': 0.20, 'tolerance_pct': 1.0},
+            '2h':  {'leverages': [50, 25, 20, 15, 10], 'min_volume': 0.10, 'step_multiplier': 1.0, 'disp_pct': 0.20, 'tolerance_pct': 1.0},
+            # Temporalidades largas (spot)
+            '4h':  {'leverages': [50, 25, 20, 15, 10], 'min_volume': 0.1, 'step_multiplier': 1.0, 'disp_pct': 0.20, 'tolerance_pct': 1.0},
+            '12h': {'leverages': [25, 20, 15, 10, 5],  'min_volume': 0.2, 'step_multiplier': 1.3, 'disp_pct': 0.25, 'tolerance_pct': 1.5},
+            '1D':  {'leverages': [20, 15, 10, 7, 5],   'min_volume': 0.3, 'step_multiplier': 1.6, 'disp_pct': 0.30, 'tolerance_pct': 2.0},
+            '1W':  {'leverages': [10, 7, 5, 3, 2],     'min_volume': 0.5, 'step_multiplier': 2.0, 'disp_pct': 0.35, 'tolerance_pct': 3.0}
+        }
+        
+        # Configuración por defecto (fallback) para timeframes no reconocidos
+        cfg = tf_config.get(timeframe, tf_config['4h'])
+        
+        self.leverages = cfg['leverages']
+        self.min_volume = cfg['min_volume']
+        self.step_multiplier = cfg['step_multiplier']
+        self.disp_pct = cfg['disp_pct']
+        self.tolerance_pct = cfg['tolerance_pct']
         
         # ============ CONFIGURACIÓN BASE ============
         self.use_wicks = True
@@ -17963,7 +17969,12 @@ class Moderador:
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    return render_template('index.html', is_futures=False)
+
+@app.route('/futures')
+def futures_page():
+    """Página de Futuros - reutiliza index.html con flag is_futures=True"""
+    return render_template('index.html', is_futures=True)
 
 @app.route('/manual')
 def manual():

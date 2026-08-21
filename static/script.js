@@ -5,6 +5,34 @@ let currentAnalysis = null;
 let currentSymbol = 'BTC-USDT';
 let currentInterval = '1D';
 
+// ============================================================================
+// HELPER UNIVERSAL PARA FETCH (Spot o Futuros según window.IS_FUTURES_PAGE)
+// ============================================================================
+// Devuelve la URL correcta para hacer el análisis según si estamos en /futures
+// o en la página principal (Spot). Es transparente para el resto del código.
+window.buildAnalyzeURL = function(symbol, interval) {
+    if (window.IS_FUTURES_PAGE) {
+        // Para futuros usamos POST a /api/futures/analyze, pero seguimos
+        // exponiendo una URL "GET-like" aquí. El fetch real se hace más abajo.
+        return { url: '/api/futures/analyze', method: 'POST', body: { symbol, timeframe: interval } };
+    }
+    return { url: `/api/analyze?symbol=${symbol}&interval=${interval}`, method: 'GET', body: null };
+};
+
+// Wrapper de fetch que hace POST o GET según corresponda
+window.fetchAnalyze = async function(symbol, interval) {
+    const req = window.buildAnalyzeURL(symbol, interval);
+    const opts = {
+        method: req.method,
+        headers: { 'Content-Type': 'application/json' }
+    };
+    if (req.method === 'POST' && req.body) {
+        opts.body = JSON.stringify(req.body);
+    }
+    const response = await fetch(req.url, opts);
+    return response.json();
+};
+
 // ============ INICIALIZACIÓN ============
 document.addEventListener('DOMContentLoaded', function() {
     console.log('DOM cargado, inicializando sistema...');
@@ -258,16 +286,22 @@ function loadInitialData() {
 
 // ============ FUNCIÓN PRINCIPAL - ANÁLISIS COMPLETO CON VISTA GLOBAL ============
 window.runCompleteAnalysis = function() {
-    const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
-    const interval = document.getElementById('interval-select')?.value || '1D';
+    const cfg = window.PAGE_CONFIG || { defaultSymbol: 'BTC-USDT', defaultTimeframe: '1D' };
+    const symbol = document.getElementById('symbol-select')?.value || cfg.defaultSymbol;
+    const interval = document.getElementById('interval-select')?.value || cfg.defaultTimeframe;
     
     window.currentSymbol = symbol;
     window.currentInterval = interval;
     
     window.showToast('🔍 Iniciando análisis completo...', 'info');
     
-    // Primero obtener el análisis del par actual (SIEMPRE se hace)
-    fetch(`/api/analyze?symbol=${symbol}&interval=${interval}`)
+    // Usar el wrapper universal (Spot o Futuros según window.IS_FUTURES_PAGE)
+    const req = window.buildAnalyzeURL(symbol, interval);
+    const fetchOpts = req.method === 'POST' 
+        ? { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(req.body) }
+        : { method: 'GET' };
+    
+    fetch(req.url, fetchOpts)
         .then(response => {
             if (!response.ok) {
                 return response.json().then(err => {

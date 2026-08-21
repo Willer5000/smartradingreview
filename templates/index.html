@@ -126,6 +126,54 @@
             opacity: 1;
         }
     </style>
+    
+    <!-- ============ FLAG DE FUTUROS (inyectado por Jinja) ============ -->
+    <script>
+        window.IS_FUTURES_PAGE = {{ 'true' if is_futures else 'false' }};
+        
+        // Configuración específica según sea Spot o Futuros
+        window.PAGE_CONFIG = window.IS_FUTURES_PAGE ? {
+            title: 'FUTUROS',
+            symbols: {
+                'BTC-USDT': 'BTC/USDT',
+                'ETH-USDT': 'ETH/USDT',
+                'SOL-USDT': 'SOL/USDT',
+                'XRP-USDT': 'XRP/USDT',
+                'ADA-USDT': 'ADA/USDT'
+            },
+            timeframes: {
+                '5m':  '5 Minutos',
+                '15m': '15 Minutos',
+                '30m': '30 Minutos',
+                '1h':  '1 Hora',
+                '2h':  '2 Horas',
+                '4h':  '4 Horas'
+            },
+            defaultSymbol: 'BTC-USDT',
+            defaultTimeframe: '1h',
+            apiEndpoint: '/api/futures/analyze',
+            systemType: 'futures'
+        } : {
+            title: 'SPOT',
+            symbols: {
+                'BTC-USDT': 'BTC/USDT',
+                'PAXG-USDT': 'PAXG/USDT (Oro)',
+                'PAXG-BTC': 'PAXG/BTC (Ratio)'
+            },
+            timeframes: {
+                '4h':  '4 Horas (Operativa)',
+                '12h': '12 Horas (Swing)',
+                '1D':  '1 Día (Inversión)',
+                '1W':  '1 Semana (Estratégica)'
+            },
+            defaultSymbol: 'BTC-USDT',
+            defaultTimeframe: '1D',
+            apiEndpoint: '/api/analyze',
+            systemType: 'spot'
+        };
+        
+        console.log('📌 Página cargada:', window.PAGE_CONFIG.title);
+    </script>
 </head>
 <body>
     <!-- Reloj Digital Bolivia -->
@@ -173,10 +221,15 @@
                 CRYPTO TRADER ANALYST PRO
             </a>
             <div class="navbar-nav ms-auto">
-                <!-- NUEVO BOTÓN: FUTUROS (Fase 6) -->
-                <a class="nav-link text-warning fw-bold" href="#" data-bs-toggle="modal" data-bs-target="#futuresModal" id="btn-open-futures">
+                {% if is_futures %}
+                <a class="nav-link" href="/">
+                    <i class="fas fa-chart-line me-1"></i>📊 Volver a Spot
+                </a>
+                {% else %}
+                <a class="nav-link text-warning fw-bold" href="/futures" id="btn-open-futures">
                     <i class="fas fa-rocket me-1"></i>🚀 FUTUROS
                 </a>
+                {% endif %}
                 <a class="nav-link" href="/manual">
                     <i class="fas fa-book me-1"></i>Manual del Sistema
                 </a>
@@ -1501,173 +1554,6 @@
         </div>
     </div>
 
-    <!-- ============================================================================ -->
-    <!-- MODAL FUTUROS (Fase 6) - Sistema de análisis para futuros LONG/SHORT         -->
-    <!-- ============================================================================ -->
-    <div class="modal fade" id="futuresModal" tabindex="-1" data-bs-backdrop="static">
-        <div class="modal-dialog modal-fullscreen">
-            <div class="modal-content bg-dark text-white">
-                <!-- Header del modal -->
-                <div class="modal-header bg-warning bg-opacity-25 border-warning">
-                    <h4 class="modal-title">
-                        <i class="fas fa-rocket me-2 text-warning"></i>
-                        🚀 SISTEMA DE FUTUROS - Trading Apalancado
-                    </h4>
-                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-                </div>
-                
-                <!-- Body del modal -->
-                <div class="modal-body">
-                    <div class="container-fluid">
-                        <!-- Selectores + Botón analizar -->
-                        <div class="row mb-3">
-                            <div class="col-md-3">
-                                <label class="form-label small">Criptomoneda</label>
-                                <select class="form-select bg-dark text-white" id="fut-symbol-select">
-                                    <option value="BTC-USDT" selected>BTC/USDT</option>
-                                    <option value="ETH-USDT">ETH/USDT</option>
-                                    <option value="SOL-USDT">SOL/USDT</option>
-                                    <option value="XRP-USDT">XRP/USDT</option>
-                                    <option value="ADA-USDT">ADA/USDT</option>
-                                </select>
-                            </div>
-                            <div class="col-md-3">
-                                <label class="form-label small">Temporalidad</label>
-                                <select class="form-select bg-dark text-white" id="fut-timeframe-select">
-                                    <option value="5m">5 Minutos (Scalping)</option>
-                                    <option value="15m">15 Minutos (Scalping)</option>
-                                    <option value="30m">30 Minutos (Intraday)</option>
-                                    <option value="1h" selected>1 Hora (Intraday)</option>
-                                    <option value="2h">2 Horas (Intraday)</option>
-                                    <option value="4h">4 Horas (Intraday)</option>
-                                </select>
-                            </div>
-                            <div class="col-md-3 d-flex align-items-end">
-                                <button class="btn btn-warning w-100" id="btn-analyze-futures" onclick="window.analyzeFutures()">
-                                    <i class="fas fa-brain me-1"></i>Analizar Futuros
-                                </button>
-                            </div>
-                            <div class="col-md-3 d-flex align-items-end">
-                                <button class="btn btn-outline-info w-100" id="btn-analyze-all-futures" onclick="window.analyzeAllFuturesInTF()">
-                                    <i class="fas fa-list me-1"></i>Ver los 5 Pares
-                                </button>
-                            </div>
-                        </div>
-                        
-                        <!-- ============ FILA PRINCIPAL: RECOMENDACIÓN + ESTRATEGIAS ============ -->
-                        <div class="row">
-                            <!-- Columna izquierda: Recomendación con niveles -->
-                            <div class="col-lg-8">
-                                <!-- Recomendación grande -->
-                                <div class="card bg-dark border-warning mb-3">
-                                    <div class="card-header bg-warning bg-opacity-25">
-                                        <h5 class="mb-0">
-                                            <i class="fas fa-bullseye me-2"></i>
-                                            RECOMENDACIÓN DE FUTUROS
-                                        </h5>
-                                    </div>
-                                    <div class="card-body" id="fut-recommendation-body">
-                                        <div class="text-center py-4">
-                                            <p class="text-muted">Selecciona un par y temporalidad, luego haz clic en "Analizar Futuros"</p>
-                                        </div>
-                                    </div>
-                                </div>
-                                
-                                <!-- Niveles Entry/SL/TP + Apalancamiento -->
-                                <div class="card bg-dark border-secondary mb-3">
-                                    <div class="card-header">
-                                        <h6 class="mb-0"><i class="fas fa-chart-line me-2"></i>Niveles de Operación</h6>
-                                    </div>
-                                    <div class="card-body" id="fut-levels-body">
-                                        <div class="text-muted text-center py-3">Sin datos aún</div>
-                                    </div>
-                                </div>
-                                
-                                <!-- Mensaje/Justificación completa -->
-                                <div class="card bg-dark border-info">
-                                    <div class="card-header">
-                                        <h6 class="mb-0"><i class="fas fa-file-alt me-2"></i>Justificación del Sistema</h6>
-                                    </div>
-                                    <div class="card-body">
-                                        <div id="fut-message-body" style="max-height: 300px; overflow-y: auto;">
-                                            <div class="text-muted text-center py-3">Sin análisis aún</div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                            
-                            <!-- Columna derecha: ReviewTrader + Señales activas -->
-                            <div class="col-lg-4">
-                                <!-- Panel de ReviewTrader -->
-                                <div class="card bg-dark border-info mb-3">
-                                    <div class="card-header bg-info bg-opacity-25">
-                                        <h6 class="mb-0">
-                                            <i class="fas fa-graduation-cap me-2"></i>
-                                            🎓 TRADER DE REVISIÓN
-                                        </h6>
-                                    </div>
-                                    <div class="card-body" id="fut-review-body">
-                                        <div class="text-muted small text-center py-3">
-                                            Sin recomendaciones aún.<br>
-                                            El ReviewTrader necesita señales previas para aprender.
-                                        </div>
-                                    </div>
-                                </div>
-                                
-                                <!-- Panel de estrategias globales -->
-                                <div class="card bg-dark border-primary mb-3">
-                                    <div class="card-header bg-primary bg-opacity-25">
-                                        <h6 class="mb-0">
-                                            <i class="fas fa-globe me-2"></i>
-                                            Estrategias Globales
-                                        </h6>
-                                    </div>
-                                    <div class="card-body" id="fut-global-body">
-                                        <div class="text-muted small text-center py-3">
-                                            Sin datos aún.
-                                        </div>
-                                    </div>
-                                </div>
-                                
-                                <!-- Panel de acciones extra -->
-                                <div class="card bg-dark border-secondary">
-                                    <div class="card-header">
-                                        <h6 class="mb-0"><i class="fas fa-cogs me-2"></i>Acciones</h6>
-                                    </div>
-                                    <div class="card-body">
-                                        <button class="btn btn-sm btn-outline-warning w-100 mb-2" onclick="window.showFuturesActiveSignals()">
-                                            <i class="fas fa-bell me-1"></i>Ver Señales Activas
-                                        </button>
-                                        <button class="btn btn-sm btn-outline-info w-100 mb-2" onclick="window.showReviewGlobalStats()">
-                                            <i class="fas fa-chart-bar me-1"></i>Stats Globales del Sistema
-                                        </button>
-                                        <button class="btn btn-sm btn-outline-success w-100" onclick="window.runReviewNow()">
-                                            <i class="fas fa-sync-alt me-1"></i>Ejecutar Review Manualmente
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <!-- Área de datos adicionales (se llena dinámicamente) -->
-                        <div id="fut-extra-content" class="row mt-3"></div>
-                    </div>
-                </div>
-                
-                <!-- Footer -->
-                <div class="modal-footer">
-                    <small class="text-muted me-auto">
-                        <i class="fas fa-info-circle me-1"></i>
-                        Sistema de análisis para futuros. Las señales usan la vela ANTERIOR (cerrada).
-                    </small>
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cerrar</button>
-                </div>
-            </div>
-        </div>
-    </div>
-    <!-- ============================================================================ -->
-    <!-- FIN MODAL FUTUROS                                                             -->
-    <!-- ============================================================================ -->
 
     <!-- Toast Container -->
     <div id="toast-container" class="toast-container position-fixed bottom-0 end-0 p-3"></div>
@@ -1676,8 +1562,10 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
     <script src="{{ url_for('static', filename='script.js') }}"></script>
-    <!-- Script de Futuros (Fase 6) -->
+    <!-- Script de Futuros (Fase 6) - Añade panel lateral ReviewTrader en /futures -->
+    {% if is_futures %}
     <script src="{{ url_for('static', filename='futures.js') }}"></script>
+    {% endif %}
     
     <script>
         // ============ VARIABLES GLOBALES (UNA SOLA DECLARACIÓN) ============
@@ -1759,13 +1647,15 @@
                 paper_bgcolor: 'rgba(0,0,0,0)',
                 plot_bgcolor: 'rgba(0,0,0,0)',
                 margin: {l: 1, r: 1, t: 1, b: 1},
+                font: {family: 'Arial', size: 10, color: 'white'},
                 xaxis: {
                     visible: false,
                     showgrid: false,
                     zeroline: false,
                     showline: false,
                     showticklabels: false,
-                    range: [last4Dates[0] - 3600000, last4Dates[last4Dates.length - 1] + 3600000]
+                    range: [last4Dates[0].getTime() - 3600000, last4Dates[last4Dates.length - 1].getTime() + 3600000],
+                    type: 'date'
                 },
                 yaxis: {
                     visible: false,
@@ -1779,7 +1669,6 @@
                 width: null,
                 showlegend: false,
                 hovermode: false
-                // ⚠️ ELIMINÉ 'font' de aquí porque causaba el error
             };
             
             const config = {
@@ -1900,13 +1789,15 @@
                 paper_bgcolor: 'rgba(0,0,0,0)',
                 plot_bgcolor: 'rgba(0,0,0,0)',
                 margin: {l: 2, r: 2, t: 2, b: 2},
+                font: {family: 'Arial', size: 10, color: 'white'},
                 xaxis: {
                     visible: false,
                     showgrid: false,
                     zeroline: false,
                     showline: false,
                     showticklabels: false,
-                    range: [last40Dates[0], last40Dates[last40Dates.length - 1]]
+                    range: [last40Dates[0].getTime(), last40Dates[last40Dates.length - 1].getTime()],
+                    type: 'date'
                 },
                 yaxis: {
                     visible: false,
@@ -1920,7 +1811,6 @@
                 width: null,
                 showlegend: false,
                 hovermode: false
-                // ⚠️ ELIMINÉ 'font' de aquí también
             };
             
             const config = {
@@ -2067,11 +1957,15 @@
             // 2. VELAS Y PATRONES - Cada 30 segundos (CON ACTUALIZACIÓN DE CORRELACIÓN GLOBAL)
             setInterval(function() {
                 // Usar las variables globales actuales
-                const currentSymbol = window.currentSymbol || 'BTC-USDT';
-                const interval = window.currentInterval || '1D';
+                const currentSymbol = window.currentSymbol || (window.PAGE_CONFIG?.defaultSymbol || 'BTC-USDT');
+                const interval = window.currentInterval || (window.PAGE_CONFIG?.defaultTimeframe || '1D');
                 
-                // Obtener datos del par actual (para gráficos)
-                fetch(`/api/analyze?symbol=${currentSymbol}&interval=${interval}`)
+                // Obtener datos del par actual (para gráficos) - usa wrapper universal
+                const _req = window.buildAnalyzeURL(currentSymbol, interval);
+                const _fetchOpts = _req.method === 'POST'
+                    ? { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(_req.body) }
+                    : { method: 'GET' };
+                fetch(_req.url, _fetchOpts)
                     .then(response => response.json())
                     .then(data => {
                         if (data.success && data.data) {
@@ -2112,11 +2006,13 @@
                     .catch(error => console.error('Error actualizando par actual:', error));
                 
                 // ============ AHORA OBTENER DATOS DE LOS OTROS DOS PARES PARA CORRELACIÓN ============
-                // Determinar qué otros pares necesitamos
+                // NOTA: la correlación global BTC/PAXG solo aplica en Spot. En Futuros se saltan.
                 const otrosPares = [];
-                if (currentSymbol !== 'BTC-USDT') otrosPares.push('BTC-USDT');
-                if (currentSymbol !== 'PAXG-USDT') otrosPares.push('PAXG-USDT');
-                if (currentSymbol !== 'PAXG-BTC') otrosPares.push('PAXG-BTC');
+                if (!window.IS_FUTURES_PAGE) {
+                    if (currentSymbol !== 'BTC-USDT') otrosPares.push('BTC-USDT');
+                    if (currentSymbol !== 'PAXG-USDT') otrosPares.push('PAXG-USDT');
+                    if (currentSymbol !== 'PAXG-BTC') otrosPares.push('PAXG-BTC');
+                }
                 
                 if (otrosPares.length > 0) {
                     // Hacer fetch en paralelo para los otros pares
@@ -2209,10 +2105,14 @@
             
             // 3. PRECIO EN VIVO - Cada 5 segundos (SOLO precio, para no saturar)
             setInterval(function() {
-                const symbol = window.currentSymbol || 'BTC-USDT';
-                const interval = window.currentInterval || '1D';
+                const symbol = window.currentSymbol || (window.PAGE_CONFIG?.defaultSymbol || 'BTC-USDT');
+                const interval = window.currentInterval || (window.PAGE_CONFIG?.defaultTimeframe || '1D');
                 
-                fetch(`/api/analyze?symbol=${symbol}&interval=${interval}`)
+                const _req2 = window.buildAnalyzeURL(symbol, interval);
+                const _opts2 = _req2.method === 'POST'
+                    ? { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(_req2.body) }
+                    : { method: 'GET' };
+                fetch(_req2.url, _opts2)
                     .then(response => response.json())
                     .then(data => {
                         if (data.success && data.data) {
@@ -2227,10 +2127,15 @@
             }, 5000);
         }
         window.getInstantRecommendation = function() {
-            const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
-            const interval = document.getElementById('interval-select')?.value || '1D';
+            const cfg = window.PAGE_CONFIG || {};
+            const symbol = document.getElementById('symbol-select')?.value || cfg.defaultSymbol || 'BTC-USDT';
+            const interval = document.getElementById('interval-select')?.value || cfg.defaultTimeframe || '1D';
             
-            fetch(`/api/analyze?symbol=${symbol}&interval=${interval}`)
+            const _req3 = window.buildAnalyzeURL(symbol, interval);
+            const _opts3 = _req3.method === 'POST'
+                ? { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(_req3.body) }
+                : { method: 'GET' };
+            fetch(_req3.url, _opts3)
                 .then(response => response.json())
                 .then(data => {
                     if (data.success && data.data && typeof window.updateInstantRecommendation === 'function') {
@@ -2469,7 +2374,78 @@
 
         // ============ INICIALIZACIÓN ============
         document.addEventListener('DOMContentLoaded', function() {
-            console.log('🚀 Inicializando sistema...');
+            console.log('🚀 Inicializando sistema...', window.PAGE_CONFIG.title);
+            
+            // ============ RECONFIGURAR SELECTORES SEGÚN SPOT O FUTUROS ============
+            // Rellena los <select> con los símbolos/timeframes correctos según la página
+            (function reconfigureSelects() {
+                try {
+                    const symbolSel = document.getElementById('symbol-select');
+                    if (symbolSel && window.PAGE_CONFIG) {
+                        symbolSel.innerHTML = '';
+                        for (const [key, label] of Object.entries(window.PAGE_CONFIG.symbols)) {
+                            const opt = document.createElement('option');
+                            opt.value = key;
+                            opt.textContent = label;
+                            if (key === window.PAGE_CONFIG.defaultSymbol) opt.selected = true;
+                            symbolSel.appendChild(opt);
+                        }
+                    }
+                    
+                    const intervalSel = document.getElementById('interval-select');
+                    if (intervalSel && window.PAGE_CONFIG) {
+                        intervalSel.innerHTML = '';
+                        for (const [key, label] of Object.entries(window.PAGE_CONFIG.timeframes)) {
+                            const opt = document.createElement('option');
+                            opt.value = key;
+                            opt.textContent = label;
+                            if (key === window.PAGE_CONFIG.defaultTimeframe) opt.selected = true;
+                            intervalSel.appendChild(opt);
+                        }
+                    }
+                    
+                    // También reconfigurar los selectores de Telegram si existen
+                    const telSymbolSel = document.getElementById('telegram-symbol');
+                    if (telSymbolSel && window.PAGE_CONFIG) {
+                        telSymbolSel.innerHTML = '';
+                        for (const [key, label] of Object.entries(window.PAGE_CONFIG.symbols)) {
+                            const opt = document.createElement('option');
+                            opt.value = key;
+                            opt.textContent = label;
+                            telSymbolSel.appendChild(opt);
+                        }
+                    }
+                    
+                    const telIntervalSel = document.getElementById('telegram-interval');
+                    if (telIntervalSel && window.PAGE_CONFIG) {
+                        telIntervalSel.innerHTML = '';
+                        for (const [key, label] of Object.entries(window.PAGE_CONFIG.timeframes)) {
+                            const opt = document.createElement('option');
+                            opt.value = key;
+                            opt.textContent = label;
+                            if (key === window.PAGE_CONFIG.defaultTimeframe) opt.selected = true;
+                            telIntervalSel.appendChild(opt);
+                        }
+                    }
+                    
+                    // Actualizar variables globales de estado
+                    window.currentSymbol = window.PAGE_CONFIG.defaultSymbol;
+                    window.currentInterval = window.PAGE_CONFIG.defaultTimeframe;
+                    
+                    // Actualizar título del navbar si es futuros
+                    if (window.IS_FUTURES_PAGE) {
+                        const navBrand = document.querySelector('.navbar-brand');
+                        if (navBrand) {
+                            navBrand.innerHTML = '<i class="fas fa-rocket me-2 text-warning"></i>🚀 CRYPTO TRADER ANALYST PRO - FUTUROS';
+                        }
+                        document.title = '🚀 FUTUROS - Crypto Trader Analyst Pro';
+                    }
+                    
+                    console.log('✅ Selectores reconfigurados para:', window.PAGE_CONFIG.title);
+                } catch(e) {
+                    console.error('Error reconfigurando selectores:', e);
+                }
+            })();
             
             // ============ CONFIGURAR EVENT LISTENERS ============
             const symbolSelect = document.getElementById('symbol-select');
