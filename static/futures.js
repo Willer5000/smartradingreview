@@ -669,7 +669,20 @@ document.addEventListener('DOMContentLoaded', function() {
         if (typeof window.loadGlobalStats === 'function') window.loadGlobalStats();
     }, 300000);
     
-    // Refrescar señales activas cada 60s (aunque script.js ya lo hace)
+    // Cargar señales activas y anteriores inmediatamente (con delay para que
+    // futures.js termine de sobrescribir window.updateActiveSignals y updatePreviousSignals)
+    setTimeout(() => {
+        if (typeof window.updateActiveSignals === 'function') {
+            console.log('🚀 futures.js: cargando señales activas iniciales');
+            window.updateActiveSignals();
+        }
+        if (typeof window.updatePreviousSignals === 'function') {
+            console.log('🚀 futures.js: cargando señales anteriores iniciales');
+            window.updatePreviousSignals();
+        }
+    }, 1200);
+    
+    // Refrescar señales activas cada 60s
     setInterval(() => {
         if (typeof window.updateActiveSignals === 'function') window.updateActiveSignals();
     }, 60000);

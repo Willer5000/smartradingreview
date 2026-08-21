@@ -5386,7 +5386,14 @@ function updateConfirmedSignals(data) {
     tbody.innerHTML = html;
 }
 // ============ ACTUALIZAR SEÑALES ACTIVAS - VERSIÓN COMPLETA ============
-function updateActiveSignals() {
+// NOTA: se asigna a window para que futures.js pueda sobreescribirla
+window.updateActiveSignals = function updateActiveSignals() {
+    // Si estamos en la página de Futuros, futures.js maneja esto con su propia lógica
+    // (consulta /api/futures/signals/active en vez de spot)
+    if (window.IS_FUTURES_PAGE) {
+        return;
+    }
+    
     const signalsList = document.getElementById('active-signals-list');
     const signalsCount = document.getElementById('active-signals-count');
     
@@ -5528,7 +5535,7 @@ function updateActiveSignals() {
         console.error('Error cargando señales activas:', error);
         signalsList.innerHTML = '<div class="list-group-item bg-dark text-danger text-center py-3">Error al cargar señales</div>';
     });
-}
+};
 // ============ FUNCIÓN PARA CAMBIAR A UNA SEÑAL ============
 window.changeToSignal = function(symbol, timeframe) {
     console.log(`🔄 Cambiando a ${symbol} ${timeframe}`);
@@ -5557,7 +5564,7 @@ window.changeToSignal = function(symbol, timeframe) {
 };
 
 // ============ ACTUALIZAR SEÑALES PERIÓDICAMENTE ============
-setInterval(updateActiveSignals, 60000); // Cada minuto
+setInterval(() => { if (typeof window.updateActiveSignals === 'function') window.updateActiveSignals(); }, 60000); // Cada minuto
 
 
 function updateMarketAlerts(data) {
@@ -5587,7 +5594,14 @@ function updateMarketAlerts(data) {
 
 
 // ============ SEÑALES DE VELA ANTERIOR - VERSIÓN CORREGIDA ============
-function updatePreviousSignals() {
+// NOTA: se asigna a window para que futures.js pueda sobreescribirla
+window.updatePreviousSignals = function updatePreviousSignals() {
+    // Si estamos en la página de Futuros, futures.js usa su propia lógica
+    // (/api/futures/signals/previous en vez de /api/previous_signals que trae PAXG)
+    if (window.IS_FUTURES_PAGE) {
+        return;
+    }
+    
     const signalsList = document.getElementById('prev-signals-list');
     const signalsCount = document.getElementById('prev-signals-count');
     
@@ -5719,7 +5733,7 @@ function updatePreviousSignals() {
                 signalsCount.className = 'badge bg-secondary';
             }
         });
-}
+};
 
 // ============ MOSTRAR JUSTIFICACIÓN DE SEÑAL ANTERIOR ============
 window.showPreviousSignalJustification = function(senal) {
@@ -5847,8 +5861,8 @@ window.showPreviousSignalJustification = function(senal) {
 };
 
 // Actualizar cada 10 minutos
-setInterval(updatePreviousSignals, 600000);
-updatePreviousSignals();
+setInterval(() => { if (typeof window.updatePreviousSignals === 'function') window.updatePreviousSignals(); }, 600000);
+if (typeof window.updatePreviousSignals === 'function') window.updatePreviousSignals();
 
 
 
