@@ -247,15 +247,49 @@ window.updateActiveSignals = function() {
     const signalsCount = document.getElementById('active-signals-count');
     if (!signalsList) return;
     
-    signalsList.innerHTML = '<div class="list-group-item bg-dark text-muted text-center py-3"><div class="spinner-border spinner-border-sm text-warning me-2"></div>Escaneando 5 cripto × 6 TF...</div>';
+    if (!window.futuresActiveLoaded) {
+        signalsList.innerHTML = `
+            <div class="list-group-item bg-dark text-muted text-center py-3">
+                <div class="spinner-border spinner-border-sm text-warning me-2"></div>
+                Escaneando 5 cripto × 6 TF...
+            </div>
+        `;
+    }
     
-    fetch('/api/futures/signals/active?min_confidence=60')
-        .then(r => r.json())
+    // Fetch con timeout de 3 min
+    const controllerAS = new AbortController();
+    const timeoutASId = setTimeout(() => controllerAS.abort(), 180000);
+    
+    fetch('/api/futures/signals/active?min_confidence=60', { signal: controllerAS.signal })
+        .then(r => {
+            clearTimeout(timeoutASId);
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            return r.json();
+        })
         .then(json => {
             if (!json.success) {
                 signalsList.innerHTML = `<div class="list-group-item bg-dark text-danger text-center py-3">Error: ${json.error || 'desconocido'}</div>`;
                 return;
             }
+            
+            // Si el servidor está calentando el caché, mostrar mensaje y reintentar
+            if (json.warming_up && (!json.signals || json.signals.length === 0)) {
+                signalsList.innerHTML = `
+                    <div class="list-group-item bg-dark text-info text-center py-3">
+                        <div class="spinner-border spinner-border-sm me-2"></div>
+                        <i class="fas fa-fire me-1"></i>
+                        Servidor calentando caché...<br>
+                        <small class="text-muted">Primera carga: ~2 min. Refresco automático en 30s.</small>
+                    </div>
+                `;
+                if (signalsCount) { signalsCount.textContent = '0'; signalsCount.className = 'badge bg-info'; }
+                setTimeout(() => {
+                    if (typeof window.updateActiveSignals === 'function') window.updateActiveSignals();
+                }, 30000);
+                return;
+            }
+            
+            window.futuresActiveLoaded = true;
             
             const signals = json.signals || [];
             if (signalsCount) {
@@ -309,8 +343,18 @@ window.updateActiveSignals = function() {
             signalsList.innerHTML = html;
         })
         .catch(err => {
+            clearTimeout(timeoutASId);
             console.error('Error futures active:', err);
-            signalsList.innerHTML = `<div class="list-group-item bg-dark text-danger text-center py-3">Error de conexión</div>`;
+            const isAbort = err.name === 'AbortError';
+            const errMsg = isAbort 
+                ? 'Servidor calentando caché (~2 min). Reintentando en 30s...'
+                : `Error: ${err.message || 'conexión perdida'}`;
+            signalsList.innerHTML = `<div class="list-group-item bg-dark text-warning text-center py-3"><i class="fas fa-hourglass-half me-1"></i>${errMsg}</div>`;
+            if (isAbort) {
+                setTimeout(() => {
+                    if (typeof window.updateActiveSignals === 'function') window.updateActiveSignals();
+                }, 30000);
+            }
         });
 };
 
@@ -329,15 +373,49 @@ window.updatePreviousSignals = function() {
     if (!signalsList) return;
     
     if (!window.futuresPrevLoaded) {
-        signalsList.innerHTML = '<div class="list-group-item bg-dark text-muted text-center py-3"><div class="spinner-border spinner-border-sm text-warning me-2"></div>Cargando señales de la vela anterior...</div>';
+        signalsList.innerHTML = `
+            <div class="list-group-item bg-dark text-muted text-center py-3">
+                <div class="spinner-border spinner-border-sm text-warning me-2"></div>
+                Cargando señales de la vela anterior...
+                <div class="small mt-2 text-info">
+                    <i class="fas fa-info-circle me-1"></i>
+                    El primer análisis puede tardar hasta 2 minutos (se cachea 5 min)
+                </div>
+            </div>
+        `;
     }
     
-    fetch('/api/futures/signals/previous?min_confidence=55')
-        .then(r => r.json())
+    // Fetch con timeout largo (3 minutos)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 180000);
+    
+    fetch('/api/futures/signals/previous?min_confidence=55', { signal: controller.signal })
+        .then(r => {
+            clearTimeout(timeoutId);
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            return r.json();
+        })
         .then(json => {
             if (!json.success) {
-                signalsList.innerHTML = `<div class="list-group-item bg-dark text-warning text-center py-3">⚠️ ${json.error || 'Error'}</div>`;
+                signalsList.innerHTML = `<div class="list-group-item bg-dark text-warning text-center py-3">⚠️ ${json.error || 'Error del servidor'}</div>`;
                 if (signalsCount) { signalsCount.textContent = '0'; signalsCount.className = 'badge bg-secondary'; }
+                return;
+            }
+            
+            // Si el servidor está calentando el caché
+            if (json.warming_up && (!json.signals || json.signals.length === 0)) {
+                signalsList.innerHTML = `
+                    <div class="list-group-item bg-dark text-info text-center py-3">
+                        <div class="spinner-border spinner-border-sm me-2"></div>
+                        <i class="fas fa-fire me-1"></i>
+                        Servidor calentando caché...<br>
+                        <small class="text-muted">Primera carga: ~2 min. Refresco automático en 30s.</small>
+                    </div>
+                `;
+                if (signalsCount) { signalsCount.textContent = '0'; signalsCount.className = 'badge bg-info'; }
+                setTimeout(() => {
+                    if (typeof window.updatePreviousSignals === 'function') window.updatePreviousSignals();
+                }, 30000);
                 return;
             }
             
@@ -409,8 +487,29 @@ window.updatePreviousSignals = function() {
             window.futuresPrevLoaded = true;
         })
         .catch(err => {
+            clearTimeout(timeoutId);
             console.error('Error futures previous:', err);
-            signalsList.innerHTML = '<div class="list-group-item bg-dark text-danger text-center py-3">Error de conexión</div>';
+            const isAbort = err.name === 'AbortError';
+            const errMsg = isAbort 
+                ? 'El servidor está calentando la caché (primera vez tarda ~2 min). Reintentando en 30s...'
+                : `Error: ${err.message || 'conexión perdida'}`;
+            
+            signalsList.innerHTML = `
+                <div class="list-group-item bg-dark text-warning text-center py-3">
+                    <i class="fas fa-hourglass-half me-1"></i>
+                    ${errMsg}
+                </div>
+            `;
+            
+            // Auto-retry en 30s si fue timeout
+            if (isAbort) {
+                setTimeout(() => {
+                    if (typeof window.updatePreviousSignals === 'function') {
+                        console.log('🔄 Reintentando updatePreviousSignals después de timeout...');
+                        window.updatePreviousSignals();
+                    }
+                }, 30000);
+            }
         });
 };
 
