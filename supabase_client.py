@@ -1,0 +1,743 @@
+# supabase_client.py
+# Cliente para la base de datos Supabase del ReviewTrader y sistema de Futuros
+# Versión 1.0 - FASE 1
+# 
+# INSTRUCCIONES DE INSTALACIÓN:
+# 1. Ejecutar en terminal: pip install supabase
+# 2. Agregar 'supabase>=2.0.0' al archivo requirements.txt
+# 3. Colocar las credenciales en las variables SUPABASE_URL y SUPABASE_KEY más abajo
+# 4. Ejecutar el archivo schema_supabase.sql en el editor SQL de Supabase (una sola vez)
+#
+# CARACTERÍSTICAS:
+# - Persistencia de señales spot y futuros
+# - Estadísticas por par/temporalidad/acción (individual)
+# - Estadísticas por estrategia agregada (general)
+# - Detección de oportunidades perdidas
+# - Rotación FIFO automática para no colapsar la BD gratuita (500MB)
+# - Compatibilidad COMPRA_SPOT ≡ LONG y VENTA_SPOT ≡ SHORT (ver normalize_action)
+
+import os
+import json
+import logging
+from datetime import datetime, timedelta
+from typing import Optional, Dict, List, Any
+
+# ============================================================================
+# CREDENCIALES DE SUPABASE
+# ============================================================================
+# Las credenciales se leen desde un archivo .env (que NO se sube a GitHub).
+# Ver archivo .env.example para saber qué variables definir.
+#
+# Instrucciones:
+# 1. Crear un archivo .env en la raíz del proyecto (al lado de app.py)
+# 2. Escribir en él:
+#      SUPABASE_URL=https://tu-proyecto.supabase.co
+#      SUPABASE_KEY=sb_secret_...
+# 3. Guardar. El archivo .env está en .gitignore, no se subirá a GitHub.
+
+# Cargar .env si está disponible
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv no está instalado, se usarán solo os.environ
+
+SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
+SUPABASE_KEY = os.environ.get('SUPABASE_KEY', '')
+
+# ============================================================================
+# LOGGING
+# ============================================================================
+logger = logging.getLogger('SUPABASE')
+logger.setLevel(logging.INFO)
+
+print("=" * 60)
+print("🗄️ SUPABASE CLIENT - INICIALIZANDO")
+print("=" * 60)
+
+# ============================================================================
+# LÍMITES DE ROTACIÓN FIFO (para no colapsar Supabase gratuito - 500MB)
+# ============================================================================
+LIMITS = {
+    'signals': 20000,                    # Máximo de señales históricas
+    'signal_indicators': 100000,         # Indicadores por señal (relación N:M)
+    'signal_results': 20000,             # Resultados TP/SL
+    'strategy_stats_specific': 5000,     # Estadísticas específicas
+    'strategy_stats_general': 500,       # Estadísticas generales
+    'missed_opportunities': 5000,        # Oportunidades perdidas
+    'review_recommendations': 2000       # Recomendaciones cacheadas
+}
+
+
+# ============================================================================
+# CLASE PRINCIPAL: SUPABASE CLIENT
+# ============================================================================
+
+class SupabaseClient:
+    """
+    Cliente Supabase para el ReviewTrader.
+    
+    Todas las operaciones son idempotentes y tolerantes a fallos.
+    Si Supabase no está configurado, las operaciones no fallan: retornan None
+    para que el sistema principal siga funcionando sin ReviewTrader.
+    """
+    
+    def __init__(self, url: str = None, key: str = None):
+        self.url = url or SUPABASE_URL
+        self.key = key or SUPABASE_KEY
+        self.client = None
+        self.enabled = False
+        
+        if not self.url or not self.key:
+            print("⚠️ SUPABASE no configurado (URL o KEY vacíos)")
+            print("   El sistema funcionará SIN ReviewTrader hasta que se configuren las credenciales")
+            return
+        
+        try:
+            from supabase import create_client, Client
+            self.client = create_client(self.url, self.key)
+            self.enabled = True
+            print(f"✅ SUPABASE conectado a: {self.url[:40]}...")
+        except ImportError:
+            print("❌ Librería 'supabase' no instalada. Ejecutar: pip install supabase")
+        except Exception as e:
+            print(f"❌ Error conectando a SUPABASE: {e}")
+    
+    # ========================================================================
+    # NORMALIZACIÓN DE ACCIONES
+    # ========================================================================
+    
+    @staticmethod
+    def normalize_action(action: str) -> str:
+        """
+        Normaliza las acciones para el ReviewTrader.
+        COMPRA_SPOT ≡ LONG (ambas se guardan como 'LONG')
+        VENTA_SPOT ≡ SHORT (ambas se guardan como 'SHORT')
+        """
+        if action in ('COMPRA_SPOT', 'LONG'):
+            return 'LONG'
+        elif action in ('VENTA_SPOT', 'SHORT'):
+            return 'SHORT'
+        elif action in ('NO_OPERAR', 'ESPERAR', 'CAUTION', 'NEUTRAL'):
+            return 'NO_OPERAR'
+        else:
+            return action
+    
+    @staticmethod
+    def get_system_type(symbol: str) -> str:
+        """Determina si el símbolo es spot o futures según el par"""
+        # PAXG es solo spot; el resto son ambos pero se distinguen por contexto
+        spot_only = ['PAXG-USDT', 'PAXG-BTC']
+        futures_symbols = ['BTC-USDT', 'ETH-USDT', 'SOL-USDT', 'XRP-USDT', 'ADA-USDT']
+        
+        if symbol in spot_only:
+            return 'spot'
+        elif symbol in futures_symbols:
+            return 'both'  # Puede operarse como spot o futures
+        return 'spot'
+    
+    # ========================================================================
+    # INSERCIÓN DE SEÑALES (Fase 1: guardar; Fase 2: evaluar resultado)
+    # ========================================================================
+    
+    def insert_signal(self, signal_data: Dict) -> Optional[str]:
+        """
+        Guarda una señal en la base de datos.
+        
+        Estructura esperada de signal_data:
+        {
+            'symbol': 'BTC-USDT',
+            'timeframe': '1h',
+            'system_type': 'spot' | 'futures',
+            'action': 'COMPRA_SPOT' | 'LONG' | 'VENTA_SPOT' | 'SHORT' | 'NO_OPERAR',
+            'confidence': 78.5,
+            'entry': 68250.0,
+            'stop_loss': 67320.0,
+            'take_profit': 70180.0,
+            'leverage': 12,
+            'risk_reward': 2.5,
+            'current_price': 68300.0,
+            'candle_timestamp': '2026-08-21T14:00:00',  # Timestamp de la vela ANTERIOR (cerrada)
+            'strategies': ['ORDER_BLOCK_ALCISTA', 'FVG_ALCISTA'],  # Lista de estrategias
+            'indicators_snapshot': { ... },  # JSON con valores de todos los indicadores
+            'context': { ... }  # sesión, día, fear&greed, correlación, etc.
+        }
+        
+        Retorna: ID de la señal insertada o None si falla.
+        """
+        if not self.enabled:
+            return None
+        
+        try:
+            normalized_action = self.normalize_action(signal_data.get('action', ''))
+            
+            payload = {
+                'symbol': signal_data.get('symbol'),
+                'timeframe': signal_data.get('timeframe'),
+                'system_type': signal_data.get('system_type', 'spot'),
+                'action_original': signal_data.get('action'),
+                'action_normalized': normalized_action,
+                'confidence': float(signal_data.get('confidence', 0)),
+                'entry_price': float(signal_data.get('entry', 0)),
+                'stop_loss': float(signal_data.get('stop_loss', 0)),
+                'take_profit': float(signal_data.get('take_profit', 0)),
+                'leverage': int(signal_data.get('leverage', 1)),
+                'risk_reward': float(signal_data.get('risk_reward', 0)),
+                'current_price': float(signal_data.get('current_price', 0)),
+                'candle_timestamp': signal_data.get('candle_timestamp'),
+                'indicators_snapshot': signal_data.get('indicators_snapshot', {}),
+                'context': signal_data.get('context', {}),
+                'was_executed': normalized_action != 'NO_OPERAR',
+                'status': 'pending',  # pending | tp_hit | sl_hit | expired | missed_opportunity
+                'created_at': datetime.utcnow().isoformat()
+            }
+            
+            response = self.client.table('signals').insert(payload).execute()
+            
+            if response.data and len(response.data) > 0:
+                signal_id = response.data[0].get('id')
+                
+                # Insertar estrategias asociadas
+                strategies = signal_data.get('strategies', [])
+                if strategies and signal_id:
+                    self._insert_signal_indicators(signal_id, strategies, signal_data.get('indicators_snapshot', {}))
+                
+                # Rotación FIFO si es necesario
+                self._check_rotation('signals')
+                
+                return signal_id
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error insertando señal: {e}")
+            return None
+    
+    def _insert_signal_indicators(self, signal_id: str, strategies: List[str], indicators_snapshot: Dict):
+        """Guarda las estrategias detectadas asociadas a la señal"""
+        if not self.enabled:
+            return
+        
+        try:
+            rows = []
+            for strategy in strategies:
+                rows.append({
+                    'signal_id': signal_id,
+                    'strategy_name': strategy,
+                    'indicator_values': indicators_snapshot,
+                    'created_at': datetime.utcnow().isoformat()
+                })
+            
+            if rows:
+                self.client.table('signal_indicators').insert(rows).execute()
+                self._check_rotation('signal_indicators')
+        except Exception as e:
+            logger.error(f"Error insertando indicadores de señal: {e}")
+    
+    # ========================================================================
+    # ACTUALIZACIÓN DE RESULTADOS (TP/SL/EXPIRED)
+    # ========================================================================
+    
+    def update_signal_result(self, signal_id: str, result: Dict) -> bool:
+        """
+        Actualiza el resultado de una señal cuando alcanza TP, SL o expira.
+        
+        result = {
+            'status': 'tp_hit' | 'sl_hit' | 'expired' | 'missed_opportunity',
+            'exit_price': 70180.0,
+            'exit_timestamp': '2026-08-21T18:00:00',
+            'pnl_pct': 2.3,
+            'candles_to_result': 4,  # Cuántas velas tardó en resolverse
+            'notes': ''
+        }
+        """
+        if not self.enabled:
+            return False
+        
+        try:
+            # Update en la tabla signals
+            update_signal = {
+                'status': result.get('status'),
+                'closed_at': datetime.utcnow().isoformat()
+            }
+            self.client.table('signals').update(update_signal).eq('id', signal_id).execute()
+            
+            # Insert en signal_results
+            payload = {
+                'signal_id': signal_id,
+                'status': result.get('status'),
+                'exit_price': float(result.get('exit_price', 0)),
+                'exit_timestamp': result.get('exit_timestamp'),
+                'pnl_pct': float(result.get('pnl_pct', 0)),
+                'candles_to_result': int(result.get('candles_to_result', 0)),
+                'notes': result.get('notes', ''),
+                'created_at': datetime.utcnow().isoformat()
+            }
+            
+            self.client.table('signal_results').insert(payload).execute()
+            self._check_rotation('signal_results')
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error actualizando resultado de señal {signal_id}: {e}")
+            return False
+    
+    # ========================================================================
+    # OPORTUNIDADES PERDIDAS
+    # ========================================================================
+    
+    def insert_missed_opportunity(self, data: Dict) -> Optional[str]:
+        """
+        Guarda una oportunidad perdida: señal NO_OPERAR/ESPERAR cuyo precio 
+        se movió a favor >2% en las siguientes N velas.
+        """
+        if not self.enabled:
+            return None
+        
+        try:
+            payload = {
+                'symbol': data.get('symbol'),
+                'timeframe': data.get('timeframe'),
+                'action_that_should_have_been': self.normalize_action(data.get('action_should', '')),
+                'confidence_at_moment': float(data.get('confidence', 0)),
+                'strategies_detected': data.get('strategies', []),
+                'indicators_snapshot': data.get('indicators_snapshot', {}),
+                'price_at_signal': float(data.get('price_at_signal', 0)),
+                'max_favorable_price': float(data.get('max_favorable_price', 0)),
+                'max_favorable_pct': float(data.get('max_favorable_pct', 0)),
+                'candles_to_max': int(data.get('candles_to_max', 0)),
+                'candle_timestamp': data.get('candle_timestamp'),
+                'created_at': datetime.utcnow().isoformat()
+            }
+            
+            response = self.client.table('missed_opportunities').insert(payload).execute()
+            self._check_rotation('missed_opportunities')
+            
+            if response.data:
+                return response.data[0].get('id')
+            return None
+        except Exception as e:
+            logger.error(f"Error insertando oportunidad perdida: {e}")
+            return None
+    
+    # ========================================================================
+    # CONSULTAS ESTADÍSTICAS
+    # ========================================================================
+    
+    def get_pending_signals(self, hours_old_max: int = 168) -> List[Dict]:
+        """
+        Retorna las señales pendientes de evaluar (status='pending') 
+        que no sean más antiguas de N horas (default 7 días).
+        """
+        if not self.enabled:
+            return []
+        
+        try:
+            cutoff = (datetime.utcnow() - timedelta(hours=hours_old_max)).isoformat()
+            response = (self.client.table('signals')
+                        .select('*')
+                        .eq('status', 'pending')
+                        .gte('created_at', cutoff)
+                        .execute())
+            return response.data or []
+        except Exception as e:
+            logger.error(f"Error obteniendo señales pendientes: {e}")
+            return []
+    
+    def get_strategy_stats(self, symbol: str = None, timeframe: str = None, 
+                          action: str = None, strategy: str = None) -> List[Dict]:
+        """
+        Consulta las estadísticas específicas de estrategias.
+        Cualquier filtro es opcional; si se omite, retorna agregado.
+        """
+        if not self.enabled:
+            return []
+        
+        try:
+            query = self.client.table('strategy_stats_specific').select('*')
+            
+            if symbol:
+                query = query.eq('symbol', symbol)
+            if timeframe:
+                query = query.eq('timeframe', timeframe)
+            if action:
+                query = query.eq('action', self.normalize_action(action))
+            if strategy:
+                query = query.eq('strategy', strategy)
+            
+            response = query.order('win_rate', desc=True).limit(50).execute()
+            return response.data or []
+        except Exception as e:
+            logger.error(f"Error obteniendo stats: {e}")
+            return []
+    
+    def get_general_stats(self, strategy: str = None) -> List[Dict]:
+        """Consulta estadísticas generales de estrategias (agregado global)."""
+        if not self.enabled:
+            return []
+        
+        try:
+            query = self.client.table('strategy_stats_general').select('*')
+            if strategy:
+                query = query.eq('strategy', strategy)
+            response = query.order('expectancy', desc=True).limit(100).execute()
+            return response.data or []
+        except Exception as e:
+            logger.error(f"Error obteniendo stats generales: {e}")
+            return []
+    
+    def get_recommendations(self, symbol: str, timeframe: str, action: str) -> Optional[Dict]:
+        """
+        Obtiene las recomendaciones cacheadas del ReviewTrader para 
+        (par, temporalidad, acción).
+        """
+        if not self.enabled:
+            return None
+        
+        try:
+            normalized = self.normalize_action(action)
+            response = (self.client.table('review_recommendations')
+                        .select('*')
+                        .eq('symbol', symbol)
+                        .eq('timeframe', timeframe)
+                        .eq('action', normalized)
+                        .order('created_at', desc=True)
+                        .limit(1)
+                        .execute())
+            if response.data:
+                return response.data[0]
+            return None
+        except Exception as e:
+            logger.error(f"Error obteniendo recomendaciones: {e}")
+            return None
+    
+    def upsert_recommendation(self, data: Dict) -> bool:
+        """Guarda o actualiza una recomendación pre-calculada del ReviewTrader"""
+        if not self.enabled:
+            return False
+        
+        try:
+            payload = {
+                'symbol': data.get('symbol'),
+                'timeframe': data.get('timeframe'),
+                'action': self.normalize_action(data.get('action', '')),
+                'winning_strategies': data.get('winning_strategies', []),
+                'losing_strategies': data.get('losing_strategies', []),
+                'best_combinations': data.get('best_combinations', []),
+                'win_rate': float(data.get('win_rate', 0)),
+                'expectancy': float(data.get('expectancy', 0)),
+                'sample_size': int(data.get('sample_size', 0)),
+                'recommended_confidence_multiplier': float(data.get('multiplier', 1.0)),
+                'recommended_leverage': int(data.get('leverage', 1)),
+                'notes': data.get('notes', ''),
+                'created_at': datetime.utcnow().isoformat()
+            }
+            
+            # Elimina la recomendación anterior (mismo par/TF/acción) e inserta la nueva
+            self.client.table('review_recommendations').delete().eq(
+                'symbol', payload['symbol']
+            ).eq('timeframe', payload['timeframe']).eq('action', payload['action']).execute()
+            
+            self.client.table('review_recommendations').insert(payload).execute()
+            self._check_rotation('review_recommendations')
+            return True
+        except Exception as e:
+            logger.error(f"Error guardando recomendación: {e}")
+            return False
+    
+    def upsert_strategy_stats(self, stats_list: List[Dict], general: bool = False) -> bool:
+        """
+        Actualiza estadísticas de estrategias en batch.
+        general=True usa la tabla general; False usa la específica.
+        """
+        if not self.enabled or not stats_list:
+            return False
+        
+        try:
+            table = 'strategy_stats_general' if general else 'strategy_stats_specific'
+            
+            # Delete previos + insert nuevos (idempotente)
+            self.client.table(table).delete().neq('id', 0).execute()  # Limpia todo
+            
+            batch_size = 100
+            for i in range(0, len(stats_list), batch_size):
+                batch = stats_list[i:i+batch_size]
+                self.client.table(table).insert(batch).execute()
+            
+            self._check_rotation(table)
+            return True
+        except Exception as e:
+            logger.error(f"Error actualizando stats {table}: {e}")
+            return False
+    
+    def get_signals_for_stats(self, days_back: int = 90) -> List[Dict]:
+        """
+        Obtiene todas las señales con resultado (no pending) de los últimos N días
+        para recalcular estadísticas.
+        """
+        if not self.enabled:
+            return []
+        
+        try:
+            cutoff = (datetime.utcnow() - timedelta(days=days_back)).isoformat()
+            response = (self.client.table('signals')
+                        .select('*, signal_indicators(strategy_name)')
+                        .neq('status', 'pending')
+                        .gte('created_at', cutoff)
+                        .execute())
+            return response.data or []
+        except Exception as e:
+            logger.error(f"Error obteniendo señales para stats: {e}")
+            return []
+    
+    def get_missed_opportunities_by_context(self, symbol: str = None, 
+                                            timeframe: str = None) -> List[Dict]:
+        """Retorna oportunidades perdidas filtradas por contexto"""
+        if not self.enabled:
+            return []
+        
+        try:
+            query = self.client.table('missed_opportunities').select('*')
+            if symbol:
+                query = query.eq('symbol', symbol)
+            if timeframe:
+                query = query.eq('timeframe', timeframe)
+            response = query.order('created_at', desc=True).limit(200).execute()
+            return response.data or []
+        except Exception as e:
+            logger.error(f"Error obteniendo missed opportunities: {e}")
+            return []
+    
+    # ========================================================================
+    # OPTIMIZACIONES DE VOLUMEN (FASE 2.5)
+    # ========================================================================
+    
+    def delete_old_signals_by_tf(self, timeframe: str, days_retention: int) -> int:
+        """
+        Borra señales de un timeframe específico que sean más antiguas que N días.
+        Se usa para el TTL diferenciado por temporalidad.
+        
+        IMPORTANTE: NO borra las señales con status='tp_hit' (son valiosas).
+        
+        Retorna: número de señales borradas.
+        """
+        if not self.enabled:
+            return 0
+        
+        try:
+            cutoff = (datetime.utcnow() - timedelta(days=days_retention)).isoformat()
+            
+            # Obtener IDs de señales antiguas que NO sean tp_hit
+            response = (self.client.table('signals')
+                        .select('id')
+                        .eq('timeframe', timeframe)
+                        .neq('status', 'tp_hit')
+                        .lt('created_at', cutoff)
+                        .execute())
+            
+            if not response.data:
+                return 0
+            
+            ids_to_delete = [s['id'] for s in response.data]
+            
+            # Borrar en batches de 100
+            deleted = 0
+            for i in range(0, len(ids_to_delete), 100):
+                batch = ids_to_delete[i:i+100]
+                self.client.table('signals').delete().in_('id', batch).execute()
+                deleted += len(batch)
+            
+            logger.info(f"TTL {timeframe}: eliminadas {deleted} señales con más de {days_retention} días")
+            return deleted
+            
+        except Exception as e:
+            logger.error(f"Error en delete_old_signals_by_tf({timeframe}): {e}")
+            return 0
+    
+    def apply_ttl_cleanup(self) -> Dict:
+        """
+        Aplica el TTL (time-to-live) diferenciado por temporalidad.
+        Cada TF tiene su propio tiempo de retención.
+        """
+        ttl_config = {
+            '5m': 7,      # 7 días
+            '15m': 14,    # 14 días
+            '30m': 21,    # 21 días
+            '1h': 30,     # 30 días
+            '2h': 45,
+            '4h': 60,
+            '12h': 90,
+            '1D': 180,
+            '1W': 365
+        }
+        
+        results = {}
+        for tf, days in ttl_config.items():
+            deleted = self.delete_old_signals_by_tf(tf, days)
+            results[tf] = deleted
+        
+        total = sum(results.values())
+        if total > 0:
+            logger.info(f"TTL cleanup total: {total} señales eliminadas")
+        
+        return results
+    
+    def delete_low_sample_stats(self, min_sample: int = 5) -> int:
+        """
+        Borra filas de strategy_stats_specific con menos de N muestras.
+        Estas filas son ruido estadístico y ocupan espacio innecesario.
+        La info se agrega igual en strategy_stats_general.
+        
+        Retorna: número de filas borradas.
+        """
+        if not self.enabled:
+            return 0
+        
+        try:
+            response = (self.client.table('strategy_stats_specific')
+                        .select('id')
+                        .lt('total_signals', min_sample)
+                        .execute())
+            
+            if not response.data:
+                return 0
+            
+            ids_to_delete = [r['id'] for r in response.data]
+            
+            deleted = 0
+            for i in range(0, len(ids_to_delete), 100):
+                batch = ids_to_delete[i:i+100]
+                self.client.table('strategy_stats_specific').delete().in_('id', batch).execute()
+                deleted += len(batch)
+            
+            logger.info(f"Compresión de stats: {deleted} filas con <{min_sample} muestras eliminadas")
+            return deleted
+        except Exception as e:
+            logger.error(f"Error en delete_low_sample_stats: {e}")
+            return 0
+    
+    def get_storage_stats(self) -> Dict:
+        """
+        Retorna conteo de filas por cada tabla.
+        Útil para monitorear el uso de almacenamiento.
+        """
+        if not self.enabled:
+            return {}
+        
+        tables = ['signals', 'signal_indicators', 'signal_results',
+                  'strategy_stats_specific', 'strategy_stats_general',
+                  'missed_opportunities', 'review_recommendations']
+        
+        stats = {}
+        for table in tables:
+            try:
+                response = self.client.table(table).select('id', count='exact').limit(1).execute()
+                stats[table] = response.count or 0
+            except Exception as e:
+                stats[table] = -1  # Error
+        
+        return stats
+    
+    # ========================================================================
+    # ROTACIÓN FIFO
+    # ========================================================================
+    
+    def _check_rotation(self, table_name: str):
+        """
+        Verifica si la tabla superó el límite y borra las filas más antiguas
+        que no tengan un resultado importante (para 'signals').
+        """
+        if not self.enabled:
+            return
+        
+        try:
+            limit = LIMITS.get(table_name, 10000)
+            
+            # Contar filas actuales
+            count_response = self.client.table(table_name).select('id', count='exact').execute()
+            current_count = count_response.count or 0
+            
+            if current_count > limit:
+                # Excede el límite: borrar el 5% más antiguo
+                to_delete = int(limit * 0.05)
+                
+                if table_name == 'signals':
+                    # Preservar señales con TP exitoso (son valiosas)
+                    old_signals = (self.client.table('signals')
+                                   .select('id')
+                                   .neq('status', 'tp_hit')
+                                   .order('created_at')
+                                   .limit(to_delete)
+                                   .execute())
+                    if old_signals.data:
+                        ids_to_delete = [s['id'] for s in old_signals.data]
+                        self.client.table('signals').delete().in_('id', ids_to_delete).execute()
+                        logger.info(f"Rotación FIFO en {table_name}: eliminadas {len(ids_to_delete)} filas")
+                else:
+                    # Para otras tablas: borrar simplemente las más antiguas
+                    old_rows = (self.client.table(table_name)
+                                .select('id')
+                                .order('created_at')
+                                .limit(to_delete)
+                                .execute())
+                    if old_rows.data:
+                        ids_to_delete = [r['id'] for r in old_rows.data]
+                        self.client.table(table_name).delete().in_('id', ids_to_delete).execute()
+                        logger.info(f"Rotación FIFO en {table_name}: eliminadas {len(ids_to_delete)} filas")
+        except Exception as e:
+            logger.error(f"Error en rotación FIFO de {table_name}: {e}")
+    
+    # ========================================================================
+    # HEALTH CHECK
+    # ========================================================================
+    
+    def health_check(self) -> Dict:
+        """Diagnóstico del cliente Supabase"""
+        result = {
+            'enabled': self.enabled,
+            'url_configured': bool(self.url),
+            'key_configured': bool(self.key),
+            'connection_ok': False,
+            'tables_ok': {}
+        }
+        
+        if not self.enabled:
+            return result
+        
+        # Verificar cada tabla
+        tables = ['signals', 'signal_indicators', 'signal_results', 
+                  'strategy_stats_specific', 'strategy_stats_general',
+                  'missed_opportunities', 'review_recommendations']
+        
+        try:
+            for table in tables:
+                try:
+                    self.client.table(table).select('id').limit(1).execute()
+                    result['tables_ok'][table] = True
+                except Exception as e:
+                    result['tables_ok'][table] = False
+            
+            result['connection_ok'] = all(result['tables_ok'].values())
+        except Exception as e:
+            logger.error(f"Health check falló: {e}")
+        
+        return result
+
+
+# ============================================================================
+# INSTANCIA GLOBAL (SINGLETON)
+# ============================================================================
+
+# El resto del sistema importa esta instancia:
+# from supabase_client import supabase_db
+supabase_db = SupabaseClient()
+
+if supabase_db.enabled:
+    health = supabase_db.health_check()
+    print(f"✅ Tablas verificadas: {sum(1 for v in health['tables_ok'].values() if v)}/{len(health['tables_ok'])}")
+    for table, ok in health['tables_ok'].items():
+        status = "✅" if ok else "❌"
+        print(f"   {status} {table}")
+else:
+    print("⚠️ SupabaseClient deshabilitado - el sistema principal seguirá funcionando sin ReviewTrader")
+
+print("=" * 60)

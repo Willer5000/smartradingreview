@@ -1,0 +1,64 @@
+# ============================================================================
+# .gitignore para smartradingreview
+# ============================================================================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Distribución
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Credenciales sensibles (¡MUY IMPORTANTE!)
+.env
+.env.local
+.env.*.local
+config.local.py
+credentials.json
+
+# NOTA: supabase_client.py CONTIENE credenciales. 
+# Si vas a compartir el repo públicamente, considera mover las credenciales
+# a variables de entorno y descomentar esta línea:
+# supabase_client.py
+
+# Bases de datos locales
+*.db
+*.sqlite3
+
+# Archivos temporales del proyecto
+temp/
+tmp/
+cache/

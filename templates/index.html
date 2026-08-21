@@ -1,0 +1,2377 @@
+<!DOCTYPE html>
+<html lang="es" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CRYPTO TRADER ANALYST PRO - Sistema Experto de Análisis y Recomendaciones</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        /* ============ ESTILOS DE PATRONES ============ */
+        .pattern-card {
+            background: linear-gradient(145deg, #0F1115 0%, #0A0C10 100%);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 12px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        
+        .pattern-badge {
+            display: inline-block;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin-right: 8px;
+        }
+        
+        .pattern-badge.bullish {
+            background: rgba(0,192,118,0.15);
+            color: #00C076;
+            border: 1px solid rgba(0,192,118,0.3);
+        }
+        
+        .pattern-badge.bearish {
+            background: rgba(255,91,91,0.15);
+            color: #FF5B5B;
+            border: 1px solid rgba(255,91,91,0.3);
+        }
+        
+        .pattern-badge.neutral {
+            background: rgba(255,215,0,0.15);
+            color: #FFD700;
+            border: 1px solid rgba(255,215,0,0.3);
+        }
+        
+        .pattern-4-chart {
+            height: 150px;
+            width: 100%;
+            background: rgba(0,0,0,0.2);
+            border-radius: 8px;
+            margin-top: 5px;
+            margin-bottom: 5px;
+        }
+        
+        .formation-40-chart {
+            height: 200px;
+            width: 100%;
+            background: rgba(0,0,0,0.2);
+            border-radius: 8px;
+            margin-top: 10px;
+            margin-bottom: 10px;
+        }
+        
+        /* ============ RECOMENDACIÓN MINIMIZABLE ============ */
+        .recommendation-card {
+            background: linear-gradient(145deg, #1a1e24 0%, #0f1115 100%);
+            border-left: 6px solid #FFD700;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .recommendation-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 16px rgba(0,0,0,0.3);
+        }
+        
+        .recommendation-header {
+            padding: 15px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .recommendation-content {
+            padding: 0 20px 20px 20px;
+            border-top: 1px solid rgba(255,255,255,0.1);
+        }
+        
+        .collapse-icon {
+            transition: transform 0.3s ease;
+        }
+        
+        .collapse-icon.collapsed {
+            transform: rotate(-90deg);
+        }
+        
+        .live-price {
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: #FFD700;
+        }
+        
+        .pattern-info-box {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 10px;
+            padding: 10px;
+            background: rgba(0,0,0,0.2);
+            border-radius: 8px;
+        }
+        
+        /* ============ MANTENER ESTILOS ORIGINALES ============ */
+        .indicator-card {
+            transition: all 0.3s ease;
+        }
+        
+        .btn-move, .btn-collapse {
+            opacity: 0.7;
+        }
+        
+        .btn-move:hover, .btn-collapse:hover {
+            opacity: 1;
+        }
+    </style>
+</head>
+<body>
+    <!-- Reloj Digital Bolivia -->
+    <div class="container-fluid bg-dark border-bottom border-secondary py-2">
+        <div class="row">
+            <div class="col-12 text-center">
+                <div class="digital-clock-container">
+                    <i class="fas fa-clock me-2 text-warning"></i>
+                    <span class="digital-clock-label me-2">Hora Bolivia (America/La_Paz):</span>
+                    <span id="bolivia-clock" class="digital-clock">00:00:00</span>
+                    <span id="bolivia-date" class="digital-date ms-2">--</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Información del Calendario de Trading y Mercado - MEJORADA -->
+    <div class="container-fluid bg-dark border-bottom border-warning py-2">
+        <div class="row">
+            <div class="col-12">
+                <div id="calendar-info" class="d-flex justify-content-between align-items-center">
+                    <div class="d-flex align-items-center">
+                        <span id="market-session-icon" class="me-1">🌏</span>
+                        <span id="market-session-badge" class="badge bg-info me-2">Sesión Asiática</span>
+                        <span id="market-liquidity" class="text-muted me-3">Liquidez: Baja</span>
+                        <span id="market-day-icon" class="me-1">📆</span>
+                        <span id="market-day-name" class="me-3">Lunes</span>
+                    </div>
+                    <div class="d-flex align-items-center">
+                        <span class="text-muted me-2">Próxima alerta:</span>
+                        <span id="next-alert" class="badge bg-warning me-3">19:53 (1D)</span>
+                        <span class="text-muted me-2">Temporalidades:</span>
+                        <span id="active-timeframes" class="me-3">4H, 12H, 1D</span>
+                        <span id="market-status" class="badge bg-success">Mercado Activo</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container">
+            <a class="navbar-brand" href="#">
+                <i class="fas fa-robot me-2 text-primary"></i>
+                CRYPTO TRADER ANALYST PRO
+            </a>
+            <div class="navbar-nav ms-auto">
+                <a class="nav-link" href="/manual">
+                    <i class="fas fa-book me-1"></i>Manual del Sistema
+                </a>
+                <a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#telegramModal">
+                    <i class="fab fa-telegram me-1"></i>Prueba Telegram
+                </a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container-fluid mt-4">
+        <div class="row">
+            <!-- ============ PANEL DE CONTROL IZQUIERDO ============ -->
+            <div class="col-lg-2">
+                <div class="card bg-dark border-secondary mb-4">
+                    <div class="card-header">
+                        <h6 class="mb-0"><i class="fas fa-sliders-h me-2"></i>Configuración de Análisis</h6>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label class="form-label">Activo a Analizar</label>
+                            <select class="form-select bg-dark text-white" id="symbol-select">
+                                <option value="BTC-USDT" selected>BTC/USDT</option>
+                                <option value="PAXG-USDT">PAXG/USDT (Oro)</option>
+                                <option value="PAXG-BTC">PAXG/BTC (Ratio)</option>
+                            </select>
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label">Temporalidad Principal</label>
+                            <select class="form-select bg-dark text-white" id="interval-select">
+                                <option value="4h">4 Horas (Operativa)</option>
+                                <option value="12h">12 Horas (Swing)</option>
+                                <option value="1D" selected>1 Día (Inversión)</option>
+                                <option value="1W">1 Semana (Estratégica)</option>
+                            </select>
+                        </div>
+
+                        <button class="btn btn-primary w-100 mb-2" onclick="window.runCompleteAnalysis()">
+                            <i class="fas fa-brain me-2"></i>Ejecutar Análisis Completo
+                        </button>
+                        
+                        <button class="btn btn-outline-warning w-100" onclick="window.sendTelegramTest()">
+                            <i class="fab fa-telegram me-2"></i>Probar Telegram
+                        </button>
+                        
+                        <button class="btn btn-outline-info w-100 mt-2" onclick="window.downloadAnalysisReport()">
+                            <i class="fas fa-download me-2"></i>Descargar Análisis
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Estado del Sistema -->
+                <div class="card bg-dark border-success mb-4">
+                    <div class="card-header bg-success bg-opacity-25">
+                        <h6 class="mb-0"><i class="fas fa-server me-2"></i>Estado del Sistema</h6>
+                    </div>
+                    <div class="card-body">
+                        <div class="system-status">
+                            <div class="d-flex justify-content-between mb-2">
+                                <span>API KuCoin:</span>
+                                <span class="badge bg-success" id="api-status">Conectado</span>
+                            </div>
+                            <div class="d-flex justify-content-between mb-2">
+                                <span>Telegram Bot:</span>
+                                <span class="badge bg-success" id="telegram-status">Activo</span>
+                            </div>
+                            <div class="d-flex justify-content-between mb-2">
+                                <span>Análisis Activo:</span>
+                                <span class="badge bg-warning" id="analysis-status">Ejecutando</span>
+                            </div>
+                            <div class="d-flex justify-content-between">
+                                <span>Última Señal:</span>
+                                <span class="text-info" id="last-signal">Hace 5min</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Información del Sistema -->
+                <!-- ============ NUEVO: TARJETA DE ESTADO DE ZONAS ============ -->
+                <!-- Reemplaza el card "Sobre el Sistema" -->
+                
+                <div class="card bg-dark border-info mb-4">
+                    <div class="card-header bg-info bg-opacity-25">
+                        <h6 class="mb-0"><i class="fas fa-chart-area me-2"></i>ESTADO DE ZONAS DE TRADING</h6>
+                    </div>
+                    <div class="card-body">
+                        <!-- Zonas principales -->
+                        <div class="row mb-3">
+                            <div class="col-6">
+                                <div class="border-start border-3 border-success ps-2">
+                                    <small class="text-muted d-block">ZONA COMPRA</small>
+                                    <strong id="zone-compra-min" class="h6">--</strong> - <strong id="zone-compra-max" class="h6">--</strong>
+                                </div>
+                            </div>
+                            <div class="col-6">
+                                <div class="border-start border-3 border-danger ps-2">
+                                    <small class="text-muted d-block">ZONA VENTA</small>
+                                    <strong id="zone-venta-min" class="h6">--</strong> - <strong id="zone-venta-max" class="h6">--</strong>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Zonas de precisión -->
+                        <div class="row mb-3">
+                            <div class="col-6">
+                                <div class="border-start border-3 border-success border-2 ps-2" style="border-left-width: 4px !important;">
+                                    <small class="text-muted d-block">ZONA LONG</small>
+                                    <strong id="zone-long-min" class="h6">--</strong> - <strong id="zone-long-max" class="h6">--</strong>
+                                </div>
+                            </div>
+                            <div class="col-6">
+                                <div class="border-start border-3 border-danger border-2 ps-2" style="border-left-width: 4px !important;">
+                                    <small class="text-muted d-block">ZONA SHORT</small>
+                                    <strong id="zone-short-min" class="h6">--</strong> - <strong id="zone-short-max" class="h6">--</strong>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Precio actual y estado -->
+                        <div class="mt-3 p-2 bg-dark rounded" style="border-left: 3px solid #FFD700;">
+                            <div class="d-flex justify-content-between mb-1">
+                                <span><i class="fas fa-circle me-1" style="color: #FFD700;"></i> Precio actual:</span>
+                                <strong id="zone-current-price" class="text-warning">--</strong>
+                            </div>
+                            <div class="d-flex justify-content-between mb-1">
+                                <span>📍 Estado:</span>
+                                <strong id="zone-status" class="text-info">Analizando...</strong>
+                            </div>
+                        </div>
+                        
+                        <!-- Distancias -->
+                        <div class="row mt-3 g-1">
+                            <div class="col-6">
+                                <small class="text-muted d-block">Dist. a COMPRA</small>
+                                <span id="zone-dist-compra" class="badge bg-dark">--</span>
+                            </div>
+                            <div class="col-6">
+                                <small class="text-muted d-block">Dist. a VENTA</small>
+                                <span id="zone-dist-venta" class="badge bg-dark">--</span>
+                            </div>
+                            <div class="col-6 mt-2">
+                                <small class="text-muted d-block">Dist. a LONG</small>
+                                <span id="zone-dist-long" class="badge bg-dark">--</span>
+                            </div>
+                            <div class="col-6 mt-2">
+                                <small class="text-muted d-block">Dist. a SHORT</small>
+                                <span id="zone-dist-short" class="badge bg-dark">--</span>
+                            </div>
+                        </div>
+                        
+                        <!-- Confianza del sistema -->
+                        <div class="mt-3 pt-2 border-top border-secondary">
+                            <div class="d-flex justify-content-between">
+                                <span>📊 Confianza del sistema:</span>
+                                <span class="badge bg-warning" id="zone-confidence">--</span>
+                            </div>
+                        </div>
+                        
+                        <!-- Leyenda -->
+                        <div class="mt-3 small text-muted">
+                            <span style="color: #00C076;">🟢 COMPRA</span> | 
+                            <span style="color: #FF5B5B;">🔴 VENTA</span> | 
+                            <span style="color: #00C076; border-left: 2px solid #00C076;">🟩 LONG</span> | 
+                            <span style="color: #FF5B5B; border-left: 2px solid #FF5B5B;">🟥 SHORT</span>
+                            <div class="mt-1">
+                                <span style="border-bottom: 1px dotted yellow;">⋯ punteado = con veto</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <!-- ============ CONTENIDO PRINCIPAL ============ -->
+            <div class="col-lg-7">
+            <!-- RECOMENDACIÓN DEL SISTEMA - MINIMIZABLE CON CONVICCIÓN -->
+            <div class="recommendation-card" id="recommendation-card">
+                <div class="recommendation-header" onclick="window.toggleRecommendation()">
+                    <div class="d-flex align-items-center">
+                        <i class="fas fa-robot me-2" style="color: #FFD700; font-size: 1.2rem;"></i>
+                        <h5 class="mb-0 fw-bold" style="color: #FFD700;">RECOMENDACIÓN DEL SISTEMA</h5>
+                    </div>
+                    <div class="d-flex align-items-center">
+                        <span id="rec-badge-mini" class="badge bg-secondary me-3">ESPERANDO</span>
+                        <span id="conviction-badge-mini" class="badge bg-secondary me-3" style="display: none;">🟡 MEDIA</span>
+                        <i class="fas fa-chevron-down collapse-icon" id="recommendation-icon"></i>
+                    </div>
+                </div>
+                <div id="recommendation-content" style="display: block;">
+                    <div class="recommendation-content">
+                        <div id="system-recommendation">
+                            <div class="text-center py-4">
+                                <div class="spinner-border text-warning" role="status">
+                                    <span class="visually-hidden">Analizando mercado...</span>
+                                </div>
+                                <p class="mt-3 mb-0">El sistema está analizando 30+ indicadores...</p>
+                            </div>
+                        </div>
+                        
+                        <!-- SECCIÓN DE CONVICCIÓN - NUEVA -->
+                        <div id="conviction-section" class="mt-3 p-3 rounded-3" style="background: rgba(255,215,0,0.05); border-left: 4px solid #FFD700; display: none;">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <div>
+                                    <span id="conviction-icon" class="fs-5 me-2">🟡</span>
+                                    <span id="conviction-level" class="fw-bold">CONVICCIÓN MEDIA</span>
+                                </div>
+                                <span id="conviction-percentage" class="badge bg-dark">70%</span>
+                            </div>
+                            <div id="conviction-description" class="small text-muted mt-1">
+                                Configuración favorable - Probabilidad moderada
+                            </div>
+                            <div class="row mt-2">
+                                <div class="col-6">
+                                    <small class="text-muted">Tamaño sugerido:</small>
+                                    <strong id="suggested-size" class="ms-1">70%</strong>
+                                </div>
+                                <div class="col-6">
+                                    <small class="text-muted">Apalancamiento:</small>
+                                    <strong id="suggested-leverage" class="ms-1">10x</strong>
+                                </div>
+                            </div>
+                            <div id="conviction-factors" class="mt-2 small">
+                                <div id="bonus-factors" class="text-success"></div>
+                                <div id="degradation-factors" class="text-danger"></div>
+                            </div>
+                        </div>
+                        
+                        <div class="mt-3 text-end">
+                            <small class="text-muted">
+                                <i class="fas fa-sync-alt me-1"></i>
+                                Actualizado: <span id="recommendation-time">--:--:--</span>
+                            </small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+                <!-- GRÁFICO PRINCIPAL CON VELAS -->
+                <div class="card bg-dark border-secondary mb-4">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0" id="chart-title">BTC/USDT 1D - <span id="live-price" class="live-price">$0.00</span></h5>
+                        <div class="btn-group">
+                            <button class="btn btn-sm btn-outline-primary" onclick="window.toggleFullScreen()">
+                                <i class="fas fa-expand me-1"></i>Pantalla Completa
+                            </button>
+                            <button class="btn btn-sm btn-outline-info" onclick="window.downloadChart()">
+                                <i class="fas fa-camera me-1"></i>Capturar Gráfico
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div id="main-chart-container">
+                            <div id="candle-chart" style="height: 450px;"></div>
+                        </div>
+                        <div class="mt-2 text-end">
+                            <small class="text-muted">
+                                <i class="fas fa-sync-alt me-1"></i>
+                                Velas actualizadas cada 30 seg
+                            </small>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ============ CONTENEDOR DE INDICADORES (EXACTAMENTE COMO ESTABA) ============ -->
+                <div id="indicators-container">
+                    <!-- FTMaverick -->
+                    <div class="card bg-dark border-warning mb-4 indicator-card" data-indicator="ftm">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0">
+                                <i class="fas fa-chart-line me-2"></i>
+                                FTMaverick - Fuerza de Tendencia
+                            </h5>
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-secondary btn-move" data-direction="up">
+                                    <i class="fas fa-arrow-up"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-move" data-direction="down">
+                                    <i class="fas fa-arrow-down"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-collapse" data-collapsed="false">
+                                    <i class="fas fa-minus"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="card-body indicator-content">
+                            <div id="ftm-chart" style="height: 300px;"></div>
+                            <div class="mt-2">
+                                <small class="text-muted">
+                                    <strong>Interpretación:</strong> Mide la fuerza del movimiento y zonas de no-operación. 
+                                    <span id="ftm-interpretation">Analizando...</span>
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- ============ MAPA DE CALOR DE LIQUIDACIONES ============ -->
+                    <div class="card bg-dark border-danger mb-4 indicator-card" data-indicator="liquidation-heatmap">
+                        <div class="card-header d-flex justify-content-between align-items-center bg-danger bg-opacity-25">
+                            <h5 class="mb-0">
+                                <i class="fas fa-fire me-2" style="color: #FF5B5B;"></i>
+                                Mapa de Calor de Liquidaciones
+                            </h5>
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-secondary btn-move" data-direction="up">
+                                    <i class="fas fa-arrow-up"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-move" data-direction="down">
+                                    <i class="fas fa-arrow-down"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-collapse" data-collapsed="false">
+                                    <i class="fas fa-minus"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="card-body indicator-content">
+                            <div id="liquidation-heatmap-chart" style="height: 450px;"></div>
+                            
+                            <!-- Resumen de liquidaciones -->
+                            <div class="row mt-3">
+                                <div class="col-md-3 col-6">
+                                    <div class="border-start border-3 border-danger ps-2">
+                                        <small class="text-muted d-block">LONG acumulado</small>
+                                        <strong id="liquidation-long-weight" class="h6">--</strong>
+                                    </div>
+                                </div>
+                                <div class="col-md-3 col-6">
+                                    <div class="border-start border-3 border-warning ps-2">
+                                        <small class="text-muted d-block">SHORT acumulado</small>
+                                        <strong id="liquidation-short-weight" class="h6">--</strong>
+                                    </div>
+                                </div>
+                                <div class="col-md-3 col-6">
+                                    <div class="border-start border-3 border-info ps-2">
+                                        <small class="text-muted d-block">Bins activos</small>
+                                        <strong id="liquidation-active-bins" class="h6">0</strong>
+                                    </div>
+                                </div>
+                                <div class="col-md-3 col-6">
+                                    <div class="border-start border-3 border-secondary ps-2">
+                                        <small class="text-muted d-block">Congelados</small>
+                                        <strong id="liquidation-frozen-bins" class="h6">0</strong>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="mt-3 p-2 bg-dark rounded" style="border-left: 3px solid #FF5B5B;">
+                                <small class="text-muted">
+                                    <i class="fas fa-info-circle me-1" style="color: #FF5B5B;"></i>
+                                    <strong>Interpretación:</strong> 
+                                    <span id="liquidation-interpretation">Analizando pools de liquidez...</span>
+                                </small>
+                                <div class="mt-1">
+                                    <small class="text-muted">
+                                        <span style="color: #FF5B5B;">🔴 Rojo = alta densidad</span> | 
+                                        <span style="color: #FFD700;">🟡 Amarillo = media</span> | 
+                                        <span style="color: #00C076;">🟢 Verde = baja</span> |
+                                        <span style="border-bottom: 1px dotted white;">⋯ punteado = congelado</span>
+                                    </small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                <!-- ============ GRÁFICO DE ZONAS DE TRADING ============ -->
+                <div class="card bg-dark border-info mb-4 indicator-card" data-indicator="trading-zones">
+                    <div class="card-header d-flex justify-content-between align-items-center bg-info bg-opacity-25">
+                        <h5 class="mb-0">
+                            <i class="fas fa-chart-area me-2" style="color: #17a2b8;"></i>
+                            Zonas Dinámicas de Trading
+                        </h5>
+                        <div class="btn-group btn-group-sm">
+                            <button class="btn btn-outline-secondary btn-move" data-direction="up">
+                                <i class="fas fa-arrow-up"></i>
+                            </button>
+                            <button class="btn btn-outline-secondary btn-move" data-direction="down">
+                                <i class="fas fa-arrow-down"></i>
+                            </button>
+                            <button class="btn btn-outline-secondary btn-collapse" data-collapsed="false">
+                                <i class="fas fa-minus"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body indicator-content">
+                        <div id="trading-zones-chart" style="height: 350px;"></div>
+                        <div class="mt-2">
+                            <small class="text-muted">
+                                <strong>Interpretación:</strong> 
+                                <span style="color: #00C076;">🟢 COMPRA</span> | 
+                                <span style="color: #FF5B5B;">🔴 VENTA</span> | 
+                                <span style="color: #00C076; border-left: 2px solid #00C076;">🟩 LONG</span> | 
+                                <span style="color: #FF5B5B; border-left: 2px solid #FF5B5B;">🟥 SHORT</span>
+                            </small>
+                        </div>
+                    </div>
+                </div>                    
+                <!-- ============ NUEVO: FEAR & GREED INDEX (GRÁFICO DE LÍNEAS) ============ -->
+                <div class="card bg-dark border-warning mb-4 indicator-card" data-indicator="fear-greed">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">
+                            <i class="fas fa-chart-line me-2" style="color: #FFD700;"></i>
+                            Fear & Greed Index - Sentimiento de Mercado
+                        </h5>
+                        <div class="btn-group btn-group-sm">
+                            <button class="btn btn-outline-secondary btn-move" data-direction="up">
+                                <i class="fas fa-arrow-up"></i>
+                            </button>
+                            <button class="btn btn-outline-secondary btn-move" data-direction="down">
+                                <i class="fas fa-arrow-down"></i>
+                            </button>
+                            <button class="btn btn-outline-secondary btn-collapse" data-collapsed="false">
+                                <i class="fas fa-minus"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body indicator-content">
+                        <!-- Gráfico principal de líneas -->
+                        <div id="fear-greed-chart" style="height: 250px;"></div>
+                        
+                        <!-- Información adicional debajo del gráfico -->
+                        <div class="row mt-3">
+                            <div class="col-md-4">
+                                <div class="border-start border-3 border-warning ps-3">
+                                    <small class="text-muted d-block">ACTUAL</small>
+                                    <strong class="h5" id="fng-current">--</strong>
+                                    <span class="badge bg-secondary ms-2" id="fng-classification">--</span>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="border-start border-3 border-info ps-3">
+                                    <small class="text-muted d-block">TENDENCIA 7D</small>
+                                    <strong class="h5" id="fng-trend-7d">--</strong>
+                                    <span class="text-muted ms-1" id="fng-trend-7d-icon"></span>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="border-start border-3 border-secondary ps-3">
+                                    <small class="text-muted d-block">CONTEXTO 30D</small>
+                                    <strong class="h5" id="fng-trend-30d">--</strong>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Interpretación y adaptación por temporalidad -->
+                        <div class="mt-3 p-2 bg-dark rounded" style="border-left: 3px solid #FFD700;">
+                            <small class="text-muted">
+                                <i class="fas fa-info-circle me-1" style="color: #FFD700;"></i>
+                                <strong>Interpretación:</strong> 
+                                <span id="fng-interpretation">Analizando sentimiento de mercado...</span>
+                            </small>
+                            <div class="mt-1">
+                                <small class="text-muted">
+                                    <i class="fas fa-clock me-1"></i>
+                                    Datos diarios adaptados para <span id="fng-timeframe-badge" class="badge bg-dark">1D</span>
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                    <!-- Detector de Ballenas -->
+                    <div class="card bg-dark border-info mb-4 indicator-card" data-indicator="whale">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0">
+                                <i class="fas fa-whale me-2"></i>
+                                Detector de Actividad Institucional (Ballenas)
+                            </h5>
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-secondary btn-move" data-direction="up">
+                                    <i class="fas fa-arrow-up"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-move" data-direction="down">
+                                    <i class="fas fa-arrow-down"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-collapse" data-collapsed="false">
+                                    <i class="fas fa-minus"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="card-body indicator-content">
+                            <div id="whale-chart" style="height: 300px;"></div>
+                            <div class="mt-2">
+                                <small class="text-muted">
+                                    <strong>Interpretación:</strong> Detecta acumulación/distribución institucional. 
+                                    <span id="whale-interpretation">Monitoreando...</span>
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- RSI Maverick -->
+                    <div class="card bg-dark border-primary mb-4 indicator-card" data-indicator="rsi_maverick">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0">
+                                <i class="fas fa-wave-square me-2"></i>
+                                RSI Modificado Maverick (%B)
+                            </h5>
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-secondary btn-move" data-direction="up">
+                                    <i class="fas fa-arrow-up"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-move" data-direction="down">
+                                    <i class="fas fa-arrow-down"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-collapse" data-collapsed="false">
+                                    <i class="fas fa-minus"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="card-body indicator-content">
+                            <div id="rsi-maverick-chart" style="height: 300px;"></div>
+                            <div class="mt-2">
+                                <small class="text-muted">
+                                    <strong>Interpretación:</strong> Posición dentro de bandas de volatilidad. 
+                                    <span id="rsi-m-interpretation">Calculando...</span>
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Ichimoku Cloud -->
+                    <div class="card bg-dark border-success mb-4 indicator-card" data-indicator="ichimoku">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0">
+                                <i class="fas fa-cloud me-2"></i>
+                                Ichimoku Kinko Hyo (Nube)
+                            </h5>
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-secondary btn-move" data-direction="up">
+                                    <i class="fas fa-arrow-up"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-move" data-direction="down">
+                                    <i class="fas fa-arrow-down"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-collapse" data-collapsed="false">
+                                    <i class="fas fa-minus"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="card-body indicator-content">
+                            <div id="ichimoku-chart" style="height: 300px;"></div>
+                            <div class="mt-2">
+                                <small class="text-muted">
+                                    <strong>Interpretación:</strong> Soportes/resistencias y tendencia. 
+                                    <span id="ichimoku-interpretation">Evaluando...</span>
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Squeeze Momentum -->
+                    <div class="card bg-dark border-danger mb-4 indicator-card" data-indicator="squeeze">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0">
+                                <i class="fas fa-compress-arrows-alt me-2"></i>
+                                Squeeze Momentum Indicator
+                            </h5>
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-secondary btn-move" data-direction="up">
+                                    <i class="fas fa-arrow-up"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-move" data-direction="down">
+                                    <i class="fas fa-arrow-down"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-collapse" data-collapsed="false">
+                                    <i class="fas fa-minus"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="card-body indicator-content">
+                            <div id="squeeze-chart" style="height: 300px;"></div>
+                            <div class="mt-2">
+                                <small class="text-muted">
+                                    <strong>Interpretación:</strong> Compresión de volatilidad y momentum. 
+                                    <span id="squeeze-interpretation">Analizando...</span>
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- ADX con DMI -->
+                    <div class="card bg-dark border-secondary mb-4 indicator-card" data-indicator="adx">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0">ADX con DMI (+DI y -DI)</h5>
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-secondary btn-move" data-direction="up">
+                                    <i class="fas fa-arrow-up"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-move" data-direction="down">
+                                    <i class="fas fa-arrow-down"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-collapse" data-collapsed="false">
+                                    <i class="fas fa-minus"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="card-body indicator-content">
+                            <div id="adx-chart" style="height: 300px;"></div>
+                            <div class="mt-2">
+                                <small class="text-muted">
+                                    <strong>Interpretación:</strong> Fuerza y dirección de tendencia. 
+                                    <span id="adx-interpretation">Calculando...</span>
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- MACD -->
+                    <div class="card bg-dark border-secondary mb-4 indicator-card" data-indicator="macd">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0">MACD con Histograma</h5>
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-secondary btn-move" data-direction="up">
+                                    <i class="fas fa-arrow-up"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-move" data-direction="down">
+                                    <i class="fas fa-arrow-down"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-collapse" data-collapsed="false">
+                                    <i class="fas fa-minus"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="card-body indicator-content">
+                            <div id="macd-chart" style="height: 300px;"></div>
+                            <div class="mt-2">
+                                <small class="text-muted">
+                                    <strong>Interpretación:</strong> Momentum y cambios de tendencia. 
+                                    <span id="macd-interpretation">Evaluando...</span>
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- RSI Tradicional -->
+                    <div class="card bg-dark border-secondary mb-4 indicator-card" data-indicator="rsi">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0">RSI Tradicional con Divergencias</h5>
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-secondary btn-move" data-direction="up">
+                                    <i class="fas fa-arrow-up"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-move" data-direction="down">
+                                    <i class="fas fa-arrow-down"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-collapse" data-collapsed="false">
+                                    <i class="fas fa-minus"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="card-body indicator-content">
+                            <div id="rsi-chart" style="height: 300px;"></div>
+                            <div class="mt-2">
+                                <small class="text-muted">
+                                    <strong>Interpretación:</strong> Condiciones de sobrecompra/sobreventa. 
+                                    <span id="rsi-interpretation">Analizando...</span>
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Estocástico -->
+                    <div class="card bg-dark border-secondary mb-4 indicator-card" data-indicator="stochastic">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0">Estocástico</h5>
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-secondary btn-move" data-direction="up">
+                                    <i class="fas fa-arrow-up"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-move" data-direction="down">
+                                    <i class="fas fa-arrow-down"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-collapse" data-collapsed="false">
+                                    <i class="fas fa-minus"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="card-body indicator-content">
+                            <div id="stochastic-chart" style="height: 300px;"></div>
+                            <div class="mt-2">
+                                <small class="text-muted">
+                                    <strong>Interpretación:</strong> Momentum y posibles reversiones. 
+                                    <span id="stochastic-interpretation">Calculando...</span>
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Volumen -->
+                    <div class="card bg-dark border-secondary mb-4 indicator-card" data-indicator="volume">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0">Análisis de Volumen</h5>
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-secondary btn-move" data-direction="up">
+                                    <i class="fas fa-arrow-up"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-move" data-direction="down">
+                                    <i class="fas fa-arrow-down"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-collapse" data-collapsed="false">
+                                    <i class="fas fa-minus"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="card-body indicator-content">
+                            <div id="volume-chart" style="height: 300px;"></div>
+                            <div class="mt-2">
+                                <small class="text-muted">
+                                    <strong>Interpretación:</strong> Confirmación de movimientos y participación. 
+                                    <span id="volume-interpretation">Evaluando...</span>
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- SuperTrend + Parabolic SAR -->
+                    <div class="card bg-dark border-secondary mb-4 indicator-card" data-indicator="supertrend">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0">
+                                <i class="fas fa-chart-line me-2" style="color: #8A63D2;"></i>
+                                SuperTrend + Parabolic SAR
+                            </h5>
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-secondary btn-move" data-direction="up">
+                                    <i class="fas fa-arrow-up"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-move" data-direction="down">
+                                    <i class="fas fa-arrow-down"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-collapse" data-collapsed="false">
+                                    <i class="fas fa-minus"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="card-body indicator-content">
+                            <div id="supertrend-chart" style="height: 350px;"></div>
+                            <div class="mt-2">
+                                <small class="text-muted">
+                                    <strong>Interpretación:</strong> 
+                                    <span style="color: #00C076;">Línea verde = SuperTrend alcista</span> | 
+                                    <span style="color: #FF5B5B;">Línea roja = SuperTrend bajista</span><br>
+                                    <span style="color: #FFD700;">◆ Diamantes = Parabolic SAR</span> (debajo = alcista, encima = bajista)
+                                    <span id="supertrend-interpretation" class="ms-2">Calculando...</span>
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Bandas de Bollinger -->
+                    <div class="card bg-dark border-secondary mb-4 indicator-card" data-indicator="bollinger">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0">Bandas de Bollinger</h5>
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-secondary btn-move" data-direction="up">
+                                    <i class="fas fa-arrow-up"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-move" data-direction="down">
+                                    <i class="fas fa-arrow-down"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-collapse" data-collapsed="false">
+                                    <i class="fas fa-minus"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="card-body indicator-content">
+                            <div id="bollinger-chart" style="height: 300px;"></div>
+                            <div class="mt-2">
+                                <small class="text-muted">
+                                    <strong>Interpretación:</strong> Volatilidad y niveles dinámicos. 
+                                    <span id="bollinger-interpretation">Calculando...</span>
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- ATR -->
+                    <div class="card bg-dark border-secondary mb-4 indicator-card" data-indicator="atr">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0">ATR - Volatilidad</h5>
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-secondary btn-move" data-direction="up">
+                                    <i class="fas fa-arrow-up"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-move" data-direction="down">
+                                    <i class="fas fa-arrow-down"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-collapse" data-collapsed="false">
+                                    <i class="fas fa-minus"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="card-body indicator-content">
+                            <div id="atr-chart" style="height: 300px;"></div>
+                            <div class="mt-2">
+                                <small class="text-muted">
+                                    <strong>Interpretación:</strong> Volatilidad del mercado. 
+                                    <span id="atr-interpretation">Analizando...</span>
+                                </small>
+                            </div>
+                        </div>
+                    </div>               
+                <!-- ============ NUEVO: PERFIL DE VOLUMEN CON POC ============ -->
+                <div class="card bg-dark border-warning mb-4 indicator-card" data-indicator="volume-profile">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">
+                            <i class="fas fa-chart-line me-2" style="color: #FFD700;"></i>
+                            Perfil de Volumen con POC
+                        </h5>
+                        <div class="btn-group btn-group-sm">
+                            <button class="btn btn-outline-secondary btn-move" data-direction="up">
+                                <i class="fas fa-arrow-up"></i>
+                            </button>
+                            <button class="btn btn-outline-secondary btn-move" data-direction="down">
+                                <i class="fas fa-arrow-down"></i>
+                            </button>
+                            <button class="btn btn-outline-secondary btn-collapse" data-collapsed="false">
+                                <i class="fas fa-minus"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body indicator-content">
+                        <div id="volume-profile-chart" style="height: 350px;"></div>
+                        <div class="mt-2">
+                            <small class="text-muted">
+                                <strong>Interpretación:</strong> 
+                                <span style="color: #FFD700;">Línea dorada = POC (Point of Control)</span> - Zona de mayor volumen.
+                                <span style="color: #3A8BFF;">Líneas azules = Value Area</span>
+                                <span id="volume-profile-interpretation" class="ms-2">Calculando perfil...</span>
+                            </small>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ============ NUEVO: FAIR VALUE GAPS + ORDER BLOCKS ============ -->
+                <div class="card bg-dark border-primary mb-4 indicator-card" data-indicator="fvg-ob">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">
+                            <i class="fas fa-draw-polygon me-2" style="color: #8A63D2;"></i>
+                            Fair Value Gaps + Order Blocks
+                        </h5>
+                        <div class="btn-group btn-group-sm">
+                            <button class="btn btn-outline-secondary btn-move" data-direction="up">
+                                <i class="fas fa-arrow-up"></i>
+                            </button>
+                            <button class="btn btn-outline-secondary btn-move" data-direction="down">
+                                <i class="fas fa-arrow-down"></i>
+                            </button>
+                            <button class="btn btn-outline-secondary btn-collapse" data-collapsed="false">
+                                <i class="fas fa-minus"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body indicator-content">
+                        <div id="fvg-ob-chart" style="height: 350px;"></div>
+                        <div class="mt-2">
+                            <small class="text-muted">
+                                <strong>Interpretación:</strong> 
+                                <span style="color: #00C076; background: rgba(0,192,118,0.1); padding: 2px 6px; border-radius: 4px;">🟢 FVG Alcista</span> 
+                                <span style="color: #FF5B5B; background: rgba(255,91,91,0.1); padding: 2px 6px; border-radius: 4px;">🔴 FVG Bajista</span>
+                                <span style="color: #8A63D2; background: rgba(138,99,210,0.1); padding: 2px 6px; border-radius: 4px;">🟣 Order Block</span>
+                                <span id="fvg-ob-interpretation" class="ms-2">Analizando niveles institucionales...</span>
+                            </small>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ============ NUEVO: WILLIAMS %R + CCI ============ -->
+                <div class="card bg-dark border-secondary mb-4 indicator-card" data-indicator="williams-cci">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">
+                            <i class="fas fa-wave-square me-2" style="color: #FFD700;"></i>
+                            Williams %R + CCI
+                        </h5>
+                        <div class="btn-group btn-group-sm">
+                            <button class="btn btn-outline-secondary btn-move" data-direction="up">
+                                <i class="fas fa-arrow-up"></i>
+                            </button>
+                            <button class="btn btn-outline-secondary btn-move" data-direction="down">
+                                <i class="fas fa-arrow-down"></i>
+                            </button>
+                            <button class="btn btn-outline-secondary btn-collapse" data-collapsed="false">
+                                <i class="fas fa-minus"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body indicator-content">
+                        <div id="williams-cci-chart" style="height: 300px;"></div>
+                        <div class="mt-2">
+                            <small class="text-muted">
+                                <strong>Interpretación:</strong> 
+                                <span style="color: #00C076;">Williams %R</span> y 
+                                <span style="color: #FFD700;">CCI (normalizado)</span>.
+                                <span id="williams-cci-interpretation" class="ms-2">Analizando condiciones extremas...</span>
+                            </small>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ============ NUEVO: MFI + FORCE INDEX ============ -->
+                <div class="card bg-dark border-danger mb-4 indicator-card" data-indicator="mfi-force">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">
+                            <i class="fas fa-coins me-2" style="color: #FFD700;"></i>
+                            MFI + Force Index
+                        </h5>
+                        <div class="btn-group btn-group-sm">
+                            <button class="btn btn-outline-secondary btn-move" data-direction="up">
+                                <i class="fas fa-arrow-up"></i>
+                            </button>
+                            <button class="btn btn-outline-secondary btn-move" data-direction="down">
+                                <i class="fas fa-arrow-down"></i>
+                            </button>
+                            <button class="btn btn-outline-secondary btn-collapse" data-collapsed="false">
+                                <i class="fas fa-minus"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body indicator-content">
+                        <div id="mfi-force-chart" style="height: 300px;"></div>
+                        <div class="mt-2">
+                            <small class="text-muted">
+                                <strong>Interpretación:</strong> 
+                                <span style="color: #3A8BFF;">MFI</span> (flujo monetario) y 
+                                <span style="color: #FFD700;">Force Index</span> (fuerza compradora/vendedora).
+                                <span id="mfi-force-interpretation" class="ms-2">Analizando flujo institucional...</span>
+                            </small>
+                        </div>
+                    </div>
+                </div>
+
+            
+                <!-- GRÁFICO DE FIBONACCI CON VELAS JAPONESAS -->
+                <div class="card bg-dark border-primary mb-4 indicator-card" data-indicator="fibonacci">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">
+                            <i class="fas fa-chart-line me-2" style="color: #FFD700;"></i>
+                            Niveles de Fibonacci con Velas
+                        </h5>
+                        <div class="btn-group btn-group-sm">
+                            <button class="btn btn-outline-secondary btn-move" data-direction="up">
+                                <i class="fas fa-arrow-up"></i>
+                            </button>
+                            <button class="btn btn-outline-secondary btn-move" data-direction="down">
+                                <i class="fas fa-arrow-down"></i>
+                            </button>
+                            <button class="btn btn-outline-secondary btn-collapse" data-collapsed="false">
+                                <i class="fas fa-minus"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body indicator-content">
+                        <div id="fibonacci-chart" style="height: 350px;"></div>
+                        <div class="mt-2">
+                            <small class="text-muted">
+                                <strong>Interpretación:</strong> Niveles clave de soporte/resistencia basados en Fibonacci. 
+                                Las etiquetas muestran el precio exacto de cada nivel.
+                                <span id="fibonacci-interpretation">Calculando niveles...</span>
+                            </small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+               
+                <!-- ============ PATRÓN DE FORMACIÓN CHARTISTA - 40 VELAS (AL FINAL DE INDICADORES) ============ -->
+                <div class="pattern-card mt-4">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h5 class="mb-0">
+                            <i class="fas fa-draw-polygon me-2" style="color: #8A63D2;"></i>
+                            PATRÓN DE FORMACIÓN CHARTISTA - 40 VELAS
+                        </h5>
+                        <span class="badge bg-dark" id="formation-timeframe">BTC/USDT 1D</span>
+                    </div>
+                    
+                    <!-- Gráfico de 40 Velas Japonesas (estilo indicador) -->
+                    <div id="formation-40-chart" class="formation-40-chart"></div>
+                    
+                    <!-- Información de la Formación -->
+                    <div class="pattern-info-box">
+                        <div id="formation-info">
+                            <span class="pattern-badge neutral">Analizando...</span>
+                            <span class="text-muted ms-2">Buscando formaciones chartistas</span>
+                        </div>
+                        <div>
+                            <span style="color: #FFD700; font-weight: 700;" id="formation-confidence">-</span>
+                            <small class="text-muted ms-1">confianza</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ============ PANEL DERECHO ============ -->
+            <div class="col-lg-3">
+                <!-- PATRÓN DE 4 VELAS (GRÁFICO PLOTLY CON VELAS REALES) -->
+                <div class="pattern-card mb-4">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <h6 class="mb-0 fw-bold">
+                            <i class="fas fa-chart-line me-2" style="color: #FFD700;"></i>
+                            PATRÓN DE 4 VELAS - AMPLIADO
+                        </h6>
+                        <span class="badge bg-dark" id="pattern-4-timeframe">1D</span>
+                    </div>
+                    
+                    <!-- Gráfico de 4 Velas Japonesas (estilo indicador, SIN ejes) -->
+                    <div id="pattern-4-chart" class="pattern-4-chart"></div>
+                    
+                    <!-- Información del Patrón -->
+                    <div class="pattern-info-box mt-2">
+                        <div id="pattern-4-info">
+                            <span class="pattern-badge neutral">Esperando...</span>
+                        </div>
+                        <div>
+                            <span style="color: #FFD700; font-weight: 700;" id="pattern-4-confidence">-</span>
+                            <small class="text-muted ms-1">confianza</small>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Resumen del Análisis -->
+                <div class="card bg-dark border-info mb-4">
+                    <div class="card-header bg-info bg-opacity-25">
+                        <h5 class="mb-0"><i class="fas fa-chart-pie me-2"></i>Resumen del Análisis</h5>
+                    </div>
+                    <div class="card-body">
+                        <div id="analysis-summary">
+                            <div class="text-center py-3">
+                                <div class="spinner-border spinner-border-sm text-info" role="status">
+                                    <span class="visually-hidden">Analizando...</span>
+                                </div>
+                                <p class="mt-2 mb-0 small">Analizando 30+ indicadores...</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- OPERACIÓN ACTUAL - FUSIONADA -->
+                <div class="card bg-dark border-warning mb-4">
+                    <div class="card-header bg-warning bg-opacity-25 d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="fas fa-bullhorn me-2"></i>Operación Actual</h5>
+                        <span class="badge bg-dark" id="op-timeframe-badge">1D</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-6 text-center border-end border-secondary">
+                                <div class="recommendation-badge mb-2" id="rec-badge">
+                                    <span class="badge bg-secondary">ESPERANDO</span>
+                                </div>
+                                <h3 class="mb-1" id="rec-action" style="font-size: 1.5rem;">---</h3>
+                                <p class="small text-muted mb-0" id="rec-symbol">BTC/USDT</p>
+                                <p class="small text-muted" id="rec-confidence">Confianza: --</p>
+                            </div>
+                            <div class="col-6 text-center">
+                                <div class="mb-2">
+                                    <span class="badge bg-dark" id="op-leverage">--x</span>
+                                </div>
+                                <div class="mt-2">
+                                    <p class="small mb-1"><strong>Entrada:</strong> <span id="op-entry">---</span></p>
+                                    <p class="small mb-1"><strong>Stop Loss:</strong> <span id="op-sl">---</span></p>
+                                    <p class="small mb-0"><strong>Take Profit:</strong> <span id="op-tp">---</span></p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="mt-3">
+                            <button class="btn btn-sm btn-outline-warning w-100" onclick="window.getInstantRecommendation()">
+                                <i class="fas fa-sync-alt me-1"></i>Actualizar
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <!-- NUEVO: SEÑALES ACTIVAS EN EL SISTEMA -->
+                <div class="card bg-dark border-success mb-4">
+                    <div class="card-header bg-success bg-opacity-25 d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="fas fa-bell me-2"></i>Señales Activas</h5>
+                        <span class="badge bg-dark" id="active-signals-count">0</span>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="list-group list-group-flush bg-dark" id="active-signals-list">
+                            <div class="list-group-item bg-dark text-muted text-center py-3">
+                                Cargando señales activas...
+                            </div>
+                        </div>
+                        <div class="p-2 text-center">
+                            <small class="text-muted">Click en cualquier señal para cambiar a ese par/temporalidad</small>
+                        </div>
+                    </div>
+                </div>
+                <!-- NUEVO: SEÑALES DE LA VELA ANTERIOR -->
+                <div class="card bg-dark border-warning mt-4">
+                    <div class="card-header bg-warning bg-opacity-25 d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">
+                            <i class="fas fa-history me-2"></i>
+                            Señales de la Vela Anterior
+                        </h5>
+                        <span class="badge bg-dark" id="prev-signals-count">0</span>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="list-group list-group-flush bg-dark" id="prev-signals-list">
+                            <div class="list-group-item bg-dark text-muted text-center py-3">
+                                <div class="spinner-border spinner-border-sm text-warning me-2"></div>
+                                Cargando señales anteriores...
+                            </div>
+                        </div>
+                        <div class="p-2 text-center">
+                            <small class="text-muted">Click en cualquier señal para ver justificación</small>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Modal para justificación de señal anterior -->
+                <div class="modal fade" id="prevSignalModal" tabindex="-1">
+                    <div class="modal-dialog modal-lg">
+                        <div class="modal-content bg-dark">
+                            <div class="modal-header">
+                                <h5 class="modal-title">
+                                    <i class="fas fa-history me-2 text-warning"></i>
+                                    Justificación de Señal Anterior
+                                </h5>
+                                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                            </div>
+                            <div class="modal-body">
+                                <div id="prev-signal-details">
+                                    <div class="text-center py-4">
+                                        <div class="spinner-border text-warning"></div>
+                                        <p class="mt-3">Cargando justificación...</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cerrar</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>               
+    
+                <!-- Señales Confirmadas -->
+                <div class="card bg-dark border-success mb-4">
+                    <div class="card-header bg-success bg-opacity-25">
+                        <h5 class="mb-0"><i class="fas fa-check-circle me-2"></i>Señales Confirmadas</h5>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-dark table-sm table-hover mb-0">
+                                <thead>
+                                    <tr>
+                                        <th>Par</th>
+                                        <th>TF</th>
+                                        <th>Señal</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="confirmed-signals">
+                                    <tr>
+                                        <td colspan="3" class="text-center py-3 small">Cargando señales...</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Alertas de Mercado -->
+                <div class="card bg-dark border-danger">
+                    <div class="card-header bg-danger bg-opacity-25">
+                        <h5 class="mb-0"><i class="fas fa-exclamation-triangle me-2"></i>Alertas de Mercado</h5>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-dark table-sm table-hover mb-0">
+                                <thead>
+                                    <tr>
+                                        <th>Tipo</th>
+                                        <th>Descripción</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="market-alerts">
+                                    <tr>
+                                        <td colspan="2" class="text-center py-3 small">No hay alertas activas</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Últimos Patrones Detectados -->
+                <div class="card bg-dark border-secondary mt-4">
+                    <div class="card-header">
+                        <h6 class="mb-0"><i class="fas fa-history me-2"></i>Últimos Patrones</h6>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="list-group list-group-flush bg-dark" id="recent-patterns-list">
+                            <div class="list-group-item bg-dark text-muted text-center py-3">
+                                No hay patrones recientes
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+<!-- SECCIÓN DE CORRELACIÓN Y ROTACIÓN - VERSIÓN MEJORADA CON LOS 3 PARES -->
+<div class="card bg-dark border-info mt-4">
+    <div class="card-header bg-info bg-opacity-25 d-flex justify-content-between align-items-center">
+        <h6 class="mb-0"><i class="fas fa-exchange-alt me-2"></i>Correlación y Rotación - Vista Global</h6>
+        <span class="badge bg-info" id="correlation-timeframe">1D</span>
+    </div>
+    <div class="card-body">
+        <div id="correlation-info">
+            <!-- BTC/USDT -->
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <span class="fw-bold" style="color: #FFD700;">BTC/USDT</span>
+                <div class="text-end">
+                    <span id="btc-correlation-status" class="badge bg-secondary me-2">Cargando...</span>
+                    <span id="btc-correlation-adx" class="badge bg-dark">ADX: --</span>
+                </div>
+            </div>
+            
+            <!-- PAXG/USDT -->
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <span class="fw-bold" style="color: #00C076;">PAXG/USDT</span>
+                <div class="text-end">
+                    <span id="paxg-correlation-status" class="badge bg-secondary me-2">Cargando...</span>
+                    <span id="paxg-correlation-adx" class="badge bg-dark">ADX: --</span>
+                </div>
+            </div>
+            
+            <!-- PAXG/BTC (RATIO) -->
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <span class="fw-bold" style="color: #8A63D2;">PAXG/BTC</span>
+                <div class="text-end">
+                    <span id="ratio-correlation-status" class="badge bg-secondary me-2">Cargando...</span>
+                    <span id="ratio-correlation-adx" class="badge bg-dark">ADX: --</span>
+                </div>
+            </div>
+            
+            <hr class="my-3">
+            
+            <!-- Señal de Rotación con explicación -->
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="d-flex align-items-center mb-2">
+                        <span class="fw-bold me-2">Rotación:</span>
+                        <span id="rotation-signal" class="badge bg-secondary">NEUTRAL</span>
+                    </div>
+                    <div id="rotation-description" class="small text-muted"></div>
+                </div>
+                <div class="col-md-6">
+                    <div class="d-flex align-items-center mb-2">
+                        <span class="fw-bold me-2">Peso en decisión:</span>
+                        <span id="weight-value" class="badge bg-dark">0%</span>
+                    </div>
+                    <div id="correlation-weight-explanation" class="small text-muted">
+                        Modificador de confianza
+                    </div>
+                </div>
+            </div>
+            
+            <!-- JUSTIFICACIÓN DETALLADA DE LA ROTACIÓN -->
+            <div class="mt-4 p-3 bg-dark rounded" style="border-left: 4px solid #17a2b8;">
+                <div class="d-flex align-items-center mb-2">
+                    <i class="fas fa-info-circle me-2 text-info"></i>
+                    <span class="fw-bold">Análisis de Rotación:</span>
+                </div>
+                <div id="correlation-explanation" class="small text-muted" style="line-height: 1.6;">
+                    Esperando datos del servidor...
+                </div>
+            </div>
+            
+            <!-- Matriz de Temporalidades (solo visible cuando hay datos) -->
+            <div class="mt-3" id="timeframe-matrix" style="display: none;">
+                <small class="text-muted d-block mb-2">⏱️ <strong>Matriz por Temporalidad:</strong></small>
+                <div class="row g-1" id="timeframe-matrix-content"></div>
+            </div>
+        </div>
+    </div>
+</div>
+    <!-- Modal Telegram -->
+    <div class="modal fade" id="telegramModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content bg-dark">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="fab fa-telegram me-2 text-primary"></i>
+                        Prueba de Envío a Telegram
+                    </h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label">Seleccionar Par</label>
+                        <select class="form-select bg-dark text-white" id="telegram-symbol">
+                            <option value="BTC-USDT">BTC/USDT</option>
+                            <option value="PAXG-USDT">PAXG/USDT (Oro)</option>
+                            <option value="PAXG-BTC">PAXG/BTC (Ratio)</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Temporalidad</label>
+                        <select class="form-select bg-dark text-white" id="telegram-interval">
+                            <option value="4h">4 Horas</option>
+                            <option value="12h">12 Horas</option>
+                            <option value="1D" selected>1 Día</option>
+                            <option value="1W">1 Semana</option>
+                        </select>
+                    </div>
+                    <div class="form-check mb-3">
+                        <input class="form-check-input" type="checkbox" id="include-chart" checked>
+                        <label class="form-check-label" for="include-chart">
+                            Incluir gráfico en el mensaje
+                        </label>
+                    </div>
+                    <div class="alert alert-info">
+                        <small>
+                            <i class="fas fa-info-circle me-1"></i>
+                            Se enviará un mensaje real al canal de Telegram.
+                        </small>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                    <button type="button" class="btn btn-primary" onclick="window.sendTelegramTest()">
+                        <i class="fab fa-telegram me-1"></i>Enviar Prueba
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div id="toast-container" class="toast-container position-fixed bottom-0 end-0 p-3"></div>
+
+    <!-- Scripts -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+    
+    <script>
+        // ============ VARIABLES GLOBALES (UNA SOLA DECLARACIÓN) ============
+        window.currentAnalysis = null;
+        window.currentSymbol = 'BTC-USDT';
+        window.currentInterval = '1D';
+        window.candleUpdateInterval = null;
+        window.priceUpdateInterval = null;
+
+        // ============ FUNCIÓN PARA MINIMIZAR RECOMENDACIÓN ============
+        window.toggleRecommendation = function() {
+            const content = document.getElementById('recommendation-content');
+            const icon = document.getElementById('recommendation-icon');
+            
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+                icon.classList.remove('collapsed');
+            } else {
+                content.style.display = 'none';
+                icon.classList.add('collapsed');
+            }
+        };
+
+
+        // ============ GRÁFICO DE 4 VELAS (PATRÓN AMPLIADO CON VELAS REALES) - CORREGIDO ============
+        window.updatePattern4Chart = function(data) {
+            const chartDiv = document.getElementById('pattern-4-chart');
+            if (!chartDiv) return;
+            
+            // Limpiar el gráfico anterior
+            Plotly.purge('pattern-4-chart');
+            
+            if (!data || !data.df) return;
+            
+            const df = data.df;
+            const dates = df.time || [];
+            const open = df.open || [];
+            const high = df.high || [];
+            const low = df.low || [];
+            const close = df.close || [];
+            
+            if (dates.length < 4) return;
+            
+            // Convertir fechas a objetos Date
+            const dateObjects = dates.map(d => new Date(d));
+            
+            // Últimas 4 velas
+            const last4Dates = dateObjects.slice(-4);
+            const last4Open = open.slice(-4);
+            const last4High = high.slice(-4);
+            const last4Low = low.slice(-4);
+            const last4Close = close.slice(-4);
+            
+            // Calcular máximos y mínimos para escala ajustada
+            const maxPrice = Math.max(...last4High);
+            const minPrice = Math.min(...last4Low);
+            const padding = (maxPrice - minPrice) * 0.15;
+            
+            // Crear colores personalizados para velas
+            const increasingColor = '#00C076';
+            const decreasingColor = '#FF5B5B';
+            
+            const trace = {
+                x: last4Dates,
+                open: last4Open,
+                high: last4High,
+                low: last4Low,
+                close: last4Close,
+                type: 'candlestick',
+                name: 'Patrón 4V',
+                increasing: {line: {color: increasingColor, width: 1.5}, fillcolor: increasingColor},
+                decreasing: {line: {color: decreasingColor, width: 1.5}, fillcolor: decreasingColor},
+                showlegend: false,
+                hoverinfo: 'none',
+                whiskerwidth: 0.8
+            };
+            
+            const layout = {
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                margin: {l: 1, r: 1, t: 1, b: 1},
+                xaxis: {
+                    visible: false,
+                    showgrid: false,
+                    zeroline: false,
+                    showline: false,
+                    showticklabels: false,
+                    range: [last4Dates[0] - 3600000, last4Dates[last4Dates.length - 1] + 3600000]
+                },
+                yaxis: {
+                    visible: false,
+                    showgrid: false,
+                    zeroline: false,
+                    showline: false,
+                    showticklabels: false,
+                    range: [minPrice - padding, maxPrice + padding]
+                },
+                height: 150,
+                width: null,
+                showlegend: false,
+                hovermode: false
+                // ⚠️ ELIMINÉ 'font' de aquí porque causaba el error
+            };
+            
+            const config = {
+                displayModeBar: false,
+                displaylogo: false,
+                responsive: true,
+                staticPlot: true
+            };
+            
+            try {
+                Plotly.newPlot('pattern-4-chart', [trace], layout, config);
+            } catch (e) {
+                console.error('Error creando gráfico de 4 velas:', e);
+            }
+            
+            // Actualizar información del patrón
+            const patterns = data.structure?.patterns || {};
+            const recentPatterns = patterns.recent_patterns || [];
+            
+            // Filtrar patrones de 1-3 velas
+            const shortTermPatterns = recentPatterns.filter(p => 
+                p.type === '1' || p.type === '2' || p.type === '3'
+            );
+            
+            if (shortTermPatterns.length > 0) {
+                const bestPattern = shortTermPatterns.sort((a, b) => {
+                    if (b.reliability !== a.reliability) return b.reliability - a.reliability;
+                    return b.index - a.index;
+                })[0];
+                
+                const direction = bestPattern.direction || 'neutral';
+                const name = bestPattern.name || 'Patrón';
+                const reliability = bestPattern.reliability || 0;
+                const type = bestPattern.type || '1';
+                
+                let badgeClass = 'neutral';
+                let directionText = 'NEUTRAL';
+                
+                if (direction === 'bullish') {
+                    badgeClass = 'bullish';
+                    directionText = 'ALCISTA';
+                } else if (direction === 'bearish') {
+                    badgeClass = 'bearish';
+                    directionText = 'BAJISTA';
+                }
+                
+                let typeText = '';
+                if (type === '1') typeText = '1 vela';
+                else if (type === '2') typeText = '2 velas';
+                else if (type === '3') typeText = '3 velas';
+                
+                document.getElementById('pattern-4-info').innerHTML = `
+                    <span class="pattern-badge ${badgeClass}">${directionText}</span>
+                    <span class="text-white fw-bold ms-1">${name}</span>
+                    <span class="text-muted ms-1">de ${typeText}</span>
+                `;
+                document.getElementById('pattern-4-confidence').innerHTML = `${reliability}%`;
+                document.getElementById('pattern-4-timeframe').innerHTML = 
+                    window.getIntervalName ? window.getIntervalName(data.timeframe) : (data.timeframe || '1D');
+            } else {
+                document.getElementById('pattern-4-info').innerHTML = `
+                    <span class="pattern-badge neutral">SIN PATRÓN</span>
+                    <span class="text-muted ms-1">Últimas 4 velas</span>
+                `;
+                document.getElementById('pattern-4-confidence').innerHTML = '-';
+            }
+        };
+        
+        // ============ GRÁFICO DE 40 VELAS (FORMACIÓN CHARTISTA) - CORREGIDO ============
+        window.updateFormation40Chart = function(data) {
+            const chartDiv = document.getElementById('formation-40-chart');
+            if (!chartDiv) return;
+            
+            // Limpiar el gráfico anterior
+            Plotly.purge('formation-40-chart');
+            
+            if (!data || !data.df) return;
+            
+            const df = data.df;
+            const dates = df.time || [];
+            const open = df.open || [];
+            const high = df.high || [];
+            const low = df.low || [];
+            const close = df.close || [];
+            
+            if (dates.length < 40) return;
+            
+            // Convertir fechas a objetos Date
+            const dateObjects = dates.map(d => new Date(d));
+            
+            // Últimas 40 velas
+            const last40Dates = dateObjects.slice(-40);
+            const last40Open = open.slice(-40);
+            const last40High = high.slice(-40);
+            const last40Low = low.slice(-40);
+            const last40Close = close.slice(-40);
+            
+            // Calcular máximos y mínimos para escala ajustada
+            const maxPrice = Math.max(...last40High);
+            const minPrice = Math.min(...last40Low);
+            const padding = (maxPrice - minPrice) * 0.05;
+            
+            const trace = {
+                x: last40Dates,
+                open: last40Open,
+                high: last40High,
+                low: last40Low,
+                close: last40Close,
+                type: 'candlestick',
+                name: 'Formación 40V',
+                increasing: {line: {color: '#00C076', width: 0.8}, fillcolor: '#00C076'},
+                decreasing: {line: {color: '#FF5B5B', width: 0.8}, fillcolor: '#FF5B5B'},
+                showlegend: false,
+                hoverinfo: 'none'
+            };
+            
+            const layout = {
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                margin: {l: 2, r: 2, t: 2, b: 2},
+                xaxis: {
+                    visible: false,
+                    showgrid: false,
+                    zeroline: false,
+                    showline: false,
+                    showticklabels: false,
+                    range: [last40Dates[0], last40Dates[last40Dates.length - 1]]
+                },
+                yaxis: {
+                    visible: false,
+                    showgrid: false,
+                    zeroline: false,
+                    showline: false,
+                    showticklabels: false,
+                    range: [minPrice - padding, maxPrice + padding]
+                },
+                height: 200,
+                width: null,
+                showlegend: false,
+                hovermode: false
+                // ⚠️ ELIMINÉ 'font' de aquí también
+            };
+            
+            const config = {
+                displayModeBar: false,
+                displaylogo: false,
+                responsive: true,
+                staticPlot: true
+            };
+            
+            try {
+                Plotly.newPlot('formation-40-chart', [trace], layout, config);
+            } catch (e) {
+                console.error('Error creando gráfico de 40 velas:', e);
+            }
+            
+            // Actualizar información de la formación
+            const patterns = data.structure?.patterns || {};
+            const recentPatterns = patterns.recent_patterns || [];
+            
+            const formationPatterns = recentPatterns.filter(p => p.type === '4+');
+            
+            if (formationPatterns.length > 0) {
+                const bestFormation = formationPatterns.sort((a, b) => b.reliability - a.reliability)[0];
+                
+                const direction = bestFormation.direction || 'neutral';
+                const name = bestFormation.name || 'Formación';
+                const reliability = bestFormation.reliability || 0;
+                
+                let badgeClass = 'neutral';
+                let directionText = 'NEUTRAL';
+                
+                if (direction === 'bullish') {
+                    badgeClass = 'bullish';
+                    directionText = 'ALCISTA';
+                } else if (direction === 'bearish') {
+                    badgeClass = 'bearish';
+                    directionText = 'BAJISTA';
+                }
+                
+                document.getElementById('formation-info').innerHTML = `
+                    <span class="pattern-badge ${badgeClass}">${directionText}</span>
+                    <span class="text-white fw-bold ms-1">${name}</span>
+                `;
+                document.getElementById('formation-confidence').innerHTML = `${reliability}%`;
+                document.getElementById('formation-timeframe').innerHTML = 
+                    `${data.symbol?.replace('-', '/') || 'BTC/USDT'} ${window.getIntervalName ? window.getIntervalName(data.timeframe) : (data.timeframe || '1D')}`;
+            } else {
+                document.getElementById('formation-info').innerHTML = `
+                    <span class="pattern-badge neutral">SIN FORMACIÓN</span>
+                    <span class="text-muted ms-1">No hay formaciones chartistas</span>
+                `;
+                document.getElementById('formation-confidence').innerHTML = '-';
+            }
+        };
+                // ============ ACTUALIZAR LISTA DE PATRONES RECIENTES ============
+                window.updateRecentPatternsList = function(data) {
+                    if (!data || !data.structure) return;
+                    
+                    const patterns = data.structure.patterns || {};
+                    const recentPatterns = patterns.recent_patterns || [];
+                    
+                    if (recentPatterns.length === 0) {
+                        document.getElementById('recent-patterns-list').innerHTML = `
+                            <div class="list-group-item bg-dark text-muted text-center py-3">
+                                No hay patrones recientes
+                            </div>
+                        `;
+                        return;
+                    }
+                    
+                    const top5 = recentPatterns.slice(0, 5);
+                    let html = '';
+                    
+                    top5.forEach(pattern => {
+                        const direction = pattern.direction || 'neutral';
+                        const name = pattern.name || 'Patrón';
+                        const reliability = pattern.reliability || 0;
+                        
+                        let badgeClass = 'secondary';
+                        let icon = '⚪';
+                        
+                        if (direction === 'bullish') {
+                            badgeClass = 'success';
+                            icon = '🟢';
+                        } else if (direction === 'bearish') {
+                            badgeClass = 'danger';
+                            icon = '🔴';
+                        }
+                        
+                        html += `
+                            <div class="list-group-item bg-dark text-white border-secondary d-flex justify-content-between align-items-center">
+                                <div>
+                                    <span class="badge bg-${badgeClass} me-2">${icon}</span>
+                                    ${name.length > 20 ? name.substring(0, 20) + '...' : name}
+                                </div>
+                                <span class="badge bg-dark">${reliability}%</span>
+                            </div>
+                        `;
+                    });
+                    
+                    document.getElementById('recent-patterns-list').innerHTML = html;
+                };
+
+        // ============ FUNCIONES DE UTILIDAD ============
+        window.getIntervalName = function(interval) {
+            const names = {'4h': '4H', '12h': '12H', '1D': '1D', '1W': '1W'};
+            return names[interval] || interval;
+        };
+
+        window.showToast = function(message, type = 'info') {
+            const toastContainer = document.getElementById('toast-container');
+            if (!toastContainer) return;
+            
+            const toastId = 'toast-' + Date.now();
+            const bgColor = {'info': 'bg-info', 'success': 'bg-success', 'danger': 'bg-danger', 'warning': 'bg-warning'}[type] || 'bg-secondary';
+            const icon = {'info': 'ℹ️', 'success': '✅', 'danger': '❌', 'warning': '⚠️'}[type] || '📌';
+            
+            const toastHtml = `
+                <div id="${toastId}" class="toast align-items-center text-white ${bgColor} border-0" role="alert">
+                    <div class="d-flex">
+                        <div class="toast-body">${icon} ${message}</div>
+                        <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+                    </div>
+                </div>
+            `;
+            
+            toastContainer.insertAdjacentHTML('beforeend', toastHtml);
+            const toastElement = document.getElementById(toastId);
+            if (toastElement) {
+                new bootstrap.Toast(toastElement, {delay: 4000}).show();
+                toastElement.addEventListener('hidden.bs.toast', () => toastElement.remove());
+            }
+        };
+
+        // ============ INTERVALOS DE ACTUALIZACIÓN - VERSIÓN CORREGIDA ============
+        function startUpdateIntervals() {
+            // 1. ANÁLISIS COMPLETO - Cada 5 minutos
+            setInterval(function() {
+                if (typeof window.runCompleteAnalysis === 'function') {
+                    window.runCompleteAnalysis();
+                }
+            }, 300000);
+            
+            // 2. VELAS Y PATRONES - Cada 30 segundos (CON ACTUALIZACIÓN DE CORRELACIÓN GLOBAL)
+            setInterval(function() {
+                // Usar las variables globales actuales
+                const currentSymbol = window.currentSymbol || 'BTC-USDT';
+                const interval = window.currentInterval || '1D';
+                
+                // Obtener datos del par actual (para gráficos)
+                fetch(`/api/analyze?symbol=${currentSymbol}&interval=${interval}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success && data.data) {
+                            window.currentAnalysis = data.data;
+                            
+                            // Actualizar gráficos y patrones
+                            if (typeof window.updateCandleChart === 'function') {
+                                window.updateCandleChart(data.data);
+                            }
+                            if (typeof window.updateAllCharts === 'function') {
+                                window.updateAllCharts(data.data);
+                            }
+                            if (typeof window.updatePattern4Chart === 'function') {
+                                window.updatePattern4Chart(data.data);
+                            }
+                            if (typeof window.updateFormation40Chart === 'function') {
+                                window.updateFormation40Chart(data.data);
+                            }
+                            if (typeof window.updateRecentPatternsList === 'function') {
+                                window.updateRecentPatternsList(data.data);
+                            }
+                            
+                            // Actualizar precio en vivo
+                            const price = data.data.current_price || 0;
+                            const livePriceEl = document.getElementById('live-price');
+                            if (livePriceEl) {
+                                livePriceEl.textContent = `$${price.toFixed(2)}`;
+                            }
+                            
+                            const chartTitle = document.getElementById('chart-title');
+                            if (chartTitle) {
+                                const symbolName = currentSymbol.replace('-', '/');
+                                const intervalName = window.getIntervalName(interval);
+                                chartTitle.innerHTML = `${symbolName} ${intervalName} - <span id="live-price" class="live-price">$${price.toFixed(2)}</span>`;
+                            }
+                        }
+                    })
+                    .catch(error => console.error('Error actualizando par actual:', error));
+                
+                // ============ AHORA OBTENER DATOS DE LOS OTROS DOS PARES PARA CORRELACIÓN ============
+                // Determinar qué otros pares necesitamos
+                const otrosPares = [];
+                if (currentSymbol !== 'BTC-USDT') otrosPares.push('BTC-USDT');
+                if (currentSymbol !== 'PAXG-USDT') otrosPares.push('PAXG-USDT');
+                if (currentSymbol !== 'PAXG-BTC') otrosPares.push('PAXG-BTC');
+                
+                if (otrosPares.length > 0) {
+                    // Hacer fetch en paralelo para los otros pares
+                    const promesas = otrosPares.map(par => 
+                        fetch(`/api/analyze?symbol=${par}&interval=${interval}`)
+                            .then(res => res.json())
+                            .then(res => {
+                                if (res.success && res.data) {
+                                    return { par, data: res.data };
+                                }
+                                return { par, data: null };
+                            })
+                            .catch(err => {
+                                console.error(`Error obteniendo ${par}:`, err);
+                                return { par, data: null };
+                            })
+                    );
+                    
+                    Promise.all(promesas).then(resultadosOtros => {
+                        // Construir objeto con datos de los 3 pares
+                        const datosGlobales = {
+                            // Datos del par actual
+                            [currentSymbol]: window.currentAnalysis,
+                        };
+                        
+                        // Agregar los otros pares
+                        resultadosOtros.forEach(item => {
+                            if (item.data) {
+                                datosGlobales[item.par] = item.data;
+                            }
+                        });
+                        
+                        // Construir estructura de correlación global
+                        const correlationGlobal = {
+                            correlation: {
+                                btc_analysis: datosGlobales['BTC-USDT'] ? {
+                                    decision: { 
+                                        action: datosGlobales['BTC-USDT'].decision?.action || 'N/A', 
+                                        confidence: datosGlobales['BTC-USDT'].decision?.confidence || 0 
+                                    },
+                                    trend: {
+                                        direction: datosGlobales['BTC-USDT'].trend?.direction || 'neutral',
+                                        adx: datosGlobales['BTC-USDT'].trend?.adx || 0,
+                                        plus_di: datosGlobales['BTC-USDT'].trend?.plus_di || 0,
+                                        minus_di: datosGlobales['BTC-USDT'].trend?.minus_di || 0
+                                    }
+                                } : null,
+                                
+                                paxg_analysis: datosGlobales['PAXG-USDT'] ? {
+                                    trend: {
+                                        direction: datosGlobales['PAXG-USDT'].trend?.direction || 'neutral',
+                                        adx: datosGlobales['PAXG-USDT'].trend?.adx || 0,
+                                        plus_di: datosGlobales['PAXG-USDT'].trend?.plus_di || 0,
+                                        minus_di: datosGlobales['PAXG-USDT'].trend?.minus_di || 0
+                                    }
+                                } : null,
+                                
+                                paxg_btc_analysis: datosGlobales['PAXG-BTC'] ? {
+                                    decision: { 
+                                        action: datosGlobales['PAXG-BTC'].decision?.action || 'N/A', 
+                                        confidence: datosGlobales['PAXG-BTC'].decision?.confidence || 0 
+                                    },
+                                    trend: {
+                                        direction: datosGlobales['PAXG-BTC'].trend?.direction || 'neutral',
+                                        adx: datosGlobales['PAXG-BTC'].trend?.adx || 0,
+                                        plus_di: datosGlobales['PAXG-BTC'].trend?.plus_di || 0,
+                                        minus_di: datosGlobales['PAXG-BTC'].trend?.minus_di || 0
+                                    }
+                                } : null,
+                                
+                                rotation_signal: window.currentAnalysis?.correlation?.rotation_signal || 'NEUTRAL',
+                                weight_modifier: window.currentAnalysis?.correlation?.weight_modifier || 1.0
+                            },
+                            symbol: currentSymbol,
+                            timeframe: interval
+                        };
+                        
+                        // Guardar para referencia futura
+                        window.globalCorrelationData = correlationGlobal;
+                        
+                        // Actualizar la correlación
+                        if (typeof window.updateCorrelationInfo === 'function') {
+                            window.updateCorrelationInfo(correlationGlobal);
+                        }
+                        
+                        console.log('✅ Correlación global actualizada (intervalo 30s)');
+                    });
+                }
+            }, 30000);
+            
+            // 3. PRECIO EN VIVO - Cada 5 segundos (SOLO precio, para no saturar)
+            setInterval(function() {
+                const symbol = window.currentSymbol || 'BTC-USDT';
+                const interval = window.currentInterval || '1D';
+                
+                fetch(`/api/analyze?symbol=${symbol}&interval=${interval}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success && data.data) {
+                            const price = data.data.current_price || 0;
+                            const livePriceEl = document.getElementById('live-price');
+                            if (livePriceEl) {
+                                livePriceEl.textContent = `$${price.toFixed(2)}`;
+                            }
+                        }
+                    })
+                    .catch(error => console.error('Error actualizando precio:', error));
+            }, 5000);
+        }
+        window.getInstantRecommendation = function() {
+            const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
+            const interval = document.getElementById('interval-select')?.value || '1D';
+            
+            fetch(`/api/analyze?symbol=${symbol}&interval=${interval}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success && data.data && typeof window.updateInstantRecommendation === 'function') {
+                        window.updateInstantRecommendation(data.data);
+                    }
+                })
+                .catch(error => console.error('Error:', error));
+        };
+
+        window.sendTelegramTest = function() {
+            const symbol = document.getElementById('telegram-symbol')?.value || 'BTC-USDT';
+            const interval = document.getElementById('telegram-interval')?.value || '1D';
+            const includeChart = document.getElementById('include-chart')?.checked || true;
+            
+            window.showToast('📤 Enviando análisis a Telegram...', 'info');
+            
+            fetch('/api/telegram/test', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({symbol, interval, include_chart: includeChart})
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    window.showToast('✅ ' + data.message, 'success');
+                    const modal = bootstrap.Modal.getInstance(document.getElementById('telegramModal'));
+                    if (modal) modal.hide();
+                } else {
+                    window.showToast('❌ Error: ' + (data.error || 'Error desconocido'), 'danger');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                window.showToast('❌ Error de conexión', 'danger');
+            });
+        };
+
+        window.downloadAnalysisReport = function() {
+            const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
+            const interval = document.getElementById('interval-select')?.value || '1D';
+            
+            window.showToast('📥 Generando reporte...', 'info');
+            
+            fetch(`/api/generate_report?symbol=${symbol}&interval=${interval}`)
+                .then(response => response.blob())
+                .then(blob => {
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `analisis_${symbol}_${interval}_${new Date().toISOString().slice(0,10)}.txt`;
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    window.showToast('✅ Reporte descargado', 'success');
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    window.showToast('❌ Error al descargar reporte', 'danger');
+                });
+        };
+
+        window.toggleFullScreen = function() {
+            const container = document.getElementById('main-chart-container');
+            if (container) {
+                if (!document.fullscreenElement) {
+                    container.requestFullscreen();
+                } else {
+                    document.exitFullscreen();
+                }
+            }
+        };
+
+        window.downloadChart = function() {
+            const chartDiv = document.getElementById('candle-chart');
+            if (chartDiv) {
+                Plotly.toImage(chartDiv, {format: 'png', width: 1200, height: 600})
+                    .then(dataUrl => {
+                        const link = document.createElement('a');
+                        link.href = dataUrl;
+                        link.download = `grafico_${window.currentSymbol}_${window.currentInterval}_${new Date().toISOString().slice(0,10)}.png`;
+                        link.click();
+                        window.showToast('✅ Gráfico capturado', 'success');
+                    })
+                    .catch(() => window.showToast('❌ Error al capturar gráfico', 'danger'));
+            }
+        };
+        // ============ ACTUALIZAR INFORMACIÓN DE SESIÓN DE MERCADO ============
+        window.updateMarketSessionInfo = function() {
+            try {
+                const now = new Date();
+                const boliviaTime = new Date(now.toLocaleString("en-US", {timeZone: "America/La_Paz"}));
+                const hour = boliviaTime.getHours();
+                const weekday = boliviaTime.getDay();
+                
+                let sessionIcon = '🌏';
+                let sessionName = 'Asiático';
+                let liquidity = 'Baja';
+                let sessionClass = 'bg-info';
+                
+                if ((hour >= 19 && hour <= 23) || (hour >= 0 && hour < 3)) {
+                    sessionIcon = '🌏';
+                    sessionName = 'Asiático';
+                    liquidity = 'Baja';
+                    sessionClass = 'bg-info';
+                } else if (hour >= 3 && hour < 11) {
+                    sessionIcon = '🇪🇺';
+                    sessionName = 'Europeo';
+                    liquidity = 'Alta';
+                    sessionClass = 'bg-primary';
+                } else if (hour >= 11 && hour < 19) {
+                    sessionIcon = '🇺🇸';
+                    sessionName = 'Americano';
+                    liquidity = 'Muy Alta';
+                    sessionClass = 'bg-success';
+                }
+                
+                if (hour >= 11 && hour < 15) {
+                    sessionName += ' + América';
+                    liquidity = 'Máxima';
+                    sessionClass = 'bg-warning';
+                }
+                
+                const dayNames = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+                const dayIcons = ['🏖️', '📆', '📊', '📊', '📊', '🏁', '🏖️'];
+                
+                const sessionIconEl = document.getElementById('market-session-icon');
+                const sessionBadgeEl = document.getElementById('market-session-badge');
+                const liquidityEl = document.getElementById('market-liquidity');
+                const dayIconEl = document.getElementById('market-day-icon');
+                const dayNameEl = document.getElementById('market-day-name');
+                
+                if (sessionIconEl) sessionIconEl.textContent = sessionIcon;
+                if (sessionBadgeEl) {
+                    sessionBadgeEl.textContent = `Sesión ${sessionName}`;
+                    sessionBadgeEl.className = `badge ${sessionClass} me-2`;
+                }
+                if (liquidityEl) liquidityEl.textContent = `Liquidez: ${liquidity}`;
+                if (dayIconEl) dayIconEl.textContent = dayIcons[weekday];
+                if (dayNameEl) {
+                    dayNameEl.textContent = dayNames[weekday];
+                    dayNameEl.className = 'badge bg-secondary me-3';
+                }
+            } catch (error) {
+                console.error('Error en updateMarketSessionInfo:', error);
+            }
+        };
+        // ============ RELOJ Y CALENDARIO ============
+        function updateBoliviaClock() {
+            const now = new Date();
+            const boliviaTime = new Date(now.toLocaleString("en-US", {timeZone: "America/La_Paz"}));
+            
+            const clockEl = document.getElementById('bolivia-clock');
+            const dateEl = document.getElementById('bolivia-date');
+            
+            if (clockEl) {
+                clockEl.textContent = boliviaTime.toLocaleTimeString('es-BO', {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+            }
+            if (dateEl) {
+                dateEl.textContent = boliviaTime.toLocaleDateString('es-BO', {weekday: 'short', year: 'numeric', month: 'short', day: 'numeric'});
+            }
+        }
+
+        function updateCalendarInfo() {
+            const now = new Date();
+            const hours = now.getHours();
+            const minutes = now.getMinutes();
+            
+            let nextAlert = 'Próximo ciclo';
+            let activeTimeframes = '4H, 12H, 1D';
+            
+            if (hours === 19 && minutes >= 50 && minutes < 53) { nextAlert = '19:53 (1D)'; activeTimeframes = '1D, 1W'; }
+            else if (hours === 19 && minutes >= 53 && minutes < 55) { nextAlert = '19:55 (12H)'; activeTimeframes = '12H, 1D'; }
+            else if (hours === 19 && minutes >= 55 && minutes < 57) { nextAlert = '19:57 (4H)'; activeTimeframes = '4H, 12H'; }
+            else if (hours === 23 && minutes >= 57) { nextAlert = '03:57 (4H)'; activeTimeframes = '4H'; }
+            else if (hours === 3 && minutes >= 57) { nextAlert = '07:57 (4H)'; activeTimeframes = '4H'; }
+            else if (hours === 7 && minutes >= 57) { nextAlert = '11:57 (4H)'; activeTimeframes = '4H'; }
+            else if (hours === 11 && minutes >= 57) { nextAlert = '15:57 (4H)'; activeTimeframes = '4H'; }
+            else if (hours === 15 && minutes >= 57) { nextAlert = '19:57 (4H)'; activeTimeframes = '4H'; }
+            
+            const nextAlertEl = document.getElementById('next-alert');
+            const activeTimeframesEl = document.getElementById('active-timeframes');
+            const marketStatusEl = document.getElementById('market-status');
+            
+            if (nextAlertEl) nextAlertEl.textContent = nextAlert;
+            if (activeTimeframesEl) activeTimeframesEl.textContent = activeTimeframes;
+            
+            if (marketStatusEl) {
+                if (hours >= 9 && hours < 17) {
+                    marketStatusEl.textContent = 'Horario Principal';
+                    marketStatusEl.className = 'badge bg-success';
+                } else if (hours >= 0 && hours < 5) {
+                    marketStatusEl.textContent = 'Horario Asiático';
+                    marketStatusEl.className = 'badge bg-info';
+                } else {
+                    marketStatusEl.textContent = 'Horario Americano';
+                    marketStatusEl.className = 'badge bg-warning';
+                }
+            }
+        }
+
+        function updateSystemStatus() {
+            fetch('/health')
+                .then(response => response.json())
+                .then(data => {
+                    const apiStatus = document.getElementById('api-status');
+                    const telegramStatus = document.getElementById('telegram-status');
+                    const analysisStatus = document.getElementById('analysis-status');
+                    const lastSignal = document.getElementById('last-signal');
+                    
+                    if (apiStatus) {
+                        apiStatus.textContent = 'Conectado';
+                        apiStatus.className = 'badge bg-success';
+                    }
+                    if (telegramStatus) {
+                        telegramStatus.textContent = 'Activo';
+                        telegramStatus.className = 'badge bg-success';
+                    }
+                    if (analysisStatus) {
+                        analysisStatus.textContent = 'Ejecutando';
+                        analysisStatus.className = 'badge bg-warning';
+                    }
+                    if (lastSignal && data.timestamp) {
+                        const lastUpdate = new Date(data.timestamp);
+                        const now = new Date();
+                        const diffMinutes = Math.floor((now - lastUpdate) / 60000);
+                        lastSignal.textContent = `Hace ${diffMinutes}min`;
+                    }
+                })
+                .catch(error => {
+                    const apiStatus = document.getElementById('api-status');
+                    if (apiStatus) {
+                        apiStatus.textContent = 'Error';
+                        apiStatus.className = 'badge bg-danger';
+                    }
+                });
+        }
+
+        // ============ INICIALIZACIÓN ============
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('🚀 Inicializando sistema...');
+            
+            // ============ CONFIGURAR EVENT LISTENERS ============
+            const symbolSelect = document.getElementById('symbol-select');
+            const intervalSelect = document.getElementById('interval-select');
+            
+            if (symbolSelect) {
+                symbolSelect.addEventListener('change', function() {
+                    window.currentSymbol = this.value;
+                    window.currentInterval = document.getElementById('interval-select')?.value || '1D';
+                    window.runCompleteAnalysis();
+                });
+            }
+            
+            if (intervalSelect) {
+                intervalSelect.addEventListener('change', function() {
+                    window.currentInterval = this.value;
+                    window.currentSymbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
+                    window.runCompleteAnalysis();
+                });
+            }
+            
+            // ============ INICIALIZAR INDICADORES DRAG & DROP ============
+            if (typeof window.initializeEventListeners === 'function') {
+                window.initializeEventListeners();
+            }
+            if (typeof window.initializeDragAndDrop === 'function') {
+                window.initializeDragAndDrop();
+            }
+            if (typeof window.loadIndicatorOrder === 'function') {
+                window.loadIndicatorOrder();
+            }
+            
+            // ============ ACTUALIZAR RELOJ Y CALENDARIO ============
+            window.updateBoliviaClock();
+            window.updateCalendarInfo();
+            window.updateMarketSessionInfo(); // ← NUEVA: Información de sesión de mercado
+            window.updateSystemStatus();
+            
+            // ============ EJECUTAR ANÁLISIS INICIAL ============
+            setTimeout(function() {
+                if (typeof window.runCompleteAnalysis === 'function') {
+                    window.runCompleteAnalysis();
+                }
+            }, 500);
+            
+            // ============ INTERVALOS DE ACTUALIZACIÓN ============
+            setInterval(window.updateBoliviaClock, 1000);
+            setInterval(window.updateCalendarInfo, 60000);
+            setInterval(window.updateMarketSessionInfo, 60000); // ← NUEVA: Cada minuto
+            setInterval(window.updateSystemStatus, 60000);
+            
+            // ============ INICIAR INTERVALOS DE VELAS Y PRECIO ============
+            window.startUpdateIntervals();
+        });
+    </script>
+    <!-- ============ FIRMA DEL DESARROLLADOR ============ -->
+    <footer class="container-fluid bg-dark border-top border-secondary py-3 mt-4">
+        <div class="row">
+            <div class="col-12 text-center">
+                <p class="small text-muted mb-1">
+                    Elaborado por el Ing. Willer Gianni Torrico Arispe
+                </p>
+                <div class="d-flex justify-content-center gap-3">
+                    <a href="https://github.com/Willer5000" target="_blank" class="text-decoration-none text-muted">
+                        <i class="fab fa-github fa-lg"></i> GitHub
+                    </a>
+                    <a href="https://www.linkedin.com/in/willer-gianni-torrico-arispe/" target="_blank" class="text-decoration-none text-muted">
+                        <i class="fab fa-linkedin fa-lg"></i> LinkedIn
+                    </a>
+                </div>
+                <p class="small text-muted mt-2 mb-0">
+                    © 2026 Crypto Trader Analyst Pro - Todos los derechos reservados
+                </p>
+            </div>
+        </div>
+    </footer>
+    <!-- =============================================== -->
+</body>
+</html>
