@@ -13525,7 +13525,8 @@ class TradingExpertSystem:
             print(f"✅ ANÁLISIS COMPLETADO para {symbol} {timeframe}")
             print(f"{'='*60}\n")
             
-            return {
+            # === CONSTRUIR RESULTADO ===
+            resultado_final = {
                 'success': True,
                 'symbol': symbol,
                 'timeframe': timeframe,
@@ -13550,7 +13551,7 @@ class TradingExpertSystem:
                 'time_factor': self._make_serializable(time_factor),
                 'sentiment': self._make_serializable(sentiment),
                 'liquidation': self._make_serializable(liquidation_data),
-                'zones': self._make_serializable({  # <--- NUEVO
+                'zones': self._make_serializable({
                     'active_zones': zonas_data,
                     'price_status': price_status,
                     'timestamp': datetime.now(self.bolivia_tz).isoformat()
@@ -13559,6 +13560,17 @@ class TradingExpertSystem:
                 'df': df_dict,
                 'timestamp': datetime.now(self.bolivia_tz).isoformat()
             }
+            
+            # === FASE 7: Registrar señal en Supabase (best-effort, no bloqueante) ===
+            try:
+                from review_trader import review_trader
+                if review_trader.db.enabled:
+                    review_trader.register_signal(resultado_final, system_type='spot')
+            except Exception as _register_error:
+                # Nunca bloquear el análisis por un error de registro
+                print(f"⚠️ No se pudo registrar señal en ReviewTrader: {_register_error}")
+            
+            return resultado_final
             
         except Exception as e:
             print(f"\n{'='*60}")
@@ -17673,7 +17685,7 @@ class TraderLiquidation(TraderBase):
 # ============================================================================
 
 class Moderador:
-    """El moderador recibe los votos de los 9 traders y genera una decisión"""
+    """El moderador recibe los votos de los 10 traders (9 originales + ReviewTrader) y genera una decisión"""
     
     def __init__(self):
         self.traders = [
@@ -17685,8 +17697,16 @@ class Moderador:
             TraderSmartMoney(),
             TraderEspectico(),
             TraderMultiframe(),
-            TraderLiquidation()  # <--- AÑADIR ESTA LÍNEA (NUEVO TRADER 9)
+            TraderLiquidation()  # Trader 9
         ]
+        
+        # === FASE 7: Agregar ReviewTrader como 10º trader (opcional, tolerante a fallos) ===
+        try:
+            from review_trader import review_trader
+            self.traders.append(review_trader)
+            print(f"✅ Moderador: ReviewTrader agregado como 10º trader")
+        except Exception as e:
+            print(f"⚠️ Moderador: ReviewTrader no disponible ({e}). Continuando con 9 traders.")
         
     def procesar_votacion(self, capas, symbol, timeframe):
         """
@@ -19039,7 +19059,8 @@ ultima_ejecucion = {
     '4h': datetime.min,
     '12h': datetime.min,
     '1D': datetime.min,
-    '1W': datetime.min
+    '1W': datetime.min,
+    'REVIEW': datetime.min  # FASE 7: Ciclo diario del ReviewTrader
 }
 
 # Control de mensajes enviados por día (persistente)
@@ -19116,6 +19137,16 @@ def verificar_y_ejecutar():
                         print(f"\n🚀 DENTRO DE VENTANA 1W - {hora:02d}:{minuto:02d}")
                         ultima_ejecucion['1W'] = ahora
                         threading.Thread(target=ejecutar_analisis_completo, args=('1W',), daemon=True).start()
+            
+            # ============ FASE 7: EJECUTAR REVIEWTRADER DIARIAMENTE ============
+            # Cierre a las 20:00 Bolivia (después de todos los análisis del día)
+            # Ejecuta: evaluar pendientes + detectar oportunidades perdidas + recalcular stats
+            if hora == 20 and minuto == 0:
+                # Evitar ejecutar más de una vez por día
+                if 'REVIEW' not in ultima_ejecucion or (ahora - ultima_ejecucion.get('REVIEW', datetime.min.replace(tzinfo=bolivia_tz))).total_seconds() > 3600:
+                    print(f"\n🎓 EJECUTANDO CICLO DIARIO DEL REVIEWTRADER - {hora:02d}:{minuto:02d}")
+                    ultima_ejecucion['REVIEW'] = ahora
+                    threading.Thread(target=ejecutar_review_diario, daemon=True).start()
             
             # Heartbeat cada 5 minutos
             if minuto % 5 == 0 and ahora.second < 10:
@@ -19266,7 +19297,56 @@ def ejecutar_analisis_completo(timeframe):
         print(f"❌ Error CRÍTICO en ejecutar_analisis_completo: {e}")
         import traceback
         traceback.print_exc()
+
+
+# ============================================================================
+# FASE 7: FUNCIÓN DEL CICLO DIARIO DEL REVIEWTRADER
+# ============================================================================
+
+def ejecutar_review_diario():
+    """
+    Ejecuta el ciclo completo del ReviewTrader una vez al día.
+    - Evalúa señales pendientes (TP/SL/expired)
+    - Detecta oportunidades perdidas
+    - Recalcula estadísticas
+    - Aplica optimizaciones de almacenamiento
+    """
+    try:
+        print(f"\n{'#'*60}")
+        print(f"# 🎓 EJECUTANDO REVIEWTRADER DIARIO - {datetime.now(bolivia_tz).strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"{'#'*60}\n")
         
+        # Importar de forma diferida (por si review_trader no está disponible)
+        try:
+            from review_trader import review_trader
+        except Exception as e:
+            print(f"❌ ReviewTrader no disponible: {e}")
+            return
+        
+        if not review_trader.db.enabled:
+            print("⚠️ Supabase no configurado - saltando ciclo diario de review")
+            return
+        
+        # Fetcher de precios reutilizando el sistema principal
+        def price_fetcher(symbol, timeframe):
+            return expert_system.get_kucoin_data(symbol, timeframe)
+        
+        results = review_trader.run_full_review(price_fetcher)
+        
+        print(f"\n{'#'*60}")
+        print(f"# ✅ REVIEWTRADER DIARIO COMPLETADO")
+        print(f"{'#'*60}")
+        print(f"Evaluated: {results.get('evaluated', {})}")
+        print(f"Missed opportunities: {results.get('missed', 0)}")
+        print(f"Stats: {results.get('stats', {})}")
+        print(f"{'#'*60}\n")
+        
+    except Exception as e:
+        print(f"❌ Error en ejecutar_review_diario: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 # ============================================================================
 # INICIALIZACIÓN (REEMPLAZA TODO LO QUE TENÍAS AL FINAL)
 # ============================================================================
