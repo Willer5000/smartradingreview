@@ -400,13 +400,19 @@ class FuturesAnalysis(TradingExpertSystem):
         # Llamar al análisis del padre
         # NOTA: paxg_analysis y paxg_btc_analysis se pasan como None
         # (no aplica en futuros)
-        result = self.analyze_full_market(
-            symbol=symbol,
-            timeframe=timeframe,
-            btc_analysis=btc_analysis,
-            paxg_analysis=None,
-            paxg_btc_analysis=None
-        )
+        # FLAG: evitar doble registro en Supabase (el padre registraría con
+        # system_type='spot'. Aquí lo registramos después con 'futures').
+        self._skip_supabase_register = True
+        try:
+            result = self.analyze_full_market(
+                symbol=symbol,
+                timeframe=timeframe,
+                btc_analysis=btc_analysis,
+                paxg_analysis=None,
+                paxg_btc_analysis=None
+            )
+        finally:
+            self._skip_supabase_register = False
         
         if not result or not result.get('success'):
             return result

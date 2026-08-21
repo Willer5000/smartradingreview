@@ -13569,13 +13569,16 @@ class TradingExpertSystem:
             }
             
             # === FASE 7: Registrar señal en Supabase (best-effort, no bloqueante) ===
-            try:
-                from review_trader import review_trader
-                if review_trader.db.enabled:
-                    review_trader.register_signal(resultado_final, system_type='spot')
-            except Exception as _register_error:
-                # Nunca bloquear el análisis por un error de registro
-                print(f"⚠️ No se pudo registrar señal en ReviewTrader: {_register_error}")
+            # Si el subsistema de futuros nos invocó, saltar registro spot
+            # (FuturesAnalysis lo registrará después con system_type='futures')
+            if not getattr(self, '_skip_supabase_register', False):
+                try:
+                    from review_trader import review_trader
+                    if review_trader.db.enabled:
+                        review_trader.register_signal(resultado_final, system_type='spot')
+                except Exception as _register_error:
+                    # Nunca bloquear el análisis por un error de registro
+                    print(f"⚠️ No se pudo registrar señal en ReviewTrader: {_register_error}")
             
             return resultado_final
             
