@@ -51,6 +51,12 @@ SUPABASE_KEY = os.environ.get('SUPABASE_KEY', '')
 logger = logging.getLogger('SUPABASE')
 logger.setLevel(logging.INFO)
 
+# Silenciar logs verbosos de httpcore/httpx/hpack en producción.
+# Estos módulos imprimen DEBUG con cada reconexión SSL/HTTP2, ensuciando los logs.
+for _noisy in ('httpcore', 'httpcore.connection', 'httpcore.http2', 'httpcore.http11',
+               'httpx', 'hpack', 'h2', 'urllib3'):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 print("=" * 60)
 print("🗄️ SUPABASE CLIENT - INICIALIZANDO")
 print("=" * 60)
@@ -87,6 +93,7 @@ class SupabaseClient:
         self.key = key or SUPABASE_KEY
         self.client = None
         self.enabled = False
+        self._reconnect_lock = None  # Se inicializa perezosamente
         
         if not self.url or not self.key:
             print("⚠️ SUPABASE no configurado (URL o KEY vacíos)")
@@ -94,14 +101,78 @@ class SupabaseClient:
             return
         
         try:
-            from supabase import create_client, Client
-            self.client = create_client(self.url, self.key)
+            self._create_client()
             self.enabled = True
             print(f"✅ SUPABASE conectado a: {self.url[:40]}...")
         except ImportError:
             print("❌ Librería 'supabase' no instalada. Ejecutar: pip install supabase")
         except Exception as e:
             print(f"❌ Error conectando a SUPABASE: {e}")
+    
+    def _create_client(self):
+        """Crea (o recrea) el cliente Supabase. Se usa en __init__ y en reconexiones."""
+        from supabase import create_client
+        self.client = create_client(self.url, self.key)
+    
+    def _reconnect(self):
+        """
+        Reconecta el cliente Supabase después de un ConnectionTerminated.
+        Thread-safe: solo un thread reconecta a la vez.
+        """
+        import threading
+        if self._reconnect_lock is None:
+            self._reconnect_lock = threading.Lock()
+        with self._reconnect_lock:
+            try:
+                self._create_client()
+                logger.info("Cliente Supabase reconectado tras ConnectionTerminated")
+                return True
+            except Exception as e:
+                logger.error(f"Fallo al reconectar cliente Supabase: {e}")
+                return False
+    
+    @staticmethod
+    def _is_connection_error(exc: Exception) -> bool:
+        """
+        Detecta si una excepción es un error de conexión transitorio
+        (ConnectionTerminated HTTP/2, RemoteProtocolError, ReadError, etc.)
+        que se puede resolver reconectando y reintentando.
+        """
+        msg = str(exc)
+        markers = (
+            'ConnectionTerminated',
+            'RemoteProtocolError',
+            'ReadError',
+            'WriteError',
+            'ConnectError',
+            'ConnectTimeout',
+            'PoolTimeout',
+            'GOAWAY',
+            'error_code:9',
+            'Server disconnected',
+            'Connection aborted',
+        )
+        return any(m in msg for m in markers)
+    
+    def _with_retry(self, operation, *args, **kwargs):
+        """
+        Ejecuta una operación de Supabase con reintento automático ante
+        errores de conexión (ConnectionTerminated, etc).
+        
+        operation: callable que ejecuta la query Supabase.
+        Si falla con error de conexión, reconecta y reintenta 1 vez.
+        Si falla por otro motivo, propaga la excepción.
+        """
+        try:
+            return operation(*args, **kwargs)
+        except Exception as e:
+            if not self._is_connection_error(e):
+                raise
+            logger.warning(f"Error de conexión Supabase: {e}. Reconectando y reintentando...")
+            if not self._reconnect():
+                raise
+            # Reintento (una sola vez)
+            return operation(*args, **kwargs)
     
     # ========================================================================
     # NORMALIZACIÓN DE ACCIONES
@@ -192,7 +263,9 @@ class SupabaseClient:
                 'created_at': datetime.utcnow().isoformat()
             }
             
-            response = self.client.table('signals').insert(payload).execute()
+            response = self._with_retry(
+                lambda: self.client.table('signals').insert(payload).execute()
+            )
             
             if response.data and len(response.data) > 0:
                 signal_id = response.data[0].get('id')
@@ -209,7 +282,10 @@ class SupabaseClient:
             return None
             
         except Exception as e:
-            logger.error(f"Error insertando señal: {e}")
+            if self._is_connection_error(e):
+                logger.warning(f"Supabase temporalmente inaccesible al insertar señal: {type(e).__name__}")
+            else:
+                logger.error(f"Error insertando señal: {e}")
             return None
     
     def _insert_signal_indicators(self, signal_id: str, strategies: List[str], indicators_snapshot: Dict):
@@ -393,8 +469,9 @@ class SupabaseClient:
         if not self.enabled:
             return None
         
-        try:
-            normalized = self.normalize_action(action)
+        normalized = self.normalize_action(action)
+        
+        def _op():
             response = (self.client.table('review_recommendations')
                         .select('*')
                         .eq('symbol', symbol)
@@ -406,8 +483,16 @@ class SupabaseClient:
             if response.data:
                 return response.data[0]
             return None
+        
+        try:
+            return self._with_retry(_op)
         except Exception as e:
-            logger.error(f"Error obteniendo recomendaciones: {e}")
+            # Si es error de conexión persistente, lo degradamos a warning
+            # (no rompe la app, solo devolvemos None y la próxima llamada intentará de nuevo)
+            if self._is_connection_error(e):
+                logger.warning(f"Supabase temporalmente inaccesible: {type(e).__name__}")
+            else:
+                logger.error(f"Error obteniendo recomendaciones: {e}")
             return None
     
     def upsert_recommendation(self, data: Dict) -> bool:
