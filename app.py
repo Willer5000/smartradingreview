@@ -17976,6 +17976,11 @@ def futures_page():
     """Página de Futuros - reutiliza index.html con flag is_futures=True"""
     return render_template('index.html', is_futures=True)
 
+@app.route('/analytics')
+def analytics_page():
+    """Página de Análisis Estadístico (Fase C)"""
+    return render_template('analytics.html')
+
 @app.route('/manual')
 def manual():
     return render_template('manual.html')
@@ -18998,7 +19003,7 @@ def api_review_run_now():
         def price_fetcher(symbol, timeframe):
             return expert_system.get_kucoin_data(symbol, timeframe)
         
-        results = review.run_full_review(price_fetcher)
+        results = review.run_full_review(price_fetcher, trigger_source='manual')
         
         return jsonify({
             'success': True,
@@ -19040,6 +19045,190 @@ def api_review_health():
             'timestamp': datetime.now(bolivia_tz).isoformat()
         })
     except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================================
+# ENDPOINTS FASE B: Analytics (estadísticas para gráficos)
+# ============================================================================
+
+def _get_analytics_service():
+    """Obtiene la instancia de AnalyticsService o None"""
+    try:
+        from analytics_service import analytics_service
+        return analytics_service
+    except Exception as e:
+        print(f"⚠️ AnalyticsService no disponible: {e}")
+        return None
+
+
+def _parse_analytics_filters():
+    """Extrae filtros comunes de query params"""
+    args = request.args
+    return {
+        'symbol':      args.get('symbol') or None,
+        'timeframe':   args.get('timeframe') or None,
+        'system_type': args.get('system_type') or None,
+        'action':      args.get('action') or None,
+        'days_back':   int(args.get('days_back', 90))
+    }
+
+
+@app.route('/api/analytics/summary')
+def api_analytics_summary():
+    """Retorna KPIs globales con filtros opcionales"""
+    try:
+        svc = _get_analytics_service()
+        if svc is None:
+            return jsonify({'success': False, 'error': 'AnalyticsService no disponible'}), 503
+        
+        filters = _parse_analytics_filters()
+        data = svc.get_summary(**filters)
+        return jsonify({'success': True, 'data': data, 'timestamp': datetime.now(bolivia_tz).isoformat()})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/analytics/strategies')
+def api_analytics_strategies():
+    """Ranking de estrategias por win rate"""
+    try:
+        svc = _get_analytics_service()
+        if svc is None:
+            return jsonify({'success': False, 'error': 'AnalyticsService no disponible'}), 503
+        
+        filters = _parse_analytics_filters()
+        top_n = int(request.args.get('top_n', 30))
+        data = svc.get_strategies_ranking(top_n=top_n, **filters)
+        return jsonify({'success': True, 'data': data, 'total': len(data)})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/analytics/heatmap')
+def api_analytics_heatmap():
+    """Heatmap símbolo × timeframe"""
+    try:
+        svc = _get_analytics_service()
+        if svc is None:
+            return jsonify({'success': False, 'error': 'AnalyticsService no disponible'}), 503
+        
+        args = request.args
+        data = svc.get_heatmap_data(
+            system_type=args.get('system_type') or None,
+            action=args.get('action') or None,
+            days_back=int(args.get('days_back', 90))
+        )
+        return jsonify({'success': True, 'data': data})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/analytics/timeline')
+def api_analytics_timeline():
+    """Evolución temporal del win_rate"""
+    try:
+        svc = _get_analytics_service()
+        if svc is None:
+            return jsonify({'success': False, 'error': 'AnalyticsService no disponible'}), 503
+        
+        filters = _parse_analytics_filters()
+        bucket = request.args.get('bucket', 'week')  # week | day
+        data = svc.get_timeline(bucket=bucket, **filters)
+        return jsonify({'success': True, 'data': data})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/analytics/pnl_distribution')
+def api_analytics_pnl():
+    """Distribución de PnL (histograma)"""
+    try:
+        svc = _get_analytics_service()
+        if svc is None:
+            return jsonify({'success': False, 'error': 'AnalyticsService no disponible'}), 503
+        
+        filters = _parse_analytics_filters()
+        data = svc.get_pnl_distribution(**filters)
+        return jsonify({'success': True, 'data': data})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/analytics/top_operations')
+def api_analytics_top_operations():
+    """Top N mejores o peores operaciones"""
+    try:
+        svc = _get_analytics_service()
+        if svc is None:
+            return jsonify({'success': False, 'error': 'AnalyticsService no disponible'}), 503
+        
+        filters = _parse_analytics_filters()
+        mode = request.args.get('mode', 'best')  # best | worst
+        top_n = int(request.args.get('top_n', 10))
+        data = svc.get_top_operations(top_n=top_n, mode=mode, **filters)
+        return jsonify({'success': True, 'data': data, 'mode': mode})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/analytics/operation_detail/<signal_id>')
+def api_analytics_operation_detail(signal_id):
+    """Detalle completo de una señal específica"""
+    try:
+        svc = _get_analytics_service()
+        if svc is None:
+            return jsonify({'success': False, 'error': 'AnalyticsService no disponible'}), 503
+        
+        detail = svc.get_operation_detail(signal_id)
+        if not detail:
+            return jsonify({'success': False, 'error': 'Señal no encontrada'}), 404
+        return jsonify({'success': True, 'data': detail})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================================
+# ENDPOINT (Fase A): Logs del ReviewTrader
+# ============================================================================
+@app.route('/api/review/logs')
+def api_review_logs():
+    """Retorna los últimos N logs del ReviewTrader (default 50)"""
+    try:
+        review = _get_review_trader()
+        if review is None:
+            return jsonify({'success': False, 'error': 'ReviewTrader no disponible'}), 503
+        
+        limit = int(request.args.get('limit', 50))
+        limit = max(1, min(200, limit))  # cap entre 1 y 200
+        
+        logs = review.db.get_recent_review_logs(limit=limit)
+        last_log = logs[0] if logs else None
+        
+        return jsonify({
+            'success': True,
+            'total': len(logs),
+            'last_log': last_log,
+            'logs': logs,
+            'timestamp': datetime.now(bolivia_tz).isoformat()
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -19342,7 +19531,7 @@ def ejecutar_review_diario():
         def price_fetcher(symbol, timeframe):
             return expert_system.get_kucoin_data(symbol, timeframe)
         
-        results = review_trader.run_full_review(price_fetcher)
+        results = review_trader.run_full_review(price_fetcher, trigger_source='scheduler')
         
         print(f"\n{'#'*60}")
         print(f"# ✅ REVIEWTRADER DIARIO COMPLETADO")

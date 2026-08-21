@@ -1282,56 +1282,140 @@ class ReviewTrader:
     # 7. MÉTODO PRINCIPAL (para ser llamado por el scheduler)
     # ========================================================================
     
-    def run_full_review(self, price_fetcher) -> Dict:
+    def run_full_review(self, price_fetcher, trigger_source: str = 'scheduler') -> Dict:
         """
         Ejecuta el ciclo completo del ReviewTrader:
         1. Evaluar señales pendientes (TP/SL/expired)
         2. Detectar oportunidades perdidas
         3. Recalcular estadísticas
-        4. Generar recomendaciones
+        4. Aplicar optimizaciones
+        5. Registrar log en Supabase (Fase A)
         
         Se ejecuta ideal 1 vez al día por un scheduler.
         
-        price_fetcher: función (symbol, timeframe) → DataFrame de velas
+        Args:
+            price_fetcher: función (symbol, timeframe) → DataFrame de velas
+            trigger_source: 'scheduler' (automático) o 'manual' (desde endpoint)
         """
+        run_started = datetime.utcnow()
+        
         print(f"\n{'#'*60}")
         print(f"# 🎓 REVIEW TRADER - CICLO COMPLETO")
-        print(f"# {datetime.utcnow().isoformat()}")
+        print(f"# Trigger: {trigger_source}")
+        print(f"# {run_started.isoformat()}")
         print(f"{'#'*60}")
         
         results = {
             'evaluated': {},
             'missed': 0,
-            'stats': {}
+            'stats': {},
+            'optimization': {}
         }
+        errors = []
+        warnings = []
         
         # 1. Evaluar señales pendientes
         try:
             results['evaluated'] = self.evaluate_pending_signals(price_fetcher)
         except Exception as e:
-            logger.error(f"Error en evaluate_pending_signals: {e}")
+            err_msg = f"evaluate_pending_signals: {str(e)[:200]}"
+            logger.error(err_msg)
+            errors.append(err_msg)
         
         # 2. Detectar oportunidades perdidas
         try:
             results['missed'] = self.detect_missed_opportunities(price_fetcher)
         except Exception as e:
-            logger.error(f"Error en detect_missed_opportunities: {e}")
+            err_msg = f"detect_missed_opportunities: {str(e)[:200]}"
+            logger.error(err_msg)
+            errors.append(err_msg)
         
         # 3. Recalcular stats
         try:
             results['stats'] = self.recalculate_stats()
         except Exception as e:
-            logger.error(f"Error en recalculate_stats: {e}")
+            err_msg = f"recalculate_stats: {str(e)[:200]}"
+            logger.error(err_msg)
+            errors.append(err_msg)
         
-        # 4. Optimizaciones de almacenamiento (Fase 2.5)
+        # 4. Optimizaciones de almacenamiento
         try:
             results['optimization'] = self.apply_optimization_cleanup()
         except Exception as e:
-            logger.error(f"Error en apply_optimization_cleanup: {e}")
-            results['optimization'] = {}
+            err_msg = f"apply_optimization_cleanup: {str(e)[:200]}"
+            logger.error(err_msg)
+            errors.append(err_msg)
+        
+        run_finished = datetime.utcnow()
+        duration = (run_finished - run_started).total_seconds()
+        
+        # 5. Registrar log completo en Supabase
+        try:
+            evaluated = results.get('evaluated', {})
+            stats = results.get('stats', {})
+            optimization = results.get('optimization', {})
+            ttl = optimization.get('ttl', {})
+            storage = optimization.get('storage', {})
+            
+            # Estado del ciclo
+            if errors:
+                status = 'failed' if len(errors) >= 3 else 'partial'
+            else:
+                status = 'success'
+            
+            # Notas descriptivas
+            notes_parts = []
+            if evaluated:
+                notes_parts.append(
+                    f"Evaluadas: {evaluated.get('processed', 0)} "
+                    f"(TP: {evaluated.get('tp_hit', 0)}, "
+                    f"SL: {evaluated.get('sl_hit', 0)}, "
+                    f"Exp: {evaluated.get('expired', 0)})"
+                )
+            if results.get('missed', 0) > 0:
+                notes_parts.append(f"Oportunidades perdidas: {results['missed']}")
+            if stats:
+                notes_parts.append(
+                    f"Stats actualizadas: {stats.get('specific', 0)} específicas + "
+                    f"{stats.get('general', 0)} generales"
+                )
+            notes = ' | '.join(notes_parts) if notes_parts else 'Ciclo sin cambios'
+            
+            log_data = {
+                'run_started_at': run_started.isoformat(),
+                'run_finished_at': run_finished.isoformat(),
+                'duration_seconds': round(duration, 2),
+                'trigger_source': trigger_source,
+                'signals_evaluated': evaluated.get('processed', 0),
+                'tp_hits': evaluated.get('tp_hit', 0),
+                'sl_hits': evaluated.get('sl_hit', 0),
+                'expired': evaluated.get('expired', 0),
+                'still_pending': evaluated.get('still_pending', 0),
+                'missed_opportunities_found': results.get('missed', 0),
+                'stats_specific_updated': stats.get('specific', 0),
+                'stats_general_updated': stats.get('general', 0),
+                'recommendations_updated': 0,  # se calcula dentro de recalculate_stats
+                'ttl_deleted': sum(ttl.values()) if isinstance(ttl, dict) else 0,
+                'low_sample_deleted': optimization.get('compression', 0),
+                'storage_stats': storage,
+                'errors': errors,
+                'warnings': warnings,
+                'notes': notes,
+                'status': status
+            }
+            
+            log_id = self.db.insert_review_log(log_data)
+            if log_id:
+                print(f"📝 [REVIEW] Log guardado: {log_id[:8]}... ({status}, {duration:.1f}s)")
+            
+            results['log_id'] = log_id
+            results['duration_seconds'] = duration
+            results['status'] = status
+        except Exception as e:
+            logger.error(f"Error insertando review_log: {e}")
         
         print(f"\n{'#'*60}")
-        print(f"# ✅ REVIEW TRADER - CICLO COMPLETADO")
+        print(f"# ✅ REVIEW TRADER - CICLO COMPLETADO ({duration:.1f}s)")
         print(f"{'#'*60}\n")
         
         return results

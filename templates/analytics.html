@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="es" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📈 Análisis Estadístico - Crypto Trader Analyst Pro</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        .kpi-card {
+            background: linear-gradient(145deg, #1a1e24 0%, #0f1115 100%);
+            border-left: 4px solid #FFD700;
+            padding: 20px;
+            border-radius: 10px;
+            min-height: 110px;
+        }
+        .kpi-value {
+            font-size: 2rem;
+            font-weight: 700;
+            line-height: 1;
+        }
+        .kpi-label {
+            font-size: 0.8rem;
+            color: #b0b7c0;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .chart-container {
+            background: #0F1115;
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .table-hover tr {
+            cursor: pointer;
+        }
+        .status-tp { color: #00C076; font-weight: 700; }
+        .status-sl { color: #FF5B5B; font-weight: 700; }
+        .status-expired { color: #FFD700; }
+        .status-missed { color: #8A63D2; }
+        .log-entry {
+            border-left: 3px solid #17a2b8;
+            padding: 10px 15px;
+            margin-bottom: 8px;
+            background: rgba(23, 162, 184, 0.05);
+            border-radius: 5px;
+            font-size: 0.85rem;
+        }
+        .log-entry.log-error { border-left-color: #FF5B5B; background: rgba(255, 91, 91, 0.05); }
+        .log-entry.log-partial { border-left-color: #FFD700; background: rgba(255, 215, 0, 0.05); }
+    </style>
+</head>
+<body>
+    <!-- Navbar -->
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container-fluid px-4">
+            <a class="navbar-brand" href="/">
+                <i class="fas fa-chart-bar me-2 text-info"></i>
+                📈 ANÁLISIS ESTADÍSTICO
+            </a>
+            <div class="navbar-nav ms-auto">
+                <a class="nav-link" href="/"><i class="fas fa-chart-line me-1"></i>📊 Spot</a>
+                <a class="nav-link" href="/futures"><i class="fas fa-rocket me-1"></i>🚀 Futuros</a>
+                <a class="nav-link" href="/manual"><i class="fas fa-book me-1"></i>Manual</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container-fluid px-4 py-3">
+        
+        <!-- ============ PANEL DE FILTROS ============ -->
+        <div class="card bg-dark border-secondary mb-3">
+            <div class="card-body py-2">
+                <div class="row g-2 align-items-end">
+                    <div class="col-md-2">
+                        <label class="form-label small mb-1">Símbolo</label>
+                        <select class="form-select form-select-sm bg-dark text-white" id="f-symbol">
+                            <option value="">Todos</option>
+                            <option>BTC-USDT</option>
+                            <option>ETH-USDT</option>
+                            <option>SOL-USDT</option>
+                            <option>XRP-USDT</option>
+                            <option>ADA-USDT</option>
+                            <option>PAXG-USDT</option>
+                            <option>PAXG-BTC</option>
+                        </select>
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small mb-1">Timeframe</label>
+                        <select class="form-select form-select-sm bg-dark text-white" id="f-timeframe">
+                            <option value="">Todos</option>
+                            <option>5m</option>
+                            <option>15m</option>
+                            <option>30m</option>
+                            <option>1h</option>
+                            <option>2h</option>
+                            <option>4h</option>
+                            <option>12h</option>
+                            <option>1D</option>
+                            <option>1W</option>
+                        </select>
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small mb-1">Sistema</label>
+                        <select class="form-select form-select-sm bg-dark text-white" id="f-system">
+                            <option value="">Ambos</option>
+                            <option value="spot">Spot</option>
+                            <option value="futures">Futuros</option>
+                        </select>
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small mb-1">Acción</label>
+                        <select class="form-select form-select-sm bg-dark text-white" id="f-action">
+                            <option value="">Ambas</option>
+                            <option value="LONG">LONG</option>
+                            <option value="SHORT">SHORT</option>
+                        </select>
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small mb-1">Días</label>
+                        <select class="form-select form-select-sm bg-dark text-white" id="f-days">
+                            <option value="7">Últimos 7</option>
+                            <option value="30">Últimos 30</option>
+                            <option value="90" selected>Últimos 90</option>
+                            <option value="180">Últimos 180</option>
+                            <option value="365">Último año</option>
+                        </select>
+                    </div>
+                    <div class="col-md-2">
+                        <button class="btn btn-info btn-sm w-100" onclick="window.loadAllAnalytics()">
+                            <i class="fas fa-filter me-1"></i>Aplicar
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- ============ KPIs GLOBALES ============ -->
+        <div class="row g-3 mb-4" id="kpi-row">
+            <div class="col-md-3">
+                <div class="kpi-card">
+                    <div class="kpi-label">📊 Total Señales</div>
+                    <div class="kpi-value text-white" id="kpi-total">--</div>
+                    <small class="text-muted" id="kpi-resolved">Resueltas: --</small>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="kpi-card" style="border-left-color: #00C076;">
+                    <div class="kpi-label">✅ Win Rate</div>
+                    <div class="kpi-value" id="kpi-winrate" style="color: #00C076;">--</div>
+                    <small class="text-muted"><span id="kpi-tps">--</span> TP / <span id="kpi-sls">--</span> SL</small>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="kpi-card" style="border-left-color: #3A8BFF;">
+                    <div class="kpi-label">💰 Expectancy</div>
+                    <div class="kpi-value" id="kpi-expectancy" style="color: #3A8BFF;">--</div>
+                    <small class="text-muted">PnL medio ganancia: <span id="kpi-avgwin">--</span></small>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="kpi-card" style="border-left-color: #FFD700;">
+                    <div class="kpi-label">🔥 Estrategias Activas</div>
+                    <div class="kpi-value" id="kpi-strategies" style="color: #FFD700;">--</div>
+                    <small class="text-muted">Últimos <span id="kpi-days">--</span> días</small>
+                </div>
+            </div>
+        </div>
+        
+        <!-- ============ GRÁFICO 1: RANKING DE ESTRATEGIAS ============ -->
+        <div class="chart-container">
+            <h5 class="mb-3"><i class="fas fa-trophy me-2 text-warning"></i>Ranking de Estrategias por Win Rate</h5>
+            <div id="chart-strategies" style="height: 500px;"></div>
+        </div>
+        
+        <!-- ============ FILA: HEATMAP + TIMELINE ============ -->
+        <div class="row g-3">
+            <div class="col-lg-6">
+                <div class="chart-container h-100">
+                    <h5 class="mb-3"><i class="fas fa-th me-2 text-info"></i>Heatmap Símbolo × Timeframe</h5>
+                    <div id="chart-heatmap" style="height: 400px;"></div>
+                </div>
+            </div>
+            <div class="col-lg-6">
+                <div class="chart-container h-100">
+                    <h5 class="mb-3"><i class="fas fa-chart-line me-2 text-success"></i>Evolución Temporal (semanal)</h5>
+                    <div id="chart-timeline" style="height: 400px;"></div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- ============ GRÁFICO 4: DISTRIBUCIÓN PnL ============ -->
+        <div class="chart-container">
+            <h5 class="mb-3"><i class="fas fa-chart-column me-2 text-primary"></i>Distribución de PnL</h5>
+            <div id="chart-pnl" style="height: 350px;"></div>
+        </div>
+        
+        <!-- ============ TABLAS: MEJORES Y PEORES ============ -->
+        <div class="row g-3 mt-1">
+            <div class="col-lg-6">
+                <div class="chart-container">
+                    <h5 class="mb-3"><i class="fas fa-arrow-up text-success me-2"></i>Top 10 Mejores Operaciones</h5>
+                    <div class="table-responsive">
+                        <table class="table table-dark table-hover table-sm" id="table-best">
+                            <thead>
+                                <tr>
+                                    <th>Par</th><th>TF</th><th>Acción</th>
+                                    <th>PnL</th><th>Fecha</th><th></th>
+                                </tr>
+                            </thead>
+                            <tbody id="tbody-best">
+                                <tr><td colspan="6" class="text-center py-3">Cargando...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            <div class="col-lg-6">
+                <div class="chart-container">
+                    <h5 class="mb-3"><i class="fas fa-arrow-down text-danger me-2"></i>Top 10 Peores Operaciones</h5>
+                    <div class="table-responsive">
+                        <table class="table table-dark table-hover table-sm" id="table-worst">
+                            <thead>
+                                <tr>
+                                    <th>Par</th><th>TF</th><th>Acción</th>
+                                    <th>PnL</th><th>Fecha</th><th></th>
+                                </tr>
+                            </thead>
+                            <tbody id="tbody-worst">
+                                <tr><td colspan="6" class="text-center py-3">Cargando...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- ============ LOGS DEL REVIEWTRADER ============ -->
+        <div class="chart-container">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5 class="mb-0"><i class="fas fa-clipboard-list me-2 text-info"></i>Logs del ReviewTrader</h5>
+                <div>
+                    <button class="btn btn-outline-info btn-sm" onclick="window.loadLogs()">
+                        <i class="fas fa-sync-alt me-1"></i>Refrescar
+                    </button>
+                    <button class="btn btn-outline-warning btn-sm" onclick="window.runReviewManually()">
+                        <i class="fas fa-play me-1"></i>Ejecutar Ahora
+                    </button>
+                </div>
+            </div>
+            <div id="logs-container" style="max-height: 500px; overflow-y: auto;">
+                <div class="text-center text-muted py-3">Cargando logs...</div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- ============ MODAL: DETALLE DE OPERACIÓN ============ -->
+    <div class="modal fade" id="opDetailModal" tabindex="-1">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content bg-dark text-white">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="fas fa-search-plus me-2"></i>
+                        Detalle de Operación
+                    </h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="opDetailBody">
+                    <div class="text-center py-4">
+                        <div class="spinner-border text-info"></div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cerrar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Toast Container -->
+    <div id="toast-container" class="toast-container position-fixed bottom-0 end-0 p-3"></div>
+    
+    <!-- Scripts -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
+    <script src="{{ url_for('static', filename='analytics.js') }}"></script>
+</body>
+</html>

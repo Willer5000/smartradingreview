@@ -615,6 +615,91 @@ class SupabaseClient:
             logger.error(f"Error en delete_low_sample_stats: {e}")
             return 0
     
+    # ========================================================================
+    # LOGS DEL REVIEWTRADER (Fase A)
+    # ========================================================================
+    
+    def insert_review_log(self, log_data: Dict) -> Optional[str]:
+        """
+        Inserta una entrada de log del ReviewTrader.
+        Se llama cada vez que se ejecuta run_full_review().
+        
+        log_data esperado:
+        {
+            'run_started_at': str ISO,
+            'run_finished_at': str ISO,
+            'duration_seconds': float,
+            'trigger_source': 'scheduler' | 'manual',
+            'signals_evaluated': int,
+            'tp_hits': int, 'sl_hits': int, 'expired': int, 'still_pending': int,
+            'missed_opportunities_found': int,
+            'stats_specific_updated': int, 'stats_general_updated': int,
+            'recommendations_updated': int,
+            'ttl_deleted': int, 'low_sample_deleted': int,
+            'storage_stats': dict,
+            'errors': list, 'warnings': list, 'notes': str,
+            'status': 'success' | 'partial' | 'failed'
+        }
+        """
+        if not self.enabled:
+            return None
+        
+        try:
+            payload = {
+                'run_started_at': log_data.get('run_started_at'),
+                'run_finished_at': log_data.get('run_finished_at'),
+                'duration_seconds': float(log_data.get('duration_seconds', 0)),
+                'trigger_source': log_data.get('trigger_source', 'scheduler'),
+                'signals_evaluated': int(log_data.get('signals_evaluated', 0)),
+                'tp_hits': int(log_data.get('tp_hits', 0)),
+                'sl_hits': int(log_data.get('sl_hits', 0)),
+                'expired': int(log_data.get('expired', 0)),
+                'still_pending': int(log_data.get('still_pending', 0)),
+                'missed_opportunities_found': int(log_data.get('missed_opportunities_found', 0)),
+                'stats_specific_updated': int(log_data.get('stats_specific_updated', 0)),
+                'stats_general_updated': int(log_data.get('stats_general_updated', 0)),
+                'recommendations_updated': int(log_data.get('recommendations_updated', 0)),
+                'ttl_deleted': int(log_data.get('ttl_deleted', 0)),
+                'low_sample_deleted': int(log_data.get('low_sample_deleted', 0)),
+                'storage_stats': log_data.get('storage_stats', {}),
+                'errors': log_data.get('errors', []),
+                'warnings': log_data.get('warnings', []),
+                'notes': log_data.get('notes', ''),
+                'status': log_data.get('status', 'success'),
+                'created_at': datetime.utcnow().isoformat()
+            }
+            
+            response = self.client.table('review_logs').insert(payload).execute()
+            if response.data:
+                return response.data[0].get('id')
+            return None
+        except Exception as e:
+            logger.error(f"Error insertando review_log: {e}")
+            return None
+    
+    def get_recent_review_logs(self, limit: int = 50) -> List[Dict]:
+        """Retorna los últimos N logs del ReviewTrader (ordenados por fecha DESC)"""
+        if not self.enabled:
+            return []
+        
+        try:
+            response = (self.client.table('review_logs')
+                        .select('*')
+                        .order('run_started_at', desc=True)
+                        .limit(limit)
+                        .execute())
+            return response.data or []
+        except Exception as e:
+            logger.error(f"Error obteniendo review_logs: {e}")
+            return []
+    
+    def get_last_review_log(self) -> Optional[Dict]:
+        """Retorna el último log del ReviewTrader (el más reciente)"""
+        logs = self.get_recent_review_logs(limit=1)
+        return logs[0] if logs else None
+    
+    # ========================================================================
+    
     def get_storage_stats(self) -> Dict:
         """
         Retorna conteo de filas por cada tabla.
@@ -625,7 +710,8 @@ class SupabaseClient:
         
         tables = ['signals', 'signal_indicators', 'signal_results',
                   'strategy_stats_specific', 'strategy_stats_general',
-                  'missed_opportunities', 'review_recommendations']
+                  'missed_opportunities', 'review_recommendations',
+                  'review_logs']
         
         stats = {}
         for table in tables:
