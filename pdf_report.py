@@ -285,7 +285,8 @@ def _build_paragraph_conclusion(analysis: Dict, msg_sections: Dict[str, str]) ->
 # ============================================================================
 def generate_analysis_pdf(analysis: Dict,
                           chart_image_bytes: Optional[bytes] = None,
-                          indicators_image_bytes: Optional[bytes] = None) -> bytes:
+                          indicators_image_bytes: Optional[bytes] = None,
+                          supporting_indicator_charts: Optional[List[Dict]] = None) -> bytes:
     """
     Genera el PDF de análisis.
     
@@ -293,11 +294,15 @@ def generate_analysis_pdf(analysis: Dict,
       - Cabecera
       - Tabla resumen niveles
       - 3 párrafos (usando banco de justificaciones)
-      - ANEXO: gráfico principal (velas) + gráfico de indicadores
+      - ANEXO A: gráfico principal (velas + EMAs + estructura)
+      - ANEXO B: gráficos individuales de cada indicador que respalda la señal
     
     analysis: dict retornado por analyze_full_market
     chart_image_bytes: PNG del gráfico completo (velas + indicadores + patrón)
-    indicators_image_bytes: PNG opcional específico de indicadores
+    indicators_image_bytes: PNG opcional específico de indicadores (LEGACY, se mantiene)
+    supporting_indicator_charts: lista [{'name': str, 'image': bytes}] con
+        gráficos individuales de indicadores que respaldan la señal.
+        Cada elemento genera una entrada en la sección anexa.
     
     Retorna: bytes del PDF listo para servir con Content-Type: application/pdf
     """
@@ -418,34 +423,59 @@ def generate_analysis_pdf(analysis: Dict,
     story.append(Paragraph("3. Conclusión", style_h2))
     story.append(Paragraph(_build_paragraph_conclusion(analysis, msg_sections), style_body))
     
-    # ============ ANEXO: GRÁFICOS ============
-    has_charts = bool(chart_image_bytes or indicators_image_bytes)
-    if has_charts:
+    # ============ ANEXO A: GRÁFICO PRINCIPAL (velas + EMAs + estructura) ============
+    if chart_image_bytes:
         story.append(PageBreak())
-        story.append(Paragraph("ANEXO — Gráficos técnicos", style_title))
+        story.append(Paragraph("Anexo A — Gráfico principal", style_title))
         story.append(Paragraph(
-            f"Evidencia visual de la señal · <b>{symbol}</b> · <b>{timeframe}</b>",
+            f"Velas, EMAs, soportes/resistencias e indicadores clave · <b>{symbol}</b> · <b>{timeframe}</b>",
+            style_subtitle
+        ))
+        try:
+            img_buf = io.BytesIO(chart_image_bytes)
+            img = Image(img_buf, width=17 * cm, height=18 * cm, kind='proportional')
+            story.append(img)
+        except Exception as e:
+            logger.warning(f"No se pudo embeber gráfico principal: {e}")
+    
+    # ============ ANEXO B: GRÁFICOS INDIVIDUALES DE INDICADORES DE RESPALDO ============
+    # Un gráfico por indicador que sustenta la señal (RSI, MACD, EMAs, Bollinger, etc.)
+    # cada uno con su propio subplot dedicado y nombre visible.
+    if supporting_indicator_charts:
+        story.append(PageBreak())
+        story.append(Paragraph("Anexo B — Indicadores que respaldan la señal", style_title))
+        action = decision.get('action', '?')
+        story.append(Paragraph(
+            f"Cada gráfico muestra un indicador del sistema que votó a favor de <b>{action}</b> · "
+            f"<b>{symbol}</b> · <b>{timeframe}</b>",
             style_subtitle
         ))
         
-        if chart_image_bytes:
+        for idx, chart in enumerate(supporting_indicator_charts):
             try:
-                story.append(Paragraph("Panel principal: velas, EMAs, soportes/resistencias e indicadores clave", style_h2))
-                img_buf = io.BytesIO(chart_image_bytes)
-                img = Image(img_buf, width=17 * cm, height=16 * cm, kind='proportional')
+                if not chart or not chart.get('image'):
+                    continue
+                story.append(Paragraph(
+                    f"{idx + 1}. {chart.get('name', 'Indicador')}",
+                    style_h2
+                ))
+                img_buf = io.BytesIO(chart['image'])
+                img = Image(img_buf, width=17 * cm, height=5.5 * cm, kind='proportional')
                 story.append(img)
+                story.append(Spacer(1, 0.2 * cm))
             except Exception as e:
-                logger.warning(f"No se pudo embeber gráfico principal: {e}")
-        
-        if indicators_image_bytes:
-            try:
-                story.append(Spacer(1, 0.5 * cm))
-                story.append(Paragraph("Detalle de indicadores que respaldan la acción", style_h2))
-                img_buf2 = io.BytesIO(indicators_image_bytes)
-                img2 = Image(img_buf2, width=17 * cm, height=13 * cm, kind='proportional')
-                story.append(img2)
-            except Exception as e:
-                logger.warning(f"No se pudo embeber gráfico de indicadores: {e}")
+                logger.warning(f"No se pudo embeber gráfico de {chart.get('name')}: {e}")
+    
+    # LEGACY: gráfico único de indicadores (por compatibilidad si aún se pasa)
+    elif indicators_image_bytes:
+        try:
+            story.append(PageBreak())
+            story.append(Paragraph("Anexo B — Indicadores que respaldan la señal", style_title))
+            img_buf2 = io.BytesIO(indicators_image_bytes)
+            img2 = Image(img_buf2, width=17 * cm, height=17 * cm, kind='proportional')
+            story.append(img2)
+        except Exception as e:
+            logger.warning(f"No se pudo embeber gráfico de indicadores: {e}")
     
     # ============ FOOTER ============
     story.append(Spacer(1, 0.8 * cm))

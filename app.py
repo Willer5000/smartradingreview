@@ -11750,39 +11750,63 @@ class TradingExpertSystem:
             # Último recurso: usar previous_close exacto
             return previous_close, 'Cierre anterior (sin zonas técnicas)', 30
         
-        # Scoring: preferimos zona con mayor fuerza y más CERCANA al cierre anterior
-        # (retroceso muy grande = poco probable de tocar; muy pequeño = poco retorno)
-        # Distancia ideal: entre 0.3% y 2.0% del cierre anterior
-        scored = []
+        # ============ NUEVA REGLA (por petición del usuario) ============
+        # El entry debe ser la zona técnica MÁS CERCANA al precio de cierre
+        # anterior, sin importar la fuerza (OB, FVG, soporte, Fibo, POC, ATR).
+        # 
+        # Objetivo: entry REALISTA — la primera zona que el precio probablemente
+        # tocará. Si un soporte estructural está más cerca que un OB fuerte,
+        # se toma el soporte porque es más probable que el precio lo toque.
+        #
+        # Umbral mínimo: 0.1% para evitar zonas ridículamente pegadas al cierre
+        # (que en la práctica ya estarían tocadas). Se acepta previous_close
+        # exacto si es lo único disponible.
+        MIN_DIST_PCT = 0.1
+        MAX_DIST_PCT = 5.0  # tampoco tan lejano que sea inalcanzable
+        
+        # Filtrar candidatos por rango de distancia razonable
+        valid = []
         for c in candidates:
             price = c['price']
             if price <= 0:
                 continue
             dist_pct = abs(previous_close - price) / previous_close * 100
-            
-            # Penalizar distancias fuera del rango sano
-            if dist_pct < 0.1:
-                dist_score = 50  # muy cerca del cierre, poco retroceso
-            elif dist_pct < 0.3:
-                dist_score = 70
-            elif dist_pct < 1.0:
-                dist_score = 100  # ideal
-            elif dist_pct < 2.0:
-                dist_score = 85
-            elif dist_pct < 3.0:
-                dist_score = 60
-            else:
-                dist_score = 30   # muy lejos, poco probable de tocar
-            
-            score = c['strength'] * 20 + dist_score * 0.5  # ponderación
-            scored.append((c, score))
+            c['_dist_pct'] = dist_pct  # guardar para debug
+            c['_dist_abs'] = abs(previous_close - price)
+            if MIN_DIST_PCT <= dist_pct <= MAX_DIST_PCT:
+                valid.append(c)
         
-        if not scored:
+        # Si el filtro estricto vacía la lista, relajarlo (tomar todos)
+        if not valid:
+            valid = [c for c in candidates if c.get('price', 0) > 0]
+            for c in valid:
+                if '_dist_abs' not in c:
+                    c['_dist_abs'] = abs(previous_close - c['price'])
+                    c['_dist_pct'] = c['_dist_abs'] / previous_close * 100
+        
+        if not valid:
             return previous_close, 'Cierre anterior (sin candidatos válidos)', 30
         
-        scored.sort(key=lambda x: -x[1])
-        best_c, best_score = scored[0]
-        return best_c['price'], best_c['source'], min(100, best_score)
+        # ORDENAR POR PROXIMIDAD (ascendente por distancia absoluta al cierre anterior)
+        # Empate → preferir zona con mayor strength
+        valid.sort(key=lambda c: (c['_dist_abs'], -c.get('strength', 1)))
+        best = valid[0]
+        
+        # Score informativo (para UI): distancia + fuerza
+        dist_pct = best['_dist_pct']
+        if dist_pct < 0.3:
+            base_score = 70
+        elif dist_pct < 1.0:
+            base_score = 90
+        elif dist_pct < 2.0:
+            base_score = 80
+        elif dist_pct < 3.0:
+            base_score = 60
+        else:
+            base_score = 40
+        best_score = min(100, base_score + best.get('strength', 1) * 5)
+        
+        return best['price'], best['source'], best_score
     
     def calculate_entry_levels(self, decision, trend, momentum, volatility, structure, symbol, timeframe, liquidation=None):
         """
@@ -14303,10 +14327,10 @@ class TradingExpertSystem:
             ema50 = self.calculate_ema(close_array, 50)
             ema200 = self.calculate_ema(close_array, 200)
             
-            fig.add_trace(go.Scatter(x=df['time'], y=ema9, name='EMA 9', line=dict(color='#3A8BFF', width=1), row=1, col=1))
-            fig.add_trace(go.Scatter(x=df['time'], y=ema21, name='EMA 21', line=dict(color='#FFD700', width=1), row=1, col=1))
-            fig.add_trace(go.Scatter(x=df['time'], y=ema50, name='EMA 50', line=dict(color='#FF8C00', width=1), row=1, col=1))
-            fig.add_trace(go.Scatter(x=df['time'], y=ema200, name='EMA 200', line=dict(color='#FF69B4', width=1), row=1, col=1))
+            fig.add_trace(go.Scatter(x=df['time'], y=ema9, name='EMA 9', line=dict(color='#3A8BFF', width=1)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df['time'], y=ema21, name='EMA 21', line=dict(color='#FFD700', width=1)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df['time'], y=ema50, name='EMA 50', line=dict(color='#FF8C00', width=1)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df['time'], y=ema200, name='EMA 200', line=dict(color='#FF69B4', width=1)), row=1, col=1)
             
             # Soportes y resistencias
             if analysis and 'structure' in analysis:
@@ -14349,13 +14373,19 @@ class TradingExpertSystem:
             for i in range(1, 7):
                 fig.update_xaxes(rangeslider=dict(visible=False), row=i, col=1)
             
-            # Convertir a imagen
+            # Convertir a imagen (kaleido)
             try:
-                img_bytes = fig.to_image(format="png", width=1600, height=1200, scale=1.5)
+                img_bytes = fig.to_image(format="png", width=1600, height=1200, scale=1.5, engine='kaleido')
                 return img_bytes
             except Exception as e:
-                print(f"Error convirtiendo gráfico a PNG: {e}")
-                return None
+                # Fallback sin engine explicito (por si la versión de plotly ya no lo requiere)
+                print(f"Error kaleido: {type(e).__name__}: {e}. Intentando sin engine explícito...")
+                try:
+                    img_bytes = fig.to_image(format="png", width=1600, height=1200, scale=1.5)
+                    return img_bytes
+                except Exception as e2:
+                    print(f"Error convirtiendo gráfico a PNG (fallback): {type(e2).__name__}: {e2}")
+                    return None
                 
         except Exception as e:
             print(f"Error generando gráfico: {e}")
@@ -14418,17 +14448,17 @@ class TradingExpertSystem:
             elif indicator == 'dmi' or indicator == 'adx':
                 adx_data = self.calculate_adx(df['high'].values, df['low'].values, df['close'].values, 14)
                 fig.add_trace(go.Scatter(x=df['time'], y=adx_data['plus_di'], name='+DI',
-                                        line=dict(color='#00C076', width=1), row=row, col=1))
+                                        line=dict(color='#00C076', width=1)), row=row, col=1)
                 fig.add_trace(go.Scatter(x=df['time'], y=adx_data['minus_di'], name='-DI',
-                                        line=dict(color='#FF5B5B', width=1), row=row, col=1))
+                                        line=dict(color='#FF5B5B', width=1)), row=row, col=1)
                 fig.add_trace(go.Scatter(x=df['time'], y=adx_data['adx'], name='ADX',
-                                        line=dict(color='#FFD700', width=1, dash='dot'), row=row, col=1))
+                                        line=dict(color='#FFD700', width=1, dash='dot')), row=row, col=1)
                 fig.update_yaxes(title_text="DMI/ADX", row=row, col=1)
             
             elif indicator == 'rsi':
                 rsi = self.calculate_rsi(df['close'].values, 14)
                 fig.add_trace(go.Scatter(x=df['time'], y=rsi, line=dict(color='#8A63D2', width=1.5),
-                                        name='RSI', row=row, col=1))
+                                        name='RSI'), row=row, col=1)
                 fig.add_hline(y=70, line_dash="dot", line_color="#FF5B5B", row=row, col=1)
                 fig.add_hline(y=30, line_dash="dot", line_color="#00C076", row=row, col=1)
                 fig.update_yaxes(title_text="RSI", range=[0, 100], row=row, col=1)
@@ -14437,11 +14467,11 @@ class TradingExpertSystem:
                 macd_data = self.calculate_macd(df['close'].values, 12, 26, 9)
                 colors = ['#00C076' if x > 0 else '#FF5B5B' for x in macd_data['histogram']]
                 fig.add_trace(go.Scatter(x=df['time'], y=macd_data['macd'], line=dict(color='#3A8BFF', width=1),
-                                        name='MACD', row=row, col=1))
+                                        name='MACD'), row=row, col=1)
                 fig.add_trace(go.Scatter(x=df['time'], y=macd_data['signal'], line=dict(color='#FFD700', width=1),
-                                        name='Señal', row=row, col=1))
+                                        name='Señal'), row=row, col=1)
                 fig.add_trace(go.Bar(x=df['time'], y=macd_data['histogram'], marker_color=colors,
-                                    name='Histograma', row=row, col=1))
+                                    name='Histograma'), row=row, col=1)
                 fig.update_yaxes(title_text="MACD", row=row, col=1)
             
             elif indicator == 'volume':
@@ -14477,26 +14507,26 @@ class TradingExpertSystem:
                 st = self.calculate_supertrend(df['high'].values, df['low'].values, df['close'].values, 10, 3)
                 st_colors = ['#00C076' if t == 1 else '#FF5B5B' for t in st['trend']]
                 fig.add_trace(go.Scatter(x=df['time'], y=df['close'], line=dict(color='white', width=0.5),
-                                        opacity=0.3, name='Precio', row=row, col=1))
+                                        opacity=0.3, name='Precio'), row=row, col=1)
                 fig.add_trace(go.Scatter(x=df['time'], y=st['supertrend'], line=dict(color='#8A63D2', width=1.5),
                                         mode='lines+markers', marker=dict(color=st_colors, size=2),
-                                        name='SuperTrend', row=row, col=1))
+                                        name='SuperTrend'), row=row, col=1)
                 fig.update_yaxes(title_text="SuperTrend", row=row, col=1)
             
             elif indicator == 'ichimoku':
                 ichimoku = self.calculate_ichimoku(df['high'].values, df['low'].values, df['close'].values)
                 fig.add_trace(go.Scatter(x=df['time'], y=ichimoku['tenkan'], line=dict(color='#FFD700', width=1),
-                                        name='Tenkan', row=row, col=1))
+                                        name='Tenkan'), row=row, col=1)
                 fig.add_trace(go.Scatter(x=df['time'], y=ichimoku['kijun'], line=dict(color='#FF69B4', width=1),
-                                        name='Kijun', row=row, col=1))
+                                        name='Kijun'), row=row, col=1)
                 fig.update_yaxes(title_text="Ichimoku", row=row, col=1)
             
             elif indicator == 'stochastic':
                 stoch = self.calculate_stochastic(df['high'].values, df['low'].values, df['close'].values, 14, 3)
                 fig.add_trace(go.Scatter(x=df['time'], y=stoch['%K'], line=dict(color='#3A8BFF', width=1),
-                                        name='%K', row=row, col=1))
+                                        name='%K'), row=row, col=1)
                 fig.add_trace(go.Scatter(x=df['time'], y=stoch['%D'], line=dict(color='#FFD700', width=1),
-                                        name='%D', row=row, col=1))
+                                        name='%D'), row=row, col=1)
                 fig.add_hline(y=80, line_dash="dot", line_color="#FF5B5B", row=row, col=1)
                 fig.add_hline(y=20, line_dash="dot", line_color="#00C076", row=row, col=1)
                 fig.update_yaxes(title_text="Estocástico", range=[0, 100], row=row, col=1)
@@ -14504,7 +14534,7 @@ class TradingExpertSystem:
             elif indicator == 'williams':
                 williams = self.calculate_williams_r(df['high'].values, df['low'].values, df['close'].values, 14)
                 fig.add_trace(go.Scatter(x=df['time'], y=williams, line=dict(color='#00C076', width=1.5),
-                                        name='Williams %R', row=row, col=1))
+                                        name='Williams %R'), row=row, col=1)
                 fig.add_hline(y=-20, line_dash="dot", line_color="#FF5B5B", row=row, col=1)
                 fig.add_hline(y=-80, line_dash="dot", line_color="#00C076", row=row, col=1)
                 fig.update_yaxes(title_text="Williams %R", row=row, col=1)
@@ -14512,7 +14542,7 @@ class TradingExpertSystem:
             elif indicator == 'cci':
                 cci = self.calculate_cci(df['high'].values, df['low'].values, df['close'].values, 20)
                 fig.add_trace(go.Scatter(x=df['time'], y=cci, line=dict(color='#FFD700', width=1.5),
-                                        name='CCI', row=row, col=1))
+                                        name='CCI'), row=row, col=1)
                 fig.add_hline(y=100, line_dash="dot", line_color="#FF5B5B", row=row, col=1)
                 fig.add_hline(y=-100, line_dash="dot", line_color="#00C076", row=row, col=1)
                 fig.update_yaxes(title_text="CCI", row=row, col=1)
@@ -14520,7 +14550,7 @@ class TradingExpertSystem:
             elif indicator == 'mfi':
                 mfi = self.calculate_mfi(df['high'].values, df['low'].values, df['close'].values, df['volume'].values, 14)
                 fig.add_trace(go.Scatter(x=df['time'], y=mfi, line=dict(color='#8A63D2', width=1.5),
-                                        name='MFI', row=row, col=1))
+                                        name='MFI'), row=row, col=1)
                 fig.add_hline(y=80, line_dash="dot", line_color="#FF5B5B", row=row, col=1)
                 fig.add_hline(y=20, line_dash="dot", line_color="#00C076", row=row, col=1)
                 fig.update_yaxes(title_text="MFI", range=[0, 100], row=row, col=1)
@@ -14528,24 +14558,24 @@ class TradingExpertSystem:
             elif indicator == 'force':
                 force = self.calculate_force_index(df['close'].values, df['volume'].values, 13)
                 fig.add_trace(go.Scatter(x=df['time'], y=force, line=dict(color='#FFD700', width=1.5),
-                                        name='Force Index', row=row, col=1))
+                                        name='Force Index'), row=row, col=1)
                 fig.add_hline(y=0, line_dash="solid", line_color="white", line_width=0.5, row=row, col=1)
                 fig.update_yaxes(title_text="Force Index", row=row, col=1)
             
             elif indicator == 'obv':
                 obv = self.calculate_obv(df['close'].values, df['volume'].values)
                 fig.add_trace(go.Scatter(x=df['time'], y=obv, line=dict(color='#FFD700', width=1.5),
-                                        name='OBV', row=row, col=1))
+                                        name='OBV'), row=row, col=1)
                 fig.update_yaxes(title_text="OBV", row=row, col=1)
             
             elif indicator == 'psar':
                 psar = self.calculate_parabolic_sar(df['high'].values, df['low'].values)
                 colors = ['#00C076' if psar['trend'][i] == 1 else '#FF5B5B' for i in range(len(df))]
                 fig.add_trace(go.Scatter(x=df['time'], y=df['close'], line=dict(color='white', width=0.5),
-                                        opacity=0.3, name='Precio', row=row, col=1))
+                                        opacity=0.3, name='Precio'), row=row, col=1)
                 fig.add_trace(go.Scatter(x=df['time'], y=psar['sar'], mode='markers',
                                         marker=dict(color=colors, size=2, symbol='diamond'),
-                                        name='Parabolic SAR', row=row, col=1))
+                                        name='Parabolic SAR'), row=row, col=1)
                 fig.update_yaxes(title_text="Parabolic SAR", row=row, col=1)
             
             elif indicator == 'fvg':
@@ -14558,7 +14588,7 @@ class TradingExpertSystem:
                                          line_width=0, fillcolor=color, opacity=0.2,
                                          row=row, col=1)
                 fig.add_trace(go.Scatter(x=df['time'], y=df['close'], line=dict(color='white', width=0.5),
-                                        name='Precio', row=row, col=1))
+                                        name='Precio'), row=row, col=1)
                 fig.update_yaxes(title_text="FVGs", row=row, col=1)
             
         except Exception as e:
@@ -15392,6 +15422,234 @@ class TradingExpertSystem:
         except Exception as e:
             print(f"❌ Error en get_top_indicators_for_chart: {e}")
             return ['ftm', 'squeeze', 'rsi', 'volume']
+    
+    # ========================================================================
+    # SOPORTE PARA GRÁFICO ANEXO EN PDF: indicadores que RESPALDAN la señal
+    # ========================================================================
+    def get_supporting_indicators_for_action(self, analysis):
+        """
+        Retorna la lista de TODOS los indicadores que respaldan la acción de la señal.
+        
+        A diferencia de get_top_indicators_for_chart (que devuelve top 4),
+        esta función devuelve TODOS los indicadores del sistema que votaron
+        en la dirección de la acción decidida. Útil para el PDF anexo.
+        
+        Filtro por dirección:
+          - COMPRA_SPOT / LONG → votos bullish
+          - VENTA_SPOT / SHORT → votos bearish
+          - NO_OPERAR / ESPERAR → mix relevante (los con más peso)
+        """
+        try:
+            if not analysis or not analysis.get('success'):
+                return []
+            
+            decision = analysis.get('decision', {}).get('action', '')
+            
+            # Dirección esperada de los votos
+            if decision in ('COMPRA_SPOT', 'LONG'):
+                target_direction = 'bullish'
+            elif decision in ('VENTA_SPOT', 'SHORT'):
+                target_direction = 'bearish'
+            else:
+                target_direction = None  # NO_OPERAR: aceptar todos
+            
+            votes = []
+            if 'trend' in analysis and 'votes' in analysis['trend']:
+                votes.extend(analysis['trend']['votes'])
+            if 'momentum' in analysis and 'votes' in analysis['momentum']:
+                votes.extend(analysis['momentum']['votes'])
+            
+            # Volumen: whale flags como votos
+            volume = analysis.get('volume', {}) or {}
+            if volume.get('whale_buy'):
+                votes.append({'source': 'whale_buy', 'direction': 'bullish', 'weight': 50})
+            if volume.get('whale_sell'):
+                votes.append({'source': 'whale_sell', 'direction': 'bearish', 'weight': 50})
+            
+            # Filtrar votos en la dirección de la señal
+            if target_direction:
+                supporting_votes = [v for v in votes if v.get('direction') == target_direction]
+            else:
+                supporting_votes = votes
+            
+            # Mapa de indicadores (mismo que get_top_indicators_for_chart pero solo
+            # los que están implementados en _add_indicator_trace)
+            indicator_map = {
+                'rsi_maverick': ['rsi_maverick', 'rsi_maverick_extreme', 'rsi_maverick_rising', 'rsi_maverick_falling'],
+                'ftm': ['ftm', 'ftm_strength', 'ftm_fuerte', 'ftm_debil'],
+                'squeeze': ['squeeze', 'squeeze_momentum', 'squeeze_alcista', 'squeeze_bajista'],
+                'macd': ['macd', 'macd_cross', 'macd_histogram'],
+                'rsi': ['rsi_oversold', 'rsi_overbought', 'rsi_cross', 'rsi_divergence'],
+                'stochastic': ['stoch', 'estocastico'],
+                'williams': ['williams'],
+                'cci': ['cci'],
+                'dmi': ['dmi', 'adx', 'plus_di', 'minus_di'],
+                'supertrend': ['supertrend'],
+                'ichimoku': ['ichimoku', 'tenkan', 'kijun'],
+                'psar': ['psar', 'parabolic'],
+                'bollinger': ['bollinger', 'bb'],
+                'atr': ['atr'],
+                'whale': ['whale', 'ballenas'],
+                'volume': ['volume', 'volumen'],
+                'obv': ['obv'],
+                'mfi': ['mfi'],
+                'force': ['force_index', 'force'],
+                'fvg': ['fvg', 'imbalance'],
+            }
+            
+            # Ranking por peso acumulado
+            indicator_scores = {}
+            for vote in supporting_votes:
+                source = str(vote.get('source', '')).lower()
+                weight = vote.get('weight', 1)
+                for indicator, keywords in indicator_map.items():
+                    if any(kw in source for kw in keywords):
+                        indicator_scores[indicator] = indicator_scores.get(indicator, 0) + weight
+                        break
+            
+            # Si no hay votos direccionales (o son pocos), agregar los más relevantes
+            # por defaults de la acción
+            if len(indicator_scores) < 4:
+                default_by_action = {
+                    'COMPRA_SPOT': ['rsi_maverick', 'squeeze', 'macd', 'dmi', 'supertrend', 'bollinger', 'volume', 'whale'],
+                    'LONG': ['rsi_maverick', 'squeeze', 'dmi', 'supertrend', 'macd', 'bollinger', 'volume', 'whale'],
+                    'VENTA_SPOT': ['rsi', 'macd', 'dmi', 'bollinger', 'volume', 'supertrend', 'psar', 'whale'],
+                    'SHORT': ['rsi', 'macd', 'ftm', 'bollinger', 'dmi', 'psar', 'volume', 'whale'],
+                }
+                for ind in default_by_action.get(decision, ['ftm', 'squeeze', 'rsi', 'macd', 'volume', 'bollinger']):
+                    if ind not in indicator_scores:
+                        indicator_scores[ind] = 0
+            
+            # Ordenar por score descendente, devolver TODOS
+            ordered = sorted(indicator_scores.items(), key=lambda x: -x[1])
+            return [ind for ind, _ in ordered]
+        except Exception as e:
+            print(f"❌ get_supporting_indicators_for_action: {e}")
+            return ['ftm', 'squeeze', 'rsi', 'macd', 'volume', 'bollinger']
+    
+    def generate_single_indicator_image(self, df, indicator, analysis):
+        """
+        Genera imagen PNG de UN indicador aislado.
+        
+        Crea un plot en un subplot de 1×1 (formato compatible con
+        _add_indicator_trace que espera row/col=1). Retorna bytes PNG.
+        """
+        try:
+            from plotly.subplots import make_subplots
+            
+            title_names = {
+                'rsi_maverick': 'RSI Maverick',
+                'ftm': 'FTMaverick (Fuerza de Tendencia)',
+                'squeeze': 'Squeeze Momentum',
+                'macd': 'MACD',
+                'rsi': 'RSI',
+                'stochastic': 'Estocástico',
+                'williams': 'Williams %R',
+                'cci': 'CCI',
+                'dmi': 'DMI / ADX',
+                'supertrend': 'SuperTrend',
+                'ichimoku': 'Ichimoku Cloud',
+                'psar': 'Parabolic SAR',
+                'bollinger': 'Bollinger Bands',
+                'atr': 'ATR',
+                'whale': 'Detección de Ballenas',
+                'volume': 'Volumen',
+                'obv': 'OBV (On-Balance Volume)',
+                'mfi': 'MFI (Money Flow Index)',
+                'force': 'Force Index',
+                'fvg': 'Fair Value Gaps',
+            }
+            title = title_names.get(indicator, indicator.upper())
+            
+            fig = make_subplots(rows=1, cols=1, subplot_titles=[title])
+            self._add_indicator_trace(fig, df, indicator, analysis, row=1)
+            
+            fig.update_layout(
+                height=380, width=1400,
+                showlegend=False,
+                template='plotly_white',
+                margin=dict(l=50, r=30, t=50, b=40),
+                title_font_size=13,
+            )
+            
+            try:
+                png = fig.to_image(format='png', width=1400, height=380, scale=1.2, engine='kaleido')
+            except Exception:
+                # Fallback sin engine explícito
+                png = fig.to_image(format='png', width=1400, height=380, scale=1.2)
+            return png
+        except Exception as e:
+            print(f"   ⚠️ generate_single_indicator_image({indicator}) falló: {type(e).__name__}: {e}")
+            return None
+    
+    def generate_supporting_indicators_images(self, symbol, timeframe, analysis, max_indicators=10):
+        """
+        Genera un LISTADO de imágenes PNG, una por cada indicador que respalda
+        la señal. Cada imagen es autónoma y va en el PDF como página anexa.
+        
+        Retorna: [{'name': 'RSI Maverick', 'image': bytes}, ...] (hasta max_indicators)
+        """
+        try:
+            indicators = self.get_supporting_indicators_for_action(analysis)
+            if not indicators:
+                return []
+            indicators = indicators[:max_indicators]
+            
+            # Obtener DataFrame
+            df_dict = analysis.get('df', {}) or {}
+            if df_dict.get('time'):
+                import pandas as pd
+                df = pd.DataFrame({
+                    'time': pd.to_datetime(df_dict.get('time', [])),
+                    'open': df_dict.get('open', []),
+                    'high': df_dict.get('high', []),
+                    'low': df_dict.get('low', []),
+                    'close': df_dict.get('close', []),
+                    'volume': df_dict.get('volume', []),
+                })
+            else:
+                df = self.get_kucoin_data(symbol, timeframe)
+            
+            if df is None or df.empty:
+                return []
+            
+            title_names = {
+                'rsi_maverick': 'RSI Maverick',
+                'ftm': 'FTMaverick (Fuerza de Tendencia)',
+                'squeeze': 'Squeeze Momentum',
+                'macd': 'MACD',
+                'rsi': 'RSI',
+                'stochastic': 'Estocástico',
+                'williams': 'Williams %R',
+                'cci': 'CCI',
+                'dmi': 'DMI / ADX',
+                'supertrend': 'SuperTrend',
+                'ichimoku': 'Ichimoku Cloud',
+                'psar': 'Parabolic SAR',
+                'bollinger': 'Bollinger Bands',
+                'atr': 'ATR',
+                'whale': 'Detección de Ballenas',
+                'volume': 'Volumen',
+                'obv': 'OBV',
+                'mfi': 'MFI',
+                'force': 'Force Index',
+                'fvg': 'Fair Value Gaps',
+            }
+            
+            results = []
+            for ind in indicators:
+                png = self.generate_single_indicator_image(df, ind, analysis)
+                if png:
+                    results.append({
+                        'name': title_names.get(ind, ind.upper()),
+                        'image': png,
+                    })
+            print(f"📊 [PDF] {len(results)} gráficos individuales de indicadores generados")
+            return results
+        except Exception as e:
+            print(f"❌ generate_supporting_indicators_images: {e}")
+            import traceback; traceback.print_exc()
+            return []
 
 
 
@@ -15448,7 +15706,8 @@ class TradingZone:
         self.created_at = start_idx
         self.last_updated = start_idx
         self.expires_at = start_idx + 20  # 20 velas de vida máxima
-        self.confidence = float(confidence)  # 0-100
+        # Cap defensivo: la confianza siempre en [0, 100]
+        self.confidence = max(0.0, min(100.0, float(confidence)))  # 0-100
         self.source_traders = source_traders  # Lista de traders que apoyan
         self.veto_active = False
         self.veto_source = None
@@ -15663,6 +15922,7 @@ class DynamicZones:
             smoothed_min = old_zone.price_min * (1 - self.smooth_factor) + price_min * self.smooth_factor
             smoothed_max = old_zone.price_max * (1 - self.smooth_factor) + price_max * self.smooth_factor
             smoothed_conf = old_zone.confidence * (1 - self.smooth_factor) + confidence * self.smooth_factor
+            smoothed_conf = max(0.0, min(100.0, smoothed_conf))  # Cap defensivo
             
             old_zone.update(smoothed_conf, traders, idx, veto, veto_source)
             old_zone.price_min = smoothed_min
@@ -19198,17 +19458,21 @@ def api_generate_report():
     
     # Generar gráficos técnicos (best-effort — si falla, el PDF sale sin gráficos)
     chart_bytes = None
-    indicators_bytes = None
+    supporting_charts = []
     try:
         top_indicators = expert_system.get_top_indicators_for_chart(result)
         chart_bytes = expert_system.generate_chart_image(symbol, interval, result, top_indicators)
     except Exception as e:
         print(f"⚠️ generate_report: no se pudo generar el gráfico principal: {e}")
     
-    # Gráfico específico de indicadores que sustentan la acción (opcional)
-    # Reutilizamos generate_chart_image con top_indicators específicos.
-    # (En futuras versiones se podría hacer un gráfico dedicado a los N indicadores 
-    #  con más peso en la votación, distinto del principal).
+    # Gráficos INDIVIDUALES de cada indicador que respalda la señal
+    # (uno por indicador, con nombre visible — para el ANEXO B del PDF)
+    try:
+        supporting_charts = expert_system.generate_supporting_indicators_images(
+            symbol, interval, result, max_indicators=10
+        )
+    except Exception as e:
+        print(f"⚠️ generate_report: no se pudieron generar gráficos individuales: {e}")
     
     # Generar PDF
     try:
@@ -19216,7 +19480,8 @@ def api_generate_report():
         pdf_bytes = generate_analysis_pdf(
             result,
             chart_image_bytes=chart_bytes,
-            indicators_image_bytes=indicators_bytes,
+            indicators_image_bytes=None,
+            supporting_indicator_charts=supporting_charts,
         )
     except ImportError:
         # Fallback si reportlab no está instalado (no debería pasar en prod)
@@ -19942,6 +20207,51 @@ def api_review_run_now():
 # ============================================================================
 # ENDPOINT AUXILIAR: Health check extendido con estado de Supabase/ReviewTrader
 # ============================================================================
+@app.route('/api/review/fix_confidence_overflow', methods=['POST'])
+def api_fix_confidence_overflow():
+    """
+    Herramienta de mantenimiento: capea a 100 las señales históricas con
+    confidence > 100 en la tabla `signals` de Supabase.
+    
+    Protegida con X-Auth-Key. Idempotente.
+    """
+    try:
+        auth_key = request.headers.get('X-Auth-Key', '')
+        expected = os.environ.get('SCHEDULED_AUTH_KEY', 'crypto_trader_analyst_2025')
+        if auth_key != expected:
+            return jsonify({'success': False, 'error': 'Unauthorized'}), 401
+        
+        from review_trader import review_trader
+        db = review_trader.db
+        if not db.enabled:
+            return jsonify({'success': False, 'error': 'Supabase no conectado'}), 503
+        
+        # Traer todas las señales con confidence > 100
+        try:
+            r = db.client.table('signals').select('id, confidence').gt('confidence', 100).execute()
+        except Exception as e:
+            return jsonify({'success': False, 'error': f'Query falló: {e}'}), 500
+        
+        rows = r.data or []
+        fixed = 0
+        for row in rows:
+            try:
+                db.client.table('signals').update({'confidence': 100.0}).eq('id', row['id']).execute()
+                fixed += 1
+            except Exception as up_err:
+                print(f"⚠️ No se pudo capar signal {row.get('id')}: {up_err}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'{fixed} señales corregidas (confidence capado a 100)',
+            'found': len(rows),
+            'fixed': fixed
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/review/health')
 def api_review_health():
     """Estado de salud del ReviewTrader y Supabase"""

@@ -5711,7 +5711,7 @@ window.updatePreviousSignals = function updatePreviousSignals() {
                                 <strong>${senal.decision.replace('_', ' ')}</strong>
                                 <span class="badge ${tfBadge} ms-2">${tfName}</span>
                             </div>
-                            <span class="badge bg-dark">${senal.confidence}%</span>
+                            <span class="badge bg-dark">${fmtConfidence(senal.confidence)}%</span>
                         </div>
                         <div class="d-flex justify-content-between mt-1">
                             <small class="text-muted">${symbolName}</small>
@@ -5813,7 +5813,7 @@ window.showPreviousSignalJustification = function(senal) {
                     </span>
                     <div>
                         <span class="badge bg-dark d-block mb-1">${symbolName} ${timeframeName}</span>
-                        <span class="badge bg-secondary">Confianza: ${senal.confidence}%</span>
+                        <span class="badge bg-secondary">Confianza: ${fmtConfidence(senal.confidence)}%</span>
                     </div>
                 </div>
                 
@@ -6562,7 +6562,7 @@ window.updateCorrelationInfo = function(data) {
             }
             
             if (confidence > 0) {
-                displayText += ` ${confidence}%`;
+                displayText += ` ${fmtConfidence(confidence)}%`;
             }
             
             elementoStatus.innerHTML = `<span class="badge ${badgeColor} me-2">${displayText}</span>`;

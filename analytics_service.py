@@ -13,6 +13,17 @@ from supabase_client import supabase_db
 logger = logging.getLogger('ANALYTICS')
 
 
+def _cap_confidence(v):
+    """
+    Cap defensivo para lectura de confianza desde BD.
+    Rows históricos pre-fix pueden contener valores >100 que corrompen la UI.
+    """
+    try:
+        return max(0.0, min(100.0, float(v or 0)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class AnalyticsService:
     """
     Servicio que agrega estadísticas para el frontend de análisis.
@@ -425,7 +436,7 @@ class AnalyticsService:
                 'symbol': s.get('symbol'),
                 'timeframe': s.get('timeframe'),
                 'action': s.get('action_normalized'),
-                'confidence': s.get('confidence'),
+                'confidence': _cap_confidence(s.get('confidence')),
                 'entry_price': s.get('entry_price'),
                 'stop_loss': s.get('stop_loss'),
                 'take_profit': s.get('take_profit'),
@@ -473,7 +484,7 @@ class AnalyticsService:
                 'timeframe': signal.get('timeframe'),
                 'system_type': signal.get('system_type'),
                 'action': signal.get('action_normalized'),
-                'confidence': signal.get('confidence'),
+                'confidence': _cap_confidence(signal.get('confidence')),
                 'entry_price': signal.get('entry_price'),
                 'stop_loss': signal.get('stop_loss'),
                 'take_profit': signal.get('take_profit'),
