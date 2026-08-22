@@ -14287,6 +14287,12 @@ class TradingExpertSystem:
             print(f"📊 Top 4 indicadores para gráfico: {top_indicators}")
             
             # ============ CREAR FIGURA CON 6 SUBPLOTS ============
+            # Nombres seguros del par y TF (compatible spot + futures)
+            # SYMBOLS solo tiene 3 pares spot; los símbolos de futuros
+            # (SOL, ETH, XRP, ADA) no están → antes generaba KeyError → sin imagen.
+            _symbol_name = self._safe_symbol_name(symbol)
+            _tf_name = self._safe_timeframe_name(timeframe)
+            
             # Filas: 6 (1 principal + 4 indicadores + 1 patrón)
             fig = make_subplots(
                 rows=6, cols=1,
@@ -14294,7 +14300,7 @@ class TradingExpertSystem:
                 vertical_spacing=0.03,
                 row_heights=[0.25, 0.15, 0.15, 0.15, 0.15, 0.15],
                 subplot_titles=[
-                    f'{SYMBOLS[symbol]["name"]} - {TIMEFRAMES[timeframe]["name"]}',
+                    f'{_symbol_name} - {_tf_name}',
                     f'📊 {top_indicators[0].upper()}',
                     f'📊 {top_indicators[1].upper()}',
                     f'📊 {top_indicators[2].upper()}',
@@ -14351,7 +14357,7 @@ class TradingExpertSystem:
             self._add_pattern_chart(fig, df, analysis, row=6)
             
             # ============ LAYOUT ============
-            title_text = f'{SYMBOLS[symbol]["name"]} - {TIMEFRAMES[timeframe]["name"]}'
+            title_text = f'{_symbol_name} - {_tf_name}'
             if analysis and 'decision' in analysis:
                 action = analysis['decision'].get('action', 'Análisis')
                 confidence = analysis['decision'].get('confidence', 0)
@@ -15326,6 +15332,50 @@ class TradingExpertSystem:
             print(f"❌ Error en should_send_telegram_alert: {e}")
             return False
         
+    def _safe_symbol_name(self, symbol):
+        """
+        Devuelve un nombre legible del símbolo.
+        Compatible con símbolos spot (BTC-USDT, PAXG-USDT, PAXG-BTC) y
+        futuros (ETH-USDT, SOL-USDT, XRP-USDT, ADA-USDT).
+        Sin este helper, acceder a SYMBOLS[symbol] fallaba con KeyError
+        para todos los pares de futuros y la imagen no se generaba.
+        """
+        # Primero intentar en SYMBOLS (spot)
+        if symbol in SYMBOLS:
+            return SYMBOLS[symbol].get('name', symbol)
+        # Segundo intentar en FUTURES_SYMBOLS
+        try:
+            from futures_system import FUTURES_SYMBOLS
+            if symbol in FUTURES_SYMBOLS:
+                return FUTURES_SYMBOLS[symbol].get('name', symbol)
+        except Exception:
+            pass
+        # Fallback: convertir SOL-USDT → SOL/USDT
+        return str(symbol).replace('-', '/')
+    
+    def _safe_timeframe_name(self, timeframe):
+        """
+        Devuelve un nombre legible del timeframe.
+        Compatible con TFs spot (4h, 12h, 1D, 1W) y futuros (5m, 15m, 30m, 1h, 2h, 4h).
+        """
+        if timeframe in TIMEFRAMES:
+            return TIMEFRAMES[timeframe].get('name', timeframe)
+        try:
+            from futures_system import FUTURES_TIMEFRAMES
+            if timeframe in FUTURES_TIMEFRAMES:
+                return FUTURES_TIMEFRAMES[timeframe].get('name', timeframe)
+        except Exception:
+            pass
+        # Fallback: mapa manual mínimo
+        fallback = {
+            '1m': '1 Minuto', '3m': '3 Minutos', '5m': '5 Minutos',
+            '15m': '15 Minutos', '30m': '30 Minutos', '1h': '1 Hora',
+            '2h': '2 Horas', '4h': '4 Horas', '6h': '6 Horas', '8h': '8 Horas',
+            '12h': '12 Horas', '1D': '1 Día', '1d': '1 Día',
+            '1W': '1 Semana', '1w': '1 Semana',
+        }
+        return fallback.get(timeframe, str(timeframe))
+    
     def get_top_indicators_for_chart(self, analysis, max_indicators=4):
         """
         Selecciona los indicadores más relevantes para el gráfico
@@ -19923,6 +19973,19 @@ def api_futures_signals_active():
                 continue
             
             levels = result.get('levels', {})
+            leverage = int(levels.get('leverage', 1))
+            
+            # FILTRO POR RANGO DE LEVERAGE (regla del usuario):
+            # No mostrar señales con apalancamiento insuficiente para el TF.
+            # Con 10 USDT de capital, señales bajo el mínimo del rango no son
+            # rentables después de comisiones + slippage.
+            try:
+                from futures_system import _leverage_in_valid_range
+                if not _leverage_in_valid_range(leverage, tf):
+                    continue
+            except Exception:
+                pass
+            
             active_signals.append({
                 'symbol': symbol,
                 'timeframe': tf,
@@ -19931,7 +19994,7 @@ def api_futures_signals_active():
                 'entry': levels.get('entry'),
                 'stop_loss': levels.get('stop_loss'),
                 'take_profit': levels.get('take_profit'),
-                'leverage': int(levels.get('leverage', 1)),
+                'leverage': leverage,
                 'risk_reward': float(levels.get('risk_reward', 0)),
                 'roi_tp': float(levels.get('roi_tp', 0)),
                 'roi_sl': float(levels.get('roi_sl', 0)),
@@ -19990,6 +20053,17 @@ def api_futures_signals_previous():
                 continue
             
             levels = result.get('levels', {})
+            leverage = int(levels.get('leverage', 1))
+            
+            # FILTRO POR RANGO DE LEVERAGE (regla del usuario):
+            # Descartar señales con apalancamiento insuficiente para el TF.
+            try:
+                from futures_system import _leverage_in_valid_range
+                if not _leverage_in_valid_range(leverage, tf):
+                    continue
+            except Exception:
+                pass
+            
             current_price = float(result.get('current_price', 0))
             sl_price = float(levels.get('stop_loss', 0) or 0)
             tp_price = float(levels.get('take_profit', 0) or 0)
@@ -20033,7 +20107,7 @@ def api_futures_signals_previous():
                 'entry': levels.get('entry'),
                 'stop_loss': levels.get('stop_loss'),
                 'take_profit': levels.get('take_profit'),
-                'leverage': int(levels.get('leverage', 1)),
+                'leverage': leverage,
                 'risk_reward': float(levels.get('risk_reward', 0)),
                 'roi_tp': float(levels.get('roi_tp', 0)),
                 'roi_sl': float(levels.get('roi_sl', 0)),

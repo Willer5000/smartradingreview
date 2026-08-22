@@ -56,14 +56,34 @@ FUTURES_KUCOIN_INTERVALS = {
 }
 
 # Rangos de apalancamiento por temporalidad (según requerimientos del usuario)
+# Filosofía: TFs cortos → más leverage (movimientos rápidos, menos volatilidad
+# acumulada); TFs largos → menos leverage (más ATR, más riesgo de wick).
+# El usuario invierte 10 USDT en futuros: por debajo del min de cada TF la
+# señal NO es rentable (comisiones + slippage se comen la operación) y se
+# DESCARTA automáticamente por el filtro de leverage en los endpoints.
 LEVERAGE_RANGES = {
-    '5m':  (10, 50),   # x10 a x50 para TF muy cortas
-    '15m': (10, 50),
-    '30m': (10, 50),
-    '1h':  (5, 20),    # x5 a x20 para TF más largas
-    '2h':  (5, 20),
-    '4h':  (5, 20)
+    '5m':  (15, 40),   # scalping muy rápido, ATR bajo
+    '15m': (10, 30),
+    '30m': (8,  25),   # intermedio entre 15m y 1h
+    '1h':  (7,  25),
+    '2h':  (5,  15),
+    '4h':  (5,  10),   # posiciones más largas, movimientos amplios
 }
+
+
+def _leverage_in_valid_range(leverage: int, timeframe: str) -> bool:
+    """
+    Verifica si un leverage está dentro del rango válido para ese TF.
+    Se usa como filtro en los endpoints de futures para descartar señales
+    con leverage insuficiente (típicamente x1-x4) que no son rentables
+    con capital reducido (10 USDT).
+    """
+    try:
+        lev = int(leverage) if leverage is not None else 0
+    except (TypeError, ValueError):
+        return False
+    lo, hi = LEVERAGE_RANGES.get(timeframe, (1, 100))
+    return lo <= lev <= hi
 
 
 # ============================================================================
