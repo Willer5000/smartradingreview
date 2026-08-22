@@ -39,6 +39,27 @@ print(f"✅ Logging activado - Nivel: DEBUG")
 
 app = Flask(__name__)
 
+# ============================================================================
+# COMPRESIÓN GZIP DE RESPUESTAS (reduce bandwidth ~70% en JSON grandes)
+# ============================================================================
+# Activa gzip automáticamente para respuestas JSON/HTML/JS/CSS >500 bytes.
+# El cliente (navegador) descomprime transparentemente.
+try:
+    from flask_compress import Compress
+    _compress = Compress()
+    app.config['COMPRESS_MIMETYPES'] = [
+        'text/html', 'text/css', 'text/xml',
+        'application/json', 'application/javascript',
+        'application/xml+rss', 'application/atom+xml',
+        'image/svg+xml'
+    ]
+    app.config['COMPRESS_LEVEL'] = 6            # Balance CPU/ratio (6 default)
+    app.config['COMPRESS_MIN_SIZE'] = 500       # No comprimir respuestas <500 B
+    _compress.init_app(app)
+    print("✅ Compresión gzip activada (Flask-Compress)")
+except ImportError:
+    print("⚠️ Flask-Compress no instalado (opcional). Corre: pip install Flask-Compress")
+
 # Configuración de zona horaria Bolivia
 bolivia_tz = pytz.timezone('America/La_Paz')
 
@@ -78,6 +99,83 @@ FEAR_GREED_CACHE = {
     'last_update': None,
     'cache_duration': 3600  # 1 hora en segundos (el índice cambia 1 vez al día)
 }
+
+# ============================================================================
+# CACHÉ DE analyze_full_market (TTL dinámico por timeframe)
+# ============================================================================
+# Guarda el resultado completo de un análisis por (symbol, timeframe).
+# Si dos peticiones consecutivas piden el mismo par/TF dentro del TTL,
+# la segunda devuelve el resultado cacheado en 0 ms sin recalcular los
+# 9 traders ni las 10 capas de indicadores.
+#
+# TTL por timeframe (proporcional a la ventana de la vela):
+#   5m -> 5s   / 15m -> 15s / 30m -> 30s / 1h -> 60s
+#   2h -> 120s / 4h -> 240s / 12h -> 600s / 1D -> 900s / 1W -> 1800s
+import threading as _threading_analysis_cache
+
+_ANALYSIS_CACHE_TTL = {
+    '1m':   3,
+    '3m':   5,
+    '5m':   5,
+    '15m':  15,
+    '30m':  30,
+    '1h':   60,
+    '2h':   120,
+    '4h':   240,
+    '6h':   360,
+    '8h':   480,
+    '12h':  600,
+    '1D':   900,
+    '1d':   900,
+    '1W':   1800,
+    '1w':   1800,
+}
+_ANALYSIS_CACHE: dict = {}   # {(symbol, tf): {'data': result, 'ts': float}}
+_ANALYSIS_CACHE_LOCK = _threading_analysis_cache.Lock()
+_ANALYSIS_CACHE_STATS = {'hits': 0, 'misses': 0}
+
+
+def _analysis_ttl_for(timeframe: str) -> int:
+    return _ANALYSIS_CACHE_TTL.get(timeframe, 30)  # default 30s
+
+
+def _analysis_cache_get(key):
+    """Retorna el análisis cacheado si está fresco, None si expiró."""
+    with _ANALYSIS_CACHE_LOCK:
+        entry = _ANALYSIS_CACHE.get(key)
+        if entry is None:
+            _ANALYSIS_CACHE_STATS['misses'] += 1
+            return None
+        import time as _time
+        _, tf = key
+        if _time.time() - entry['ts'] >= _analysis_ttl_for(tf):
+            _ANALYSIS_CACHE_STATS['misses'] += 1
+            return None
+        _ANALYSIS_CACHE_STATS['hits'] += 1
+        return entry['data']
+
+
+def _analysis_cache_put(key, data):
+    """Guarda el resultado del análisis con timestamp."""
+    import time as _time
+    with _ANALYSIS_CACHE_LOCK:
+        _ANALYSIS_CACHE[key] = {'data': data, 'ts': _time.time()}
+        # Limite defensivo: si el caché crece descontroladamente, purgar los más viejos
+        if len(_ANALYSIS_CACHE) > 200:
+            oldest_key = min(_ANALYSIS_CACHE.keys(), key=lambda k: _ANALYSIS_CACHE[k]['ts'])
+            _ANALYSIS_CACHE.pop(oldest_key, None)
+
+
+def get_analysis_cache_stats() -> dict:
+    with _ANALYSIS_CACHE_LOCK:
+        total = _ANALYSIS_CACHE_STATS['hits'] + _ANALYSIS_CACHE_STATS['misses']
+        hit_rate = (_ANALYSIS_CACHE_STATS['hits'] / total * 100) if total > 0 else 0.0
+        return {
+            'entries': len(_ANALYSIS_CACHE),
+            'hits': _ANALYSIS_CACHE_STATS['hits'],
+            'misses': _ANALYSIS_CACHE_STATS['misses'],
+            'hit_rate_pct': round(hit_rate, 1),
+        }
 
 # ============================================================================
 # CLASE PRINCIPAL: SISTEMA EXPERTO DE TRADING
@@ -7399,54 +7497,23 @@ class TradingExpertSystem:
     # Ubicación: Reemplazar función completa
     
     def get_kucoin_data(self, symbol, interval):
-        """Obtener datos de velas de KuCoin con manejo robusto de errores"""
+        """
+        Obtener datos de velas de KuCoin con caché HTTP + Session pooling.
+        
+        La lógica de descarga y parseo está delegada a kucoin_cache.fetch_kucoin_candles,
+        que:
+          - Reutiliza conexión TCP+TLS (requests.Session)
+          - Cachea el DataFrame por (symbol, interval) con TTL corto según TF
+          - Retorna DataFrame idéntico al que producía el código anterior
+        
+        Si el fetch falla (None), aquí caemos al fallback sintético como antes.
+        """
         try:
-            kucoin_interval = KUCOIN_INTERVALS.get(interval, '1day')
-            url = f"https://api.kucoin.com/api/v1/market/candles?symbol={symbol}&type={kucoin_interval}"
-            
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'application/json'
-            }
-            
-            response = requests.get(url, headers=headers, timeout=15)
-            
-            if response.status_code != 200:
-                print(f"Error HTTP {response.status_code} en KuCoin: {response.text[:200]}")
+            from kucoin_cache import fetch_kucoin_candles
+            df = fetch_kucoin_candles(symbol, interval, timeout=15)
+            if df is None or df.empty:
                 return self._generate_fallback_data(symbol, interval)
-            
-            data = response.json()
-            
-            if data.get('code') != '200000' or 'data' not in data:
-                print(f"Respuesta KuCoin inválida: {data.get('code', 'unknown')}")
-                return self._generate_fallback_data(symbol, interval)
-            
-            candles = data['data']
-            if not candles or len(candles) < 30:
-                print(f"Datos insuficientes de KuCoin: {len(candles) if candles else 0} velas")
-                return self._generate_fallback_data(symbol, interval)
-            
-            df = pd.DataFrame(candles, columns=['time', 'open', 'close', 'high', 'low', 'volume', 'turnover'])
-            
-            # Convertir tipos
-            df['time'] = pd.to_datetime(df['time'].astype(int), unit='s')
-            df['open'] = df['open'].astype(float)
-            df['high'] = df['high'].astype(float)
-            df['low'] = df['low'].astype(float)
-            df['close'] = df['close'].astype(float)
-            df['volume'] = df['volume'].astype(float)
-            
-            df = df.sort_values('time')
-            df = df.reset_index(drop=True)
-            
             return df
-            
-        except requests.exceptions.Timeout:
-            print(f"Timeout al obtener datos de KuCoin para {symbol} {interval}")
-            return self._generate_fallback_data(symbol, interval)
-        except requests.exceptions.ConnectionError:
-            print(f"Error de conexión con KuCoin para {symbol} {interval}")
-            return self._generate_fallback_data(symbol, interval)
         except Exception as e:
             print(f"Excepción inesperada en KuCoin: {e}")
             return self._generate_fallback_data(symbol, interval)
@@ -7541,7 +7608,14 @@ class TradingExpertSystem:
             url = f"{FEAR_GREED_API_URL}?limit={limit}"
             print(f"📡 Obteniendo Fear & Greed Index de {url}")
             
-            response = requests.get(url, timeout=10)
+            # Reutilizar Session compartida (connection pooling)
+            try:
+                from kucoin_cache import get_shared_session
+                _session = get_shared_session()
+                response = _session.get(url, timeout=10)
+            except Exception:
+                # Fallback si el módulo no está disponible
+                response = requests.get(url, timeout=10)
             
             if response.status_code != 200:
                 print(f"❌ Error HTTP {response.status_code} al obtener Fear & Greed")
@@ -12942,6 +13016,23 @@ class TradingExpertSystem:
         
     def analyze_full_market(self, symbol, timeframe, btc_analysis=None, paxg_analysis=None, 
                             paxg_btc_analysis=None, df_override=None):
+        # ============ CACHÉ DE ANÁLISIS (in-memory, TTL por TF) ============
+        # Solo cacheamos el caso "estándar" (sin overrides ni contextos externos)
+        # porque cuando el caller pasa btc_analysis/paxg_analysis/df_override,
+        # el resultado depende de esos parámetros y no del par (símbolo, TF).
+        _cache_hit = False
+        _cache_key = None
+        if (df_override is None and btc_analysis is None 
+                and paxg_analysis is None and paxg_btc_analysis is None):
+            try:
+                _cache_key = (symbol, timeframe)
+                _cached_result = _analysis_cache_get(_cache_key)
+                if _cached_result is not None:
+                    print(f"⚡ CACHÉ HIT: {symbol} {timeframe} (analyze_full_market omitido)")
+                    return _cached_result
+            except Exception:
+                pass  # Si el caché falla por lo que sea, seguimos con el análisis normal
+        
         try:
             print(f"\n{'='*60}")
             print(f"🔍 INICIANDO ANÁLISIS para {symbol} {timeframe}")
@@ -13579,6 +13670,13 @@ class TradingExpertSystem:
                 except Exception as _register_error:
                     # Nunca bloquear el análisis por un error de registro
                     print(f"⚠️ No se pudo registrar señal en ReviewTrader: {_register_error}")
+            
+            # Guardar en caché de análisis (solo si es la variante "estándar")
+            if _cache_key is not None:
+                try:
+                    _analysis_cache_put(_cache_key, resultado_final)
+                except Exception:
+                    pass
             
             return resultado_final
             

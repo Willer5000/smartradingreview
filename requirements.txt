@@ -1,4 +1,5 @@
 Flask
+Flask-Compress>=1.14
 numpy
 pandas
 requests

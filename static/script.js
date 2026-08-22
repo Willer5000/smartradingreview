@@ -205,12 +205,10 @@ function loadInitialData() {
             // Intentar inmediatamente
             window.updateActiveSignals();
             
-            // Programar actualizaciones periódicas (cada 2 minutos)
-            setInterval(function() {
-                if (typeof window.updateActiveSignals === 'function') {
-                    window.updateActiveSignals();
-                }
-            }, 120000);
+            // NOTA: el setInterval periódico se define UNA sola vez más abajo
+            // (buscar "ACTUALIZAR SEÑALES PERIÓDICAMENTE"). Antes había DOS
+            // setIntervals (uno aquí a 120s, otro a 60s) que se solapaban
+            // y duplicaban las llamadas al backend.
             
             console.log('✅ Sistema de señales activas inicializado');
         } else {
@@ -5564,7 +5562,12 @@ window.changeToSignal = function(symbol, timeframe) {
 };
 
 // ============ ACTUALIZAR SEÑALES PERIÓDICAMENTE ============
-setInterval(() => { if (typeof window.updateActiveSignals === 'function') window.updateActiveSignals(); }, 60000); // Cada minuto
+// Único setInterval del sistema para refrescar señales activas.
+// Antes había dos (uno a 60s aquí + otro a 120s en la inicialización),
+// que causaban peticiones duplicadas al backend.
+setInterval(() => {
+    if (typeof window.updateActiveSignals === 'function') window.updateActiveSignals();
+}, 120000); // Cada 2 minutos
 
 
 function updateMarketAlerts(data) {

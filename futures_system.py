@@ -102,54 +102,21 @@ class FuturesAnalysis(TradingExpertSystem):
         """
         Obtener datos de velas de KuCoin.
         Sobrescribe el método padre para incluir las temporalidades cortas.
+        Usa kucoin_cache (Session HTTP + caché con TTL por TF).
         """
-        # Combinar los intervalos del sistema principal + los de futuros
-        all_intervals = {**KUCOIN_INTERVALS, **FUTURES_KUCOIN_INTERVALS}
-        
         try:
-            import requests
-            import pandas as pd
+            from kucoin_cache import fetch_kucoin_candles, KUCOIN_INTERVALS as CACHE_INTERVALS
             
-            kucoin_interval = all_intervals.get(interval)
-            if not kucoin_interval:
+            # Validar que el intervalo esté soportado (incluye los TF cortos de futuros)
+            all_intervals = {**KUCOIN_INTERVALS, **FUTURES_KUCOIN_INTERVALS}
+            if interval not in all_intervals and interval not in CACHE_INTERVALS:
                 print(f"❌ Intervalo no soportado: {interval}")
                 return self._generate_fallback_data(symbol, interval)
             
-            url = f"https://api.kucoin.com/api/v1/market/candles?symbol={symbol}&type={kucoin_interval}"
-            
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'application/json'
-            }
-            
-            response = requests.get(url, headers=headers, timeout=15)
-            
-            if response.status_code != 200:
-                print(f"Error HTTP {response.status_code} en KuCoin: {response.text[:200]}")
+            df = fetch_kucoin_candles(symbol, interval, timeout=15)
+            if df is None or df.empty:
                 return self._generate_fallback_data(symbol, interval)
-            
-            data = response.json()
-            
-            if data.get('code') != '200000' or 'data' not in data:
-                print(f"Respuesta KuCoin inválida: {data.get('code', 'unknown')}")
-                return self._generate_fallback_data(symbol, interval)
-            
-            candles = data['data']
-            if not candles or len(candles) < 30:
-                print(f"Datos insuficientes de KuCoin: {len(candles) if candles else 0} velas")
-                return self._generate_fallback_data(symbol, interval)
-            
-            df = pd.DataFrame(candles, columns=['time', 'open', 'close', 'high', 'low', 'volume', 'turnover'])
-            df['time'] = pd.to_datetime(df['time'].astype(int), unit='s')
-            df['open'] = df['open'].astype(float)
-            df['high'] = df['high'].astype(float)
-            df['low'] = df['low'].astype(float)
-            df['close'] = df['close'].astype(float)
-            df['volume'] = df['volume'].astype(float)
-            df = df.sort_values('time').reset_index(drop=True)
-            
             return df
-            
         except Exception as e:
             print(f"Excepción en get_kucoin_data (futures): {e}")
             return self._generate_fallback_data(symbol, interval)
