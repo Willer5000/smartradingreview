@@ -8602,6 +8602,90 @@ class TradingExpertSystem:
     # === FUNCIÓN COMPLETA:  ===
     # Ubicación: Reemplazar entre línea ~1250 y línea ~1320 aproximadamente
         
+    def detect_market_regime(self, trend, momentum, volatility, structure):
+        """
+        Detector de RÉGIMEN DE MERCADO — devuelve uno de 4 regímenes clásicos.
+        
+        El régimen se usa por el Moderador para ajustar pesos de los traders:
+        un TraderBallenas debe pesar más en BREAKOUT que en RANGING; un
+        TraderTecnico debe pesar más en TRENDING que en RANGING; etc.
+        
+        Regímenes:
+          - 'TRENDING_BULL':  ADX > 25, DMI +DI dominante, EMAs alineadas alcistas
+          - 'TRENDING_BEAR':  ADX > 25, DMI -DI dominante, EMAs alineadas bajistas
+          - 'RANGING':        ADX < 20, BB width baja, oscilación en rango
+          - 'HIGH_VOLATILITY': ATR% > 4%, volumen elevado, movimiento errático
+        
+        Retorna:
+          {'regime': str, 'confidence': float, 'reasoning': [str, ...]}
+        """
+        try:
+            adx = float((trend or {}).get('adx', 0) or 0)
+            plus_di = float((trend or {}).get('plus_di', 0) or 0)
+            minus_di = float((trend or {}).get('minus_di', 0) or 0)
+            direction = (trend or {}).get('direction', 'neutral')
+            
+            atr_pct = float((volatility or {}).get('atr_pct', 0) or 0)
+            
+            # BB width para detectar rango (BB estrecho = consolidación)
+            momentum_indicators = (momentum or {}).get('indicators', {}) or {}
+            bb_width = float(momentum_indicators.get('bb_width', 0) or 0)
+            
+            reasoning = []
+            regime = 'RANGING'  # default conservador
+            confidence = 50.0
+            
+            # ============ HIGH VOLATILITY (prioridad — mercado errático) ============
+            if atr_pct > 4.0:
+                regime = 'HIGH_VOLATILITY'
+                confidence = min(90.0, 50 + atr_pct * 5)
+                reasoning.append(f'ATR% muy alto: {atr_pct:.2f}% (> 4% umbral)')
+                return {'regime': regime, 'confidence': round(confidence, 1),
+                        'reasoning': reasoning, 'adx': adx, 'atr_pct': atr_pct}
+            
+            # ============ TRENDING (ADX fuerte + DMI dominante) ============
+            if adx > 25 and abs(plus_di - minus_di) > 8:
+                if plus_di > minus_di and direction == 'bullish':
+                    regime = 'TRENDING_BULL'
+                    confidence = min(90.0, 60 + (adx - 25) * 1.5)
+                    reasoning.append(f'ADX {adx:.1f} > 25 con +DI {plus_di:.1f} > -DI {minus_di:.1f}')
+                    reasoning.append(f'Direction confirmada: {direction}')
+                elif minus_di > plus_di and direction == 'bearish':
+                    regime = 'TRENDING_BEAR'
+                    confidence = min(90.0, 60 + (adx - 25) * 1.5)
+                    reasoning.append(f'ADX {adx:.1f} > 25 con -DI {minus_di:.1f} > +DI {plus_di:.1f}')
+                    reasoning.append(f'Direction confirmada: {direction}')
+                else:
+                    # ADX alto pero DMI y direction no coinciden → indeterminado
+                    regime = 'HIGH_VOLATILITY'
+                    confidence = 60.0
+                    reasoning.append(f'ADX fuerte pero DMI/direction inconsistentes')
+                return {'regime': regime, 'confidence': round(confidence, 1),
+                        'reasoning': reasoning, 'adx': adx, 'atr_pct': atr_pct}
+            
+            # ============ RANGING (ADX débil o BB estrecho) ============
+            if adx < 20:
+                regime = 'RANGING'
+                confidence = min(85.0, 60 + (20 - adx) * 1.5)
+                reasoning.append(f'ADX {adx:.1f} < 20 (sin tendencia)')
+                if bb_width > 0 and bb_width < 3.0:
+                    confidence = min(90.0, confidence + 10)
+                    reasoning.append(f'BB width {bb_width:.2f}% (contracción)')
+                return {'regime': regime, 'confidence': round(confidence, 1),
+                        'reasoning': reasoning, 'adx': adx, 'atr_pct': atr_pct}
+            
+            # ============ ZONA GRIS (ADX 20-25) → RANGING por defecto ============
+            regime = 'RANGING'
+            confidence = 50.0
+            reasoning.append(f'ADX {adx:.1f} en zona gris (20-25); asumiendo RANGING')
+            return {'regime': regime, 'confidence': round(confidence, 1),
+                    'reasoning': reasoning, 'adx': adx, 'atr_pct': atr_pct}
+        
+        except Exception as e:
+            print(f"⚠️ Error detectando régimen: {e}")
+            return {'regime': 'RANGING', 'confidence': 30.0,
+                    'reasoning': ['Fallback por error'], 'adx': 0, 'atr_pct': 0}
+    
     def analyze_price_structure_layer(self, df, timeframe='1D', symbol=None):  # <--- CAMBIO: Añadir parámetro timeframe con valor por defecto
         """Capa 5: Análisis de Precio y Estructura - VERSIÓN COMPLETA con FVGs y OB"""
         try:
@@ -13495,6 +13579,15 @@ class TradingExpertSystem:
                     'current_price': 0
                 }
             
+            # ============ DETECTAR RÉGIMEN DE MERCADO ============
+            # Nueva "capa 11": clasifica el mercado en TRENDING_BULL / TRENDING_BEAR
+            # / RANGING / HIGH_VOLATILITY. El Moderador usa este régimen para
+            # ajustar los pesos de los 10 traders (ver Moderador.procesar_votacion).
+            market_regime = self.detect_market_regime(trend, momentum, volatility, structure)
+            print(f"📊 Régimen detectado: {market_regime['regime']} (confianza {market_regime['confidence']}%)")
+            for r in market_regime.get('reasoning', []):
+                print(f"   • {r}")
+            
             # ============ CONSTRUIR CAPAS PARA TRADERS ============
             capas = {
                 'trend': trend,
@@ -13507,6 +13600,7 @@ class TradingExpertSystem:
                 'time_factor': time_factor,
                 'sentiment': sentiment,
                 'liquidation': liquidation_data,
+                'market_regime': market_regime,   # nueva capa 11
                 'symbol': symbol,
                 'timeframe': timeframe,
                 'btc_analysis': btc_analysis,
@@ -13914,6 +14008,7 @@ class TradingExpertSystem:
                 'time_factor': self._make_serializable(time_factor),
                 'sentiment': self._make_serializable(sentiment),
                 'liquidation': self._make_serializable(liquidation_data),
+                'market_regime': self._make_serializable(market_regime),   # nueva capa
                 'zones': self._make_serializable({
                     'active_zones': zonas_data,
                     'price_status': price_status,
@@ -17837,10 +17932,37 @@ class TraderEspectico(TraderBase):
 # ============================================================================
 # TRADER 8: MULTIFRAME ANALYST - VERSIÓN CORREGIDA CON ANÁLISIS REAL
 # ============================================================================
+def _get_higher_tf_analysis_from_cache(symbol, current_timeframe):
+    """
+    Devuelve el análisis del TIMEFRAME SUPERIOR desde el caché de análisis,
+    SI está disponible. Nunca dispara requests nuevos (para no saturar).
+    
+    Mapeo de TF superior:
+      5m → 15m, 15m → 1h, 30m → 2h, 1h → 4h, 2h → 4h,
+      4h → 1D, 12h → 1D, 1D → 1W, 1W → None
+    """
+    higher_tf_map = {
+        '5m': '15m', '15m': '1h', '30m': '2h',
+        '1h': '4h', '2h': '4h', '4h': '1D',
+        '12h': '1D', '1D': '1W', '1W': None,
+    }
+    higher_tf = higher_tf_map.get(current_timeframe)
+    if not higher_tf:
+        return None
+    try:
+        cached = _analysis_cache_get((symbol, higher_tf))
+        return cached
+    except Exception:
+        return None
+
+
 class TraderMultiframe(TraderBase):
     """
-    Trader 8: Especialista en Análisis Multitemporal
-    Analiza timeframes SUPERIORES e INFERIORES al actual
+    Trader 8: Especialista en Análisis Multitemporal REAL.
+    
+    Consulta el caché de análisis para leer el TF SUPERIOR real (no más EMAs
+    proxy del mismo TF como fallback). Si el TF superior está en caché
+    (warm-up ya lo procesó), lo usa. Si no, cae a EMAs proxy como antes.
     """
     
     def __init__(self):
@@ -17854,29 +17976,43 @@ class TraderMultiframe(TraderBase):
         razones = []
         
         try:
-            # ============ OBTENER ANÁLISIS DE DIFERENTES TEMPORALIDADES ============
-            # Estos análisis deberían venir en capas desde analyze_full_market
-            # Necesitamos: análisis de 1D, 12H, 4H para el mismo símbolo
+            # ============ FETCH DEL TF SUPERIOR REAL (desde caché, sin disparar requests) ============
+            higher_analysis = _get_higher_tf_analysis_from_cache(symbol, timeframe)
             
             btc_analysis = capas.get('btc_analysis', {})
             paxg_analysis = capas.get('paxg_analysis', {})
             ratio_analysis = capas.get('ratio_analysis', {})
             
             # Determinar qué análisis usar según el símbolo
+            # PRIORIDAD 1: análisis del TF superior real (cache hit)
+            # PRIORIDAD 2: análisis del par via capas (btc/paxg/ratio_analysis)
+            if higher_analysis and higher_analysis.get('success'):
+                # Analísis multiframe REAL disponible
+                analisis_superior = higher_analysis
+                razones.append(f'📡 Multiframe REAL: {timeframe}→{higher_analysis.get("timeframe","?")} desde caché')
+            else:
+                analisis_superior = None
+            
             if symbol == 'BTC-USDT':
                 # Para BTC, podemos obtener sus propios análisis de diferentes timeframes
                 # Por ahora, usaremos los que vienen en capas
-                analisis_1d = btc_analysis if btc_analysis.get('timeframe') == '1D' else None
+                analisis_1d = analisis_superior if (analisis_superior and analisis_superior.get('timeframe') == '1D') else (btc_analysis if btc_analysis.get('timeframe') == '1D' else None)
                 analisis_12h = btc_analysis if btc_analysis.get('timeframe') == '12h' else None
                 analisis_4h = btc_analysis if btc_analysis.get('timeframe') == '4h' else None
             elif symbol == 'PAXG-USDT':
-                analisis_1d = paxg_analysis if paxg_analysis.get('timeframe') == '1D' else None
+                analisis_1d = analisis_superior if (analisis_superior and analisis_superior.get('timeframe') == '1D') else (paxg_analysis if paxg_analysis.get('timeframe') == '1D' else None)
                 analisis_12h = paxg_analysis if paxg_analysis.get('timeframe') == '12h' else None
                 analisis_4h = paxg_analysis if paxg_analysis.get('timeframe') == '4h' else None
-            else:  # PAXG-BTC
-                analisis_1d = ratio_analysis if ratio_analysis.get('timeframe') == '1D' else None
+            elif symbol == 'PAXG-BTC':
+                analisis_1d = analisis_superior if (analisis_superior and analisis_superior.get('timeframe') == '1D') else (ratio_analysis if ratio_analysis.get('timeframe') == '1D' else None)
                 analisis_12h = ratio_analysis if ratio_analysis.get('timeframe') == '12h' else None
                 analisis_4h = ratio_analysis if ratio_analysis.get('timeframe') == '4h' else None
+            else:
+                # Para pares de futuros (SOL, ETH, XRP, ADA): usar el análisis
+                # del TF superior real como referencia principal
+                analisis_1d = analisis_superior if (analisis_superior and analisis_superior.get('timeframe') in ('1D',)) else None
+                analisis_12h = analisis_superior if (analisis_superior and analisis_superior.get('timeframe') in ('12h',)) else None
+                analisis_4h = analisis_superior if (analisis_superior and analisis_superior.get('timeframe') in ('4h',)) else None
             
             # Si no tenemos análisis de otros timeframes, usar el actual con EMAs (fallback)
             trend = capas.get('trend', {})
@@ -18358,24 +18494,83 @@ class Moderador:
             TraderLiquidation()  # Trader 9
         ]
         
-        # === FASE 7: Agregar ReviewTrader como 10º trader (opcional, tolerante a fallos) ===
+        # === Agregar ReviewTrader como 10º trader (opcional, tolerante a fallos) ===
+        # También guardamos referencia directa para consultar get_confidence_adjustment
+        # y ejercer su rol de "juez del comité" sobre los otros 9 traders.
+        self._review_trader = None
         try:
             from review_trader import review_trader
             self.traders.append(review_trader)
-            print(f"✅ Moderador: ReviewTrader agregado como 10º trader")
+            self._review_trader = review_trader
+            print(f"✅ Moderador: ReviewTrader agregado como 10º trader + juez del comité")
         except Exception as e:
             print(f"⚠️ Moderador: ReviewTrader no disponible ({e}). Continuando con 9 traders.")
         
+    # ========================================================================
+    # PESOS DINÁMICOS POR RÉGIMEN DE MERCADO
+    # ========================================================================
+    # Cada régimen amplifica a los traders más apropiados y atenúa a los que
+    # generarían ruido en ese contexto. El peso multiplicador se aplica sobre
+    # el peso_base del trader.
+    #
+    # Ejemplos:
+    #   - TRENDING_BULL: TraderTecnico y TraderMultiframe pesan más (ven la
+    #     tendencia). TraderSmartMoney atenuado (los rangos/OB pierden validez
+    #     en trends fuertes).
+    #   - RANGING: TraderSmartMoney y TraderChartista dominan (patrones y
+    #     estructura funcionan). TraderMultiframe atenuado.
+    #   - HIGH_VOLATILITY: TraderEspectico amplificado (más cautela).
+    #     TraderBallenas atenuado (whale signals ruidosas en volatilidad).
+    REGIME_WEIGHT_MULTIPLIERS = {
+        'TRENDING_BULL': {
+            'Técnico Puro': 1.3, 'Multiframe': 1.3, 'Pullback': 1.2,
+            'Cazador de Ballenas': 1.1, 'Macroeconomista': 1.1,
+            'Chartista': 0.9, 'Smart Money': 0.85, 'El Liquidador': 0.9,
+            'Escéptico': 0.8, 'Trader de Revisión': 1.0,
+        },
+        'TRENDING_BEAR': {
+            'Técnico Puro': 1.3, 'Multiframe': 1.3, 'Pullback': 1.2,
+            'Cazador de Ballenas': 1.1, 'Macroeconomista': 1.1,
+            'Chartista': 0.9, 'Smart Money': 0.85, 'El Liquidador': 0.9,
+            'Escéptico': 0.8, 'Trader de Revisión': 1.0,
+        },
+        'RANGING': {
+            'Smart Money': 1.4, 'Chartista': 1.3, 'El Liquidador': 1.2,
+            'Escéptico': 1.2,
+            'Técnico Puro': 0.8, 'Multiframe': 0.7, 'Pullback': 0.7,
+            'Cazador de Ballenas': 0.9, 'Macroeconomista': 1.0,
+            'Trader de Revisión': 1.1,
+        },
+        'HIGH_VOLATILITY': {
+            'Escéptico': 1.4, 'El Liquidador': 1.3, 'Trader de Revisión': 1.2,
+            'Macroeconomista': 1.1,
+            'Cazador de Ballenas': 0.7, 'Chartista': 0.8, 'Smart Money': 0.9,
+            'Técnico Puro': 0.9, 'Multiframe': 0.9, 'Pullback': 0.8,
+        },
+    }
+    
+    def _get_regime_multiplier(self, trader_name, regime):
+        """Devuelve el multiplicador de peso para (trader, régimen)."""
+        if not regime:
+            return 1.0
+        return self.REGIME_WEIGHT_MULTIPLIERS.get(regime, {}).get(trader_name, 1.0)
+    
     def procesar_votacion(self, capas, symbol, timeframe):
         """
         Procesa los votos de todos los traders y genera una decisión consensuada
-        VERSIÓN CON LOGS DETALLADOS
+        con PESOS DINÁMICOS según régimen de mercado.
         """
         votos = []
         todas_estrategias = []
         
+        # Régimen de mercado detectado en analyze_full_market
+        market_regime_data = capas.get('market_regime', {}) or {}
+        regime = market_regime_data.get('regime', 'RANGING')
+        regime_conf = market_regime_data.get('confidence', 0)
+        
         print(f"\n{'='*60}")
         print(f"👥 INICIANDO VOTACIÓN - {symbol} {timeframe}")
+        print(f"📊 Régimen: {regime} (conf {regime_conf}%)")
         print(f"{'='*60}")
         print(f"📋 Traders participantes: {len(self.traders)}")
         print()
@@ -18397,15 +18592,39 @@ class Moderador:
                 if razones is None:
                     razones = []
                 
-                # Aplicar peso del trader — con CAP a 100 para evitar valores >100%
-                # El peso sigue distinguiendo la importancia de cada trader (traders
-                # con peso 1.5 llegan más fácil a 100 que traders con peso 1.0),
-                # pero ya no genera valores 130-150 que rompen la estadística.
-                confianza_ponderada = min(100.0, max(0.0, confianza * trader.peso_base))
+                # ============ APLICAR PESO DEL TRADER + AJUSTES DE CONTEXTO ============
+                # Fórmula: peso_efectivo = peso_base × mult_régimen × mult_review
+                #
+                # 1. peso_base: importancia estructural del trader (1.0-1.5)
+                # 2. mult_régimen: amplificación/atenuación según contexto de
+                #    mercado (TRENDING vs RANGING vs HIGH_VOLATILITY)
+                # 3. mult_review: el ReviewTrader ajusta la voz de OTROS traders
+                #    según su historial. Si "TraderChartista con DOBLE_SUELO en
+                #    BTC 4h" históricamente pierde 60% de las veces, su voto se
+                #    atenúa (0.7x). Si TraderBallenas en breakouts gana 75%, su
+                #    voto se amplifica (1.3x). Es el juez del comité.
+                
+                regime_mult = self._get_regime_multiplier(trader.nombre, regime)
+                
+                # El ReviewTrader NO se ajusta a sí mismo (evitar bucle)
+                review_mult = 1.0
+                if trader.nombre != 'Trader de Revisión' and self._review_trader is not None:
+                    try:
+                        review_mult = self._review_trader.get_confidence_adjustment(
+                            symbol, timeframe, accion
+                        )
+                    except Exception:
+                        review_mult = 1.0
+                
+                peso_efectivo = trader.peso_base * regime_mult * review_mult
+                confianza_ponderada = min(100.0, max(0.0, confianza * peso_efectivo))
                 
                 # Mostrar voto del trader
                 print(f"   📊 VOTO: {accion}")
-                print(f"   📈 Confianza original: {confianza}% | Ponderada: {confianza_ponderada:.1f}%")
+                if abs(regime_mult - 1.0) > 0.01 or abs(review_mult - 1.0) > 0.01:
+                    print(f"   📈 Confianza: {confianza}% × peso {trader.peso_base} × régimen {regime_mult:.2f} × review {review_mult:.2f} = {confianza_ponderada:.1f}%")
+                else:
+                    print(f"   📈 Confianza original: {confianza}% | Ponderada: {confianza_ponderada:.1f}%")
                 
                 if estrategias:
                     print(f"   🎯 Estrategias: {', '.join(estrategias)}")
@@ -18454,14 +18673,33 @@ class Moderador:
         estrategias_por_accion = {}
         razones_por_accion = {}
         
+        # NEUTRAL cualificado del ReviewTrader: cuando el juez dice "no hay
+        # evidencia estadística clara" con conf ≥60, actúa como abstención
+        # cualificada que penaliza los votos direccionales (reduce su confianza).
+        review_neutral_penalty = 1.0
+        for voto in votos:
+            if (voto['trader'] == 'Trader de Revisión'
+                    and voto['accion'] == 'NEUTRAL'
+                    and voto['confianza_original'] >= 60):
+                # Penalización proporcional: NEUTRAL@60 → 0.90, NEUTRAL@80 → 0.80, NEUTRAL@95 → 0.70
+                penalty = 1.0 - (voto['confianza_original'] - 50) / 150.0
+                review_neutral_penalty = max(0.60, min(1.0, penalty))
+                print(f"   ⚖️ ReviewTrader NEUTRAL@{voto['confianza_original']}% aplicará penalización {review_neutral_penalty:.2f} a votos direccionales")
+                break
+        
         for voto in votos:
             accion = voto['accion']
             
-            # Saltar NEUTRAL para el conteo principal
+            # Saltar NEUTRAL para el conteo principal (pero ya fue procesado arriba)
             if accion == 'NEUTRAL':
                 continue
                 
             confianza = voto['confianza']
+            
+            # Aplicar penalización si el ReviewTrader emitió NEUTRAL cualificado
+            if accion in ('LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT'):
+                confianza = confianza * review_neutral_penalty
+            
             trader = voto['trader']
             estrategias = voto['estrategias']
             razones = voto['razones']
@@ -18505,17 +18743,77 @@ class Moderador:
             for e in estrategias_consenso:
                 print(f"   • {e} ({frecuencia_estrategias[e]} veces)")
         
-        # 7. VERIFICAR SI HAY VETO (NO_OPERAR con alta confianza)
+        # ============ 7. VETO DEMOCRÁTICO CON DERECHO A RÉPLICA ============
+        # Filosofía: el sistema es un COMITÉ DELIBERANTE, no una dictadura de un
+        # solo trader. Un veto solo procede si hay CONSENSO en la cautela, o si
+        # un veto único NO tiene oposición mayoritaria con conviction alta.
+        #
+        # Reglas:
+        #  (a) VETO CONFIRMADO: ≥2 traders votan NO_OPERAR con confianza ≥80%
+        #      → NO_OPERAR queda.
+        #  (b) VETO ÚNICO con derecho a réplica: 1 trader vota NO_OPERAR ≥90%
+        #      → NO_OPERAR SOLO si NO hay ≥3 traders con conviction ≥85% en
+        #        dirección alternativa (LONG/SHORT/COMPRA_SPOT/VENTA_SPOT).
+        #      → Si hay réplica fuerte del comité, el veto queda ANULADO y se
+        #        registra en la BD como "veto disputado" (para que el
+        #        ReviewTrader aprenda).
+        #  (c) Sin ninguno de los dos casos → NO hay veto, se procede al conteo.
+        
+        vetos = [
+            v for v in votos
+            if v['accion'] == 'NO_OPERAR' and v['confianza_original'] >= 80
+        ]
+        vetos_fuertes = [v for v in vetos if v['confianza_original'] >= 90]
+        
+        # Direccionales con conviction alta (para posible réplica)
+        replicas_fuertes = [
+            v for v in votos
+            if v['accion'] in ('LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT')
+            and v['confianza_original'] >= 85
+        ]
+        
         veto_activo = False
-        for voto in votos:
-            if voto['accion'] == 'NO_OPERAR' and voto['confianza_original'] >= 80:
+        veto_razon = None
+        
+        if len(vetos) >= 2:
+            # (a) Consenso vetador → NO_OPERAR firme
+            veto_activo = True
+            trader_names = ', '.join(v['trader'] for v in vetos[:3])
+            veto_razon = f'Veto por consenso ({len(vetos)} traders): {trader_names}'
+            print(f"\n⚠️ VETO CONFIRMADO por {len(vetos)} traders: {trader_names}")
+        elif len(vetos_fuertes) == 1 and len(replicas_fuertes) < 3:
+            # (b) Veto único sin réplica suficiente → NO_OPERAR
+            veto_activo = True
+            v = vetos_fuertes[0]
+            veto_razon = f'Veto único de {v["trader"]} ({v["confianza_original"]}%) sin réplica del comité'
+            print(f"\n⚠️ VETO ÚNICO ACEPTADO: {v['trader']} con {v['confianza_original']}% (solo {len(replicas_fuertes)} traders opositores fuertes)")
+        elif len(vetos_fuertes) == 1 and len(replicas_fuertes) >= 3:
+            # (b) Veto único ANULADO por réplica del comité → deliberación continúa
+            v = vetos_fuertes[0]
+            print(f"\n⚖️ VETO DISPUTADO: {v['trader']} vetó con {v['confianza_original']}% pero {len(replicas_fuertes)} traders replican con conviction alta")
+            print(f"   → El comité anula el veto y continúa deliberando")
+            # No hay veto activo; el conteo procede normalmente
+        elif len(vetos) == 1 and len(vetos_fuertes) == 0:
+            # Un único veto de 80-89% (no fuerte) → solo tiene efecto si NO hay
+            # réplica de al menos 2 traders con conviction ≥80% en direccional
+            replicas_normales = [
+                v for v in votos
+                if v['accion'] in ('LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT')
+                and v['confianza_original'] >= 80
+            ]
+            if len(replicas_normales) < 2:
                 veto_activo = True
-                print(f"\n⚠️ VETO DETECTADO: {voto['trader']} votó NO_OPERAR con {voto['confianza_original']}%")
-                break
-                
+                v = vetos[0]
+                veto_razon = f'Veto de {v["trader"]} ({v["confianza_original"]}%) sin réplica'
+                print(f"\n⚠️ VETO ACEPTADO: {v['trader']} con {v['confianza_original']}% (sin réplica suficiente)")
+            else:
+                v = vetos[0]
+                print(f"\n⚖️ Veto de {v['trader']} anulado por réplica de {len(replicas_normales)} traders")
+        
         if veto_activo:
             print(f"\n🚫 Decisión final: NO_OPERAR por veto (confianza 90%)")
-            return 'NO_OPERAR', 90, ['VETO_DETECTADO'], ['Un trader detectó condiciones peligrosas'], votos
+            print(f"   Razón: {veto_razon}")
+            return 'NO_OPERAR', 90, ['VETO_DETECTADO'], [veto_razon or 'Veto del comité'], votos
         
         # 8. SELECCIONAR ACCIÓN GANADORA
         # Priorizar acciones con al menos 2 votos

@@ -913,6 +913,44 @@ class ReviewTrader:
     # 5. CONSULTAS PARA EL FRONTEND
     # ========================================================================
     
+    def get_confidence_adjustment(self, symbol: str, timeframe: str, action: str,
+                                     min_sample_size: int = 10) -> float:
+        """
+        Devuelve el multiplicador de confianza que el ReviewTrader recomienda
+        para un trader que vote (action) en (symbol, timeframe).
+        
+        Ejemplo: si históricamente COMPRA_SPOT en BTC-USDT 4h tiene win_rate 70%
+        con 50 muestras, el multiplicador será 1.3 (amplificar convicción).
+        Si tiene win_rate 25% con 30 muestras, será 0.7 (atenuar).
+        
+        Retorna:
+          1.0 si no hay datos suficientes (min_sample_size no alcanzado) o
+              Supabase no está conectado (comportamiento neutral).
+          0.5 a 1.5 según el historial (con clip).
+        
+        Uso desde el Moderador: aplicar este multiplicador ANTES del peso del
+        régimen, para que el ReviewTrader ejerza su rol de juez del comité.
+        """
+        try:
+            if not self.db.enabled:
+                return 1.0
+            if action not in ('LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT'):
+                return 1.0  # solo ajustamos direccionales
+            
+            rec = self.db.get_recommendations(symbol, timeframe, action)
+            if not rec:
+                return 1.0  # sin recomendación cacheada = neutral
+            
+            sample = int(rec.get('sample_size', 0) or 0)
+            if sample < min_sample_size:
+                return 1.0  # muestra insuficiente para ejercer autoridad
+            
+            mult = float(rec.get('recommended_confidence_multiplier', 1.0) or 1.0)
+            # Clip defensivo
+            return max(0.5, min(1.5, mult))
+        except Exception:
+            return 1.0
+    
     def get_recommendations_for(self, symbol: str, timeframe: str, action: str) -> Dict:
         """
         Retorna recomendaciones cacheadas para un contexto específico.
