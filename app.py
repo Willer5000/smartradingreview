@@ -18595,6 +18595,51 @@ def health():
 # === CORRECCIÓN: app.py - Manejo de errores en rutas API ===
 # Ubicación: Reemplazar rutas  y /api/telegram/test
 
+@app.route('/api/price')
+def api_price():
+    """
+    Endpoint LIGERO: solo devuelve el precio actual del par/timeframe.
+    
+    A diferencia de /api/analyze (que ejecuta 9 traders + 10 capas + 20 indicadores,
+    tarda 2-5s con caché frío y satura Render Free si se llama cada 5s), este
+    endpoint solo:
+      1. Consulta las velas de KuCoin (usa caché HTTP con TTL corto)
+      2. Extrae el precio de cierre de la última vela
+      3. Retorna en <50ms
+    
+    Uso desde frontend: `setInterval` de precio en vivo cada 5s.
+    """
+    try:
+        symbol = request.args.get('symbol', 'BTC-USDT')
+        interval = request.args.get('interval', '1D')
+        
+        # Elegir el system apropiado (spot vs futures) según symbol
+        try:
+            from kucoin_cache import fetch_kucoin_candles
+            df = fetch_kucoin_candles(symbol, interval, timeout=8)
+        except Exception as e:
+            return jsonify({'success': False, 'error': f'fetch failed: {e}'}), 500
+        
+        if df is None or df.empty:
+            return jsonify({'success': False, 'error': 'sin datos'}), 503
+        
+        current_price = float(df['close'].iloc[-1])
+        previous_close = float(df['close'].iloc[-2]) if len(df) >= 2 else current_price
+        change_pct = ((current_price - previous_close) / previous_close * 100) if previous_close > 0 else 0.0
+        
+        return jsonify({
+            'success': True,
+            'symbol': symbol,
+            'timeframe': interval,
+            'current_price': current_price,
+            'previous_close': previous_close,
+            'change_pct': change_pct,
+            'timestamp': datetime.now(bolivia_tz).isoformat()
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/analyze')
 def api_analyze():
     """Endpoint de análisis con manejo robusto de errores"""

@@ -2110,28 +2110,33 @@
                 }
             }, 30000);
             
-            // 3. PRECIO EN VIVO - Cada 5 segundos (SOLO precio, para no saturar)
+            // 3. PRECIO EN VIVO - Cada 15 segundos (endpoint LIGERO /api/price)
+            // Antes usaba /api/analyze (ejecuta 9 traders + 10 capas cada 5s), que
+            // saturaba Render Free con 502 Bad Gateway. Ahora usa /api/price que solo
+            // consulta velas (con caché HTTP) y responde en <50ms.
             setInterval(function() {
                 const symbol = window.currentSymbol || (window.PAGE_CONFIG?.defaultSymbol || 'BTC-USDT');
                 const interval = window.currentInterval || (window.PAGE_CONFIG?.defaultTimeframe || '1D');
                 
-                const _req2 = window.buildAnalyzeURL(symbol, interval);
-                const _opts2 = _req2.method === 'POST'
-                    ? { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(_req2.body) }
-                    : { method: 'GET' };
-                fetch(_req2.url, _opts2)
-                    .then(response => response.json())
+                fetch(`/api/price?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}`)
+                    .then(response => {
+                        if (!response.ok) throw new Error('HTTP ' + response.status);
+                        return response.json();
+                    })
                     .then(data => {
-                        if (data.success && data.data) {
-                            const price = data.data.current_price || 0;
+                        if (data.success && data.current_price) {
                             const livePriceEl = document.getElementById('live-price');
                             if (livePriceEl) {
-                                livePriceEl.textContent = `$${price.toFixed(2)}`;
+                                livePriceEl.textContent = `$${Number(data.current_price).toFixed(2)}`;
                             }
                         }
                     })
-                    .catch(error => console.error('Error actualizando precio:', error));
-            }, 5000);
+                    .catch(error => {
+                        // Silencioso: si falla temporalmente no lo mostramos como error,
+                        // el próximo tick lo recuperará.
+                        console.debug('price refresh skipped:', error.message);
+                    });
+            }, 15000);
         }
         window.getInstantRecommendation = function() {
             const cfg = window.PAGE_CONFIG || {};
