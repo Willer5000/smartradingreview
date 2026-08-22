@@ -3,7 +3,7 @@ services:
     name: crypto-trader-analyst
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --timeout 120 --workers 1 --threads 4 --worker-class gthread --graceful-timeout 30
+    startCommand: gunicorn app:app --timeout 180 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 30 --max-requests 200 --max-requests-jitter 30
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0

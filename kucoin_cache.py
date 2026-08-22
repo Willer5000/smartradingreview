@@ -108,7 +108,7 @@ def _get_session() -> requests.Session:
             s = requests.Session()
             adapter = HTTPAdapter(
                 pool_connections=20,   # hosts distintos
-                pool_maxsize=50,       # conexiones simultáneas por host
+                pool_maxsize=20,       # conexiones simultáneas por host (reducido para Render Free)
                 max_retries=0,         # el retry lo maneja el caller
                 pool_block=False
             )
@@ -121,7 +121,7 @@ def _get_session() -> requests.Session:
                 'Connection': 'keep-alive',
             })
             _session = s
-            logger.info("Session HTTP KuCoin creada (pool_maxsize=50, keep-alive)")
+            logger.info("Session HTTP KuCoin creada (pool_maxsize=20, keep-alive)")
     return _session
 
 

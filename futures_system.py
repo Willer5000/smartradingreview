@@ -422,6 +422,55 @@ class FuturesAnalysis(TradingExpertSystem):
         result['system_type'] = 'futures'
         result['is_futures'] = True
         
+        # ============ ADAPTAR JUSTIFICACIÓN AL CONTEXTO DE FUTUROS ============
+        # El mensaje se generó con la acción original (COMPRA_SPOT / VENTA_SPOT)
+        # usando las plantillas spot. Para futuros necesitamos:
+        #   1. Reemplazar títulos: "COMPRA SPOT DE X" → "LONG FUTURES DE X"
+        #   2. Reemplazar recomendaciones incorrectas de par-ratio (SOL/XRP/ADA/ETH
+        #      caían en la rama "ratio PAXG/BTC" del selector spot)
+        try:
+            msg = result.get('message', '') or ''
+            if msg:
+                symbol_name_map = {
+                    'BTC-USDT': 'BTC/USDT', 'ETH-USDT': 'ETH/USDT',
+                    'SOL-USDT': 'SOL/USDT', 'XRP-USDT': 'XRP/USDT',
+                    'ADA-USDT': 'ADA/USDT',
+                }
+                pretty_name = symbol_name_map.get(symbol, symbol.replace('-', '/'))
+                
+                if original_action == 'COMPRA_SPOT':
+                    # Título
+                    msg = msg.replace(
+                        f'🟢 COMPRA SPOT DE {pretty_name}',
+                        f'📈 LONG FUTURES DE {pretty_name}'
+                    )
+                    # Fallback si el símbolo no tenía nombre mapeado
+                    msg = msg.replace('🟢 COMPRA SPOT DE', '📈 LONG FUTURES DE')
+                    # Recomendaciones incorrectas: eliminar todas las variantes spot
+                    # y reemplazar por una recomendación futures apropiada
+                    for wrong in (
+                        'Se recomienda COMPRA del ratio PAXG/BTC.',
+                        'Se recomienda COMPRA SPOT de BTC/USDT.',
+                        'Se aconseja COMPRA SPOT de PAXG.',
+                    ):
+                        msg = msg.replace(wrong, f'Se recomienda LONG en futuros de {pretty_name}.')
+                elif original_action == 'VENTA_SPOT':
+                    msg = msg.replace(
+                        f'🔴 VENTA SPOT DE {pretty_name}',
+                        f'📉 SHORT FUTURES DE {pretty_name}'
+                    )
+                    msg = msg.replace('🔴 VENTA SPOT DE', '📉 SHORT FUTURES DE')
+                    for wrong in (
+                        'Se aconseja VENTA del ratio PAXG/BTC.',
+                        'Se recomienda VENTA SPOT de BTC/USDT.',
+                        'Se sugiere VENTA SPOT de PAXG.',
+                    ):
+                        msg = msg.replace(wrong, f'Se recomienda SHORT en futuros de {pretty_name}.')
+                
+                result['message'] = msg
+        except Exception as _msg_err:
+            logger.debug(f"No se pudo adaptar mensaje a futures: {_msg_err}")
+        
         # ============ RECALCULAR NIVELES CON LÓGICA DE FUTUROS ============
         # (Ya se hizo dentro de analyze_full_market → calculate_entry_levels overrideado)
         # Pero verificamos que la traducción sea consistente

@@ -160,8 +160,10 @@ def _analysis_cache_put(key, data):
     import time as _time
     with _ANALYSIS_CACHE_LOCK:
         _ANALYSIS_CACHE[key] = {'data': data, 'ts': _time.time()}
-        # Limite defensivo: si el caché crece descontroladamente, purgar los más viejos
-        if len(_ANALYSIS_CACHE) > 200:
+        # Límite defensivo: reducido de 200→50 para evitar OOM en Render Free (512MB).
+        # Cada entrada del caché contiene un DataFrame + estructuras de análisis
+        # que pueden llegar a ~1-2 MB, así que 200 = ~300MB solo caché.
+        if len(_ANALYSIS_CACHE) > 50:
             oldest_key = min(_ANALYSIS_CACHE.keys(), key=lambda k: _ANALYSIS_CACHE[k]['ts'])
             _ANALYSIS_CACHE.pop(oldest_key, None)
 
@@ -19182,7 +19184,13 @@ def api_previous_signals():
                     try:
                         tiempo_vida = {'4h': 14400, '12h': 43200, '1D': 86400, '1W': 604800}.get(timeframe, 14400)
                         tiempo_cierre = pd.Timestamp(df['time'].iloc[-2]).to_pydatetime()
-                        tiempo_transcurrido = (tiempo_actual - tiempo_cierre).total_seconds()
+                        # FIX: tiempo_actual es tz-aware (bolivia_tz) pero tiempo_cierre
+                        # es naive. Normalizar a naive para evitar
+                        # "can't subtract offset-naive and offset-aware datetimes".
+                        if tiempo_cierre.tzinfo is not None:
+                            tiempo_cierre = tiempo_cierre.replace(tzinfo=None)
+                        tiempo_actual_naive = tiempo_actual.replace(tzinfo=None) if tiempo_actual.tzinfo else tiempo_actual
+                        tiempo_transcurrido = (tiempo_actual_naive - tiempo_cierre).total_seconds()
                         tiempo_restante = int(max(0, tiempo_vida - tiempo_transcurrido))
                     except Exception as e:
                         print(f"      ⚠️ Error calculando tiempo: {e}")
@@ -19548,6 +19556,7 @@ def api_generate_report():
       symbol   (default BTC-USDT)
       interval (default 1D)
     """
+    import gc
     symbol = request.args.get('symbol', 'BTC-USDT')
     interval = request.args.get('interval', '1D')
     
@@ -19566,14 +19575,22 @@ def api_generate_report():
     except Exception as e:
         print(f"⚠️ generate_report: no se pudo generar el gráfico principal: {e}")
     
+    # Liberar memoria entre generación de gráficos
+    gc.collect()
+    
     # Gráficos INDIVIDUALES de cada indicador que respalda la señal
     # (uno por indicador, con nombre visible — para el ANEXO B del PDF)
     try:
+        # Limitado a 4 indicadores (antes 10) para no consumir demasiada memoria
+        # con kaleido/Chrome. Cada imagen adicional cuesta ~30-50MB en Render Free.
         supporting_charts = expert_system.generate_supporting_indicators_images(
-            symbol, interval, result, max_indicators=10
+            symbol, interval, result, max_indicators=4
         )
     except Exception as e:
         print(f"⚠️ generate_report: no se pudieron generar gráficos individuales: {e}")
+    
+    # Liberar memoria antes de armar el PDF
+    gc.collect()
     
     # Generar PDF
     try:
@@ -19594,6 +19611,10 @@ def api_generate_report():
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': f'Error generando PDF: {e}'}), 500
+    
+    # Liberar chart_bytes y supporting_charts (ya están en el PDF)
+    del chart_bytes, supporting_charts, result
+    gc.collect()
     
     filename = f'analisis_{symbol}_{interval}_{datetime.now().strftime("%Y%m%d_%H%M")}.pdf'
     return pdf_bytes, 200, {
@@ -19838,10 +19859,12 @@ def _analyze_futures_all_parallel():
         except Exception as e:
             return (symbol, tf, None, str(e)[:120])
     
-    # Máximo 6 workers para no saturar KuCoin (rate limit)
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    # Máximo 2 workers para no saturar memoria en Render Free (512MB).
+    # Cada worker mantiene DataFrame + análisis en memoria simultáneamente.
+    # Antes 6 workers × ~50MB = 300MB solo warm-up → OOM.
+    with ThreadPoolExecutor(max_workers=2) as pool:
         futures_list = [pool.submit(_worker, c) for c in combos]
-        for fut in _as_completed(futures_list, timeout=180):
+        for fut in _as_completed(futures_list, timeout=240):
             try:
                 symbol, tf, result, err = fut.result(timeout=30)
                 if err:
@@ -21441,22 +21464,19 @@ LEARNING_WORKER_INTERVAL = 15 * 60  # 15 minutos entre evaluaciones
 
 def learning_worker_loop():
     """
-    Bucle que evalúa periódicamente las señales pendientes:
-      - Revisa signals con status=pending
-      - Comprueba si el precio ha tocado TP o SL desde su emisión
-      - Actualiza status a tp_hit / sl_hit / expired
-      - Cada 4 horas ejecuta también recalculate_stats para actualizar stats
+    Bucle que evalúa periódicamente las señales pendientes.
     
-    Antes esto SOLO corría 1 vez al día (20:00) → 98% de signals se quedaban
-    en pending. Ahora las tablas strategy_stats_* se llenan progresivamente
-    conforme llegan resultados reales de operaciones.
+    IMPORTANTE: espera 120s inicial (antes 60s) para que el warm-up de futuros
+    termine antes de cargar más carga. Y libera memoria con gc.collect al final
+    de cada ciclo para no acumular en Render Free (512MB).
     """
+    import gc
     print("=" * 60)
     print(f"🧠 LEARNING WORKER iniciado (cada {LEARNING_WORKER_INTERVAL//60} min)")
     print("=" * 60)
     
-    # Esperar 60s inicial para que el warm-up general termine
-    time.sleep(60)
+    # Esperar 120s inicial para no competir con el warm-up de futuros
+    time.sleep(120)
     
     stats_counter = 0
     
@@ -21501,6 +21521,12 @@ def learning_worker_loop():
         except Exception as loop_err:
             print(f"❌ learning_worker: excepción en loop: {loop_err}")
             import traceback; traceback.print_exc()
+        
+        # Liberar memoria acumulada tras procesar señales
+        try:
+            gc.collect()
+        except Exception:
+            pass
         
         time.sleep(LEARNING_WORKER_INTERVAL)
 
