@@ -78,7 +78,15 @@ class AnalyticsService:
                     system_type: str = None, action: str = None,
                     days_back: int = 90) -> Dict:
         """
-        Retorna KPIs globales: total señales, win_rate, expectancy, etc.
+        Retorna KPIs globales: total señales, win_rate, expectancy, PnL total, etc.
+        
+        AMPLIADO v13: ahora incluye rendimiento económico completo:
+          - pnl_total_pct: suma de todos los PnL % de operaciones resueltas
+          - profit_factor: ganancia total / pérdida total (>1 rentable)
+          - avg_pnl_per_trade: PnL medio por operación
+          - best_trade / worst_trade: extremos
+          - consecutive_wins / consecutive_losses: rachas
+          - roi_estimated_1000_usd: ROI simulado con capital de 1000 USD
         """
         signals = self._fetch_signals_with_results(symbol, timeframe, system_type, action, days_back)
         
@@ -86,31 +94,83 @@ class AnalyticsService:
         tp_count = sum(1 for s in signals if s.get('status') == 'tp_hit')
         sl_count = sum(1 for s in signals if s.get('status') == 'sl_hit')
         expired_count = sum(1 for s in signals if s.get('status') == 'expired')
+        missed_count = sum(1 for s in signals if s.get('status') == 'missed_opportunity')
         resolved = tp_count + sl_count
         
         win_rate = (tp_count / resolved * 100) if resolved > 0 else 0
         
-        # PnL promedio
-        pnl_values = []
+        # ============ PnL de operaciones REALES (solo tp_hit / sl_hit) ============
+        # Excluir missed_opportunity porque son NO_OPERAR con "PnL teórico" que no
+        # es dinero real: contaminan el rendimiento económico del sistema.
+        pnl_real_trades = []  # lista de PnL de operaciones que realmente se hicieron
+        pnl_by_status_order = []  # para calcular rachas (por fecha)
+        
         for s in signals:
+            status = s.get('status')
+            if status not in ('tp_hit', 'sl_hit'):
+                continue
             results_data = s.get('signal_results', [])
             if isinstance(results_data, list) and results_data:
-                pnl = results_data[0].get('pnl_pct', 0)
-                if pnl:
-                    pnl_values.append(float(pnl))
+                pnl = results_data[0].get('pnl_pct')
+                if pnl is not None:
+                    pnl_val = float(pnl)
+                    pnl_real_trades.append(pnl_val)
+                    pnl_by_status_order.append((
+                        s.get('created_at', ''),
+                        status,
+                        pnl_val
+                    ))
         
-        avg_win = 0
-        avg_loss = 0
-        wins = [p for p in pnl_values if p > 0]
-        losses = [p for p in pnl_values if p < 0]
-        if wins:
-            avg_win = sum(wins) / len(wins)
-        if losses:
-            avg_loss = abs(sum(losses) / len(losses))
+        wins_pnl = [p for p in pnl_real_trades if p > 0]
+        losses_pnl = [p for p in pnl_real_trades if p < 0]
         
+        avg_win = sum(wins_pnl) / len(wins_pnl) if wins_pnl else 0
+        avg_loss = abs(sum(losses_pnl) / len(losses_pnl)) if losses_pnl else 0
+        
+        # ============ EXPECTANCY (real, no asumida) ============
         expectancy = 0
         if resolved > 0:
             expectancy = (win_rate/100 * avg_win) - ((100-win_rate)/100 * avg_loss)
+        
+        # ============ MÉTRICAS ECONÓMICAS ============
+        # PnL total acumulado (suma de todos los PnL individuales)
+        pnl_total_pct = sum(pnl_real_trades)
+        
+        # Profit factor: ganancia total / pérdida total
+        total_wins = sum(wins_pnl) if wins_pnl else 0
+        total_losses = abs(sum(losses_pnl)) if losses_pnl else 0
+        profit_factor = (total_wins / total_losses) if total_losses > 0 else (total_wins if total_wins > 0 else 0)
+        
+        # PnL promedio por trade
+        avg_pnl_per_trade = (pnl_total_pct / len(pnl_real_trades)) if pnl_real_trades else 0
+        
+        # Mejor y peor trade
+        best_trade_pct = max(pnl_real_trades) if pnl_real_trades else 0
+        worst_trade_pct = min(pnl_real_trades) if pnl_real_trades else 0
+        
+        # Rachas (ordenadas cronológicamente)
+        pnl_by_status_order.sort(key=lambda x: x[0])
+        max_consec_wins = 0
+        max_consec_losses = 0
+        cur_wins = 0
+        cur_losses = 0
+        for _, status, _ in pnl_by_status_order:
+            if status == 'tp_hit':
+                cur_wins += 1
+                cur_losses = 0
+                max_consec_wins = max(max_consec_wins, cur_wins)
+            elif status == 'sl_hit':
+                cur_losses += 1
+                cur_wins = 0
+                max_consec_losses = max(max_consec_losses, cur_losses)
+        
+        # ROI estimado con capital fijo de 1000 USD y sizing 100% (simulación simple)
+        # Cada operación multiplica el capital por (1 + pnl/100)
+        # Nota: esto asume que se sale exactamente en el toque, sin slippage
+        capital = 1000.0
+        for _, _, pnl in pnl_by_status_order:
+            capital *= (1 + pnl / 100)
+        roi_1000 = ((capital - 1000.0) / 1000.0) * 100
         
         # Estrategias únicas activas
         strategies_seen = set()
@@ -126,12 +186,26 @@ class AnalyticsService:
             'tp_hit': tp_count,
             'sl_hit': sl_count,
             'expired': expired_count,
+            'missed_opportunity': missed_count,
             'resolved': resolved,
             'win_rate': round(win_rate, 2),
             'avg_win_pct': round(avg_win, 3),
             'avg_loss_pct': round(avg_loss, 3),
             'expectancy': round(expectancy, 3),
             'unique_strategies': len(strategies_seen),
+            # ============ NUEVAS MÉTRICAS ECONÓMICAS ============
+            'pnl_total_pct': round(pnl_total_pct, 2),
+            'avg_pnl_per_trade': round(avg_pnl_per_trade, 3),
+            'profit_factor': round(profit_factor, 2),
+            'best_trade_pct': round(best_trade_pct, 2),
+            'worst_trade_pct': round(worst_trade_pct, 2),
+            'total_gains_pct': round(total_wins, 2),
+            'total_losses_pct': round(-total_losses, 2),
+            'max_consecutive_wins': max_consec_wins,
+            'max_consecutive_losses': max_consec_losses,
+            'roi_1000usd_estimated': round(roi_1000, 2),
+            'is_profitable': profit_factor >= 1.0,
+            # ============ FIN NUEVAS MÉTRICAS ============
             'days_back': days_back,
             'filters': {
                 'symbol': symbol, 'timeframe': timeframe,

@@ -1749,19 +1749,30 @@
             const chartDiv = document.getElementById('formation-40-chart');
             if (!chartDiv) return;
             
-            // Limpiar el gráfico anterior
-            Plotly.purge('formation-40-chart');
+            // Guardas defensivas para evitar "Cannot read properties of undefined (reading 'font')"
+            // Este error de plotly aparece cuando el layout se procesa con datos vacíos o corruptos.
+            // Suele pasar cuando el response llegó como 502 HTML en lugar de JSON válido.
+            if (typeof Plotly === 'undefined' || !Plotly.newPlot) {
+                console.warn('Plotly no disponible aún');
+                return;
+            }
             
-            if (!data || !data.df) return;
+            // Limpiar el gráfico anterior
+            try { Plotly.purge('formation-40-chart'); } catch(e) {}
+            
+            if (!data || typeof data !== 'object' || !data.df) return;
             
             const df = data.df;
-            const dates = df.time || [];
-            const open = df.open || [];
-            const high = df.high || [];
-            const low = df.low || [];
-            const close = df.close || [];
+            const dates = Array.isArray(df.time) ? df.time : [];
+            const open = Array.isArray(df.open) ? df.open : [];
+            const high = Array.isArray(df.high) ? df.high : [];
+            const low = Array.isArray(df.low) ? df.low : [];
+            const close = Array.isArray(df.close) ? df.close : [];
             
-            if (dates.length < 40) return;
+            // Verificar que todos los arrays tienen datos válidos y la misma longitud
+            if (dates.length < 40 || dates.length !== open.length ||
+                dates.length !== high.length || dates.length !== low.length ||
+                dates.length !== close.length) return;
             
             // Convertir fechas a objetos Date
             const dateObjects = dates.map(d => new Date(d));
@@ -1774,8 +1785,14 @@
             const last40Close = close.slice(-40);
             
             // Calcular máximos y mínimos para escala ajustada
-            const maxPrice = Math.max(...last40High);
-            const minPrice = Math.min(...last40Low);
+            // Filtrar valores inválidos (NaN, null, undefined) que causan el bug del 'font'
+            const validHighs = last40High.filter(v => Number.isFinite(v));
+            const validLows = last40Low.filter(v => Number.isFinite(v));
+            if (validHighs.length < 40 || validLows.length < 40) return;
+            
+            const maxPrice = Math.max(...validHighs);
+            const minPrice = Math.min(...validLows);
+            if (!Number.isFinite(maxPrice) || !Number.isFinite(minPrice)) return;
             const padding = (maxPrice - minPrice) * 0.05;
             
             const trace = {

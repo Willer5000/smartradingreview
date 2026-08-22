@@ -20752,12 +20752,16 @@ print("=" * 60)
 # ============================================================================
 
 # Control de ejecuciones (evita duplicados)
+# IMPORTANTE: datetime.min es NAIVE; `ahora` es tz-aware (bolivia_tz).
+# Al restar ambos → "can't subtract offset-naive and offset-aware".
+# Solución: inicializar con datetime.min tz-aware en la misma zona.
+_MIN_DT = datetime.min.replace(tzinfo=bolivia_tz)
 ultima_ejecucion = {
-    '4h': datetime.min,
-    '12h': datetime.min,
-    '1D': datetime.min,
-    '1W': datetime.min,
-    'REVIEW': datetime.min  # FASE 7: Ciclo diario del ReviewTrader
+    '4h': _MIN_DT,
+    '12h': _MIN_DT,
+    '1D': _MIN_DT,
+    '1W': _MIN_DT,
+    'REVIEW': _MIN_DT  # FASE 7: Ciclo diario del ReviewTrader
 }
 
 # Control de mensajes enviados por día (persistente)

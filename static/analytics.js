@@ -91,6 +91,8 @@ async function loadSummary() {
         if (!json.success) { console.error('Error summary:', json.error); return; }
         
         const d = json.data;
+        
+        // ============ KPIs BÁSICOS ============
         document.getElementById('kpi-total').textContent = d.total_signals.toLocaleString();
         document.getElementById('kpi-resolved').textContent = `Resueltas: ${d.resolved.toLocaleString()}`;
         document.getElementById('kpi-winrate').textContent = d.win_rate + '%';
@@ -104,6 +106,42 @@ async function loadSummary() {
         // Colorear expectancy según sea positivo o negativo
         const expEl = document.getElementById('kpi-expectancy');
         expEl.style.color = d.expectancy > 0 ? '#00C076' : d.expectancy < 0 ? '#FF5B5B' : '#FFD700';
+        
+        // ============ KPIs ECONÓMICOS (nuevos v13) ============
+        const pnlTotal = d.pnl_total_pct || 0;
+        const pnlTotalEl = document.getElementById('kpi-pnl-total');
+        if (pnlTotalEl) {
+            pnlTotalEl.textContent = (pnlTotal >= 0 ? '+' : '') + pnlTotal.toFixed(2) + '%';
+            pnlTotalEl.style.color = pnlTotal > 0 ? '#00C076' : pnlTotal < 0 ? '#FF5B5B' : '#FFD700';
+        }
+        
+        const roi = d.roi_1000usd_estimated || 0;
+        const roiEl = document.getElementById('kpi-roi');
+        if (roiEl) {
+            const usdFinal = 1000 * (1 + roi / 100);
+            roiEl.textContent = (roi >= 0 ? '+' : '') + roi.toFixed(2) + '%';
+            roiEl.title = `Capital final: $${usdFinal.toFixed(2)}`;
+            roiEl.style.color = roi > 0 ? '#00C076' : roi < 0 ? '#FF5B5B' : '#FFD700';
+        }
+        
+        const pf = d.profit_factor || 0;
+        const pfEl = document.getElementById('kpi-profit-factor');
+        if (pfEl) {
+            pfEl.textContent = pf.toFixed(2);
+            pfEl.style.color = pf >= 1.5 ? '#00C076' : pf >= 1.0 ? '#FFD700' : '#FF5B5B';
+        }
+        
+        const bestTrade = d.best_trade_pct || 0;
+        const worstTrade = d.worst_trade_pct || 0;
+        const bestEl = document.getElementById('kpi-best-trade');
+        const worstEl = document.getElementById('kpi-worst-trade');
+        if (bestEl) bestEl.textContent = (bestTrade >= 0 ? '+' : '') + bestTrade.toFixed(2) + '%';
+        if (worstEl) worstEl.textContent = worstTrade.toFixed(2) + '%';
+        
+        const maxWinsEl = document.getElementById('kpi-max-wins');
+        const maxLossesEl = document.getElementById('kpi-max-losses');
+        if (maxWinsEl) maxWinsEl.textContent = d.max_consecutive_wins || 0;
+        if (maxLossesEl) maxLossesEl.textContent = d.max_consecutive_losses || 0;
         
     } catch (err) {
         console.error('Error loadSummary:', err);

@@ -137,8 +137,8 @@
             </div>
         </div>
         
-        <!-- ============ KPIs GLOBALES ============ -->
-        <div class="row g-3 mb-4" id="kpi-row">
+        <!-- ============ KPIs GLOBALES (fila 1: básicos) ============ -->
+        <div class="row g-3 mb-3" id="kpi-row">
             <div class="col-md-3">
                 <div class="kpi-card">
                     <div class="kpi-label">📊 Total Señales</div>
@@ -155,7 +155,7 @@
             </div>
             <div class="col-md-3">
                 <div class="kpi-card" style="border-left-color: #3A8BFF;">
-                    <div class="kpi-label">💰 Expectancy</div>
+                    <div class="kpi-label">💰 Expectancy (real)</div>
                     <div class="kpi-value" id="kpi-expectancy" style="color: #3A8BFF;">--</div>
                     <small class="text-muted">PnL medio ganancia: <span id="kpi-avgwin">--</span></small>
                 </div>
@@ -165,6 +165,46 @@
                     <div class="kpi-label">🔥 Estrategias Activas</div>
                     <div class="kpi-value" id="kpi-strategies" style="color: #FFD700;">--</div>
                     <small class="text-muted">Últimos <span id="kpi-days">--</span> días</small>
+                </div>
+            </div>
+        </div>
+        
+        <!-- ============ KPIs ECONÓMICOS (fila 2: rendimiento) ============ -->
+        <div class="row g-3 mb-4">
+            <div class="col-md-3">
+                <div class="kpi-card" style="border-left-color: #00C076;">
+                    <div class="kpi-label">💵 PnL Total Acumulado</div>
+                    <div class="kpi-value" id="kpi-pnl-total" style="color: #00C076;">--</div>
+                    <small class="text-muted">Suma de PnL % de operaciones reales</small>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="kpi-card" style="border-left-color: #8A63D2;">
+                    <div class="kpi-label">📈 ROI simulado (1000 USD)</div>
+                    <div class="kpi-value" id="kpi-roi" style="color: #8A63D2;">--</div>
+                    <small class="text-muted">Si hubieras invertido 1000 USD</small>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="kpi-card" style="border-left-color: #FF8C00;">
+                    <div class="kpi-label">⚖️ Profit Factor</div>
+                    <div class="kpi-value" id="kpi-profit-factor" style="color: #FF8C00;">--</div>
+                    <small class="text-muted">Ganancia / Pérdida (>1 = rentable)</small>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="kpi-card" style="border-left-color: #FF5B5B;">
+                    <div class="kpi-label">🎯 Mejor / Peor Trade</div>
+                    <div class="kpi-value" style="font-size: 1.2rem;">
+                        <span id="kpi-best-trade" style="color: #00C076;">--</span>
+                        <span style="color: #666; font-size: 0.8rem;"> · </span>
+                        <span id="kpi-worst-trade" style="color: #FF5B5B;">--</span>
+                    </div>
+                    <small class="text-muted">
+                        Rachas: 
+                        <span id="kpi-max-wins" style="color: #00C076;">--</span> W / 
+                        <span id="kpi-max-losses" style="color: #FF5B5B;">--</span> L
+                    </small>
                 </div>
             </div>
         </div>
