@@ -34,7 +34,8 @@ def _fetch_learning_data() -> Dict:
         'tp_hit': 0,
         'sl_hit': 0,
         'expired': 0,
-        'missed_opportunities': 0,
+        'missed_opp_from_signals': 0,  # count desde signals.status='missed_opportunity'
+        'missed_opportunities': 0,      # count desde tabla dedicada
         'stats_specific': [],   # top por (par, tf, acción, estrategia)
         'stats_general': [],    # top por estrategia agregada
         'recommendations': [],  # recomendaciones activas
@@ -56,19 +57,38 @@ def _fetch_learning_data() -> Dict:
     data['supabase_connected'] = True
     
     # 1. Signals: totales por status
+    # FIX CRÍTICO: Supabase-py (PostgREST) limita el data array a 1000 rows
+    # por default aunque se pida count='exact'. Antes se hacía len(r.data)
+    # que daba máximo 1000 → los conteos eran erróneos.
+    # Ahora hacemos una query por status con count='exact' y leemos el
+    # atributo `.count` que sí trae el total real.
     try:
-        r = db.client.table('signals').select('status', count='exact').execute()
-        data['total_signals'] = len(r.data or [])
-        for row in (r.data or []):
-            st = (row.get('status') or 'pending').lower()
-            if st == 'tp_hit':
-                data['tp_hit'] += 1
-            elif st == 'sl_hit':
-                data['sl_hit'] += 1
-            elif st == 'expired':
-                data['expired'] += 1
-            elif st == 'pending':
-                data['pending_signals'] += 1
+        # Total absoluto
+        r_total = (db.client.table('signals')
+                   .select('id', count='exact')
+                   .limit(1)
+                   .execute())
+        data['total_signals'] = int(getattr(r_total, 'count', 0) or 0)
+        
+        # Por cada status individual (Supabase soporta filtro .eq)
+        for status_name, key in [
+            ('tp_hit', 'tp_hit'),
+            ('sl_hit', 'sl_hit'),
+            ('expired', 'expired'),
+            ('pending', 'pending_signals'),
+            ('missed_opportunity', 'missed_opp_from_signals'),
+        ]:
+            try:
+                r_s = (db.client.table('signals')
+                       .select('id', count='exact')
+                       .eq('status', status_name)
+                       .limit(1)
+                       .execute())
+                data[key] = int(getattr(r_s, 'count', 0) or 0)
+            except Exception as e_inner:
+                logger.warning(f'Error contando {status_name}: {e_inner}')
+                data[key] = 0
+        
         data['evaluated_signals'] = data['tp_hit'] + data['sl_hit'] + data['expired']
     except Exception as e:
         logger.warning(f'Error contando signals: {e}')
@@ -251,16 +271,20 @@ def generate_learning_pdf() -> bytes:
         ['Métrica', 'Valor'],
         ['Señales registradas totales', str(data['total_signals'])],
         ['Señales pendientes (aún abiertas)', str(data['pending_signals'])],
-        ['Señales evaluadas (TP/SL/Expired)', str(data['evaluated_signals'])],
+        ['Señales evaluadas (TP/SL/Expired/Missed)',
+            str(data['evaluated_signals'] + data.get('missed_opp_from_signals', 0))],
         ['   — Toques de Take Profit', str(data['tp_hit'])],
         ['   — Toques de Stop Loss', str(data['sl_hit'])],
         ['   — Expiradas sin toque', str(data['expired'])],
-        ['Oportunidades perdidas detectadas', str(data['missed_opportunities'])],
+        ['   — Marcadas como oportunidad perdida', str(data.get('missed_opp_from_signals', 0))],
+        ['Oportunidades perdidas (tabla dedicada)', str(data['missed_opportunities'])],
     ]
     
-    total_eval = max(1, data['evaluated_signals'])
-    win_rate_global = data['tp_hit'] / total_eval * 100 if total_eval > 0 else 0
-    metrics_data.append(['Win rate global (TP / evaluadas)', f'{win_rate_global:.1f}%'])
+    # Win rate real: solo cuentan TP y SL (operaciones ejecutadas y resueltas)
+    resolved = data['tp_hit'] + data['sl_hit']
+    win_rate_global = (data['tp_hit'] / resolved * 100) if resolved > 0 else 0
+    metrics_data.append(['Operaciones resueltas (TP + SL)', str(resolved)])
+    metrics_data.append(['Win rate real (TP / (TP+SL))', f'{win_rate_global:.1f}%'])
     
     if data.get('last_review_log'):
         try:

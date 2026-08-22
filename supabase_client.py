@@ -268,6 +268,35 @@ class SupabaseClient:
                 'created_at': datetime.utcnow().isoformat()
             }
             
+            # ============ DEDUP CHECK ============
+            # Verifica si ya existe una señal para el mismo (symbol, timeframe,
+            # candle_timestamp, action_normalized, system_type). Si existe, no
+            # inserta. Evita duplicados sin depender de UNIQUE constraint en BD.
+            # 
+            # Corrige el problema de "8 señales ADA/USDT 2h LONG idénticas en 35
+            # min" causado por el warm-up paralelo de futuros que ejecutaba
+            # register_signal múltiples veces por vela.
+            try:
+                if payload.get('candle_timestamp'):
+                    existing = self._with_retry(
+                        lambda: self.client.table('signals')
+                                .select('id')
+                                .eq('symbol', payload['symbol'])
+                                .eq('timeframe', payload['timeframe'])
+                                .eq('action_normalized', payload['action_normalized'])
+                                .eq('system_type', payload['system_type'])
+                                .eq('candle_timestamp', payload['candle_timestamp'])
+                                .limit(1)
+                                .execute()
+                    )
+                    if existing.data and len(existing.data) > 0:
+                        # Ya existe → devolver el ID existente (comportamiento idempotente)
+                        return existing.data[0].get('id')
+            except Exception as _dedup_err:
+                # Si la verificación de dedup falla por conectividad, seguimos
+                # con el INSERT (se guardará; peor caso duplicado ocasional).
+                logger.debug(f"dedup check falló, continuando con INSERT: {_dedup_err}")
+            
             response = self._with_retry(
                 lambda: self.client.table('signals').insert(payload).execute()
             )

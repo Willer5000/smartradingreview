@@ -13284,6 +13284,12 @@ class TradingExpertSystem:
                 _cached_result = _analysis_cache_get(_cache_key)
                 if _cached_result is not None:
                     print(f"⚡ CACHÉ HIT: {symbol} {timeframe} (analyze_full_market omitido)")
+                    # Marcar el resultado como "de caché" para que los callers
+                    # (analyze_futures_market) NO re-registren la señal en Supabase.
+                    # Evita duplicados masivos cuando el warm-up paralelo golpea
+                    # el mismo par/TF múltiples veces dentro del TTL.
+                    if isinstance(_cached_result, dict):
+                        _cached_result['_from_cache'] = True
                     return _cached_result
             except Exception:
                 pass  # Si el caché falla por lo que sea, seguimos con el análisis normal
@@ -20371,6 +20377,117 @@ def api_fix_confidence_overflow():
             'message': f'{fixed} señales corregidas (confidence capado a 100)',
             'found': len(rows),
             'fixed': fixed
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/admin/dedup_signals', methods=['POST'])
+def api_admin_dedup_signals():
+    """
+    Herramienta de mantenimiento: elimina señales DUPLICADAS en la tabla
+    `signals` de Supabase.
+    
+    Estrategia: por cada grupo (symbol, timeframe, candle_timestamp,
+    action_normalized, system_type), mantiene la señal MÁS ANTIGUA
+    (menor created_at) y borra el resto.
+    
+    Motivo: por un bug histórico, el warm-up paralelo de futuros
+    registraba múltiples veces la misma señal dentro de la misma vela
+    (ej. 8 señales ADA/USDT 2h LONG idénticas en 35 min). Este endpoint
+    limpia esa data sucia para que el ReviewTrader tenga estadísticas
+    honestas.
+    
+    Protegido con X-Auth-Key. Idempotente (una segunda llamada no hace nada).
+    
+    Devuelve: cuántos grupos había, cuántos duplicados se borraron.
+    """
+    try:
+        auth_key = request.headers.get('X-Auth-Key', '')
+        expected = os.environ.get('SCHEDULED_AUTH_KEY', 'crypto_trader_analyst_2025')
+        if auth_key != expected:
+            return jsonify({'success': False, 'error': 'Unauthorized'}), 401
+        
+        from review_trader import review_trader
+        db = review_trader.db
+        if not db.enabled:
+            return jsonify({'success': False, 'error': 'Supabase no conectado'}), 503
+        
+        # Traer todas las señales con candle_timestamp no nulo
+        # Nota: paginación manual porque Supabase limita a 1000 por request
+        all_signals = []
+        offset = 0
+        page_size = 1000
+        while True:
+            r = (db.client.table('signals')
+                 .select('id, symbol, timeframe, candle_timestamp, action_normalized, system_type, created_at')
+                 .not_.is_('candle_timestamp', 'null')
+                 .order('created_at')  # asc: más antiguo primero
+                 .range(offset, offset + page_size - 1)
+                 .execute())
+            batch = r.data or []
+            all_signals.extend(batch)
+            if len(batch) < page_size:
+                break
+            offset += page_size
+            if offset > 50000:  # safety cap
+                print(f"⚠️ dedup: cap 50000 alcanzado, deteniendo paginación")
+                break
+        
+        # Agrupar por clave
+        groups = {}
+        for sig in all_signals:
+            key = (
+                sig.get('symbol'),
+                sig.get('timeframe'),
+                sig.get('candle_timestamp'),
+                sig.get('action_normalized'),
+                sig.get('system_type'),
+            )
+            groups.setdefault(key, []).append(sig)
+        
+        # Identificar duplicados: para cada grupo con >1 elemento, borrar
+        # todos excepto el primero (más antiguo, ya ordenado ASC arriba)
+        ids_to_delete = []
+        groups_with_dups = 0
+        for key, sigs in groups.items():
+            if len(sigs) > 1:
+                groups_with_dups += 1
+                # Mantener el primero (más antiguo), borrar el resto
+                for s in sigs[1:]:
+                    ids_to_delete.append(s['id'])
+        
+        # Borrar en batches (Supabase limita el tamaño del IN)
+        deleted = 0
+        batch_size = 100
+        for i in range(0, len(ids_to_delete), batch_size):
+            batch = ids_to_delete[i:i+batch_size]
+            try:
+                # Primero borrar de signal_results y signal_indicators (FK)
+                try:
+                    db.client.table('signal_results').delete().in_('signal_id', batch).execute()
+                except Exception:
+                    pass
+                try:
+                    db.client.table('signal_indicators').delete().in_('signal_id', batch).execute()
+                except Exception:
+                    pass
+                # Borrar signals
+                db.client.table('signals').delete().in_('id', batch).execute()
+                deleted += len(batch)
+            except Exception as del_err:
+                print(f"⚠️ dedup: error borrando batch {i}: {del_err}")
+        
+        return jsonify({
+            'success': True,
+            'total_signals_scanned': len(all_signals),
+            'unique_groups': len(groups),
+            'groups_with_duplicates': groups_with_dups,
+            'duplicates_deleted': deleted,
+            'message': f'Escaneadas {len(all_signals)} señales. '
+                       f'{groups_with_dups} grupos tenían duplicados. '
+                       f'{deleted} señales duplicadas borradas.'
         })
     except Exception as e:
         import traceback; traceback.print_exc()

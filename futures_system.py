@@ -428,13 +428,20 @@ class FuturesAnalysis(TradingExpertSystem):
         levels = result.get('levels', {})
         
         # ============ REGISTRAR EN REVIEWTRADER (si está disponible) ============
-        try:
-            from review_trader import review_trader
-            if review_trader.db.enabled:
-                review_trader.register_signal(result, system_type='futures')
-                print(f"   📝 Señal registrada en ReviewTrader (futures)")
-        except Exception as e:
-            logger.debug(f"ReviewTrader no disponible: {e}")
+        # IMPORTANTE: solo registrar si el análisis fue FRESCO (no vino del caché).
+        # Antes se registraba SIEMPRE, causando 5-10 duplicados idénticos por
+        # cada TF cada vez que el warm-up paralelo tocaba el mismo par.
+        if result.get('_from_cache'):
+            # Análisis servido desde caché → la señal ya fue registrada antes.
+            pass
+        else:
+            try:
+                from review_trader import review_trader
+                if review_trader.db.enabled:
+                    review_trader.register_signal(result, system_type='futures')
+                    print(f"   📝 Señal registrada en ReviewTrader (futures)")
+            except Exception as e:
+                logger.debug(f"ReviewTrader no disponible: {e}")
         
         return result
     

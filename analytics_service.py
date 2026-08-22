@@ -406,9 +406,21 @@ class AnalyticsService:
         """
         signals = self._fetch_signals_with_results(symbol, timeframe, system_type, action, days_back)
         
-        # Filtrar solo las que tienen resultado
+        # Filtrar solo OPERACIONES REALES resueltas (tp_hit / sl_hit)
+        # Antes se incluían missed_opportunity (NO_OPERAR con PnL positivo por
+        # movimientos no aprovechados), que aparecían como "TOP mejores" siendo
+        # oportunidades no tomadas, no ganancias reales. Ahora solo cuentan
+        # operaciones que el sistema recomendó ejecutar y que tocaron TP o SL.
         signals_with_pnl = []
         for s in signals:
+            # Excluir missed_opportunity y NO_OPERAR — no son operaciones reales
+            status = s.get('status', '')
+            if status not in ('tp_hit', 'sl_hit'):
+                continue
+            action_norm = s.get('action_normalized', '')
+            if action_norm not in ('LONG', 'SHORT'):
+                continue
+            
             results_data = s.get('signal_results', [])
             if isinstance(results_data, list) and results_data:
                 pnl = results_data[0].get('pnl_pct')
