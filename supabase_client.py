@@ -592,18 +592,38 @@ class SupabaseClient:
         """
         Obtiene todas las señales con resultado (no pending) de los últimos N días
         para recalcular estadísticas.
+        
+        FIX: PostgREST limita a 1000 rows por request. Antes solo se leían las
+        primeras 1000, dejando afuera señales resueltas → stats vacías. Ahora
+        paginamos manualmente con .range() hasta traer todas.
         """
         if not self.enabled:
             return []
         
         try:
             cutoff = (datetime.utcnow() - timedelta(days=days_back)).isoformat()
-            response = (self.client.table('signals')
-                        .select('*, signal_indicators(strategy_name)')
-                        .neq('status', 'pending')
-                        .gte('created_at', cutoff)
-                        .execute())
-            return response.data or []
+            all_data = []
+            offset = 0
+            page_size = 1000
+            max_pages = 50  # safety cap (50k signals máx)
+            
+            for _ in range(max_pages):
+                response = (self.client.table('signals')
+                            .select('*, signal_indicators(strategy_name)')
+                            .neq('status', 'pending')
+                            .gte('created_at', cutoff)
+                            .order('created_at', desc=True)
+                            .range(offset, offset + page_size - 1)
+                            .execute())
+                batch = response.data or []
+                if not batch:
+                    break
+                all_data.extend(batch)
+                if len(batch) < page_size:
+                    break
+                offset += page_size
+            
+            return all_data
         except Exception as e:
             logger.error(f"Error obteniendo señales para stats: {e}")
             return []
