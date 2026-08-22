@@ -20020,6 +20020,11 @@ def api_futures_signals_previous():
             if len(times) >= 2:
                 candle_ts = str(times[-2])
             
+            # Justificación (truncada) para que el monitor de entries y el
+            # frontend puedan mostrarla sin re-analizar.
+            _msg_raw = result.get('message', '') or ''
+            _msg_short = (_msg_raw[:800] + '...') if len(_msg_raw) > 800 else _msg_raw
+            
             previous_signals.append({
                 'symbol': symbol,
                 'timeframe': tf,
@@ -20037,7 +20042,8 @@ def api_futures_signals_previous():
                 'current_price': current_price,
                 'candle_timestamp': candle_ts,
                 'activa': activa,
-                'resultado': resultado
+                'resultado': resultado,
+                'message': _msg_short,   # justificación futures (mismo campo que spot)
             })
         
         # Ordenar: activas primero, luego por confianza
@@ -20557,15 +20563,84 @@ MONITOR_ENTRY_TIMEFRAMES = ('1h', '2h', '4h', '12h', '1D')
 MONITOR_ENTRY_TOLERANCE_PCT = 0.15  # 0.15% de tolerancia para "tocar" entry
 MONITOR_CHECK_INTERVAL = 60         # segundos entre chequeos
 
-# Deduplicación: guarda (symbol, timeframe, candle_ts) -> timestamp de envío.
-# Se limpia entradas viejas (>7 días) para no crecer indefinidamente.
+# Duración de cada TF en segundos (para normalizar candle_start)
+_TF_SECONDS = {
+    '1h':  3600,
+    '2h':  7200,
+    '4h':  14400,
+    '12h': 43200,
+    '1D':  86400,
+    '1d':  86400,
+}
+
+
+def _normalize_candle_start(timeframe, candle_ts):
+    """
+    Normaliza el candle_timestamp al INICIO EXACTO de la vela según su TF.
+    
+    Esta función garantiza que dentro de una misma vela, siempre se genera
+    la MISMA clave de dedup, sin importar si el candle_ts recibido varía
+    ligeramente por refreshes de caché o análisis intermedios.
+    
+    Ejemplos:
+      - TF 4h, candle_ts='2026-08-22 05:12:34' → '2026-08-22 04:00:00'
+      - TF 4h, candle_ts='2026-08-22 05:15:00' → '2026-08-22 04:00:00' (misma vela!)
+      - TF 1h, candle_ts='2026-08-22 05:35:00' → '2026-08-22 05:00:00'
+      - TF 1D, candle_ts='2026-08-22 14:30:00' → '2026-08-22 00:00:00'
+    """
+    if not candle_ts:
+        return 'unknown'
+    try:
+        from datetime import datetime, timezone
+        # Intentar parsear el timestamp
+        ts_str = str(candle_ts)
+        # Formatos comunes: 'YYYY-MM-DD HH:MM:SS' o ISO
+        dt = None
+        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S.%f'):
+            try:
+                dt = datetime.strptime(ts_str.split('+')[0].split('Z')[0].strip(), fmt)
+                break
+            except ValueError:
+                continue
+        if dt is None:
+            # ISO 8601 fallback
+            try:
+                dt = datetime.fromisoformat(ts_str.replace('Z', '+00:00').split('+')[0])
+            except Exception:
+                return str(candle_ts)  # Sin poder parsear, devolver original
+        
+        # Truncar según TF
+        tf_sec = _TF_SECONDS.get(timeframe, 3600)
+        if tf_sec >= 86400:
+            # Truncar a día completo
+            dt_norm = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            # Truncar hora al múltiplo de tf_hours
+            tf_hours = tf_sec // 3600
+            dt_norm = dt.replace(
+                hour=(dt.hour // tf_hours) * tf_hours,
+                minute=0, second=0, microsecond=0
+            )
+        return dt_norm.strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        return str(candle_ts)
+
+
+# Deduplicación: guarda (symbol, timeframe, candle_start_normalizado) -> timestamp de envío.
 _entry_alerts_sent = {}
 _entry_alerts_lock = threading.Lock()
 
 
 def _entry_alert_key(symbol, timeframe, candle_ts):
-    """Construye la clave única para deduplicación."""
-    return f"{symbol}|{timeframe}|{candle_ts}"
+    """
+    Construye la clave única para deduplicación.
+    
+    IMPORTANTE: usa _normalize_candle_start para que dentro de una misma vela
+    (aunque el candle_ts recibido varíe por refresh del caché) siempre se
+    genere la misma clave.
+    """
+    norm_ts = _normalize_candle_start(timeframe, candle_ts)
+    return f"{symbol}|{timeframe}|{norm_ts}"
 
 
 def _entry_alert_already_sent(symbol, timeframe, candle_ts):
@@ -20741,7 +20816,7 @@ def _get_signals_for_entry_monitor():
                         'candle_timestamp': sig.get('candle_timestamp'),
                         'leverage': sig.get('leverage'),
                         'risk_reward': sig.get('risk_reward'),
-                        'message': '',  # futures no incluye justificación en este payload
+                        'message': sig.get('message', ''),  # justificación futures (nuevo)
                     })
     except Exception as e:
         print(f"⚠️ monitor_entries: error leyendo señales futures: {e}")
@@ -20795,37 +20870,49 @@ def monitor_entries_loop():
                 
                 # DISPARAR ALERTA
                 try:
-                    message = _build_entry_alert_message(sig, current)
-                    
-                    # ============ GENERAR IMAGEN CON INDICADORES DE LA ACCIÓN ============
-                    # La imagen contiene:
-                    #  - Panel principal: velas + EMAs + zonas S/R + OBs + FVGs
-                    #  - 4 subplots de los TOP indicadores que sustentan la acción
-                    #    (elegidos por peso de voto acumulado en trend/momentum/volumen)
-                    #  - Panel de patrón de velas detectado
-                    # Usa el mismo análisis + get_top_indicators_for_chart para
-                    # asegurar coherencia con la señal alertada.
+                    # ============ REANALIZAR PARA TENER JUSTIFICACIÓN E IMAGEN ============
+                    # Se usa la ruta correcta según el sistema (spot vs futures)
+                    # para que los símbolos como SOL/XRP/ADA se analicen bien.
                     image_bytes = None
+                    analysis = None
                     try:
-                        # El caché de analyze_full_market (TTL dinámico por TF)
-                        # hace que esto sea casi instantáneo si ya se analizó reciente
-                        analysis = expert_system.analyze_full_market(symbol, tf)
+                        if sig.get('system') == 'futures':
+                            futures_sys = _get_futures_system()
+                            if futures_sys is not None:
+                                analysis = futures_sys.analyze_futures_market(symbol, tf)
+                        else:
+                            analysis = expert_system.analyze_full_market(symbol, tf)
+                        
                         if analysis and analysis.get('success'):
-                            top_indicators = expert_system.get_top_indicators_for_chart(analysis)
-                            image_bytes = expert_system.generate_chart_image(
-                                symbol, tf, analysis, top_indicators
-                            )
-                            if image_bytes:
-                                print(f"   🖼️  Imagen generada con indicadores: {top_indicators}")
-                    except Exception as chart_err:
-                        print(f"   ⚠️ monitor_entries: no se pudo generar imagen: {chart_err}")
+                            # Inyectar la justificación del análisis en el sig
+                            # (para que _build_entry_alert_message la use)
+                            just_msg = analysis.get('message', '') or ''
+                            if just_msg and not sig.get('message'):
+                                # Truncar justificación a 800 chars como en spot
+                                sig['message'] = just_msg[:800] + ('...' if len(just_msg) > 800 else '')
+                            
+                            # Generar imagen con indicadores que respaldan la señal
+                            try:
+                                top_indicators = expert_system.get_top_indicators_for_chart(analysis)
+                                image_bytes = expert_system.generate_chart_image(
+                                    symbol, tf, analysis, top_indicators
+                                )
+                                if image_bytes:
+                                    print(f"   🖼️  Imagen generada ({sig.get('system')}) con indicadores: {top_indicators}")
+                            except Exception as chart_err:
+                                print(f"   ⚠️ imagen falló: {chart_err}")
+                    except Exception as an_err:
+                        print(f"   ⚠️ reanálisis falló: {an_err}")
+                    
+                    # Construir mensaje (ahora con message ya inyectado en sig si aplica)
+                    message = _build_entry_alert_message(sig, current)
                     
                     # Enviar (con imagen si se pudo generar, si no solo texto)
                     ok = expert_system.send_telegram_alert(message, image_bytes)
                     if ok:
                         _entry_alert_mark_sent(symbol, tf, candle_ts)
                         alerts_sent += 1
-                        print(f"   🔔 Alerta ENTRY enviada: {sig.get('action')} {symbol} {tf} @ {current:.4f} (entry {entry:.4f}) [vela {candle_ts}]")
+                        print(f"   🔔 Alerta ENTRY enviada [{sig.get('system')}]: {sig.get('action')} {symbol} {tf} @ {current:.4f} (entry {entry:.4f}) [vela {candle_ts}]")
                     else:
                         print(f"   ⚠️ Telegram rechazó la alerta para {symbol} {tf}")
                 except Exception as send_err:
@@ -21155,11 +21242,84 @@ _BACKGROUND_THREADS_STARTED = False
 _BACKGROUND_LOCK = threading.Lock()
 
 
+# ============================================================================
+# LEARNING WORKER — evalúa periódicamente las señales pendientes
+# ============================================================================
+LEARNING_WORKER_INTERVAL = 15 * 60  # 15 minutos entre evaluaciones
+
+
+def learning_worker_loop():
+    """
+    Bucle que evalúa periódicamente las señales pendientes:
+      - Revisa signals con status=pending
+      - Comprueba si el precio ha tocado TP o SL desde su emisión
+      - Actualiza status a tp_hit / sl_hit / expired
+      - Cada 4 horas ejecuta también recalculate_stats para actualizar stats
+    
+    Antes esto SOLO corría 1 vez al día (20:00) → 98% de signals se quedaban
+    en pending. Ahora las tablas strategy_stats_* se llenan progresivamente
+    conforme llegan resultados reales de operaciones.
+    """
+    print("=" * 60)
+    print(f"🧠 LEARNING WORKER iniciado (cada {LEARNING_WORKER_INTERVAL//60} min)")
+    print("=" * 60)
+    
+    # Esperar 60s inicial para que el warm-up general termine
+    time.sleep(60)
+    
+    stats_counter = 0
+    
+    while True:
+        try:
+            from review_trader import review_trader
+            
+            if not review_trader.db.enabled:
+                # Supabase no configurado — dormir y reintentar
+                time.sleep(LEARNING_WORKER_INTERVAL)
+                continue
+            
+            # 1. Evaluar signals pendientes → tp_hit / sl_hit / expired
+            try:
+                def _price_fetcher(sym, tf):
+                    """Callable que ReviewTrader usa para obtener velas."""
+                    return expert_system.get_kucoin_data(sym, tf)
+                
+                stats = review_trader.evaluate_pending_signals(_price_fetcher)
+                processed = stats.get('processed', 0)
+                tp = stats.get('tp_hit', 0)
+                sl = stats.get('sl_hit', 0)
+                exp = stats.get('expired', 0)
+                if processed > 0:
+                    print(f"🧠 [LEARN] Evaluadas {processed} señales: {tp} TP, {sl} SL, {exp} Expired")
+            except Exception as ev_err:
+                print(f"⚠️ learning_worker.evaluate_pending_signals: {ev_err}")
+                import traceback; traceback.print_exc()
+            
+            # 2. Cada 4 horas (16 ciclos * 15 min): recalcular stats + recomendaciones
+            stats_counter += 1
+            if stats_counter >= 16:
+                stats_counter = 0
+                try:
+                    result = review_trader.recalculate_stats()
+                    print(f"🧠 [LEARN] Stats recalculadas: "
+                          f"{result.get('specific', 0)} específicas, "
+                          f"{result.get('general', 0)} generales")
+                except Exception as rc_err:
+                    print(f"⚠️ learning_worker.recalculate_stats: {rc_err}")
+        
+        except Exception as loop_err:
+            print(f"❌ learning_worker: excepción en loop: {loop_err}")
+            import traceback; traceback.print_exc()
+        
+        time.sleep(LEARNING_WORKER_INTERVAL)
+
+
 def _start_background_threads():
     """
     Arranca los threads de background del sistema:
     - verificar_y_ejecutar: análisis programado por ventana horaria + review diario
     - monitor_entries: alertas Telegram cuando precio toca entry de señal previa
+    - learning_worker: evalúa signals pendientes y actualiza aprendizaje (cada 15 min)
     
     Idempotente: si ya se arrancaron, no hace nada.
     Se desactiva con la variable de entorno DISABLE_SCHEDULER=1 (para tests).
@@ -21194,6 +21354,17 @@ def _start_background_threads():
         print("✅ Thread monitor_entries iniciado (revisa cada 60s)")
     except Exception as e:
         print(f"⚠️ Error iniciando monitor_entries: {e}")
+    
+    # 3. Learning worker: evalúa signals pendientes (TP/SL/Expired) cada 15 min
+    #    Antes SOLO se ejecutaba una vez al día en run_full_review, dejando
+    #    miles de signals en pending. Ahora las tablas de stats se llenan
+    #    conforme llegan resultados de operaciones.
+    try:
+        t3 = threading.Thread(target=learning_worker_loop, name='learning-worker', daemon=True)
+        t3.start()
+        print("✅ Thread learning_worker iniciado (evalúa pending cada 15 min)")
+    except Exception as e:
+        print(f"⚠️ Error iniciando learning_worker: {e}")
     
     print("=" * 60 + "\n")
 

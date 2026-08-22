@@ -217,11 +217,11 @@ def generate_learning_pdf() -> bytes:
         "<b>1. Aprendizaje INDIVIDUAL (por par, temporalidad, acción y estrategia).</b> "
         "Ejemplo: '¿La estrategia ORDER_BLOCK_ALCISTA funciona en BTC-USDT 1h para LONG?'. "
         "Se calcula win rate específico, expectancy, y si la estrategia está degradándose "
-        "(últimas 20 señales vs histórico). Requiere mínimo <b>20 muestras</b> para publicar."
+        "(últimas 20 señales vs histórico). Requiere mínimo <b>10 muestras</b> para publicar."
         "<br/><br/>"
         "<b>2. Aprendizaje GENERAL (por estrategia agregando todos los pares y TFs).</b> "
         "Ejemplo: '¿RSI-Maverick funciona bien globalmente?'. Además guarda los mejores "
-        "pares y timeframes en los que dicha estrategia rinde. Requiere mínimo <b>50 muestras</b>."
+        "pares y timeframes en los que dicha estrategia rinde. Requiere mínimo <b>25 muestras</b>."
         "<br/><br/>"
         "<b>3. Recomendaciones cacheadas.</b> Combinación de lo aprendido en un formato "
         "listo para consulta: top estrategias ganadoras/perdedoras por (par, TF, acción), "
@@ -321,7 +321,7 @@ def generate_learning_pdf() -> bytes:
     else:
         story.append(Paragraph(
             "<i>Aún no hay estadísticas específicas publicadas. Se requieren al menos "
-            "20 muestras por combinación (par, TF, acción, estrategia) antes de aparecer aquí. "
+            "10 muestras por combinación (par, TF, acción, estrategia) antes de aparecer aquí. "
             "El sistema empezará a mostrar datos conforme se acumulen resultados de operaciones.</i>",
             style_body
         ))
@@ -332,7 +332,7 @@ def generate_learning_pdf() -> bytes:
     story.append(Paragraph("Aprendizaje general · top estrategias agregadas", style_h2))
     story.append(Paragraph(
         "Estas son las estrategias con mejor rendimiento agregando todos los pares y "
-        "temporalidades. Requieren al menos 50 muestras totales.",
+        "temporalidades. Requieren al menos 25 muestras totales.",
         style_body
     ))
     
@@ -362,7 +362,7 @@ def generate_learning_pdf() -> bytes:
         story.append(tgen)
     else:
         story.append(Paragraph(
-            "<i>Sin datos aún. Requiere ≥50 muestras por estrategia.</i>",
+            "<i>Sin datos aún. Requiere ≥25 muestras por estrategia.</i>",
             style_body
         ))
     
@@ -411,8 +411,8 @@ def generate_learning_pdf() -> bytes:
     story.append(Paragraph("Notas técnicas", style_h2))
     story.append(Paragraph(
         "<b>Umbrales estadísticos configurados:</b>"
-        "<br/>• Muestras mínimas para publicar stats específicas: <b>20</b>"
-        "<br/>• Muestras mínimas para stats generales: <b>50</b>"
+        "<br/>• Muestras mínimas para publicar stats específicas: <b>10</b>"
+        "<br/>• Muestras mínimas para stats generales: <b>25</b>"
         "<br/>• Umbral de estrategia ganadora: <b>win rate ≥ 60%</b>"
         "<br/>• Umbral de estrategia perdedora: <b>win rate ≤ 40%</b>"
         "<br/>• Degradación: se marca si el win rate de las últimas 20 señales cae ≥20% "
@@ -420,7 +420,8 @@ def generate_learning_pdf() -> bytes:
         "<br/><br/>"
         "<b>Frecuencia de aprendizaje:</b>"
         "<br/>• Registro de señales: cada análisis (inmediato)"
-        "<br/>• Evaluación TP/SL/Expired: cada 5 minutos (worker background)"
+        "<br/>• Evaluación TP/SL/Expired: cada 15 minutos (learning worker background)"
+        "<br/>• Recalculo automático de estadísticas: cada 4 horas (integrado en el learning worker)"
         "<br/>• Recalculo de estadísticas y recomendaciones: 20:00 Bolivia (diario)"
         "<br/>• Detección de oportunidades perdidas: durante el ciclo diario",
         style_body

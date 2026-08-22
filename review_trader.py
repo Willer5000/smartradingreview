@@ -28,8 +28,12 @@ logger.setLevel(logging.INFO)
 # ============================================================================
 
 # Umbrales para clasificar estrategias
-MIN_SAMPLE_SIZE = 20              # Mínimo de muestras para considerar estadísticamente válido
-MIN_SAMPLE_SIZE_GENERAL = 50      # Para stats generales necesitamos más muestras
+# NOTA: reducidos de 20/50 → 10/25 para tener aprendizaje visible antes.
+# El sistema es joven y con umbrales altos el PDF muestra 0 durante semanas.
+# A medida que se acumulen muestras se pueden ir subiendo (>= 20 estadísticamente
+# más robusto, pero requiere que N combinaciones tengan >=20 muestras cada una).
+MIN_SAMPLE_SIZE = 10              # Mínimo de muestras para considerar estadísticamente válido
+MIN_SAMPLE_SIZE_GENERAL = 25      # Para stats generales necesitamos más muestras
 WIN_RATE_WINNER = 60.0            # % para considerar estrategia "ganadora"
 WIN_RATE_LOSER = 40.0             # % para considerar estrategia "perdedora"
 DEGRADATION_THRESHOLD = 15.0      # Caída de win rate en últimas 20 vs histórico
@@ -1256,12 +1260,12 @@ class ReviewTrader:
             results['ttl'] = {}
         
         # 2. Compresión de stats con muestra baja
-        try:
-            results['compression'] = self.db.delete_low_sample_stats(min_sample=5)
-            print(f"   ✅ Compresión de stats: {results['compression']} filas con <5 muestras eliminadas")
-        except Exception as e:
-            logger.error(f"Error en compresión: {e}")
-            results['compression'] = 0
+        # DESACTIVADO: en sistemas jóvenes, borrar stats con <5 muestras impide
+        # que se acumule aprendizaje visible. Preferimos guardar todas las stats
+        # aunque tengan pocas muestras (el PDF ya las etiqueta como "insuficientes"
+        # si están por debajo de MIN_SAMPLE_SIZE).
+        results['compression'] = 0
+        print(f"   ℹ️  Compresión de stats: DESACTIVADA (se mantienen todas las stats aunque tengan <5 muestras)")
         
         # 3. Reporte de uso
         try:
