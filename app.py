@@ -8611,6 +8611,10 @@ class TradingExpertSystem:
             
             n = len(close)
             current_price = close[-1] if n > 0 else 0
+            # Cierre de la vela ANTERIOR (penúltima) — se usa para calcular
+            # entries con retroceso (LONG) / rebote (SHORT) respetando la
+            # regla del usuario: entry_long <= previous_close, entry_short >= previous_close
+            previous_close = float(close[-2]) if n >= 2 else float(current_price)
 
             # Si symbol no viene, intentar inferirlo (fallback)
             if symbol is None:
@@ -9021,6 +9025,7 @@ class TradingExpertSystem:
                 'closest_hvn': closest_hvn,
                 'closest_lvn': closest_lvn,
                 'current_price': float(current_price),
+                'previous_close': float(previous_close),
                 # ============ LÍNEA CRÍTICA QUE FALTA ============
                 'df': {
                     'time': [str(t) for t in df['time'].dt.strftime('%Y-%m-%d %H:%M:%S').tolist()],
@@ -9043,7 +9048,7 @@ class TradingExpertSystem:
                 'timeframe': timeframe,
                 'decision': {
                     'action': accion_consenso,
-                    'confidence': float(confianza_consenso),
+                    'confidence': max(0.0, min(100.0, float(confianza_consenso))),
                     'estrategias': [str(e) for e in estrategias_consenso],
                     'razones': [str(r) for r in razones_consenso],
                     'registro_votacion': registro_serializable,
@@ -11571,11 +11576,220 @@ class TradingExpertSystem:
         best = scored[0]
         return best[0]['price'], best[0]['source'], best[1]
     
+    def _select_optimal_entry(self, direction, structure, current_price, previous_close, volatility, timeframe):
+        """
+        Selecciona el ENTRY óptimo respetando la filosofía Smart Money.
+        
+        REGLAS DURAS:
+          - LONG / COMPRA:  entry <= previous_close  (retroceso; nunca comprar arriba)
+          - SHORT / VENTA:  entry >= previous_close  (rebote; nunca vender abajo)
+        
+        Fuentes usadas (mismo pool que TP/SL para coherencia):
+          - Order Blocks alcistas (LONG) / bajistas (SHORT) cerca del precio
+          - Fair Value Gaps sin rellenar en el lado del retroceso
+          - Fibonacci retracement (0.382, 0.5, 0.618) del último swing
+          - Soportes (LONG) / Resistencias (SHORT) inmediatos
+          - Value Area POC si está en el lado correcto
+          - ATR fallback: previous_close ± 0.5*ATR (si no hay zonas)
+        
+        Retorna: (entry_price, entry_source, entry_score)
+        """
+        atr = volatility.get('atr', current_price * 0.02) or (current_price * 0.02)
+        candidates = []  # [{'price', 'source', 'strength'}]
+        
+        # Base: NUNCA arriba del cierre anterior en LONG, NUNCA abajo en SHORT
+        if direction == 'long':
+            ceiling = previous_close  # entry <= previous_close
+        else:
+            floor = previous_close  # entry >= previous_close
+        
+        if direction == 'long':
+            # 1. Order Blocks ALCISTAS por debajo (o al nivel) del cierre anterior
+            for ob in structure.get('order_blocks', []) or []:
+                if not isinstance(ob, dict):
+                    continue
+                if ob.get('type') == 'bullish':
+                    pr = ob.get('price_range', [0, 0])
+                    if len(pr) >= 2:
+                        # Parte alta del OB alcista = mejor zona de compra por rebote
+                        target = pr[1] if pr[1] > 0 else pr[0]
+                        if 0 < target <= ceiling:
+                            candidates.append({
+                                'price': target,
+                                'source': f'Order Block alcista ${target:.4f}',
+                                'strength': 3 if ob.get('strength') == 'strong' else 2,
+                            })
+            
+            # 2. FVGs alcistas sin rellenar por debajo del cierre
+            for fvg in structure.get('fair_value_gaps', []) or []:
+                if not isinstance(fvg, dict) or fvg.get('filled', True):
+                    continue
+                if fvg.get('type') == 'bullish':
+                    gap_top = fvg.get('gap_top', 0)
+                    if 0 < gap_top <= ceiling:
+                        candidates.append({
+                            'price': gap_top,
+                            'source': f'FVG alcista ${gap_top:.4f}',
+                            'strength': 2 if fvg.get('strength') == 'strong' else 1,
+                        })
+            
+            # 3. Soportes cercanos por debajo del cierre
+            for s in structure.get('supports', []) or []:
+                if s and 0 < s <= ceiling:
+                    candidates.append({
+                        'price': s,
+                        'source': f'Soporte ${s:.4f}',
+                        'strength': 2,
+                    })
+            
+            # 4. Fibonacci retracement (0.382, 0.5, 0.618) — pullbacks clásicos
+            fib_ret = structure.get('fib_retracements', {}) or structure.get('fibonacci', {}) or {}
+            for level, price in fib_ret.items():
+                if not price:
+                    continue
+                level_str = str(level)
+                if level_str in ('0.382', '0.5', '0.618') and 0 < price <= ceiling:
+                    strength = 3 if level_str == '0.618' else 2
+                    candidates.append({
+                        'price': float(price),
+                        'source': f'Fibonacci {level_str}',
+                        'strength': strength,
+                    })
+            
+            # 5. Value Area / POC del perfil de volumen si está debajo del cierre
+            vp = structure.get('volume_profile', {}) or {}
+            poc = vp.get('poc')
+            if poc and 0 < poc <= ceiling:
+                candidates.append({
+                    'price': float(poc),
+                    'source': f'POC (Point of Control) ${poc:.4f}',
+                    'strength': 3,
+                })
+            
+            # 6. ATR fallback: retroceso de 0.5 ATR desde el cierre anterior
+            atr_entry = previous_close - 0.5 * atr
+            if atr_entry > 0:
+                candidates.append({
+                    'price': atr_entry,
+                    'source': f'Retroceso 0.5·ATR desde cierre anterior',
+                    'strength': 1,
+                })
+        
+        else:  # SHORT
+            # 1. Order Blocks BAJISTAS por encima del cierre
+            for ob in structure.get('order_blocks', []) or []:
+                if not isinstance(ob, dict):
+                    continue
+                if ob.get('type') == 'bearish':
+                    pr = ob.get('price_range', [0, 0])
+                    if len(pr) >= 2:
+                        # Parte baja del OB bajista = mejor zona de venta por rechazo
+                        target = pr[0] if pr[0] > 0 else pr[1]
+                        if target >= floor:
+                            candidates.append({
+                                'price': target,
+                                'source': f'Order Block bajista ${target:.4f}',
+                                'strength': 3 if ob.get('strength') == 'strong' else 2,
+                            })
+            
+            # 2. FVGs bajistas sin rellenar por encima
+            for fvg in structure.get('fair_value_gaps', []) or []:
+                if not isinstance(fvg, dict) or fvg.get('filled', True):
+                    continue
+                if fvg.get('type') == 'bearish':
+                    gap_bottom = fvg.get('gap_bottom', 0)
+                    if gap_bottom >= floor:
+                        candidates.append({
+                            'price': gap_bottom,
+                            'source': f'FVG bajista ${gap_bottom:.4f}',
+                            'strength': 2 if fvg.get('strength') == 'strong' else 1,
+                        })
+            
+            # 3. Resistencias por encima del cierre
+            for r in structure.get('resistances', []) or []:
+                if r and r >= floor:
+                    candidates.append({
+                        'price': r,
+                        'source': f'Resistencia ${r:.4f}',
+                        'strength': 2,
+                    })
+            
+            # 4. Fibonacci retracement en el lado de arriba
+            fib_ret = structure.get('fib_retracements', {}) or structure.get('fibonacci', {}) or {}
+            for level, price in fib_ret.items():
+                if not price:
+                    continue
+                level_str = str(level)
+                if level_str in ('0.382', '0.5', '0.618') and price >= floor:
+                    strength = 3 if level_str == '0.618' else 2
+                    candidates.append({
+                        'price': float(price),
+                        'source': f'Fibonacci {level_str}',
+                        'strength': strength,
+                    })
+            
+            # 5. POC si está arriba
+            vp = structure.get('volume_profile', {}) or {}
+            poc = vp.get('poc')
+            if poc and poc >= floor:
+                candidates.append({
+                    'price': float(poc),
+                    'source': f'POC (Point of Control) ${poc:.4f}',
+                    'strength': 3,
+                })
+            
+            # 6. ATR fallback: rebote de 0.5 ATR sobre el cierre anterior
+            atr_entry = previous_close + 0.5 * atr
+            candidates.append({
+                'price': atr_entry,
+                'source': f'Rebote 0.5·ATR desde cierre anterior',
+                'strength': 1,
+            })
+        
+        if not candidates:
+            # Último recurso: usar previous_close exacto
+            return previous_close, 'Cierre anterior (sin zonas técnicas)', 30
+        
+        # Scoring: preferimos zona con mayor fuerza y más CERCANA al cierre anterior
+        # (retroceso muy grande = poco probable de tocar; muy pequeño = poco retorno)
+        # Distancia ideal: entre 0.3% y 2.0% del cierre anterior
+        scored = []
+        for c in candidates:
+            price = c['price']
+            if price <= 0:
+                continue
+            dist_pct = abs(previous_close - price) / previous_close * 100
+            
+            # Penalizar distancias fuera del rango sano
+            if dist_pct < 0.1:
+                dist_score = 50  # muy cerca del cierre, poco retroceso
+            elif dist_pct < 0.3:
+                dist_score = 70
+            elif dist_pct < 1.0:
+                dist_score = 100  # ideal
+            elif dist_pct < 2.0:
+                dist_score = 85
+            elif dist_pct < 3.0:
+                dist_score = 60
+            else:
+                dist_score = 30   # muy lejos, poco probable de tocar
+            
+            score = c['strength'] * 20 + dist_score * 0.5  # ponderación
+            scored.append((c, score))
+        
+        if not scored:
+            return previous_close, 'Cierre anterior (sin candidatos válidos)', 30
+        
+        scored.sort(key=lambda x: -x[1])
+        best_c, best_score = scored[0]
+        return best_c['price'], best_c['source'], min(100, best_score)
+    
     def calculate_entry_levels(self, decision, trend, momentum, volatility, structure, symbol, timeframe, liquidation=None):
         """
         Calcula niveles de entrada, SL y TP.
         
         FASE 3: UN SOLO TP (el más rentable Y realista) + SL óptimo (protector y poco probable de toque).
+        FASE 4: ENTRY inteligente con retroceso (LONG) / rebote (SHORT) usando zonas técnicas.
         
         Si no hay un TP/SL válido o el R/R es < 1:1.5 → devuelve rejected_reason.
         """
@@ -11593,7 +11807,7 @@ class TradingExpertSystem:
                 atr_pct = 0.02
                 volatility['atr'] = atr  # Actualizar para métodos internos
             
-            print(f"💰 [FASE 3] Calculando niveles para {decision} - Precio: {current_price:.2f}, ATR: {atr:.4f}")
+            print(f"💰 [FASE 3+4] Calculando niveles para {decision} - Precio: {current_price:.2f}, ATR: {atr:.4f}")
             
             # Solo procesar decisiones de trading
             if decision not in ('COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT'):
@@ -11603,11 +11817,28 @@ class TradingExpertSystem:
             direction = 'long' if decision in ('COMPRA_SPOT', 'LONG') else 'short'
             is_futures = decision in ('LONG', 'SHORT')
             
-            # Entry = precio actual (con pequeño offset)
-            if direction == 'long':
-                entry = current_price * 1.001  # +0.1%
-            else:
-                entry = current_price * 0.999  # -0.1%
+            # Cierre de la vela anterior (para restringir el entry)
+            # structure['previous_close'] si existe; si no, current_price como fallback
+            previous_close = structure.get('previous_close', current_price) or current_price
+            
+            # ============ SELECCIONAR ENTRY ÓPTIMO (retroceso/rebote) ============
+            entry, entry_source, entry_score = self._select_optimal_entry(
+                direction, structure, current_price, previous_close, volatility, timeframe
+            )
+            
+            # ============ GARANTÍA DURA de la regla del usuario ============
+            # LONG: entry NUNCA puede ser > previous_close
+            # SHORT: entry NUNCA puede ser < previous_close
+            if direction == 'long' and entry > previous_close:
+                print(f"   ⚠️ Entry LONG {entry:.4f} > cierre anterior {previous_close:.4f}. Forzando a cierre.")
+                entry = previous_close
+                entry_source = f'Cierre anterior (regla LONG<=close_prev)'
+            elif direction == 'short' and entry < previous_close:
+                print(f"   ⚠️ Entry SHORT {entry:.4f} < cierre anterior {previous_close:.4f}. Forzando a cierre.")
+                entry = previous_close
+                entry_source = f'Cierre anterior (regla SHORT>=close_prev)'
+            
+            print(f"   🎯 Entry: ${entry:.4f} ({entry_source}, score {entry_score:.0f})")
             
             # Apalancamiento base
             base_leverage = volatility.get('suggested_leverage', 5)
@@ -13320,13 +13551,15 @@ class TradingExpertSystem:
                     nivel_conv = 'MUY BAJA'
                     icono_conv = '⛔'
                 
+                # Cap defensivo: raw_conviction se muestra directamente en la UI
+                _capped_conv = max(0.0, min(100.0, float(confianza_consenso)))
                 conviction = {
                     'level': nivel_conv,
                     'icon': icono_conv,
                     'description': f'Convicción {nivel_conv} basada en consenso',
                     'suggested_size': float(levels.get('suggested_size', 0.5)),
-                    'suggested_leverage_modifier': float(confianza_consenso) / 100,
-                    'raw_conviction': float(confianza_consenso),
+                    'suggested_leverage_modifier': _capped_conv / 100,
+                    'raw_conviction': _capped_conv,
                     'bonus_reasons': [str(r) for r in razones_consenso if isinstance(r, str) and ('favorable' in r or 'óptimo' in r or 'oportunidad' in r)][:2],
                     'degradation_reasons': [str(r) for r in razones_consenso if isinstance(r, str) and ('desfavorable' in r or 'riesgo' in r or 'cautela' in r)][:2]
                 }
@@ -13416,7 +13649,7 @@ class TradingExpertSystem:
                         }
                         correlation['btc_analysis']['decision'] = {
                             'action': accion_consenso,
-                            'confidence': float(confianza_consenso)
+                            'confidence': max(0.0, min(100.0, float(confianza_consenso)))
                         }
                 elif symbol == 'PAXG-USDT':
                     if 'paxg_analysis' in correlation:
@@ -13438,7 +13671,7 @@ class TradingExpertSystem:
                         }
                         correlation['paxg_btc_analysis']['decision'] = {
                             'action': accion_consenso,
-                            'confidence': float(confianza_consenso)
+                            'confidence': max(0.0, min(100.0, float(confianza_consenso)))
                         }
                 
                 print(f"   ✅ Correlación calculada: {correlation.get('rotation_signal', 'NEUTRAL')}")
@@ -13630,7 +13863,7 @@ class TradingExpertSystem:
                 'timeframe': timeframe,
                 'decision': {
                     'action': accion_consenso,
-                    'confidence': float(confianza_consenso),
+                    'confidence': max(0.0, min(100.0, float(confianza_consenso))),
                     'estrategias': [str(e) for e in estrategias_consenso],
                     'razones': [str(r) for r in razones_consenso],
                     'registro_votacion': registro_serializable,
@@ -18598,6 +18831,14 @@ def api_previous_signals():
                     if len(mensaje_corto) > 500:
                         mensaje_corto = mensaje_corto[:500] + '...'
                     
+                    # ============ TIMESTAMP DE LA VELA CERRADA (penúltima) ============
+                    # Se usa para dedup del monitor_entries: solo cambia cuando
+                    # cierra una NUEVA vela, no en cada análisis.
+                    try:
+                        candle_ts = str(df['time'].iloc[-2])
+                    except Exception:
+                        candle_ts = str(tiempo_actual.isoformat())
+                    
                     # ============ GUARDAR (TODOS LOS VALORES JSON SERIALIZABLES) ============
                     clave = f"{symbol}_{timeframe}"
                     resultados[clave] = {
@@ -18609,10 +18850,11 @@ def api_previous_signals():
                         'stop_loss': stop_loss,
                         'take_profit': take_profit,
                         'precio_actual': float(precio_actual),
-                        'activa': int(activa),  # ← Convertido a int para JSON
+                        'activa': int(activa),
                         'tiempo_restante': int(tiempo_restante),
                         'message': str(mensaje_corto),
-                        'timestamp': str(tiempo_actual.isoformat())
+                        'candle_timestamp': candle_ts,   # ← NUEVO: timestamp real de vela cerrada (dedup)
+                        'timestamp': str(tiempo_actual.isoformat())  # wall-clock del análisis
                     }
                     
                     estado = "🟢 ACTIVA" if activa == 1 else "⚪ inactiva"
@@ -18954,18 +19196,28 @@ def api_generate_report():
     if not result or not result.get('success'):
         return jsonify({'success': False, 'error': 'No se pudo generar el análisis'}), 400
     
-    # Generar gráfico técnico (best-effort — si falla, el PDF sale sin gráfico)
+    # Generar gráficos técnicos (best-effort — si falla, el PDF sale sin gráficos)
     chart_bytes = None
+    indicators_bytes = None
     try:
         top_indicators = expert_system.get_top_indicators_for_chart(result)
         chart_bytes = expert_system.generate_chart_image(symbol, interval, result, top_indicators)
     except Exception as e:
-        print(f"⚠️ generate_report: no se pudo generar el gráfico: {e}")
+        print(f"⚠️ generate_report: no se pudo generar el gráfico principal: {e}")
+    
+    # Gráfico específico de indicadores que sustentan la acción (opcional)
+    # Reutilizamos generate_chart_image con top_indicators específicos.
+    # (En futuras versiones se podría hacer un gráfico dedicado a los N indicadores 
+    #  con más peso en la votación, distinto del principal).
     
     # Generar PDF
     try:
         from pdf_report import generate_analysis_pdf
-        pdf_bytes = generate_analysis_pdf(result, chart_image_bytes=chart_bytes)
+        pdf_bytes = generate_analysis_pdf(
+            result,
+            chart_image_bytes=chart_bytes,
+            indicators_image_bytes=indicators_bytes,
+        )
     except ImportError:
         # Fallback si reportlab no está instalado (no debería pasar en prod)
         return jsonify({
@@ -18983,6 +19235,41 @@ def api_generate_report():
         'Content-Disposition': f'attachment; filename={filename}',
         'Content-Length': str(len(pdf_bytes)),
     }
+
+
+# ============================================================================
+# ENDPOINT: PDF de Aprendizaje del Sistema (ReviewTrader)
+# ============================================================================
+@app.route('/api/review/learning_pdf')
+def api_review_learning_pdf():
+    """
+    Genera un PDF que explica qué está aprendiendo el ReviewTrader:
+      - Métricas globales de señales registradas/evaluadas/pendientes
+      - Aprendizaje INDIVIDUAL: top estrategias por (par, TF, acción)
+      - Aprendizaje GENERAL: top estrategias agregadas
+      - Recomendaciones activas
+      - Notas técnicas sobre umbrales y frecuencia de aprendizaje
+    """
+    try:
+        from pdf_learning_report import generate_learning_pdf
+        pdf_bytes = generate_learning_pdf()
+    except ImportError:
+        return jsonify({
+            'success': False,
+            'error': 'reportlab no está instalado'
+        }), 500
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': f'Error generando PDF de aprendizaje: {e}'}), 500
+    
+    filename = f'aprendizaje_sistema_{datetime.now().strftime("%Y%m%d_%H%M")}.pdf'
+    return pdf_bytes, 200, {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': f'attachment; filename={filename}',
+        'Content-Length': str(len(pdf_bytes)),
+    }
+
 
 # === FUNCIÓN COMPLETA: api_run_scheduled ===
 # Ubicación: Reemplazar entre línea 1950 y línea 1980 aproximadamente
@@ -20064,7 +20351,9 @@ def _get_signals_for_entry_monitor():
                         'take_profit': sig.get('take_profit'),
                         'confidence': sig.get('confidence'),
                         'current_price': sig.get('precio_actual'),
-                        'candle_timestamp': sig.get('timestamp'),  # spot usa timestamp del análisis
+                        # DEDUP FIX: usar el timestamp REAL de la vela cerrada (no el wall-clock del análisis).
+                        # Con esto solo se envía UNA alerta por formación de vela (regla del usuario).
+                        'candle_timestamp': sig.get('candle_timestamp') or sig.get('timestamp'),
                         'message': sig.get('message', ''),
                     })
     except Exception as e:
@@ -20153,26 +20442,40 @@ def monitor_entries_loop():
                 try:
                     message = _build_entry_alert_message(sig, current)
                     
-                    # Intentar generar imagen del análisis (opcional, best-effort)
+                    # ============ GENERAR IMAGEN CON INDICADORES DE LA ACCIÓN ============
+                    # La imagen contiene:
+                    #  - Panel principal: velas + EMAs + zonas S/R + OBs + FVGs
+                    #  - 4 subplots de los TOP indicadores que sustentan la acción
+                    #    (elegidos por peso de voto acumulado en trend/momentum/volumen)
+                    #  - Panel de patrón de velas detectado
+                    # Usa el mismo análisis + get_top_indicators_for_chart para
+                    # asegurar coherencia con la señal alertada.
                     image_bytes = None
                     try:
-                        # Reanalizar para tener capas frescas para el gráfico
+                        # El caché de analyze_full_market (TTL dinámico por TF)
+                        # hace que esto sea casi instantáneo si ya se analizó reciente
                         analysis = expert_system.analyze_full_market(symbol, tf)
                         if analysis and analysis.get('success'):
                             top_indicators = expert_system.get_top_indicators_for_chart(analysis)
                             image_bytes = expert_system.generate_chart_image(
                                 symbol, tf, analysis, top_indicators
                             )
+                            if image_bytes:
+                                print(f"   🖼️  Imagen generada con indicadores: {top_indicators}")
                     except Exception as chart_err:
                         print(f"   ⚠️ monitor_entries: no se pudo generar imagen: {chart_err}")
                     
-                    # Enviar
-                    expert_system.send_telegram_alert(message, image_bytes)
-                    _entry_alert_mark_sent(symbol, tf, candle_ts)
-                    alerts_sent += 1
-                    print(f"   🔔 Alerta ENTRY enviada: {sig.get('action')} {symbol} {tf} @ {current:.4f} (entry {entry:.4f})")
+                    # Enviar (con imagen si se pudo generar, si no solo texto)
+                    ok = expert_system.send_telegram_alert(message, image_bytes)
+                    if ok:
+                        _entry_alert_mark_sent(symbol, tf, candle_ts)
+                        alerts_sent += 1
+                        print(f"   🔔 Alerta ENTRY enviada: {sig.get('action')} {symbol} {tf} @ {current:.4f} (entry {entry:.4f}) [vela {candle_ts}]")
+                    else:
+                        print(f"   ⚠️ Telegram rechazó la alerta para {symbol} {tf}")
                 except Exception as send_err:
                     print(f"   ⚠️ monitor_entries: fallo enviando alerta: {send_err}")
+                    import traceback; traceback.print_exc()
             
             if checked > 0:
                 print(f"🔍 monitor_entries: revisadas {checked} señales, {alerts_sent} alertas enviadas")

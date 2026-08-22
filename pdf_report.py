@@ -7,16 +7,19 @@ Generador de reporte PDF profesional de análisis para el botón
 Estructura del PDF:
   - Cabecera con símbolo, timeframe, acción, confianza, fecha
   - Tabla resumen de niveles (Entry, SL, TP, R/R, Leverage)
-  - 3 párrafos generados automáticamente:
+  - 3 párrafos generados usando el BANCO DE JUSTIFICACIONES:
       1. ACCIÓN A TOMAR EN CUENTA
       2. INDICADORES QUE RESPALDAN
       3. CONCLUSIÓN
-  - Gráfico del análisis con velas + indicadores top
+  - ANEXO: 
+      - Gráfico principal de velas con EMAs / S-R
+      - Gráfico de indicadores que sustentan la señal
 
 Requiere: reportlab, kaleido (para el gráfico), plotly.
 """
 
 import io
+import re
 import logging
 from typing import Optional, Dict, List
 
@@ -24,7 +27,7 @@ logger = logging.getLogger('PDF_REPORT')
 
 
 # ============================================================================
-# Helpers de texto — construcción de los 3 párrafos
+# Helpers de texto
 # ============================================================================
 def _cap_conf(v):
     try:
@@ -47,8 +50,64 @@ def _describe_action(action: str) -> str:
     }.get(action, action.lower() if action else 'sin decisión')
 
 
-def _build_paragraph_action(analysis: Dict) -> str:
-    """Párrafo 1: Acción a tomar en cuenta."""
+def _clean_message_for_pdf(msg: str) -> str:
+    """
+    Limpia el mensaje del banco de justificaciones para renderizar en PDF.
+    - Elimina emojis conflictivos
+    - Convierte saltos de línea en <br/>
+    - Escapa caracteres XML problemáticos
+    """
+    if not msg:
+        return ''
+    
+    # Escape básico
+    msg = msg.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    # ReportLab acepta un subconjunto de HTML: <b>, <i>, <br/>
+    msg = msg.replace('\n\n', '<br/><br/>').replace('\n', '<br/>')
+    # Truncar si es excesivamente largo (para no romper paginación)
+    if len(msg) > 10000:
+        msg = msg[:9500] + '...<br/><i>[justificación truncada]</i>'
+    return msg
+
+
+def _split_message_by_categories(msg: str) -> Dict[str, str]:
+    """
+    Divide el mensaje del banco de justificaciones en secciones lógicas
+    para poblar los 3 párrafos. Las plantillas del banco están ordenadas
+    por 'order': 1=acción, 2=tendencia, 3=momentum, ..., 98=recomendación,
+    99=cierre. Aproximamos dividiendo por líneas.
+    """
+    if not msg:
+        return {'accion': '', 'indicadores': '', 'conclusion': ''}
+    
+    lines = [l.strip() for l in msg.split('\n') if l.strip()]
+    n = len(lines)
+    if n == 0:
+        return {'accion': '', 'indicadores': '', 'conclusion': ''}
+    
+    # Heurística: primer bloque = acción (1-2 líneas), medio = indicadores,
+    # último 20% = recomendación/cierre/conclusión
+    if n <= 3:
+        return {'accion': '\n'.join(lines), 'indicadores': '', 'conclusion': ''}
+    
+    accion_end = min(2, n // 4)
+    conclusion_start = max(accion_end + 1, int(n * 0.75))
+    
+    return {
+        'accion': '\n'.join(lines[:accion_end]),
+        'indicadores': '\n'.join(lines[accion_end:conclusion_start]),
+        'conclusion': '\n'.join(lines[conclusion_start:])
+    }
+
+
+# ============================================================================
+# Construcción de los 3 párrafos (usando banco de justificaciones + resúmenes)
+# ============================================================================
+def _build_paragraph_action(analysis: Dict, msg_sections: Dict[str, str]) -> str:
+    """
+    Párrafo 1: Acción a tomar en cuenta.
+    Combina: título del banco + niveles + resumen humano.
+    """
     decision = analysis.get('decision', {}) or {}
     levels = analysis.get('levels', {}) or {}
     symbol = analysis.get('symbol', '?')
@@ -60,182 +119,196 @@ def _build_paragraph_action(analysis: Dict) -> str:
     tp = levels.get('take_profit', 0) or 0
     rr = levels.get('risk_reward', 0) or 0
     lev = levels.get('leverage', 1) or 1
+    tp_source = levels.get('tp_source', '')
+    sl_source = levels.get('sl_source', '')
     
     action_desc = _describe_action(action)
+    parts = []
     
-    parts = [
-        f"El sistema experto recomienda <b>{action_desc.upper()}</b> para {symbol} en temporalidad {tf} "
-        f"con un nivel de confianza del <b>{conf:.0f}%</b>."
-    ]
+    # Frase del banco (si existe)
+    banco_accion = _clean_message_for_pdf(msg_sections.get('accion', ''))
+    if banco_accion:
+        parts.append(banco_accion)
+        parts.append('<br/><br/>')
+    
+    parts.append(
+        f"El sistema experto recomienda <b>{action_desc.upper()}</b> para "
+        f"<b>{symbol}</b> en temporalidad <b>{tf}</b> con un nivel de confianza del "
+        f"<b>{conf:.0f}%</b>. "
+    )
     
     if action in ('COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT') and entry > 0:
         parts.append(
-            f"El nivel óptimo de entrada se sitúa en <b>{entry:.4f}</b>, "
-            f"con stop-loss de protección en <b>{sl:.4f}</b> y objetivo de take-profit en <b>{tp:.4f}</b>."
+            f"El nivel óptimo de entrada se sitúa en <b>{entry:.4f}</b> "
+            f"(retroceso técnico respecto al cierre de la vela anterior). "
+            f"El stop-loss de protección se coloca en <b>{sl:.4f}</b>"
         )
+        if sl_source:
+            parts.append(f" (fuente: {sl_source})")
+        parts.append(
+            f" y el objetivo de take-profit en <b>{tp:.4f}</b>"
+        )
+        if tp_source:
+            parts.append(f" (fuente: {tp_source})")
+        parts.append('. ')
         if rr:
-            parts.append(f"La relación riesgo/recompensa es de <b>1:{rr:.2f}</b>, "
-                        f"considerada {'favorable' if rr >= 1.5 else 'ajustada'} para esta operación.")
+            parts.append(
+                f"La relación riesgo/recompensa es de <b>1:{rr:.2f}</b>, "
+                f"considerada {'favorable' if rr >= 1.5 else 'ajustada'} para esta operación. "
+            )
         if lev and lev > 1:
-            parts.append(f"El apalancamiento sugerido es <b>x{lev}</b>, calibrado para el perfil de volatilidad actual.")
+            parts.append(f"El apalancamiento sugerido es <b>x{lev}</b>. ")
     else:
         parts.append(
-            "En este momento no se cumplen las condiciones necesarias para tomar una posición direccional. "
-            "Se recomienda mantener disciplina y esperar una configuración más clara antes de exponer capital."
+            "En este momento no se cumplen las condiciones necesarias para tomar una posición "
+            "direccional. Se recomienda mantener disciplina y esperar una configuración más clara."
         )
     
-    # Contexto de mercado
-    session = (analysis.get('market_hours', {}) or {}).get('session', '')
-    if session:
-        parts.append(f"El análisis se ejecuta durante la sesión de mercado <i>{session}</i>.")
+    return ''.join(parts)
+
+
+def _build_paragraph_indicators(analysis: Dict, msg_sections: Dict[str, str]) -> str:
+    """
+    Párrafo 2: Indicadores que respaldan la señal.
+    Prioriza el contenido del banco de justificaciones (que ya incorpora
+    los indicadores relevantes) + resumen numérico compacto.
+    """
+    parts = []
     
-    return ' '.join(parts)
-
-
-def _build_paragraph_indicators(analysis: Dict) -> str:
-    """Párrafo 2: Indicadores que respaldan la señal."""
+    # Contenido del banco (indicadores/estructura/volatilidad/etc.)
+    banco_ind = _clean_message_for_pdf(msg_sections.get('indicadores', ''))
+    if banco_ind:
+        parts.append(banco_ind)
+        parts.append('<br/><br/>')
+    
+    # Resumen numérico compacto (complementa el banco)
     trend = analysis.get('trend', {}) or {}
     momentum = analysis.get('momentum', {}) or {}
     volatility = analysis.get('volatility', {}) or {}
     volume = analysis.get('volume', {}) or {}
-    structure = analysis.get('structure', {}) or {}
     
-    parts = ["El análisis técnico se sustenta en múltiples indicadores convergentes."]
-    
-    # Tendencia
-    direction = trend.get('direction', 'neutral')
-    strength = trend.get('strength', '')
-    adx = trend.get('adx', 0) or 0
-    parts.append(
-        f"En cuanto a la <b>tendencia</b>, la dirección es <b>{direction.upper()}</b> "
-        f"con fuerza {strength} (ADX={adx:.1f})."
-    )
-    
-    # Momentum
     indicators = momentum.get('indicators', {}) or {}
-    rsi = indicators.get('rsi', 0) or 0
-    rsi_maverick = indicators.get('rsi_maverick', 0) or 0
-    momentum_dir = momentum.get('direction', 'neutral')
-    parts.append(
-        f"El <b>momentum</b> se orienta {momentum_dir.upper()}, con RSI en {rsi:.1f} "
-        f"y RSI-Maverick en {rsi_maverick:.2f}."
+    resumen = (
+        "<b>Resumen técnico numérico:</b> "
+        f"Tendencia {trend.get('direction', 'neutral').upper()} "
+        f"(ADX={trend.get('adx', 0) or 0:.1f}), "
+        f"RSI={indicators.get('rsi', 0) or 0:.1f}, "
+        f"RSI-Maverick={indicators.get('rsi_maverick', 0) or 0:.2f}, "
+        f"ATR={volatility.get('atr_pct', 0) or 0:.2f}%, "
+        f"volumen ratio={volume.get('volume_ratio', 1) or 1:.2f}x."
     )
-    divergences = momentum.get('divergences', []) or []
-    if divergences:
-        parts.append(f"Se han detectado divergencias en: {', '.join(divergences[:3])}.")
+    parts.append(resumen)
     
-    # Volatilidad
-    atr_pct = volatility.get('atr_pct', 0) or 0
-    vol_level = volatility.get('volatility_level', '')
-    ftm_zone = volatility.get('ftm_zone', '')
-    parts.append(
-        f"La <b>volatilidad</b> se ubica en nivel {vol_level} (ATR={atr_pct:.2f}%), "
-        f"con FTMaverick indicando zona <b>{ftm_zone}</b>."
-    )
+    # Divergencias si existen
+    divs = momentum.get('divergences', []) or []
+    if divs:
+        parts.append(f" Divergencias detectadas: <i>{', '.join(divs[:3])}</i>.")
     
-    # Volumen
-    vol_ratio = volume.get('volume_ratio', 1) or 1
+    # Ballenas
     if volume.get('whale_buy'):
-        parts.append(f"Se observa <b>presencia compradora institucional</b> "
-                     f"(ratio volumen {vol_ratio:.2f}x).")
+        parts.append(" Se observa <b>presencia compradora institucional</b>.")
     elif volume.get('whale_sell'):
-        parts.append(f"Se observa <b>presencia vendedora institucional</b> "
-                     f"(ratio volumen {vol_ratio:.2f}x).")
-    else:
-        parts.append(f"El volumen se mantiene {'elevado' if vol_ratio > 1.5 else 'normal'} "
-                     f"(ratio {vol_ratio:.2f}x).")
+        parts.append(" Se observa <b>presencia vendedora institucional</b>.")
     
-    # Estructura
-    patterns = (structure.get('patterns') or {}).get('count', 0) or 0
-    if patterns > 0:
-        parts.append(f"Se identifican <b>{patterns} patrones</b> de precio relevantes en la estructura actual.")
-    
-    return ' '.join(parts)
+    return ''.join(parts)
 
 
-def _build_paragraph_conclusion(analysis: Dict) -> str:
-    """Párrafo 3: Conclusión."""
+def _build_paragraph_conclusion(analysis: Dict, msg_sections: Dict[str, str]) -> str:
+    """Párrafo 3: Conclusión (usando cierre del banco + evaluación de convicción)."""
     decision = analysis.get('decision', {}) or {}
     action = decision.get('action', 'NO_OPERAR')
     conf = _cap_conf(decision.get('confidence'))
-    
-    # Estrategias
     estrategias = decision.get('estrategias', []) or []
-    
-    # Traders que votaron por la acción ganadora
-    registro = decision.get('registro_votacion', {}) or {}
-    ganadores = []
-    if isinstance(registro, dict):
-        votos = registro.get('todos_los_votos', []) or []
-        for v in votos:
-            if isinstance(v, dict) and v.get('accion') == action:
-                nombre = v.get('trader', '')
-                if nombre:
-                    ganadores.append(nombre)
     
     parts = []
     
+    # Frase del banco (cierre/recomendación)
+    banco_conc = _clean_message_for_pdf(msg_sections.get('conclusion', ''))
+    if banco_conc:
+        parts.append(banco_conc)
+        parts.append('<br/><br/>')
+    
+    # Evaluación de convicción
     if conf >= 80:
         parts.append(
-            f"En conclusión, la señal presenta una <b>alta convicción</b> ({conf:.0f}%) "
-            f"con múltiples factores técnicos alineados a favor de la acción propuesta."
+            f"<b>Convicción ALTA</b> ({conf:.0f}%): múltiples factores técnicos alineados "
+            f"a favor de la acción propuesta. "
         )
     elif conf >= 65:
         parts.append(
-            f"En conclusión, la señal muestra una <b>convicción moderada-alta</b> ({conf:.0f}%). "
-            f"El escenario es favorable pero requiere confirmación de precio en el nivel de entrada."
+            f"<b>Convicción MODERADA-ALTA</b> ({conf:.0f}%): el escenario es favorable "
+            f"pero requiere confirmación de precio en el nivel de entrada. "
         )
     elif conf >= 50:
         parts.append(
-            f"En conclusión, la señal tiene <b>convicción media</b> ({conf:.0f}%). "
-            f"Existe una configuración interesante pero conviene manejar tamaños de posición conservadores."
+            f"<b>Convicción MEDIA</b> ({conf:.0f}%): existe una configuración interesante "
+            f"pero conviene manejar tamaños de posición conservadores. "
         )
     else:
         parts.append(
-            f"En conclusión, la <b>convicción es baja</b> ({conf:.0f}%). "
-            f"No se recomienda tomar acción hasta que las condiciones técnicas mejoren."
+            f"<b>Convicción BAJA</b> ({conf:.0f}%): no se recomienda tomar acción hasta "
+            f"que las condiciones técnicas mejoren. "
         )
     
     if estrategias:
         parts.append(
-            f"Las estrategias clave detectadas son: <i>{', '.join(estrategias[:5])}</i>."
+            f"Estrategias clave detectadas por los traders: "
+            f"<i>{', '.join(estrategias[:5])}</i>. "
         )
     
+    # Traders del comité
+    registro = decision.get('registro_votacion', {}) or {}
+    ganadores = []
+    if isinstance(registro, dict):
+        for v in registro.get('todos_los_votos', []) or []:
+            if isinstance(v, dict) and v.get('accion') == action:
+                nombre = v.get('trader', '')
+                if nombre:
+                    ganadores.append(nombre)
     if ganadores:
         parts.append(
-            f"Los {len(ganadores)} traders del comité que respaldan esta decisión son: "
-            f"<i>{', '.join(ganadores[:5])}</i>."
+            f"<br/><br/>El comité de {len(ganadores)} traders que respaldan esta decisión: "
+            f"<i>{', '.join(ganadores[:6])}</i>."
         )
     
-    # Advertencia de riesgo
     parts.append(
-        "<i>Recordatorio: toda operación implica riesgo. Use únicamente capital que pueda permitirse "
-        "perder y respete siempre los niveles de stop-loss establecidos.</i>"
+        "<br/><br/><i>Aviso: este análisis es informativo y no constituye asesoría "
+        "financiera. Toda operación implica riesgo; use únicamente capital que pueda permitirse "
+        "perder y respete los niveles de stop-loss.</i>"
     )
     
-    return ' '.join(parts)
+    return ''.join(parts)
 
 
 # ============================================================================
 # Función principal — genera el PDF completo
 # ============================================================================
-def generate_analysis_pdf(analysis: Dict, chart_image_bytes: Optional[bytes] = None) -> bytes:
+def generate_analysis_pdf(analysis: Dict,
+                          chart_image_bytes: Optional[bytes] = None,
+                          indicators_image_bytes: Optional[bytes] = None) -> bytes:
     """
-    Genera el PDF de análisis con 3 párrafos + gráfico.
+    Genera el PDF de análisis.
+    
+    Estructura:
+      - Cabecera
+      - Tabla resumen niveles
+      - 3 párrafos (usando banco de justificaciones)
+      - ANEXO: gráfico principal (velas) + gráfico de indicadores
     
     analysis: dict retornado por analyze_full_market
-    chart_image_bytes: PNG del gráfico (opcional, se puede pasar externamente)
+    chart_image_bytes: PNG del gráfico completo (velas + indicadores + patrón)
+    indicators_image_bytes: PNG opcional específico de indicadores
     
     Retorna: bytes del PDF listo para servir con Content-Type: application/pdf
     """
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import cm
-    from reportlab.lib.colors import HexColor, black, white
-    from reportlab.lib.enums import TA_JUSTIFY, TA_CENTER, TA_LEFT
+    from reportlab.lib.colors import HexColor, black
+    from reportlab.lib.enums import TA_JUSTIFY, TA_CENTER
     from reportlab.platypus import (
         SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-        Image, PageBreak, KeepTogether
+        Image, PageBreak
     )
     
     buf = io.BytesIO()
@@ -247,8 +320,6 @@ def generate_analysis_pdf(analysis: Dict, chart_image_bytes: Optional[bytes] = N
     )
     
     styles = getSampleStyleSheet()
-    
-    # Estilos personalizados
     style_title = ParagraphStyle(
         'CustomTitle', parent=styles['Title'],
         fontSize=18, textColor=HexColor('#1a1a2e'),
@@ -262,8 +333,7 @@ def generate_analysis_pdf(analysis: Dict, chart_image_bytes: Optional[bytes] = N
     style_h2 = ParagraphStyle(
         'CustomH2', parent=styles['Heading2'],
         fontSize=13, textColor=HexColor('#1a1a2e'),
-        spaceBefore=14, spaceAfter=8,
-        leftIndent=0, borderPadding=0
+        spaceBefore=14, spaceAfter=8
     )
     style_body = ParagraphStyle(
         'CustomBody', parent=styles['Normal'],
@@ -289,7 +359,7 @@ def generate_analysis_pdf(analysis: Dict, chart_image_bytes: Optional[bytes] = N
     from datetime import datetime
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M')
     
-    story.append(Paragraph(f"Análisis Técnico Profesional", style_title))
+    story.append(Paragraph("Análisis Técnico Profesional", style_title))
     story.append(Paragraph(
         f"<b>{symbol}</b> · Temporalidad <b>{timeframe}</b> · Emitido {now_str}",
         style_subtitle
@@ -299,12 +369,11 @@ def generate_analysis_pdf(analysis: Dict, chart_image_bytes: Optional[bytes] = N
     levels = analysis.get('levels', {}) or {}
     current_price = analysis.get('current_price', 0) or 0
     
-    # Color de la acción
     action_color = HexColor('#666666')
     if action in ('COMPRA_SPOT', 'LONG'):
-        action_color = HexColor('#0a8f4c')  # verde
+        action_color = HexColor('#0a8f4c')
     elif action in ('VENTA_SPOT', 'SHORT'):
-        action_color = HexColor('#c92a2a')  # rojo
+        action_color = HexColor('#c92a2a')
     
     table_data = [
         ['Recomendación', action, 'Confianza', f'{conf:.0f}%'],
@@ -319,11 +388,11 @@ def generate_analysis_pdf(analysis: Dict, chart_image_bytes: Optional[bytes] = N
         ('BACKGROUND', (0, 0), (0, -1), HexColor('#e0e4ec')),
         ('BACKGROUND', (2, 0), (2, -1), HexColor('#e0e4ec')),
         ('TEXTCOLOR', (0, 0), (-1, -1), black),
-        ('TEXTCOLOR', (1, 0), (1, 0), action_color),   # acción en color
+        ('TEXTCOLOR', (1, 0), (1, 0), action_color),
         ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
         ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
         ('FONTNAME', (2, 0), (2, -1), 'Helvetica-Bold'),
-        ('FONTNAME', (1, 0), (1, 0), 'Helvetica-Bold'),  # acción en bold
+        ('FONTNAME', (1, 0), (1, 0), 'Helvetica-Bold'),
         ('FONTSIZE', (0, 0), (-1, -1), 10),
         ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
@@ -334,28 +403,49 @@ def generate_analysis_pdf(analysis: Dict, chart_image_bytes: Optional[bytes] = N
         ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
     ]))
     story.append(table)
-    story.append(Spacer(1, 0.6 * cm))
+    story.append(Spacer(1, 0.5 * cm))
     
-    # ============ 3 PÁRRAFOS ============
+    # ============ 3 PÁRRAFOS (con banco de justificaciones) ============
+    msg = analysis.get('message', '') or ''
+    msg_sections = _split_message_by_categories(msg)
+    
     story.append(Paragraph("1. Acción a tomar en cuenta", style_h2))
-    story.append(Paragraph(_build_paragraph_action(analysis), style_body))
+    story.append(Paragraph(_build_paragraph_action(analysis, msg_sections), style_body))
     
     story.append(Paragraph("2. Indicadores que respaldan la señal", style_h2))
-    story.append(Paragraph(_build_paragraph_indicators(analysis), style_body))
+    story.append(Paragraph(_build_paragraph_indicators(analysis, msg_sections), style_body))
     
     story.append(Paragraph("3. Conclusión", style_h2))
-    story.append(Paragraph(_build_paragraph_conclusion(analysis), style_body))
+    story.append(Paragraph(_build_paragraph_conclusion(analysis, msg_sections), style_body))
     
-    # ============ GRÁFICO ============
-    if chart_image_bytes:
-        try:
-            story.append(Spacer(1, 0.4 * cm))
-            story.append(Paragraph("Gráfico técnico de indicadores", style_h2))
-            img_buf = io.BytesIO(chart_image_bytes)
-            img = Image(img_buf, width=17 * cm, height=13 * cm, kind='proportional')
-            story.append(img)
-        except Exception as e:
-            logger.warning(f"No se pudo embeber gráfico: {e}")
+    # ============ ANEXO: GRÁFICOS ============
+    has_charts = bool(chart_image_bytes or indicators_image_bytes)
+    if has_charts:
+        story.append(PageBreak())
+        story.append(Paragraph("ANEXO — Gráficos técnicos", style_title))
+        story.append(Paragraph(
+            f"Evidencia visual de la señal · <b>{symbol}</b> · <b>{timeframe}</b>",
+            style_subtitle
+        ))
+        
+        if chart_image_bytes:
+            try:
+                story.append(Paragraph("Panel principal: velas, EMAs, soportes/resistencias e indicadores clave", style_h2))
+                img_buf = io.BytesIO(chart_image_bytes)
+                img = Image(img_buf, width=17 * cm, height=16 * cm, kind='proportional')
+                story.append(img)
+            except Exception as e:
+                logger.warning(f"No se pudo embeber gráfico principal: {e}")
+        
+        if indicators_image_bytes:
+            try:
+                story.append(Spacer(1, 0.5 * cm))
+                story.append(Paragraph("Detalle de indicadores que respaldan la acción", style_h2))
+                img_buf2 = io.BytesIO(indicators_image_bytes)
+                img2 = Image(img_buf2, width=17 * cm, height=13 * cm, kind='proportional')
+                story.append(img2)
+            except Exception as e:
+                logger.warning(f"No se pudo embeber gráfico de indicadores: {e}")
     
     # ============ FOOTER ============
     story.append(Spacer(1, 0.8 * cm))

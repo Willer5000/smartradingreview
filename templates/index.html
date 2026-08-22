@@ -282,6 +282,10 @@
                         <button class="btn btn-outline-info w-100 mt-2" onclick="window.downloadAnalysisReport()">
                             <i class="fas fa-download me-2"></i>Descargar Análisis
                         </button>
+                        
+                        <button class="btn btn-outline-primary w-100 mt-2" onclick="window.downloadLearningReport()">
+                            <i class="fas fa-brain me-2"></i>Aprendizaje del Sistema
+                        </button>
                     </div>
                 </div>
 
@@ -2224,6 +2228,28 @@
                 .catch(error => {
                     console.error('Error:', error);
                     window.showToast('❌ Error al descargar reporte', 'danger');
+                });
+        };
+
+        window.downloadLearningReport = function() {
+            window.showToast('🧠 Generando informe de aprendizaje...', 'info');
+            fetch('/api/review/learning_pdf')
+                .then(response => {
+                    if (!response.ok) throw new Error('HTTP ' + response.status);
+                    return response.blob();
+                })
+                .then(blob => {
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `aprendizaje_sistema_${new Date().toISOString().slice(0,10)}.pdf`;
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    window.showToast('✅ Informe de aprendizaje descargado', 'success');
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    window.showToast('❌ Error al descargar informe', 'danger');
                 });
         };
 

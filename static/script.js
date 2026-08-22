@@ -6733,7 +6733,7 @@ window.updateConvictionInfo = function(data) {
         levelEl.style.color = conviction.level === 'ALTA' ? '#00C076' : 
                               conviction.level === 'MEDIA' ? '#FFD700' : '#FF5B5B';
     }
-    if (percentageEl) percentageEl.textContent = `${Math.round(conviction.raw_conviction || 70)}%`;
+    if (percentageEl) percentageEl.textContent = `${fmtConfidence(conviction.raw_conviction || 70)}%`;
     if (descriptionEl) descriptionEl.textContent = conviction.description || '';
     if (sizeEl) sizeEl.textContent = `${Math.round((conviction.suggested_size || 1.0) * 100)}%`;
     if (leverageEl && data.levels) {
