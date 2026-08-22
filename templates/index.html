@@ -2148,24 +2148,49 @@
                 .catch(error => console.error('Error:', error));
         };
 
+        // Prueba Telegram:
+        //   - Si el modal está abierto (usuario seleccionó par/TF específicos) → modo 'single'
+        //   - Si se llama desde el sidebar (sin modal abierto) → modo 'all'
+        //     (envía TODAS las señales de vela anterior, spot + futures)
         window.sendTelegramTest = function() {
-            const symbol = document.getElementById('telegram-symbol')?.value || 'BTC-USDT';
-            const interval = document.getElementById('telegram-interval')?.value || '1D';
-            const includeChart = document.getElementById('include-chart')?.checked || true;
+            const modalEl = document.getElementById('telegramModal');
+            const modalOpen = modalEl && modalEl.classList.contains('show');
             
-            window.showToast('📤 Enviando análisis a Telegram...', 'info');
+            let payload;
+            let toastMsg;
+            
+            if (modalOpen) {
+                // Modo detallado: análisis de un par/TF específico
+                const symbol = document.getElementById('telegram-symbol')?.value || 'BTC-USDT';
+                const interval = document.getElementById('telegram-interval')?.value || '1D';
+                const includeChart = document.getElementById('include-chart')?.checked !== false;
+                payload = { mode: 'single', symbol, interval, include_chart: includeChart };
+                toastMsg = '📤 Enviando análisis a Telegram...';
+            } else {
+                // Modo por defecto: TODAS las señales de vela anterior (spot + futures)
+                payload = { mode: 'all', include_chart: true };
+                toastMsg = '📤 Enviando TODAS las señales de vela anterior a Telegram...';
+            }
+            
+            window.showToast(toastMsg, 'info');
             
             fetch('/api/telegram/test', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({symbol, interval, include_chart: includeChart})
+                body: JSON.stringify(payload)
             })
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
-                    window.showToast('✅ ' + data.message, 'success');
-                    const modal = bootstrap.Modal.getInstance(document.getElementById('telegramModal'));
-                    if (modal) modal.hide();
+                    let msg = data.message || '✅ Enviado';
+                    if (data.signals_count != null) {
+                        msg = `✅ ${data.signals_count} señales enviadas (${data.spot_count||0} spot + ${data.futures_count||0} futures)`;
+                    }
+                    window.showToast(msg, 'success');
+                    if (modalOpen) {
+                        const modal = bootstrap.Modal.getInstance(modalEl);
+                        if (modal) modal.hide();
+                    }
                 } else {
                     window.showToast('❌ Error: ' + (data.error || 'Error desconocido'), 'danger');
                 }
@@ -2180,18 +2205,21 @@
             const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
             const interval = document.getElementById('interval-select')?.value || '1D';
             
-            window.showToast('📥 Generando reporte...', 'info');
+            window.showToast('📥 Generando reporte PDF... (puede tardar ~5s)', 'info');
             
             fetch(`/api/generate_report?symbol=${symbol}&interval=${interval}`)
-                .then(response => response.blob())
+                .then(response => {
+                    if (!response.ok) throw new Error('HTTP ' + response.status);
+                    return response.blob();
+                })
                 .then(blob => {
                     const url = window.URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = `analisis_${symbol}_${interval}_${new Date().toISOString().slice(0,10)}.txt`;
+                    a.download = `analisis_${symbol}_${interval}_${new Date().toISOString().slice(0,10)}.pdf`;
                     a.click();
                     window.URL.revokeObjectURL(url);
-                    window.showToast('✅ Reporte descargado', 'success');
+                    window.showToast('✅ Reporte PDF descargado', 'success');
                 })
                 .catch(error => {
                     console.error('Error:', error);

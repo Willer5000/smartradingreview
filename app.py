@@ -17846,8 +17846,11 @@ class Moderador:
                 if razones is None:
                     razones = []
                 
-                # Aplicar peso del trader
-                confianza_ponderada = confianza * trader.peso_base
+                # Aplicar peso del trader — con CAP a 100 para evitar valores >100%
+                # El peso sigue distinguiendo la importancia de cada trader (traders
+                # con peso 1.5 llegan más fácil a 100 que traders con peso 1.0),
+                # pero ya no genera valores 130-150 que rompen la estadística.
+                confianza_ponderada = min(100.0, max(0.0, confianza * trader.peso_base))
                 
                 # Mostrar voto del trader
                 print(f"   📊 VOTO: {accion}")
@@ -18648,9 +18651,203 @@ def api_previous_signals():
         })
 
 
+def _telegram_test_all_previous_signals(include_chart=True):
+    """
+    Construye y envía a Telegram un mensaje con TODAS las señales activas
+    de vela anterior (spot + futures). Modo por defecto del botón "Prueba Telegram".
+    
+    - Consulta /api/previous_signals y /api/futures/signals/previous
+    - Filtra señales direccionales activas (LONG/SHORT/COMPRA_SPOT/VENTA_SPOT)
+    - Arma un único mensaje resumen ordenado por confianza descendente
+    - Si include_chart=True, adjunta 1 gráfico de la señal con mayor confianza
+    """
+    from flask import jsonify
+    
+    all_signals = []  # [{system, symbol, timeframe, action, entry, sl, tp, confidence, ...}]
+    
+    # 1. Señales SPOT
+    try:
+        with app.test_client() as client:
+            r = client.get('/api/previous_signals')
+            if r.status_code == 200:
+                data = r.get_json() or {}
+                for _key, sig in (data.get('data') or {}).items():
+                    action = sig.get('decision', '')
+                    if action not in ('LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT'):
+                        continue
+                    all_signals.append({
+                        'system': 'SPOT',
+                        'symbol': sig.get('symbol'),
+                        'timeframe': sig.get('timeframe'),
+                        'action': action,
+                        'entry': sig.get('entry'),
+                        'stop_loss': sig.get('stop_loss'),
+                        'take_profit': sig.get('take_profit'),
+                        'confidence': max(0.0, min(100.0, float(sig.get('confidence') or 0))),
+                        'activa': sig.get('activa', 0),
+                        'current_price': sig.get('precio_actual'),
+                    })
+    except Exception as e:
+        print(f"⚠️ _telegram_test_all: error leyendo señales spot: {e}")
+    
+    # 2. Señales FUTURES
+    try:
+        with app.test_client() as client:
+            r = client.get('/api/futures/signals/previous?min_confidence=55')
+            if r.status_code == 200:
+                data = r.get_json() or {}
+                for sig in (data.get('signals') or []):
+                    if sig.get('action') not in ('LONG', 'SHORT'):
+                        continue
+                    all_signals.append({
+                        'system': 'FUTURES',
+                        'symbol': sig.get('symbol'),
+                        'timeframe': sig.get('timeframe'),
+                        'action': sig.get('action'),
+                        'entry': sig.get('entry'),
+                        'stop_loss': sig.get('stop_loss'),
+                        'take_profit': sig.get('take_profit'),
+                        'confidence': max(0.0, min(100.0, float(sig.get('confidence') or 0))),
+                        'leverage': sig.get('leverage'),
+                        'risk_reward': sig.get('risk_reward'),
+                        'activa': sig.get('activa', 0),
+                        'current_price': sig.get('current_price'),
+                    })
+    except Exception as e:
+        print(f"⚠️ _telegram_test_all: error leyendo señales futures: {e}")
+    
+    if not all_signals:
+        # Aunque no haya señales, enviamos mensaje informativo
+        msg = ("🔔 <b>Prueba Telegram</b>\n\n"
+               "No hay señales direccionales activas en la vela anterior.\n"
+               "El sistema está monitorizando el mercado.")
+        try:
+            expert_system.send_telegram_alert(msg, None)
+            return jsonify({
+                'success': True,
+                'message': 'Mensaje enviado (sin señales activas)',
+                'signals_count': 0
+            })
+        except Exception as e:
+            return jsonify({'success': False, 'error': f'Fallo enviando: {e}'}), 500
+    
+    # Ordenar por confianza descendente, luego por activas primero
+    all_signals.sort(key=lambda s: (-s.get('activa', 0), -s.get('confidence', 0)))
+    
+    # Iconos por acción
+    def _icon(action):
+        return {
+            'LONG': '🟢 LONG',
+            'COMPRA_SPOT': '🟢 COMPRA',
+            'SHORT': '🔴 SHORT',
+            'VENTA_SPOT': '🔴 VENTA',
+        }.get(action, action)
+    
+    # Construir mensaje
+    lines = [
+        '📡 <b>SEÑALES ACTIVAS - VELA ANTERIOR</b>',
+        f'📅 {datetime.now(bolivia_tz).strftime("%Y-%m-%d %H:%M")} (Bolivia)',
+        f'📊 Total: <b>{len(all_signals)}</b> señales',
+        '',
+        '━━━━━━━━━━━━━━━━━━━━━━━━'
+    ]
+    
+    # Agrupar por sistema
+    spot_signals = [s for s in all_signals if s['system'] == 'SPOT']
+    fut_signals = [s for s in all_signals if s['system'] == 'FUTURES']
+    
+    def _format_signal(sig, idx):
+        action_lbl = _icon(sig.get('action', ''))
+        activa_lbl = '🟢' if sig.get('activa') == 1 else '⚪'
+        symbol = sig.get('symbol', '?')
+        tf = sig.get('timeframe', '?')
+        entry = sig.get('entry') or 0
+        sl = sig.get('stop_loss') or 0
+        tp = sig.get('take_profit') or 0
+        conf = sig.get('confidence', 0)
+        current = sig.get('current_price') or 0
+        
+        sublines = [
+            f'{activa_lbl} <b>{idx}. {action_lbl}  {symbol} · {tf}</b>',
+            f'   💰 Entry: {entry:.4f}  |  Precio: {current:.4f}',
+            f'   🎯 TP: {tp:.4f}  |  🛑 SL: {sl:.4f}',
+            f'   📊 Confianza: {conf:.0f}%',
+        ]
+        if sig.get('leverage'):
+            sublines.append(f'   ⚡ Leverage: x{sig["leverage"]}  |  R/R: {sig.get("risk_reward", 0):.2f}')
+        return '\n'.join(sublines)
+    
+    if spot_signals:
+        lines.append('')
+        lines.append(f'💎 <b>SPOT ({len(spot_signals)})</b>')
+        for i, sig in enumerate(spot_signals, 1):
+            lines.append('')
+            lines.append(_format_signal(sig, i))
+    
+    if fut_signals:
+        lines.append('')
+        lines.append('━━━━━━━━━━━━━━━━━━━━━━━━')
+        lines.append(f'⚡ <b>FUTUROS ({len(fut_signals)})</b>')
+        for i, sig in enumerate(fut_signals, 1):
+            lines.append('')
+            lines.append(_format_signal(sig, i))
+    
+    lines.append('')
+    lines.append('━━━━━━━━━━━━━━━━━━━━━━━━')
+    lines.append('🤖 <i>Crypto Trader Analyst</i>')
+    
+    message = '\n'.join(lines)
+    
+    # Truncar si excede el límite de Telegram (~4096 chars)
+    if len(message) > 4000:
+        message = message[:3900] + '\n\n... <i>(mensaje truncado)</i>'
+    
+    # Imagen opcional: la señal top (mayor confianza)
+    image_bytes = None
+    if include_chart and all_signals:
+        try:
+            top_sig = all_signals[0]
+            analysis = expert_system.analyze_full_market(top_sig['symbol'], top_sig['timeframe'])
+            if analysis and analysis.get('success'):
+                top_indicators = expert_system.get_top_indicators_for_chart(analysis)
+                image_bytes = expert_system.generate_chart_image(
+                    top_sig['symbol'], top_sig['timeframe'], analysis, top_indicators
+                )
+        except Exception as e:
+            print(f"⚠️ No se pudo generar imagen del top: {e}")
+    
+    try:
+        success = expert_system.send_telegram_alert(message, image_bytes)
+        if success:
+            return jsonify({
+                'success': True,
+                'message': f'✅ {len(all_signals)} señales enviadas a Telegram',
+                'signals_count': len(all_signals),
+                'spot_count': len(spot_signals),
+                'futures_count': len(fut_signals),
+                'has_chart': image_bytes is not None
+            })
+        return jsonify({'success': False, 'error': 'Telegram rechazó el mensaje'}), 500
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Error enviando a Telegram: {e}'}), 500
+
+
 @app.route('/api/telegram/test', methods=['POST'])
 def api_telegram_test():
-    """Endpoint de prueba Telegram con TODOS los indicadores en la imagen"""
+    """
+    Endpoint de prueba Telegram.
+    
+    Modos:
+      - mode='all' (default): envía TODAS las señales activas de vela anterior
+        de spot + futures. Un mensaje resumido con todas las señales listadas.
+      - mode='single': comportamiento antiguo — envía análisis de UN par/TF.
+    
+    Payload:
+      { mode: 'all' | 'single',
+        symbol: 'BTC-USDT',  (solo si mode='single')
+        interval: '1D',      (solo si mode='single')
+        include_chart: true }
+    """
     try:
         if not request.is_json:
             return jsonify({'success': False, 'error': 'Content-Type debe ser application/json'}), 400
@@ -18659,9 +18856,16 @@ def api_telegram_test():
         if not data:
             return jsonify({'success': False, 'error': 'Cuerpo de solicitud vacío'}), 400
         
+        # Nuevo: modo por defecto es 'all' (todas las señales de vela anterior)
+        mode = data.get('mode', 'all')
+        include_chart = data.get('include_chart', True)
+        
+        if mode == 'all':
+            return _telegram_test_all_previous_signals(include_chart)
+        
+        # Modo 'single' (comportamiento anterior)
         symbol = data.get('symbol', 'BTC-USDT')
         interval = data.get('interval', '1D')
-        include_chart = data.get('include_chart', True)
         
         if symbol not in SYMBOLS:
             return jsonify({'success': False, 'error': f'Símbolo no válido: {symbol}'}), 400
@@ -18726,69 +18930,58 @@ def api_telegram_test():
 
 @app.route('/api/generate_report')
 def api_generate_report():
+    """
+    Genera reporte PDF de análisis con 3 párrafos + gráfico técnico.
+    
+    Estructura del PDF:
+      1. Cabecera con símbolo, timeframe, acción, confianza
+      2. Tabla resumen (entry, SL, TP, R/R, leverage)
+      3. Párrafo 1: Acción a tomar en cuenta
+      4. Párrafo 2: Indicadores que respaldan
+      5. Párrafo 3: Conclusión
+      6. Gráfico con velas + indicadores top que sustentan la señal
+    
+    Query params:
+      symbol   (default BTC-USDT)
+      interval (default 1D)
+    """
     symbol = request.args.get('symbol', 'BTC-USDT')
     interval = request.args.get('interval', '1D')
     
+    # Ejecutar análisis completo
     result = expert_system.analyze_full_market(symbol, interval)
     
-    if not result['success']:
+    if not result or not result.get('success'):
         return jsonify({'success': False, 'error': 'No se pudo generar el análisis'}), 400
     
-    report = f"""ANÁLISIS TÉCNICO PROFESIONAL
-==============================
-Par: {SYMBOLS[symbol]['name']}
-Temporalidad: {TIMEFRAMES[interval]['name']}
-Fecha: {datetime.now(bolivia_tz).strftime('%Y-%m-%d %H:%M:%S')} Hora Bolivia
-
-RECOMENDACIÓN: {result['decision']['action']}
-Confianza: {result['decision']['confidence']:.1f}%
-
-NIVELES DE OPERACIÓN:
-- Entrada: ${result['levels']['entry']:.2f}
-- Stop Loss: ${result['levels']['stop_loss']:.2f}
-- Take Profit: ${result['levels']['take_profit']:.2f}
-- Riesgo/Recompensa: 1:{result['levels']['risk_reward']}
-- Apalancamiento sugerido: {result['levels']['leverage']}x
-
-ANÁLISIS DE TENDENCIA:
-- Dirección: {result['trend']['direction'].upper()}
-- Fuerza: {result['trend']['strength']}
-- ADX: {result['trend']['adx']:.1f} 
-
-ANÁLISIS DE MOMENTUM:
-- Dirección: {result['momentum']['direction'].upper()}
-- RSI: {result['momentum']['indicators'].get('rsi', 0):.1f}
-- RSI Maverick: {result['momentum']['indicators'].get('rsi_maverick', 0):.2f}
-- Divergencias: {', '.join(result['momentum']['divergences']) if result['momentum']['divergences'] else 'Ninguna'}
-
-ANÁLISIS DE VOLATILIDAD:
-- Nivel: {result['volatility']['volatility_level']}
-- ATR %: {result['volatility']['atr_pct']:.2f}%
-- FTMaverick: {result['volatility']['ftm_zone']}
-- Operabilidad: {'SÍ' if result['volatility']['operability'] else 'NO'}
-
-ANÁLISIS DE VOLUMEN:
-- Participación: {result['volume']['volume_participation']}
-- Ratio Volumen: {result['volume']['volume_ratio']:.2f}x
-- Ballenas Compra: {'SÍ' if result['volume'].get('whale_buy', False) else 'NO'}
-- Ballenas Venta: {'SÍ' if result['volume'].get('whale_sell', False) else 'NO'}
-
-ESTRUCTURA DE PRECIO:
-- Precio Actual: ${result['current_price']:.2f}
-- Soportes Cercanos: {', '.join([f'${s:.2f}' for s in result['structure']['supports'][:3]]) if result['structure']['supports'] else 'N/A'}
-- Resistencias Cercanas: {', '.join([f'${r:.2f}' for r in result['structure']['resistances'][:3]]) if result['structure']['resistances'] else 'N/A'}
-- Patrones Detectados: {result['structure']['patterns']['count']}
-
-JUSTIFICACIÓN COMPLETA:
-{result['message']}
-
-==============================
-© Crypto Trader Analyst Pro - Sistema Experto de Trading
-"""
+    # Generar gráfico técnico (best-effort — si falla, el PDF sale sin gráfico)
+    chart_bytes = None
+    try:
+        top_indicators = expert_system.get_top_indicators_for_chart(result)
+        chart_bytes = expert_system.generate_chart_image(symbol, interval, result, top_indicators)
+    except Exception as e:
+        print(f"⚠️ generate_report: no se pudo generar el gráfico: {e}")
     
-    return report, 200, {
-        'Content-Type': 'text/plain; charset=utf-8',
-        'Content-Disposition': f'attachment; filename=analisis_{symbol}_{interval}_{datetime.now().strftime("%Y%m%d")}.txt'
+    # Generar PDF
+    try:
+        from pdf_report import generate_analysis_pdf
+        pdf_bytes = generate_analysis_pdf(result, chart_image_bytes=chart_bytes)
+    except ImportError:
+        # Fallback si reportlab no está instalado (no debería pasar en prod)
+        return jsonify({
+            'success': False,
+            'error': 'reportlab no está instalado. Instala con: pip install reportlab'
+        }), 500
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': f'Error generando PDF: {e}'}), 500
+    
+    filename = f'analisis_{symbol}_{interval}_{datetime.now().strftime("%Y%m%d_%H%M")}.pdf'
+    return pdf_bytes, 200, {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': f'attachment; filename={filename}',
+        'Content-Length': str(len(pdf_bytes)),
     }
 
 # === FUNCIÓN COMPLETA: api_run_scheduled ===
@@ -19708,6 +19901,290 @@ ultima_ejecucion = {
 # Control de mensajes enviados por día (persistente)
 mensajes_enviados_hoy = {}
 
+
+# ============================================================================
+# MONITOR DE ENTRIES — Alerta Telegram cuando precio toca entry de señal previa
+# ============================================================================
+# Reglas:
+# - Solo TFs útiles: 1h, 2h, 4h, 12h, 1D (los cortos generan ruido)
+# - Solo acciones direccionales: LONG, SHORT, COMPRA_SPOT, VENTA_SPOT
+# - Máximo 1 alerta por (símbolo, timeframe, timestamp_vela) — nunca duplica
+# - Tolerancia: precio toca entry si |precio - entry| / entry <= 0.15%
+
+MONITOR_ENTRY_TIMEFRAMES = ('1h', '2h', '4h', '12h', '1D')
+MONITOR_ENTRY_TOLERANCE_PCT = 0.15  # 0.15% de tolerancia para "tocar" entry
+MONITOR_CHECK_INTERVAL = 60         # segundos entre chequeos
+
+# Deduplicación: guarda (symbol, timeframe, candle_ts) -> timestamp de envío.
+# Se limpia entradas viejas (>7 días) para no crecer indefinidamente.
+_entry_alerts_sent = {}
+_entry_alerts_lock = threading.Lock()
+
+
+def _entry_alert_key(symbol, timeframe, candle_ts):
+    """Construye la clave única para deduplicación."""
+    return f"{symbol}|{timeframe}|{candle_ts}"
+
+
+def _entry_alert_already_sent(symbol, timeframe, candle_ts):
+    """¿Ya se envió alerta para esta señal/vela?"""
+    key = _entry_alert_key(symbol, timeframe, candle_ts)
+    with _entry_alerts_lock:
+        return key in _entry_alerts_sent
+
+
+def _entry_alert_mark_sent(symbol, timeframe, candle_ts):
+    """Marca la alerta como enviada."""
+    key = _entry_alert_key(symbol, timeframe, candle_ts)
+    with _entry_alerts_lock:
+        _entry_alerts_sent[key] = time.time()
+        # Limpiar entradas viejas (>7 días) para no crecer indefinidamente
+        if len(_entry_alerts_sent) > 500:
+            cutoff = time.time() - 7 * 86400
+            to_del = [k for k, v in _entry_alerts_sent.items() if v < cutoff]
+            for k in to_del:
+                _entry_alerts_sent.pop(k, None)
+
+
+def _price_touches_entry(current_price, entry, action):
+    """
+    Determina si el precio ha 'tocado' el entry.
+    
+    Para LONG/COMPRA_SPOT: alertamos cuando el precio actual está en zona entry
+      (dentro de tolerancia o ligeramente por debajo — mejor entrada).
+    Para SHORT/VENTA_SPOT: alertamos cuando está en entry o ligeramente por
+      encima.
+    
+    Retorna True si el precio está dentro de la tolerancia del entry.
+    """
+    if not entry or entry <= 0 or not current_price or current_price <= 0:
+        return False
+    try:
+        diff_pct = abs(current_price - entry) / entry * 100
+        return diff_pct <= MONITOR_ENTRY_TOLERANCE_PCT
+    except Exception:
+        return False
+
+
+def _build_entry_alert_message(signal, current_price):
+    """
+    Construye el mensaje de Telegram cuando el precio toca entry.
+    
+    signal: dict con symbol, timeframe, action, entry, stop_loss, take_profit,
+            confidence, message (justificación), leverage (opcional), 
+            risk_reward (opcional)
+    """
+    action = signal.get('action', '') or signal.get('decision', '')
+    symbol = signal.get('symbol', '?')
+    timeframe = signal.get('timeframe', '?')
+    entry = float(signal.get('entry') or 0)
+    sl = float(signal.get('stop_loss') or 0)
+    tp = float(signal.get('take_profit') or 0)
+    confidence = float(signal.get('confidence') or 0)
+    confidence = max(0.0, min(100.0, confidence))  # cap defensivo
+    leverage = signal.get('leverage')
+    rr = signal.get('risk_reward')
+    justification = signal.get('message', '') or signal.get('justification', '') or ''
+    
+    # Icono según acción
+    icon_map = {
+        'LONG': '🟢 LONG',
+        'COMPRA_SPOT': '🟢 COMPRA',
+        'SHORT': '🔴 SHORT',
+        'VENTA_SPOT': '🔴 VENTA',
+    }
+    action_label = icon_map.get(action, action)
+    
+    lines = [
+        '🚨 <b>ALERTA DE ENTRY TOCADO</b> 🚨',
+        '',
+        f'{action_label}  <b>{symbol}</b> · {timeframe}',
+        '',
+        f'💰 <b>Entry:</b> {entry:.4f}',
+        f'🎯 <b>Take Profit:</b> {tp:.4f}',
+        f'🛑 <b>Stop Loss:</b> {sl:.4f}',
+        f'📊 <b>Precio actual:</b> {current_price:.4f}',
+    ]
+    if leverage:
+        lines.append(f'⚡ <b>Apalancamiento:</b> x{leverage}')
+    if rr:
+        try:
+            lines.append(f'⚖️ <b>Risk/Reward:</b> {float(rr):.2f}')
+        except Exception:
+            pass
+    lines.append(f'🎯 <b>Confianza:</b> {confidence:.0f}%')
+    lines.append('')
+    lines.append('📝 <b>Justificación:</b>')
+    if justification:
+        # Truncar justificación a ~800 chars para no exceder límite Telegram
+        just_clean = justification.strip()
+        if len(just_clean) > 800:
+            just_clean = just_clean[:800] + '...'
+        lines.append(just_clean)
+    else:
+        lines.append('(no disponible)')
+    
+    return '\n'.join(lines)
+
+
+def _get_signals_for_entry_monitor():
+    """
+    Obtiene todas las señales activas (spot + futures) elegibles para monitor:
+    - TF en MONITOR_ENTRY_TIMEFRAMES
+    - Acción direccional (LONG, SHORT, COMPRA_SPOT, VENTA_SPOT)
+    - Debe incluir entry, tp, sl y candle_timestamp
+    
+    Retorna lista de dicts con formato uniforme.
+    """
+    signals = []
+    
+    # 1. Spot: pedir /api/previous_signals internamente (usa caché de 10 min)
+    try:
+        with app.test_client() as client:
+            r = client.get('/api/previous_signals')
+            if r.status_code == 200:
+                data = r.get_json() or {}
+                for _key, sig in (data.get('data') or {}).items():
+                    tf = sig.get('timeframe')
+                    if tf not in MONITOR_ENTRY_TIMEFRAMES:
+                        continue
+                    action = sig.get('decision', '')
+                    if action not in ('LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT'):
+                        continue
+                    # Solo alertar si la señal aún está activa
+                    if sig.get('activa') != 1:
+                        continue
+                    signals.append({
+                        'system': 'spot',
+                        'symbol': sig.get('symbol'),
+                        'timeframe': tf,
+                        'action': action,
+                        'entry': sig.get('entry'),
+                        'stop_loss': sig.get('stop_loss'),
+                        'take_profit': sig.get('take_profit'),
+                        'confidence': sig.get('confidence'),
+                        'current_price': sig.get('precio_actual'),
+                        'candle_timestamp': sig.get('timestamp'),  # spot usa timestamp del análisis
+                        'message': sig.get('message', ''),
+                    })
+    except Exception as e:
+        print(f"⚠️ monitor_entries: error leyendo señales spot: {e}")
+    
+    # 2. Futures: leer del caché global (ya alimentado por warm-up)
+    try:
+        with app.test_client() as client:
+            r = client.get('/api/futures/signals/previous?min_confidence=55')
+            if r.status_code == 200:
+                data = r.get_json() or {}
+                for sig in (data.get('signals') or []):
+                    tf = sig.get('timeframe')
+                    if tf not in MONITOR_ENTRY_TIMEFRAMES:
+                        continue
+                    if sig.get('action') not in ('LONG', 'SHORT'):
+                        continue
+                    if sig.get('activa') != 1:
+                        continue
+                    signals.append({
+                        'system': 'futures',
+                        'symbol': sig.get('symbol'),
+                        'timeframe': tf,
+                        'action': sig.get('action'),
+                        'entry': sig.get('entry'),
+                        'stop_loss': sig.get('stop_loss'),
+                        'take_profit': sig.get('take_profit'),
+                        'confidence': sig.get('confidence'),
+                        'current_price': sig.get('current_price'),
+                        'candle_timestamp': sig.get('candle_timestamp'),
+                        'leverage': sig.get('leverage'),
+                        'risk_reward': sig.get('risk_reward'),
+                        'message': '',  # futures no incluye justificación en este payload
+                    })
+    except Exception as e:
+        print(f"⚠️ monitor_entries: error leyendo señales futures: {e}")
+    
+    return signals
+
+
+def monitor_entries_loop():
+    """
+    Bucle principal del monitor de entries.
+    Se ejecuta indefinidamente en un thread daemon.
+    Cada MONITOR_CHECK_INTERVAL segundos:
+      1. Obtiene señales activas elegibles (spot + futures)
+      2. Para cada una, verifica si el precio actual "toca" el entry
+      3. Si toca Y no se envió antes para esta vela → envía alerta Telegram
+    """
+    print("=" * 60)
+    print("🔔 MONITOR DE ENTRIES iniciado")
+    print(f"   TFs monitorizadas: {', '.join(MONITOR_ENTRY_TIMEFRAMES)}")
+    print(f"   Tolerancia: ±{MONITOR_ENTRY_TOLERANCE_PCT}%")
+    print(f"   Chequeo cada: {MONITOR_CHECK_INTERVAL}s")
+    print("=" * 60)
+    
+    # Esperar 30s inicial para que el warm-up de futuros termine de llenar caché
+    time.sleep(30)
+    
+    while True:
+        try:
+            signals = _get_signals_for_entry_monitor()
+            checked = 0
+            alerts_sent = 0
+            
+            for sig in signals:
+                checked += 1
+                symbol = sig.get('symbol')
+                tf = sig.get('timeframe')
+                candle_ts = sig.get('candle_timestamp') or 'unknown'
+                entry = sig.get('entry')
+                current = sig.get('current_price')
+                
+                if not symbol or not tf or entry is None or current is None:
+                    continue
+                
+                # ¿Ya enviamos alerta para esta señal/vela?
+                if _entry_alert_already_sent(symbol, tf, candle_ts):
+                    continue
+                
+                # ¿El precio actual toca el entry?
+                if not _price_touches_entry(current, entry, sig.get('action')):
+                    continue
+                
+                # DISPARAR ALERTA
+                try:
+                    message = _build_entry_alert_message(sig, current)
+                    
+                    # Intentar generar imagen del análisis (opcional, best-effort)
+                    image_bytes = None
+                    try:
+                        # Reanalizar para tener capas frescas para el gráfico
+                        analysis = expert_system.analyze_full_market(symbol, tf)
+                        if analysis and analysis.get('success'):
+                            top_indicators = expert_system.get_top_indicators_for_chart(analysis)
+                            image_bytes = expert_system.generate_chart_image(
+                                symbol, tf, analysis, top_indicators
+                            )
+                    except Exception as chart_err:
+                        print(f"   ⚠️ monitor_entries: no se pudo generar imagen: {chart_err}")
+                    
+                    # Enviar
+                    expert_system.send_telegram_alert(message, image_bytes)
+                    _entry_alert_mark_sent(symbol, tf, candle_ts)
+                    alerts_sent += 1
+                    print(f"   🔔 Alerta ENTRY enviada: {sig.get('action')} {symbol} {tf} @ {current:.4f} (entry {entry:.4f})")
+                except Exception as send_err:
+                    print(f"   ⚠️ monitor_entries: fallo enviando alerta: {send_err}")
+            
+            if checked > 0:
+                print(f"🔍 monitor_entries: revisadas {checked} señales, {alerts_sent} alertas enviadas")
+        
+        except Exception as loop_err:
+            print(f"❌ monitor_entries: excepción en loop: {loop_err}")
+            import traceback
+            traceback.print_exc()
+        
+        time.sleep(MONITOR_CHECK_INTERVAL)
+
+
 def verificar_y_ejecutar():
     """
     Bucle principal que verifica horarios CADA MINUTO
@@ -20006,12 +20483,85 @@ else:
 
 
 # ============================================================================
-# INICIALIZACIÓN (REEMPLAZA TODO LO QUE TENÍAS AL FINAL)
+# ARRANQUE DE THREADS BACKGROUND (fuera de __main__ para que corra bajo Gunicorn)
+# ============================================================================
+# CONTEXTO: Render corre la app con `gunicorn app:app`. Esto importa el módulo
+# pero NO ejecuta `if __name__ == '__main__'`. Por eso los threads que se
+# arrancaban ahí (verificar_y_ejecutar, monitor_entries) nunca corrían en
+# producción y las tablas del ReviewTrader quedaban vacías + no se enviaban
+# alertas de Telegram.
+#
+# SOLUCIÓN: arrancar los threads aquí, al importar el módulo, con guard
+# anti-duplicado (por si Gunicorn corre con múltiples workers).
+_BACKGROUND_THREADS_STARTED = False
+_BACKGROUND_LOCK = threading.Lock()
+
+
+def _start_background_threads():
+    """
+    Arranca los threads de background del sistema:
+    - verificar_y_ejecutar: análisis programado por ventana horaria + review diario
+    - monitor_entries: alertas Telegram cuando precio toca entry de señal previa
+    
+    Idempotente: si ya se arrancaron, no hace nada.
+    Se desactiva con la variable de entorno DISABLE_SCHEDULER=1 (para tests).
+    """
+    global _BACKGROUND_THREADS_STARTED
+    
+    if os.environ.get('DISABLE_SCHEDULER'):
+        print("⏭️ Scheduler DESHABILITADO por variable DISABLE_SCHEDULER")
+        return
+    
+    with _BACKGROUND_LOCK:
+        if _BACKGROUND_THREADS_STARTED:
+            return
+        _BACKGROUND_THREADS_STARTED = True
+    
+    print("\n" + "=" * 60)
+    print("🚀 ARRANCANDO THREADS BACKGROUND (compatible con Gunicorn)")
+    print("=" * 60)
+    
+    # 1. Verificador de horarios (dispara análisis + review diario a las 20:00)
+    try:
+        t1 = threading.Thread(target=verificar_y_ejecutar, name='verificar-horarios', daemon=True)
+        t1.start()
+        print("✅ Thread verificar_y_ejecutar iniciado (revisa cada 60s)")
+    except Exception as e:
+        print(f"⚠️ Error iniciando verificar_y_ejecutar: {e}")
+    
+    # 2. Monitor de entries (alerta Telegram cuando precio toca entry)
+    try:
+        t2 = threading.Thread(target=monitor_entries_loop, name='monitor-entries', daemon=True)
+        t2.start()
+        print("✅ Thread monitor_entries iniciado (revisa cada 60s)")
+    except Exception as e:
+        print(f"⚠️ Error iniciando monitor_entries: {e}")
+    
+    print("=" * 60 + "\n")
+
+
+# NOTA: la llamada real a _start_background_threads() se hace más abajo,
+# DESPUÉS de que verificar_y_ejecutar y monitor_entries_loop estén definidos.
+
+
+# ============================================================================
+# ARRANQUE AUTOMÁTICO DE THREADS BACKGROUND AL IMPORTAR EL MÓDULO
+# ============================================================================
+# Ahora que verificar_y_ejecutar y monitor_entries_loop están definidos,
+# los arrancamos. Esto ocurre TANTO bajo Gunicorn (importa app) COMO en dev.
+try:
+    _start_background_threads()
+except Exception as _start_err:
+    print(f"⚠️ Error arrancando threads background: {_start_err}")
+
+
+# ============================================================================
+# INICIALIZACIÓN (bloque __main__ solo para desarrollo local)
 # ============================================================================
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("🚀 CRYPTO TRADER ANALYST PRO - INICIANDO")
+    print("🚀 CRYPTO TRADER ANALYST PRO - INICIANDO (modo dev)")
     print("=" * 60)
     
     # Verificar Telegram
@@ -20025,13 +20575,8 @@ if __name__ == '__main__':
     else:
         print("❌ Telegram no configurado")
     
-    # Iniciar verificador de horarios en hilo SEPARADO
-    print("\n🕐 Iniciando verificador de horarios...")
-    verificador_thread = threading.Thread(target=verificar_y_ejecutar, daemon=True)
-    verificador_thread.start()
-    print("✅ Verificador iniciado (revisa cada 30 segundos)")
-    
-    # (El warm-up de futuros ya se ejecutó automáticamente al importar el módulo)
+    # NOTA: los threads background ya se arrancan al importar el módulo
+    # (ver llamada a _start_background_threads() más abajo).
     
     # Iniciar Flask
     print("\n🌐 Iniciando servidor Flask...")

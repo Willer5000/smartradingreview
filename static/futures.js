@@ -5,6 +5,14 @@
 
 console.log('🚀 futures.js cargado - modo Futuros activo');
 
+// Helper global: nunca mostrar confianza > 100% (defensa contra datos viejos).
+function fmtConfidence(c) {
+    const n = Number(c) || 0;
+    const capped = Math.max(0, Math.min(100, n));
+    return capped.toFixed(0);
+}
+window.fmtConfidence = fmtConfidence;
+
 
 // ============================================================================
 // UTILIDADES
@@ -322,7 +330,7 @@ window.updateActiveSignals = function() {
                                 <strong>${symbolName}</strong>
                                 <span class="badge bg-dark ms-1">${sig.timeframe}</span>
                             </div>
-                            <span class="badge bg-warning text-dark">${sig.confidence.toFixed(0)}%</span>
+                            <span class="badge bg-warning text-dark">${fmtConfidence(sig.confidence)}%</span>
                         </div>
                         <!-- Fila 2: leverage + R/R + ROI -->
                         <div class="mt-2 d-flex justify-content-between align-items-center" style="font-size: 0.75rem;">
@@ -464,7 +472,7 @@ window.updatePreviousSignals = function() {
                             </div>
                             <div>
                                 ${statusBadge}
-                                <span class="badge bg-secondary ms-1">${sig.confidence.toFixed(0)}%</span>
+                                <span class="badge bg-secondary ms-1">${fmtConfidence(sig.confidence)}%</span>
                             </div>
                         </div>
                         <!-- Fila 2 -->
@@ -547,7 +555,7 @@ window.showFuturesPrevJustif = function(sig) {
                     </span>
                     <div>
                         <span class="badge bg-dark d-block mb-1">${symbolName} · ${sig.timeframe}</span>
-                        <span class="badge bg-secondary">Confianza: ${sig.confidence.toFixed(0)}%</span>
+                        <span class="badge bg-secondary">Confianza: ${fmtConfidence(sig.confidence)}%</span>
                     </div>
                 </div>
                 ${estadoHTML}

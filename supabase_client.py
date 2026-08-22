@@ -242,13 +242,18 @@ class SupabaseClient:
         try:
             normalized_action = self.normalize_action(signal_data.get('action', ''))
             
+            # Cap defensivo: la confianza NUNCA debe superar 100% estadísticamente.
+            # Aunque el Moderador ahora capa correctamente, blindamos también aquí.
+            _raw_conf = float(signal_data.get('confidence', 0))
+            _capped_conf = max(0.0, min(100.0, _raw_conf))
+            
             payload = {
                 'symbol': signal_data.get('symbol'),
                 'timeframe': signal_data.get('timeframe'),
                 'system_type': signal_data.get('system_type', 'spot'),
                 'action_original': signal_data.get('action'),
                 'action_normalized': normalized_action,
-                'confidence': float(signal_data.get('confidence', 0)),
+                'confidence': _capped_conf,
                 'entry_price': float(signal_data.get('entry', 0)),
                 'stop_loss': float(signal_data.get('stop_loss', 0)),
                 'take_profit': float(signal_data.get('take_profit', 0)),

@@ -5,6 +5,15 @@ let currentAnalysis = null;
 let currentSymbol = 'BTC-USDT';
 let currentInterval = '1D';
 
+// Helper global: nunca mostrar confianza > 100% (defensa contra datos viejos).
+// Si futures.js ya lo definió, no lo sobreescribe.
+if (typeof window.fmtConfidence !== 'function') {
+    window.fmtConfidence = function(c) {
+        const n = Number(c) || 0;
+        return Math.max(0, Math.min(100, n)).toFixed(0);
+    };
+}
+
 // ============================================================================
 // HELPER UNIVERSAL PARA FETCH (Spot o Futuros según window.IS_FUTURES_PAGE)
 // ============================================================================
@@ -5273,7 +5282,7 @@ window.updateRecommendation = function(data) {
                 <span class="badge bg-${badgeColor} p-3 me-3" style="font-size: 1.2rem;">
                     ${icon} ${action.replace('_', ' ')}
                 </span>
-                <span class="badge bg-dark p-2">Confianza: ${confidence.toFixed(0)}%</span>
+                <span class="badge bg-dark p-2">Confianza: ${fmtConfidence(confidence)}%</span>
             </div>
             <div class="analysis-text p-3 bg-dark rounded-3">${messageText.replace(/\n/g, '<br>')}</div>
     `;
@@ -5330,7 +5339,7 @@ function updateInstantRecommendation(data) {
     if (badge) badge.innerHTML = `<span class="badge ${badgeClass}">${badgeText}</span>`;
     if (actionEl) actionEl.textContent = action.replace('_', ' ');
     if (symbolEl) symbolEl.textContent = data.symbol?.replace('-', '/') || 'BTC/USDT';
-    if (confidenceEl) confidenceEl.textContent = `Confianza: ${confidence.toFixed(0)}%`;
+    if (confidenceEl) confidenceEl.textContent = `Confianza: ${fmtConfidence(confidence)}%`;
     if (entryEl) entryEl.textContent = `$${data.levels?.entry?.toFixed(2) || '0.00'}`;
     if (slEl) slEl.textContent = `$${data.levels?.stop_loss?.toFixed(2) || '0.00'}`;
     if (tpEl) tpEl.textContent = `$${data.levels?.take_profit?.toFixed(2) || '0.00'}`;
@@ -5517,7 +5526,7 @@ window.updateActiveSignals = function updateActiveSignals() {
                             <span class="badge bg-${signal.color} me-2">${signal.icon}</span>
                             <strong>${signal.action.replace('_', ' ')}</strong>
                         </div>
-                        <span class="badge bg-dark">${signal.confidence.toFixed(0)}%</span>
+                        <span class="badge bg-dark">${fmtConfidence(signal.confidence)}%</span>
                     </div>
                     <div class="d-flex justify-content-between mt-1">
                         <small class="text-muted">${symbolName} ${timeframeName}</small>
@@ -6288,7 +6297,7 @@ function sendTelegramTest() {
 function downloadAnalysisReport() {
     const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
     const interval = document.getElementById('interval-select')?.value || '1D';
-    showToast('📥 Generando reporte...', 'info');
+    showToast('📥 Generando reporte PDF... (puede tardar ~5s)', 'info');
     
     fetch(`/api/generate_report?symbol=${symbol}&interval=${interval}`)
         .then(response => {
@@ -6299,10 +6308,10 @@ function downloadAnalysisReport() {
             const url = window.URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `analisis_${symbol}_${interval}_${new Date().toISOString().slice(0,10)}.txt`;
+            a.download = `analisis_${symbol}_${interval}_${new Date().toISOString().slice(0,10)}.pdf`;
             a.click();
             window.URL.revokeObjectURL(url);
-            showToast('✅ Reporte descargado', 'success');
+            showToast('✅ Reporte PDF descargado', 'success');
         })
         .catch(error => {
             console.error('Error:', error);
