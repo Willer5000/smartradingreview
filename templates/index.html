@@ -193,29 +193,23 @@
                      tienen más confianza estadística. Se actualizan cada 5 min. -->
                 <div class="d-flex justify-content-end align-items-center gap-2 flex-wrap">
                     <span class="text-muted small">
-                        <i class="fas fa-brain me-1 text-info"></i>Rendimiento del sistema:
+                        <i class="fas fa-brain me-1 text-info"></i>Rendimiento de señales del frontend:
                     </span>
                     <span id="header-kpi-winrate" 
                           class="badge bg-secondary" 
-                          title="Win rate real: TP / (TP + SL). >40% con RR 1:1.5 es rentable."
+                          title="Win rate de las señales visibles ahora (spot + futuros). TP / (TP + SL) sobre las resueltas."
                           data-bs-toggle="tooltip">
                         Win Rate: <b>--</b>
                     </span>
                     <span id="header-kpi-pnl" 
                           class="badge bg-secondary"
-                          title="PnL total acumulado en % (últimos 90 días). Suma de todas las operaciones cerradas."
+                          title="PnL acumulado en % de las señales visibles ahora que ya se resolvieron (TP o SL)."
                           data-bs-toggle="tooltip">
                         PnL: <b>--</b>
                     </span>
-                    <span id="header-kpi-pf" 
-                          class="badge bg-secondary"
-                          title="Profit Factor: ganancia total / pérdida total. >1 = rentable, >1.5 = sólido."
-                          data-bs-toggle="tooltip">
-                        PF: <b>--</b>
-                    </span>
                     <span id="header-kpi-resolved" 
                           class="badge bg-dark text-muted"
-                          title="Operaciones resueltas (TP + SL) en los últimos 90 días."
+                          title="Señales resueltas / señales visibles totales en el frontend (spot + futuros). Para métricas históricas amplias ver la pestaña Análisis del Sistema."
                           data-bs-toggle="tooltip">
                         <b>--</b> ops
                     </span>
@@ -2307,19 +2301,25 @@
                     const pnlPct = Number(d.pnl_total_pct) || 0;
                     const resolved = Number(d.resolved) || 0;
                     const active = Number(d.active) || 0;
-                    // v22: profit factor no aplica sobre pocas muestras; se calcula
-                    // como pnl_total_pct / |max_dd|. Como no tenemos DD aquí, usamos
-                    // 1.0 como neutral (verde solo si winRate>=55).
-                    const pf = winRate >= 55 ? 1.5 : (winRate >= 40 ? 1.0 : 0.5);
+                    const totalSpot = Number(d.total_spot) || 0;
+                    const totalFut = Number(d.total_futures) || 0;
+                    const total = Number(d.total) || 0;
                     
                     // ============ Win Rate ============
+                    // v22.1: solo colorear si hay muestras suficientes (>=5).
+                    // Con <5 resueltas, mostrar en gris para no engañar al usuario.
                     const wrEl = document.getElementById('header-kpi-winrate');
                     if (wrEl) {
                         wrEl.innerHTML = `Win Rate: <b>${winRate.toFixed(1)}%</b>`;
-                        let cls = 'bg-danger';    // <40% pierde con RR 1:1.5
-                        if (winRate >= 55) cls = 'bg-success';
-                        else if (winRate >= 40) cls = 'bg-warning text-dark';
+                        let cls = 'bg-secondary';  // <5 muestras: sin color
+                        if (resolved >= 5) {
+                            cls = winRate >= 55 ? 'bg-success' :
+                                  winRate >= 40 ? 'bg-warning text-dark' : 'bg-danger';
+                        }
                         wrEl.className = 'badge ' + cls;
+                        wrEl.title = resolved < 5
+                            ? `${resolved} señales resueltas — muestra insuficiente para conclusiones.`
+                            : `Win rate real: ${resolved} señales resueltas del frontend (spot + futuros).`;
                     }
                     
                     // ============ PnL total ============
@@ -2327,44 +2327,29 @@
                     if (pnlEl) {
                         const sign = pnlPct >= 0 ? '+' : '';
                         pnlEl.innerHTML = `PnL: <b>${sign}${pnlPct.toFixed(2)}%</b>`;
-                        let cls = 'bg-danger';
-                        if (pnlPct >= 5) cls = 'bg-success';
-                        else if (pnlPct >= 0) cls = 'bg-warning text-dark';
+                        let cls = 'bg-secondary';
+                        if (resolved >= 5) {
+                            cls = pnlPct >= 5 ? 'bg-success' :
+                                  pnlPct >= 0 ? 'bg-warning text-dark' : 'bg-danger';
+                        }
                         pnlEl.className = 'badge ' + cls;
                     }
                     
-                    // ============ Profit Factor ============
-                    const pfEl = document.getElementById('header-kpi-pf');
-                    if (pfEl) {
-                        pfEl.innerHTML = `PF: <b>${pf.toFixed(2)}</b>`;
-                        let cls = 'bg-danger';
-                        if (pf >= 1.5) cls = 'bg-success';
-                        else if (pf >= 1.0) cls = 'bg-warning text-dark';
-                        pfEl.className = 'badge ' + cls;
-                    }
-                    
-                    // ============ Operaciones resueltas (contexto) ============
-                    // v22: 'resolved' aquí = señales del frontend YA resueltas (TP+SL).
-                    // Cambia también el texto: 'X/Y ops' donde Y = total de señales
-                    // visibles en el frontend, para que quede claro que es un subset.
+                    // ============ Ops (resueltas / totales visibles) ============
+                    // Formato: 'X/Y ops' donde Y = total visible en el frontend
+                    // (spot + futuros). El tooltip explica el desglose.
                     const resEl = document.getElementById('header-kpi-resolved');
                     if (resEl) {
-                        const total = Number(d.total) || 0;
                         resEl.innerHTML = `<b>${resolved}/${total}</b> ops`;
-                        if (resolved < 5) {
-                            resEl.className = 'badge bg-secondary';
-                            resEl.title = `Solo ${resolved} de ${total} señales del frontend están resueltas. La estadística se afinará conforme el sistema evalúe más.`;
-                        } else {
-                            resEl.className = 'badge bg-dark text-muted';
-                            resEl.title = `${resolved} de ${total} señales del frontend resueltas (TP/SL) + ${active} activas.`;
-                        }
+                        resEl.className = resolved < 5 ? 'badge bg-secondary' : 'badge bg-dark text-muted';
+                        resEl.title = `${resolved} resueltas de ${total} señales visibles (${totalSpot} spot + ${totalFut} futuros) + ${active} activas. Para el histórico completo ver Análisis del Sistema.`;
                     }
                     
-                    // Log de debug — no afecta al usuario final
+                    // Log de debug
                     if (resolved >= 5) {
-                        console.log(`📊 KPIs frontend: WR ${winRate.toFixed(1)}% · PnL ${pnlPct.toFixed(2)}% · ${resolved} resueltas · ${active} activas`);
+                        console.log(`📊 KPIs frontend: WR ${winRate.toFixed(1)}% · PnL ${pnlPct.toFixed(2)}% · ${resolved}/${total} (${totalSpot}spot+${totalFut}fut) · ${active} activas`);
                     } else {
-                        console.log(`⏳ KPIs frontend: solo ${resolved} señales resueltas de ${d.total || 0}. Esperando evaluaciones.`);
+                        console.log(`⏳ KPIs frontend: ${resolved}/${total} resueltas (${totalSpot}spot+${totalFut}fut). Muestra insuficiente aún.`);
                     }
                 })
                 .catch(err => {

@@ -19688,44 +19688,148 @@ def api_previous_signals():
 
 
 # ============================================================================
-# v22: KPIs del HEADER — solo sobre señales de la vela anterior (frontend)
+# v22.1: KPIs del HEADER — señales visibles en el frontend (spot + futuros)
 # ============================================================================
+def _collect_frontend_signals():
+    """
+    Retorna la lista UNIFICADA de señales que el usuario ve actualmente en el
+    frontend. Combina:
+      - Caché de previous_signals (SPOT: 3 pares × 4 TFs)
+      - Caché de _futures_analysis_cache (FUTUROS: 5 pares × 6 TFs)
+    
+    Solo incluye señales de trading (LONG/SHORT/COMPRA_SPOT/VENTA_SPOT). Se
+    devuelve una lista de dicts con formato normalizado:
+      {'symbol', 'timeframe', 'action', 'confidence', 'entry', 'stop_loss',
+       'take_profit', 'current_price', 'candle_timestamp', 'activa', 'system'}
+    
+    system: 'spot' o 'futures'
+    
+    NO consulta Supabase — solo caché en memoria. Rápido (<10ms).
+    """
+    unified = []
+    
+    # ============ SPOT ============
+    spot_cache = getattr(expert_system, 'prev_signals_cache', None) or {}
+    for clave, sig in spot_cache.items():
+        try:
+            unified.append({
+                'symbol': sig.get('symbol'),
+                'timeframe': sig.get('timeframe'),
+                'action': sig.get('decision'),  # spot usa 'decision'
+                'confidence': float(sig.get('confidence', 0)),
+                'entry': sig.get('entry'),
+                'stop_loss': sig.get('stop_loss'),
+                'take_profit': sig.get('take_profit'),
+                'current_price': sig.get('precio_actual'),
+                'candle_timestamp': sig.get('candle_timestamp'),
+                'activa': int(sig.get('activa', 0) or 0),
+                'system': 'spot',
+            })
+        except Exception as e:
+            print(f"   ⚠️ _collect_frontend_signals spot skip {clave}: {e}")
+            continue
+    
+    # ============ FUTUROS ============
+    # Ojo: los mismos filtros que api_futures_signals_previous aplica.
+    try:
+        cache = _get_or_refresh_futures_analysis()
+        for (symbol, tf), result in (cache.get('analysis') or {}).items():
+            if not result or not result.get('success'):
+                continue
+            decision = result.get('decision', {}) or {}
+            action = decision.get('action', 'NO_OPERAR')
+            if action not in ('LONG', 'SHORT'):
+                continue
+            confidence = float(decision.get('confidence', 0) or 0)
+            if confidence < 55:  # mismo min_conf default que /api/futures/signals/previous
+                continue
+            
+            levels = result.get('levels', {}) or {}
+            leverage = int(levels.get('leverage', 1) or 1)
+            try:
+                from futures_system import _leverage_in_valid_range
+                if not _leverage_in_valid_range(leverage, tf):
+                    continue
+            except Exception:
+                pass
+            
+            current_price = float(result.get('current_price', 0) or 0)
+            sl_price = float(levels.get('stop_loss', 0) or 0)
+            tp_price = float(levels.get('take_profit', 0) or 0)
+            
+            # ¿Sigue activa?
+            activa = 1
+            if action == 'LONG' and sl_price > 0:
+                if current_price <= sl_price:
+                    activa = 0
+                elif tp_price > 0 and current_price >= tp_price:
+                    activa = 0
+            elif action == 'SHORT' and sl_price > 0:
+                if current_price >= sl_price:
+                    activa = 0
+                elif tp_price > 0 and current_price <= tp_price:
+                    activa = 0
+            
+            # candle_timestamp — puede ser None porque df fue eliminado del caché.
+            # Fallback: usar timestamp del análisis (menos preciso pero funcional).
+            candle_ts = None
+            df_dict = result.get('df', {}) or {}
+            times = df_dict.get('time', []) if isinstance(df_dict, dict) else []
+            if len(times) >= 2:
+                candle_ts = str(times[-2])
+            
+            unified.append({
+                'symbol': symbol,
+                'timeframe': tf,
+                'action': action,
+                'confidence': confidence,
+                'entry': levels.get('entry'),
+                'stop_loss': sl_price,
+                'take_profit': tp_price,
+                'current_price': current_price,
+                'candle_timestamp': candle_ts,
+                'activa': activa,
+                'system': 'futures',
+            })
+    except Exception as e:
+        print(f"   ⚠️ _collect_frontend_signals futures error: {e}")
+    
+    return unified
+
+
 @app.route('/api/kpis/frontend_signals')
 def api_kpis_frontend_signals():
     """
-    Retorna win_rate + rentabilidad ACUMULADA de las mismas señales que el
-    usuario ve en el frontend (las de la vela anterior por par/TF).
+    v22.1: KPIs del HEADER — refleja EXACTAMENTE lo que el usuario ve en el
+    frontend (spot + futuros unificados). No hay base de datos separada; la
+    fuente son los cachés en memoria.
     
-    Antes: el header consultaba /api/analytics/summary?days_back=90 → mostraba
-    métricas de todo el histórico (90 días), lo que no refleja "las señales
-    que estoy viendo ahora". Confundía al usuario.
+    Estadísticas: cruza cada señal (symbol, timeframe, candle_ts) contra
+    Supabase para obtener su outcome (tp_hit / sl_hit + pnl_pct). Todo lo que
+    no está resuelto cuenta como pending.
     
-    Ahora: cruza el caché de previous_signals (lo que se ve) contra Supabase
-    para obtener el outcome (tp_hit/sl_hit + pnl_pct) de cada una. Si la señal
-    aún no está resuelta, cuenta como 'pending'.
-    
-    Retorna:
-      - total: cuántas señales hay en el frontend
-      - resolved: cuántas ya tienen outcome
-      - tp_hit / sl_hit / pending
-      - win_rate = tp / (tp + sl)
-      - pnl_total_pct = suma de pnl_pct de las resueltas
-      - active: cuántas siguen vigentes (activa=1 en el frontend)
+    IMPORTANTE: las señales OCULTAS (TFs cortas 5m/15m/30m/1h/2h en spot,
+    pares que no están en la parrilla base, etc.) se siguen guardando en
+    Supabase para aprendizaje, pero NO cuentan aquí. Para ver métricas de
+    TODAS las señales (visibles + ocultas) usa la pestaña 'Análisis del
+    Sistema' que consume /api/analytics/summary.
     """
     try:
-        cache_data = getattr(expert_system, 'prev_signals_cache', None) or {}
-        if not cache_data:
+        signals = _collect_frontend_signals()
+        total = len(signals)
+        
+        if total == 0:
             return jsonify({
                 'success': True,
                 'data': {
-                    'total': 0, 'resolved': 0, 'tp_hit': 0, 'sl_hit': 0,
-                    'pending': 0, 'active': 0, 'win_rate': 0.0,
-                    'pnl_total_pct': 0.0,
-                    'note': 'Caché de señales aún no calculado — recarga en 30s.'
+                    'total': 0, 'total_spot': 0, 'total_futures': 0,
+                    'resolved': 0, 'tp_hit': 0, 'sl_hit': 0,
+                    'pending': 0, 'active': 0,
+                    'win_rate': 0.0, 'pnl_total_pct': 0.0,
+                    'note': 'Caché de señales aún no calculado — recarga en 30-60s.'
                 }
             })
         
-        # Buscar outcome en Supabase para cada (symbol, tf, candle_ts)
         try:
             from supabase_client import get_supabase_client
             db = get_supabase_client()
@@ -19735,10 +19839,11 @@ def api_kpis_frontend_signals():
         
         tp_hit = sl_hit = pending = active = 0
         pnl_sum = 0.0
-        total = len(cache_data)
+        total_spot = sum(1 for s in signals if s['system'] == 'spot')
+        total_futures = total - total_spot
         
-        for clave, sig in cache_data.items():
-            if sig.get('activa') == 1:
+        for sig in signals:
+            if sig['activa'] == 1:
                 active += 1
             
             if db is None:
@@ -19746,36 +19851,27 @@ def api_kpis_frontend_signals():
                 continue
             
             try:
-                symbol = sig.get('symbol')
-                tf = sig.get('timeframe')
-                candle_ts = sig.get('candle_timestamp')
-                if not (symbol and tf and candle_ts):
-                    pending += 1
-                    continue
+                symbol = sig['symbol']
+                tf = sig['timeframe']
                 
-                # Buscar señal en Supabase por (symbol, timeframe) con
-                # timestamp cercano a la vela anterior (±2h de tolerancia).
+                # Buscar la última señal (symbol, tf) que ya tenga outcome.
+                # No filtramos por candle_timestamp porque puede haber pequeñas
+                # diferencias de formato entre el caché y Supabase. La señal más
+                # reciente resuelta para ese (symbol, tf) es lo más honesto.
                 r = (db.client.table('signals')
                      .select('id, status')
                      .eq('symbol', symbol)
                      .eq('timeframe', tf)
+                     .in_('status', ['tp_hit', 'sl_hit'])
                      .order('timestamp', desc=True)
-                     .limit(5)
+                     .limit(1)
                      .execute())
-                
                 rows = r.data if r and r.data else []
-                found = None
-                for row in rows:
-                    if row.get('status') in ('tp_hit', 'sl_hit'):
-                        found = row
-                        break
-                
-                if not found:
+                if not rows:
                     pending += 1
                     continue
                 
-                # Traer pnl_pct desde signal_results
-                sig_id = found['id']
+                sig_id = rows[0]['id']
                 rr = (db.client.table('signal_results')
                       .select('status, pnl_pct')
                       .eq('signal_id', sig_id)
@@ -19795,11 +19891,11 @@ def api_kpis_frontend_signals():
                     pnl_sum += pnl
                 elif status == 'sl_hit':
                     sl_hit += 1
-                    pnl_sum += pnl  # pnl_pct suele venir negativo aquí
+                    pnl_sum += pnl  # típicamente negativo
                 else:
                     pending += 1
             except Exception as e:
-                print(f"   ⚠️ KPIs frontend: error consultando {clave}: {e}")
+                print(f"   ⚠️ KPIs frontend: error {sig.get('symbol')} {sig.get('timeframe')}: {e}")
                 pending += 1
                 continue
         
@@ -19810,6 +19906,8 @@ def api_kpis_frontend_signals():
             'success': True,
             'data': {
                 'total': total,
+                'total_spot': total_spot,
+                'total_futures': total_futures,
                 'resolved': resolved,
                 'tp_hit': tp_hit,
                 'sl_hit': sl_hit,
@@ -19817,7 +19915,7 @@ def api_kpis_frontend_signals():
                 'active': active,
                 'win_rate': round(win_rate, 2),
                 'pnl_total_pct': round(pnl_sum, 3),
-                'source': 'frontend_signals_last_candle'
+                'source': 'frontend_signals_spot+futures'
             }
         })
     except Exception as e:
