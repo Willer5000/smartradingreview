@@ -6262,37 +6262,7 @@ function actualizarTextosPorDefecto() {
     document.getElementById('fng-trend-30d').textContent = '--';
     document.getElementById('fng-interpretation').textContent = 'Esperando datos...';
 }
-// ============ FUNCIONES DE TELEGRAM ============
-function sendTelegramTest() {
-    const symbol = document.getElementById('telegram-symbol')?.value || 'BTC-USDT';
-    const interval = document.getElementById('telegram-interval')?.value || '1D';
-    const includeChart = document.getElementById('include-chart')?.checked || true;
-    
-    showToast('📤 Enviando análisis a Telegram...', 'info');
-    
-    fetch('/api/telegram/test', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({symbol, interval, include_chart: includeChart})
-    })
-    .then(response => {
-        if (!response.ok) throw new Error(`Error HTTP ${response.status}`);
-        return response.json();
-    })
-    .then(data => {
-        if (data.success) {
-            showToast('✅ ' + data.message, 'success');
-            const modal = bootstrap.Modal.getInstance(document.getElementById('telegramModal'));
-            if (modal) modal.hide();
-        } else {
-            showToast('❌ Error: ' + (data.error || 'Error desconocido'), 'danger');
-        }
-    })
-    .catch(error => {
-        console.error('Error:', error);
-        showToast('❌ Error de conexión: ' + error.message, 'danger');
-    });
-}
+// FUNCIÓN sendTelegramTest ELIMINADA en v22 — no se usaba (código muerto).
 
 function downloadAnalysisReport() {
     const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';

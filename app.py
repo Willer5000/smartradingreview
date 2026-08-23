@@ -15728,22 +15728,32 @@ class TradingExpertSystem:
                         indicator_scores[indicator] = indicator_scores.get(indicator, 0) + weight
                         break
             
-            # Si no hay votos direccionales (o son pocos), agregar los más relevantes
-            # por defaults de la acción
-            if len(indicator_scores) < 4:
-                default_by_action = {
-                    'COMPRA_SPOT': ['rsi_maverick', 'squeeze', 'macd', 'dmi', 'supertrend', 'bollinger', 'volume', 'whale'],
-                    'LONG': ['rsi_maverick', 'squeeze', 'dmi', 'supertrend', 'macd', 'bollinger', 'volume', 'whale'],
-                    'VENTA_SPOT': ['rsi', 'macd', 'dmi', 'bollinger', 'volume', 'supertrend', 'psar', 'whale'],
-                    'SHORT': ['rsi', 'macd', 'ftm', 'bollinger', 'dmi', 'psar', 'volume', 'whale'],
-                }
-                for ind in default_by_action.get(decision, ['ftm', 'squeeze', 'rsi', 'macd', 'volume', 'bollinger']):
-                    if ind not in indicator_scores:
-                        indicator_scores[ind] = 0
+            # v22: SOLO indicadores que realmente respaldaron la señal (score > 0).
+            # Antes: si había pocos, se rellenaba con defaults arbitrarios → el
+            # PDF/Telegram mostraba indicadores que NO respaldaron la señal.
+            # Ahora: si hay < 3 con score > 0, completar con defaults SOLO hasta 3
+            # (mínimo para tener contexto). Máximo absoluto: 6 (evita OOM en PDF).
+            real_supporters = [(k, v) for k, v in indicator_scores.items() if v > 0]
+            real_supporters.sort(key=lambda x: -x[1])
             
-            # Ordenar por score descendente, devolver TODOS
-            ordered = sorted(indicator_scores.items(), key=lambda x: -x[1])
-            return [ind for ind, _ in ordered]
+            if len(real_supporters) < 3:
+                default_by_action = {
+                    'COMPRA_SPOT': ['rsi_maverick', 'squeeze', 'macd', 'dmi', 'supertrend', 'bollinger'],
+                    'LONG': ['rsi_maverick', 'squeeze', 'dmi', 'supertrend', 'macd', 'bollinger'],
+                    'VENTA_SPOT': ['rsi', 'macd', 'dmi', 'bollinger', 'supertrend', 'psar'],
+                    'SHORT': ['rsi', 'macd', 'ftm', 'bollinger', 'dmi', 'psar'],
+                }
+                existing_names = {k for k, _ in real_supporters}
+                defaults = default_by_action.get(decision,
+                    ['ftm', 'squeeze', 'rsi', 'macd', 'volume', 'bollinger'])
+                for ind in defaults:
+                    if ind not in existing_names:
+                        real_supporters.append((ind, 0))
+                        if len(real_supporters) >= 3:
+                            break
+            
+            # Cap absoluto: 6 indicadores (memoria del PDF)
+            return [ind for ind, _ in real_supporters[:6]]
         except Exception as e:
             print(f"❌ get_supporting_indicators_for_action: {e}")
             return ['ftm', 'squeeze', 'rsi', 'macd', 'volume', 'bollinger']
@@ -19034,10 +19044,6 @@ def analytics_page():
     """Página de Análisis Estadístico (Fase C)"""
     return render_template('analytics.html')
 
-@app.route('/manual')
-def manual():
-    return render_template('manual.html')
-
 @app.route('/health')
 def health():
     """Health check para Render"""
@@ -19426,516 +19432,400 @@ def api_analyze():
         return jsonify(error_response), 500
         
 
+_PREV_SIGNALS_LOCK = threading.Lock()
+_PREV_SIGNALS_COMPUTING = {'running': False}
+
+
+def _compute_previous_signals():
+    """
+    v22: EXTRAÍDO del endpoint web para poder ejecutar en background.
+    
+    Antes: el endpoint web ejecutaba analyze_full_market 12 veces (3 pares
+    × 4 TFs) en cada request → cargaba ~150MB de dataframes + indicadores en
+    el worker gunicorn (512MB total en Render Free) → SIGKILL por OOM.
+    
+    Ahora: esta función corre en un hilo background con calma, sin timeout
+    de request web, con gc.collect() entre iteraciones. El endpoint web
+    solo LEE el caché resultante.
+    
+    Retorna dict {clave: {...}} con las señales, o None si falla catastróficamente.
+    """
+    import gc
+    resultados = {}
+    tiempo_actual = datetime.now(bolivia_tz)
+    temporalidades = ['4h', '12h', '1D', '1W']
+    pares = ['BTC-USDT', 'PAXG-USDT', 'PAXG-BTC']
+    print(f"\n{'='*60}\n🧮 CALCULANDO previous_signals en BACKGROUND\n{'='*60}")
+        
+    # ============ OBTENER ANÁLISIS DE CORRELACIÓN POR TEMPORALIDAD ============
+    print("📊 Obteniendo análisis de correlación para todas las temporalidades...")
+    analisis_correlacion = {}
+    
+    for timeframe in temporalidades:
+        print(f"\n   📈 Procesando correlación para {timeframe}...")
+        analisis_correlacion[timeframe] = {}
+        
+        # BTC
+        try:
+            btc_actual = expert_system.analyze_full_market('BTC-USDT', timeframe)
+            if btc_actual and btc_actual.get('success'):
+                analisis_correlacion[timeframe]['BTC-USDT'] = btc_actual
+                print(f"      ✅ BTC-{timeframe} obtenido")
+        except Exception as e:
+            print(f"      ⚠️ Error en BTC-{timeframe}: {e}")
+        
+        # PAXG (depende de BTC)
+        if 'BTC-USDT' in analisis_correlacion[timeframe]:
+            try:
+                paxg_actual = expert_system.analyze_full_market(
+                    'PAXG-USDT', 
+                    timeframe,
+                    btc_analysis=analisis_correlacion[timeframe]['BTC-USDT']
+                )
+                if paxg_actual and paxg_actual.get('success'):
+                    analisis_correlacion[timeframe]['PAXG-USDT'] = paxg_actual
+                    print(f"      ✅ PAXG-{timeframe} obtenido")
+            except Exception as e:
+                print(f"      ⚠️ Error en PAXG-{timeframe}: {e}")
+        
+        # RATIO (depende de BTC y PAXG)
+        if ('BTC-USDT' in analisis_correlacion[timeframe] and 
+            'PAXG-USDT' in analisis_correlacion[timeframe]):
+            try:
+                ratio_actual = expert_system.analyze_full_market(
+                    'PAXG-BTC', 
+                    timeframe,
+                    btc_analysis=analisis_correlacion[timeframe]['BTC-USDT'],
+                    paxg_analysis=analisis_correlacion[timeframe]['PAXG-USDT']
+                )
+                if ratio_actual and ratio_actual.get('success'):
+                    analisis_correlacion[timeframe]['PAXG-BTC'] = ratio_actual
+                    print(f"      ✅ RATIO-{timeframe} obtenido")
+            except Exception as e:
+                print(f"      ⚠️ Error en RATIO-{timeframe}: {e}")
+        
+    # ============ PROCESAR SEÑALES DE VELA ANTERIOR ============
+    for timeframe in temporalidades:
+        print(f"\n📊 Procesando {timeframe}...")
+        for symbol in pares:
+            try:
+                df = expert_system.get_kucoin_data(symbol, timeframe)
+                if df is None or len(df) < 50:
+                    print(f"   ⚠️ {symbol} {timeframe}: datos insuficientes")
+                    continue
+                if len(df) < 2:
+                    print(f"   ⚠️ {symbol} {timeframe}: menos de 2 velas")
+                    continue
+                
+                precio_cierre_anterior = float(df['close'].iloc[-2])
+                precio_actual = float(df['close'].iloc[-1])
+                
+                if len(df) >= 101:
+                    df_anterior = df.iloc[-101:-1].copy()
+                else:
+                    df_anterior = df.iloc[:-1].copy()
+                df_anterior = df_anterior.reset_index(drop=True)
+                
+                btc_analysis = analisis_correlacion[timeframe].get('BTC-USDT')
+                paxg_analysis = analisis_correlacion[timeframe].get('PAXG-USDT')
+                paxg_btc_analysis = analisis_correlacion[timeframe].get('PAXG-BTC')
+                
+                analisis = expert_system.analyze_full_market(
+                    symbol, timeframe,
+                    btc_analysis=btc_analysis,
+                    paxg_analysis=paxg_analysis,
+                    paxg_btc_analysis=paxg_btc_analysis,
+                    df_override=df_anterior
+                )
+                if not analisis or not analisis.get('success'):
+                    print(f"   ⚠️ {symbol} {timeframe}: análisis falló")
+                    continue
+                
+                decision = analisis['decision']['action']
+                confianza = float(analisis['decision']['confidence'])
+                if decision not in ['COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT']:
+                    print(f"   ⏸️ {symbol} {timeframe}: {decision} - ignorada")
+                    continue
+                
+                levels = analisis.get('levels', {})
+                entry = float(levels.get('entry', precio_cierre_anterior)) if levels.get('entry') else None
+                stop_loss = float(levels.get('stop_loss', 0)) if levels.get('stop_loss') else None
+                take_profit = float(levels.get('take_profit', 0)) if levels.get('take_profit') else None
+                
+                activa = 0
+                if decision in ['COMPRA_SPOT', 'LONG'] and stop_loss and stop_loss > 0:
+                    activa = 1 if precio_actual > stop_loss else 0
+                elif decision in ['VENTA_SPOT', 'SHORT'] and stop_loss and stop_loss > 0:
+                    activa = 1 if precio_actual < stop_loss else 0
+                
+                tiempo_restante = 0
+                try:
+                    tiempo_vida = {'4h': 14400, '12h': 43200, '1D': 86400, '1W': 604800}.get(timeframe, 14400)
+                    tiempo_cierre = pd.Timestamp(df['time'].iloc[-2]).to_pydatetime()
+                    if tiempo_cierre.tzinfo is not None:
+                        tiempo_cierre = tiempo_cierre.replace(tzinfo=None)
+                    tiempo_actual_naive = tiempo_actual.replace(tzinfo=None) if tiempo_actual.tzinfo else tiempo_actual
+                    tiempo_transcurrido = (tiempo_actual_naive - tiempo_cierre).total_seconds()
+                    tiempo_restante = int(max(0, tiempo_vida - tiempo_transcurrido))
+                except Exception as e:
+                    print(f"      ⚠️ Error calculando tiempo: {e}")
+                
+                mensaje_corto = analisis.get('message', '')
+                if len(mensaje_corto) > 500:
+                    mensaje_corto = mensaje_corto[:500] + '...'
+                
+                try:
+                    candle_ts = str(df['time'].iloc[-2])
+                except Exception:
+                    candle_ts = str(tiempo_actual.isoformat())
+                
+                clave = f"{symbol}_{timeframe}"
+                resultados[clave] = {
+                    'symbol': str(symbol),
+                    'timeframe': str(timeframe),
+                    'decision': str(decision),
+                    'confidence': float(confianza),
+                    'entry': entry,
+                    'stop_loss': stop_loss,
+                    'take_profit': take_profit,
+                    'precio_actual': float(precio_actual),
+                    'activa': int(activa),
+                    'tiempo_restante': int(tiempo_restante),
+                    'message': str(mensaje_corto),
+                    'candle_timestamp': candle_ts,
+                    'timestamp': str(tiempo_actual.isoformat())
+                }
+                estado = "🟢 ACTIVA" if activa == 1 else "⚪ inactiva"
+                print(f"   ✅ {symbol} {timeframe}: {decision} ({confianza:.0f}%) - {estado}")
+                
+                # v22: liberar memoria (df + df_anterior + analisis pueden pesar ~10MB)
+                del df, df_anterior, analisis
+                gc.collect()
+                
+            except Exception as e:
+                print(f"   ❌ Error en {symbol} {timeframe}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+            time.sleep(0.2)
+    
+    # ============ GUARDAR EN CACHÉ ============
+    setattr(expert_system, 'prev_signals_cache', resultados)
+    setattr(expert_system, 'prev_signals_cache_time', time.time())
+    activas = sum(1 for r in resultados.values() if r.get('activa', 0) == 1)
+    print(f"\n✅ CÁLCULO COMPLETADO - {len(resultados)} señales totales, {activas} activas")
+    return resultados
+
+
+def _run_previous_signals_background():
+    """Ejecuta _compute_previous_signals con lock para evitar cálculos concurrentes."""
+    if _PREV_SIGNALS_COMPUTING['running']:
+        print("⏳ previous_signals ya se está calculando en background — skip")
+        return
+    with _PREV_SIGNALS_LOCK:
+        _PREV_SIGNALS_COMPUTING['running'] = True
+        try:
+            _compute_previous_signals()
+        except Exception as e:
+            print(f"❌ Error en _compute_previous_signals background: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            _PREV_SIGNALS_COMPUTING['running'] = False
+
+
 @app.route('/api/previous_signals')
 def api_previous_signals():
     """
-    Endpoint que devuelve las señales de la vela anterior - VERSIÓN CORREGIDA
+    v22: Endpoint LIVIANO. Solo sirve caché precalculada por background.
+    Si no hay caché, dispara el cálculo en un hilo y devuelve 'processing'.
+    
+    Antes: ejecutaba 12 analyze_full_market en la request → SIGKILL OOM.
+    Ahora: la request web NUNCA hace cálculos pesados → sin OOM.
     """
     try:
-        print(f"\n{'='*60}")
-        print(f"🔍 API PREVIOUS SIGNALS solicitado")
-        print(f"{'='*60}")
-        
-        # ============ CACHE DE 10 MINUTOS ============
         cache_key = "prev_signals_cache"
         cache_time_key = "prev_signals_cache_time"
-        cache_duration = 600  # 10 minutos
+        cache_duration = 600  # 10 min: si es más viejo, dispara refresh en bg
         
         now = time.time()
+        cache_data = getattr(expert_system, cache_key, None)
+        cache_time = getattr(expert_system, cache_time_key, 0)
+        age = now - cache_time if cache_time else 999999
         
-        if hasattr(expert_system, cache_key) and hasattr(expert_system, cache_time_key):
-            cache_time = getattr(expert_system, cache_time_key)
-            if now - cache_time < cache_duration:
-                print(f"📦 Usando caché (expira en {int(cache_duration - (now - cache_time))}s)")
-                return jsonify({
-                    'success': True,
-                    'data': getattr(expert_system, cache_key),
-                    'cached': True,
-                    'timestamp': datetime.now(bolivia_tz).isoformat()
-                })
+        # Si hay caché aunque sea viejo, lo devolvemos + refresh en bg si toca
+        if cache_data:
+            if age > cache_duration and not _PREV_SIGNALS_COMPUTING['running']:
+                # Refresh silencioso en background — no bloqueamos al usuario
+                threading.Thread(target=_run_previous_signals_background, daemon=True).start()
+                print(f"📦 Sirviendo caché stale ({int(age)}s), refresh en bg disparado")
+            else:
+                print(f"📦 Sirviendo caché ({int(age)}s)")
+            return jsonify({
+                'success': True,
+                'data': cache_data,
+                'cached': True,
+                'cache_age_seconds': int(age),
+                'timestamp': datetime.now(bolivia_tz).isoformat()
+            })
         
-        resultados = {}
-        tiempo_actual = datetime.now(bolivia_tz)
-        temporalidades = ['4h', '12h', '1D', '1W']
-        pares = ['BTC-USDT', 'PAXG-USDT', 'PAXG-BTC']
-        
-        # ============ OBTENER ANÁLISIS DE CORRELACIÓN POR TEMPORALIDAD ============
-        print("📊 Obteniendo análisis de correlación para todas las temporalidades...")
-        analisis_correlacion = {}
-        
-        for timeframe in temporalidades:
-            print(f"\n   📈 Procesando correlación para {timeframe}...")
-            analisis_correlacion[timeframe] = {}
-            
-            # BTC
-            try:
-                btc_actual = expert_system.analyze_full_market('BTC-USDT', timeframe)
-                if btc_actual and btc_actual.get('success'):
-                    analisis_correlacion[timeframe]['BTC-USDT'] = btc_actual
-                    print(f"      ✅ BTC-{timeframe} obtenido")
-            except Exception as e:
-                print(f"      ⚠️ Error en BTC-{timeframe}: {e}")
-            
-            # PAXG (depende de BTC)
-            if 'BTC-USDT' in analisis_correlacion[timeframe]:
-                try:
-                    paxg_actual = expert_system.analyze_full_market(
-                        'PAXG-USDT', 
-                        timeframe,
-                        btc_analysis=analisis_correlacion[timeframe]['BTC-USDT']
-                    )
-                    if paxg_actual and paxg_actual.get('success'):
-                        analisis_correlacion[timeframe]['PAXG-USDT'] = paxg_actual
-                        print(f"      ✅ PAXG-{timeframe} obtenido")
-                except Exception as e:
-                    print(f"      ⚠️ Error en PAXG-{timeframe}: {e}")
-            
-            # RATIO (depende de BTC y PAXG)
-            if ('BTC-USDT' in analisis_correlacion[timeframe] and 
-                'PAXG-USDT' in analisis_correlacion[timeframe]):
-                try:
-                    ratio_actual = expert_system.analyze_full_market(
-                        'PAXG-BTC', 
-                        timeframe,
-                        btc_analysis=analisis_correlacion[timeframe]['BTC-USDT'],
-                        paxg_analysis=analisis_correlacion[timeframe]['PAXG-USDT']
-                    )
-                    if ratio_actual and ratio_actual.get('success'):
-                        analisis_correlacion[timeframe]['PAXG-BTC'] = ratio_actual
-                        print(f"      ✅ RATIO-{timeframe} obtenido")
-                except Exception as e:
-                    print(f"      ⚠️ Error en RATIO-{timeframe}: {e}")
-        
-        # ============ PROCESAR SEÑALES DE VELA ANTERIOR ============
-        for timeframe in temporalidades:
-            print(f"\n📊 Procesando {timeframe}...")
-            
-            for symbol in pares:
-                try:
-                    # Obtener datos
-                    df = expert_system.get_kucoin_data(symbol, timeframe)
-                    
-                    if df is None or len(df) < 50:
-                        print(f"   ⚠️ {symbol} {timeframe}: datos insuficientes")
-                        continue
-                    
-                    # Verificar que hay al menos 2 velas
-                    if len(df) < 2:
-                        print(f"   ⚠️ {symbol} {timeframe}: menos de 2 velas")
-                        continue
-                    
-                    # Precios
-                    precio_cierre_anterior = float(df['close'].iloc[-2])
-                    precio_actual = float(df['close'].iloc[-1])
-                    
-                    # DataFrame para vela anterior (100 velas terminando en penúltima)
-                    if len(df) >= 101:
-                        df_anterior = df.iloc[-101:-1].copy()
-                    else:
-                        df_anterior = df.iloc[:-1].copy()
-                    
-                    df_anterior = df_anterior.reset_index(drop=True)
-                    
-                    # Obtener análisis de correlación para esta temporalidad
-                    btc_analysis = analisis_correlacion[timeframe].get('BTC-USDT')
-                    paxg_analysis = analisis_correlacion[timeframe].get('PAXG-USDT')
-                    paxg_btc_analysis = analisis_correlacion[timeframe].get('PAXG-BTC')
-                    
-                    # Analizar vela anterior
-                    analisis = expert_system.analyze_full_market(
-                        symbol, 
-                        timeframe, 
-                        btc_analysis=btc_analysis,
-                        paxg_analysis=paxg_analysis,
-                        paxg_btc_analysis=paxg_btc_analysis,
-                        df_override=df_anterior
-                    )
-                    
-                    if not analisis or not analisis.get('success'):
-                        print(f"   ⚠️ {symbol} {timeframe}: análisis falló")
-                        continue
-                    
-                    decision = analisis['decision']['action']
-                    confianza = float(analisis['decision']['confidence'])
-                    
-                    # SOLO señales de trading
-                    if decision not in ['COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT']:
-                        print(f"   ⏸️ {symbol} {timeframe}: {decision} - ignorada")
-                        continue
-                    
-                    # Obtener niveles
-                    levels = analisis.get('levels', {})
-                    entry = float(levels.get('entry', precio_cierre_anterior)) if levels.get('entry') else None
-                    stop_loss = float(levels.get('stop_loss', 0)) if levels.get('stop_loss') else None
-                    take_profit = float(levels.get('take_profit', 0)) if levels.get('take_profit') else None
-                    
-                    # ============ VERIFICAR SI SIGUE ACTIVA (convertir a int para JSON) ============
-                    activa = 0  # 0 = False, 1 = True
-                    
-                    if decision in ['COMPRA_SPOT', 'LONG'] and stop_loss and stop_loss > 0:
-                        activa = 1 if precio_actual > stop_loss else 0
-                    elif decision in ['VENTA_SPOT', 'SHORT'] and stop_loss and stop_loss > 0:
-                        activa = 1 if precio_actual < stop_loss else 0
-                    
-                    # ============ TIEMPO RESTANTE ============
-                    tiempo_restante = 0
-                    try:
-                        tiempo_vida = {'4h': 14400, '12h': 43200, '1D': 86400, '1W': 604800}.get(timeframe, 14400)
-                        tiempo_cierre = pd.Timestamp(df['time'].iloc[-2]).to_pydatetime()
-                        # FIX: tiempo_actual es tz-aware (bolivia_tz) pero tiempo_cierre
-                        # es naive. Normalizar a naive para evitar
-                        # "can't subtract offset-naive and offset-aware datetimes".
-                        if tiempo_cierre.tzinfo is not None:
-                            tiempo_cierre = tiempo_cierre.replace(tzinfo=None)
-                        tiempo_actual_naive = tiempo_actual.replace(tzinfo=None) if tiempo_actual.tzinfo else tiempo_actual
-                        tiempo_transcurrido = (tiempo_actual_naive - tiempo_cierre).total_seconds()
-                        tiempo_restante = int(max(0, tiempo_vida - tiempo_transcurrido))
-                    except Exception as e:
-                        print(f"      ⚠️ Error calculando tiempo: {e}")
-                    
-                    # ============ CONSTRUIR MENSAJE CORTO ============
-                    mensaje_corto = analisis.get('message', '')
-                    if len(mensaje_corto) > 500:
-                        mensaje_corto = mensaje_corto[:500] + '...'
-                    
-                    # ============ TIMESTAMP DE LA VELA CERRADA (penúltima) ============
-                    # Se usa para dedup del monitor_entries: solo cambia cuando
-                    # cierra una NUEVA vela, no en cada análisis.
-                    try:
-                        candle_ts = str(df['time'].iloc[-2])
-                    except Exception:
-                        candle_ts = str(tiempo_actual.isoformat())
-                    
-                    # ============ GUARDAR (TODOS LOS VALORES JSON SERIALIZABLES) ============
-                    clave = f"{symbol}_{timeframe}"
-                    resultados[clave] = {
-                        'symbol': str(symbol),
-                        'timeframe': str(timeframe),
-                        'decision': str(decision),
-                        'confidence': float(confianza),
-                        'entry': entry,
-                        'stop_loss': stop_loss,
-                        'take_profit': take_profit,
-                        'precio_actual': float(precio_actual),
-                        'activa': int(activa),
-                        'tiempo_restante': int(tiempo_restante),
-                        'message': str(mensaje_corto),
-                        'candle_timestamp': candle_ts,   # ← NUEVO: timestamp real de vela cerrada (dedup)
-                        'timestamp': str(tiempo_actual.isoformat())  # wall-clock del análisis
-                    }
-                    
-                    estado = "🟢 ACTIVA" if activa == 1 else "⚪ inactiva"
-                    print(f"   ✅ {symbol} {timeframe}: {decision} ({confianza:.0f}%) - {estado}")
-                    
-                except Exception as e:
-                    print(f"   ❌ Error en {symbol} {timeframe}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    continue
-                
-                time.sleep(0.2)
-        
-        # ============ GUARDAR EN CACHÉ ============
-        setattr(expert_system, cache_key, resultados)
-        setattr(expert_system, cache_time_key, now)
-        
-        activas = sum(1 for r in resultados.values() if r.get('activa', 0) == 1)
-        print(f"\n✅ API COMPLETADA - {len(resultados)} señales totales, {activas} activas")
-        
+        # Sin caché: primer arranque. Disparar en bg y decir 'processing'.
+        if not _PREV_SIGNALS_COMPUTING['running']:
+            threading.Thread(target=_run_previous_signals_background, daemon=True).start()
+            print("🧮 Sin caché — cálculo disparado en background")
         return jsonify({
             'success': True,
-            'data': resultados,
-            'cached': False,
-            'timestamp': tiempo_actual.isoformat()
+            'processing': True,
+            'data': {},
+            'message': 'Analizando señales por primera vez. Espere 30-60s y recargue.',
+            'timestamp': datetime.now(bolivia_tz).isoformat()
         })
-        
     except Exception as e:
         print(f"❌ Error CRÍTICO en api_previous_signals: {e}")
         import traceback
         traceback.print_exc()
-        return jsonify({
-            'success': False, 
-            'error': str(e),
-            'data': {}
-        })
+        return jsonify({'success': False, 'error': str(e), 'data': {}})
 
 
-def _telegram_test_all_previous_signals(include_chart=True):
+# ============================================================================
+# v22: KPIs del HEADER — solo sobre señales de la vela anterior (frontend)
+# ============================================================================
+@app.route('/api/kpis/frontend_signals')
+def api_kpis_frontend_signals():
     """
-    Construye y envía a Telegram un mensaje con TODAS las señales activas
-    de vela anterior (spot + futures). Modo por defecto del botón "Prueba Telegram".
+    Retorna win_rate + rentabilidad ACUMULADA de las mismas señales que el
+    usuario ve en el frontend (las de la vela anterior por par/TF).
     
-    - Consulta /api/previous_signals y /api/futures/signals/previous
-    - Filtra señales direccionales activas (LONG/SHORT/COMPRA_SPOT/VENTA_SPOT)
-    - Arma un único mensaje resumen ordenado por confianza descendente
-    - Si include_chart=True, adjunta 1 gráfico de la señal con mayor confianza
+    Antes: el header consultaba /api/analytics/summary?days_back=90 → mostraba
+    métricas de todo el histórico (90 días), lo que no refleja "las señales
+    que estoy viendo ahora". Confundía al usuario.
+    
+    Ahora: cruza el caché de previous_signals (lo que se ve) contra Supabase
+    para obtener el outcome (tp_hit/sl_hit + pnl_pct) de cada una. Si la señal
+    aún no está resuelta, cuenta como 'pending'.
+    
+    Retorna:
+      - total: cuántas señales hay en el frontend
+      - resolved: cuántas ya tienen outcome
+      - tp_hit / sl_hit / pending
+      - win_rate = tp / (tp + sl)
+      - pnl_total_pct = suma de pnl_pct de las resueltas
+      - active: cuántas siguen vigentes (activa=1 en el frontend)
     """
-    from flask import jsonify
-    
-    all_signals = []  # [{system, symbol, timeframe, action, entry, sl, tp, confidence, ...}]
-    
-    # 1. Señales SPOT
     try:
-        with app.test_client() as client:
-            r = client.get('/api/previous_signals')
-            if r.status_code == 200:
-                data = r.get_json() or {}
-                for _key, sig in (data.get('data') or {}).items():
-                    action = sig.get('decision', '')
-                    if action not in ('LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT'):
-                        continue
-                    all_signals.append({
-                        'system': 'SPOT',
-                        'symbol': sig.get('symbol'),
-                        'timeframe': sig.get('timeframe'),
-                        'action': action,
-                        'entry': sig.get('entry'),
-                        'stop_loss': sig.get('stop_loss'),
-                        'take_profit': sig.get('take_profit'),
-                        'confidence': max(0.0, min(100.0, float(sig.get('confidence') or 0))),
-                        'activa': sig.get('activa', 0),
-                        'current_price': sig.get('precio_actual'),
-                    })
-    except Exception as e:
-        print(f"⚠️ _telegram_test_all: error leyendo señales spot: {e}")
-    
-    # 2. Señales FUTURES
-    try:
-        with app.test_client() as client:
-            r = client.get('/api/futures/signals/previous?min_confidence=55')
-            if r.status_code == 200:
-                data = r.get_json() or {}
-                for sig in (data.get('signals') or []):
-                    if sig.get('action') not in ('LONG', 'SHORT'):
-                        continue
-                    all_signals.append({
-                        'system': 'FUTURES',
-                        'symbol': sig.get('symbol'),
-                        'timeframe': sig.get('timeframe'),
-                        'action': sig.get('action'),
-                        'entry': sig.get('entry'),
-                        'stop_loss': sig.get('stop_loss'),
-                        'take_profit': sig.get('take_profit'),
-                        'confidence': max(0.0, min(100.0, float(sig.get('confidence') or 0))),
-                        'leverage': sig.get('leverage'),
-                        'risk_reward': sig.get('risk_reward'),
-                        'activa': sig.get('activa', 0),
-                        'current_price': sig.get('current_price'),
-                    })
-    except Exception as e:
-        print(f"⚠️ _telegram_test_all: error leyendo señales futures: {e}")
-    
-    if not all_signals:
-        # Aunque no haya señales, enviamos mensaje informativo
-        msg = ("🔔 <b>Prueba Telegram</b>\n\n"
-               "No hay señales direccionales activas en la vela anterior.\n"
-               "El sistema está monitorizando el mercado.")
-        try:
-            expert_system.send_telegram_alert(msg, None)
+        cache_data = getattr(expert_system, 'prev_signals_cache', None) or {}
+        if not cache_data:
             return jsonify({
                 'success': True,
-                'message': 'Mensaje enviado (sin señales activas)',
-                'signals_count': 0
+                'data': {
+                    'total': 0, 'resolved': 0, 'tp_hit': 0, 'sl_hit': 0,
+                    'pending': 0, 'active': 0, 'win_rate': 0.0,
+                    'pnl_total_pct': 0.0,
+                    'note': 'Caché de señales aún no calculado — recarga en 30s.'
+                }
             })
-        except Exception as e:
-            return jsonify({'success': False, 'error': f'Fallo enviando: {e}'}), 500
-    
-    # Ordenar por confianza descendente, luego por activas primero
-    all_signals.sort(key=lambda s: (-s.get('activa', 0), -s.get('confidence', 0)))
-    
-    # Iconos por acción
-    def _icon(action):
-        return {
-            'LONG': '🟢 LONG',
-            'COMPRA_SPOT': '🟢 COMPRA',
-            'SHORT': '🔴 SHORT',
-            'VENTA_SPOT': '🔴 VENTA',
-        }.get(action, action)
-    
-    # Construir mensaje
-    lines = [
-        '📡 <b>SEÑALES ACTIVAS - VELA ANTERIOR</b>',
-        f'📅 {datetime.now(bolivia_tz).strftime("%Y-%m-%d %H:%M")} (Bolivia)',
-        f'📊 Total: <b>{len(all_signals)}</b> señales',
-        '',
-        '━━━━━━━━━━━━━━━━━━━━━━━━'
-    ]
-    
-    # Agrupar por sistema
-    spot_signals = [s for s in all_signals if s['system'] == 'SPOT']
-    fut_signals = [s for s in all_signals if s['system'] == 'FUTURES']
-    
-    def _format_signal(sig, idx):
-        action_lbl = _icon(sig.get('action', ''))
-        activa_lbl = '🟢' if sig.get('activa') == 1 else '⚪'
-        symbol = sig.get('symbol', '?')
-        tf = sig.get('timeframe', '?')
-        entry = sig.get('entry') or 0
-        sl = sig.get('stop_loss') or 0
-        tp = sig.get('take_profit') or 0
-        conf = sig.get('confidence', 0)
-        current = sig.get('current_price') or 0
         
-        sublines = [
-            f'{activa_lbl} <b>{idx}. {action_lbl}  {symbol} · {tf}</b>',
-            f'   💰 Entry: {entry:.4f}  |  Precio: {current:.4f}',
-            f'   🎯 TP: {tp:.4f}  |  🛑 SL: {sl:.4f}',
-            f'   📊 Confianza: {conf:.0f}%',
-        ]
-        if sig.get('leverage'):
-            sublines.append(f'   ⚡ Leverage: x{sig["leverage"]}  |  R/R: {sig.get("risk_reward", 0):.2f}')
-        return '\n'.join(sublines)
-    
-    if spot_signals:
-        lines.append('')
-        lines.append(f'💎 <b>SPOT ({len(spot_signals)})</b>')
-        for i, sig in enumerate(spot_signals, 1):
-            lines.append('')
-            lines.append(_format_signal(sig, i))
-    
-    if fut_signals:
-        lines.append('')
-        lines.append('━━━━━━━━━━━━━━━━━━━━━━━━')
-        lines.append(f'⚡ <b>FUTUROS ({len(fut_signals)})</b>')
-        for i, sig in enumerate(fut_signals, 1):
-            lines.append('')
-            lines.append(_format_signal(sig, i))
-    
-    lines.append('')
-    lines.append('━━━━━━━━━━━━━━━━━━━━━━━━')
-    lines.append('🤖 <i>Crypto Trader Analyst</i>')
-    
-    message = '\n'.join(lines)
-    
-    # Truncar si excede el límite de Telegram (~4096 chars)
-    if len(message) > 4000:
-        message = message[:3900] + '\n\n... <i>(mensaje truncado)</i>'
-    
-    # Imagen opcional: la señal top (mayor confianza)
-    image_bytes = None
-    if include_chart and all_signals:
+        # Buscar outcome en Supabase para cada (symbol, tf, candle_ts)
         try:
-            top_sig = all_signals[0]
-            analysis = expert_system.analyze_full_market(top_sig['symbol'], top_sig['timeframe'])
-            if analysis and analysis.get('success'):
-                top_indicators = expert_system.get_top_indicators_for_chart(analysis)
-                image_bytes = expert_system.generate_chart_image(
-                    top_sig['symbol'], top_sig['timeframe'], analysis, top_indicators
-                )
+            from supabase_client import get_supabase_client
+            db = get_supabase_client()
         except Exception as e:
-            print(f"⚠️ No se pudo generar imagen del top: {e}")
-    
-    try:
-        success = expert_system.send_telegram_alert(message, image_bytes)
-        if success:
-            return jsonify({
-                'success': True,
-                'message': f'✅ {len(all_signals)} señales enviadas a Telegram',
-                'signals_count': len(all_signals),
-                'spot_count': len(spot_signals),
-                'futures_count': len(fut_signals),
-                'has_chart': image_bytes is not None
-            })
-        return jsonify({'success': False, 'error': 'Telegram rechazó el mensaje'}), 500
-    except Exception as e:
-        return jsonify({'success': False, 'error': f'Error enviando a Telegram: {e}'}), 500
-
-
-@app.route('/api/telegram/test', methods=['POST'])
-def api_telegram_test():
-    """
-    Endpoint de prueba Telegram.
-    
-    Modos:
-      - mode='all' (default): envía TODAS las señales activas de vela anterior
-        de spot + futures. Un mensaje resumido con todas las señales listadas.
-      - mode='single': comportamiento antiguo — envía análisis de UN par/TF.
-    
-    Payload:
-      { mode: 'all' | 'single',
-        symbol: 'BTC-USDT',  (solo si mode='single')
-        interval: '1D',      (solo si mode='single')
-        include_chart: true }
-    """
-    try:
-        if not request.is_json:
-            return jsonify({'success': False, 'error': 'Content-Type debe ser application/json'}), 400
+            print(f"⚠️ Supabase no disponible: {e}")
+            db = None
+        
+        tp_hit = sl_hit = pending = active = 0
+        pnl_sum = 0.0
+        total = len(cache_data)
+        
+        for clave, sig in cache_data.items():
+            if sig.get('activa') == 1:
+                active += 1
             
-        data = request.get_json()
-        if not data:
-            return jsonify({'success': False, 'error': 'Cuerpo de solicitud vacío'}), 400
-        
-        # Nuevo: modo por defecto es 'all' (todas las señales de vela anterior)
-        mode = data.get('mode', 'all')
-        include_chart = data.get('include_chart', True)
-        
-        if mode == 'all':
-            return _telegram_test_all_previous_signals(include_chart)
-        
-        # Modo 'single' (comportamiento anterior)
-        symbol = data.get('symbol', 'BTC-USDT')
-        interval = data.get('interval', '1D')
-        
-        if symbol not in SYMBOLS:
-            return jsonify({'success': False, 'error': f'Símbolo no válido: {symbol}'}), 400
-        
-        if interval not in TIMEFRAMES:
-            return jsonify({'success': False, 'error': f'Intervalo no válido: {interval}'}), 400
-        
-        result = expert_system.analyze_full_market(symbol, interval)
-        
-        if not result or not isinstance(result, dict):
-            return jsonify({'success': False, 'error': 'El análisis no devolvió un resultado válido'}), 400
+            if db is None:
+                pending += 1
+                continue
             
-        if not result.get('success'):
-            error_msg = result.get('error', 'Error desconocido en el análisis')
-            return jsonify({'success': False, 'error': f'Error en análisis: {error_msg}'}), 400
-        
-        # Obtener top indicadores
-        top_indicadores = expert_system.get_top_indicators_for_chart(result)
-        
-        message = result.get('message')
-        if not message:
-            message = f"🔍 Análisis de {SYMBOLS[symbol]['name']} en {TIMEFRAMES[interval]['name']}\n\n"
-            message += f"Recomendación: {result.get('decision', {}).get('action', 'NO_OPERAR')}\n"
-            message += f"Precio: ${result.get('current_price', 0):.2f}\n"
-            message += f"Indicadores clave: {', '.join(top_indicadores[:4])}"
-        
-        images = []
-        if include_chart:
             try:
-                # Generar imagen con TODOS los indicadores
-                img = expert_system.generate_chart_image(symbol, interval, result, top_indicadores)
-                if img:
-                    images = [img]
-                    print(f"✅ Imagen generada con {len(top_indicadores)} indicadores top")
+                symbol = sig.get('symbol')
+                tf = sig.get('timeframe')
+                candle_ts = sig.get('candle_timestamp')
+                if not (symbol and tf and candle_ts):
+                    pending += 1
+                    continue
+                
+                # Buscar señal en Supabase por (symbol, timeframe) con
+                # timestamp cercano a la vela anterior (±2h de tolerancia).
+                r = (db.client.table('signals')
+                     .select('id, status')
+                     .eq('symbol', symbol)
+                     .eq('timeframe', tf)
+                     .order('timestamp', desc=True)
+                     .limit(5)
+                     .execute())
+                
+                rows = r.data if r and r.data else []
+                found = None
+                for row in rows:
+                    if row.get('status') in ('tp_hit', 'sl_hit'):
+                        found = row
+                        break
+                
+                if not found:
+                    pending += 1
+                    continue
+                
+                # Traer pnl_pct desde signal_results
+                sig_id = found['id']
+                rr = (db.client.table('signal_results')
+                      .select('status, pnl_pct')
+                      .eq('signal_id', sig_id)
+                      .limit(1)
+                      .execute())
+                res_rows = rr.data if rr and rr.data else []
+                if not res_rows:
+                    pending += 1
+                    continue
+                
+                res = res_rows[0]
+                status = res.get('status')
+                pnl = float(res.get('pnl_pct') or 0)
+                
+                if status == 'tp_hit':
+                    tp_hit += 1
+                    pnl_sum += pnl
+                elif status == 'sl_hit':
+                    sl_hit += 1
+                    pnl_sum += pnl  # pnl_pct suele venir negativo aquí
                 else:
-                    print("⚠️ No se pudo generar el gráfico")
+                    pending += 1
             except Exception as e:
-                print(f"❌ Error generando gráfico: {e}")
-                import traceback
-                traceback.print_exc()
+                print(f"   ⚠️ KPIs frontend: error consultando {clave}: {e}")
+                pending += 1
+                continue
         
-        # Enviar a Telegram
-        success = expert_system.send_telegram_alert(message, images[0] if images else None)
+        resolved = tp_hit + sl_hit
+        win_rate = (tp_hit / resolved * 100.0) if resolved > 0 else 0.0
         
-        if success:
-            return jsonify({
-                'success': True, 
-                'message': f'✅ Análisis de {SYMBOLS[symbol]["name"]} {TIMEFRAMES[interval]["name"]} enviado a Telegram',
-                'symbol': symbol,
-                'interval': interval,
-                'has_chart': len(images) > 0,
-                'top_indicators': top_indicadores[:4]
-            })
-        else:
-            return jsonify({'success': False, 'error': 'Error al enviar mensaje a Telegram'}), 500
-            
+        return jsonify({
+            'success': True,
+            'data': {
+                'total': total,
+                'resolved': resolved,
+                'tp_hit': tp_hit,
+                'sl_hit': sl_hit,
+                'pending': pending,
+                'active': active,
+                'win_rate': round(win_rate, 2),
+                'pnl_total_pct': round(pnl_sum, 3),
+                'source': 'frontend_signals_last_candle'
+            }
+        })
     except Exception as e:
-        print(f"❌ Error en API telegram test: {str(e)}")
+        print(f"❌ Error api_kpis_frontend_signals: {e}")
         import traceback
         traceback.print_exc()
-        return jsonify({'success': False, 'error': f'Error interno: {str(e)}'}), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 @app.route('/api/generate_report')
 def api_generate_report():
@@ -21919,6 +21809,38 @@ if not os.environ.get('DISABLE_WARMUP'):
         _start_futures_warmup()
     except Exception as _e:
         print(f"⚠️ Warm-up de futuros al importar módulo falló: {_e}")
+    
+    # v22: warm-up de previous_signals (SPOT + PAXG) en background.
+    # Antes: la primera request GET /api/previous_signals disparaba 12
+    # analyze_full_market en el worker web → SIGKILL OOM.
+    # Ahora: se calcula al arrancar en un hilo, y se refresca cada 15 min.
+    def _start_previous_signals_warmup():
+        import gc
+        def _delayed_first():
+            time.sleep(30)  # esperar a que futuros termine su warmup primero
+            try:
+                _run_previous_signals_background()
+            except Exception as e:
+                print(f"⚠️ Warm-up previous_signals inicial: {e}")
+        threading.Thread(target=_delayed_first, daemon=True,
+                          name='prev-signals-warmup').start()
+        
+        def _periodic_prev():
+            while True:
+                time.sleep(900)  # 15 min entre refreshes
+                try:
+                    if not _PREV_SIGNALS_COMPUTING['running']:
+                        _run_previous_signals_background()
+                        time.sleep(30)
+                        gc.collect()
+                except Exception as e:
+                    print(f"❌ Error refresh periódico previous_signals: {e}")
+        threading.Thread(target=_periodic_prev, daemon=True,
+                          name='prev-signals-periodic').start()
+    try:
+        _start_previous_signals_warmup()
+    except Exception as _e:
+        print(f"⚠️ Warm-up de previous_signals falló: {_e}")
 else:
     print("⏭️ Warm-up de futuros DESHABILITADO por variable DISABLE_WARMUP")
 

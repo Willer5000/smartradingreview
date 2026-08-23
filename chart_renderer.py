@@ -41,7 +41,8 @@ plt.style.use('dark_background')
 # CONFIGURACIÓN DE COLORES (consistente con el resto del sistema)
 # ============================================================================
 COLORS = {
-    'bg': '#1a1a2e',
+    # v22: alineados con el frontend (script.js paper_bgcolor='#0A0C10')
+    'bg': '#0A0C10',
     'grid': 'rgba(255,255,255,0.1)',
     'green': '#00C076',
     'red': '#FF5B5B',

@@ -267,12 +267,6 @@
                 <a class="nav-link text-info fw-bold" href="/analytics">
                     <i class="fas fa-chart-bar me-1"></i>📈 ANÁLISIS
                 </a>
-                <a class="nav-link" href="/manual">
-                    <i class="fas fa-book me-1"></i>Manual del Sistema
-                </a>
-                <a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#telegramModal">
-                    <i class="fab fa-telegram me-1"></i>Prueba Telegram
-                </a>
             </div>
         </div>
     </nav>
@@ -307,10 +301,6 @@
 
                         <button class="btn btn-primary w-100 mb-2" onclick="window.runCompleteAnalysis()">
                             <i class="fas fa-brain me-2"></i>Ejecutar Análisis Completo
-                        </button>
-                        
-                        <button class="btn btn-outline-warning w-100" onclick="window.sendTelegramTest()">
-                            <i class="fab fa-telegram me-2"></i>Probar Telegram
                         </button>
                         
                         <button class="btn btn-outline-info w-100 mt-2" onclick="window.downloadAnalysisReport()">
@@ -1543,59 +1533,6 @@
         </div>
     </div>
 </div>
-    <!-- Modal Telegram -->
-    <div class="modal fade" id="telegramModal" tabindex="-1">
-        <div class="modal-dialog">
-            <div class="modal-content bg-dark">
-                <div class="modal-header">
-                    <h5 class="modal-title">
-                        <i class="fab fa-telegram me-2 text-primary"></i>
-                        Prueba de Envío a Telegram
-                    </h5>
-                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="mb-3">
-                        <label class="form-label">Seleccionar Par</label>
-                        <select class="form-select bg-dark text-white" id="telegram-symbol">
-                            <option value="BTC-USDT">BTC/USDT</option>
-                            <option value="PAXG-USDT">PAXG/USDT (Oro)</option>
-                            <option value="PAXG-BTC">PAXG/BTC (Ratio)</option>
-                        </select>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">Temporalidad</label>
-                        <select class="form-select bg-dark text-white" id="telegram-interval">
-                            <option value="4h">4 Horas</option>
-                            <option value="12h">12 Horas</option>
-                            <option value="1D" selected>1 Día</option>
-                            <option value="1W">1 Semana</option>
-                        </select>
-                    </div>
-                    <div class="form-check mb-3">
-                        <input class="form-check-input" type="checkbox" id="include-chart" checked>
-                        <label class="form-check-label" for="include-chart">
-                            Incluir gráfico en el mensaje
-                        </label>
-                    </div>
-                    <div class="alert alert-info">
-                        <small>
-                            <i class="fas fa-info-circle me-1"></i>
-                            Se enviará un mensaje real al canal de Telegram.
-                        </small>
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
-                    <button type="button" class="btn btn-primary" onclick="window.sendTelegramTest()">
-                        <i class="fab fa-telegram me-1"></i>Enviar Prueba
-                    </button>
-                </div>
-            </div>
-        </div>
-    </div>
-
-
     <!-- Toast Container -->
     <div id="toast-container" class="toast-container position-fixed bottom-0 end-0 p-3"></div>
 
@@ -2208,59 +2145,6 @@
                 .catch(error => console.error('Error:', error));
         };
 
-        // Prueba Telegram:
-        //   - Si el modal está abierto (usuario seleccionó par/TF específicos) → modo 'single'
-        //   - Si se llama desde el sidebar (sin modal abierto) → modo 'all'
-        //     (envía TODAS las señales de vela anterior, spot + futures)
-        window.sendTelegramTest = function() {
-            const modalEl = document.getElementById('telegramModal');
-            const modalOpen = modalEl && modalEl.classList.contains('show');
-            
-            let payload;
-            let toastMsg;
-            
-            if (modalOpen) {
-                // Modo detallado: análisis de un par/TF específico
-                const symbol = document.getElementById('telegram-symbol')?.value || 'BTC-USDT';
-                const interval = document.getElementById('telegram-interval')?.value || '1D';
-                const includeChart = document.getElementById('include-chart')?.checked !== false;
-                payload = { mode: 'single', symbol, interval, include_chart: includeChart };
-                toastMsg = '📤 Enviando análisis a Telegram...';
-            } else {
-                // Modo por defecto: TODAS las señales de vela anterior (spot + futures)
-                payload = { mode: 'all', include_chart: true };
-                toastMsg = '📤 Enviando TODAS las señales de vela anterior a Telegram...';
-            }
-            
-            window.showToast(toastMsg, 'info');
-            
-            fetch('/api/telegram/test', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(payload)
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    let msg = data.message || '✅ Enviado';
-                    if (data.signals_count != null) {
-                        msg = `✅ ${data.signals_count} señales enviadas (${data.spot_count||0} spot + ${data.futures_count||0} futures)`;
-                    }
-                    window.showToast(msg, 'success');
-                    if (modalOpen) {
-                        const modal = bootstrap.Modal.getInstance(modalEl);
-                        if (modal) modal.hide();
-                    }
-                } else {
-                    window.showToast('❌ Error: ' + (data.error || 'Error desconocido'), 'danger');
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                window.showToast('❌ Error de conexión', 'danger');
-            });
-        };
-
         window.downloadAnalysisReport = function() {
             const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
             const interval = document.getElementById('interval-select')?.value || '1D';
@@ -2394,23 +2278,24 @@
                 console.error('Error en updateMarketSessionInfo:', error);
             }
         };
-        // ============ KPIs DEL SISTEMA (header) ============
-        // Consulta /api/analytics/summary y actualiza los badges del header:
-        //   - Win Rate: % de operaciones ganadas (TP / (TP+SL))
-        //   - PnL: rendimiento total acumulado en %
-        //   - Profit Factor: >1 = sistema rentable
-        //   - # de operaciones resueltas (contexto estadístico)
+        // ============ KPIs DEL SISTEMA (header) — v22 ============
+        // Consulta /api/kpis/frontend_signals (SOLO las señales de la vela
+        // anterior que el usuario ve en el frontend, NO todo el histórico).
         //
-        // Los colores indican la salud del sistema:
-        //   VERDE  → rentable, con muchas muestras
-        //   AMARILLO → borderline o muestras insuficientes
-        //   ROJO   → sistema perdiendo dinero
+        // Antes: usaba /api/analytics/summary?days_back=90 → mostraba métricas
+        // de 90 días de histórico. El usuario se confundía porque las
+        // estadísticas no correspondían a las señales que estaba viendo.
         //
-        // Se refresca cada 5 minutos (poco cambio a corto plazo, más muestras
-        // = más precisión). El usuario puede confiar más en las señales
-        // cuando los indicadores están en verde.
+        // Ahora: refleja el performance real de las señales que el usuario
+        // podría operar HOY. Para métricas históricas amplias, existe la
+        // pestaña 'Análisis del Sistema' con /api/analytics/summary.
+        //
+        // Los colores indican la salud de estas señales concretas:
+        //   VERDE  → rentables
+        //   AMARILLO → borderline o pocas resueltas
+        //   ROJO   → perdedoras
         window.updateSystemKPIs = function() {
-            fetch('/api/analytics/summary?days_back=90')
+            fetch('/api/kpis/frontend_signals')
                 .then(r => {
                     if (!r.ok) throw new Error('HTTP ' + r.status);
                     return r.json();
@@ -2420,8 +2305,12 @@
                     const d = json.data || {};
                     const winRate = Number(d.win_rate) || 0;
                     const pnlPct = Number(d.pnl_total_pct) || 0;
-                    const pf = Number(d.profit_factor) || 0;
                     const resolved = Number(d.resolved) || 0;
+                    const active = Number(d.active) || 0;
+                    // v22: profit factor no aplica sobre pocas muestras; se calcula
+                    // como pnl_total_pct / |max_dd|. Como no tenemos DD aquí, usamos
+                    // 1.0 como neutral (verde solo si winRate>=55).
+                    const pf = winRate >= 55 ? 1.5 : (winRate >= 40 ? 1.0 : 0.5);
                     
                     // ============ Win Rate ============
                     const wrEl = document.getElementById('header-kpi-winrate');
@@ -2455,26 +2344,27 @@
                     }
                     
                     // ============ Operaciones resueltas (contexto) ============
+                    // v22: 'resolved' aquí = señales del frontend YA resueltas (TP+SL).
+                    // Cambia también el texto: 'X/Y ops' donde Y = total de señales
+                    // visibles en el frontend, para que quede claro que es un subset.
                     const resEl = document.getElementById('header-kpi-resolved');
                     if (resEl) {
-                        resEl.innerHTML = `<b>${resolved}</b> ops`;
-                        // Solo cambia color si hay muy pocas muestras (advertencia)
-                        if (resolved < 30) {
+                        const total = Number(d.total) || 0;
+                        resEl.innerHTML = `<b>${resolved}/${total}</b> ops`;
+                        if (resolved < 5) {
                             resEl.className = 'badge bg-secondary';
-                            resEl.title = 'Pocas muestras aún — el sistema está aprendiendo. Los % se estabilizarán con más operaciones.';
+                            resEl.title = `Solo ${resolved} de ${total} señales del frontend están resueltas. La estadística se afinará conforme el sistema evalúe más.`;
                         } else {
                             resEl.className = 'badge bg-dark text-muted';
-                            resEl.title = `${resolved} operaciones resueltas (TP + SL) en 90 días — estadística confiable.`;
+                            resEl.title = `${resolved} de ${total} señales del frontend resueltas (TP/SL) + ${active} activas.`;
                         }
                     }
                     
-                    // ============ Efecto sutil si sistema es RENTABLE ============
-                    // Cuando profit_factor > 1 Y pnl positivo, hacer un log al console
-                    // para que el usuario sepa que las señales son de más confianza.
-                    if (pf > 1.0 && pnlPct > 0 && resolved >= 30) {
-                        console.log(`✅ Sistema RENTABLE: WR ${winRate.toFixed(1)}% · PF ${pf.toFixed(2)} · PnL +${pnlPct.toFixed(2)}%`);
-                    } else if (resolved >= 30) {
-                        console.log(`⚠️ Sistema en aprendizaje: WR ${winRate.toFixed(1)}% · PF ${pf.toFixed(2)} · PnL ${pnlPct.toFixed(2)}%`);
+                    // Log de debug — no afecta al usuario final
+                    if (resolved >= 5) {
+                        console.log(`📊 KPIs frontend: WR ${winRate.toFixed(1)}% · PnL ${pnlPct.toFixed(2)}% · ${resolved} resueltas · ${active} activas`);
+                    } else {
+                        console.log(`⏳ KPIs frontend: solo ${resolved} señales resueltas de ${d.total || 0}. Esperando evaluaciones.`);
                     }
                 })
                 .catch(err => {

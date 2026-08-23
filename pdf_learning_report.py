@@ -10,10 +10,11 @@ Estructura del informe:
   4. Top 20 peores estrategias generales
   5. Top 15 mejores combinaciones específicas (par + TF + acción + estrategia)
   6. Top 15 peores combinaciones específicas
-  7. Aprendizaje por PAR (win rate por símbolo)
-  8. Aprendizaje por TIMEFRAME
-  9. Oportunidades perdidas: indicadores que estaban activos
-  10. Notas técnicas
+  7. ESTRATEGIAS POR TRADER (cobertura del comité) — v22
+  8. Aprendizaje por PAR (win rate por símbolo)
+  9. Aprendizaje por TIMEFRAME
+  10. Oportunidades perdidas: indicadores que estaban activos
+  11. Notas técnicas
 
 CAMBIO IMPORTANTE: en lugar de leer solo las tablas strategy_stats_* (que
 requieren ejecutar run_full_review y a veces fallan por timeout), este PDF
@@ -38,6 +39,190 @@ SPECIFIC_SAMPLES_RIGOROUS = 10   # con >=10 muestras el resultado es "válido"
 SPECIFIC_SAMPLES_MIN = 3         # con <3 no lo mostramos (ruido puro)
 GENERAL_SAMPLES_RIGOROUS = 25    # con >=25 muestras el resultado es "válido"
 GENERAL_SAMPLES_MIN = 5
+
+
+# ============================================================================
+# v22: MAPEO ESTRATEGIA → TRADER (para auditar cobertura del comité)
+# ============================================================================
+# Cada trader emite un conjunto conocido de estrategias. Este mapa permite
+# saber a qué trader corresponde cada strategy_name guardada en Supabase, y
+# generar la sección "estrategias por trader" del PDF de Aprendizaje.
+STRATEGY_TO_TRADER = {
+    # TraderTecnico (RSI, MACD, ADX, BB, Squeeze)
+    'BAND_WALK_ALCISTA': 'TraderTecnico',
+    'BAND_WALK_BAJISTA': 'TraderTecnico',
+    'EXPANSION_VOLATILIDAD': 'TraderTecnico',
+    'PULLBACK_TENDENCIA': 'TraderTecnico',
+    'SOBRECOMPRA': 'TraderTecnico',
+    'SOBREVENTA': 'TraderTecnico',
+    'SQUEEZE_ALCISTA': 'TraderTecnico',
+    'SQUEEZE_BAJISTA': 'TraderTecnico',
+    'TENDENCIA_FUERTE': 'TraderTecnico',
+    # TraderChartista (patrones gráficos)
+    'ACUMULACION_PATRONES': 'TraderChartista',
+    'ACUMULACION_PATRONES_BAJISTAS': 'TraderChartista',
+    'BANDERA_ALCISTA': 'TraderChartista',
+    'DOBLE_SUELO': 'TraderChartista',
+    'DOBLE_TECHO': 'TraderChartista',
+    'HCH_INVERTIDO': 'TraderChartista',
+    # TraderBallenas (volumen anómalo, whale)
+    'ACUMULACION_ICEBERG': 'TraderBallenas',
+    'DISTRIBUCION_ICEBERG': 'TraderBallenas',
+    'MAVERICK': 'TraderBallenas',
+    'MAVERICK_BAJISTA': 'TraderBallenas',
+    'VOLUMEN_ANOMALO_ALCISTA': 'TraderBallenas',
+    'VOLUMEN_ANOMALO_BAJISTA': 'TraderBallenas',
+    # TraderMacro (correlaciones BTC/PAXG, régimen macro)
+    'BTC_ALCISTA_UNILATERAL': 'TraderMacro',
+    'BTC_BAJISTA_UNILATERAL': 'TraderMacro',
+    'BTC_MAS_FUERTE': 'TraderMacro',
+    'BTC_MAS_FUERTE_RATIO': 'TraderMacro',
+    'CORRELACION_NEGATIVA': 'TraderMacro',
+    'CORRELACION_POSITIVA': 'TraderMacro',
+    'EVITAR_BTC_POR_ROTACION': 'TraderMacro',
+    'EVITAR_PAXG_POR_ROTACION': 'TraderMacro',
+    'PAXG_MAS_FUERTE': 'TraderMacro',
+    'PAXG_MAS_FUERTE_RATIO': 'TraderMacro',
+    'RATIO_ALCISTA': 'TraderMacro',
+    'RATIO_BAJISTA': 'TraderMacro',
+    'ROTACION_REFUGIO': 'TraderMacro',
+    'ROTACION_REFUGIO_RATIO': 'TraderMacro',
+    'ROTACION_RIESGO': 'TraderMacro',
+    'ROTACION_RIESGO_RATIO': 'TraderMacro',
+    # TraderPullback
+    'PULLBACK_ALCISTA': 'TraderPullback',
+    'PULLBACK_BAJISTA': 'TraderPullback',
+    # TraderSmartMoney (SMC: OB, FVG, VP, liquidity)
+    'CONFLUENCIA_MULTIPLE': 'TraderSmartMoney',
+    'FVG_ALCISTA': 'TraderSmartMoney',
+    'FVG_BAJISTA': 'TraderSmartMoney',
+    'HVN_RESISTENCIA': 'TraderSmartMoney',
+    'HVN_SOPORTE': 'TraderSmartMoney',
+    'LIQUIDITY_SWEEP_ALCISTA': 'TraderSmartMoney',
+    'LIQUIDITY_SWEEP_BAJISTA': 'TraderSmartMoney',
+    'LVN_ROTURA': 'TraderSmartMoney',
+    'ORDER_BLOCK_ALCISTA': 'TraderSmartMoney',
+    'ORDER_BLOCK_BAJISTA': 'TraderSmartMoney',
+    'POC_CONFLUENCIA': 'TraderSmartMoney',
+    'POC_REBOTE': 'TraderSmartMoney',
+    'POC_RESISTENCIA': 'TraderSmartMoney',
+    'POC_VWAP_CONFLUENCIA': 'TraderSmartMoney',
+    'STOP_HUNT_ALCISTA': 'TraderSmartMoney',
+    'STOP_HUNT_BAJISTA': 'TraderSmartMoney',
+    'STOP_HUNT_OB': 'TraderSmartMoney',
+    'VALUE_AREA_BREAKDOWN': 'TraderSmartMoney',
+    'VALUE_AREA_BREAKOUT': 'TraderSmartMoney',
+    'VALUE_AREA_CONFIRMACION': 'TraderSmartMoney',
+    'VALUE_AREA_CONFIRMACION_BAJISTA': 'TraderSmartMoney',
+    'VALUE_AREA_EXTREMO_ALTO': 'TraderSmartMoney',
+    'VALUE_AREA_EXTREMO_BAJO': 'TraderSmartMoney',
+    'VOLUMEN_ANOMALO': 'TraderSmartMoney',
+    # TraderEspectico (cauteloso)
+    'CONFIRMACION_RECHAZADA': 'TraderEspectico',
+    # TraderMultiframe (multi-timeframe)
+    'ACUMULACION_EN_ZONA_BAJISTA': 'TraderMultiframe',
+    'ALINEACION_BEARISH_COMPLETA': 'TraderMultiframe',
+    'ALINEACION_BULLISH_COMPLETA': 'TraderMultiframe',
+    'CONFLICTO_MAYOR_ADVIERTE_CAMBIO': 'TraderMultiframe',
+    'DISTRIBUCION_EN_ZONA_ALCISTA': 'TraderMultiframe',
+    'PULLBACK_OPORTUNIDAD': 'TraderMultiframe',
+    'RUPTURA_CONFIRMADA': 'TraderMultiframe',
+    # TraderLiquidation (mapa de liquidaciones futuros)
+    'HEAVY_LONG_CONCENTRATION': 'TraderLiquidation',
+    'HEAVY_SHORT_CONCENTRATION': 'TraderLiquidation',
+    'LIQUIDITY_BALANCE': 'TraderLiquidation',
+    'LIQUIDITY_PRESENT': 'TraderLiquidation',
+    'LONG_DOMINANCE_SUPPORT': 'TraderLiquidation',
+    'LONG_EXTREME_REVERSAL': 'TraderLiquidation',
+    'RECENT_LONG_LIQUIDATIONS': 'TraderLiquidation',
+    'RECENT_SHORT_LIQUIDATIONS': 'TraderLiquidation',
+    'SHORT_DOMINANCE_RESISTANCE': 'TraderLiquidation',
+    'SHORT_EXTREME_REVERSAL': 'TraderLiquidation',
+    'SPIKE_ACCUMULATION_LONG': 'TraderLiquidation',
+    'SPIKE_ACCUMULATION_SHORT': 'TraderLiquidation',
+    # ReviewTrader (juez del comité)
+    'REVIEW_HISTORICO_GANADOR_LONG': 'ReviewTrader',
+    'REVIEW_HISTORICO_GANADOR_SHORT': 'ReviewTrader',
+    'REVIEW_PATRON_PERDEDOR': 'ReviewTrader',
+    # Ambiguas / compartidas
+    'ESPERAR_CONFIRMACION': 'TraderPullback+TraderEspectico',
+}
+# Lista canónica de traders para orden estable en el PDF
+CANONICAL_TRADERS = [
+    'TraderTecnico', 'TraderChartista', 'TraderBallenas',
+    'TraderMacro', 'TraderPullback', 'TraderSmartMoney',
+    'TraderEspectico', 'TraderMultiframe', 'TraderLiquidation',
+    'ReviewTrader',
+]
+
+
+def _calc_stats_by_trader(signals: List[Dict]) -> List[Dict]:
+    """
+    v22: agrupa las señales resueltas por trader (usando STRATEGY_TO_TRADER)
+    y calcula: nº estrategias distintas, señales totales, wins, losses, WR.
+    
+    Retorna lista ordenada por WR desc, con métricas por trader.
+    """
+    by_trader = defaultdict(lambda: {
+        'strategies_seen': set(),
+        'wins': 0, 'losses': 0, 'expired': 0,
+    })
+    
+    for sig in signals:
+        strategies = [
+            si.get('strategy_name') for si in (sig.get('signal_indicators') or [])
+            if si.get('strategy_name')
+        ]
+        if not strategies:
+            continue
+        status = sig.get('status')
+        
+        traders_de_esta_signal = set()
+        for strat in strategies:
+            trader = STRATEGY_TO_TRADER.get(strat)
+            if not trader:
+                continue
+            # Estrategia ambigua: contarla para cada trader que la emite
+            for t in trader.split('+'):
+                traders_de_esta_signal.add(t)
+                by_trader[t]['strategies_seen'].add(strat)
+        
+        # Cada trader que contribuyó recibe crédito/débito
+        for t in traders_de_esta_signal:
+            b = by_trader[t]
+            if status == 'tp_hit':
+                b['wins'] += 1
+            elif status == 'sl_hit':
+                b['losses'] += 1
+            elif status == 'expired':
+                b['expired'] += 1
+    
+    rows = []
+    for t in CANONICAL_TRADERS:
+        b = by_trader.get(t)
+        if not b:
+            # Trader que NO aportó nada en el período — se lista igual como aviso
+            rows.append({
+                'trader': t, 'signals': 0, 'wins': 0, 'losses': 0,
+                'win_rate': 0.0, 'expired': 0, 'unique_strategies': 0,
+                'strategies': [],
+            })
+            continue
+        resolved = b['wins'] + b['losses']
+        wr = (b['wins'] / resolved * 100) if resolved > 0 else 0.0
+        rows.append({
+            'trader': t,
+            'signals': resolved + b['expired'],
+            'wins': b['wins'],
+            'losses': b['losses'],
+            'expired': b['expired'],
+            'win_rate': round(wr, 1),
+            'unique_strategies': len(b['strategies_seen']),
+            'strategies': sorted(b['strategies_seen']),
+        })
+    # Ordenar: primero por si aportó, luego por WR
+    rows.sort(key=lambda x: (-x['signals'], -x['win_rate']))
+    return rows
 
 
 # ============================================================================
@@ -792,7 +977,63 @@ def generate_learning_pdf() -> bytes:
     
     story.append(PageBreak())
     
-    # ============ 7. APRENDIZAJE POR PAR ============
+    # ============ v22: 7. ESTRATEGIAS POR TRADER (auditoría del comité) ============
+    # Permite al usuario verificar que cada uno de los 10 traders está
+    # aportando estrategias distintas y qué performance tiene cada uno.
+    story.append(Paragraph("Estrategias por trader (cobertura del comité)", style_h2))
+    story.append(Paragraph(
+        "Cada uno de los 10 traders del sistema emite un conjunto de estrategias distintas. "
+        "Esta tabla muestra <b>qué está aportando cada trader</b>: cuántas estrategias diferentes "
+        "ha emitido, cuántas señales resueltas tiene y su win rate. Si un trader tiene 0 señales, "
+        "significa que no ha aportado en el período — puede indicar que no encuentra setups o que "
+        "sus estrategias están silenciadas por el régimen de mercado actual.",
+        style_body
+    ))
+    
+    stats_by_trader = _calc_stats_by_trader(signals_with_ind) if signals_with_ind else []
+    if stats_by_trader:
+        rows = [['Trader', '# Estrategias', 'Señales', 'TP', 'SL', 'Expired', 'Win %']]
+        for s in stats_by_trader:
+            active_mark = '' if s['signals'] > 0 else ' (inactivo)'
+            rows.append([
+                s['trader'] + active_mark,
+                str(s['unique_strategies']),
+                str(s['signals']),
+                str(s['wins']),
+                str(s['losses']),
+                str(s['expired']),
+                f"{s['win_rate']}%" if s['signals'] > 0 else '—'
+            ])
+        t = Table(rows, colWidths=[4.5*cm, 2.2*cm, 1.8*cm, 1.5*cm, 1.5*cm, 2*cm, 2*cm])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), HexColor('#1a5490')),
+            ('TEXTCOLOR', (0,0), (-1,0), white),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0,0), (-1,-1), 9),
+            ('GRID', (0,0), (-1,-1), 0.3, HexColor('#c8ccd6')),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [HexColor('#f4f6fa'), white]),
+            ('ALIGN', (1,1), (-1,-1), 'CENTER'),
+        ]))
+        story.append(t)
+        story.append(Spacer(1, 8))
+        
+        # Detalle: estrategias emitidas por cada trader activo
+        story.append(Paragraph("Estrategias emitidas por cada trader (detalle)", style_h3))
+        for s in stats_by_trader:
+            if s['unique_strategies'] == 0:
+                continue
+            strategies_str = ', '.join(s['strategies'])
+            story.append(Paragraph(
+                f"<b>{s['trader']}</b> ({s['unique_strategies']} estrategias): "
+                f"<font color='#555'>{strategies_str}</font>",
+                style_note
+            ))
+    else:
+        story.append(Paragraph("<i>Sin datos suficientes — el sistema aún no ha resuelto señales.</i>", style_body))
+    
+    story.append(PageBreak())
+    
+    # ============ 8. APRENDIZAJE POR PAR ============
     story.append(Paragraph("Aprendizaje por par (todos los TFs y acciones)", style_h2))
     if stats_by_symbol:
         rows = [['Par', 'Wins (TP)', 'Losses (SL)', 'Expired', 'Missed', 'Muestras', 'Win %']]
