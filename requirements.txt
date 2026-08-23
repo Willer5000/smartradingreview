@@ -5,8 +5,6 @@ pandas
 requests
 pytz
 plotly
-matplotlib
-schedule
 gunicorn
 kaleido==0.2.1
 supabase>=2.0.0

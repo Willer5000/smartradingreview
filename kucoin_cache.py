@@ -155,10 +155,21 @@ def _cache_get(symbol: str, interval: str) -> Optional[pd.DataFrame]:
 
 
 def _cache_put(symbol: str, interval: str, df: pd.DataFrame) -> None:
-    """Guarda el DataFrame en caché (thread-safe)."""
+    """
+    Guarda el DataFrame en caché (thread-safe).
+    
+    LRU implícito: si la caché supera 40 entradas (~5 símbolos × 8 TFs),
+    purga la entrada más vieja. Cada DataFrame ~100 velas × 6 cols ≈ 100KB,
+    así que 40 entradas = ~4MB máx.
+    """
     key = (symbol, interval)
     with _cache_lock:
         _cache[key] = {'df': df, 'ts': time.time()}
+        # LRU: purgar el 25% más antiguo cuando supera 40 entradas
+        if len(_cache) > 40:
+            sorted_keys = sorted(_cache.keys(), key=lambda k: _cache[k]['ts'])
+            for k in sorted_keys[:10]:  # purgar los 10 más antiguos
+                _cache.pop(k, None)
 
 
 # ============================================================================
