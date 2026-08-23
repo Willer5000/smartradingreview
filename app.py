@@ -19834,6 +19834,23 @@ def api_kpis_debug():
         # header siempre mostraba 0/N ops.
         from supabase_client import supabase_db as db
         out['supabase_enabled'] = bool(db and db.enabled)
+        out['supabase_url_present'] = bool(os.environ.get('SUPABASE_URL'))
+        out['supabase_key_present'] = bool(os.environ.get('SUPABASE_KEY') or os.environ.get('SUPABASE_SERVICE_ROLE_KEY'))
+        out['supabase_url_first10'] = (os.environ.get('SUPABASE_URL') or '')[:30]
+        
+        # Test de conexión directa: ¿puedo hacer una query mínima?
+        if db and db.enabled:
+            try:
+                r_test = (db.client.table('signals')
+                          .select('id', count='exact')
+                          .limit(1)
+                          .execute())
+                out['test_query'] = {
+                    'ok': True,
+                    'total_signals_in_db': r_test.count if hasattr(r_test, 'count') else 'unknown'
+                }
+            except Exception as e:
+                out['test_query'] = {'ok': False, 'error': str(e)[:300]}
         
         if db and db.enabled:
             # Conteos globales por status
