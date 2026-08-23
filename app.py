@@ -13973,10 +13973,27 @@ class TradingExpertSystem:
                 df_dict = {'time': [], 'open': [], 'high': [], 'low': [], 'close': [], 'volume': []}
             
             # ============ PREPARAR REGISTRO DE VOTACIÓN ============
+            # CRÍTICO v20: incluir 'todos_los_votos' con las estrategias de CADA
+            # trader individual. Sin esto, review_trader._extract_strategies solo
+            # ve 'estrategias_consenso' (filtro frecuencia≥2) y perdemos las
+            # estrategias únicas de 9 de los 10 traders (SmartMoney, Ballenas,
+            # Macro, Pullback, Multiframe, Liquidation, etc).
             registro_serializable = {}
             try:
                 if registro_votacion:
                     if isinstance(registro_votacion, dict):
+                        # Serializar cada voto individual con sus estrategias
+                        todos_votos_serial = []
+                        for v in (registro_votacion.get('todos_los_votos') or []):
+                            if isinstance(v, dict):
+                                todos_votos_serial.append({
+                                    'trader': str(v.get('trader', '')),
+                                    'accion': str(v.get('accion', '')),
+                                    'confianza': float(v.get('confianza', 0)),
+                                    'confianza_original': float(v.get('confianza_original', v.get('confianza', 0))),
+                                    'estrategias': [str(e) for e in (v.get('estrategias') or [])],
+                                })
+                        
                         registro_serializable = {
                             'accion_ganadora': str(registro_votacion.get('accion_ganadora', '')),
                             'confianza_final': float(registro_votacion.get('confianza_final', 0)),
@@ -13984,6 +14001,7 @@ class TradingExpertSystem:
                             'conteo_acciones': {str(k): int(v) for k, v in registro_votacion.get('conteo_acciones', {}).items()},
                             'confianza_por_accion': {str(k): float(v) for k, v in registro_votacion.get('confianza_por_accion', {}).items()},
                             'estrategias_consenso': [str(e) for e in registro_votacion.get('estrategias_consenso', [])],
+                            'todos_los_votos': todos_votos_serial,   # ← CRÍTICO
                         }
                     else:
                         registro_serializable = {
@@ -13992,7 +14010,8 @@ class TradingExpertSystem:
                             'traders_que_apoyan': [],
                             'conteo_acciones': {},
                             'confianza_por_accion': {},
-                            'estrategias_consenso': [str(e) for e in estrategias_consenso]
+                            'estrategias_consenso': [str(e) for e in estrategias_consenso],
+                            'todos_los_votos': [],
                         }
             except Exception as e:
                 print(f"❌ ERROR preparando registro de votación: {e}")
@@ -14002,7 +14021,8 @@ class TradingExpertSystem:
                     'traders_que_apoyan': [],
                     'conteo_acciones': {},
                     'confianza_por_accion': {},
-                    'estrategias_consenso': [str(e) for e in estrategias_consenso]
+                    'estrategias_consenso': [str(e) for e in estrategias_consenso],
+                    'todos_los_votos': [],
                 }
             
             print(f"✅ ANÁLISIS COMPLETADO para {symbol} {timeframe}")
@@ -21314,14 +21334,20 @@ def _price_touches_entry(current_price, entry, action):
 
 def _build_entry_alert_message(signal, current_price):
     """
-    Construye el mensaje de Telegram cuando el precio toca entry.
+    Construye el mensaje COMPACTO de Telegram cuando el precio toca entry.
     
-    Estructura:
-      - Cabecera con acción + par/TF
-      - Niveles (entry, precio actual, TP, SL, leverage, R/R)
+    Estructura MINIMALISTA (v20):
+      - Cabecera con acción
+      - Par + timeframe
+      - Niveles (Entry, TP, SL)
+      - Leverage y R/R si aplica (futures)
       - Confianza
-      - Justificación breve (400 chars max) — resume por qué el sistema recomienda
-      - Imagen adjunta con gráficos de indicadores que respaldan la señal
+      - Imagen adjunta con: gráfico principal (velas + niveles) + gráficos
+        de los indicadores que respaldan la señal
+    
+    Se ELIMINÓ:
+      - Precio actual (redundante, está en la imagen)
+      - Justificación en texto (verbosa, los indicadores en la imagen bastan)
     """
     action = signal.get('action', '') or signal.get('decision', '')
     symbol = signal.get('symbol', '?')
@@ -21333,7 +21359,6 @@ def _build_entry_alert_message(signal, current_price):
     confidence = max(0.0, min(100.0, confidence))
     leverage = signal.get('leverage')
     rr = signal.get('risk_reward')
-    justification = signal.get('message', '') or signal.get('justification', '') or ''
     
     icon_map = {
         'LONG': '🟢 LONG',
@@ -21348,27 +21373,19 @@ def _build_entry_alert_message(signal, current_price):
         f'<b>{symbol}</b> · {timeframe}',
         '',
         f'💰 Entry: <b>{entry:.4f}</b>',
-        f'📊 Precio: {current_price:.4f}',
         f'🎯 TP: {tp:.4f}',
         f'🛑 SL: {sl:.4f}',
     ]
-    if leverage:
+    if leverage and leverage > 1:
         lines.append(f'⚡ Leverage: x{leverage}')
     if rr:
         try:
-            lines.append(f'⚖️ R/R: {float(rr):.2f}')
+            rr_val = float(rr)
+            if rr_val > 0:
+                lines.append(f'⚖️ R/R: {rr_val:.2f}')
         except Exception:
             pass
     lines.append(f'🎯 Confianza: {confidence:.0f}%')
-    
-    if justification:
-        # Truncar a 400 chars para mensaje compacto
-        just_clean = justification.strip()
-        if len(just_clean) > 400:
-            just_clean = just_clean[:400] + '...'
-        lines.append('')
-        lines.append('📝 <b>Justificación:</b>')
-        lines.append(just_clean)
     
     return '\n'.join(lines)
 
@@ -21499,62 +21516,61 @@ def monitor_entries_loop():
                 
                 # DISPARAR ALERTA
                 try:
-                    # ============ REANALIZAR PARA IMAGEN + JUSTIFICACIÓN ============
-                    # El caché de futures elimina 'df' para ahorrar memoria en el
-                    # warm-up. Pero la IMAGEN necesita el df completo. Solución:
-                    # reanalizar SOLO cuando toca alerta (evento raro: máx 1 vez
-                    # por vela). Esto usa ~50MB temporalmente pero se libera
-                    # inmediatamente después de enviar.
-                    #
-                    # OPTIMIZACIÓN: antes de reanalizar, liberar caché de análisis
-                    # (~40MB) para tener margen sin OOM.
+                    # ============ GENERAR IMAGEN COMBINADA (principal + indicadores) ============
+                    # v20: usamos render_telegram_signal_chart que combina en UNA
+                    # sola imagen: velas + niveles + hasta 4 indicadores que
+                    # respaldan la señal. Es más eficiente que enviar múltiples
+                    # (Telegram sendPhoto solo acepta 1 imagen).
+                    # El renderer usa fallback a KuCoin si no hay df en el caché.
                     import gc
                     image_bytes = None
                     analysis = None
+                    top_indicators = []
                     
-                    # Liberar caché temporalmente para tener RAM disponible
+                    # Intentar leer del caché primero (rápido, 0 memoria extra)
                     try:
-                        with _ANALYSIS_CACHE_LOCK:
-                            _cache_backup = dict(_ANALYSIS_CACHE)
-                            _ANALYSIS_CACHE.clear()
-                        gc.collect()
+                        analysis = _analysis_cache_get((symbol, tf))
                     except Exception:
-                        _cache_backup = None
+                        analysis = None
                     
-                    try:
-                        # Reanalizar usando el sistema correcto según spot/futures
-                        if sig.get('system') == 'futures':
-                            futures_sys = _get_futures_system()
-                            if futures_sys is not None:
-                                analysis = futures_sys.analyze_futures_market(symbol, tf)
-                        else:
-                            analysis = expert_system.analyze_full_market(symbol, tf)
-                        
-                        if analysis and analysis.get('success'):
-                            # Inyectar justificación (mensaje breve) en la señal
-                            just_msg = analysis.get('message', '') or ''
-                            if just_msg:
-                                # Truncar a 400 chars para mensaje compacto
-                                sig['message'] = just_msg[:400] + ('...' if len(just_msg) > 400 else '')
-                            
-                            # Generar imagen con indicadores que respaldan la señal
-                            try:
-                                top_indicators = expert_system.get_top_indicators_for_chart(analysis)
+                    # Si no está en caché, reanalizar (evento raro: 1 vez por vela)
+                    if analysis is None or not analysis.get('success'):
+                        try:
+                            if sig.get('system') == 'futures':
+                                futures_sys = _get_futures_system()
+                                if futures_sys is not None:
+                                    analysis = futures_sys.analyze_futures_market(symbol, tf)
+                            else:
+                                analysis = expert_system.analyze_full_market(symbol, tf)
+                        except Exception as an_err:
+                            print(f"   ⚠️ reanálisis falló: {an_err}")
+                            analysis = None
+                    
+                    # Generar imagen COMBINADA (principal + 4 indicadores en 1 PNG)
+                    if analysis and analysis.get('success'):
+                        try:
+                            top_indicators = expert_system.get_top_indicators_for_chart(analysis)
+                            from chart_renderer import render_telegram_signal_chart
+                            image_bytes = render_telegram_signal_chart(
+                                symbol, tf, analysis, indicators=top_indicators
+                            )
+                            if image_bytes:
+                                print(f"   🖼️ Imagen combinada generada ({sig.get('system')}): principal + {top_indicators}")
+                            else:
+                                # Fallback: solo gráfico principal
                                 image_bytes = expert_system.generate_chart_image(
                                     symbol, tf, analysis, top_indicators
                                 )
                                 if image_bytes:
-                                    print(f"   🖼️ Imagen generada ({sig.get('system')}) con {top_indicators}")
-                            except Exception as chart_err:
-                                print(f"   ⚠️ imagen falló: {chart_err}")
-                    except Exception as an_err:
-                        print(f"   ⚠️ reanálisis falló: {an_err}")
+                                    print(f"   🖼️ Fallback: solo gráfico principal")
+                        except Exception as chart_err:
+                            print(f"   ⚠️ imagen combinada falló: {chart_err}")
                     
-                    # Liberar análisis (grande) antes de enviar
+                    # Liberar análisis (grande) antes de enviar Telegram
                     del analysis
                     gc.collect()
                     
-                    # Construir mensaje con justificación breve
+                    # Construir mensaje compacto (sin precio actual, sin justificación)
                     message = _build_entry_alert_message(sig, current)
                     
                     # Enviar
@@ -21566,15 +21582,7 @@ def monitor_entries_loop():
                     else:
                         print(f"   ⚠️ Telegram rechazó la alerta para {symbol} {tf}")
                     
-                    # Restaurar caché
-                    try:
-                        if _cache_backup:
-                            with _ANALYSIS_CACHE_LOCK:
-                                _ANALYSIS_CACHE.update(_cache_backup)
-                    except Exception:
-                        pass
-                    
-                    # Liberar memoria de la alerta
+                    # Liberar memoria
                     del image_bytes, message
                     gc.collect()
                 except Exception as send_err:

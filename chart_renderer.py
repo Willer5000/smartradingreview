@@ -55,40 +55,53 @@ COLORS = {
 }
 
 
-def _prepare_df(analysis: dict, min_candles: int = 60) -> Optional[pd.DataFrame]:
+def _prepare_df(analysis: dict, min_candles: int = 30,
+                 symbol: str = None, timeframe: str = None) -> Optional[pd.DataFrame]:
     """
     Extrae el DataFrame del análisis. Devuelve None si no hay datos suficientes.
-    Puede venir en analysis['df'] o análisis['structure']['df'].
+    
+    Prioridad:
+      1. analysis['df'] (top-level, disponible en spot y análisis fresco)
+      2. analysis['structure']['df'] (fallback)
+      3. Fetch directo de KuCoin usando kucoin_cache (si symbol y timeframe se pasan)
+         → Este fallback es CRÍTICO porque el caché de futures elimina 'df'
+         para ahorrar memoria, entonces las funciones downstream (PDF anexo B,
+         imagen Telegram) necesitan re-obtenerlo desde KuCoin.
     """
     df_dict = analysis.get('df') or (analysis.get('structure') or {}).get('df') or {}
-    if not df_dict or not isinstance(df_dict, dict):
-        return None
     
-    times = df_dict.get('time', [])
-    opens = df_dict.get('open', [])
-    highs = df_dict.get('high', [])
-    lows = df_dict.get('low', [])
-    closes = df_dict.get('close', [])
-    volumes = df_dict.get('volume', [])
+    # Camino 1 y 2: df en el análisis
+    if df_dict and isinstance(df_dict, dict):
+        times = df_dict.get('time', [])
+        if len(times) >= min_candles:
+            try:
+                df = pd.DataFrame({
+                    'time': pd.to_datetime(times),
+                    'open': [float(x) for x in df_dict.get('open', [])],
+                    'high': [float(x) for x in df_dict.get('high', [])],
+                    'low':  [float(x) for x in df_dict.get('low', [])],
+                    'close': [float(x) for x in df_dict.get('close', [])],
+                    'volume': [float(x) if x else 0 for x in df_dict.get('volume', [])],
+                })
+                # Tomar solo las últimas N velas para el gráfico
+                df = df.tail(100).reset_index(drop=True)
+                return df
+            except Exception as e:
+                logger.warning(f'Error construyendo df desde analysis: {e}')
     
-    if len(times) < min_candles:
-        return None
+    # Camino 3: fallback — fetch directo de KuCoin (soluciona anexo B vacío)
+    if symbol and timeframe:
+        try:
+            from kucoin_cache import fetch_kucoin_candles
+            df = fetch_kucoin_candles(symbol, timeframe, timeout=8)
+            if df is not None and len(df) >= min_candles:
+                df = df.tail(100).reset_index(drop=True)
+                logger.info(f'_prepare_df: usó fallback KuCoin para {symbol} {timeframe}')
+                return df
+        except Exception as e:
+            logger.warning(f'_prepare_df: fallback KuCoin falló: {e}')
     
-    try:
-        df = pd.DataFrame({
-            'time': pd.to_datetime(times),
-            'open': [float(x) for x in opens],
-            'high': [float(x) for x in highs],
-            'low':  [float(x) for x in lows],
-            'close': [float(x) for x in closes],
-            'volume': [float(x) if x else 0 for x in volumes],
-        })
-        # Tomar solo las últimas N velas para el gráfico
-        df = df.tail(100).reset_index(drop=True)
-        return df
-    except Exception as e:
-        logger.warning(f'Error construyendo df: {e}')
-        return None
+    return None
 
 
 def _fig_to_png_bytes(fig: Figure, dpi: int = 100) -> Optional[bytes]:
@@ -121,7 +134,7 @@ def render_main_chart(symbol: str, timeframe: str, analysis: dict,
     - Panel superior (70%): velas + EMA9/21/50/200 + soportes/resistencias
     - Panel inferior (30%): volumen
     """
-    df = _prepare_df(analysis, min_candles=30)
+    df = _prepare_df(analysis, min_candles=30, symbol=symbol, timeframe=timeframe)
     if df is None:
         logger.warning(f'render_main_chart: sin df para {symbol} {timeframe}')
         return None
@@ -485,6 +498,191 @@ def render_indicator_chart(df: pd.DataFrame, indicator: str,
         return None
 
 
+def render_telegram_signal_chart(symbol: str, timeframe: str,
+                                   analysis: dict,
+                                   indicators: List[str] = None,
+                                   width: int = 14, height: int = 12) -> Optional[bytes]:
+    """
+    Genera UNA sola imagen combinada para alerta Telegram con:
+    - Panel superior: velas + EMAs + soportes/resistencias + niveles entry/SL/TP
+    - Paneles inferiores: hasta 4 indicadores que respaldan la señal
+    
+    Telegram solo acepta 1 imagen por sendPhoto, así que combinamos todo en
+    una sola figura de matplotlib. Es más eficiente que enviar múltiples fotos.
+    """
+    df = _prepare_df(analysis, min_candles=30, symbol=symbol, timeframe=timeframe)
+    if df is None:
+        logger.warning(f'render_telegram_signal_chart: sin df para {symbol} {timeframe}')
+        return None
+    
+    indicators = (indicators or [])[:4]  # máximo 4 indicadores extra
+    n_indicators = len(indicators)
+    
+    try:
+        # Estructura: 1 fila principal grande + N filas de indicadores
+        n_rows = 1 + n_indicators
+        height_ratios = [3] + [1] * n_indicators
+        fig = plt.figure(figsize=(width, height), facecolor=COLORS['bg'])
+        gs = fig.add_gridspec(n_rows, 1, height_ratios=height_ratios, hspace=0.35)
+        
+        # ============ PANEL PRINCIPAL: velas + niveles ============
+        ax_main = fig.add_subplot(gs[0])
+        _draw_candles(ax_main, df)
+        
+        # EMAs
+        closes = df['close'].values
+        for period, color in [(9, COLORS['blue']), (21, COLORS['yellow']),
+                              (50, COLORS['orange']), (200, COLORS['pink'])]:
+            if len(closes) >= period:
+                ema = _calc_ema(closes, period)
+                ax_main.plot(df.index, ema, color=color, linewidth=1,
+                             label=f'EMA {period}', alpha=0.85)
+        
+        # Niveles Entry/SL/TP prominentes
+        levels = analysis.get('levels', {}) or {}
+        entry = levels.get('entry')
+        sl = levels.get('stop_loss')
+        tp = levels.get('take_profit')
+        if entry and entry > 0:
+            ax_main.axhline(y=entry, color=COLORS['blue'], linestyle='-',
+                            linewidth=1.8, alpha=0.9,
+                            label=f'ENTRY ${entry:.4f}')
+        if sl and sl > 0:
+            ax_main.axhline(y=sl, color=COLORS['red'], linestyle='-',
+                            linewidth=1.8, alpha=0.9, label=f'SL ${sl:.4f}')
+        if tp and tp > 0:
+            ax_main.axhline(y=tp, color=COLORS['green'], linestyle='-',
+                            linewidth=1.8, alpha=0.9, label=f'TP ${tp:.4f}')
+        
+        # Título principal
+        decision = analysis.get('decision', {}) or {}
+        action = decision.get('action', '?')
+        try:
+            conf = max(0, min(100, float(decision.get('confidence', 0))))
+        except Exception:
+            conf = 0
+        color_action = COLORS['green'] if action in ('LONG', 'COMPRA_SPOT') else \
+                       COLORS['red'] if action in ('SHORT', 'VENTA_SPOT') else \
+                       COLORS['yellow']
+        ax_main.set_title(f'{symbol} · {timeframe} · {action} ({conf:.0f}%)',
+                          color=color_action, fontsize=14, fontweight='bold', pad=10)
+        ax_main.set_ylabel('Precio', color='white', fontsize=10)
+        ax_main.legend(loc='upper left', fontsize=8, framealpha=0.7, ncol=2)
+        ax_main.grid(True, alpha=0.15, linestyle=':')
+        ax_main.tick_params(colors='white', labelsize=8)
+        ax_main.set_facecolor(COLORS['bg'])
+        # Sin xticks en panel principal (limpieza visual)
+        ax_main.set_xticks([])
+        
+        # ============ PANELES DE INDICADORES ============
+        for idx, ind in enumerate(indicators):
+            ax = fig.add_subplot(gs[idx + 1])
+            ax.set_facecolor(COLORS['bg'])
+            _render_indicator_into_ax(ax, df, ind, idx == n_indicators - 1)
+        
+        return _fig_to_png_bytes(fig, dpi=90)
+    except Exception as e:
+        logger.error(f'render_telegram_signal_chart error: {e}')
+        try:
+            plt.close('all')
+        except Exception:
+            pass
+        return None
+
+
+def _render_indicator_into_ax(ax, df: pd.DataFrame, indicator: str, is_last: bool):
+    """
+    Helper: dibuja un indicador en un ax dado (para figuras compuestas).
+    """
+    indicator = (indicator or '').lower()
+    closes = df['close'].values
+    highs = df['high'].values
+    lows = df['low'].values
+    n = len(df)
+    
+    title_map = {
+        'rsi': 'RSI (14)', 'rsi_maverick': 'RSI Maverick',
+        'macd': 'MACD', 'bollinger': 'Bollinger',
+        'volume': 'Volumen', 'dmi': 'DMI/ADX', 'adx': 'ADX',
+        'stochastic': 'Estocástico', 'williams': 'Williams %R',
+        'atr': 'ATR%', 'obv': 'OBV',
+        'supertrend': 'SuperTrend', 'psar': 'PSAR',
+        'ichimoku': 'Ichimoku', 'squeeze': 'Squeeze',
+        'ftm': 'FTM', 'whale': 'Whale', 'cci': 'CCI',
+        'mfi': 'MFI', 'fvg': 'FVG',
+    }
+    ax.set_title(title_map.get(indicator, indicator.upper()),
+                  color='white', fontsize=9, fontweight='bold', pad=5)
+    ax.tick_params(colors='white', labelsize=7)
+    ax.grid(True, alpha=0.15, linestyle=':')
+    
+    try:
+        if indicator == 'rsi':
+            rsi = _calc_rsi(closes, 14)
+            ax.plot(range(n), rsi, color=COLORS['purple'], linewidth=1)
+            ax.axhline(y=70, color=COLORS['red'], linestyle='--', linewidth=0.6, alpha=0.5)
+            ax.axhline(y=30, color=COLORS['green'], linestyle='--', linewidth=0.6, alpha=0.5)
+            ax.set_ylim([0, 100])
+        elif indicator == 'macd':
+            macd_line, signal_line, hist = _calc_macd(closes)
+            colors_hist = [COLORS['green'] if h >= 0 else COLORS['red'] for h in hist]
+            ax.bar(range(n), hist, color=colors_hist, alpha=0.5, width=0.8)
+            ax.plot(range(n), macd_line, color=COLORS['blue'], linewidth=0.9)
+            ax.plot(range(n), signal_line, color=COLORS['yellow'], linewidth=0.9)
+            ax.axhline(y=0, color=COLORS['white'], linewidth=0.4, alpha=0.5)
+        elif indicator == 'bollinger':
+            upper, sma, lower = _calc_bollinger(closes, 20, 2)
+            ax.plot(range(n), closes, color=COLORS['white'], linewidth=0.8)
+            ax.plot(range(n), upper, color=COLORS['red'], linewidth=0.6, linestyle='--')
+            ax.plot(range(n), sma, color=COLORS['yellow'], linewidth=0.6)
+            ax.plot(range(n), lower, color=COLORS['green'], linewidth=0.6, linestyle='--')
+            ax.fill_between(range(n), lower, upper, color=COLORS['blue'], alpha=0.08)
+        elif indicator == 'volume':
+            volumes = df['volume'].values
+            colors_vol = [COLORS['green'] if c >= o else COLORS['red']
+                          for c, o in zip(closes, df['open'].values)]
+            ax.bar(range(n), volumes, color=colors_vol, alpha=0.7, width=0.8)
+        elif indicator in ('dmi', 'adx'):
+            high_diff = np.diff(highs, prepend=highs[0])
+            low_diff = -np.diff(lows, prepend=lows[0])
+            plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
+            minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
+            tr = np.maximum(highs - lows,
+                             np.maximum(np.abs(highs - np.roll(closes, 1)),
+                                        np.abs(lows - np.roll(closes, 1))))
+            tr[0] = highs[0] - lows[0]
+            atr = _calc_ema(tr, 14)
+            plus_di = np.divide(_calc_ema(plus_dm, 14) * 100, atr,
+                                 out=np.zeros_like(atr), where=atr != 0)
+            minus_di = np.divide(_calc_ema(minus_dm, 14) * 100, atr,
+                                  out=np.zeros_like(atr), where=atr != 0)
+            dx = np.divide(np.abs(plus_di - minus_di) * 100, plus_di + minus_di,
+                            out=np.zeros_like(plus_di), where=(plus_di + minus_di) != 0)
+            adx = _calc_ema(dx, 14)
+            ax.plot(range(n), plus_di, color=COLORS['green'], linewidth=0.9, label='+DI')
+            ax.plot(range(n), minus_di, color=COLORS['red'], linewidth=0.9, label='-DI')
+            ax.plot(range(n), adx, color=COLORS['yellow'], linewidth=1.1, linestyle='-.')
+            ax.axhline(y=25, color=COLORS['gray'], linestyle=':', alpha=0.4)
+        else:
+            # Fallback: precio + EMA 21
+            if n >= 21:
+                ema21 = _calc_ema(closes, 21)
+                ax.plot(range(n), closes, color=COLORS['white'], linewidth=0.7)
+                ax.plot(range(n), ema21, color=COLORS['yellow'], linewidth=0.9)
+    except Exception as e:
+        logger.debug(f'_render_indicator_into_ax {indicator}: {e}')
+    
+    # X-ticks solo en el último panel
+    if is_last:
+        times = df['time'].values
+        step = max(1, n // 6)
+        ax.set_xticks(range(0, n, step))
+        ax.set_xticklabels([pd.Timestamp(times[i]).strftime('%m-%d %H:%M')
+                              for i in range(0, n, step)], rotation=25, ha='right', fontsize=6)
+    else:
+        ax.set_xticks([])
+
+
 def render_supporting_indicators_bundle(symbol: str, timeframe: str,
                                           analysis: dict,
                                           indicators: List[str],
@@ -493,8 +691,9 @@ def render_supporting_indicators_bundle(symbol: str, timeframe: str,
     Genera imágenes individuales de los indicadores que respaldan la señal.
     Retorna lista de {'name': str, 'image': bytes}.
     """
-    df = _prepare_df(analysis, min_candles=30)
+    df = _prepare_df(analysis, min_candles=30, symbol=symbol, timeframe=timeframe)
     if df is None:
+        logger.warning(f'render_supporting_indicators_bundle: sin df para {symbol} {timeframe}')
         return []
     
     indicators = (indicators or [])[:max_indicators]
