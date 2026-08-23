@@ -17,7 +17,17 @@ from flask import Flask, render_template, jsonify, request, send_file
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import warnings
-import kaleido
+# kaleido: import opcional. v19 migró a matplotlib (chart_renderer.py) que es
+# 10× más ligero. Si kaleido no está instalado (default post v19), los métodos
+# generate_chart_image ya delegan a matplotlib. El fallback plotly+kaleido solo
+# se usa si matplotlib falla — con este try/except no rompe el deploy aunque
+# kaleido no esté en requirements.
+try:
+    import kaleido
+    KALEIDO_AVAILABLE = True
+except ImportError:
+    kaleido = None
+    KALEIDO_AVAILABLE = False
 import threading
 warnings.filterwarnings('ignore')
 # ============================================================================
