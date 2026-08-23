@@ -76,14 +76,27 @@ SYMBOLS = {
 
 # Mapeo de intervalos KuCoin
 KUCOIN_INTERVALS = {
-    '4h': '4hour',
+    '5m':  '5min',
+    '15m': '15min',
+    '30m': '30min',
+    '1h':  '1hour',
+    '2h':  '2hour',
+    '4h':  '4hour',
     '12h': '12hour',
-    '1D': '1day',
-    '1W': '1week'
+    '1D':  '1day',
+    '1W':  '1week'
 }
 
 # Temporalidades operativas con horarios de ejecución (Bolivia)
 TIMEFRAMES = {
+    # TFs cortos (para consultas puntuales desde /futures o para PAXG-USDT).
+    # No tienen 'execution' porque no participan del scheduler de alertas.
+    '5m':  {'execution': [], 'name': '5 Minutos',  'type': 'scalping'},
+    '15m': {'execution': [], 'name': '15 Minutos', 'type': 'scalping'},
+    '30m': {'execution': [], 'name': '30 Minutos', 'type': 'intraday'},
+    '1h':  {'execution': [], 'name': '1 Hora',     'type': 'intraday'},
+    '2h':  {'execution': [], 'name': '2 Horas',    'type': 'intraday'},
+    # TFs originales de spot (con horarios de análisis programado)
     '4h': {'execution': ['23:57', '03:57', '07:57', '11:57', '15:57', '19:57'], 'name': '4 Horas', 'type': 'intraday'},
     '12h': {'execution': ['07:55', '19:55'], 'name': '12 Horas', 'type': 'swing'},
     '1D': {'execution': ['19:53'], 'name': '1 Día', 'type': 'investment'},
@@ -19843,22 +19856,25 @@ def api_telegram_test():
 @app.route('/api/generate_report')
 def api_generate_report():
     """
-    Genera reporte PDF de análisis (versión ligera para Render Free 512MB).
+    Genera reporte PDF completo con gráficos del análisis técnico.
     
     Estructura del PDF:
       1. Cabecera + tabla resumen niveles
-      2. 3 párrafos: acción, indicadores, conclusión (banco justificaciones)
-      3. Gráfico principal (opcional: ?with_charts=1)
+      2. 3 párrafos (acción, indicadores, conclusión) con banco justificaciones
+      3. ANEXO A: gráfico principal (velas + EMAs + estructura)
+      4. ANEXO B: gráficos individuales de indicadores que respaldan la señal
     
-    IMPORTANTE (v15): por defecto NO se generan gráficos con kaleido/Chrome
-    porque consume ~200MB y dispara OOM en Render Free. Para incluirlos:
-      GET /api/generate_report?symbol=BTC-USDT&interval=1D&with_charts=1
+    OPTIMIZACIONES DE MEMORIA (Render Free 512MB):
+    - Se libera temporalmente el caché de análisis (~40MB) antes de kaleido
+    - gc.collect() agresivo entre cada gráfico
+    - Máximo 4 imágenes de indicadores (era 10, reducido a 4)
+    - Si aún falla por memoria: usar ?with_charts=0 para PDF ligero sin gráficos
     """
     import gc
     symbol = request.args.get('symbol', 'BTC-USDT')
     interval = request.args.get('interval', '1D')
-    # Flag opcional para incluir gráficos (por defecto desactivados por OOM)
-    with_charts = request.args.get('with_charts', '0') in ('1', 'true', 'yes')
+    # Por defecto CON gráficos (el usuario los necesita para justificación visual)
+    with_charts = request.args.get('with_charts', '1') in ('1', 'true', 'yes')
     
     # Ejecutar análisis (usa caché si está caliente → 0ms)
     result = expert_system.analyze_full_market(symbol, interval)
@@ -19870,24 +19886,46 @@ def api_generate_report():
     supporting_charts = []
     
     if with_charts:
-        # Solo si el usuario lo pide explícitamente. Consume ~200MB extra.
+        # ============ LIBERAR MEMORIA ANTES DE KALEIDO ============
+        # Kaleido (Chrome headless) consume ~150-200MB al generar imágenes.
+        # Para no reventar los 512MB de Render Free, liberamos temporalmente
+        # el caché de análisis (~40MB) y forzamos gc antes de invocarlo.
+        try:
+            with _ANALYSIS_CACHE_LOCK:
+                _cache_backup = dict(_ANALYSIS_CACHE)
+                _ANALYSIS_CACHE.clear()
+        except Exception:
+            _cache_backup = None
+        gc.collect()
+        
+        # 1. Gráfico principal (velas + EMAs + estructura + top indicadores)
         try:
             top_indicators = expert_system.get_top_indicators_for_chart(result)
             chart_bytes = expert_system.generate_chart_image(symbol, interval, result, top_indicators)
             gc.collect()
+            print(f"✅ Gráfico principal PDF: {len(chart_bytes) if chart_bytes else 0} bytes")
         except Exception as e:
             print(f"⚠️ generate_report: gráfico principal falló: {e}")
         
+        # 2. Gráficos individuales de indicadores (máx 4 para no exceder RAM)
         try:
-            # Máximo 2 imágenes de indicadores (antes 4) para minimizar OOM
             supporting_charts = expert_system.generate_supporting_indicators_images(
-                symbol, interval, result, max_indicators=2
+                symbol, interval, result, max_indicators=4
             )
             gc.collect()
+            print(f"✅ Gráficos individuales PDF: {len(supporting_charts)}")
         except Exception as e:
             print(f"⚠️ generate_report: gráficos indicadores fallaron: {e}")
+        
+        # ============ RESTAURAR CACHÉ DE ANÁLISIS ============
+        try:
+            if _cache_backup:
+                with _ANALYSIS_CACHE_LOCK:
+                    _ANALYSIS_CACHE.update(_cache_backup)
+        except Exception:
+            pass
     
-    # Generar PDF (el PDF sin gráficos pesa solo ~30KB y no usa Chrome)
+    # Generar PDF
     try:
         from pdf_report import generate_analysis_pdf
         pdf_bytes = generate_analysis_pdf(
@@ -20141,15 +20179,15 @@ def _analyze_futures_all_parallel():
     
     from futures_system import FUTURES_SYMBOLS, FUTURES_TIMEFRAMES
     
-    # REDUCCIÓN AGRESIVA DE MEMORIA (Render Free 512MB):
-    # 1. Solo TFs útiles para alertas Telegram (1h, 2h, 4h). 
-    # 2. Ejecución SECUENCIAL (antes 2 workers paralelos → 2 análisis en RAM
-    #    simultáneos). Ahora solo 1 análisis a la vez.
-    # 3. gc.collect() entre análisis para liberar DataFrames grandes.
-    # 4. Se elimina 'df' del resultado — el frontend no lo necesita en el 
-    #    payload compacto de futuros (solo lo usan endpoints spot).
-    FUTURES_TFS_ACTIVE = ('1h', '2h', '4h')
-    combos = [(s, tf) for s in FUTURES_SYMBOLS.keys() for tf in FUTURES_TFS_ACTIVE]
+    # OPTIMIZACIONES DE MEMORIA (Render Free 512MB):
+    # 1. TODOS los TFs del sistema futures (5m, 15m, 30m, 1h, 2h, 4h) para que
+    #    el frontend siempre tenga datos. El monitor de entries filtra
+    #    internamente los TFs relevantes.
+    # 2. Ejecución SECUENCIAL (1 análisis a la vez, no paralelo) → ~50MB pico.
+    # 3. gc.collect() cada 3 análisis para liberar DataFrames.
+    # 4. Se elimina 'df' del resultado — el frontend no lo necesita en el
+    #    payload compacto de futuros.
+    combos = [(s, tf) for s in FUTURES_SYMBOLS.keys() for tf in FUTURES_TIMEFRAMES.keys()]
     results = {}
     errors = []
     

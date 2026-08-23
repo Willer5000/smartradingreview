@@ -287,13 +287,13 @@ window.updateActiveSignals = function() {
                         <div class="spinner-border spinner-border-sm me-2"></div>
                         <i class="fas fa-fire me-1"></i>
                         Servidor calentando caché...<br>
-                        <small class="text-muted">Primera carga: ~2 min. Refresco automático en 30s.</small>
+                        <small class="text-muted">Primera carga: 4-5 min (30 análisis). Refresco automático en 60s.</small>
                     </div>
                 `;
                 if (signalsCount) { signalsCount.textContent = '0'; signalsCount.className = 'badge bg-info'; }
                 setTimeout(() => {
                     if (typeof window.updateActiveSignals === 'function') window.updateActiveSignals();
-                }, 30000);
+                }, 60000);
                 return;
             }
             
@@ -361,7 +361,7 @@ window.updateActiveSignals = function() {
             if (isAbort) {
                 setTimeout(() => {
                     if (typeof window.updateActiveSignals === 'function') window.updateActiveSignals();
-                }, 30000);
+                }, 60000);
             }
         });
 };
@@ -417,13 +417,13 @@ window.updatePreviousSignals = function() {
                         <div class="spinner-border spinner-border-sm me-2"></div>
                         <i class="fas fa-fire me-1"></i>
                         Servidor calentando caché...<br>
-                        <small class="text-muted">Primera carga: ~2 min. Refresco automático en 30s.</small>
+                        <small class="text-muted">Primera carga: 4-5 min (30 análisis). Refresco automático en 60s.</small>
                     </div>
                 `;
                 if (signalsCount) { signalsCount.textContent = '0'; signalsCount.className = 'badge bg-info'; }
                 setTimeout(() => {
                     if (typeof window.updatePreviousSignals === 'function') window.updatePreviousSignals();
-                }, 30000);
+                }, 60000);
                 return;
             }
             
@@ -516,7 +516,7 @@ window.updatePreviousSignals = function() {
                         console.log('🔄 Reintentando updatePreviousSignals después de timeout...');
                         window.updatePreviousSignals();
                     }
-                }, 30000);
+                }, 60000);
             }
         });
 };
@@ -766,10 +766,10 @@ document.addEventListener('DOMContentLoaded', function() {
         insertReviewTraderPanel();
     }, 800);
     
-    // Refrescar panel review cada 60s
+    // Refrescar panel review cada 3 min (v15: reduce carga en Render Free)
     setInterval(() => {
         if (typeof window.refreshReviewPanel === 'function') window.refreshReviewPanel();
-    }, 60000);
+    }, 180000);
     
     // Refrescar stats globales cada 5 min
     setInterval(() => {
@@ -789,10 +789,10 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }, 1200);
     
-    // Refrescar señales activas cada 60s
+    // Refrescar señales activas cada 2 min (v15: reduce carga)
     setInterval(() => {
         if (typeof window.updateActiveSignals === 'function') window.updateActiveSignals();
-    }, 60000);
+    }, 120000);
     
     // Refrescar señales anteriores cada 10 min
     setInterval(() => {
