@@ -176,15 +176,49 @@
     </script>
 </head>
 <body>
-    <!-- Reloj Digital Bolivia -->
+    <!-- Reloj Digital Bolivia + KPIs del Sistema (Rendimiento del ReviewTrader) -->
     <div class="container-fluid bg-dark border-bottom border-secondary py-2">
-        <div class="row">
-            <div class="col-12 text-center">
+        <div class="row align-items-center">
+            <div class="col-md-6">
                 <div class="digital-clock-container">
                     <i class="fas fa-clock me-2 text-warning"></i>
                     <span class="digital-clock-label me-2">Hora Bolivia (America/La_Paz):</span>
                     <span id="bolivia-clock" class="digital-clock">00:00:00</span>
                     <span id="bolivia-date" class="digital-date ms-2">--</span>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <!-- KPIs de rendimiento del sistema (ReviewTrader).
+                     Cuando estos números son positivos, las señales del sistema
+                     tienen más confianza estadística. Se actualizan cada 5 min. -->
+                <div class="d-flex justify-content-end align-items-center gap-2 flex-wrap">
+                    <span class="text-muted small">
+                        <i class="fas fa-brain me-1 text-info"></i>Rendimiento del sistema:
+                    </span>
+                    <span id="header-kpi-winrate" 
+                          class="badge bg-secondary" 
+                          title="Win rate real: TP / (TP + SL). >40% con RR 1:1.5 es rentable."
+                          data-bs-toggle="tooltip">
+                        Win Rate: <b>--</b>
+                    </span>
+                    <span id="header-kpi-pnl" 
+                          class="badge bg-secondary"
+                          title="PnL total acumulado en % (últimos 90 días). Suma de todas las operaciones cerradas."
+                          data-bs-toggle="tooltip">
+                        PnL: <b>--</b>
+                    </span>
+                    <span id="header-kpi-pf" 
+                          class="badge bg-secondary"
+                          title="Profit Factor: ganancia total / pérdida total. >1 = rentable, >1.5 = sólido."
+                          data-bs-toggle="tooltip">
+                        PF: <b>--</b>
+                    </span>
+                    <span id="header-kpi-resolved" 
+                          class="badge bg-dark text-muted"
+                          title="Operaciones resueltas (TP + SL) en los últimos 90 días."
+                          data-bs-toggle="tooltip">
+                        <b>--</b> ops
+                    </span>
                 </div>
             </div>
         </div>
@@ -2360,6 +2394,94 @@
                 console.error('Error en updateMarketSessionInfo:', error);
             }
         };
+        // ============ KPIs DEL SISTEMA (header) ============
+        // Consulta /api/analytics/summary y actualiza los badges del header:
+        //   - Win Rate: % de operaciones ganadas (TP / (TP+SL))
+        //   - PnL: rendimiento total acumulado en %
+        //   - Profit Factor: >1 = sistema rentable
+        //   - # de operaciones resueltas (contexto estadístico)
+        //
+        // Los colores indican la salud del sistema:
+        //   VERDE  → rentable, con muchas muestras
+        //   AMARILLO → borderline o muestras insuficientes
+        //   ROJO   → sistema perdiendo dinero
+        //
+        // Se refresca cada 5 minutos (poco cambio a corto plazo, más muestras
+        // = más precisión). El usuario puede confiar más en las señales
+        // cuando los indicadores están en verde.
+        window.updateSystemKPIs = function() {
+            fetch('/api/analytics/summary?days_back=90')
+                .then(r => {
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    return r.json();
+                })
+                .then(json => {
+                    if (!json || !json.success) return;
+                    const d = json.data || {};
+                    const winRate = Number(d.win_rate) || 0;
+                    const pnlPct = Number(d.pnl_total_pct) || 0;
+                    const pf = Number(d.profit_factor) || 0;
+                    const resolved = Number(d.resolved) || 0;
+                    
+                    // ============ Win Rate ============
+                    const wrEl = document.getElementById('header-kpi-winrate');
+                    if (wrEl) {
+                        wrEl.innerHTML = `Win Rate: <b>${winRate.toFixed(1)}%</b>`;
+                        let cls = 'bg-danger';    // <40% pierde con RR 1:1.5
+                        if (winRate >= 55) cls = 'bg-success';
+                        else if (winRate >= 40) cls = 'bg-warning text-dark';
+                        wrEl.className = 'badge ' + cls;
+                    }
+                    
+                    // ============ PnL total ============
+                    const pnlEl = document.getElementById('header-kpi-pnl');
+                    if (pnlEl) {
+                        const sign = pnlPct >= 0 ? '+' : '';
+                        pnlEl.innerHTML = `PnL: <b>${sign}${pnlPct.toFixed(2)}%</b>`;
+                        let cls = 'bg-danger';
+                        if (pnlPct >= 5) cls = 'bg-success';
+                        else if (pnlPct >= 0) cls = 'bg-warning text-dark';
+                        pnlEl.className = 'badge ' + cls;
+                    }
+                    
+                    // ============ Profit Factor ============
+                    const pfEl = document.getElementById('header-kpi-pf');
+                    if (pfEl) {
+                        pfEl.innerHTML = `PF: <b>${pf.toFixed(2)}</b>`;
+                        let cls = 'bg-danger';
+                        if (pf >= 1.5) cls = 'bg-success';
+                        else if (pf >= 1.0) cls = 'bg-warning text-dark';
+                        pfEl.className = 'badge ' + cls;
+                    }
+                    
+                    // ============ Operaciones resueltas (contexto) ============
+                    const resEl = document.getElementById('header-kpi-resolved');
+                    if (resEl) {
+                        resEl.innerHTML = `<b>${resolved}</b> ops`;
+                        // Solo cambia color si hay muy pocas muestras (advertencia)
+                        if (resolved < 30) {
+                            resEl.className = 'badge bg-secondary';
+                            resEl.title = 'Pocas muestras aún — el sistema está aprendiendo. Los % se estabilizarán con más operaciones.';
+                        } else {
+                            resEl.className = 'badge bg-dark text-muted';
+                            resEl.title = `${resolved} operaciones resueltas (TP + SL) en 90 días — estadística confiable.`;
+                        }
+                    }
+                    
+                    // ============ Efecto sutil si sistema es RENTABLE ============
+                    // Cuando profit_factor > 1 Y pnl positivo, hacer un log al console
+                    // para que el usuario sepa que las señales son de más confianza.
+                    if (pf > 1.0 && pnlPct > 0 && resolved >= 30) {
+                        console.log(`✅ Sistema RENTABLE: WR ${winRate.toFixed(1)}% · PF ${pf.toFixed(2)} · PnL +${pnlPct.toFixed(2)}%`);
+                    } else if (resolved >= 30) {
+                        console.log(`⚠️ Sistema en aprendizaje: WR ${winRate.toFixed(1)}% · PF ${pf.toFixed(2)} · PnL ${pnlPct.toFixed(2)}%`);
+                    }
+                })
+                .catch(err => {
+                    console.debug('updateSystemKPIs skipped:', err.message);
+                });
+        };
+        
         // ============ RELOJ Y CALENDARIO ============
         function updateBoliviaClock() {
             const now = new Date();
@@ -2562,6 +2684,7 @@
             window.updateCalendarInfo();
             window.updateMarketSessionInfo(); // ← NUEVA: Información de sesión de mercado
             window.updateSystemStatus();
+            window.updateSystemKPIs(); // ← NUEVA: KPIs del sistema (winrate + rentabilidad)
             
             // ============ EJECUTAR ANÁLISIS INICIAL ============
             setTimeout(function() {
@@ -2575,6 +2698,7 @@
             setInterval(window.updateCalendarInfo, 60000);
             setInterval(window.updateMarketSessionInfo, 60000); // ← NUEVA: Cada minuto
             setInterval(window.updateSystemStatus, 120000);  // 2 minutos (antes 60s)
+            setInterval(window.updateSystemKPIs, 300000);  // KPIs del sistema cada 5 min
             
             // ============ INICIAR INTERVALOS DE VELAS Y PRECIO ============
             window.startUpdateIntervals();
