@@ -21286,8 +21286,60 @@ def _normalize_candle_start(timeframe, candle_ts):
 
 
 # Deduplicación: guarda (symbol, timeframe, candle_start_normalizado) -> timestamp de envío.
+#
+# v22.7 BUGFIX CRÍTICO: antes _entry_alerts_sent era un dict en RAM. Gunicorn
+# reinicia el worker cada 200 requests (--max-requests 200) para liberar
+# memoria → el dict se perdía → todas las señales activas se re-alertaban.
+# Por eso las alertas de 12h/1D llegaban cada 3 min (MONITOR_CHECK_INTERVAL)
+# tras cada reciclo de worker.
+#
+# AHORA: se persiste en /tmp/entry_alerts_sent.json (sobrevive reciclos de
+# worker aunque no reinicios completos de Render). Al arrancar el worker,
+# se carga desde disco. Cada mark_sent hace flush inmediato a disco.
 _entry_alerts_sent = {}
 _entry_alerts_lock = threading.Lock()
+_ENTRY_ALERTS_FILE = os.environ.get('ENTRY_ALERTS_FILE', '/tmp/entry_alerts_sent.json')
+
+
+def _load_entry_alerts_from_disk():
+    """Carga el dict de dedup desde disco al arrancar. Best-effort."""
+    global _entry_alerts_sent
+    try:
+        if os.path.exists(_ENTRY_ALERTS_FILE):
+            import json
+            with open(_ENTRY_ALERTS_FILE, 'r') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    # Limpiar entradas viejas al cargar (>7 días)
+                    cutoff = time.time() - 7 * 86400
+                    _entry_alerts_sent = {
+                        k: float(v) for k, v in data.items()
+                        if isinstance(v, (int, float)) and float(v) >= cutoff
+                    }
+                    print(f"📂 Cargadas {len(_entry_alerts_sent)} entradas de dedup desde {_ENTRY_ALERTS_FILE}")
+    except Exception as e:
+        print(f"⚠️ No se pudo cargar dedup desde disco: {e}")
+        _entry_alerts_sent = {}
+
+
+def _save_entry_alerts_to_disk():
+    """Guarda el dict de dedup a disco. Best-effort, no bloquea si falla."""
+    try:
+        import json
+        # Snapshot bajo el lock
+        with _entry_alerts_lock:
+            snap = dict(_entry_alerts_sent)
+        # Escribir fuera del lock (I/O no debe bloquear otros threads)
+        tmp_path = _ENTRY_ALERTS_FILE + '.tmp'
+        with open(tmp_path, 'w') as f:
+            json.dump(snap, f)
+        os.replace(tmp_path, _ENTRY_ALERTS_FILE)
+    except Exception as e:
+        print(f"⚠️ No se pudo guardar dedup a disco: {e}")
+
+
+# Cargar al importar el módulo (una sola vez por worker)
+_load_entry_alerts_from_disk()
 
 
 def _entry_alert_key(symbol, timeframe, candle_ts):
@@ -21310,7 +21362,7 @@ def _entry_alert_already_sent(symbol, timeframe, candle_ts):
 
 
 def _entry_alert_mark_sent(symbol, timeframe, candle_ts):
-    """Marca la alerta como enviada."""
+    """Marca la alerta como enviada. Persiste a disco inmediatamente."""
     key = _entry_alert_key(symbol, timeframe, candle_ts)
     with _entry_alerts_lock:
         _entry_alerts_sent[key] = time.time()
@@ -21320,6 +21372,8 @@ def _entry_alert_mark_sent(symbol, timeframe, candle_ts):
             to_del = [k for k, v in _entry_alerts_sent.items() if v < cutoff]
             for k in to_del:
                 _entry_alerts_sent.pop(k, None)
+    # Persistir a disco (fuera del lock)
+    _save_entry_alerts_to_disk()
 
 
 def _price_touches_entry(current_price, entry, action):
