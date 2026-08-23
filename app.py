@@ -21617,60 +21617,63 @@ def verificar_y_ejecutar():
             minuto_actual = hora * 60 + minuto
             dia_semana = ahora.strftime('%A')
             
-            # ============ VERIFICAR 4H ============
-            # Cierres: 23:00, 03:00, 07:00, 11:00, 15:00, 19:00
-            horas_4h = [23, 3, 7, 11, 15, 19]
+            # ============ VERIFICAR VENTANAS PRE-CIERRE ============
+            # BUGFIX v21: antes se ejecutaba CADA MINUTO durante los 30 min
+            # previos al cierre de vela → generaba 30 alertas por cierre.
+            # AHORA: solo se ejecuta UNA VEZ por cierre de vela, en el minuto
+            # exacto de disparo pre-cierre (5 min antes del cierre real).
+            # 
+            # Dedup: usamos clave (timeframe, fecha, hora_de_cierre_vela) para
+            # que el mismo cierre no se dispare dos veces.
             
-            for hora_cierre in horas_4h:
-                cierre = hora_cierre * 60
-                inicio_ventana = cierre - 30
-                fin_ventana = cierre - 1
-                
-                # ✅ AHORA: Verifica CADA MINUTO dentro de la ventana
-                if inicio_ventana <= minuto_actual <= fin_ventana:
-                    # Evitar ejecutar más de una vez por minuto
-                    if (ahora - ultima_ejecucion['4h']).total_seconds() > 50:
-                        print(f"\n🚀 DENTRO DE VENTANA 4H - {hora:02d}:{minuto:02d}")
-                        print(f"   Ventana activa: {inicio_ventana//60:02d}:{inicio_ventana%60:02d} - {fin_ventana//60:02d}:{fin_ventana%60:02d}")
-                        ultima_ejecucion['4h'] = ahora
-                        threading.Thread(target=ejecutar_analisis_completo, args=('4h',), daemon=True).start()
+            if 'VELAS_DISPARADAS' not in ultima_ejecucion:
+                ultima_ejecucion['VELAS_DISPARADAS'] = set()
+            velas_disparadas = ultima_ejecucion['VELAS_DISPARADAS']
+            fecha_hoy = ahora.strftime('%Y-%m-%d')
             
-            # ============ VERIFICAR 12H ============
-            horas_12h = [7, 19]
+            def _disparar_una_vez(tf, hora_cierre_int):
+                """Dispara ejecutar_analisis_completo UNA sola vez para la vela
+                que cierra a hora_cierre_int en el día actual."""
+                key = f"{tf}|{fecha_hoy}|{hora_cierre_int:02d}"
+                if key in velas_disparadas:
+                    return False
+                velas_disparadas.add(key)
+                # Limpiar velas del día anterior (evitar crecimiento infinito)
+                if len(velas_disparadas) > 100:
+                    velas_disparadas.clear()
+                    velas_disparadas.add(key)
+                print(f"\n🚀 DISPARANDO ANÁLISIS {tf} (cierre {hora_cierre_int:02d}:00) - {hora:02d}:{minuto:02d}")
+                threading.Thread(target=ejecutar_analisis_completo,
+                                  args=(tf,), daemon=True).start()
+                return True
             
-            for hora_cierre in horas_12h:
-                cierre = hora_cierre * 60
-                inicio_ventana = cierre - 60
-                fin_ventana = cierre - 1
-                
-                if inicio_ventana <= minuto_actual <= fin_ventana:
-                    if (ahora - ultima_ejecucion['12h']).total_seconds() > 50:
-                        print(f"\n🚀 DENTRO DE VENTANA 12H - {hora:02d}:{minuto:02d}")
-                        ultima_ejecucion['12h'] = ahora
-                        threading.Thread(target=ejecutar_analisis_completo, args=('12h',), daemon=True).start()
+            # ============ 4H: cierres 03, 07, 11, 15, 19, 23 ============
+            # Disparar 5 min ANTES del cierre para tener margen y análisis fresco.
+            # Ejemplo: cierre a las 03:00 → dispara a las 02:55.
+            for hora_cierre in [3, 7, 11, 15, 19, 23]:
+                # El disparo ocurre 5 minutos antes del cierre
+                disparar_hora = hora_cierre
+                disparar_minuto = 55
+                if hora_cierre > 0:
+                    # 5 min antes = hora anterior + minuto 55
+                    disparar_hora_ = (hora_cierre - 1) % 24
+                else:
+                    disparar_hora_ = 23
+                if hora == disparar_hora_ and minuto == disparar_minuto:
+                    _disparar_una_vez('4h', hora_cierre)
             
-            # ============ VERIFICAR 1D ============
-            cierre_1d = 19 * 60
-            inicio_1d = cierre_1d - 120
-            fin_1d = cierre_1d - 1
+            # ============ 12H: cierres 07 y 19 (disparar 06:55 y 18:55) ============
+            for hora_cierre in [7, 19]:
+                if hora == (hora_cierre - 1) % 24 and minuto == 55:
+                    _disparar_una_vez('12h', hora_cierre)
             
-            if inicio_1d <= minuto_actual <= fin_1d:
-                if (ahora - ultima_ejecucion['1D']).total_seconds() > 50:
-                    print(f"\n🚀 DENTRO DE VENTANA 1D - {hora:02d}:{minuto:02d}")
-                    ultima_ejecucion['1D'] = ahora
-                    threading.Thread(target=ejecutar_analisis_completo, args=('1D',), daemon=True).start()
+            # ============ 1D: cierre 19 (disparar 18:55) ============
+            if hora == 18 and minuto == 55:
+                _disparar_una_vez('1D', 19)
             
-            # ============ VERIFICAR 1W ============
-            if dia_semana == 'Sunday':
-                cierre_1w = 19 * 60
-                inicio_1w = cierre_1w - 240
-                fin_1w = cierre_1w - 1
-                
-                if inicio_1w <= minuto_actual <= fin_1w:
-                    if (ahora - ultima_ejecucion['1W']).total_seconds() > 50:
-                        print(f"\n🚀 DENTRO DE VENTANA 1W - {hora:02d}:{minuto:02d}")
-                        ultima_ejecucion['1W'] = ahora
-                        threading.Thread(target=ejecutar_analisis_completo, args=('1W',), daemon=True).start()
+            # ============ 1W: cierre domingo 19 (disparar domingo 18:55) ============
+            if dia_semana == 'Sunday' and hora == 18 and minuto == 55:
+                _disparar_una_vez('1W', 19)
             
             # ============ FASE 7: EJECUTAR REVIEWTRADER DIARIAMENTE ============
             # Cierre a las 20:00 Bolivia (después de todos los análisis del día)
@@ -21723,8 +21726,31 @@ def ejecutar_analisis_completo(timeframe):
         limite = limites.get(timeframe, {'max_por_par': 1, 'ventana_minutos': 30})
         max_por_par = limite['max_por_par']
         
-        # Clave para saber qué señales ya se enviaron en ESTA ventana
-        ventana_clave = f"señales_{timeframe}_{fecha_str}_{ahora.strftime('%H:%M')}"
+        # ============ DEDUP POR VELA (no por minuto) ============
+        # BUGFIX v21: antes la ventana_clave incluía ahora.strftime('%H:%M')
+        # que cambia CADA MINUTO → nunca aplicaba el dedup y se enviaban 30
+        # alertas por cierre. AHORA: calcular la hora de CIERRE de la vela
+        # en curso, y usar eso como clave. Así una misma vela solo dispara 1 vez.
+        def _hora_cierre_vela_actual(tf, ahora_dt):
+            """Retorna la hora entera de cierre de la vela EN CURSO."""
+            h = ahora_dt.hour
+            if tf == '4h':
+                # Cierres: 03, 07, 11, 15, 19, 23
+                for hc in [3, 7, 11, 15, 19, 23]:
+                    if h < hc:
+                        return hc
+                return 3  # siguiente día
+            elif tf == '12h':
+                return 19 if h < 19 else 7
+            elif tf == '1D':
+                return 19
+            elif tf == '1W':
+                return 19  # domingo
+            return h
+        
+        hora_cierre = _hora_cierre_vela_actual(timeframe, ahora)
+        # Clave estable dentro de la misma vela (no cambia con el minuto actual)
+        ventana_clave = f"señales_{timeframe}_{fecha_str}_cierre{hora_cierre:02d}"
         
         if not hasattr(expert_system, 'señales_ventana'):
             expert_system.señales_ventana = {}
