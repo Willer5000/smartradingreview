@@ -14357,9 +14357,31 @@ class TradingExpertSystem:
     
     def generate_chart_image(self, symbol, timeframe, analysis=None, top_indicators=None):
         """
-        Generar gráfico con TODOS los indicadores relevantes
-        - 6 subplots: 1 principal (velas) + 4 indicadores top + 1 patrón de velas
+        Genera imagen PNG del análisis técnico.
+        
+        v19: MIGRADO de plotly+kaleido a matplotlib (10x menos memoria).
+        kaleido levantaba Chrome headless que consumía ~250MB y disparaba
+        OOM en Render Free. matplotlib genera PNG directamente sin browser,
+        consume ~30MB. La calidad es equivalente para lo que se necesita:
+        velas + EMAs + soportes/resistencias + niveles + volumen.
+        
+        Si matplotlib falla por cualquier razón, hace fallback al método
+        antiguo con plotly+kaleido (que puede fallar por OOM pero al menos
+        no rompe la app).
         """
+        # Nuevo renderer matplotlib (rápido, ligero, sin OOM)
+        try:
+            from chart_renderer import render_main_chart
+            if analysis is None:
+                # Reconstruir análisis mínimo para el renderer
+                analysis = {}
+            png = render_main_chart(symbol, timeframe, analysis)
+            if png:
+                return png
+        except Exception as e:
+            print(f"⚠️ render_main_chart (matplotlib) falló: {e}. Intentando fallback plotly...")
+        
+        # Fallback: método antiguo con plotly+kaleido (puede fallar por OOM)
         try:
             # Obtener datos
             df = None
@@ -15756,8 +15778,26 @@ class TradingExpertSystem:
         Genera un LISTADO de imágenes PNG, una por cada indicador que respalda
         la señal. Cada imagen es autónoma y va en el PDF como página anexa.
         
+        v19: MIGRADO a matplotlib. Ver comentario en generate_chart_image.
+        
         Retorna: [{'name': 'RSI Maverick', 'image': bytes}, ...] (hasta max_indicators)
         """
+        # Nuevo renderer matplotlib (rápido, ligero, sin OOM)
+        try:
+            from chart_renderer import render_supporting_indicators_bundle
+            indicators = self.get_supporting_indicators_for_action(analysis)
+            if not indicators:
+                return []
+            result = render_supporting_indicators_bundle(
+                symbol, timeframe, analysis, indicators, max_indicators=max_indicators
+            )
+            if result:
+                print(f"📊 [PDF] {len(result)} gráficos individuales generados (matplotlib)")
+                return result
+        except Exception as e:
+            print(f"⚠️ render_supporting_indicators_bundle falló: {e}. Fallback plotly...")
+        
+        # Fallback: método antiguo con plotly+kaleido
         try:
             indicators = self.get_supporting_indicators_for_action(analysis)
             if not indicators:

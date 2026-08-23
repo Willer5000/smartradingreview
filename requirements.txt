@@ -5,8 +5,9 @@ pandas
 requests
 pytz
 plotly
+matplotlib>=3.7
+mplfinance>=0.12.10b0
 gunicorn
-kaleido==0.2.1
 supabase>=2.0.0
 python-dotenv>=1.0.0
 reportlab>=4.0.0
