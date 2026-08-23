@@ -572,13 +572,31 @@ window.loadLogs = async function() {
     
     try {
         const res = await fetch('/api/review/logs?limit=30');
-        const json = await res.json();
+        
+        // v22.6: manejar caso de HTML de error (502/504 del gunicorn).
+        // Antes: res.json() lanzaba "Unexpected token '<'" y todo caía sin
+        // mensaje claro. Ahora: leer como texto primero y validar.
+        const text = await res.text();
+        let json;
+        try {
+            json = JSON.parse(text);
+        } catch (parseErr) {
+            container.innerHTML = `
+                <div class="alert alert-warning py-3">
+                    <i class="fas fa-exclamation-triangle me-2"></i>
+                    El servidor respondió con un error (status ${res.status}). Es probable que estuviera saturado. Recarga la página en unos segundos.
+                </div>
+            `;
+            console.error('loadLogs: respuesta no-JSON', text.slice(0, 200));
+            return;
+        }
         
         if (!json.success || !json.logs || json.logs.length === 0) {
+            const errMsg = json.error ? ` (${json.error})` : '';
             container.innerHTML = `
                 <div class="text-center text-muted py-4">
                     <i class="fas fa-info-circle me-1"></i>
-                    Aún no hay logs. Ejecuta el ReviewTrader manualmente o espera al ciclo diario (20:00 Bolivia).
+                    Aún no hay logs${errMsg}. Ejecuta el ReviewTrader manualmente o espera al ciclo diario (20:00 Bolivia).
                 </div>
             `;
             return;

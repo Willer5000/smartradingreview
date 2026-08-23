@@ -161,22 +161,33 @@ class SupabaseClient:
     def _with_retry(self, operation, *args, **kwargs):
         """
         Ejecuta una operación de Supabase con reintento automático ante
-        errores de conexión (ConnectionTerminated, etc).
+        errores de conexión (ConnectionTerminated, EAGAIN, etc).
         
         operation: callable que ejecuta la query Supabase.
         Si falla con error de conexión, reconecta y reintenta 1 vez.
         Si falla por otro motivo, propaga la excepción.
+        
+        v22.6: cambio de log level: si el retry TIENE ÉXITO, se registra a
+        nivel DEBUG (no polluye los logs de Render). Solo si el retry FALLA
+        se registra a WARNING para alertar al operador. Los EAGAIN transitorios
+        (que se resuelven al 2° intento) son normales cuando el pool HTTP/2
+        está saturado y no ameritan preocupar.
         """
         try:
             return operation(*args, **kwargs)
         except Exception as e:
             if not self._is_connection_error(e):
                 raise
-            logger.warning(f"Error de conexión Supabase: {e}. Reconectando y reintentando...")
+            logger.debug(f"Error de conexión Supabase transitorio: {e}. Reconectando...")
             if not self._reconnect():
+                logger.warning(f"Error de conexión Supabase y no se pudo reconectar: {e}")
                 raise
             # Reintento (una sola vez)
-            return operation(*args, **kwargs)
+            try:
+                return operation(*args, **kwargs)
+            except Exception as e2:
+                logger.warning(f"Error de conexión Supabase persistió tras retry: {e2}")
+                raise
     
     # ========================================================================
     # NORMALIZACIÓN DE ACCIONES
@@ -825,12 +836,17 @@ class SupabaseClient:
         if not self.enabled:
             return []
         
+        # v22.6: envolver con _with_retry para tolerar EAGAIN transitorios
+        # que aparecían cuando el frontend disparaba 8 requests en paralelo a
+        # Supabase y saturaba el pool HTTP/2.
         try:
-            response = (self.client.table('review_logs')
+            def _op():
+                return (self.client.table('review_logs')
                         .select('*')
                         .order('run_started_at', desc=True)
                         .limit(limit)
                         .execute())
+            response = self._with_retry(_op)
             return response.data or []
         except Exception as e:
             logger.error(f"Error obteniendo review_logs: {e}")

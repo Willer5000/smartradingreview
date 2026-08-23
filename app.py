@@ -19797,143 +19797,6 @@ def _collect_frontend_signals():
     return unified
 
 
-@app.route('/api/kpis/debug')
-def api_kpis_debug():
-    """
-    v22.3 DIAGNÓSTICO: endpoint temporal para entender por qué el header
-    muestra 0/N ops. Retorna:
-      - Muestra de señales del frontend (spot + futuros)
-      - Conteos por status en Supabase (pending, tp_hit, sl_hit, expired)
-      - Últimas 5 señales resueltas (tp_hit/sl_hit) globales
-      - Stats por (symbol, timeframe, system_type) del frontend
-      - Estado del learning_worker (última vez que corrió)
-    """
-    out = {'timestamp': datetime.now(bolivia_tz).isoformat()}
-    
-    try:
-        signals = _collect_frontend_signals()
-        out['frontend_signals'] = {
-            'total': len(signals),
-            'spot': sum(1 for s in signals if s['system'] == 'spot'),
-            'futures': sum(1 for s in signals if s['system'] == 'futures'),
-            'sample': [
-                {'symbol': s['symbol'], 'timeframe': s['timeframe'],
-                 'action': s['action'], 'system': s['system'],
-                 'candle_ts': s.get('candle_timestamp')}
-                for s in signals[:5]
-            ]
-        }
-    except Exception as e:
-        out['frontend_signals_error'] = str(e)
-    
-    # Supabase diagnóstico
-    try:
-        # v22.4 FIX: era 'from supabase_client import get_supabase_client'
-        # pero esa función NO existe. El módulo exporta el singleton supabase_db.
-        # Este bug hacía que db=None → todas las señales caían en 'pending' →
-        # header siempre mostraba 0/N ops.
-        from supabase_client import supabase_db as db
-        out['supabase_enabled'] = bool(db and db.enabled)
-        out['supabase_url_present'] = bool(os.environ.get('SUPABASE_URL'))
-        out['supabase_key_present'] = bool(os.environ.get('SUPABASE_KEY') or os.environ.get('SUPABASE_SERVICE_ROLE_KEY'))
-        out['supabase_url_first10'] = (os.environ.get('SUPABASE_URL') or '')[:30]
-        
-        # Test de conexión directa: ¿puedo hacer una query mínima?
-        if db and db.enabled:
-            try:
-                r_test = (db.client.table('signals')
-                          .select('id', count='exact')
-                          .limit(1)
-                          .execute())
-                out['test_query'] = {
-                    'ok': True,
-                    'total_signals_in_db': r_test.count if hasattr(r_test, 'count') else 'unknown'
-                }
-            except Exception as e:
-                out['test_query'] = {'ok': False, 'error': str(e)[:300]}
-        
-        if db and db.enabled:
-            # Conteos globales por status
-            counts = {}
-            for st in ('pending', 'tp_hit', 'sl_hit', 'expired', 'missed_opportunity'):
-                try:
-                    r = (db.client.table('signals')
-                         .select('id', count='exact')
-                         .eq('status', st)
-                         .limit(1)
-                         .execute())
-                    counts[st] = r.count if hasattr(r, 'count') and r.count is not None else 'unknown'
-                except Exception as e:
-                    counts[st] = f'err: {str(e)[:100]}'
-            out['supabase_counts_by_status'] = counts
-            
-            # Últimas 10 señales resueltas globales
-            try:
-                r = (db.client.table('signals')
-                     .select('symbol, timeframe, system_type, status, action_normalized, created_at')
-                     .in_('status', ['tp_hit', 'sl_hit'])
-                     .order('created_at', desc=True)
-                     .limit(10)
-                     .execute())
-                out['last_resolved_globally'] = r.data if r and r.data else []
-            except Exception as e:
-                out['last_resolved_error'] = str(e)
-            
-            # Para cada señal del frontend, buscar EXACTAMENTE lo que la query real hace
-            per_signal = []
-            for sig in signals[:20]:  # cap para no explotar
-                try:
-                    r = (db.client.table('signals')
-                         .select('id, status, action_normalized, created_at')
-                         .eq('symbol', sig['symbol'])
-                         .eq('timeframe', sig['timeframe'])
-                         .eq('system_type', sig['system'])
-                         .in_('status', ['tp_hit', 'sl_hit'])
-                         .order('created_at', desc=True)
-                         .limit(1)
-                         .execute())
-                    rows = r.data if r and r.data else []
-                    
-                    # Además conteo total por (symbol, tf, system_type)
-                    r_all = (db.client.table('signals')
-                             .select('id', count='exact')
-                             .eq('symbol', sig['symbol'])
-                             .eq('timeframe', sig['timeframe'])
-                             .eq('system_type', sig['system'])
-                             .limit(1)
-                             .execute())
-                    total_stored = r_all.count if hasattr(r_all, 'count') and r_all.count is not None else 'unknown'
-                    
-                    per_signal.append({
-                        'symbol': sig['symbol'], 'timeframe': sig['timeframe'],
-                        'system': sig['system'],
-                        'total_in_supabase': total_stored,
-                        'resolved_found': len(rows),
-                        'last_resolved': rows[0] if rows else None
-                    })
-                except Exception as e:
-                    per_signal.append({
-                        'symbol': sig.get('symbol'), 'timeframe': sig.get('timeframe'),
-                        'system': sig.get('system'), 'error': str(e)[:200]
-                    })
-            out['per_signal_lookup'] = per_signal
-            
-            # Ver si hay signal_results en la tabla derivada
-            try:
-                r = (db.client.table('signal_results')
-                     .select('signal_id, status, pnl_pct, exit_timestamp')
-                     .order('exit_timestamp', desc=True)
-                     .limit(5)
-                     .execute())
-                out['signal_results_sample'] = r.data if r and r.data else []
-            except Exception as e:
-                out['signal_results_error'] = str(e)
-    except Exception as e:
-        out['supabase_error'] = str(e)
-    
-    return jsonify(out)
-
-
 @app.route('/api/kpis/frontend_signals')
 def api_kpis_frontend_signals():
     """
@@ -21268,16 +21131,25 @@ def api_analytics_operation_detail(signal_id):
 # ============================================================================
 @app.route('/api/review/logs')
 def api_review_logs():
-    """Retorna los últimos N logs del ReviewTrader (default 50)"""
+    """Retorna los últimos N logs del ReviewTrader (default 50).
+    
+    v22.6: NUNCA devuelve HTML de error, siempre JSON. Antes, si el worker
+    era matado por OOM o timeout, gunicorn devolvía HTML 502/504 y el JS
+    fallaba con 'Unexpected token <'. Ahora tenemos try/except general +
+    respuesta 200 siempre (excepto errores irrecuperables del framework).
+    """
     try:
         review = _get_review_trader()
         if review is None:
-            return jsonify({'success': False, 'error': 'ReviewTrader no disponible'}), 503
+            return jsonify({
+                'success': False, 'error': 'ReviewTrader no disponible',
+                'logs': [], 'total': 0
+            }), 200  # 200 en vez de 503 para que el JS parsee JSON
         
         limit = int(request.args.get('limit', 50))
         limit = max(1, min(200, limit))  # cap entre 1 y 200
         
-        logs = review.db.get_recent_review_logs(limit=limit)
+        logs = review.db.get_recent_review_logs(limit=limit) or []
         last_log = logs[0] if logs else None
         
         return jsonify({
@@ -21290,7 +21162,12 @@ def api_review_logs():
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)}), 500
+        # Devolver 200 con JSON de error en vez de 500 con HTML
+        return jsonify({
+            'success': False,
+            'error': str(e)[:300],
+            'logs': [], 'total': 0
+        }), 200
 
 
 # === FIN ENDPOINTS FASE 5 ===
