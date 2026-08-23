@@ -19853,17 +19853,25 @@ def api_kpis_frontend_signals():
             try:
                 symbol = sig['symbol']
                 tf = sig['timeframe']
+                system_type = sig['system']  # 'spot' o 'futures'
                 
-                # Buscar la última señal (symbol, tf) que ya tenga outcome.
+                # v22.2 BUGFIX: 
+                # (1) .order('timestamp') no existía - la columna es 'created_at'.
+                #     Esto hacía que la query fallara silenciosamente y todo diera
+                #     pending. Cambiado a 'created_at'.
+                # (2) Sin filtro por system_type se cruzaban señales spot y futuros
+                #     del mismo símbolo (BTC-USDT existe en ambos). Ahora filtro.
+                # 
                 # No filtramos por candle_timestamp porque puede haber pequeñas
-                # diferencias de formato entre el caché y Supabase. La señal más
-                # reciente resuelta para ese (symbol, tf) es lo más honesto.
+                # diferencias de formato. La señal más reciente resuelta para ese
+                # (symbol, tf, system_type) es lo más honesto.
                 r = (db.client.table('signals')
                      .select('id, status')
                      .eq('symbol', symbol)
                      .eq('timeframe', tf)
+                     .eq('system_type', system_type)
                      .in_('status', ['tp_hit', 'sl_hit'])
-                     .order('timestamp', desc=True)
+                     .order('created_at', desc=True)
                      .limit(1)
                      .execute())
                 rows = r.data if r and r.data else []
