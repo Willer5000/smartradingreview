@@ -19828,8 +19828,11 @@ def api_kpis_debug():
     
     # Supabase diagnóstico
     try:
-        from supabase_client import get_supabase_client
-        db = get_supabase_client()
+        # v22.4 FIX: era 'from supabase_client import get_supabase_client'
+        # pero esa función NO existe. El módulo exporta el singleton supabase_db.
+        # Este bug hacía que db=None → todas las señales caían en 'pending' →
+        # header siempre mostraba 0/N ops.
+        from supabase_client import supabase_db as db
         out['supabase_enabled'] = bool(db and db.enabled)
         
         if db and db.enabled:
@@ -19948,8 +19951,8 @@ def api_kpis_frontend_signals():
             })
         
         try:
-            from supabase_client import get_supabase_client
-            db = get_supabase_client()
+            # v22.4 FIX: get_supabase_client no existe, es supabase_db (singleton)
+            from supabase_client import supabase_db as db
         except Exception as e:
             print(f"⚠️ Supabase no disponible: {e}")
             db = None
