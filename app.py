@@ -160,12 +160,15 @@ def _analysis_cache_put(key, data):
     import time as _time
     with _ANALYSIS_CACHE_LOCK:
         _ANALYSIS_CACHE[key] = {'data': data, 'ts': _time.time()}
-        # Límite defensivo: reducido de 200→50 para evitar OOM en Render Free (512MB).
-        # Cada entrada del caché contiene un DataFrame + estructuras de análisis
-        # que pueden llegar a ~1-2 MB, así que 200 = ~300MB solo caché.
-        if len(_ANALYSIS_CACHE) > 50:
-            oldest_key = min(_ANALYSIS_CACHE.keys(), key=lambda k: _ANALYSIS_CACHE[k]['ts'])
-            _ANALYSIS_CACHE.pop(oldest_key, None)
+        # Límite MUY REDUCIDO para OOM en Render Free (512MB).
+        # 50→20 entradas. Cada entrada ~1-2 MB → máx 40MB de caché.
+        # Ya no hay margen para más porque el warm-up de futuros ocupa mucho.
+        if len(_ANALYSIS_CACHE) > 20:
+            # Purgar el 20% más antiguo de golpe (evita hacer sort N veces)
+            sorted_keys = sorted(_ANALYSIS_CACHE.keys(), key=lambda k: _ANALYSIS_CACHE[k]['ts'])
+            to_remove = sorted_keys[:5]  # los 5 más antiguos
+            for k in to_remove:
+                _ANALYSIS_CACHE.pop(k, None)
 
 
 def get_analysis_cache_stats() -> dict:
@@ -19840,57 +19843,51 @@ def api_telegram_test():
 @app.route('/api/generate_report')
 def api_generate_report():
     """
-    Genera reporte PDF de análisis con 3 párrafos + gráfico técnico.
+    Genera reporte PDF de análisis (versión ligera para Render Free 512MB).
     
     Estructura del PDF:
-      1. Cabecera con símbolo, timeframe, acción, confianza
-      2. Tabla resumen (entry, SL, TP, R/R, leverage)
-      3. Párrafo 1: Acción a tomar en cuenta
-      4. Párrafo 2: Indicadores que respaldan
-      5. Párrafo 3: Conclusión
-      6. Gráfico con velas + indicadores top que sustentan la señal
+      1. Cabecera + tabla resumen niveles
+      2. 3 párrafos: acción, indicadores, conclusión (banco justificaciones)
+      3. Gráfico principal (opcional: ?with_charts=1)
     
-    Query params:
-      symbol   (default BTC-USDT)
-      interval (default 1D)
+    IMPORTANTE (v15): por defecto NO se generan gráficos con kaleido/Chrome
+    porque consume ~200MB y dispara OOM en Render Free. Para incluirlos:
+      GET /api/generate_report?symbol=BTC-USDT&interval=1D&with_charts=1
     """
     import gc
     symbol = request.args.get('symbol', 'BTC-USDT')
     interval = request.args.get('interval', '1D')
+    # Flag opcional para incluir gráficos (por defecto desactivados por OOM)
+    with_charts = request.args.get('with_charts', '0') in ('1', 'true', 'yes')
     
-    # Ejecutar análisis completo
+    # Ejecutar análisis (usa caché si está caliente → 0ms)
     result = expert_system.analyze_full_market(symbol, interval)
     
     if not result or not result.get('success'):
         return jsonify({'success': False, 'error': 'No se pudo generar el análisis'}), 400
     
-    # Generar gráficos técnicos (best-effort — si falla, el PDF sale sin gráficos)
     chart_bytes = None
     supporting_charts = []
-    try:
-        top_indicators = expert_system.get_top_indicators_for_chart(result)
-        chart_bytes = expert_system.generate_chart_image(symbol, interval, result, top_indicators)
-    except Exception as e:
-        print(f"⚠️ generate_report: no se pudo generar el gráfico principal: {e}")
     
-    # Liberar memoria entre generación de gráficos
-    gc.collect()
+    if with_charts:
+        # Solo si el usuario lo pide explícitamente. Consume ~200MB extra.
+        try:
+            top_indicators = expert_system.get_top_indicators_for_chart(result)
+            chart_bytes = expert_system.generate_chart_image(symbol, interval, result, top_indicators)
+            gc.collect()
+        except Exception as e:
+            print(f"⚠️ generate_report: gráfico principal falló: {e}")
+        
+        try:
+            # Máximo 2 imágenes de indicadores (antes 4) para minimizar OOM
+            supporting_charts = expert_system.generate_supporting_indicators_images(
+                symbol, interval, result, max_indicators=2
+            )
+            gc.collect()
+        except Exception as e:
+            print(f"⚠️ generate_report: gráficos indicadores fallaron: {e}")
     
-    # Gráficos INDIVIDUALES de cada indicador que respalda la señal
-    # (uno por indicador, con nombre visible — para el ANEXO B del PDF)
-    try:
-        # Limitado a 4 indicadores (antes 10) para no consumir demasiada memoria
-        # con kaleido/Chrome. Cada imagen adicional cuesta ~30-50MB en Render Free.
-        supporting_charts = expert_system.generate_supporting_indicators_images(
-            symbol, interval, result, max_indicators=4
-        )
-    except Exception as e:
-        print(f"⚠️ generate_report: no se pudieron generar gráficos individuales: {e}")
-    
-    # Liberar memoria antes de armar el PDF
-    gc.collect()
-    
-    # Generar PDF
+    # Generar PDF (el PDF sin gráficos pesa solo ~30KB y no usa Chrome)
     try:
         from pdf_report import generate_analysis_pdf
         pdf_bytes = generate_analysis_pdf(
@@ -19900,17 +19897,16 @@ def api_generate_report():
             supporting_indicator_charts=supporting_charts,
         )
     except ImportError:
-        # Fallback si reportlab no está instalado (no debería pasar en prod)
         return jsonify({
             'success': False,
-            'error': 'reportlab no está instalado. Instala con: pip install reportlab'
+            'error': 'reportlab no está instalado'
         }), 500
     except Exception as e:
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': f'Error generando PDF: {e}'}), 500
     
-    # Liberar chart_bytes y supporting_charts (ya están en el PDF)
+    # Liberar todo agresivamente antes de devolver
     del chart_bytes, supporting_charts, result
     gc.collect()
     
@@ -20145,24 +20141,54 @@ def _analyze_futures_all_parallel():
     
     from futures_system import FUTURES_SYMBOLS, FUTURES_TIMEFRAMES
     
-    combos = [(s, tf) for s in FUTURES_SYMBOLS.keys() for tf in FUTURES_TIMEFRAMES.keys()]
+    # REDUCCIÓN AGRESIVA DE MEMORIA (Render Free 512MB):
+    # 1. Solo TFs útiles para alertas Telegram (1h, 2h, 4h). 
+    # 2. Ejecución SECUENCIAL (antes 2 workers paralelos → 2 análisis en RAM
+    #    simultáneos). Ahora solo 1 análisis a la vez.
+    # 3. gc.collect() entre análisis para liberar DataFrames grandes.
+    # 4. Se elimina 'df' del resultado — el frontend no lo necesita en el 
+    #    payload compacto de futuros (solo lo usan endpoints spot).
+    FUTURES_TFS_ACTIVE = ('1h', '2h', '4h')
+    combos = [(s, tf) for s in FUTURES_SYMBOLS.keys() for tf in FUTURES_TFS_ACTIVE]
+    results = {}
+    errors = []
+    
+    import gc
+    # Ejecución SECUENCIAL - más lenta pero mucho más suave con la memoria
+    for symbol, tf in combos:
+        try:
+            r = futures.analyze_futures_market(symbol, tf)
+            # Liberar memoria del df crudo (ocupa varios MB por análisis)
+            if isinstance(r, dict) and 'df' in r:
+                _df = r.pop('df', None)
+                del _df
+            results[(symbol, tf)] = r
+        except Exception as e:
+            errors.append(f"{symbol} {tf}: {str(e)[:120]}")
+            continue
+        
+        # gc cada 3 análisis para liberar memoria acumulada
+        if (len(results) + len(errors)) % 3 == 0:
+            gc.collect()
+    
+    gc.collect()  # gc final
+    return {'analysis': results, 'errors': errors}
+
+
+def _analyze_futures_all_parallel_DISABLED():
+    """LEGACY: versión con ThreadPool. Deshabilitada por OOM en Render Free."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed_
+    combos = []
     results = {}
     errors = []
     
     def _worker(symbol_tf):
         symbol, tf = symbol_tf
-        try:
-            r = futures.analyze_futures_market(symbol, tf)
-            return (symbol, tf, r, None)
-        except Exception as e:
-            return (symbol, tf, None, str(e)[:120])
+        return (symbol, tf, None, 'disabled')
     
-    # Máximo 2 workers para no saturar memoria en Render Free (512MB).
-    # Cada worker mantiene DataFrame + análisis en memoria simultáneamente.
-    # Antes 6 workers × ~50MB = 300MB solo warm-up → OOM.
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    with ThreadPoolExecutor(max_workers=1) as pool:
         futures_list = [pool.submit(_worker, c) for c in combos]
-        for fut in _as_completed(futures_list, timeout=240):
+        for fut in _as_completed_(futures_list, timeout=240):
             try:
                 symbol, tf, result, err = fut.result(timeout=30)
                 if err:
@@ -20256,16 +20282,25 @@ def _trigger_futures_refresh_async():
 
 def _start_futures_warmup():
     """Al arrancar la app, disparar un análisis inicial en background."""
+    import gc
     print("🔥 Iniciando warm-up de análisis futuros en background...")
-    _trigger_futures_refresh_async()
+    # Esperar 15s inicial para que Flask termine de arrancar antes de la carga
+    def _delayed_first_warmup():
+        time.sleep(15)
+        _trigger_futures_refresh_async()
+    threading.Thread(target=_delayed_first_warmup, daemon=True).start()
     
-    # Programar refresh periódico cada 5 minutos
+    # Programar refresh periódico cada 10 minutos (antes 5 min → menos carga)
+    # gc.collect() al final para forzar liberación de memoria acumulada
     def _periodic():
         while True:
-            time.sleep(300)  # 5 min
+            time.sleep(600)  # 10 min (antes 5 min)
             try:
                 if not _futures_analysis_cache['running']:
                     _trigger_futures_refresh_async()
+                    # Esperar a que termine antes de gc
+                    time.sleep(60)
+                    gc.collect()
             except Exception as e:
                 print(f"❌ Error en refresh periódico futuros: {e}")
     
@@ -21077,7 +21112,7 @@ mensajes_enviados_hoy = {}
 
 MONITOR_ENTRY_TIMEFRAMES = ('1h', '2h', '4h', '12h', '1D')
 MONITOR_ENTRY_TOLERANCE_PCT = 0.15  # 0.15% de tolerancia para "tocar" entry
-MONITOR_CHECK_INTERVAL = 60         # segundos entre chequeos
+MONITOR_CHECK_INTERVAL = 180        # 3 minutos entre chequeos (antes 60s, reduce carga)
 
 # Duración de cada TF en segundos (para normalizar candle_start)
 _TF_SECONDS = {
@@ -21201,11 +21236,14 @@ def _price_touches_entry(current_price, entry, action):
 
 def _build_entry_alert_message(signal, current_price):
     """
-    Construye el mensaje de Telegram cuando el precio toca entry.
+    Construye el mensaje COMPACTO de Telegram cuando el precio toca entry.
     
-    signal: dict con symbol, timeframe, action, entry, stop_loss, take_profit,
-            confidence, message (justificación), leverage (opcional), 
-            risk_reward (opcional)
+    IMPORTANTE (v15): Se elimina la justificación en texto para hacer las
+    alertas más ligeras. La justificación va implícita en la IMAGEN ADJUNTA
+    que muestra los indicadores que respaldan la señal. Esto reduce:
+      - Tamaño del mensaje (~800 chars menos)
+      - Ruido visual en el chat de Telegram
+      - Carga cognitiva para el operador (imagen > texto extenso)
     """
     action = signal.get('action', '') or signal.get('decision', '')
     symbol = signal.get('symbol', '?')
@@ -21214,12 +21252,10 @@ def _build_entry_alert_message(signal, current_price):
     sl = float(signal.get('stop_loss') or 0)
     tp = float(signal.get('take_profit') or 0)
     confidence = float(signal.get('confidence') or 0)
-    confidence = max(0.0, min(100.0, confidence))  # cap defensivo
+    confidence = max(0.0, min(100.0, confidence))
     leverage = signal.get('leverage')
     rr = signal.get('risk_reward')
-    justification = signal.get('message', '') or signal.get('justification', '') or ''
     
-    # Icono según acción
     icon_map = {
         'LONG': '🟢 LONG',
         'COMPRA_SPOT': '🟢 COMPRA',
@@ -21229,33 +21265,24 @@ def _build_entry_alert_message(signal, current_price):
     action_label = icon_map.get(action, action)
     
     lines = [
-        '🚨 <b>ALERTA DE ENTRY TOCADO</b> 🚨',
+        f'🚨 <b>ENTRY TOCADO</b> · {action_label}',
+        f'<b>{symbol}</b> · {timeframe}',
         '',
-        f'{action_label}  <b>{symbol}</b> · {timeframe}',
-        '',
-        f'💰 <b>Entry:</b> {entry:.4f}',
-        f'🎯 <b>Take Profit:</b> {tp:.4f}',
-        f'🛑 <b>Stop Loss:</b> {sl:.4f}',
-        f'📊 <b>Precio actual:</b> {current_price:.4f}',
+        f'💰 Entry: <b>{entry:.4f}</b>',
+        f'📊 Precio: {current_price:.4f}',
+        f'🎯 TP: {tp:.4f}',
+        f'🛑 SL: {sl:.4f}',
     ]
     if leverage:
-        lines.append(f'⚡ <b>Apalancamiento:</b> x{leverage}')
+        lines.append(f'⚡ Leverage: x{leverage}')
     if rr:
         try:
-            lines.append(f'⚖️ <b>Risk/Reward:</b> {float(rr):.2f}')
+            lines.append(f'⚖️ R/R: {float(rr):.2f}')
         except Exception:
             pass
-    lines.append(f'🎯 <b>Confianza:</b> {confidence:.0f}%')
+    lines.append(f'🎯 Confianza: {confidence:.0f}%')
     lines.append('')
-    lines.append('📝 <b>Justificación:</b>')
-    if justification:
-        # Truncar justificación a ~800 chars para no exceder límite Telegram
-        just_clean = justification.strip()
-        if len(just_clean) > 800:
-            just_clean = just_clean[:800] + '...'
-        lines.append(just_clean)
-    else:
-        lines.append('(no disponible)')
+    lines.append('<i>Ver imagen para indicadores que respaldan la señal.</i>')
     
     return '\n'.join(lines)
 
@@ -21386,44 +21413,34 @@ def monitor_entries_loop():
                 
                 # DISPARAR ALERTA
                 try:
-                    # ============ REANALIZAR PARA TENER JUSTIFICACIÓN E IMAGEN ============
-                    # Se usa la ruta correcta según el sistema (spot vs futures)
-                    # para que los símbolos como SOL/XRP/ADA se analicen bien.
+                    # ============ USAR ANÁLISIS DEL CACHÉ (no reanalizar) ============
+                    # ANTES: monitor_entries reanalizaba el par cada vez que iba a
+                    # enviar alerta → doblaba el consumo de memoria y disparaba OOM.
+                    # AHORA: usamos el análisis que YA está en caché (fue calculado
+                    # en el warm-up). Si no está, la imagen no se genera pero la
+                    # alerta se envía igual con texto.
                     image_bytes = None
                     analysis = None
                     try:
-                        if sig.get('system') == 'futures':
-                            futures_sys = _get_futures_system()
-                            if futures_sys is not None:
-                                analysis = futures_sys.analyze_futures_market(symbol, tf)
-                        else:
-                            analysis = expert_system.analyze_full_market(symbol, tf)
-                        
-                        if analysis and analysis.get('success'):
-                            # Inyectar la justificación del análisis en el sig
-                            # (para que _build_entry_alert_message la use)
-                            just_msg = analysis.get('message', '') or ''
-                            if just_msg and not sig.get('message'):
-                                # Truncar justificación a 800 chars como en spot
-                                sig['message'] = just_msg[:800] + ('...' if len(just_msg) > 800 else '')
-                            
-                            # Generar imagen con indicadores que respaldan la señal
-                            try:
-                                top_indicators = expert_system.get_top_indicators_for_chart(analysis)
-                                image_bytes = expert_system.generate_chart_image(
-                                    symbol, tf, analysis, top_indicators
-                                )
-                                if image_bytes:
-                                    print(f"   🖼️  Imagen generada ({sig.get('system')}) con indicadores: {top_indicators}")
-                            except Exception as chart_err:
-                                print(f"   ⚠️ imagen falló: {chart_err}")
-                    except Exception as an_err:
-                        print(f"   ⚠️ reanálisis falló: {an_err}")
+                        analysis = _analysis_cache_get((symbol, tf))
+                    except Exception:
+                        analysis = None
                     
-                    # Construir mensaje (ahora con message ya inyectado en sig si aplica)
+                    if analysis and analysis.get('success'):
+                        try:
+                            top_indicators = expert_system.get_top_indicators_for_chart(analysis)
+                            image_bytes = expert_system.generate_chart_image(
+                                symbol, tf, analysis, top_indicators
+                            )
+                            if image_bytes:
+                                print(f"   🖼️ Imagen generada desde caché ({sig.get('system')})")
+                        except Exception as chart_err:
+                            print(f"   ⚠️ imagen falló: {chart_err}")
+                    
+                    # Construir mensaje compacto (sin justificación en texto)
                     message = _build_entry_alert_message(sig, current)
                     
-                    # Enviar (con imagen si se pudo generar, si no solo texto)
+                    # Enviar
                     ok = expert_system.send_telegram_alert(message, image_bytes)
                     if ok:
                         _entry_alert_mark_sent(symbol, tf, candle_ts)
@@ -21431,6 +21448,11 @@ def monitor_entries_loop():
                         print(f"   🔔 Alerta ENTRY enviada [{sig.get('system')}]: {sig.get('action')} {symbol} {tf} @ {current:.4f} (entry {entry:.4f}) [vela {candle_ts}]")
                     else:
                         print(f"   ⚠️ Telegram rechazó la alerta para {symbol} {tf}")
+                    
+                    # Liberar memoria del análisis inmediatamente
+                    del analysis, image_bytes, message
+                    import gc
+                    gc.collect()
                 except Exception as send_err:
                     print(f"   ⚠️ monitor_entries: fallo enviando alerta: {send_err}")
                     import traceback; traceback.print_exc()
@@ -21761,7 +21783,7 @@ _BACKGROUND_LOCK = threading.Lock()
 # ============================================================================
 # LEARNING WORKER — evalúa periódicamente las señales pendientes
 # ============================================================================
-LEARNING_WORKER_INTERVAL = 15 * 60  # 15 minutos entre evaluaciones
+LEARNING_WORKER_INTERVAL = 30 * 60  # 30 minutos entre evaluaciones (antes 15min - reduce carga)
 
 
 def learning_worker_loop():

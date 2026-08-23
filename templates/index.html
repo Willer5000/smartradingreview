@@ -1978,7 +1978,7 @@
                 }
             }, 300000);
             
-            // 2. VELAS Y PATRONES - Cada 30 segundos (CON ACTUALIZACIÓN DE CORRELACIÓN GLOBAL)
+            // 2. VELAS Y PATRONES - Cada 90 segundos (antes 30s, reduce carga en Render Free)
             setInterval(function() {
                 // Usar las variables globales actuales
                 const currentSymbol = window.currentSymbol || (window.PAGE_CONFIG?.defaultSymbol || 'BTC-USDT');
@@ -2122,12 +2122,12 @@
                             window.updateCorrelationInfo(correlationGlobal);
                         }
                         
-                        console.log('✅ Correlación global actualizada (intervalo 30s)');
+                        console.log('✅ Correlación global actualizada (intervalo 90s)');
                     });
                 }
-            }, 30000);
+            }, 90000);
             
-            // 3. PRECIO EN VIVO - Cada 15 segundos (endpoint LIGERO /api/price)
+            // 3. PRECIO EN VIVO - Cada 30 segundos (antes 15s, reduce carga en Render Free)
             // Antes usaba /api/analyze (ejecuta 9 traders + 10 capas cada 5s), que
             // saturaba Render Free con 502 Bad Gateway. Ahora usa /api/price que solo
             // consulta velas (con caché HTTP) y responde en <50ms.
@@ -2153,7 +2153,7 @@
                         // el próximo tick lo recuperará.
                         console.debug('price refresh skipped:', error.message);
                     });
-            }, 15000);
+            }, 30000);
         }
         window.getInstantRecommendation = function() {
             const cfg = window.PAGE_CONFIG || {};
@@ -2574,7 +2574,7 @@
             setInterval(window.updateBoliviaClock, 1000);
             setInterval(window.updateCalendarInfo, 60000);
             setInterval(window.updateMarketSessionInfo, 60000); // ← NUEVA: Cada minuto
-            setInterval(window.updateSystemStatus, 60000);
+            setInterval(window.updateSystemStatus, 120000);  // 2 minutos (antes 60s)
             
             // ============ INICIAR INTERVALOS DE VELAS Y PRECIO ============
             window.startUpdateIntervals();

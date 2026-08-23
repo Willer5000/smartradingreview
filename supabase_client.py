@@ -151,6 +151,10 @@ class SupabaseClient:
             'error_code:9',
             'Server disconnected',
             'Connection aborted',
+            'Resource temporarily unavailable',  # EAGAIN cuando el sistema está saturado
+            'Errno 11',                          # código EAGAIN en Linux
+            'BrokenPipeError',
+            'OSError',
         )
         return any(m in msg for m in markers)
     
@@ -868,17 +872,26 @@ class SupabaseClient:
     
     def _check_rotation(self, table_name: str):
         """
-        Verifica si la tabla superó el límite y borra las filas más antiguas
-        que no tengan un resultado importante (para 'signals').
+        Verifica si la tabla superó el límite y borra las filas más antiguas.
+        
+        OPTIMIZACIÓN v15: probabilístico (10% de las llamadas) para reducir carga.
+        Antes se ejecutaba en CADA insert (15+ requests por warm-up). Ahora se
+        ejecuta en promedio 1 de cada 10 inserts, lo que es suficiente porque
+        el límite tiene margen (LIMITS son valores grandes ~20000).
         """
         if not self.enabled:
+            return
+        
+        # Chequeo probabilístico: solo 10% de las veces
+        import random
+        if random.random() > 0.1:
             return
         
         try:
             limit = LIMITS.get(table_name, 10000)
             
             # Contar filas actuales
-            count_response = self.client.table(table_name).select('id', count='exact').execute()
+            count_response = self.client.table(table_name).select('id', count='exact').limit(1).execute()
             current_count = count_response.count or 0
             
             if current_count > limit:
@@ -909,7 +922,11 @@ class SupabaseClient:
                         self.client.table(table_name).delete().in_('id', ids_to_delete).execute()
                         logger.info(f"Rotación FIFO en {table_name}: eliminadas {len(ids_to_delete)} filas")
         except Exception as e:
-            logger.error(f"Error en rotación FIFO de {table_name}: {e}")
+            if self._is_connection_error(e):
+                # Sistema saturado — no ensucies logs, la rotación FIFO no es crítica
+                logger.debug(f"Rotación FIFO {table_name}: sistema temporalmente saturado")
+            else:
+                logger.error(f"Error en rotación FIFO de {table_name}: {e}")
     
     # ========================================================================
     # HEALTH CHECK
