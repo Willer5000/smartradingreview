@@ -453,16 +453,24 @@ def _fetch_missed_opp_indicators(db, limit: int = 200) -> List[Dict]:
     Trae oportunidades perdidas junto con los indicadores que estaban activos
     cuando el sistema NO tomó la operación. Ayuda a identificar patrones de
     'cuándo el sistema es demasiado conservador'.
+    
+    v22.8 FIX: los nombres de columnas eran INCORRECTOS. La tabla
+    missed_opportunities usa 'max_favorable_pct' y 'strategies_detected'
+    (ver schema_supabase.sql:137-151), no 'pct_missed' ni 'active_strategies'.
+    Este bug hacía que el fetch fallara silenciosamente (try/except return [])
+    y el PDF siempre mostraba 0 oportunidades perdidas, aunque en Supabase
+    hubiera cientos (log del ReviewTrader reportaba 1061).
     """
     try:
         r = (db.client.table('missed_opportunities')
              .select('symbol, timeframe, action_that_should_have_been, '
-                     'pct_missed, active_strategies, created_at')
+                     'max_favorable_pct, strategies_detected, created_at')
              .order('created_at', desc=True)
              .limit(limit)
              .execute())
         return r.data or []
-    except Exception:
+    except Exception as e:
+        logger.warning(f"_fetch_missed_opp_indicators falló: {e}")
         return []
 
 
@@ -471,6 +479,8 @@ def _analyze_missed_opps(missed: List[Dict]) -> Dict:
     De las oportunidades perdidas, agrupa por indicadores/estrategias activas
     para ver qué combinaciones aparecen con más frecuencia (candidatas a
     'próximas veces con este set, sí tomar la operación').
+    
+    v22.8: nombres de campos corregidos (strategies_detected, max_favorable_pct).
     """
     indicator_freq = defaultdict(lambda: {'count': 0, 'total_pct': 0.0})
     combination_freq = defaultdict(lambda: {'count': 0, 'total_pct': 0.0})
@@ -478,10 +488,12 @@ def _analyze_missed_opps(missed: List[Dict]) -> Dict:
     by_direction = defaultdict(int)
     
     for opp in missed:
-        strats = opp.get('active_strategies') or []
+        # v22.8: el schema usa 'strategies_detected', no 'active_strategies'
+        strats = opp.get('strategies_detected') or []
         if not isinstance(strats, list):
             continue
-        pct = float(opp.get('pct_missed', 0) or 0)
+        # v22.8: el schema usa 'max_favorable_pct', no 'pct_missed'
+        pct = float(opp.get('max_favorable_pct', 0) or 0)
         
         # Frecuencia individual
         for s in strats:
