@@ -20674,6 +20674,66 @@ def api_futures_signals_active():
 # ============================================================================
 # ENDPOINT: Señales de la VELA ANTERIOR (estáticas)
 # ============================================================================
+@app.route('/api/futures/debug')
+def api_futures_debug():
+    """
+    v22.9.2 DIAGNÓSTICO: retorna el estado del caché de futuros SIN NINGÚN
+    FILTRO. Sirve para saber por qué un par/TF NO aparece en la lista del
+    frontend cuando el sistema sí generó alerta por Telegram.
+    """
+    try:
+        cache = _get_or_refresh_futures_analysis()
+        warming_up = cache.get('warming_up', False)
+        cache_age = cache.get('cache_age', 0)
+        errors = cache.get('errors') or []
+        
+        entries = []
+        for (symbol, tf), result in (cache.get('analysis') or {}).items():
+            entry = {
+                'symbol': symbol,
+                'timeframe': tf,
+                'has_result': bool(result),
+                'success': bool(result and result.get('success')),
+            }
+            if result and result.get('success'):
+                d = result.get('decision', {}) or {}
+                lv = result.get('levels', {}) or {}
+                entry['action'] = d.get('action')
+                entry['confidence'] = d.get('confidence')
+                entry['leverage'] = lv.get('leverage')
+                entry['entry'] = lv.get('entry')
+                entry['stop_loss'] = lv.get('stop_loss')
+                entry['take_profit'] = lv.get('take_profit')
+                entry['current_price'] = result.get('current_price')
+                # ¿Por qué se filtraría?
+                try:
+                    from futures_system import _leverage_in_valid_range
+                    entry['leverage_ok'] = _leverage_in_valid_range(
+                        int(lv.get('leverage', 1)), tf)
+                except Exception as e:
+                    entry['leverage_ok'] = f'err: {e}'
+            elif result:
+                entry['error'] = result.get('error', 'no_success_flag')
+            entries.append(entry)
+        
+        # Ordenar por symbol, tf
+        entries.sort(key=lambda x: (x['symbol'], x['timeframe']))
+        
+        return jsonify({
+            'success': True,
+            'warming_up': warming_up,
+            'cache_age_seconds': cache_age,
+            'stale': bool(cache.get('stale', False)),
+            'total_entries': len(entries),
+            'errors_at_analysis': errors,
+            'entries': entries,
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 200
+
+
 @app.route('/api/futures/signals/previous')
 def api_futures_signals_previous():
     """
