@@ -198,31 +198,43 @@ class FuturesAnalysis(TradingExpertSystem):
     # ========================================================================
     
     def calculate_optimal_leverage(self, timeframe: str, atr_pct: float, 
-                                    confidence: float, review_multiplier: float = 1.0) -> int:
+                                    confidence: float, review_multiplier: float = 1.0,
+                                    sl_distance_pct: float = None,
+                                    max_loss_pct_of_margin: float = 20.0) -> int:
         """
         Calcula el apalancamiento óptimo para futuros.
         
-        Fórmula:
-        1. Rango base según TF (definido por el usuario)
-        2. Reducir si ATR es alto (volatilidad = más riesgo)
-        3. Ajustar por confianza (más confianza = más apalancamiento)
-        4. Aplicar multiplicador del ReviewTrader
-        5. Cap por temporalidad
+        v23 (Parte A4): NUEVA REGLA — el leverage ahora se calcula para que,
+        si el SL se toca, la pérdida en el margen NO supere max_loss_pct_of_margin
+        (default 20%). Esto significa que con 10 USDT invertidos, la pérdida
+        máxima si toca SL es 2 USDT.
+        
+        Fórmula matemática:
+          leverage_seguro = max_loss_pct_of_margin / sl_distance_pct
+        
+        Ejemplo:
+          - SL a 3% del entry, tolerancia 20%: leverage_seguro = 20/3 = 6.67 → 6x
+          - SL a 1.5% del entry: leverage_seguro = 20/1.5 = 13.3 → 13x
+          - SL a 0.5% (muy apretado): leverage_seguro = 20/0.5 = 40x (cap por TF)
+        
+        Este leverage se toma como TECHO DURO. El leverage final es el MÍNIMO
+        entre: (a) fórmula clásica por ATR + confianza + review, (b) el techo
+        seguro por SL. Nunca podrá excederse aunque los otros factores lo pidan.
         
         Args:
             timeframe: '5m', '15m', ..., '4h'
             atr_pct: ATR como porcentaje del precio (ej: 1.5 para 1.5%)
             confidence: 0-100
             review_multiplier: multiplicador del ReviewTrader (0.5x-1.5x)
+            sl_distance_pct: distancia del SL al entry en % (para tope de riesgo)
+            max_loss_pct_of_margin: % máximo del margen a arriesgar (default 20%)
         """
         # 1. Rango base
         lo, hi = LEVERAGE_RANGES.get(timeframe, (2, 5))
         
         # 2. Ajuste por volatilidad (a más ATR, menos leverage)
-        # Fórmula: base_by_atr = 20 / atr_pct (limitado al rango)
         if atr_pct <= 0:
-            atr_pct = 1.0  # Fallback
-        
+            atr_pct = 1.0
         base_by_atr = 20.0 / atr_pct
         base_by_atr = max(lo, min(hi, base_by_atr))
         
@@ -232,14 +244,25 @@ class FuturesAnalysis(TradingExpertSystem):
         # 4. Factor del ReviewTrader (limitado 0.6 - 1.4)
         review_factor = max(0.6, min(1.4, review_multiplier))
         
-        # 5. Combinar todos los factores
+        # 5. Combinar factores clásicos
         leverage_raw = base_by_atr * confidence_factor * review_factor
+        leverage_classic = int(round(leverage_raw))
+        leverage_classic = max(lo, min(hi, leverage_classic))
         
-        # 6. Redondear y aplicar cap del rango
-        leverage = int(round(leverage_raw))
+        # 6. v23 PARTE A4: techo seguro por SL — clave del control de riesgo
+        if sl_distance_pct is not None and sl_distance_pct > 0:
+            safe_leverage = int(max_loss_pct_of_margin / sl_distance_pct)
+            safe_leverage = max(1, safe_leverage)
+            # El leverage final es el MÍNIMO entre clásico y seguro
+            leverage = min(leverage_classic, safe_leverage)
+        else:
+            # Sin SL: usar clásico
+            leverage = leverage_classic
+        
+        # 7. Aplicar rangos duros del TF (nunca fuera del rango del TF)
         leverage = max(lo, min(hi, leverage))
         
-        # 7. Regla de precaución: si ATR es extremadamente alto (>5%), leverage bajo
+        # 8. Regla de precaución extrema: ATR > 5% → reducir a la mitad
         if atr_pct > 5.0:
             leverage = max(2, int(leverage * 0.5))
         
@@ -308,21 +331,27 @@ class FuturesAnalysis(TradingExpertSystem):
         if levels.get('rejected_reason'):
             return levels
         
-        # ============ AJUSTAR APALANCAMIENTO PARA FUTUROS ============
+        # ============ AJUSTAR APALANCAMIENTO PARA FUTUROS (v23 A4) ============
         atr_pct = volatility.get('atr_pct', 1.0)
-        
-        # Usar la confianza si viene en el decision (por defecto 60 si no)
         confidence = 70  # Se ajustará cuando venga del Moderador
-        
-        # Multiplicador del ReviewTrader (se puede sobreescribir cuando se integre)
         review_multiplier = getattr(self, '_current_review_multiplier', 1.0)
         
+        # v23 PARTE A4: pasar sl_distance_pct para que el leverage NUNCA
+        # cause pérdida > 20% del margen si se toca SL.
+        entry_price = float(levels.get('entry', 0) or 0)
+        sl_price = float(levels.get('stop_loss', 0) or 0)
+        sl_distance_pct = None
+        if entry_price > 0 and sl_price > 0:
+            sl_distance_pct = abs(entry_price - sl_price) / entry_price * 100
+        
         optimal_leverage = self.calculate_optimal_leverage(
-            timeframe, atr_pct, confidence, review_multiplier
+            timeframe, atr_pct, confidence, review_multiplier,
+            sl_distance_pct=sl_distance_pct,
+            max_loss_pct_of_margin=20.0
         )
         
-        # Actualizar el apalancamiento en levels
         levels['leverage'] = optimal_leverage
+        levels['sl_distance_pct'] = round(sl_distance_pct, 3) if sl_distance_pct else None
         
         # ============ CALCULAR ROI POTENCIAL ============
         direction = 'long' if decision == 'LONG' else 'short'
@@ -335,7 +364,6 @@ class FuturesAnalysis(TradingExpertSystem):
         levels['is_futures'] = True
         
         # ============ VALIDACIÓN ADICIONAL: ROI MÍNIMO ============
-        # Con 10 USDT invertidos, ROI mínimo aceptable es 5% (=0.5 USDT netos)
         min_roi_tp = 5.0
         if roi['roi_tp'] < min_roi_tp:
             print(f"   ⚠️ RECHAZADO (futuros): ROI potencial {roi['roi_tp']:.1f}% < mínimo {min_roi_tp}%")
@@ -344,7 +372,15 @@ class FuturesAnalysis(TradingExpertSystem):
                 f"ROI potencial {roi['roi_tp']:.1f}% < {min_roi_tp}% mínimo"
             )
         
-        print(f"   ✅ FUTUROS - Leverage: {optimal_leverage}x | ROI TP: +{roi['roi_tp']:.1f}% | ROI SL: {roi['roi_sl']:.1f}%")
+        # v23: verificar que roi_sl (pérdida) esté acotado (≤ 20% del margen)
+        # Este check es informativo; el leverage ya se limitó en A4.
+        if roi['roi_sl'] < -25.0:
+            print(f"   ⚠️ Aviso: ROI SL {roi['roi_sl']:.1f}% supera -25% del margen. "
+                  f"Leverage {optimal_leverage}x, SL dist {sl_distance_pct:.2f}%")
+        
+        print(f"   ✅ FUTUROS - Leverage: {optimal_leverage}x | ROI TP: +{roi['roi_tp']:.1f}% | "
+              f"ROI SL: {roi['roi_sl']:.1f}% | SL dist: {sl_distance_pct:.2f}%" if sl_distance_pct else
+              f"   ✅ FUTUROS - Leverage: {optimal_leverage}x | ROI TP: +{roi['roi_tp']:.1f}% | ROI SL: {roi['roi_sl']:.1f}%")
         
         return levels
     

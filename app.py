@@ -11181,18 +11181,23 @@ class TradingExpertSystem:
     def _calculate_max_sl_distance_pct(self, timeframe):
         """
         Distancia MÁXIMA del SL en % (protección contra pérdidas catastróficas).
+        
+        v23 (Parte A3): valores ligeramente ampliados porque el sweet spot
+        del scoring pasó de 1.0-2.5×ATR a 2.0-3.5×ATR. El máximo debe
+        acomodar SL en la parte alta del sweet spot sin que se descarten.
+        La pérdida real la controla el leverage (Parte A4), no el %.
         """
         return {
-            '5m': 1.5,
-            '15m': 2.0,
-            '30m': 2.5,
-            '1h': 3.0,
-            '2h': 3.5,
-            '4h': 4.0,
-            '12h': 5.0,
-            '1D': 6.0,
-            '1W': 8.0
-        }.get(timeframe, 4.0)
+            '5m': 2.0,   # antes 1.5
+            '15m': 2.5,  # antes 2.0
+            '30m': 3.0,  # antes 2.5
+            '1h': 3.5,   # antes 3.0
+            '2h': 4.0,   # antes 3.5
+            '4h': 5.0,   # antes 4.0
+            '12h': 6.0,  # antes 5.0
+            '1D': 7.5,   # antes 6.0
+            '1W': 10.0,  # antes 8.0
+        }.get(timeframe, 4.5)
     
     def _collect_tp_candidates(self, direction, structure, current_price, volatility, timeframe):
         """
@@ -11537,76 +11542,109 @@ class TradingExpertSystem:
         
         return candidates
     
-    def _score_tp_candidate(self, candidate, entry, direction, all_candidates, min_distance_pct):
+    def _score_tp_candidate(self, candidate, entry, direction, all_candidates,
+                             min_distance_pct, sl_distance_pct=None):
         """
         Puntúa un candidato de TP.
-        Un TP ideal: DISTANCIA suficiente (rentable) + ALTA probabilidad de ser tocado.
         
-        score = (distancia_score × 0.4) + (probabilidad_score × 0.6)
+        v23 (Parte A1+A2): scoring con dos mejoras críticas:
+        - MIN distance ahora se calcula como múltiplo del SL (1.8×SL) por
+          fuera de esta función. Aquí solo se descarta si distance < min.
+        - distance_score NO es lineal saturada; es una CAMPANA centrada
+          en 2.5×SL_distance (rentable + probable). Se penalizan TPs
+          absurdos (más de 6×SL) porque son fantasiosos aunque tengan
+          confluencia. Antes: TP a 30% valía igual que TP a 10%.
+        
+        score = (distance_score × 0.45) + (probability_score × 0.55)
         """
         price = candidate['price']
         distance_pct = abs(price - entry) / entry * 100 if entry > 0 else 0
         
         # Descartar si NO cumple distancia mínima
         if distance_pct < min_distance_pct:
-            return -1  # Descarta
+            return -1
         
-        # Score de distancia (más lejos = más rentable) — normalizado 0-100
-        # Cap en 10% para no favorecer TPs irreales
-        distance_score = min(100, (distance_pct / 10) * 100)
+        # ============ DISTANCE SCORE (campana centrada en 2.5×SL) ============
+        # Si tenemos sl_distance_pct, la campana se centra en 2.5× ese valor
+        # (RR objetivo ~2.5). Si no, usamos min_distance_pct como referencia.
+        if sl_distance_pct and sl_distance_pct > 0:
+            optimal_distance = 2.5 * sl_distance_pct
+            max_reasonable = 6.0 * sl_distance_pct  # más allá = fantasioso
+        else:
+            optimal_distance = 2.5 * min_distance_pct
+            max_reasonable = 6.0 * min_distance_pct
         
-        # Score de probabilidad de toque:
-        # - Fuerza del nivel (strength 1-3): peso 30
-        # - Volumen anómalo cerca del nivel (volume_ratio): peso 20
-        # - Confluencia con otros niveles cercanos (±0.5%): peso 50
+        if distance_pct <= optimal_distance:
+            # Rampa ascendente 0 → 100 hasta el óptimo
+            distance_score = 100 * (distance_pct / optimal_distance)
+        elif distance_pct <= max_reasonable:
+            # Bajada gradual 100 → 40 después del óptimo
+            excess_ratio = (distance_pct - optimal_distance) / (max_reasonable - optimal_distance)
+            distance_score = 100 - (60 * excess_ratio)
+        else:
+            # Muy lejos → penalización fuerte, pero no descarta (por si es único)
+            distance_score = max(10, 40 - (distance_pct - max_reasonable) * 3)
+        
+        # ============ PROBABILITY SCORE (fuerza + volumen + confluencia) ============
         strength = candidate.get('strength', 1)
         volume_ratio = candidate.get('volume_ratio', 1.0)
         
-        # Confluencia: contar otros candidatos cercanos
+        # Confluencia: contar otros candidatos cercanos (±0.5%)
         confluence = 0
         for other in all_candidates:
             if other is candidate:
                 continue
             other_price = other['price']
-            if abs(other_price - price) / price < 0.005:  # Dentro de 0.5%
+            if abs(other_price - price) / price < 0.005:
                 confluence += 1
         
-        strength_score = (strength / 3) * 30  # 0-30
-        volume_score = min(20, (volume_ratio - 1) * 10)  # 0-20 (0 si volume_ratio<=1)
-        confluence_score = min(50, confluence * 15)  # 0-50
+        strength_score = (strength / 3) * 30
+        volume_score = min(20, (volume_ratio - 1) * 10)
+        confluence_score = min(50, confluence * 15)
         
         probability_score = strength_score + max(0, volume_score) + confluence_score
         
-        total_score = (distance_score * 0.4) + (probability_score * 0.6)
+        total_score = (distance_score * 0.45) + (probability_score * 0.55)
         return total_score
     
     def _score_sl_candidate(self, candidate, entry, direction, timeframe, max_distance_pct, atr):
         """
         Puntúa un SL: menos probable de ser tocado + protector.
         
+        v23 (Parte A3): sweet spot movido de 1.0-2.5×ATR a 2.0-3.5×ATR.
+        Motivo del cambio: los SL a 1×ATR se tocan por ruido normal de
+        mercado (cualquier vela de retroceso los detona). Con 2-3.5×ATR
+        el SL queda fuera del ruido intradía pero aún dentro de un rango
+        estructural (invalidación real de la tesis).
+        
+        Además elevamos el mínimo de 0.3% a 0.6% para blindar contra
+        SL peligrosamente pegados al entry.
+        
         score = (proteccion_score × 0.4) + (baja_probabilidad_score × 0.6)
         """
         price = candidate['price']
         distance_pct = abs(price - entry) / entry * 100 if entry > 0 else 0
         
-        # Descartar si SL está muy cerca (menos 0.3%) o muy lejos (más max_distance_pct)
-        if distance_pct < 0.3 or distance_pct > max_distance_pct:
+        # v23: mínimo elevado de 0.3% a 0.6% (SL apretados son trampa)
+        if distance_pct < 0.6 or distance_pct > max_distance_pct:
             return -1
         
-        # Score de protección: sweet spot alrededor de 1×ATR a 2×ATR
+        # Score de protección: sweet spot 2.0-3.5×ATR (antes 1.0-2.5×ATR)
         atr_pct = (atr / entry) * 100 if entry > 0 else 1
         distance_in_atr = distance_pct / atr_pct if atr_pct > 0 else 1
         
-        if 1.0 <= distance_in_atr <= 2.5:
-            proteccion_score = 100  # Ideal
-        elif 0.7 <= distance_in_atr < 1.0:
-            proteccion_score = 70   # Un poco pegado
-        elif 2.5 < distance_in_atr <= 3.5:
-            proteccion_score = 80   # Un poco amplio pero ok
-        elif distance_in_atr < 0.7:
-            proteccion_score = 30   # Muy pegado (fácil de tocar)
-        else:  # > 3.5
-            proteccion_score = 40   # Muy amplio (poca protección real)
+        if 2.0 <= distance_in_atr <= 3.5:
+            proteccion_score = 100  # Ideal: fuera del ruido, dentro de invalidación
+        elif 1.5 <= distance_in_atr < 2.0:
+            proteccion_score = 70   # Un poco pegado (riesgo ruido)
+        elif 3.5 < distance_in_atr <= 4.5:
+            proteccion_score = 75   # Amplio pero aún ok
+        elif 1.0 <= distance_in_atr < 1.5:
+            proteccion_score = 40   # Muy pegado — probable toque por ruido
+        elif distance_in_atr < 1.0:
+            proteccion_score = 15   # Demasiado pegado — casi trampa
+        else:  # > 4.5
+            proteccion_score = 35   # Muy amplio — pérdida grande si se toca
         
         # Score de baja probabilidad de toque:
         # - Fuerza del nivel (más fuerte = precio menos probable de romperlo): peso 60
@@ -11630,32 +11668,49 @@ class TradingExpertSystem:
         total_score = (proteccion_score * 0.4) + (baja_prob_score * 0.6)
         return total_score
     
-    def _select_optimal_tp(self, direction, structure, current_price, volatility, timeframe, leverage=1, is_futures=False):
+    def _select_optimal_tp(self, direction, structure, current_price, volatility,
+                            timeframe, leverage=1, is_futures=False,
+                            sl_price=None):
         """
         Selecciona el TP óptimo: rentable + probable.
         
-        Retorna: (tp_price, tp_source, tp_score) o (None, "No hay TP válido", 0)
-        """
-        min_distance = self._calculate_min_tp_distance_pct(timeframe, leverage, is_futures)
-        candidates = self._collect_tp_candidates(direction, structure, current_price, volatility, timeframe)
+        v23 (Parte A2): si se pasa sl_price, el TP mínimo se calcula como
+        1.8×distancia_SL (asegura RR mínimo 1.8 = breakeven WR 36%).
+        Antes: TP mínimo era un valor absoluto por TF, permitiendo RR < 1.
         
+        Retorna: (tp_price, tp_source, tp_score) o (None, msg, 0)
+        """
+        candidates = self._collect_tp_candidates(direction, structure, current_price, volatility, timeframe)
         if not candidates:
             return None, "Sin candidatos de TP", 0
         
-        # Scoring
+        # ============ Calcular MIN distance como múltiplo del SL ============
+        sl_distance_pct = None
+        if sl_price and sl_price > 0 and current_price > 0:
+            sl_distance_pct = abs(current_price - sl_price) / current_price * 100
+            # v23: TP mínimo = 1.8×SL (garantiza RR ≥ 1.8, breakeven WR ~36%)
+            min_distance_from_sl = 1.8 * sl_distance_pct
+            # Piso absoluto para cubrir comisiones + slippage (0.4%)
+            min_distance = max(min_distance_from_sl, 0.4)
+        else:
+            # Fallback al método antiguo si no hay SL calculado aún
+            min_distance = self._calculate_min_tp_distance_pct(timeframe, leverage, is_futures)
+        
+        # Scoring (pasa sl_distance_pct para campana centrada)
         scored = []
         for c in candidates:
-            score = self._score_tp_candidate(c, current_price, direction, candidates, min_distance)
+            score = self._score_tp_candidate(
+                c, current_price, direction, candidates,
+                min_distance, sl_distance_pct=sl_distance_pct
+            )
             if score > 0:
                 scored.append((c, score))
         
         if not scored:
-            return None, f"Ningún TP cumple distancia mínima ({min_distance:.1f}%)", 0
+            return None, f"Ningún TP cumple RR mínimo 1:1.8 (mín distancia {min_distance:.2f}%)", 0
         
-        # Ordenar por score descendente
         scored.sort(key=lambda x: -x[1])
         best = scored[0]
-        
         return best[0]['price'], best[0]['source'], best[1]
     
     def _select_optimal_sl(self, direction, structure, current_price, volatility, timeframe):
@@ -11862,18 +11917,18 @@ class TradingExpertSystem:
             # Último recurso: usar previous_close exacto
             return previous_close, 'Cierre anterior (sin zonas técnicas)', 30
         
-        # ============ NUEVA REGLA (por petición del usuario) ============
-        # El entry debe ser la zona técnica MÁS CERCANA al precio de cierre
-        # anterior, sin importar la fuerza (OB, FVG, soporte, Fibo, POC, ATR).
-        # 
-        # Objetivo: entry REALISTA — la primera zona que el precio probablemente
-        # tocará. Si un soporte estructural está más cerca que un OB fuerte,
-        # se toma el soporte porque es más probable que el precio lo toque.
+        # ============ v23 (Parte A5): retroceso mínimo obligatorio ============
+        # El entry NUNCA puede estar exactamente en previous_close. Debe haber
+        # un retroceso mínimo de 0.3×ATR para que el precio tenga que "venir
+        # a nosotros" antes de disparar la operación. Filosofía Smart Money:
+        # no perseguir precio, esperar zona.
         #
-        # Umbral mínimo: 0.1% para evitar zonas ridículamente pegadas al cierre
-        # (que en la práctica ya estarían tocadas). Se acepta previous_close
-        # exacto si es lo único disponible.
-        MIN_DIST_PCT = 0.1
+        # Antes: MIN_DIST_PCT = 0.1% (muy pegado, aceptaba prácticamente el
+        # cierre exacto). Consecuencia: precio abría, hacía un tick contra
+        # el trader, tocaba el SL casi apretado y salía perdiendo.
+        # Ahora: MIN_DIST_ABS = 0.3×ATR (típicamente 0.3-1% según volatilidad).
+        atr_pct_dist = (atr / previous_close) * 100 if previous_close > 0 else 0.5
+        MIN_DIST_PCT = max(0.15, 0.3 * atr_pct_dist)  # 0.3×ATR o 0.15% mínimo absoluto
         MAX_DIST_PCT = 5.0  # tampoco tan lejano que sea inalcanzable
         
         # Filtrar candidatos por rango de distancia razonable
@@ -11888,16 +11943,15 @@ class TradingExpertSystem:
             if MIN_DIST_PCT <= dist_pct <= MAX_DIST_PCT:
                 valid.append(c)
         
-        # Si el filtro estricto vacía la lista, relajarlo (tomar todos)
+        # v23: si el filtro estricto vacía la lista, forzar retroceso ATR
+        # (nunca aceptar previous_close exacto — es lo que causaba SL rápido).
         if not valid:
-            valid = [c for c in candidates if c.get('price', 0) > 0]
-            for c in valid:
-                if '_dist_abs' not in c:
-                    c['_dist_abs'] = abs(previous_close - c['price'])
-                    c['_dist_pct'] = c['_dist_abs'] / previous_close * 100
-        
-        if not valid:
-            return previous_close, 'Cierre anterior (sin candidatos válidos)', 30
+            # Sintetizar entry a exactamente MIN_DIST_PCT del previous_close
+            if direction == 'long':
+                synthetic_entry = previous_close * (1 - MIN_DIST_PCT / 100)
+            else:
+                synthetic_entry = previous_close * (1 + MIN_DIST_PCT / 100)
+            return synthetic_entry, f'Retroceso {MIN_DIST_PCT:.2f}% (ATR sintético)', 40
         
         # ORDENAR POR PROXIMIDAD (ascendente por distancia absoluta al cierre anterior)
         # Empate → preferir zona con mayor strength
@@ -11989,35 +12043,39 @@ class TradingExpertSystem:
             else:
                 leverage = 1
             
-            # ============ SELECCIONAR TP ÓPTIMO ============
-            tp_price, tp_source, tp_score = self._select_optimal_tp(
-                direction, structure, current_price, volatility, timeframe, leverage, is_futures
-            )
+            # ============ v23: SL PRIMERO, TP DESPUÉS (Parte A) ============
+            # Motivo: el TP mínimo debe calcularse como múltiplo del SL real
+            # (RR ≥ 1.8), no como valor absoluto por TF. Antes se calculaba
+            # TP primero con un mínimo fijo — permitía trades con RR < 1.
             
-            # ============ SELECCIONAR SL ÓPTIMO ============
+            # 1. SELECCIONAR SL ÓPTIMO (sweet spot 2.0-3.5×ATR)
             sl_price, sl_source, sl_score = self._select_optimal_sl(
                 direction, structure, current_price, volatility, timeframe
             )
-            
-            # ============ VALIDACIÓN ============
-            if tp_price is None:
-                print(f"   ⚠️ RECHAZADO: {tp_source}")
-                return self._build_rejected_levels(current_price, symbol, tp_source)
-            
             if sl_price is None:
                 print(f"   ⚠️ RECHAZADO: sin SL válido")
                 return self._build_rejected_levels(current_price, symbol, "Sin SL válido")
+            
+            # 2. SELECCIONAR TP ÓPTIMO con SL como referencia (RR mín 1.8)
+            tp_price, tp_source, tp_score = self._select_optimal_tp(
+                direction, structure, current_price, volatility, timeframe,
+                leverage=leverage, is_futures=is_futures,
+                sl_price=sl_price   # v23: TP mín = 1.8×SL
+            )
+            if tp_price is None:
+                print(f"   ⚠️ RECHAZADO: {tp_source}")
+                return self._build_rejected_levels(current_price, symbol, tp_source)
             
             # ============ CALCULAR R/R ============
             reward = abs(tp_price - entry)
             risk = abs(entry - sl_price)
             rr = reward / risk if risk > 0 else 0
             
-            # POLÍTICA: Rechazar si R/R < 1:1.5
-            if rr < 1.5:
-                print(f"   ⚠️ RECHAZADO: R/R muy bajo ({rr:.2f} < 1.5)")
+            # v23: umbral R/R subido de 1.5 a 1.8 (coherente con A2)
+            if rr < 1.8:
+                print(f"   ⚠️ RECHAZADO: R/R muy bajo ({rr:.2f} < 1.8)")
                 return self._build_rejected_levels(
-                    current_price, symbol, f"R/R desfavorable {rr:.2f} < 1.5"
+                    current_price, symbol, f"R/R desfavorable {rr:.2f} < 1.8"
                 )
             
             # ============ AJUSTAR APALANCAMIENTO POR VOLATILIDAD ============
