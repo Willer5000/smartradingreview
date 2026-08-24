@@ -62,9 +62,18 @@ CREATE TABLE IF NOT EXISTS saved_signals (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     
+    -- v22.9.4: fecha/hora que el USUARIO ingresa la señal (editable)
+    -- Puede ser distinta de created_at si el usuario guarda una señal con
+    -- retraso o si quiere backtestear una entrada teórica de una vela pasada.
+    entry_at TIMESTAMPTZ,
+    
     -- Notas del usuario (opcional)
     notes TEXT
 );
+
+-- Migración: añadir columna entry_at si la tabla ya existe (idempotente)
+ALTER TABLE saved_signals
+    ADD COLUMN IF NOT EXISTS entry_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_saved_signals_status ON saved_signals(status);
 CREATE INDEX IF NOT EXISTS idx_saved_signals_symbol_tf ON saved_signals(symbol, timeframe);

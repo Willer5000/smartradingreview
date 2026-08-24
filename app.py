@@ -20502,32 +20502,56 @@ def _deserialize_futures_cache(payload):
 
 
 def _load_futures_cache_from_disk():
-    """Al arrancar el worker, cargar el último snapshot conocido."""
+    """
+    Al arrancar el worker, cargar el último snapshot conocido.
+    
+    v22.9.4: log MUY explícito (aparecen en logs de Render) para diagnosticar
+    fallos silenciosos. También aceptamos snapshots más viejos (24h en vez
+    de 4h) porque en Render Free el redeploy puede tardar horas si el
+    servicio duerme por inactividad.
+    """
     global _futures_analysis_cache
+    print(f"📂 [FUT] Intentando cargar snapshot desde {_FUTURES_CACHE_FILE}...")
     try:
         if not os.path.exists(_FUTURES_CACHE_FILE):
-            print(f"📂 [FUT] Sin snapshot previo en {_FUTURES_CACHE_FILE}")
+            print(f"📂 [FUT] Sin snapshot previo (archivo no existe) — se hará warmup completo")
             return
+        
+        file_size = os.path.getsize(_FUTURES_CACHE_FILE)
+        print(f"📂 [FUT] Archivo encontrado: {file_size} bytes")
+        
         import json
+        t_start = time.time()
         with open(_FUTURES_CACHE_FILE, 'r') as f:
             payload = json.load(f)
+        t_load = time.time() - t_start
+        print(f"📂 [FUT] JSON parseado en {t_load:.2f}s")
         
         ts = float(payload.get('ts', 0))
         age = time.time() - ts
         
-        # Si el snapshot es más viejo de 4 horas, no lo cargamos (obsoleto)
-        if age > 4 * 3600:
-            print(f"📂 [FUT] Snapshot en disco muy viejo ({int(age/60)}min), ignorado")
+        # v22.9.4: aumentamos ventana a 24h. Los snapshots viejos siguen siendo
+        # útiles como "algo mejor que nada" mientras el warmup nuevo corre.
+        if age > 24 * 3600:
+            print(f"📂 [FUT] Snapshot muy viejo ({int(age/3600)}h), ignorado — warmup completo")
             return
         
         data = _deserialize_futures_cache(payload.get('data'))
-        if data and data.get('analysis'):
-            _futures_analysis_cache['data'] = data
-            _futures_analysis_cache['ts'] = ts
-            print(f"📂 [FUT] Snapshot cargado desde disco: "
-                  f"{len(data['analysis'])} pares (edad {int(age)}s)")
+        if not data:
+            print(f"📂 [FUT] Deserialización falló (data=None) — warmup completo")
+            return
+        n_entries = len(data.get('analysis') or {})
+        if n_entries == 0:
+            print(f"📂 [FUT] Snapshot vacío (0 pares) — ignorado")
+            return
+        
+        _futures_analysis_cache['data'] = data
+        _futures_analysis_cache['ts'] = ts
+        print(f"✅ [FUT] Snapshot APLICADO: {n_entries} pares en memoria (edad {int(age)}s)")
     except Exception as e:
-        print(f"⚠️ [FUT] Error cargando snapshot: {e}")
+        import traceback
+        print(f"❌ [FUT] Error cargando snapshot: {e}")
+        traceback.print_exc()
 
 
 def _save_futures_cache_to_disk():

@@ -141,6 +141,20 @@ def create_saved_signal(data: Dict) -> Optional[Dict]:
                 logger.warning(f"candle_timestamp no parseable ({raw_ts}): {e} - se guarda como null")
                 candle_ts = None
         
+        # v22.9.4: entry_at (fecha/hora de ingreso editable por el usuario)
+        # Si viene, se parsea. Si no, se usa datetime.utcnow() por default.
+        raw_entry_at = data.get('entry_at')
+        entry_at = None
+        if raw_entry_at:
+            try:
+                import pandas as pd
+                entry_at = pd.Timestamp(raw_entry_at).isoformat()
+            except Exception as e:
+                logger.warning(f"entry_at no parseable ({raw_entry_at}): {e} - se usa now()")
+                entry_at = datetime.utcnow().isoformat()
+        else:
+            entry_at = datetime.utcnow().isoformat()
+        
         payload = {
             'symbol': symbol,
             'timeframe': timeframe,
@@ -157,6 +171,7 @@ def create_saved_signal(data: Dict) -> Optional[Dict]:
             'original_take_profit': float(data.get('original_take_profit', 0) or 0) or None,
             'original_leverage': int(data.get('original_leverage', 0) or 0) or None,
             'candle_timestamp': candle_ts,
+            'entry_at': entry_at,
             'status': 'active',
             'entry_touched': False,
             'notes': str(data.get('notes', '') or '')[:500],
@@ -288,6 +303,14 @@ def update_saved_signal(signal_id: str, updates: Dict) -> Optional[Dict]:
                 pass
         if 'notes' in updates:
             allowed['notes'] = str(updates['notes'] or '')[:500]
+        
+        # v22.9.4: entry_at editable
+        if 'entry_at' in updates and updates['entry_at']:
+            try:
+                import pandas as pd
+                allowed['entry_at'] = pd.Timestamp(updates['entry_at']).isoformat()
+            except Exception as e:
+                logger.warning(f"update entry_at no parseable ({updates['entry_at']}): {e}")
         
         if not allowed:
             return current
@@ -430,12 +453,18 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                 if df is None or len(df) == 0:
                     continue
                 
-                # Filtrar velas POSTERIORES al created_at de la señal
+                # v22.9.4: Filtrar velas POSTERIORES al entry_at (o created_at si no hay entry_at).
+                # entry_at es la fecha que el usuario declaró como ingreso teórico;
+                # created_at es cuando se registró en el sistema. Priorizamos entry_at.
                 import pandas as pd
-                created_ts = pd.Timestamp(sig.get('created_at')).tz_convert('UTC') \
-                    if pd.Timestamp(sig.get('created_at')).tz else pd.Timestamp(sig.get('created_at'), tz='UTC')
+                ts_source = sig.get('entry_at') or sig.get('created_at')
+                start_ts = pd.Timestamp(ts_source)
+                if start_ts.tz is None:
+                    start_ts = start_ts.tz_localize('UTC')
+                else:
+                    start_ts = start_ts.tz_convert('UTC')
                 df_time = pd.to_datetime(df['time'], utc=True) if df['time'].dtype != 'datetime64[ns, UTC]' else df['time']
-                df_after = df[df_time > created_ts]
+                df_after = df[df_time > start_ts]
                 
                 if len(df_after) == 0:
                     # No hay velas nuevas aún

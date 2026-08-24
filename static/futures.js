@@ -889,6 +889,8 @@ window.openSaveSignalModal = function() {
     document.getElementById('ss-sl').value = sig.stop_loss || '';
     document.getElementById('ss-tp').value = sig.take_profit || '';
     document.getElementById('ss-notes').value = '';
+    // v22.9.4: fecha/hora de ingreso — default = ahora en zona local del navegador
+    document.getElementById('ss-entry-at').value = _nowLocalDatetimeInput();
     
     // Habilitar preview del cálculo
     _updateSaveCalcPreview();
@@ -930,6 +932,39 @@ function _updateSaveCalcPreview() {
 }
 
 // ============ Confirmar guardar señal ============
+// v22.9.4: formatear fecha ISO -> string legible en hora local del navegador
+function _fmtLocalDate(iso) {
+    if (!iso) return '--';
+    try {
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return String(iso);
+        const pad = n => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    } catch (e) {
+        return String(iso);
+    }
+}
+
+// v22.9.4: helper para formato datetime-local (YYYY-MM-DDTHH:mm) en hora local
+function _nowLocalDatetimeInput() {
+    const d = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// v22.9.4: convertir datetime-local (local naive) a ISO UTC
+function _localDatetimeToISO(dtLocal) {
+    if (!dtLocal) return null;
+    try {
+        // datetime-local no lleva zona; JS lo interpreta como hora local del navegador
+        const d = new Date(dtLocal);
+        if (isNaN(d.getTime())) return null;
+        return d.toISOString();
+    } catch (e) {
+        return null;
+    }
+}
+
 window.confirmSaveSignal = async function() {
     const sig = window._currentPrevSignal;
     if (!sig) return;
@@ -940,6 +975,8 @@ window.confirmSaveSignal = async function() {
     const sl = parseFloat(document.getElementById('ss-sl').value);
     const tp = parseFloat(document.getElementById('ss-tp').value);
     const notes = document.getElementById('ss-notes').value || '';
+    const entryAtLocal = document.getElementById('ss-entry-at').value;
+    const entryAtISO = _localDatetimeToISO(entryAtLocal);
     
     if (!(investment > 0) || !(leverage > 0) || !(entry > 0) || !(sl > 0) || !(tp > 0)) {
         showToast('Todos los campos deben ser mayores que 0', 'warning');
@@ -959,6 +996,7 @@ window.confirmSaveSignal = async function() {
         original_take_profit: sig.take_profit,
         original_leverage: sig.leverage,
         candle_timestamp: sig.candle_timestamp,
+        entry_at: entryAtISO,   // v22.9.4: fecha/hora del usuario
         notes,
     };
     
@@ -1146,6 +1184,10 @@ window.openSavedSignalDetail = async function(signalId) {
                 <div class="col-md-3"><span class="text-muted">TP:</span> <strong class="text-success">${sig.take_profit}</strong></div>
                 <div class="col-md-3"><span class="text-muted">Precio actual:</span> <strong>${currentPrice}</strong></div>
             </div>
+            <div class="row g-2 mb-3 small">
+                <div class="col-md-6"><span class="text-muted">🕒 Ingreso:</span> <strong>${_fmtLocalDate(sig.entry_at || sig.created_at)}</strong></div>
+                ${sig.entry_touched_at ? `<div class="col-md-6"><span class="text-muted">🎯 Entry tocado:</span> <strong>${_fmtLocalDate(sig.entry_touched_at)}</strong></div>` : ''}
+            </div>
             <div id="saved-signal-chart" style="height: 500px;"></div>
             ${sig.notes ? `<div class="mt-3 p-2 bg-black rounded small"><strong>Notas:</strong> ${sig.notes}</div>` : ''}
         `;
@@ -1267,6 +1309,21 @@ window.openEditSavedSignal = function() {
     document.getElementById('edit-ss-sl').value = sig.stop_loss;
     document.getElementById('edit-ss-tp').value = sig.take_profit;
     document.getElementById('edit-ss-notes').value = sig.notes || '';
+    // v22.9.4: entry_at editable — convertir ISO UTC de la BD a datetime-local
+    const entryAtEl = document.getElementById('edit-ss-entry-at');
+    if (entryAtEl) {
+        if (sig.entry_at) {
+            try {
+                const d = new Date(sig.entry_at);
+                const pad = n => String(n).padStart(2, '0');
+                entryAtEl.value = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+            } catch (e) {
+                entryAtEl.value = _nowLocalDatetimeInput();
+            }
+        } else {
+            entryAtEl.value = _nowLocalDatetimeInput();
+        }
+    }
     
     // Cerrar el detalle para evitar solapamiento
     const detailModal = bootstrap.Modal.getInstance(document.getElementById('savedSignalDetailModal'));
@@ -1280,6 +1337,9 @@ window.confirmEditSavedSignal = async function() {
     const sig = window._currentSavedSignal;
     if (!sig) return;
     
+    const entryAtLocal = document.getElementById('edit-ss-entry-at').value;
+    const entryAtISO = _localDatetimeToISO(entryAtLocal);
+    
     const payload = {
         investment_usdt: parseFloat(document.getElementById('edit-ss-investment').value),
         leverage: parseInt(document.getElementById('edit-ss-leverage').value),
@@ -1287,6 +1347,7 @@ window.confirmEditSavedSignal = async function() {
         stop_loss: parseFloat(document.getElementById('edit-ss-sl').value),
         take_profit: parseFloat(document.getElementById('edit-ss-tp').value),
         notes: document.getElementById('edit-ss-notes').value || '',
+        entry_at: entryAtISO,  // v22.9.4
     };
     
     try {

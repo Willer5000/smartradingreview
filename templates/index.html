@@ -1463,6 +1463,12 @@
                                         <input type="number" class="form-control bg-dark text-white" id="ss-tp"
                                                step="0.00000001">
                                     </div>
+                                    <!-- v22.9.4: fecha/hora de ingreso editable -->
+                                    <div class="col-12">
+                                        <label class="form-label">🕒 Fecha y hora de ingreso</label>
+                                        <input type="datetime-local" class="form-control bg-dark text-white" id="ss-entry-at">
+                                        <small class="text-muted">Por defecto es la hora actual. Puedes cambiarla si estás guardando una entrada teórica de una vela pasada.</small>
+                                    </div>
                                     <div class="col-12">
                                         <label class="form-label">📝 Notas (opcional)</label>
                                         <textarea class="form-control bg-dark text-white" id="ss-notes"
@@ -1563,6 +1569,11 @@
                                         <label class="form-label text-success">Take Profit</label>
                                         <input type="number" class="form-control bg-dark text-white" id="edit-ss-tp"
                                                step="0.00000001">
+                                    </div>
+                                    <!-- v22.9.4: entry_at editable -->
+                                    <div class="col-12">
+                                        <label class="form-label">🕒 Fecha y hora de ingreso</label>
+                                        <input type="datetime-local" class="form-control bg-dark text-white" id="edit-ss-entry-at">
                                     </div>
                                     <div class="col-12">
                                         <label class="form-label">Notas</label>
