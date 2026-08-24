@@ -20439,8 +20439,122 @@ def api_futures_analyze_all(timeframe):
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
 
+# v22.9.3: caché en RAM + persistencia en disco para sobrevivir reciclos del
+# worker gunicorn (--max-requests 200). Antes: al reciclar el worker, el
+# cache se perdía → durante ~2 min (warmup) el frontend veía lista vacía y
+# las alertas ENTRY_TOCADO no podían dispararse. Ahora: al arrancar el nuevo
+# worker se carga el snapshot desde /tmp/ y el frontend tiene datos inmediatos.
 _futures_analysis_cache = {'data': None, 'ts': 0, 'lock': threading.Lock(), 'running': False}
 _futures_correlation_cache = {'data': None, 'ts': 0, 'key': None}
+
+_FUTURES_CACHE_FILE = os.environ.get('FUTURES_CACHE_FILE', '/tmp/futures_analysis_cache.json')
+
+
+def _serialize_futures_cache(data):
+    """
+    Convierte el dict del cache a un formato JSON-serializable.
+    Las claves son tuplas (symbol, tf) → las convertimos a strings 'SYMBOL|TF'.
+    """
+    if not data or not isinstance(data, dict):
+        return None
+    analysis_serial = {}
+    for k, v in (data.get('analysis') or {}).items():
+        if isinstance(k, tuple) and len(k) == 2:
+            key_str = f"{k[0]}|{k[1]}"
+        else:
+            key_str = str(k)
+        # Verificamos que v sea JSON-serializable removiendo objetos problemáticos
+        try:
+            import json
+            json.dumps(v)
+            analysis_serial[key_str] = v
+        except (TypeError, ValueError):
+            # Contiene objetos no serializables (ej: pd.DataFrame residual)
+            # Intentamos limpiar campos conocidos
+            try:
+                v_clean = {kk: vv for kk, vv in v.items() if kk not in ('df',)}
+                json.dumps(v_clean)
+                analysis_serial[key_str] = v_clean
+            except Exception:
+                # Si aún así falla, saltar esta entrada
+                continue
+    return {
+        'analysis_serial': analysis_serial,
+        'errors': data.get('errors') or [],
+    }
+
+
+def _deserialize_futures_cache(payload):
+    """Reconstruye el dict con claves tupla desde el JSON."""
+    if not payload or not isinstance(payload, dict):
+        return None
+    analysis = {}
+    for k_str, v in (payload.get('analysis_serial') or {}).items():
+        if '|' in k_str:
+            parts = k_str.split('|', 1)
+            analysis[(parts[0], parts[1])] = v
+        else:
+            analysis[k_str] = v
+    return {
+        'analysis': analysis,
+        'errors': payload.get('errors') or [],
+    }
+
+
+def _load_futures_cache_from_disk():
+    """Al arrancar el worker, cargar el último snapshot conocido."""
+    global _futures_analysis_cache
+    try:
+        if not os.path.exists(_FUTURES_CACHE_FILE):
+            print(f"📂 [FUT] Sin snapshot previo en {_FUTURES_CACHE_FILE}")
+            return
+        import json
+        with open(_FUTURES_CACHE_FILE, 'r') as f:
+            payload = json.load(f)
+        
+        ts = float(payload.get('ts', 0))
+        age = time.time() - ts
+        
+        # Si el snapshot es más viejo de 4 horas, no lo cargamos (obsoleto)
+        if age > 4 * 3600:
+            print(f"📂 [FUT] Snapshot en disco muy viejo ({int(age/60)}min), ignorado")
+            return
+        
+        data = _deserialize_futures_cache(payload.get('data'))
+        if data and data.get('analysis'):
+            _futures_analysis_cache['data'] = data
+            _futures_analysis_cache['ts'] = ts
+            print(f"📂 [FUT] Snapshot cargado desde disco: "
+                  f"{len(data['analysis'])} pares (edad {int(age)}s)")
+    except Exception as e:
+        print(f"⚠️ [FUT] Error cargando snapshot: {e}")
+
+
+def _save_futures_cache_to_disk():
+    """Guarda el snapshot actual del cache. Best-effort."""
+    try:
+        cache = _futures_analysis_cache
+        if not cache.get('data'):
+            return
+        serial_data = _serialize_futures_cache(cache['data'])
+        if not serial_data:
+            return
+        payload = {
+            'ts': cache.get('ts', time.time()),
+            'data': serial_data,
+        }
+        import json
+        tmp_path = _FUTURES_CACHE_FILE + '.tmp'
+        with open(tmp_path, 'w') as f:
+            json.dump(payload, f)
+        os.replace(tmp_path, _FUTURES_CACHE_FILE)
+        print(f"💾 [FUT] Snapshot guardado ({len(serial_data.get('analysis_serial', {}))} pares)")
+    except Exception as e:
+        print(f"⚠️ [FUT] Error guardando snapshot: {e}")
+
+
+# Cargar al importar el módulo (una vez por worker)
+_load_futures_cache_from_disk()
 
 
 def _analyze_futures_all_parallel():
@@ -20558,6 +20672,11 @@ def _trigger_futures_refresh_async():
                       f"{len(data.get('errors', []))} errores)")
                 cache['data'] = data
                 cache['ts'] = time.time()
+                # v22.9.3: persistir a disco para sobrevivir reciclos de worker
+                try:
+                    _save_futures_cache_to_disk()
+                except Exception as save_err:
+                    print(f"⚠️ [FUT] Snapshot save falló: {save_err}")
             except Exception as e:
                 print(f"❌ [BG] Error refrescando futuros: {e}")
                 import traceback
@@ -20677,9 +20796,8 @@ def api_futures_signals_active():
 @app.route('/api/futures/debug')
 def api_futures_debug():
     """
-    v22.9.2 DIAGNÓSTICO: retorna el estado del caché de futuros SIN NINGÚN
-    FILTRO. Sirve para saber por qué un par/TF NO aparece en la lista del
-    frontend cuando el sistema sí generó alerta por Telegram.
+    v22.9.3: endpoint de diagnóstico del estado del caché de futuros.
+    Útil para verificar si el snapshot en disco funcionó tras reciclo de worker.
     """
     try:
         cache = _get_or_refresh_futures_analysis()
@@ -20688,7 +20806,11 @@ def api_futures_debug():
         errors = cache.get('errors') or []
         
         entries = []
-        for (symbol, tf), result in (cache.get('analysis') or {}).items():
+        for k, result in (cache.get('analysis') or {}).items():
+            if isinstance(k, tuple):
+                symbol, tf = k
+            else:
+                symbol, tf = str(k), ''
             entry = {
                 'symbol': symbol,
                 'timeframe': tf,
@@ -20701,11 +20823,7 @@ def api_futures_debug():
                 entry['action'] = d.get('action')
                 entry['confidence'] = d.get('confidence')
                 entry['leverage'] = lv.get('leverage')
-                entry['entry'] = lv.get('entry')
-                entry['stop_loss'] = lv.get('stop_loss')
-                entry['take_profit'] = lv.get('take_profit')
                 entry['current_price'] = result.get('current_price')
-                # ¿Por qué se filtraría?
                 try:
                     from futures_system import _leverage_in_valid_range
                     entry['leverage_ok'] = _leverage_in_valid_range(
@@ -20716,8 +20834,20 @@ def api_futures_debug():
                 entry['error'] = result.get('error', 'no_success_flag')
             entries.append(entry)
         
-        # Ordenar por symbol, tf
         entries.sort(key=lambda x: (x['symbol'], x['timeframe']))
+        
+        # v22.9.3: info del snapshot en disco
+        snapshot_info = {'exists': False}
+        try:
+            if os.path.exists(_FUTURES_CACHE_FILE):
+                stat = os.stat(_FUTURES_CACHE_FILE)
+                snapshot_info = {
+                    'exists': True,
+                    'size_bytes': stat.st_size,
+                    'age_seconds': int(time.time() - stat.st_mtime),
+                }
+        except Exception:
+            pass
         
         return jsonify({
             'success': True,
@@ -20726,6 +20856,7 @@ def api_futures_debug():
             'stale': bool(cache.get('stale', False)),
             'total_entries': len(entries),
             'errors_at_analysis': errors,
+            'snapshot_on_disk': snapshot_info,
             'entries': entries,
         })
     except Exception as e:
