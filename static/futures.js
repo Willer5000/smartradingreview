@@ -818,3 +818,557 @@ document.addEventListener('DOMContentLoaded', function() {
         }, 500);
     });
 });
+
+
+// ============================================================================
+// v22.9: SEÑALES GUARDADAS (solo página FUTUROS)
+// ============================================================================
+// El usuario ve una señal en "Señales de la Vela Anterior" → click → modal
+// justificación → botón GUARDAR → modal con inputs → confirmar → señal
+// aparece en pestaña "Señales Guardadas" con KPIs propios.
+//
+// Auto-cierre: el learning_worker cada 30 min evalúa contra precio actual
+// y marca entry_touched / tp_hit / sl_hit. Cuando se cierra por TP/SL o
+// manualmente, deja de aparecer en la lista de activas.
+// ============================================================================
+
+// Referencia global a la señal actualmente mostrada en el modal de justificación
+window._currentPrevSignal = null;
+// Referencia global a la señal guardada mostrada en el modal detalle
+window._currentSavedSignal = null;
+
+// ============ Botón GUARDAR en modal de justificación ============
+// Solo visible en la página de FUTUROS. Se hace visible cuando showFuturesPrevJustif se ejecuta.
+(function _wrapShowPrevJustif() {
+    if (!window.IS_FUTURES_PAGE) return;
+    const original = window.showFuturesPrevJustif;
+    if (typeof original !== 'function') return;
+    
+    window.showFuturesPrevJustif = function(sig) {
+        window._currentPrevSignal = sig;
+        original(sig);
+        // Mostrar el botón GUARDAR (está oculto por default)
+        setTimeout(() => {
+            const btn = document.getElementById('btn-save-signal');
+            if (btn) btn.style.display = 'inline-block';
+        }, 150);
+    };
+})();
+
+// ============ Abrir modal "Guardar señal" ============
+window.openSaveSignalModal = function() {
+    const sig = window._currentPrevSignal;
+    if (!sig) {
+        showToast('No hay señal seleccionada', 'warning');
+        return;
+    }
+    
+    // Cerrar el modal actual de justificación
+    const prevModal = bootstrap.Modal.getInstance(document.getElementById('prevSignalModal'));
+    if (prevModal) prevModal.hide();
+    
+    // Prefijar inputs con los valores sugeridos por el sistema
+    const info = document.getElementById('save-signal-info');
+    if (info) {
+        const emoji = sig.action === 'LONG' ? '📈' : '📉';
+        const badgeClass = sig.action === 'LONG' ? 'success' : 'danger';
+        info.innerHTML = `
+            <div class="d-flex align-items-center mb-2">
+                <span class="badge bg-${badgeClass} p-2 me-3">${emoji} ${sig.action}</span>
+                <strong>${sig.symbol.replace('-', '/')}</strong>
+                <span class="badge bg-dark ms-2">${sig.timeframe}</span>
+                <span class="badge bg-secondary ms-2">Confianza ${Math.round(sig.confidence)}%</span>
+            </div>
+        `;
+    }
+    
+    document.getElementById('ss-investment').value = 10;
+    document.getElementById('ss-leverage').value = sig.leverage || 1;
+    document.getElementById('ss-leverage-hint').textContent = `Sugerido por el sistema: ${sig.leverage || 1}x`;
+    document.getElementById('ss-entry').value = sig.entry || '';
+    document.getElementById('ss-sl').value = sig.stop_loss || '';
+    document.getElementById('ss-tp').value = sig.take_profit || '';
+    document.getElementById('ss-notes').value = '';
+    
+    // Habilitar preview del cálculo
+    _updateSaveCalcPreview();
+    ['ss-investment', 'ss-leverage', 'ss-entry', 'ss-sl', 'ss-tp'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('input', _updateSaveCalcPreview);
+    });
+    
+    const modal = new bootstrap.Modal(document.getElementById('saveSignalModal'));
+    modal.show();
+};
+
+function _updateSaveCalcPreview() {
+    const sig = window._currentPrevSignal;
+    if (!sig) return;
+    const investment = parseFloat(document.getElementById('ss-investment').value) || 0;
+    const leverage = parseInt(document.getElementById('ss-leverage').value) || 1;
+    const entry = parseFloat(document.getElementById('ss-entry').value) || 0;
+    const sl = parseFloat(document.getElementById('ss-sl').value) || 0;
+    const tp = parseFloat(document.getElementById('ss-tp').value) || 0;
+    const dir = sig.action === 'LONG' ? 1 : -1;
+    
+    if (entry <= 0 || sl <= 0 || tp <= 0) {
+        document.getElementById('ss-calc-preview').innerHTML = '<span class="text-muted">Completa entry/SL/TP para ver el cálculo.</span>';
+        return;
+    }
+    
+    const tpPct = ((tp - entry) / entry) * 100 * leverage * dir;
+    const slPct = ((sl - entry) / entry) * 100 * leverage * dir;
+    const tpUsdt = investment * (tpPct / 100);
+    const slUsdt = investment * (slPct / 100);
+    const rr = Math.abs(tpPct / slPct).toFixed(2);
+    
+    document.getElementById('ss-calc-preview').innerHTML = `
+        Si TP: <strong class="text-success">+${tpUsdt.toFixed(2)} USDT (${tpPct.toFixed(2)}%)</strong>
+        · Si SL: <strong class="text-danger">${slUsdt.toFixed(2)} USDT (${slPct.toFixed(2)}%)</strong>
+        · R/R: <strong>${rr}</strong>
+    `;
+}
+
+// ============ Confirmar guardar señal ============
+window.confirmSaveSignal = async function() {
+    const sig = window._currentPrevSignal;
+    if (!sig) return;
+    
+    const investment = parseFloat(document.getElementById('ss-investment').value);
+    const leverage = parseInt(document.getElementById('ss-leverage').value);
+    const entry = parseFloat(document.getElementById('ss-entry').value);
+    const sl = parseFloat(document.getElementById('ss-sl').value);
+    const tp = parseFloat(document.getElementById('ss-tp').value);
+    const notes = document.getElementById('ss-notes').value || '';
+    
+    if (!(investment > 0) || !(leverage > 0) || !(entry > 0) || !(sl > 0) || !(tp > 0)) {
+        showToast('Todos los campos deben ser mayores que 0', 'warning');
+        return;
+    }
+    
+    const payload = {
+        symbol: sig.symbol,
+        timeframe: sig.timeframe,
+        action: sig.action,
+        confidence: sig.confidence,
+        entry, stop_loss: sl, take_profit: tp,
+        leverage, investment_usdt: investment,
+        original_confidence: sig.confidence,
+        original_entry: sig.entry,
+        original_stop_loss: sig.stop_loss,
+        original_take_profit: sig.take_profit,
+        original_leverage: sig.leverage,
+        candle_timestamp: sig.candle_timestamp,
+        notes,
+    };
+    
+    try {
+        const res = await fetch('/api/saved_signals', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload),
+        });
+        const json = await res.json();
+        if (json.success) {
+            showToast('✅ Señal guardada correctamente', 'success');
+            const modal = bootstrap.Modal.getInstance(document.getElementById('saveSignalModal'));
+            if (modal) modal.hide();
+            window.updateSavedSignalsList();
+        } else {
+            showToast('Error: ' + (json.error || 'no se pudo guardar'), 'danger');
+        }
+    } catch (e) {
+        showToast('Error de red: ' + e.message, 'danger');
+    }
+};
+
+// ============ Refrescar lista y KPIs ============
+window.updateSavedSignalsList = async function() {
+    if (!window.IS_FUTURES_PAGE) return;
+    
+    const card = document.getElementById('saved-signals-card');
+    const list = document.getElementById('saved-signals-list');
+    if (!card || !list) return;
+    
+    // Mostrar la card en futuros
+    card.style.display = 'block';
+    
+    try {
+        // KPIs propios
+        const kRes = await fetch('/api/saved_signals/kpis');
+        const kJson = await kRes.json();
+        if (kJson.success) {
+            const k = kJson.data || {};
+            const wrEl = document.getElementById('ss-kpi-winrate');
+            const pnlEl = document.getElementById('ss-kpi-pnl');
+            const cntEl = document.getElementById('ss-kpi-count');
+            if (wrEl) {
+                wrEl.textContent = `WR: ${(k.win_rate || 0).toFixed(1)}%`;
+                let cls = 'bg-secondary';
+                if (k.total >= 5) {
+                    cls = k.win_rate >= 55 ? 'bg-success' : (k.win_rate >= 40 ? 'bg-warning text-dark' : 'bg-danger');
+                }
+                wrEl.className = 'badge ' + cls;
+            }
+            if (pnlEl) {
+                const sign = (k.pnl_total_usdt || 0) >= 0 ? '+' : '';
+                pnlEl.textContent = `PnL: ${sign}${(k.pnl_total_usdt || 0).toFixed(2)} USDT`;
+                let cls = 'bg-secondary';
+                if (k.total >= 5) {
+                    cls = k.pnl_total_usdt > 0 ? 'bg-success' : (k.pnl_total_usdt < 0 ? 'bg-danger' : 'bg-warning text-dark');
+                }
+                pnlEl.className = 'badge ' + cls;
+            }
+            if (cntEl) {
+                cntEl.textContent = `${k.total || 0} cerradas / ${k.active || 0} activas`;
+            }
+        }
+        
+        // Lista de todas (activas + cerradas recientes)
+        const lRes = await fetch('/api/saved_signals?limit=100');
+        const lJson = await lRes.json();
+        if (!lJson.success) {
+            list.innerHTML = `<div class="list-group-item bg-dark text-warning">Error: ${lJson.error || 'desconocido'}</div>`;
+            return;
+        }
+        
+        const signals = lJson.signals || [];
+        if (signals.length === 0) {
+            list.innerHTML = `
+                <div class="list-group-item bg-dark text-muted text-center py-3">
+                    <i class="fas fa-info-circle me-1"></i>
+                    Aún no has guardado ninguna señal.
+                </div>`;
+            return;
+        }
+        
+        let html = '';
+        signals.forEach(s => {
+            const emoji = s.action === 'LONG' ? '📈' : '📉';
+            const statusBadge = _statusBadge(s.status, s.entry_touched);
+            const pnlDisplay = _formatPnl(s);
+            const bgColor = s.action === 'LONG' ? 'success' : 'danger';
+            
+            html += `
+                <a href="#" class="list-group-item list-group-item-action bg-dark text-white"
+                   onclick="event.preventDefault(); window.openSavedSignalDetail('${s.id}')">
+                    <div class="d-flex justify-content-between align-items-center flex-wrap">
+                        <div>
+                            <span class="badge bg-${bgColor} me-2">${emoji} ${s.action}</span>
+                            <strong>${(s.symbol || '').replace('-', '/')}</strong>
+                            <span class="badge bg-dark ms-1">${s.timeframe}</span>
+                            <span class="badge bg-secondary ms-1">${s.leverage}x</span>
+                            <span class="text-muted ms-2 small">$${s.investment_usdt} USDT</span>
+                        </div>
+                        <div class="text-end">
+                            ${statusBadge}
+                            ${pnlDisplay}
+                        </div>
+                    </div>
+                </a>
+            `;
+        });
+        list.innerHTML = html;
+    } catch (e) {
+        list.innerHTML = `<div class="list-group-item bg-dark text-danger">Error: ${e.message}</div>`;
+    }
+};
+
+function _statusBadge(status, entryTouched) {
+    if (status === 'active') return '<span class="badge bg-info">⏳ Esperando entry</span>';
+    if (status === 'entry_touched') return '<span class="badge bg-primary">🎯 En operación</span>';
+    if (status === 'tp_hit') return '<span class="badge bg-success">✅ TP</span>';
+    if (status === 'sl_hit') return '<span class="badge bg-danger">❌ SL</span>';
+    if (status === 'closed_manual') {
+        return entryTouched ? '<span class="badge bg-warning text-dark">🔒 Cerrada</span>'
+                             : '<span class="badge bg-secondary">🔒 Cerrada (sin entry)</span>';
+    }
+    return `<span class="badge bg-secondary">${status}</span>`;
+}
+
+function _formatPnl(s) {
+    if (s.status === 'active' || s.status === 'entry_touched') return '';
+    if (!s.entry_touched) {
+        return '<div class="small text-muted">Sin operación</div>';
+    }
+    const pct = parseFloat(s.pnl_pct || 0);
+    const usdt = parseFloat(s.pnl_usdt || 0);
+    const cls = pct >= 0 ? 'text-success' : 'text-danger';
+    const sign = pct >= 0 ? '+' : '';
+    return `<div class="small ${cls}"><strong>${sign}${usdt.toFixed(2)} USDT</strong> (${sign}${pct.toFixed(2)}%)</div>`;
+}
+
+// ============ Modal DETALLE con gráfico Plotly + zonas TP/SL ============
+window.openSavedSignalDetail = async function(signalId) {
+    const modal = new bootstrap.Modal(document.getElementById('savedSignalDetailModal'));
+    modal.show();
+    
+    const body = document.getElementById('saved-signal-detail-body');
+    body.innerHTML = '<div class="text-center py-4"><div class="spinner-border text-info"></div><p class="mt-3">Cargando gráfico...</p></div>';
+    
+    try {
+        const res = await fetch(`/api/saved_signals/${signalId}/chart_data`);
+        const json = await res.json();
+        if (!json.success) {
+            body.innerHTML = `<div class="alert alert-warning">${json.error || 'Error cargando datos'}</div>`;
+            return;
+        }
+        
+        const sig = json.signal;
+        window._currentSavedSignal = sig;
+        const c = json.candles;
+        const currentPrice = json.current_price;
+        
+        // Habilitar/deshabilitar botones según estado
+        const isOpen = (sig.status === 'active' || sig.status === 'entry_touched');
+        document.getElementById('btn-ss-edit').style.display = isOpen ? 'inline-block' : 'none';
+        document.getElementById('btn-ss-close-manual').style.display = isOpen ? 'inline-block' : 'none';
+        
+        // Renderizar body con panel de info + div para el gráfico
+        const emoji = sig.action === 'LONG' ? '📈' : '📉';
+        const badgeClass = sig.action === 'LONG' ? 'success' : 'danger';
+        const statusBadge = _statusBadge(sig.status, sig.entry_touched);
+        const pnlDisplay = _formatPnl(sig);
+        
+        body.innerHTML = `
+            <div class="mb-3 d-flex flex-wrap align-items-center gap-2">
+                <span class="badge bg-${badgeClass} p-2">${emoji} ${sig.action}</span>
+                <strong>${sig.symbol.replace('-', '/')}</strong>
+                <span class="badge bg-dark">${sig.timeframe}</span>
+                <span class="badge bg-secondary">${sig.leverage}x</span>
+                <span class="text-muted">$${sig.investment_usdt} USDT</span>
+                ${statusBadge}
+                <div class="ms-auto">${pnlDisplay}</div>
+            </div>
+            <div class="row g-2 mb-3 small">
+                <div class="col-md-3"><span class="text-muted">Entry:</span> <strong class="text-primary">${sig.entry}</strong></div>
+                <div class="col-md-3"><span class="text-muted">SL:</span> <strong class="text-danger">${sig.stop_loss}</strong></div>
+                <div class="col-md-3"><span class="text-muted">TP:</span> <strong class="text-success">${sig.take_profit}</strong></div>
+                <div class="col-md-3"><span class="text-muted">Precio actual:</span> <strong>${currentPrice}</strong></div>
+            </div>
+            <div id="saved-signal-chart" style="height: 500px;"></div>
+            ${sig.notes ? `<div class="mt-3 p-2 bg-black rounded small"><strong>Notas:</strong> ${sig.notes}</div>` : ''}
+        `;
+        
+        // Renderizar el gráfico Plotly
+        _renderSavedSignalChart(c, sig, currentPrice);
+    } catch (e) {
+        body.innerHTML = `<div class="alert alert-danger">Error: ${e.message}</div>`;
+    }
+};
+
+function _renderSavedSignalChart(candles, sig, currentPrice) {
+    const times = candles.time;
+    const entry = parseFloat(sig.entry);
+    const sl = parseFloat(sig.stop_loss);
+    const tp = parseFloat(sig.take_profit);
+    const isLong = sig.action === 'LONG';
+    
+    // Rango X: primer a último candle + un poco de margen a la derecha
+    const xStart = times[0];
+    const xEnd = times[times.length - 1];
+    
+    const traces = [{
+        type: 'candlestick',
+        x: times,
+        open: candles.open,
+        high: candles.high,
+        low: candles.low,
+        close: candles.close,
+        name: 'Precio',
+        increasing: {line: {color: '#00C076', width: 1}, fillcolor: '#00C076'},
+        decreasing: {line: {color: '#FF5B5B', width: 1}, fillcolor: '#FF5B5B'},
+        showlegend: false,
+    }];
+    
+    // Zonas: verde (favorable) y roja (desfavorable) tipo TradingView
+    // LONG: entry→TP arriba (verde), entry→SL abajo (rojo)
+    // SHORT: entry→TP abajo (verde), entry→SL arriba (rojo)
+    const shapes = [
+        // Zona de ganancia (verde)
+        {
+            type: 'rect', xref: 'x', yref: 'y',
+            x0: xStart, x1: xEnd,
+            y0: isLong ? entry : tp,
+            y1: isLong ? tp : entry,
+            fillcolor: 'rgba(0, 192, 118, 0.15)',
+            line: {color: 'rgba(0, 192, 118, 0.5)', width: 1},
+            layer: 'below',
+        },
+        // Zona de pérdida (rojo)
+        {
+            type: 'rect', xref: 'x', yref: 'y',
+            x0: xStart, x1: xEnd,
+            y0: isLong ? sl : entry,
+            y1: isLong ? entry : sl,
+            fillcolor: 'rgba(255, 91, 91, 0.15)',
+            line: {color: 'rgba(255, 91, 91, 0.5)', width: 1},
+            layer: 'below',
+        },
+        // Línea del entry
+        {
+            type: 'line', xref: 'x', yref: 'y',
+            x0: xStart, x1: xEnd,
+            y0: entry, y1: entry,
+            line: {color: '#3A8BFF', width: 2, dash: 'solid'},
+        },
+        // Línea SL punteada
+        {
+            type: 'line', xref: 'x', yref: 'y',
+            x0: xStart, x1: xEnd,
+            y0: sl, y1: sl,
+            line: {color: '#FF5B5B', width: 1.5, dash: 'dash'},
+        },
+        // Línea TP punteada
+        {
+            type: 'line', xref: 'x', yref: 'y',
+            x0: xStart, x1: xEnd,
+            y0: tp, y1: tp,
+            line: {color: '#00C076', width: 1.5, dash: 'dash'},
+        },
+    ];
+    
+    const annotations = [
+        {x: xEnd, y: entry, xref: 'x', yref: 'y', text: `Entry: ${entry}`,
+         showarrow: false, xanchor: 'left', font: {color: '#3A8BFF', size: 11},
+         bgcolor: 'rgba(0,0,0,0.7)', bordercolor: '#3A8BFF', borderwidth: 1, borderpad: 3},
+        {x: xEnd, y: sl, xref: 'x', yref: 'y', text: `SL: ${sl}`,
+         showarrow: false, xanchor: 'left', font: {color: '#FF5B5B', size: 11},
+         bgcolor: 'rgba(0,0,0,0.7)', bordercolor: '#FF5B5B', borderwidth: 1, borderpad: 3},
+        {x: xEnd, y: tp, xref: 'x', yref: 'y', text: `TP: ${tp}`,
+         showarrow: false, xanchor: 'left', font: {color: '#00C076', size: 11},
+         bgcolor: 'rgba(0,0,0,0.7)', bordercolor: '#00C076', borderwidth: 1, borderpad: 3},
+    ];
+    
+    const layout = {
+        paper_bgcolor: '#0A0C10',
+        plot_bgcolor: '#0A0C10',
+        font: {color: 'white', size: 11},
+        xaxis: {rangeslider: {visible: false}, gridcolor: 'rgba(255,255,255,0.08)'},
+        yaxis: {gridcolor: 'rgba(255,255,255,0.08)', side: 'right'},
+        margin: {l: 40, r: 80, t: 20, b: 40},
+        shapes,
+        annotations,
+        hovermode: 'x unified',
+    };
+    
+    Plotly.newPlot('saved-signal-chart', traces, layout,
+                   {responsive: true, displayModeBar: false});
+}
+
+// ============ Editar señal guardada ============
+window.openEditSavedSignal = function() {
+    const sig = window._currentSavedSignal;
+    if (!sig) return;
+    
+    document.getElementById('edit-ss-investment').value = sig.investment_usdt;
+    document.getElementById('edit-ss-leverage').value = sig.leverage;
+    document.getElementById('edit-ss-entry').value = sig.entry;
+    document.getElementById('edit-ss-sl').value = sig.stop_loss;
+    document.getElementById('edit-ss-tp').value = sig.take_profit;
+    document.getElementById('edit-ss-notes').value = sig.notes || '';
+    
+    // Cerrar el detalle para evitar solapamiento
+    const detailModal = bootstrap.Modal.getInstance(document.getElementById('savedSignalDetailModal'));
+    if (detailModal) detailModal.hide();
+    
+    const modal = new bootstrap.Modal(document.getElementById('editSavedSignalModal'));
+    modal.show();
+};
+
+window.confirmEditSavedSignal = async function() {
+    const sig = window._currentSavedSignal;
+    if (!sig) return;
+    
+    const payload = {
+        investment_usdt: parseFloat(document.getElementById('edit-ss-investment').value),
+        leverage: parseInt(document.getElementById('edit-ss-leverage').value),
+        entry: parseFloat(document.getElementById('edit-ss-entry').value),
+        stop_loss: parseFloat(document.getElementById('edit-ss-sl').value),
+        take_profit: parseFloat(document.getElementById('edit-ss-tp').value),
+        notes: document.getElementById('edit-ss-notes').value || '',
+    };
+    
+    try {
+        const res = await fetch(`/api/saved_signals/${sig.id}`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload),
+        });
+        const json = await res.json();
+        if (json.success) {
+            showToast('✅ Señal modificada', 'success');
+            const modal = bootstrap.Modal.getInstance(document.getElementById('editSavedSignalModal'));
+            if (modal) modal.hide();
+            window.updateSavedSignalsList();
+        } else {
+            showToast('Error: ' + (json.error || ''), 'danger');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'danger');
+    }
+};
+
+// ============ Cerrar señal manualmente ============
+window.closeSavedSignalManual = async function() {
+    const sig = window._currentSavedSignal;
+    if (!sig) return;
+    
+    const confirmed = confirm(
+        sig.entry_touched
+            ? '¿Cerrar la operación manualmente? Se calcula PnL con el precio actual.'
+            : '⚠️ El precio aún no ha tocado el entry. Al cerrar NO cuenta para winrate ni PnL. ¿Continuar?'
+    );
+    if (!confirmed) return;
+    
+    try {
+        const res = await fetch(`/api/saved_signals/${sig.id}/close`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({}),  // el backend obtiene precio actual
+        });
+        const json = await res.json();
+        if (json.success) {
+            showToast('✅ Señal cerrada', 'success');
+            const modal = bootstrap.Modal.getInstance(document.getElementById('savedSignalDetailModal'));
+            if (modal) modal.hide();
+            window.updateSavedSignalsList();
+        } else {
+            showToast('Error: ' + (json.error || ''), 'danger');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'danger');
+    }
+};
+
+// ============ Eliminar señal guardada ============
+window.deleteSavedSignal = async function() {
+    const sig = window._currentSavedSignal;
+    if (!sig) return;
+    
+    const confirmed = confirm('¿Eliminar esta señal permanentemente? Esta acción no se puede deshacer.');
+    if (!confirmed) return;
+    
+    try {
+        const res = await fetch(`/api/saved_signals/${sig.id}`, {method: 'DELETE'});
+        const json = await res.json();
+        if (json.success) {
+            showToast('🗑️ Señal eliminada', 'success');
+            const modal = bootstrap.Modal.getInstance(document.getElementById('savedSignalDetailModal'));
+            if (modal) modal.hide();
+            window.updateSavedSignalsList();
+        } else {
+            showToast('Error: ' + (json.error || ''), 'danger');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'danger');
+    }
+};
+
+// ============ Auto-refresh de la lista cada 5 min ============
+if (window.IS_FUTURES_PAGE) {
+    document.addEventListener('DOMContentLoaded', () => {
+        setTimeout(() => window.updateSavedSignalsList(), 1500);
+        setInterval(() => window.updateSavedSignalsList(), 5 * 60 * 1000);
+    });
+}

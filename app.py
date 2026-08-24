@@ -19797,6 +19797,193 @@ def _collect_frontend_signals():
     return unified
 
 
+# ============================================================================
+# v22.9: SEÑALES GUARDADAS (solo FUTUROS) — CRUD + KPIs
+# ============================================================================
+@app.route('/api/saved_signals', methods=['GET'])
+def api_saved_signals_list():
+    """Lista señales guardadas. Por defecto excluye 'deleted'.
+    
+    Query params:
+      status: 'active,entry_touched' (coma) para filtrar. Default: todas menos deleted.
+      limit: máximo a devolver (default 200)
+    """
+    try:
+        from saved_signals import list_saved_signals
+        limit = int(request.args.get('limit', 200))
+        limit = max(1, min(500, limit))
+        status_raw = request.args.get('status', '')
+        status_filter = [s.strip() for s in status_raw.split(',') if s.strip()] if status_raw else None
+        
+        signals = list_saved_signals(status_filter=status_filter, limit=limit)
+        return jsonify({
+            'success': True,
+            'total': len(signals),
+            'signals': signals,
+        })
+    except Exception as e:
+        print(f"❌ api_saved_signals_list: {e}")
+        return jsonify({'success': False, 'error': str(e)[:200], 'signals': [], 'total': 0}), 200
+
+
+@app.route('/api/saved_signals', methods=['POST'])
+def api_saved_signals_create():
+    """Crea una nueva señal guardada.
+    
+    Body JSON: symbol, timeframe, action, entry, stop_loss, take_profit,
+    leverage, investment_usdt, [confidence, candle_timestamp, original_*, notes]
+    """
+    try:
+        from saved_signals import create_saved_signal
+        data = request.get_json() or {}
+        result = create_saved_signal(data)
+        if not result:
+            return jsonify({'success': False, 'error': 'No se pudo guardar (verifica datos)'}), 200
+        return jsonify({'success': True, 'signal': result})
+    except Exception as e:
+        print(f"❌ api_saved_signals_create: {e}")
+        return jsonify({'success': False, 'error': str(e)[:200]}), 200
+
+
+@app.route('/api/saved_signals/<signal_id>', methods=['GET'])
+def api_saved_signals_get(signal_id):
+    """Retorna una señal guardada por id."""
+    try:
+        from saved_signals import get_saved_signal
+        sig = get_saved_signal(signal_id)
+        if not sig:
+            return jsonify({'success': False, 'error': 'No encontrada'}), 200
+        return jsonify({'success': True, 'signal': sig})
+    except Exception as e:
+        print(f"❌ api_saved_signals_get: {e}")
+        return jsonify({'success': False, 'error': str(e)[:200]}), 200
+
+
+@app.route('/api/saved_signals/<signal_id>', methods=['PUT'])
+def api_saved_signals_update(signal_id):
+    """Modifica campos editables: entry, stop_loss, take_profit, leverage,
+    investment_usdt, notes."""
+    try:
+        from saved_signals import update_saved_signal
+        data = request.get_json() or {}
+        result = update_saved_signal(signal_id, data)
+        if not result:
+            return jsonify({'success': False, 'error': 'No editable o no encontrada'}), 200
+        return jsonify({'success': True, 'signal': result})
+    except Exception as e:
+        print(f"❌ api_saved_signals_update: {e}")
+        return jsonify({'success': False, 'error': str(e)[:200]}), 200
+
+
+@app.route('/api/saved_signals/<signal_id>/close', methods=['POST'])
+def api_saved_signals_close(signal_id):
+    """Cierra manualmente una señal con el precio actual del par.
+    
+    Body JSON opcional: {'current_price': X}. Si no se pasa, se consulta a KuCoin.
+    """
+    try:
+        from saved_signals import get_saved_signal, close_saved_signal_manual
+        sig = get_saved_signal(signal_id)
+        if not sig:
+            return jsonify({'success': False, 'error': 'No encontrada'}), 200
+        
+        data = request.get_json() or {}
+        current_price = data.get('current_price')
+        
+        # Si no viene precio, consultarlo (best-effort)
+        if current_price is None or float(current_price) <= 0:
+            try:
+                df = expert_system.get_kucoin_data(sig['symbol'], sig['timeframe'])
+                if df is not None and len(df) > 0:
+                    current_price = float(df['close'].iloc[-1])
+                else:
+                    return jsonify({'success': False, 'error': 'No se pudo obtener precio'}), 200
+            except Exception as e:
+                return jsonify({'success': False, 'error': f'Precio no disponible: {e}'}), 200
+        
+        result = close_saved_signal_manual(signal_id, float(current_price))
+        if not result:
+            return jsonify({'success': False, 'error': 'No se pudo cerrar'}), 200
+        return jsonify({'success': True, 'signal': result})
+    except Exception as e:
+        print(f"❌ api_saved_signals_close: {e}")
+        return jsonify({'success': False, 'error': str(e)[:200]}), 200
+
+
+@app.route('/api/saved_signals/<signal_id>', methods=['DELETE'])
+def api_saved_signals_delete(signal_id):
+    """Elimina permanentemente (soft delete: status='deleted')."""
+    try:
+        from saved_signals import delete_saved_signal
+        ok = delete_saved_signal(signal_id)
+        return jsonify({'success': bool(ok)})
+    except Exception as e:
+        print(f"❌ api_saved_signals_delete: {e}")
+        return jsonify({'success': False, 'error': str(e)[:200]}), 200
+
+
+@app.route('/api/saved_signals/kpis', methods=['GET'])
+def api_saved_signals_kpis():
+    """Retorna KPIs de las señales guardadas: total, wins, losses, win_rate,
+    pnl_total_pct, pnl_total_usdt, active."""
+    try:
+        from saved_signals import get_saved_signals_kpis
+        kpis = get_saved_signals_kpis()
+        return jsonify({'success': True, 'data': kpis})
+    except Exception as e:
+        print(f"❌ api_saved_signals_kpis: {e}")
+        return jsonify({'success': False, 'error': str(e)[:200]}), 200
+
+
+@app.route('/api/saved_signals/<signal_id>/chart_data', methods=['GET'])
+def api_saved_signals_chart_data(signal_id):
+    """
+    Retorna datos de velas para renderizar el gráfico TradingView-style de la
+    señal guardada. Incluye: velas OHLC + entry + SL + TP + action + current_price.
+    
+    El frontend usa Plotly para dibujar:
+    - Velas japonesas (dark theme)
+    - Zona VERDE semitransparente: del entry hacia TP (dirección favorable)
+    - Zona ROJA semitransparente: del entry hacia SL (dirección desfavorable)
+    """
+    try:
+        from saved_signals import get_saved_signal
+        sig = get_saved_signal(signal_id)
+        if not sig:
+            return jsonify({'success': False, 'error': 'No encontrada'}), 200
+        
+        symbol = sig.get('symbol')
+        tf = sig.get('timeframe')
+        
+        df = expert_system.get_kucoin_data(symbol, tf)
+        if df is None or len(df) < 5:
+            return jsonify({'success': False, 'error': 'Sin datos de velas'}), 200
+        
+        # Últimas 100 velas
+        df = df.tail(100).copy().reset_index(drop=True)
+        
+        # Convertir a lista JSON-serializable
+        candles = {
+            'time': [str(t) for t in df['time'].astype(str).tolist()],
+            'open': [float(v) for v in df['open'].tolist()],
+            'high': [float(v) for v in df['high'].tolist()],
+            'low': [float(v) for v in df['low'].tolist()],
+            'close': [float(v) for v in df['close'].tolist()],
+        }
+        current_price = float(df['close'].iloc[-1])
+        
+        return jsonify({
+            'success': True,
+            'signal': sig,
+            'candles': candles,
+            'current_price': current_price,
+        })
+    except Exception as e:
+        print(f"❌ api_saved_signals_chart_data: {e}")
+        import traceback; traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)[:200]}), 200
+
+
 @app.route('/api/kpis/frontend_signals')
 def api_kpis_frontend_signals():
     """
@@ -22083,6 +22270,23 @@ def learning_worker_loop():
             except Exception as ev_err:
                 print(f"⚠️ learning_worker.evaluate_pending_signals: {ev_err}")
                 import traceback; traceback.print_exc()
+            
+            # 1b. v22.9: Evaluar SEÑALES GUARDADAS por el usuario (solo futuros).
+            # Detecta si el precio tocó entry, TP o SL desde la última evaluación.
+            try:
+                from saved_signals import evaluate_saved_signals
+                def _price_fetcher_saved(sym, tf):
+                    return expert_system.get_kucoin_data(sym, tf)
+                
+                ss_stats = evaluate_saved_signals(_price_fetcher_saved)
+                if ss_stats.get('checked', 0) > 0:
+                    et = ss_stats.get('entry_touched', 0)
+                    ss_tp = ss_stats.get('tp_hit', 0)
+                    ss_sl = ss_stats.get('sl_hit', 0)
+                    print(f"💾 [SAVED] Evaluadas {ss_stats['checked']} guardadas: "
+                          f"{et} entry_touched, {ss_tp} TP, {ss_sl} SL")
+            except Exception as ss_err:
+                print(f"⚠️ learning_worker.evaluate_saved_signals: {ss_err}")
             
             # 2. Cada 4 horas (16 ciclos * 15 min): recalcular stats + recomendaciones
             stats_counter += 1

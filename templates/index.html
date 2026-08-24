@@ -1359,6 +1359,38 @@
                     </div>
                 </div>
                 
+                <!-- v22.9: SEÑALES GUARDADAS (solo visible en FUTUROS) -->
+                <div class="card bg-dark border-success mt-4" id="saved-signals-card" style="display: none;">
+                    <div class="card-header bg-success bg-opacity-25 d-flex justify-content-between align-items-center flex-wrap">
+                        <h5 class="mb-0">
+                            <i class="fas fa-bookmark me-2"></i>
+                            Señales Guardadas <small class="text-muted">(mi portafolio)</small>
+                        </h5>
+                        <div class="d-flex gap-2 align-items-center">
+                            <span class="badge bg-secondary" id="ss-kpi-winrate" title="Winrate de señales cerradas (TP/SL/manual) con entry tocado">
+                                WR: --%
+                            </span>
+                            <span class="badge bg-secondary" id="ss-kpi-pnl" title="PnL total en USDT (apalancado real)">
+                                PnL: --
+                            </span>
+                            <span class="badge bg-dark" id="ss-kpi-count" title="Cerradas / activas">
+                                0 / 0
+                            </span>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="list-group list-group-flush bg-dark" id="saved-signals-list">
+                            <div class="list-group-item bg-dark text-muted text-center py-3">
+                                <i class="fas fa-info-circle me-1"></i>
+                                Aún no has guardado ninguna señal. Ábrelas desde "Señales de la Vela Anterior" y usa el botón GUARDAR.
+                            </div>
+                        </div>
+                        <div class="p-2 text-center">
+                            <small class="text-muted">Click en una señal para ver gráfico con zonas TP/SL, modificar o cerrar</small>
+                        </div>
+                    </div>
+                </div>
+                
                 <!-- Modal para justificación de señal anterior -->
                 <div class="modal fade" id="prevSignalModal" tabindex="-1">
                     <div class="modal-dialog modal-lg">
@@ -1379,11 +1411,175 @@
                                 </div>
                             </div>
                             <div class="modal-footer">
+                                <!-- v22.9: botón GUARDAR solo visible en página de FUTUROS -->
+                                <button type="button" class="btn btn-success" id="btn-save-signal"
+                                        onclick="window.openSaveSignalModal()" style="display: none;">
+                                    <i class="fas fa-bookmark me-2"></i>GUARDAR
+                                </button>
+                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">CERRAR</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- v22.9: Modal para GUARDAR una señal (solo futuros) -->
+                <div class="modal fade" id="saveSignalModal" tabindex="-1">
+                    <div class="modal-dialog modal-lg">
+                        <div class="modal-content bg-dark">
+                            <div class="modal-header">
+                                <h5 class="modal-title">
+                                    <i class="fas fa-bookmark me-2 text-success"></i>
+                                    Guardar Señal en Mi Portafolio
+                                </h5>
+                                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                            </div>
+                            <div class="modal-body">
+                                <div id="save-signal-info" class="mb-3"></div>
+                                <div class="row g-3">
+                                    <div class="col-md-6">
+                                        <label class="form-label">💰 Monto a invertir (USDT)</label>
+                                        <input type="number" class="form-control bg-dark text-white" id="ss-investment"
+                                               min="1" step="0.01" value="10">
+                                        <small class="text-muted">Cuánto USDT quieres arriesgar en esta operación.</small>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label">⚡ Apalancamiento (x)</label>
+                                        <input type="number" class="form-control bg-dark text-white" id="ss-leverage"
+                                               min="1" max="125" step="1" value="1">
+                                        <small class="text-muted" id="ss-leverage-hint">Sugerido por el sistema: --</small>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label text-primary">📍 Entry</label>
+                                        <input type="number" class="form-control bg-dark text-white" id="ss-entry"
+                                               step="0.00000001">
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label text-danger">🛑 Stop Loss</label>
+                                        <input type="number" class="form-control bg-dark text-white" id="ss-sl"
+                                               step="0.00000001">
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label text-success">🎯 Take Profit</label>
+                                        <input type="number" class="form-control bg-dark text-white" id="ss-tp"
+                                               step="0.00000001">
+                                    </div>
+                                    <div class="col-12">
+                                        <label class="form-label">📝 Notas (opcional)</label>
+                                        <textarea class="form-control bg-dark text-white" id="ss-notes"
+                                                  rows="2" maxlength="500" placeholder="Ej: entrada agresiva por breakout de EMA..."></textarea>
+                                    </div>
+                                </div>
+                                <div class="mt-3 p-3 bg-black rounded" style="border-left: 3px solid #00C076;">
+                                    <small class="text-muted">
+                                        <strong>Cálculo estimado:</strong>
+                                        <div id="ss-calc-preview">--</div>
+                                    </small>
+                                </div>
+                            </div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                                <button type="button" class="btn btn-success" onclick="window.confirmSaveSignal()">
+                                    <i class="fas fa-check me-2"></i>Guardar señal
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- v22.9: Modal para VER DETALLE de una señal guardada con gráfico -->
+                <div class="modal fade" id="savedSignalDetailModal" tabindex="-1">
+                    <div class="modal-dialog modal-xl">
+                        <div class="modal-content bg-dark">
+                            <div class="modal-header">
+                                <h5 class="modal-title">
+                                    <i class="fas fa-chart-line me-2 text-info"></i>
+                                    Detalle de Señal Guardada
+                                </h5>
+                                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                            </div>
+                            <div class="modal-body">
+                                <div id="saved-signal-detail-body">
+                                    <div class="text-center py-4">
+                                        <div class="spinner-border text-info"></div>
+                                        <p class="mt-3">Cargando gráfico...</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="modal-footer d-flex justify-content-between">
+                                <div>
+                                    <button type="button" class="btn btn-danger btn-sm" id="btn-ss-delete"
+                                            onclick="window.deleteSavedSignal()">
+                                        <i class="fas fa-trash me-1"></i>Eliminar
+                                    </button>
+                                    <button type="button" class="btn btn-warning btn-sm" id="btn-ss-edit"
+                                            onclick="window.openEditSavedSignal()">
+                                        <i class="fas fa-edit me-1"></i>Modificar
+                                    </button>
+                                    <button type="button" class="btn btn-info btn-sm" id="btn-ss-close-manual"
+                                            onclick="window.closeSavedSignalManual()">
+                                        <i class="fas fa-times-circle me-1"></i>Cerrar operación
+                                    </button>
+                                </div>
                                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cerrar</button>
                             </div>
                         </div>
                     </div>
-                </div>               
+                </div>
+                
+                <!-- v22.9: Modal para editar señal guardada -->
+                <div class="modal fade" id="editSavedSignalModal" tabindex="-1">
+                    <div class="modal-dialog">
+                        <div class="modal-content bg-dark">
+                            <div class="modal-header">
+                                <h5 class="modal-title">
+                                    <i class="fas fa-edit me-2 text-warning"></i>
+                                    Modificar Señal Guardada
+                                </h5>
+                                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                            </div>
+                            <div class="modal-body">
+                                <div class="row g-3">
+                                    <div class="col-md-6">
+                                        <label class="form-label">💰 Monto (USDT)</label>
+                                        <input type="number" class="form-control bg-dark text-white" id="edit-ss-investment"
+                                               min="1" step="0.01">
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label">⚡ Apalancamiento (x)</label>
+                                        <input type="number" class="form-control bg-dark text-white" id="edit-ss-leverage"
+                                               min="1" max="125" step="1">
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label text-primary">Entry</label>
+                                        <input type="number" class="form-control bg-dark text-white" id="edit-ss-entry"
+                                               step="0.00000001">
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label text-danger">Stop Loss</label>
+                                        <input type="number" class="form-control bg-dark text-white" id="edit-ss-sl"
+                                               step="0.00000001">
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label text-success">Take Profit</label>
+                                        <input type="number" class="form-control bg-dark text-white" id="edit-ss-tp"
+                                               step="0.00000001">
+                                    </div>
+                                    <div class="col-12">
+                                        <label class="form-label">Notas</label>
+                                        <textarea class="form-control bg-dark text-white" id="edit-ss-notes"
+                                                  rows="2" maxlength="500"></textarea>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                                <button type="button" class="btn btn-warning" onclick="window.confirmEditSavedSignal()">
+                                    <i class="fas fa-save me-2"></i>Guardar cambios
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
     
                 <!-- Señales Confirmadas -->
                 <div class="card bg-dark border-success mb-4">
