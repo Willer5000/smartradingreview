@@ -19832,17 +19832,25 @@ def api_saved_signals_create():
     
     Body JSON: symbol, timeframe, action, entry, stop_loss, take_profit,
     leverage, investment_usdt, [confidence, candle_timestamp, original_*, notes]
+    
+    v22.9.1: propaga el error REAL de saved_signals (antes decía siempre
+    'No se pudo guardar (verifica datos)' que no ayudaba a diagnosticar).
     """
     try:
         from saved_signals import create_saved_signal
         data = request.get_json() or {}
-        result = create_saved_signal(data)
+        result, error_msg = create_saved_signal(data)
         if not result:
-            return jsonify({'success': False, 'error': 'No se pudo guardar (verifica datos)'}), 200
+            return jsonify({
+                'success': False,
+                'error': error_msg or 'No se pudo guardar (motivo desconocido)'
+            }), 200
         return jsonify({'success': True, 'signal': result})
     except Exception as e:
         print(f"❌ api_saved_signals_create: {e}")
-        return jsonify({'success': False, 'error': str(e)[:200]}), 200
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)[:250]}), 200
 
 
 @app.route('/api/saved_signals/<signal_id>', methods=['GET'])

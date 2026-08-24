@@ -87,32 +87,63 @@ def create_saved_signal(data: Dict) -> Optional[Dict]:
       investment_usdt, confidence (opcional), candle_timestamp (opcional),
       original_* (opcional, snapshot de valores originales)
     
-    Retorna: dict con la fila creada + id, o None si falló.
+    Retorna: tupla (row_dict|None, error_msg|None)
+      - Éxito: (dict con la fila creada + id, None)
+      - Fallo: (None, "mensaje explicativo")
     """
     db = _get_db()
     if db is None:
-        logger.warning("create_saved_signal: Supabase no disponible")
-        return None
+        msg = "Supabase no está configurado o no está conectado"
+        logger.warning(f"create_saved_signal: {msg}")
+        return None, msg
     
     try:
+        # ============ VALIDACIONES ============
         action = str(data.get('action', '')).upper()
         if action not in ('LONG', 'SHORT'):
-            logger.warning(f"create_saved_signal: acción inválida {action}")
-            return None
+            msg = f"acción inválida '{action}' (debe ser LONG o SHORT)"
+            logger.warning(f"create_saved_signal: {msg}")
+            return None, msg
         
-        entry = float(data.get('entry', 0))
-        stop_loss = float(data.get('stop_loss', 0))
-        take_profit = float(data.get('take_profit', 0))
-        leverage = int(data.get('leverage', 1) or 1)
-        investment = float(data.get('investment_usdt', 10))
+        try:
+            entry = float(data.get('entry', 0))
+            stop_loss = float(data.get('stop_loss', 0))
+            take_profit = float(data.get('take_profit', 0))
+            leverage = int(data.get('leverage', 1) or 1)
+            investment = float(data.get('investment_usdt', 10))
+        except (TypeError, ValueError) as e:
+            msg = f"campos numéricos inválidos: {e}"
+            logger.warning(f"create_saved_signal: {msg}")
+            return None, msg
         
         if entry <= 0 or stop_loss <= 0 or take_profit <= 0:
-            logger.warning("create_saved_signal: entry/SL/TP inválidos")
-            return None
+            msg = f"entry/SL/TP deben ser > 0 (entry={entry}, sl={stop_loss}, tp={take_profit})"
+            logger.warning(f"create_saved_signal: {msg}")
+            return None, msg
+        
+        symbol = str(data.get('symbol', '')).strip()
+        timeframe = str(data.get('timeframe', '')).strip()
+        if not symbol or not timeframe:
+            msg = "symbol y timeframe son obligatorios"
+            logger.warning(f"create_saved_signal: {msg}")
+            return None, msg
+        
+        # ============ CANDLE_TIMESTAMP: parseo tolerante ============
+        # El frontend envía candle_timestamp como string ("2026-08-24 12:00:00")
+        # o null. Supabase espera TIMESTAMPTZ (ISO 8601). Normalizamos aquí.
+        raw_ts = data.get('candle_timestamp')
+        candle_ts = None
+        if raw_ts:
+            try:
+                import pandas as pd
+                candle_ts = pd.Timestamp(raw_ts).isoformat()
+            except Exception as e:
+                logger.warning(f"candle_timestamp no parseable ({raw_ts}): {e} - se guarda como null")
+                candle_ts = None
         
         payload = {
-            'symbol': str(data.get('symbol', '')),
-            'timeframe': str(data.get('timeframe', '')),
+            'symbol': symbol,
+            'timeframe': timeframe,
             'action': action,
             'confidence': float(data.get('confidence', 0) or 0),
             'entry': entry,
@@ -125,22 +156,47 @@ def create_saved_signal(data: Dict) -> Optional[Dict]:
             'original_stop_loss': float(data.get('original_stop_loss', 0) or 0) or None,
             'original_take_profit': float(data.get('original_take_profit', 0) or 0) or None,
             'original_leverage': int(data.get('original_leverage', 0) or 0) or None,
-            'candle_timestamp': data.get('candle_timestamp'),
+            'candle_timestamp': candle_ts,
             'status': 'active',
             'entry_touched': False,
             'notes': str(data.get('notes', '') or '')[:500],
         }
         
+        # ============ INSERT ============
         def _op():
             return db.client.table('saved_signals').insert(payload).execute()
-        r = db._with_retry(_op)
+        
+        try:
+            r = db._with_retry(_op)
+        except Exception as db_err:
+            # Errores comunes de Supabase que capturamos aquí:
+            # - Tabla no existe: 'relation "saved_signals" does not exist'
+            # - RLS: 'new row violates row-level security policy'
+            # - Column desconocida: 'column "X" does not exist'
+            err_str = str(db_err)
+            if 'does not exist' in err_str and 'saved_signals' in err_str:
+                msg = ('La tabla saved_signals no existe en Supabase. '
+                       'Aplica el schema schema_saved_signals.sql en el SQL Editor de Supabase.')
+            elif 'row-level security' in err_str.lower() or 'rls' in err_str.lower():
+                msg = ('La tabla saved_signals tiene Row Level Security activo. '
+                       'Deshabilita RLS en Supabase: ALTER TABLE saved_signals DISABLE ROW LEVEL SECURITY;')
+            elif 'column' in err_str.lower() and 'does not exist' in err_str.lower():
+                msg = f"Columna desconocida en el schema: {err_str[:200]}"
+            else:
+                msg = f"Error de Supabase: {err_str[:250]}"
+            logger.error(f"create_saved_signal insert: {msg}")
+            return None, msg
         
         if r and r.data:
-            return r.data[0]
-        return None
+            return r.data[0], None
+        
+        return None, "Supabase no devolvió datos tras el insert (respuesta vacía)"
     except Exception as e:
-        logger.error(f"create_saved_signal: {e}")
-        return None
+        msg = f"Excepción interna: {type(e).__name__}: {str(e)[:200]}"
+        logger.error(f"create_saved_signal: {msg}")
+        import traceback
+        traceback.print_exc()
+        return None, msg
 
 
 def list_saved_signals(status_filter: Optional[List[str]] = None,
