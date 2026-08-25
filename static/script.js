@@ -73,6 +73,45 @@ document.addEventListener('DOMContentLoaded', function() {
     setInterval(updateBoliviaClock, 1000);
     setInterval(updateCalendarInfo, 60000);
     setInterval(updateSystemStatus, 60000);
+    // ====== EVENT LISTENERS DEL GUARDIÁN (TGP) ======
+    
+    // Inicializar UI de portafolio al cargar la página
+    updatePortfolioUI();
+    
+    // Botón "Guardar Portafolio"
+    const btnSavePortfolio = document.getElementById('btn-save-portfolio');
+    if (btnSavePortfolio) {
+        btnSavePortfolio.addEventListener('click', savePortfolioToLocal);
+    }
+    
+    // Cambio de usuario en el dropdown
+    const userSelect = document.getElementById('portfolio-user-select');
+    if (userSelect) {
+        userSelect.addEventListener('change', function() {
+            currentUser = this.value;
+            localStorage.setItem('smarttrading_user', currentUser);
+            // Cargar portafolio del usuario desde localStorage
+            userPortfolio.BTC = parseFloat(localStorage.getItem('portfolio_btc_' + currentUser)) || 0;
+            userPortfolio.PAXG = parseFloat(localStorage.getItem('portfolio_paxg_' + currentUser)) || 0;
+            userPortfolio.USDT = parseFloat(localStorage.getItem('portfolio_usdt_' + currentUser)) || 0;
+            updatePortfolioUI();
+        });
+    }
+    
+    // Botón "Guardar Operación del Guardián" (en el banner)
+    const btnSaveTGP = document.getElementById('btn-save-tgp-trade');
+    if (btnSaveTGP) {
+        btnSaveTGP.addEventListener('click', openSaveTradeModal);
+    }
+    
+    // Botón "Guardar" dentro del modal
+    const btnConfirmSave = document.getElementById('btn-confirm-save-trade');
+    if (btnConfirmSave) {
+        btnConfirmSave.addEventListener('click', confirmSaveTrade);
+    }
+    
+    // ====== FIN EVENT LISTENERS TGP ======
+
 });
 
 // ============ EVENT LISTENERS ============
