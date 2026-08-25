@@ -589,13 +589,33 @@ class SupabaseClient:
         try:
             table = 'strategy_stats_general' if general else 'strategy_stats_specific'
             
-            # Delete previos + insert nuevos (idempotente)
-            self.client.table(table).delete().neq('id', 0).execute()  # Limpia todo
-            
-            batch_size = 100
-            for i in range(0, len(stats_list), batch_size):
-                batch = stats_list[i:i+batch_size]
-                self.client.table(table).insert(batch).execute()
+            # Upsert fila por fila (más lento pero seguro)
+            for stat in stats_list:
+                # Construir filtro de unicidad
+                if general:
+                    # general: único por (strategy, action)
+                    query = (self.client.table(table)
+                             .select('id')
+                             .eq('strategy', stat['strategy'])
+                             .eq('action', stat['action']))
+                else:
+                    # specific: único por (symbol, timeframe, action, strategy)
+                    query = (self.client.table(table)
+                             .select('id')
+                             .eq('symbol', stat['symbol'])
+                             .eq('timeframe', stat['timeframe'])
+                             .eq('action', stat['action'])
+                             .eq('strategy', stat['strategy']))
+                
+                existing = query.limit(1).execute()
+                
+                if existing.data and len(existing.data) > 0:
+                    # Update
+                    stat_id = existing.data[0]['id']
+                    self.client.table(table).update(stat).eq('id', stat_id).execute()
+                else:
+                    # Insert
+                    self.client.table(table).insert(stat).execute()
             
             self._check_rotation(table)
             return True
