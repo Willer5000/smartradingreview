@@ -333,7 +333,67 @@
                         </div>
                     </div>
                 </div>
-
+                <!-- ====== PANEL DE PORTAFOLIO DEL USUARIO (TGP) ====== -->
+                <div id="portfolio-panel" class="card bg-dark border-secondary mb-3">
+                  <div class="card-header d-flex justify-content-between align-items-center py-2">
+                    <span class="fw-bold text-warning">💼 Mi Portafolio</span>
+                    <select id="portfolio-user-select" class="form-select form-select-sm bg-dark text-light border-secondary" style="width: 120px;">
+                      <option value="Willer" selected>Willer</option>
+                      <option value="Danilo">Danilo</option>
+                      <option value="Invitado">Invitado</option>
+                    </select>
+                  </div>
+                  <div class="card-body p-3">
+                    <!-- BTC -->
+                    <div class="mb-2">
+                      <label class="form-label text-muted small mb-1">BTC</label>
+                      <div class="input-group input-group-sm">
+                        <input type="number" id="portfolio-btc" class="form-control bg-dark text-light border-secondary" step="0.00000001" value="0.00158007">
+                        <span class="input-group-text bg-dark text-light border-secondary">₿</span>
+                      </div>
+                    </div>
+                    <!-- PAXG -->
+                    <div class="mb-2">
+                      <label class="form-label text-muted small mb-1">PAXG</label>
+                      <div class="input-group input-group-sm">
+                        <input type="number" id="portfolio-paxg" class="form-control bg-dark text-light border-secondary" step="0.00000001" value="0.23673009">
+                        <span class="input-group-text bg-dark text-light border-secondary">🥇</span>
+                      </div>
+                    </div>
+                    <!-- USDT -->
+                    <div class="mb-2">
+                      <label class="form-label text-muted small mb-1">USDT</label>
+                      <div class="input-group input-group-sm">
+                        <input type="number" id="portfolio-usdt" class="form-control bg-dark text-light border-secondary" step="0.01" value="0">
+                        <span class="input-group-text bg-dark text-light border-secondary">💵</span>
+                      </div>
+                    </div>
+                    
+                    <!-- Resumen -->
+                    <div class="mt-3 pt-2 border-top border-secondary">
+                      <div class="d-flex justify-content-between small">
+                        <span class="text-muted">Total:</span>
+                        <span id="portfolio-total-usd" class="text-light fw-bold">$0.00</span>
+                      </div>
+                      <div class="progress mt-2" style="height: 6px;">
+                        <div id="bar-btc" class="progress-bar bg-warning" style="width: 0%"></div>
+                        <div id="bar-paxg" class="progress-bar bg-info" style="width: 0%"></div>
+                        <div id="bar-usdt" class="progress-bar bg-success" style="width: 0%"></div>
+                      </div>
+                      <div class="d-flex justify-content-between mt-1" style="font-size: 10px;">
+                        <span class="text-warning">BTC <span id="pct-btc">0%</span></span>
+                        <span class="text-info">PAXG <span id="pct-paxg">0%</span></span>
+                        <span class="text-success">USDT <span id="pct-usdt">0%</span></span>
+                      </div>
+                      <div id="portfolio-state" class="mt-2 badge bg-secondary">Cargando...</div>
+                    </div>
+                    
+                    <button id="btn-save-portfolio" class="btn btn-sm btn-outline-warning w-100 mt-2">
+                      💾 Guardar Portafolio
+                    </button>
+                  </div>
+                </div>
+                <!-- ====== FIN PANEL PORTAFOLIO ====== -->
                 <!-- Información del Sistema -->
                 <!-- ============ NUEVO: TARJETA DE ESTADO DE ZONAS ============ -->
                 <!-- Reemplaza el card "Sobre el Sistema" -->
@@ -491,7 +551,70 @@
                     </div>
                 </div>
             </div>
-
+            <!-- ====== BANNER DEL GUARDIÁN DE PORTAFOLIO (TGP) ====== -->
+            <div id="tgp-banner" class="alert d-none mt-3" role="alert">
+              <div class="d-flex align-items-start">
+                <div class="fs-3 me-3">🛡️</div>
+                <div class="flex-grow-1">
+                  <h6 class="alert-heading mb-1 fw-bold" id="tgp-title">Guardián de Portafolio</h6>
+                  <p class="mb-2 small" id="tgp-reason">Razón del guardián...</p>
+                  
+                  <!-- Detalles de la operación sugerida -->
+                  <div id="tgp-trade-details" class="d-none">
+                    <div class="row g-2 small">
+                      <div class="col-6">
+                        <span class="text-muted">Acción:</span>
+                        <span id="tgp-action" class="fw-bold ms-1">-</span>
+                      </div>
+                      <div class="col-6">
+                        <span class="text-muted">Confianza:</span>
+                        <span id="tgp-confidence" class="fw-bold ms-1">-</span>
+                      </div>
+                      <div class="col-6">
+                        <span class="text-muted">Cantidad:</span>
+                        <span id="tgp-amount" class="fw-bold ms-1">-</span>
+                      </div>
+                      <div class="col-6">
+                        <span class="text-muted">Valor:</span>
+                        <span id="tgp-value" class="fw-bold ms-1">-</span>
+                      </div>
+                    </div>
+                    
+                    <!-- Portafolio antes/después -->
+                    <div class="mt-2 pt-2 border-top border-light border-opacity-25">
+                      <div class="row g-1 text-center" style="font-size: 11px;">
+                        <div class="col-4">
+                          <div class="text-muted">Antes</div>
+                          <div id="tgp-before-btc" class="text-warning">-</div>
+                          <div id="tgp-before-paxg" class="text-info">-</div>
+                          <div id="tgp-before-usdt" class="text-success">-</div>
+                        </div>
+                        <div class="col-4 d-flex align-items-center justify-content-center">
+                          <span class="fs-4">→</span>
+                        </div>
+                        <div class="col-4">
+                          <div class="text-muted">Después</div>
+                          <div id="tgp-after-btc" class="text-warning">-</div>
+                          <div id="tgp-after-paxg" class="text-info">-</div>
+                          <div id="tgp-after-usdt" class="text-success">-</div>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <button id="btn-save-tgp-trade" class="btn btn-sm btn-success mt-2 w-100">
+                      ✅ Guardar Operación del Guardián
+                    </button>
+                  </div>
+                  
+                  <!-- Badge de veto -->
+                  <div id="tgp-veto-badge" class="d-none mt-2">
+                    <span class="badge bg-danger">⛔ VETADO POR GUARDIÁN</span>
+                    <p class="small mt-1 mb-0 text-muted">El sistema dio una señal, pero el Guardián la bloqueó por protección de portafolio.</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <!-- ====== FIN BANNER TGP ====== -->
                 <!-- GRÁFICO PRINCIPAL CON VELAS -->
                 <div class="card bg-dark border-secondary mb-4">
                     <div class="card-header d-flex justify-content-between align-items-center">
@@ -1591,7 +1714,52 @@
                         </div>
                     </div>
                 </div>
-    
+
+
+                
+                <!-- ====== MODAL: GUARDAR OPERACIÓN SPOT ( OJO con esto) ====== -->
+                <div class="modal fade" id="modalSaveSpotTrade" tabindex="-1" aria-hidden="true">
+                  <div class="modal-dialog modal-sm">
+                    <div class="modal-content bg-dark text-light border-secondary">
+                      <div class="modal-header border-secondary">
+                        <h5 class="modal-title">💾 Guardar Operación Spot</h5>
+                        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                      </div>
+                      <div class="modal-body">
+                        <div class="mb-2">
+                          <label class="small text-muted">Usuario</label>
+                          <input type="text" id="trade-user" class="form-control form-control-sm bg-dark text-light border-secondary" readonly>
+                        </div>
+                        <div class="mb-2">
+                          <label class="small text-muted">Acción</label>
+                          <input type="text" id="trade-action" class="form-control form-control-sm bg-dark text-light border-secondary" readonly>
+                        </div>
+                        <div class="mb-2">
+                          <label class="small text-muted">Cantidad</label>
+                          <input type="text" id="trade-amount" class="form-control form-control-sm bg-dark text-light border-secondary" readonly>
+                        </div>
+                        <div class="mb-2">
+                          <label class="small text-muted">Valor USD</label>
+                          <input type="text" id="trade-value" class="form-control form-control-sm bg-dark text-light border-secondary" readonly>
+                        </div>
+                        <div class="mb-2">
+                          <label class="small text-muted">Entry Price</label>
+                          <input type="number" id="trade-entry-price" class="form-control form-control-sm bg-dark text-light border-secondary" step="0.01">
+                        </div>
+                        <div class="alert alert-info py-2 small">
+                          <strong>Portafolio se actualizará:</strong><br>
+                          <span id="trade-portfolio-preview"></span>
+                        </div>
+                      </div>
+                      <div class="modal-footer border-secondary">
+                        <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                        <button type="button" id="btn-confirm-save-trade" class="btn btn-sm btn-success">Guardar</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <!-- ====== FIN MODAL ====== -->                
+          
                 <!-- Señales Confirmadas -->
                 <div class="card bg-dark border-success mb-4">
                     <div class="card-header bg-success bg-opacity-25">
