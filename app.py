@@ -9561,7 +9561,17 @@ class TradingExpertSystem:
                     correlation_score = 50
                     weight_modifier = 1.3 if current_symbol == 'PAXG-USDT' else 1.2
                     print(f"   ✅ ROTACIÓN POR DECISIONES: RISK_OFF")
+
+
+            # v24: Detectar divergencia extrema para super-peso en TraderMacro
+            extreme_divergence = False
+            if btc_confidence >= 80 and ratio_confidence >= 80:
+                if (btc_action in ['COMPRA_SPOT', 'LONG'] and ratio_action in ['VENTA_SPOT', 'SHORT']) or \
+                   (btc_action in ['VENTA_SPOT', 'SHORT'] and ratio_action in ['COMPRA_SPOT', 'LONG']):
+                    extreme_divergence = True
+                    print(f"   🌟 DIVERGENCIA EXTREMA: BTC conf={btc_confidence}% vs Ratio conf={ratio_confidence}%")
             
+
             # ============ CONDICIÓN 2: ROTACIÓN POR TENDENCIAS ============
             if rotation_signal == 'NEUTRAL' and btc_trend_confidence >= 50 and ratio_trend_confidence >= 50:
                 if btc_trend == 'bullish' and ratio_trend == 'bearish':
@@ -9591,20 +9601,24 @@ class TradingExpertSystem:
                     print(f"   ✅ CORRELACIÓN NEGATIVA")
             
             # ============ CONDICIÓN 4: FORTALEZA RELATIVA ============
+            # v24: Filtro ADX >= 20 para evitar rotaciones falsas en mercados laterales
             if rotation_signal == 'NEUTRAL':
-                if paxg_trend == 'bullish' and btc_trend == 'bearish':
-                    rotation_signal = 'PAXG_STRONGER'
-                    correlation_score = 25
-                    if current_symbol == 'PAXG-USDT':
-                        weight_modifier = 1.15
-                    print(f"   ✅ PAXG MÁS FUERTE")
-                
-                elif btc_trend == 'bullish' and paxg_trend == 'bearish':
-                    rotation_signal = 'BTC_STRONGER'
-                    correlation_score = 25
-                    if current_symbol == 'BTC-USDT':
-                        weight_modifier = 1.15
-                    print(f"   ✅ BTC MÁS FUERTE")
+                if btc_adx >= 20 or paxg_adx >= 20:
+                    if paxg_trend == 'bullish' and btc_trend == 'bearish':
+                        rotation_signal = 'PAXG_STRONGER'
+                        correlation_score = 25
+                        if current_symbol == 'PAXG-USDT':
+                            weight_modifier = 1.15
+                        print(f"   ✅ PAXG MÁS FUERTE")
+                    
+                    elif btc_trend == 'bullish' and paxg_trend == 'bearish':
+                        rotation_signal = 'BTC_STRONGER'
+                        correlation_score = 25
+                        if current_symbol == 'BTC-USDT':
+                            weight_modifier = 1.15
+                        print(f"   ✅ BTC MÁS FUERTE")
+                else:
+                    print(f"   ⏸️ CONDICIÓN 4 BLOQUEADA: ADX bajo (BTC ADX={btc_adx:.1f}, PAXG ADX={paxg_adx:.1f}) — mercado lateral, sin rotación")
             
             # ============ CONDICIÓN 5: DECISIONES UNILATERALES ============
             if rotation_signal == 'NEUTRAL':
@@ -9699,6 +9713,7 @@ class TradingExpertSystem:
                 'correlation_score': correlation_score,
                 'rotation_signal': rotation_signal,
                 'weight_modifier': weight_modifier,
+                'extreme_divergence': extreme_divergence,
                 'symbol_recommendation': symbol_recommendation,
                 'symbol_score': symbol_score,
                 'btc_analysis': {
@@ -11199,6 +11214,25 @@ class TradingExpertSystem:
             '1W': 10.0,  # antes 8.0
         }.get(timeframe, 4.5)
     
+    def _get_expected_sl_band(self, timeframe):
+        """
+        v24 (Propuesta 1): Banda esperada de distancia SL por TF.
+        Si un candidato de SL cae fuera de este rango, se penaliza.
+        Fuerza coherencia: TF corto = SL apretado, TF largo = SL amplio.
+        """
+        return {
+            '5m':  (0.3, 0.7),
+            '15m': (0.5, 1.0),
+            '30m': (0.7, 1.3),
+            '1h':  (1.0, 1.8),
+            '2h':  (1.5, 2.5),
+            '4h':  (2.0, 3.5),
+            '12h': (2.5, 4.5),
+            '1D':  (3.0, 6.0),
+            '1W':  (4.0, 8.0),
+        }.get(timeframe, (1.0, 3.0))
+    
+      
     def _collect_tp_candidates(self, direction, structure, current_price, volatility, timeframe):
         """
         Recolecta TODOS los niveles candidatos para TP desde Smart Money.
@@ -11569,7 +11603,7 @@ class TradingExpertSystem:
         # (RR objetivo ~2.5). Si no, usamos min_distance_pct como referencia.
         if sl_distance_pct and sl_distance_pct > 0:
             optimal_distance = 2.5 * sl_distance_pct
-            max_reasonable = 6.0 * sl_distance_pct  # más allá = fantasioso
+            max_reasonable = 4.5 * sl_distance_pct  # más allá = fantasioso
         else:
             optimal_distance = 2.5 * min_distance_pct
             max_reasonable = 6.0 * min_distance_pct
@@ -11665,9 +11699,22 @@ class TradingExpertSystem:
         
         baja_prob_score = strength_score + type_score
         
-        total_score = (proteccion_score * 0.4) + (baja_prob_score * 0.6)
+        # v24 (Propuesta 1): Penalización/bonus por banda esperada del TF
+        band_lo, band_hi = self._get_expected_sl_band(timeframe)
+        if distance_pct < band_lo:
+            # SL más apretado de lo típico para este TF → penalizar leve
+            band_penalty = 0.85
+        elif distance_pct > band_hi:
+            # SL más amplio de lo típico para este TF → penalizar fuerte
+            band_penalty = 0.70
+        else:
+            # Dentro de la banda esperada → bonus
+            band_penalty = 1.10
+        
+        total_score = ((proteccion_score * 0.4) + (baja_prob_score * 0.6)) * band_penalty
         return total_score
     
+  
     def _select_optimal_tp(self, direction, structure, current_price, volatility,
                             timeframe, leverage=1, is_futures=False,
                             sl_price=None):
@@ -11709,9 +11756,51 @@ class TradingExpertSystem:
         if not scored:
             return None, f"Ningún TP cumple RR mínimo 1:1.8 (mín distancia {min_distance:.2f}%)", 0
         
+
         scored.sort(key=lambda x: -x[1])
         best = scored[0]
-        return best[0]['price'], best[0]['source'], best[1]
+        
+        # v24 (Propuesta 2): Techo duro RR máximo 4.5
+        best_price = best[0]['price']
+        best_source = best[0]['source']
+        best_score = best[1]
+        
+        if sl_price and sl_price > 0 and current_price > 0:
+            sl_dist = abs(current_price - sl_price) / current_price * 100
+            tp_dist = abs(best_price - current_price) / current_price * 100
+            rr = tp_dist / sl_dist if sl_dist > 0 else 0
+            
+            if rr > 4.5:
+                # Buscar candidato intermedio con RR entre 2.5 y 4.5
+                intermediate = None
+                for c, s in scored:
+                    c_tp_dist = abs(c['price'] - current_price) / current_price * 100
+                    c_rr = c_tp_dist / sl_dist if sl_dist > 0 else 0
+                    if 2.5 <= c_rr <= 4.5:
+                        intermediate = (c, s)
+                        break
+                
+                if intermediate:
+                    best_price = intermediate[0]['price']
+                    best_source = intermediate[0]['source'] + ' (RR ajustado v24)'
+                    best_score = intermediate[1]
+                    print(f"   ✅ TP ajustado: RR {c_rr:.2f} (dentro de rango realista)")
+                else:
+                    # Sintetizar TP a 3.0×SL (RR 1:3, realista y rentable)
+                    if direction in ['COMPRA_SPOT', 'LONG', 'long', 'buy']:
+                        synthetic_tp = current_price * (1 + 3.0 * sl_dist / 100)
+                    else:
+                        synthetic_tp = current_price * (1 - 3.0 * sl_dist / 100)
+                    best_price = synthetic_tp
+                    best_source = 'synthetic_3xSL_v24'
+                    best_score = 70
+                    print(f"   ⚠️ TP sintético generado: RR 1:3.0 (ningún candidato Smart Money era realista)")
+        
+        return best_price, best_source, best_score
+
+
+    
+    
     
     def _select_optimal_sl(self, direction, structure, current_price, volatility, timeframe):
         """
@@ -17477,8 +17566,14 @@ class TraderMacro(TraderBase):
                 confianza = max(0, confianza - 10)
                 razones.append(f"Sentimiento extremo ({classification}) sin dirección clara")
             
-            # Ajustar por peso de correlación
-            confianza = int(confianza * weight_modifier)
+            # v24: Super-peso en divergencia extrema
+            if correlation.get('extreme_divergence', False):
+                confianza = min(100, int(confianza * 1.4))
+                razones.append("Divergencia extrema BTC↔Oro detectada — confianza reforzada")
+                print(f"   🌟 SUPER-PESO: confianza boosteada a {confianza}%")
+            else:
+                # Ajustar por peso de correlación normal
+                confianza = int(confianza * weight_modifier)
             
             # Limitar confianza
             confianza = min(100, max(0, confianza))
