@@ -6,6 +6,18 @@ let currentSymbol = 'BTC-USDT';
 let currentInterval = '1D';
 
 // ====== VARIABLES DEL GUARDIÁN DE PORTAFOLIO (TGP) ======
+let currentUser = null;  // null = no autenticado
+let userPortfolio = { BTC: 0, PAXG: 0, USDT: 0 };
+let lastPrices = { 'BTC-USDT': 0, 'PAXG-USDT': 0 };
+let lastTGPResult = null;
+
+// Claves por defecto (en producción deberían estar en el backend)
+const DEFAULT_PASSWORDS = { 'Willer': '1234', 'Danilo': '1234' };
+// ====== FIN VARIABLES TGP ======
+
+
+
+// ====== VARIABLES DEL GUARDIÁN DE PORTAFOLIO (TGP) ======
 let currentUser = localStorage.getItem('smarttrading_user') || 'Willer';
 let userPortfolio = {
     BTC: parseFloat(localStorage.getItem('portfolio_btc')) || 0.00158007,
@@ -52,6 +64,246 @@ window.fetchAnalyze = async function(symbol, interval) {
     const response = await fetch(req.url, opts);
     return response.json();
 };
+
+// ====== FUNCIONES DEL GUARDIÁN DE PORTAFOLIO (TGP) ======
+
+function getUserPassword(user) {
+    return localStorage.getItem('tgp_pass_' + user) || DEFAULT_PASSWORDS[user] || null;
+}
+
+function setUserPassword(user, newPass) {
+    localStorage.setItem('tgp_pass_' + user, newPass);
+}
+
+function getUserPortfolio(user) {
+    const key = 'tgp_portfolio_' + user;
+    const saved = localStorage.getItem(key);
+    if (saved) return JSON.parse(saved);
+    return { BTC: 0, PAXG: 0, USDT: 0 };
+}
+
+function saveUserPortfolio(user, portfolio) {
+    localStorage.setItem('tgp_portfolio_' + user, JSON.stringify(portfolio));
+}
+
+function isAuthenticated() {
+    return localStorage.getItem('tgp_authenticated') === 'true';
+}
+
+function getAuthenticatedUser() {
+    return localStorage.getItem('tgp_user');
+}
+
+function login(user, password) {
+    const correctPass = getUserPassword(user);
+    if (correctPass && password === correctPass) {
+        currentUser = user;
+        localStorage.setItem('tgp_authenticated', 'true');
+        localStorage.setItem('tgp_user', user);
+        userPortfolio = getUserPortfolio(user);
+        updatePortfolioUI();
+        return true;
+    }
+    return false;
+}
+
+function logout() {
+    currentUser = null;
+    userPortfolio = { BTC: 0, PAXG: 0, USDT: 0 };
+    localStorage.removeItem('tgp_authenticated');
+    localStorage.removeItem('tgp_user');
+    updatePortfolioUI();
+}
+
+function changePassword(user, oldPass, newPass) {
+    const correctPass = getUserPassword(user);
+    if (correctPass && oldPass === correctPass) {
+        setUserPassword(user, newPass);
+        return true;
+    }
+    return false;
+}
+
+function updatePortfolioUI() {
+    const loginPrompt = document.getElementById('portfolio-login-prompt');
+    const portfolioForm = document.getElementById('portfolio-form');
+    const userDisplay = document.getElementById('portfolio-user-display');
+    
+    if (!loginPrompt || !portfolioForm) return;
+    
+    if (!isAuthenticated()) {
+        loginPrompt.classList.remove('d-none');
+        portfolioForm.classList.add('d-none');
+        if (userDisplay) { userDisplay.textContent = 'Invitado'; userDisplay.className = 'badge bg-secondary'; }
+        return;
+    }
+    
+    loginPrompt.classList.add('d-none');
+    portfolioForm.classList.remove('d-none');
+    if (userDisplay) { userDisplay.textContent = currentUser || getAuthenticatedUser(); userDisplay.className = 'badge bg-primary'; }
+    
+    const btcInput = document.getElementById('portfolio-btc');
+    const paxgInput = document.getElementById('portfolio-paxg');
+    const usdtInput = document.getElementById('portfolio-usdt');
+    
+    if (btcInput) btcInput.value = userPortfolio.BTC.toFixed(8);
+    if (paxgInput) paxgInput.value = userPortfolio.PAXG.toFixed(8);
+    if (usdtInput) usdtInput.value = userPortfolio.USDT.toFixed(2);
+    
+    const btcPrice = lastPrices['BTC-USDT'] || 0;
+    const paxgPrice = lastPrices['PAXG-USDT'] || 0;
+    
+    const btcValue = userPortfolio.BTC * btcPrice;
+    const paxgValue = userPortfolio.PAXG * paxgPrice;
+    const usdtValue = userPortfolio.USDT;
+    const total = btcValue + paxgValue + usdtValue;
+    
+    const valBtc = document.getElementById('val-btc');
+    const valPaxg = document.getElementById('val-paxg');
+    if (valBtc) valBtc.textContent = '≈ $' + btcValue.toFixed(2);
+    if (valPaxg) valPaxg.textContent = '≈ $' + paxgValue.toFixed(2);
+    
+    const totalEl = document.getElementById('portfolio-total-usd');
+    if (totalEl) totalEl.textContent = '$' + total.toFixed(2);
+    
+    if (total > 0) {
+        const pctBtc = (btcValue / total * 100).toFixed(1);
+        const pctPaxg = (paxgValue / total * 100).toFixed(1);
+        const pctUsdt = (usdtValue / total * 100).toFixed(1);
+        
+        document.getElementById('pct-btc').textContent = pctBtc + '%';
+        document.getElementById('pct-paxg').textContent = pctPaxg + '%';
+        document.getElementById('pct-usdt').textContent = pctUsdt + '%';
+        
+        document.getElementById('bar-btc').style.width = pctBtc + '%';
+        document.getElementById('bar-paxg').style.width = pctPaxg + '%';
+        document.getElementById('bar-usdt').style.width = pctUsdt + '%';
+        
+        const stateBadge = document.getElementById('portfolio-state');
+        if (usdtValue / total >= 0.80) { stateBadge.className = 'mt-2 badge bg-success'; stateBadge.textContent = '🟢 Todo en Efectivo'; }
+        else if (paxgValue / total >= 0.75) { stateBadge.className = 'mt-2 badge bg-info'; stateBadge.textContent = '🥇 Concentrado en Oro'; }
+        else if (btcValue / total >= 0.75) { stateBadge.className = 'mt-2 badge bg-warning'; stateBadge.textContent = '⚠️ Concentrado en BTC'; }
+        else if (usdtValue / total <= 0.05) { stateBadge.className = 'mt-2 badge bg-secondary'; stateBadge.textContent = '💧 Sin Efectivo'; }
+        else { stateBadge.className = 'mt-2 badge bg-primary'; stateBadge.textContent = '⚖️ Balanceado'; }
+    } else {
+        document.getElementById('portfolio-state').textContent = 'Portafolio vacío';
+    }
+}
+
+function savePortfolioToLocal() {
+    if (!isAuthenticated()) return;
+    const btc = parseFloat(document.getElementById('portfolio-btc')?.value) || 0;
+    const paxg = parseFloat(document.getElementById('portfolio-paxg')?.value) || 0;
+    const usdt = parseFloat(document.getElementById('portfolio-usdt')?.value) || 0;
+    userPortfolio = { BTC: btc, PAXG: paxg, USDT: usdt };
+    saveUserPortfolio(currentUser || getAuthenticatedUser(), userPortfolio);
+    updatePortfolioUI();
+    if (typeof showToast === 'function') showToast('Portafolio guardado', 'success');
+}
+
+function displayTGPResult(tgp) {
+    if (!tgp) return;
+    lastTGPResult = tgp;
+    const banner = document.getElementById('tgp-banner');
+    if (!banner) return;
+    
+    banner.classList.remove('d-none');
+    const reasonEl = document.getElementById('tgp-reason');
+    if (reasonEl) reasonEl.textContent = tgp.reason;
+    
+    const tradeDetails = document.getElementById('tgp-trade-details');
+    const vetoBadge = document.getElementById('tgp-veto-badge');
+    
+    if (tgp.action === 'HOLD') {
+        banner.className = 'alert alert-secondary mt-3';
+        document.getElementById('tgp-title').textContent = '🛡️ Guardián: MANTENER';
+        if (tradeDetails) tradeDetails.classList.add('d-none');
+        if (vetoBadge) vetoBadge.classList.add('d-none');
+    } else if (tgp.veto) {
+        banner.className = 'alert alert-danger mt-3';
+        document.getElementById('tgp-title').textContent = '🛡️ Guardián: VETO';
+        if (tradeDetails) tradeDetails.classList.add('d-none');
+        if (vetoBadge) vetoBadge.classList.remove('d-none');
+    } else {
+        banner.className = 'alert alert-warning mt-3';
+        document.getElementById('tgp-title').textContent = '🛡️ Guardián: ' + formatAction(tgp.action);
+        if (tradeDetails) tradeDetails.classList.remove('d-none');
+        if (vetoBadge) vetoBadge.classList.add('d-none');
+        
+        document.getElementById('tgp-action').textContent = formatAction(tgp.action);
+        document.getElementById('tgp-confidence').textContent = tgp.confidence + '%';
+        document.getElementById('tgp-amount').textContent = (tgp.amount_crypto || 0).toFixed(8) + ' ' + (tgp.source_asset || '');
+        document.getElementById('tgp-value').textContent = '$' + (tgp.amount_usd || 0).toFixed(2);
+        
+        const before = tgp.portfolio_before || {};
+        const after = tgp.portfolio_after || {};
+        document.getElementById('tgp-before-btc').textContent = ((before.pct_btc || 0) * 100).toFixed(1) + '%';
+        document.getElementById('tgp-before-paxg').textContent = ((before.pct_paxg || 0) * 100).toFixed(1) + '%';
+        document.getElementById('tgp-before-usdt').textContent = ((before.pct_usdt || 0) * 100).toFixed(1) + '%';
+        document.getElementById('tgp-after-btc').textContent = ((after.pct_btc || 0) * 100).toFixed(1) + '%';
+        document.getElementById('tgp-after-paxg').textContent = ((after.pct_paxg || 0) * 100).toFixed(1) + '%';
+        document.getElementById('tgp-after-usdt').textContent = ((after.pct_usdt || 0) * 100).toFixed(1) + '%';
+    }
+}
+
+function formatAction(action) {
+    const map = { 'BUY_BTC': 'COMPRAR BTC', 'BUY_PAXG': 'COMPRAR PAXG', 'SELL_BTC': 'VENDER BTC', 'SELL_PAXG': 'VENDER PAXG', 'SWAP_PAXG_TO_BTC': 'CAMBIO PAXG → BTC', 'SWAP_BTC_TO_PAXG': 'CAMBIO BTC → PAXG', 'HOLD': 'MANTENER' };
+    return map[action] || action;
+}
+
+function openSaveTradeModal() {
+    if (!lastTGPResult || lastTGPResult.action === 'HOLD') return;
+    const tgp = lastTGPResult;
+    document.getElementById('trade-user').value = currentUser || getAuthenticatedUser() || 'Invitado';
+    document.getElementById('trade-action').value = formatAction(tgp.action);
+    document.getElementById('trade-amount').value = (tgp.amount_crypto || 0).toFixed(8) + ' ' + (tgp.source_asset || '');
+    document.getElementById('trade-value').value = '$' + (tgp.amount_usd || 0).toFixed(2);
+    document.getElementById('trade-entry-price').value = lastPrices['BTC-USDT'] || 0;
+    const after = tgp.portfolio_after || {};
+    const preview = document.getElementById('trade-portfolio-preview');
+    if (preview) preview.innerHTML = 'BTC: ' + (after.BTC || 0).toFixed(8) + ' | PAXG: ' + (after.PAXG || 0).toFixed(8) + ' | USDT: $' + (after.USDT || 0).toFixed(2);
+    const modalEl = document.getElementById('modalSaveSpotTrade');
+    if (modalEl && typeof bootstrap !== 'undefined') { new bootstrap.Modal(modalEl).show(); }
+}
+
+async function confirmSaveTrade() {
+    if (!lastTGPResult) return;
+    const tgp = lastTGPResult;
+    const entryPrice = parseFloat(document.getElementById('trade-entry-price')?.value) || 0;
+    const tradeData = {
+        user: currentUser || getAuthenticatedUser() || 'Invitado',
+        symbol: typeof currentSymbol !== 'undefined' ? currentSymbol : 'BTC-USDT',
+        action: tgp.action,
+        entry_price: entryPrice,
+        amount_crypto: tgp.amount_crypto || 0,
+        amount_usd: tgp.amount_usd || 0,
+        source_asset: tgp.source_asset,
+        target_asset: tgp.target_asset,
+        system_signal_action: tgp.system_signal ? tgp.system_signal.action : 'NO_OPERAR',
+        tgp_recommendation: tgp.reason,
+        timeframe: typeof currentInterval !== 'undefined' ? currentInterval : '1h',
+        portfolio_update: tgp.portfolio_after
+    };
+    try {
+        const response = await fetch('/api/save-spot-trade', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(tradeData) });
+        const result = await response.json();
+        if (result.success) {
+            userPortfolio = { ...tgp.portfolio_after };
+            saveUserPortfolio(currentUser || getAuthenticatedUser(), userPortfolio);
+            updatePortfolioUI();
+            if (typeof showToast === 'function') showToast('Operación guardada', 'success');
+            const modalEl = document.getElementById('modalSaveSpotTrade');
+            if (modalEl && typeof bootstrap !== 'undefined') bootstrap.Modal.getInstance(modalEl)?.hide();
+        } else {
+            if (typeof showToast === 'function') showToast('Error: ' + result.error, 'danger');
+        }
+    } catch (e) {
+        if (typeof showToast === 'function') showToast('Error de red', 'danger');
+    }
+}
+
+// ====== FIN FUNCIONES TGP ======
+
 
 // ============ INICIALIZACIÓN ============
 document.addEventListener('DOMContentLoaded', function() {
@@ -378,6 +630,74 @@ async function confirmSaveTrade() {
     }
     
     // ====== FIN EVENT LISTENERS TGP ======
+
+    // ====== EVENT LISTENERS DEL GUARDIÁN (TGP) ======
+    
+    // Restaurar sesión si existe
+    if (isAuthenticated()) {
+        currentUser = getAuthenticatedUser();
+        userPortfolio = getUserPortfolio(currentUser);
+        updatePortfolioUI();
+    } else {
+        updatePortfolioUI(); // Muestra "Iniciar sesión"
+    }
+    
+    // Login
+    document.getElementById('btn-tgp-login')?.addEventListener('click', () => {
+        const modal = new bootstrap.Modal(document.getElementById('modalTGPLogin'));
+        modal.show();
+    });
+    
+    document.getElementById('btn-confirm-login')?.addEventListener('click', () => {
+        const user = document.getElementById('login-user')?.value;
+        const pass = document.getElementById('login-password')?.value;
+        const errorEl = document.getElementById('login-error');
+        if (login(user, pass)) {
+            bootstrap.Modal.getInstance(document.getElementById('modalTGPLogin'))?.hide();
+            document.getElementById('login-password').value = '';
+            if (errorEl) errorEl.classList.add('d-none');
+        } else {
+            if (errorEl) errorEl.classList.remove('d-none');
+        }
+    });
+    
+    // Logout
+    document.getElementById('btn-tgp-logout')?.addEventListener('click', logout);
+    
+    // Cambiar clave
+    document.getElementById('btn-tgp-changepass')?.addEventListener('click', () => {
+        const modal = new bootstrap.Modal(document.getElementById('modalTGPChangePass'));
+        modal.show();
+    });
+    
+    document.getElementById('btn-confirm-changepass')?.addEventListener('click', () => {
+        const oldPass = document.getElementById('changepass-old')?.value;
+        const newPass = document.getElementById('changepass-new')?.value;
+        const errorEl = document.getElementById('changepass-error');
+        const user = currentUser || getAuthenticatedUser();
+        if (changePassword(user, oldPass, newPass)) {
+            bootstrap.Modal.getInstance(document.getElementById('modalTGPChangePass'))?.hide();
+            document.getElementById('changepass-old').value = '';
+            document.getElementById('changepass-new').value = '';
+            if (errorEl) errorEl.classList.add('d-none');
+            if (typeof showToast === 'function') showToast('Clave cambiada', 'success');
+        } else {
+            if (errorEl) errorEl.classList.remove('d-none');
+        }
+    });
+    
+    // Guardar portafolio
+    document.getElementById('btn-save-portfolio')?.addEventListener('click', savePortfolioToLocal);
+    
+    // Guardar operación del TGP
+    document.getElementById('btn-save-tgp-trade')?.addEventListener('click', openSaveTradeModal);
+    document.getElementById('btn-confirm-save-trade')?.addEventListener('click', confirmSaveTrade);
+    
+    // ====== FIN EVENT LISTENERS TGP ======
+    
+
+
+
 
 });
 
