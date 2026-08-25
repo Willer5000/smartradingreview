@@ -995,6 +995,208 @@ if supabase_db.enabled:
     for table, ok in health['tables_ok'].items():
         status = "✅" if ok else "❌"
         print(f"   {status} {table}")
+
+
+
+# ============================================================================
+# INSTRUCCIONES PARA AGREGAR A supabase_client.py
+# ============================================================================
+#
+# Paso 1: Nuevas funciones dentro de la clase SupabaseClient
+# (o como funciones sueltas si tu supabase_client no usa clase)
+#
+# Busca el final de supabase_client.py (después de todas las funciones
+# existentes) y AGREGA estas funciones:
+
+    # ========================================================================
+    # USER PORTFOLIO
+    # ========================================================================
+
+    def get_user_portfolio(self, user_name):
+        """Obtiene el portafolio de un usuario desde Supabase."""
+        try:
+            result = self.supabase.table('user_portfolios')\
+                .select('*')\
+                .eq('user_name', user_name)\
+                .execute()
+            if result.data and len(result.data) > 0:
+                row = result.data[0]
+                return {
+                    'BTC': float(row.get('btc_amount', 0)),
+                    'PAXG': float(row.get('paxg_amount', 0)),
+                    'USDT': float(row.get('usdt_amount', 0)),
+                    'btc_price_at_update': float(row.get('btc_price_at_update', 0)),
+                    'paxg_price_at_update': float(row.get('paxg_price_at_update', 0)),
+                    'updated_at': row.get('updated_at', '')
+                }
+            return {'BTC': 0, 'PAXG': 0, 'USDT': 0}
+        except Exception as e:
+            print(f"❌ Error get_user_portfolio: {e}")
+            return {'BTC': 0, 'PAXG': 0, 'USDT': 0}
+
+    def upsert_user_portfolio(self, portfolio_data):
+        """Guarda o actualiza el portafolio de un usuario."""
+        try:
+            # Verificar si existe
+            existing = self.supabase.table('user_portfolios')\
+                .select('id')\
+                .eq('user_name', portfolio_data['user_name'])\
+                .execute()
+
+            if existing.data and len(existing.data) > 0:
+                # Update
+                self.supabase.table('user_portfolios')\
+                    .update(portfolio_data)\
+                    .eq('user_name', portfolio_data['user_name'])\
+                    .execute()
+            else:
+                # Insert
+                self.supabase.table('user_portfolios')\
+                    .insert(portfolio_data)\
+                    .execute()
+            return True
+        except Exception as e:
+            print(f"❌ Error upsert_user_portfolio: {e}")
+            return False
+
+    # ========================================================================
+    # USER TRADES (operaciones spot personales)
+    # ========================================================================
+
+    def insert_user_trade(self, trade_data):
+        """Guarda una operación spot del usuario."""
+        try:
+            result = self.supabase.table('user_trades')\
+                .insert(trade_data)\
+                .execute()
+            return result.data[0] if result.data else {}
+        except Exception as e:
+            print(f"❌ Error insert_user_trade: {e}")
+            return {}
+
+    def get_user_trades(self, user_name, status=None, limit=100):
+        """Obtiene operaciones del usuario."""
+        try:
+            query = self.supabase.table('user_trades')\
+                .select('*')\
+                .eq('user_name', user_name)\
+                .order('created_at', desc=True)\
+                .limit(limit)
+            if status:
+                query = query.eq('status', status)
+            result = query.execute()
+            return result.data or []
+        except Exception as e:
+            print(f"❌ Error get_user_trades: {e}")
+            return []
+
+    def update_user_trade(self, trade_id, updates):
+        """Actualiza una operación (ej: cerrarla con PnL)."""
+        try:
+            self.supabase.table('user_trades')\
+                .update(updates)\
+                .eq('id', trade_id)\
+                .execute()
+            return True
+        except Exception as e:
+            print(f"❌ Error update_user_trade: {e}")
+            return False
+
+    def get_user_trade_stats(self, user_name):
+        """Calcula estadísticas personales del usuario."""
+        try:
+            trades = self.get_user_trades(user_name, limit=1000)
+
+            if not trades:
+                return {
+                    'total_trades': 0,
+                    'win_rate': 0,
+                    'total_pnl_usd': 0,
+                    'total_pnl_pct': 0,
+                    'avg_trade_usd': 0,
+                    'best_trade': None,
+                    'worst_trade': None,
+                    'open_trades': 0,
+                    'closed_trades': 0
+                }
+
+            closed = [t for t in trades if t.get('status') in ('CLOSED_WIN', 'CLOSED_LOSS', 'CLOSED_TIME', 'CLOSED_MANUAL')]
+            wins = [t for t in closed if float(t.get('pnl_usd', 0)) > 0]
+            losses = [t for t in closed if float(t.get('pnl_usd', 0)) <= 0]
+
+            total_pnl = sum(float(t.get('pnl_usd', 0)) for t in closed)
+
+            best = max(closed, key=lambda x: float(x.get('pnl_usd', 0))) if closed else None
+            worst = min(closed, key=lambda x: float(x.get('pnl_usd', 0))) if closed else None
+
+            return {
+                'total_trades': len(trades),
+                'win_rate': round(len(wins) / len(closed) * 100, 2) if closed else 0,
+                'total_pnl_usd': round(total_pnl, 2),
+                'total_pnl_pct': round(sum(float(t.get('pnl_pct', 0)) for t in closed), 2),
+                'avg_trade_usd': round(sum(float(t.get('amount_usd', 0)) for t in trades) / len(trades), 2) if trades else 0,
+                'best_trade': {
+                    'action': best.get('action'),
+                    'pnl_usd': round(float(best.get('pnl_usd', 0)), 2),
+                    'date': best.get('closed_at')
+                } if best else None,
+                'worst_trade': {
+                    'action': worst.get('action'),
+                    'pnl_usd': round(float(worst.get('pnl_usd', 0)), 2),
+                    'date': worst.get('closed_at')
+                } if worst else None,
+                'open_trades': len([t for t in trades if t.get('status') == 'OPEN']),
+                'closed_trades': len(closed)
+            }
+        except Exception as e:
+            print(f"❌ Error get_user_trade_stats: {e}")
+            return {}
+
+
+# ============================================================================
+# Paso 2: SQL para crear las tablas en Supabase
+# ============================================================================
+# Ejecuta esto en el SQL Editor de Supabase:
+
+-- Tabla de portafolios por usuario
+CREATE TABLE IF NOT EXISTS user_portfolios (
+    id SERIAL PRIMARY KEY,
+    user_name TEXT NOT NULL UNIQUE,
+    btc_amount DECIMAL(20,8) DEFAULT 0,
+    paxg_amount DECIMAL(20,8) DEFAULT 0,
+    usdt_amount DECIMAL(20,2) DEFAULT 0,
+    btc_price_at_update DECIMAL(20,2) DEFAULT 0,
+    paxg_price_at_update DECIMAL(20,2) DEFAULT 0,
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Tabla de operaciones spot personales
+CREATE TABLE IF NOT EXISTS user_trades (
+    id SERIAL PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    symbol TEXT,
+    action TEXT,  -- BUY_BTC, BUY_PAXG, SELL_BTC, SELL_PAXG, SWAP_PAXG_TO_BTC, SWAP_BTC_TO_PAXG, HOLD
+    entry_price DECIMAL(20,8) DEFAULT 0,
+    exit_price DECIMAL(20,8) DEFAULT 0,
+    amount_crypto DECIMAL(20,8) DEFAULT 0,
+    amount_usd DECIMAL(20,2) DEFAULT 0,
+    source_asset TEXT,
+    target_asset TEXT,
+    pnl_usd DECIMAL(20,2) DEFAULT 0,
+    pnl_pct DECIMAL(10,4) DEFAULT 0,
+    status TEXT DEFAULT 'OPEN',  -- OPEN, CLOSED_WIN, CLOSED_LOSS, CLOSED_TIME, CLOSED_MANUAL
+    system_signal_action TEXT,
+    tgp_recommendation TEXT,
+    timeframe TEXT,
+    opened_at TIMESTAMP,
+    closed_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Índices para performance
+CREATE INDEX IF NOT EXISTS idx_user_trades_user ON user_trades(user_name);
+CREATE INDEX IF NOT EXISTS idx_user_trades_status ON user_trades(status);
+CREATE INDEX IF NOT EXISTS idx_user_portfolios_user ON user_portfolios(user_name);
 else:
     print("⚠️ SupabaseClient deshabilitado - el sistema principal seguirá funcionando sin ReviewTrader")
 
