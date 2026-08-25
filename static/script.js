@@ -429,7 +429,18 @@ window.runCompleteAnalysis = function() {
                 
                 // Hacer fetch en paralelo para los otros pares
                 const promesas = otrosPares.map(par => 
-                    fetch(`/api/analyze?symbol=${par}&interval=${interval}`)
+// DESPUÉS:
+                    fetch('/api/analyze-with-portfolio', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            symbol: par,
+                            timeframe: interval,
+                            user: currentUser,
+                            portfolio: userPortfolio,
+                            prices: lastPrices
+                        })
+                    })
                         .then(res => res.json())
                         .then(res => {
                             if (res.success && res.data) {
@@ -529,12 +540,37 @@ function getInstantRecommendation() {
     const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
     const interval = document.getElementById('interval-select')?.value || '1D';
     
-    fetch(`/api/analyze?symbol=${symbol}&interval=${interval}`)
+    // ====== TGP: Enviar portafolio al análisis ======
+    fetch('/api/analyze-with-portfolio', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            symbol: symbol,
+            timeframe: interval,
+            user: currentUser,
+            portfolio: userPortfolio,
+            prices: lastPrices
+        })
+    })
+    // ====== FIN TGP ======
         .then(response => response.json())
         .then(data => {
             if (data.success && data.data) {
                 updateInstantRecommendation(data.data);
             }
+           
+            // ====== TGP: Mostrar recomendación del Guardián ======
+            if (data.tgp) {
+                displayTGPResult(data.tgp);
+                if (data.current_price) {
+                    lastPrices[selectedSymbol || symbol] = data.current_price;
+                }
+                if (data.correlation && data.correlation.paxg_price) {
+                    lastPrices['PAXG-USDT'] = data.correlation.paxg_price;
+                }
+                updatePortfolioUI();
+            }
+            // ====== FIN TGP ======
         })
         .catch(error => console.error('Error:', error));
 }
