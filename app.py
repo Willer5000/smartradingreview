@@ -44,6 +44,12 @@ print("=" * 60)
 print(f"✅ Logging activado - Nivel: DEBUG")
 
 # ============================================================================
+# Importacion de portafolio guardian
+# ============================================================================
+
+from portfolio_guardian import portfolio_guardian
+
+# ============================================================================
 # CONFIGURACIÓN INICIAL DEL SISTEMA
 # ============================================================================
 
@@ -22757,6 +22763,313 @@ try:
     _start_background_threads()
 except Exception as _start_err:
     print(f"⚠️ Error arrancando threads background: {_start_err}")
+
+# ============================================================================
+# Paso 2: NUEVO ENDPOINT /api/analyze-with-portfolio
+# ============================================================================
+# Busca donde terminan los endpoints de app.py (probablemente cerca del final,
+# antes de "if __name__ == '__main__':").
+# Agrega este endpoint completo:
+
+@app.route('/api/analyze-with-portfolio', methods=['POST'])
+def api_analyze_with_portfolio():
+    """
+    Endpoint que analiza el mercado Y evalúa el portafolio del usuario.
+    Retorna la señal del sistema + la recomendación independiente del TGP.
+    """
+    try:
+        data = request.get_json() or {}
+        symbol = data.get('symbol', 'BTC-USDT')
+        timeframe = data.get('timeframe', '1h')
+        user = data.get('user', 'Invitado')
+        portfolio = data.get('portfolio', {})
+        prices = data.get('prices', {})
+
+        print(f"\n{'='*60}")
+        print(f"👤 {user} - Análisis con Portafolio")
+        print(f"{'='*60}")
+        print(f"   Portafolio: BTC={portfolio.get('BTC',0)}, PAXG={portfolio.get('PAXG',0)}, USDT={portfolio.get('USDT',0)}")
+        print(f"   Precios: BTC={prices.get('BTC-USDT')}, PAXG={prices.get('PAXG-USDT')}")
+
+        # 1. Análisis normal del sistema (9 traders + moderador)
+        result = trading_system.analyze_full_market(symbol, timeframe)
+
+        if not result or not result.get('success'):
+            return jsonify({
+                'success': False,
+                'error': 'Análisis del sistema falló',
+                'system_result': result
+            }), 500
+
+        # 2. Análisis del TGP (INDEPENDIENTE)
+        tgp_result = portfolio_guardian.analyze(
+            user=user,
+            portfolio=portfolio,
+            prices=prices,
+            system_analysis=result
+        )
+
+        # 3. Merge: agregar TGP al resultado original
+        result['tgp'] = tgp_result
+        result['user'] = user
+
+        print(f"\n   🛡️ TGP: {tgp_result['action']} | Conf: {tgp_result['confidence']}%")
+        print(f"   🛡️ Razón: {tgp_result['reason'][:80]}...")
+        
+        # === ALERTA TGP A TELEGRAM (solo urgente) ===
+        should_alert, alert_reason = should_send_tgp_alert(tgp_result, user)
+        if should_alert:
+            print(f"   📱 TGP Telegram: {alert_reason} → Enviando alerta...")
+            send_tgp_telegram_alert(tgp_result, user, symbol, timeframe, prices)
+        else:
+            print(f"   📱 TGP Telegram: No urgente. Sin alerta.")
+        
+        print(f"{'='*60}\n")
+        
+        return jsonify(result)
+
+    except Exception as e:
+        print(f"❌ Error en /api/analyze-with-portfolio: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================================
+# Paso 3: NUEVO ENDPOINT /api/save-spot-trade
+# ============================================================================
+# Este endpoint guarda una operación spot del usuario en Supabase
+# y actualiza su portafolio.
+
+@app.route('/api/save-spot-trade', methods=['POST'])
+def api_save_spot_trade():
+    """Guarda una operación spot ejecutada por el usuario."""
+    try:
+        data = request.get_json() or {}
+
+        trade_data = {
+            'user_name': data.get('user', 'Invitado'),
+            'symbol': data.get('symbol', ''),
+            'action': data.get('action', ''),  # BUY_BTC, SELL_PAXG, SWAP_PAXG_TO_BTC, etc.
+            'entry_price': float(data.get('entry_price', 0)),
+            'amount_crypto': float(data.get('amount_crypto', 0)),
+            'amount_usd': float(data.get('amount_usd', 0)),
+            'source_asset': data.get('source_asset', ''),
+            'target_asset': data.get('target_asset', ''),
+            'system_signal_action': data.get('system_signal_action', ''),
+            'tgp_recommendation': data.get('tgp_recommendation', ''),
+            'timeframe': data.get('timeframe', ''),
+            'status': 'OPEN',
+            'opened_at': datetime.now().isoformat(),
+        }
+
+        # Guardar en Supabase
+        from supabase_client import supabase_client
+        saved = supabase_client.insert_user_trade(trade_data)
+
+        # Actualizar portafolio del usuario
+        portfolio_update = data.get('portfolio_update', {})
+        if portfolio_update:
+            supabase_client.upsert_user_portfolio({
+                'user_name': data.get('user', 'Invitado'),
+                'btc_amount': portfolio_update.get('BTC', 0),
+                'paxg_amount': portfolio_update.get('PAXG', 0),
+                'usdt_amount': portfolio_update.get('USDT', 0),
+                'btc_price_at_update': data.get('btc_price', 0),
+                'paxg_price_at_update': data.get('paxg_price', 0),
+            })
+
+        return jsonify({'success': True, 'trade_id': saved.get('id')})
+
+    except Exception as e:
+        print(f"❌ Error guardando trade: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================================
+# Paso 4: NUEVO ENDPOINT /api/user-portfolio
+# ============================================================================
+
+@app.route('/api/user-portfolio', methods=['GET', 'POST'])
+def api_user_portfolio():
+    """GET: Obtiene portafolio del usuario. POST: Actualiza portafolio."""
+    from supabase_client import supabase_client
+
+    if request.method == 'GET':
+        user = request.args.get('user', 'Invitado')
+        portfolio = supabase_client.get_user_portfolio(user)
+        return jsonify({'success': True, 'portfolio': portfolio})
+
+    else:  # POST
+        data = request.get_json() or {}
+        user = data.get('user', 'Invitado')
+        portfolio_data = {
+            'user_name': user,
+            'btc_amount': float(data.get('BTC', 0)),
+            'paxg_amount': float(data.get('PAXG', 0)),
+            'usdt_amount': float(data.get('USDT', 0)),
+            'btc_price_at_update': float(data.get('btc_price', 0)),
+            'paxg_price_at_update': float(data.get('paxg_price', 0)),
+        }
+        supabase_client.upsert_user_portfolio(portfolio_data)
+        return jsonify({'success': True, 'user': user})
+
+
+# ============================================================================
+# Paso 5: NUEVO ENDPOINT /api/user-stats
+# ============================================================================
+
+@app.route('/api/user-stats', methods=['GET'])
+def api_user_stats():
+    """Estadísticas personales de trading del usuario."""
+    try:
+        from supabase_client import supabase_client
+        user = request.args.get('user', 'Invitado')
+
+        stats = supabase_client.get_user_trade_stats(user)
+        return jsonify({'success': True, 'user': user, 'stats': stats})
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# ============================================================================
+# ALERTAS INDEPENDIENTES DEL TGP (Trader Guardián de Portafolio)
+# Solo alertas URGENTES. No spam.
+# ============================================================================
+
+def should_send_tgp_alert(tgp_result, user):
+    """
+    Decide si la recomendación del TGP merece una alerta de Telegram.
+    Solo 4 casos justifican interrumpir al usuario:
+    """
+    if not tgp_result:
+        return False, ""
+    
+    action = tgp_result.get('action', 'HOLD')
+    state = tgp_result.get('state', '')
+    veto = tgp_result.get('veto', False)
+    confidence = tgp_result.get('confidence', 0)
+    
+    # CASO 1: El TGP generó una señal PROPIA (no del sistema)
+    # Ej: "Estás 90% en oro, el ratio favorece BTC, cambiá ahora"
+    system_signal = tgp_result.get('system_signal', {}).get('action', 'NO_OPERAR')
+    if action not in ['HOLD'] and system_signal == 'NO_OPERAR' and confidence >= 70:
+        return True, "🌟 Señal propia del Guardián"
+    
+    # CASO 2: Sobreconcentración CRÍTICA (>90% en un activo) + acción recomendada
+    if state in ['CONCENTRATED_BTC', 'CONCENTRATED_PAXG'] and action != 'HOLD' and confidence >= 75:
+        return True, "⚠️ Sobreconcentración crítica"
+    
+    # CASO 3: 100% en efectivo + oportunidad fuerte de entrada
+    if state == 'ALL_CASH' and action in ['BUY_BTC', 'BUY_PAXG'] and confidence >= 75:
+        return True, "💰 Capital ocioso + oportunidad"
+    
+    # CASO 4: El TGP VETÓ una señal del sistema (para que no entre por error)
+    if veto and system_signal not in ['NO_OPERAR']:
+        return True, "⛔ Veto del Guardián"
+    
+    return False, ""
+
+
+def send_tgp_telegram_alert(tgp_result, user, symbol, timeframe, prices):
+    """
+    Envía alerta independiente del TGP a Telegram.
+    Solo se llama cuando should_send_tgp_alert() dice True.
+    """
+    try:
+        import requests
+        
+        bot_token = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+        chat_id = os.environ.get('TELEGRAM_CHAT_ID', '')
+        
+        if not bot_token or not chat_id:
+            print("   ⚠️ TGP Telegram: faltan credenciales")
+            return
+        
+        action = tgp_result.get('action', 'HOLD')
+        reason = tgp_result.get('reason', '')
+        confidence = tgp_result.get('confidence', 0)
+        amount_crypto = tgp_result.get('amount_crypto', 0)
+        amount_usd = tgp_result.get('amount_usd', 0)
+        source = tgp_result.get('source_asset', '')
+        target = tgp_result.get('target_asset', '')
+        state = tgp_result.get('state', '')
+        veto = tgp_result.get('veto', False)
+        
+        # Emoji según acción
+        action_emojis = {
+            'BUY_BTC': '🟢 COMPRAR BTC',
+            'BUY_PAXG': '🟡 COMPRAR PAXG',
+            'SELL_BTC': '🔴 VENDER BTC',
+            'SELL_PAXG': '🔴 VENDER PAXG',
+            'SWAP_PAXG_TO_BTC': '🔁 CAMBIO: Oro → BTC',
+            'SWAP_BTC_TO_PAXG': '🔁 CAMBIO: BTC → Oro',
+            'HOLD': '⏸️ MANTENER'
+        }
+        action_text = action_emojis.get(action, action)
+        
+        # Estado del portafolio
+        before = tgp_result.get('portfolio_before', {})
+        pct_btc = before.get('pct_btc', 0) * 100
+        pct_paxg = before.get('pct_paxg', 0) * 100
+        pct_usdt = before.get('pct_usdt', 0) * 100
+        
+        # Construir mensaje
+        if veto:
+            message = f"""📊 {user} — 🛡️ GUARDIÁN DE PORTAFOLIO
+
+⛔ VETO: El sistema dice COMPRAR, pero el Guardián lo BLOQUEÓ
+
+💡 Razón: {reason}
+
+📊 Tu portafolio actual:
+   • BTC:  {pct_btc:.1f}%
+   • PAXG: {pct_paxg:.1f}%
+   • USDT: {pct_usdt:.1f}%
+
+⏸️ Acción: NO OPERAR (protección de capital)
+"""
+        else:
+            message = f"""📊 {user} — 🛡️ GUARDIÁN DE PORTAFOLIO
+
+{action_text} | Confianza: {confidence}%
+
+💡 Razón: {reason}
+
+📊 Tu portafolio actual:
+   • BTC:  {pct_btc:.1f}%
+   • PAXG: {pct_paxg:.1f}%
+   • USDT: {pct_usdt:.1f}%
+
+💰 Operación sugerida:
+   • Usar: {amount_crypto:.6f} {source}
+   • Valor: ${amount_usd:.2f} USD
+
+📈 Después de la operación:
+   • BTC:  {tgp_result.get('portfolio_after', {}).get('pct_btc', 0)*100:.1f}%
+   • PAXG: {tgp_result.get('portfolio_after', {}).get('pct_paxg', 0)*100:.1f}%
+   • USDT: {tgp_result.get('portfolio_after', {}).get('pct_usdt', 0)*100:.1f}%
+
+⏰ {symbol} {timeframe} | {datetime.now().strftime('%H:%M')}
+"""
+        
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        payload = {
+            'chat_id': chat_id,
+            'text': message,
+            'parse_mode': 'HTML',
+            'disable_web_page_preview': True
+        }
+        
+        response = requests.post(url, data=payload, timeout=10)
+        if response.status_code == 200:
+            print(f"   ✅ TGP Telegram enviado a {user}")
+        else:
+            print(f"   ⚠️ TGP Telegram error: {response.text[:100]}")
+            
+    except Exception as e:
+        print(f"   ❌ Error TGP Telegram: {e}")
+
 
 
 # ============================================================================
