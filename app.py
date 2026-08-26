@@ -19969,12 +19969,15 @@ def api_saved_signals_list():
     """
     try:
         from saved_signals import list_saved_signals
-        limit = int(request.args.get('limit', 200))
-        limit = max(1, min(500, limit))
-        status_raw = request.args.get('status', '')
-        status_filter = [s.strip() for s in status_raw.split(',') if s.strip()] if status_raw else None
+        status_filter = request.args.get('status')
+        limit = request.args.get('limit', 200, type=int)
         
-        signals = list_saved_signals(status_filter=status_filter, limit=limit)
+        # v22.10: Filtrar por usuario autenticado
+        user = request.args.get('user') or request.headers.get('X-User-Name') or 'Invitado'
+        if status_filter:
+            status_filter = status_filter.split(',')
+        
+        signals = list_saved_signals(status_filter=status_filter, limit=limit, user_name=user)
         return jsonify({
             'success': True,
             'total': len(signals),
@@ -19996,8 +19999,7 @@ def api_saved_signals_create():
         if user == 'Invitado':
             return jsonify({'success': False, 'error': 'Debes iniciar sesión para guardar señales'}), 401
         
-        # Agregar usuario a los datos si no está
-        data['user_name'] = user
+        data['user_name'] = user  # <-- AGREGAR ESTO
         
         result, error_msg = create_saved_signal(data)
         if not result:
