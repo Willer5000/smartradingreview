@@ -22791,6 +22791,10 @@ def api_analyze_with_portfolio():
         print(f"   Portafolio: BTC={portfolio.get('BTC',0)}, PAXG={portfolio.get('PAXG',0)}, USDT={portfolio.get('USDT',0)}")
         print(f"   Precios: BTC={prices.get('BTC-USDT')}, PAXG={prices.get('PAXG-USDT')}")
 
+        # ====== AGREGAR ESTO ======
+        trading_system = TradingExpertSystem()  # ← Crear la instancia aquí
+        # ==========================
+        
         # 1. Análisis normal del sistema (9 traders + moderador)
         result = trading_system.analyze_full_market(symbol, timeframe)
 
