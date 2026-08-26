@@ -208,55 +208,6 @@ function savePortfolioToLocal() {
     if (typeof showToast === 'function') showToast('Portafolio guardado', 'success');
 }
 
-function displayTGPResult(tgp) {
-    if (!tgp) return;
-    lastTGPResult = tgp;
-    const banner = document.getElementById('tgp-banner');
-    if (!banner) return;
-    
-    banner.classList.remove('d-none');
-    const reasonEl = document.getElementById('tgp-reason');
-    if (reasonEl) reasonEl.textContent = tgp.reason;
-    
-    const tradeDetails = document.getElementById('tgp-trade-details');
-    const vetoBadge = document.getElementById('tgp-veto-badge');
-    
-    if (tgp.action === 'HOLD') {
-        banner.className = 'alert alert-secondary mt-3';
-        document.getElementById('tgp-title').textContent = '🛡️ Guardián: MANTENER';
-        if (tradeDetails) tradeDetails.classList.add('d-none');
-        if (vetoBadge) vetoBadge.classList.add('d-none');
-    } else if (tgp.veto) {
-        banner.className = 'alert alert-danger mt-3';
-        document.getElementById('tgp-title').textContent = '🛡️ Guardián: VETO';
-        if (tradeDetails) tradeDetails.classList.add('d-none');
-        if (vetoBadge) vetoBadge.classList.remove('d-none');
-    } else {
-        banner.className = 'alert alert-warning mt-3';
-        document.getElementById('tgp-title').textContent = '🛡️ Guardián: ' + formatAction(tgp.action);
-        if (tradeDetails) tradeDetails.classList.remove('d-none');
-        if (vetoBadge) vetoBadge.classList.add('d-none');
-        
-        document.getElementById('tgp-action').textContent = formatAction(tgp.action);
-        document.getElementById('tgp-confidence').textContent = tgp.confidence + '%';
-        document.getElementById('tgp-amount').textContent = (tgp.amount_crypto || 0).toFixed(8) + ' ' + (tgp.source_asset || '');
-        document.getElementById('tgp-value').textContent = '$' + (tgp.amount_usd || 0).toFixed(2);
-        
-        const before = tgp.portfolio_before || {};
-        const after = tgp.portfolio_after || {};
-        document.getElementById('tgp-before-btc').textContent = ((before.pct_btc || 0) * 100).toFixed(1) + '%';
-        document.getElementById('tgp-before-paxg').textContent = ((before.pct_paxg || 0) * 100).toFixed(1) + '%';
-        document.getElementById('tgp-before-usdt').textContent = ((before.pct_usdt || 0) * 100).toFixed(1) + '%';
-        document.getElementById('tgp-after-btc').textContent = ((after.pct_btc || 0) * 100).toFixed(1) + '%';
-        document.getElementById('tgp-after-paxg').textContent = ((after.pct_paxg || 0) * 100).toFixed(1) + '%';
-        document.getElementById('tgp-after-usdt').textContent = ((after.pct_usdt || 0) * 100).toFixed(1) + '%';
-    }
-}
-
-function formatAction(action) {
-    const map = { 'BUY_BTC': 'COMPRAR BTC', 'BUY_PAXG': 'COMPRAR PAXG', 'SELL_BTC': 'VENDER BTC', 'SELL_PAXG': 'VENDER PAXG', 'SWAP_PAXG_TO_BTC': 'CAMBIO PAXG → BTC', 'SWAP_BTC_TO_PAXG': 'CAMBIO BTC → PAXG', 'HOLD': 'MANTENER' };
-    return map[action] || action;
-}
 
 // ====== LOGIN / LOGOUT / CAMBIO DE CLAVE ======
 
@@ -1031,32 +982,13 @@ window.runCompleteAnalysis = function() {
     
     // Usar el wrapper universal (Spot o Futuros según window.IS_FUTURES_PAGE)
     // ====== TGP: Usar /api/analyze-with-portfolio en Spot para obtener recomendación del Guardián ======
-    let fetchUrl, fetchOpts;
-    if (window.IS_FUTURES_PAGE) {
-        // Futuros: endpoint normal sin TGP
-        const req = window.buildAnalyzeURL(symbol, interval);
-        fetchUrl = req.url;
-        fetchOpts = req.method === 'POST'
-            ? { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(req.body) }
-            : { method: 'GET' };
-    } else {
-        // Spot: usar endpoint con portafolio para obtener TGP
-        fetchUrl = '/api/analyze-with-portfolio';
-        fetchOpts = {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                symbol: symbol,
-                timeframe: interval,
-                user: currentUser,
-                portfolio: userPortfolio,
-                prices: lastPrices
-            })
-        };
-    }
-    // ====== FIN TGP ======
+    // Usar el wrapper universal (Spot o Futuros según window.IS_FUTURES_PAGE)
+    const req = window.buildAnalyzeURL(symbol, interval);
+    const fetchOpts = req.method === 'POST'
+        ? { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(req.body) }
+        : { method: 'GET' };
 
-    fetch(fetchUrl, fetchOpts)
+    fetch(req.url, fetchOpts)
         .then(response => {
             if (!response.ok) {
                 return response.json().then(err => {
@@ -1085,17 +1017,44 @@ window.runCompleteAnalysis = function() {
                 }
                 updatePortfolioUI();
                 // ============ FIN ACTUALIZAR PRECIOS ============
-                // ============ TGP: MOSTRAR RECOMENDACIÓN DEL GUARDIÁN ============
-                if (data.tgp) {
-                    displayTGPResult(data.tgp);
-                }
-                // ============ FIN TGP ============
+
                 
                 // ============ ACTUALIZAR TODOS LOS GRÁFICOS (SOLO CON PAR ACTUAL) ============
                 if (typeof window.updateAllCharts === 'function') {
                     window.updateAllCharts(data.data);
                 }
-                
+                // ============ TGP: LLAMADA SEPARADA AL GUARDIÁN ============
+                // Solo en Spot, después de que el análisis principal terminó
+                if (!window.IS_FUTURES_PAGE) {
+                    fetch('/api/analyze-with-portfolio', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            symbol: symbol,
+                            timeframe: interval,
+                            user: currentUser,
+                            portfolio: userPortfolio,
+                            prices: lastPrices
+                        })
+                    })
+                    .then(r => r.ok ? r.json() : Promise.reject(r.statusText))
+                    .then(tgpData => {
+                        if (tgpData.tgp) {
+                            displayTGPResult(tgpData.tgp);
+                        }
+                        if (tgpData.current_price) {
+                            lastPrices[symbol] = tgpData.current_price;
+                            if (symbol === 'BTC-USDT') lastPrices['BTC-USDT'] = tgpData.current_price;
+                            if (symbol === 'PAXG-USDT') lastPrices['PAXG-USDT'] = tgpData.current_price;
+                        }
+                        if (tgpData.correlation && tgpData.correlation.paxg_price) {
+                            lastPrices['PAXG-USDT'] = tgpData.correlation.paxg_price;
+                        }
+                        updatePortfolioUI();
+                    })
+                    .catch(err => console.warn('TGP no disponible:', err));
+                }
+                // ============ FIN TGP ============                
                 if (typeof window.updateCandleChart === 'function') {
                     window.updateCandleChart(data.data);
                 }
