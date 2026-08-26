@@ -6,13 +6,28 @@ let currentSymbol = 'BTC-USDT';
 let currentInterval = '1D';
 
 // ====== VARIABLES DEL GUARDIÁN DE PORTAFOLIO (TGP) ======
-let currentUser = null;  // null = no autenticado
-let userPortfolio = { BTC: 0, PAXG: 0, USDT: 0 };
+// --- SESIÓN PERSISTENTE ---
+function getTGPUserKey(suffix) {
+    const u = localStorage.getItem('tgp_session_user') || 'Willer';
+    return suffix ? `portfolio_${suffix}_${u}` : `portfolio_${suffix}`;
+}
+
+let currentUser = localStorage.getItem('tgp_session_user') || localStorage.getItem('smarttrading_user') || 'Willer';
+let isLoggedIn = localStorage.getItem('tgp_logged_in') === 'true';
+
+// Cargar portafolio del usuario actual (con clave por usuario)
+function loadUserPortfolio() {
+    const u = currentUser;
+    return {
+        BTC: parseFloat(localStorage.getItem(`portfolio_btc_${u}`)) || 0.00158007,
+        PAXG: parseFloat(localStorage.getItem(`portfolio_paxg_${u}`)) || 0.23673009,
+        USDT: parseFloat(localStorage.getItem(`portfolio_usdt_${u}`)) || 0
+    };
+}
+
+let userPortfolio = loadUserPortfolio();
 let lastPrices = { 'BTC-USDT': 0, 'PAXG-USDT': 0 };
 let lastTGPResult = null;
-
-// Claves por defecto (en producción deberían estar en el backend)
-const DEFAULT_PASSWORDS = { 'Willer': '1234', 'Danilo': '1234' };
 // ====== FIN VARIABLES TGP ======
 
 
@@ -141,19 +156,20 @@ function updatePortfolioUI() {
     if (paxgInput) paxgInput.value = userPortfolio.PAXG.toFixed(8);
     if (usdtInput) usdtInput.value = userPortfolio.USDT.toFixed(2);
     
-    const btcPrice = lastPrices['BTC-USDT'] || 0;
-    const paxgPrice = lastPrices['PAXG-USDT'] || 0;
-    
+    const btcPrice = lastPrices['BTC-USDT'] || 78800;
+    const paxgPrice = lastPrices['PAXG-USDT'] || 2650;
+
     const btcValue = userPortfolio.BTC * btcPrice;
     const paxgValue = userPortfolio.PAXG * paxgPrice;
     const usdtValue = userPortfolio.USDT;
     const total = btcValue + paxgValue + usdtValue;
-    
-    const valBtc = document.getElementById('val-btc');
-    const valPaxg = document.getElementById('val-paxg');
-    if (valBtc) valBtc.textContent = '≈ $' + btcValue.toFixed(2);
-    if (valPaxg) valPaxg.textContent = '≈ $' + paxgValue.toFixed(2);
-    
+
+    // Actualizar valores individuales en USD (debajo de cada input)
+    const valBtcEl = document.getElementById('val-btc');
+    const valPaxgEl = document.getElementById('val-paxg');
+    if (valBtcEl) valBtcEl.textContent = '≈ $' + btcValue.toFixed(2);
+    if (valPaxgEl) valPaxgEl.textContent = '≈ $' + paxgValue.toFixed(2);
+
     const totalEl = document.getElementById('portfolio-total-usd');
     if (totalEl) totalEl.textContent = '$' + total.toFixed(2);
     
@@ -241,6 +257,93 @@ function formatAction(action) {
     const map = { 'BUY_BTC': 'COMPRAR BTC', 'BUY_PAXG': 'COMPRAR PAXG', 'SELL_BTC': 'VENDER BTC', 'SELL_PAXG': 'VENDER PAXG', 'SWAP_PAXG_TO_BTC': 'CAMBIO PAXG → BTC', 'SWAP_BTC_TO_PAXG': 'CAMBIO BTC → PAXG', 'HOLD': 'MANTENER' };
     return map[action] || action;
 }
+
+// ====== LOGIN / LOGOUT / CAMBIO DE CLAVE ======
+
+function initTGPSession() {
+    // Verificar sesión al cargar
+    isLoggedIn = localStorage.getItem('tgp_logged_in') === 'true';
+    currentUser = localStorage.getItem('tgp_session_user') || localStorage.getItem('smarttrading_user') || 'Willer';
+    userPortfolio = loadUserPortfolio();
+    updatePortfolioUI();
+}
+
+function doLogin() {
+    const user = document.getElementById('login-user')?.value || 'Willer';
+    const pass = document.getElementById('login-password')?.value || '';
+    const errorEl = document.getElementById('login-error');
+
+    // Validación simple (clave 1234 para ambos)
+    if (pass === '1234') {
+        isLoggedIn = true;
+        currentUser = user;
+        localStorage.setItem('tgp_logged_in', 'true');
+        localStorage.setItem('tgp_session_user', user);
+        localStorage.setItem('smarttrading_user', user);
+        userPortfolio = loadUserPortfolio();
+
+        // Cerrar modal
+        const modalEl = document.getElementById('modalTGPLogin');
+        if (modalEl && typeof bootstrap !== 'undefined') {
+            bootstrap.Modal.getInstance(modalEl)?.hide();
+        }
+
+        updatePortfolioUI();
+        if (typeof showToast === 'function') showToast(`Bienvenido, ${user}`, 'success');
+        if (errorEl) errorEl.classList.add('d-none');
+    } else {
+        if (errorEl) {
+            errorEl.textContent = 'Clave incorrecta';
+            errorEl.classList.remove('d-none');
+        }
+    }
+}
+
+function doLogout() {
+    isLoggedIn = false;
+    localStorage.removeItem('tgp_logged_in');
+    // No borramos tgp_session_user ni el portafolio, solo cerramos la sesión visual
+    updatePortfolioUI();
+    if (typeof showToast === 'function') showToast('Sesión cerrada', 'info');
+}
+
+function doChangePass() {
+    const oldPass = document.getElementById('changepass-old')?.value || '';
+    const newPass = document.getElementById('changepass-new')?.value || '';
+    const errorEl = document.getElementById('changepass-error');
+
+    if (oldPass !== '1234') {
+        if (errorEl) {
+            errorEl.textContent = 'Clave actual incorrecta';
+            errorEl.classList.remove('d-none');
+        }
+        return;
+    }
+    if (!newPass || newPass.length < 4) {
+        if (errorEl) {
+            errorEl.textContent = 'La nueva clave debe tener al menos 4 caracteres';
+            errorEl.classList.remove('d-none');
+        }
+        return;
+    }
+    // Guardar nueva clave en localStorage (por usuario)
+    localStorage.setItem(`tgp_pass_${currentUser}`, newPass);
+    if (errorEl) errorEl.classList.add('d-none');
+
+    const modalEl = document.getElementById('modalTGPChangePass');
+    if (modalEl && typeof bootstrap !== 'undefined') {
+        bootstrap.Modal.getInstance(modalEl)?.hide();
+    }
+    if (typeof showToast === 'function') showToast('Clave actualizada', 'success');
+}
+
+function getStoredPass(user) {
+    return localStorage.getItem(`tgp_pass_${user}`) || '1234';
+}
+
+// ====== FIN LOGIN / LOGOUT ======
+
+
 
 function openSaveTradeModal() {
     if (!lastTGPResult || lastTGPResult.action === 'HOLD') return;
@@ -331,13 +434,32 @@ document.addEventListener('DOMContentLoaded', function() {
 // ====== FUNCIONES DEL GUARDIÁN DE PORTAFOLIO (TGP) ======
 
 function updatePortfolioUI() {
+    // --- ACTUALIZAR ESTADO DE LOGIN EN EL PANEL ---
+    const loginPrompt = document.getElementById('portfolio-login-prompt');
+    const portfolioForm = document.getElementById('portfolio-form');
+    const userDisplay = document.getElementById('portfolio-user-display');
+    const userSelect = document.getElementById('portfolio-user-select');
+
+    if (loginPrompt && portfolioForm) {
+        if (isLoggedIn) {
+            loginPrompt.classList.add('d-none');
+            portfolioForm.classList.remove('d-none');
+            if (userDisplay) userDisplay.textContent = currentUser;
+            if (userSelect) userSelect.value = currentUser;
+        } else {
+            loginPrompt.classList.remove('d-none');
+            portfolioForm.classList.add('d-none');
+            if (userDisplay) userDisplay.textContent = 'Invitado';
+        }
+    }
+    // --- FIN ESTADO LOGIN ---
+
     const btcInput = document.getElementById('portfolio-btc');
     const paxgInput = document.getElementById('portfolio-paxg');
     const usdtInput = document.getElementById('portfolio-usdt');
-    const userSelect = document.getElementById('portfolio-user-select');
-    
     if (!btcInput || !paxgInput || !usdtInput) return;
-    
+    // ... resto de la función sigue igual ...
+ 
     btcInput.value = userPortfolio.BTC.toFixed(8);
     paxgInput.value = userPortfolio.PAXG.toFixed(8);
     usdtInput.value = userPortfolio.USDT.toFixed(2);
@@ -403,20 +525,20 @@ function savePortfolioToLocal() {
     const paxgInput = document.getElementById('portfolio-paxg');
     const usdtInput = document.getElementById('portfolio-usdt');
     const userSelect = document.getElementById('portfolio-user-select');
-    
+
     userPortfolio.BTC = parseFloat(btcInput?.value) || 0;
     userPortfolio.PAXG = parseFloat(paxgInput?.value) || 0;
     userPortfolio.USDT = parseFloat(usdtInput?.value) || 0;
-    currentUser = userSelect?.value || 'Willer';
-    
+    currentUser = userSelect?.value || currentUser;
+
+    // Guardar con sufijo de usuario para que cada uno tenga su portafolio
     localStorage.setItem('smarttrading_user', currentUser);
-    localStorage.setItem('portfolio_btc', userPortfolio.BTC);
-    localStorage.setItem('portfolio_paxg', userPortfolio.PAXG);
-    localStorage.setItem('portfolio_usdt', userPortfolio.USDT);
-    
+    localStorage.setItem(`portfolio_btc_${currentUser}`, userPortfolio.BTC);
+    localStorage.setItem(`portfolio_paxg_${currentUser}`, userPortfolio.PAXG);
+    localStorage.setItem(`portfolio_usdt_${currentUser}`, userPortfolio.USDT);
+
     updatePortfolioUI();
-    
-    // Toast de confirmación (si existe la función)
+
     if (typeof showToast === 'function') {
         showToast('Portafolio guardado para ' + currentUser, 'success');
     }
@@ -585,106 +707,94 @@ async function confirmSaveTrade() {
     
     // ====== EVENT LISTENERS DEL GUARDIÁN (TGP) ======
     
-    // Inicializar UI de portafolio al cargar la página
-    updatePortfolioUI();
+     // ====== EVENT LISTENERS DEL GUARDIÁN (TGP) ======
     
-    // Botón "Guardar Portafolio"
-    const btnSavePortfolio = document.getElementById('btn-save-portfolio');
-    if (btnSavePortfolio) {
-        btnSavePortfolio.addEventListener('click', savePortfolioToLocal);
-    }
+     // Inicializar UI de portafolio al cargar la página (con sesión persistida)
+     initTGPSession();
     
-    // Cambio de usuario en el dropdown
-    const userSelect = document.getElementById('portfolio-user-select');
-    if (userSelect) {
-        userSelect.addEventListener('change', function() {
-            currentUser = this.value;
-            localStorage.setItem('smarttrading_user', currentUser);
-            // Cargar portafolio del usuario desde localStorage
-            userPortfolio.BTC = parseFloat(localStorage.getItem('portfolio_btc_' + currentUser)) || 0;
-            userPortfolio.PAXG = parseFloat(localStorage.getItem('portfolio_paxg_' + currentUser)) || 0;
-            userPortfolio.USDT = parseFloat(localStorage.getItem('portfolio_usdt_' + currentUser)) || 0;
-            updatePortfolioUI();
-        });
-    }
+     // Botón "Guardar Portafolio"
+     const btnSavePortfolio = document.getElementById('btn-save-portfolio');
+     if (btnSavePortfolio) {
+         btnSavePortfolio.addEventListener('click', savePortfolioToLocal);
+     }
     
-    // Botón "Guardar Operación del Guardián" (en el banner)
-    const btnSaveTGP = document.getElementById('btn-save-tgp-trade');
-    if (btnSaveTGP) {
-        btnSaveTGP.addEventListener('click', openSaveTradeModal);
-    }
+     // Botón "Iniciar Sesión" (muestra modal)
+     const btnTGPLogin = document.getElementById('btn-tgp-login');
+     if (btnTGPLogin) {
+         btnTGPLogin.addEventListener('click', function() {
+             const modalEl = document.getElementById('modalTGPLogin');
+             if (modalEl && typeof bootstrap !== 'undefined') {
+                 const modal = new bootstrap.Modal(modalEl);
+                 modal.show();
+             }
+         });
+     }
     
-    // Botón "Guardar" dentro del modal
-    const btnConfirmSave = document.getElementById('btn-confirm-save-trade');
-    if (btnConfirmSave) {
-        btnConfirmSave.addEventListener('click', confirmSaveTrade);
-    }
+     // Botón "Confirmar Login" dentro del modal
+     const btnConfirmLogin = document.getElementById('btn-confirm-login');
+     if (btnConfirmLogin) {
+         btnConfirmLogin.addEventListener('click', doLogin);
+     }
     
-    // ====== FIN EVENT LISTENERS TGP ======
-
-    // ====== EVENT LISTENERS DEL GUARDIÁN (TGP) ======
+     // Login con Enter en el input de clave
+     const loginPassInput = document.getElementById('login-password');
+     if (loginPassInput) {
+         loginPassInput.addEventListener('keypress', function(e) {
+             if (e.key === 'Enter') doLogin();
+         });
+     }
     
-    // Restaurar sesión si existe
-    if (isAuthenticated()) {
-        currentUser = getAuthenticatedUser();
-        userPortfolio = getUserPortfolio(currentUser);
-        updatePortfolioUI();
-    } else {
-        updatePortfolioUI(); // Muestra "Iniciar sesión"
-    }
+     // Botón "Salir"
+     const btnTGPLogout = document.getElementById('btn-tgp-logout');
+     if (btnTGPLogout) {
+         btnTGPLogout.addEventListener('click', doLogout);
+     }
     
-    // Login
-    document.getElementById('btn-tgp-login')?.addEventListener('click', () => {
-        const modal = new bootstrap.Modal(document.getElementById('modalTGPLogin'));
-        modal.show();
-    });
+     // Botón "Cambiar Clave" (muestra modal)
+     const btnTGPChangePass = document.getElementById('btn-tgp-changepass');
+     if (btnTGPChangePass) {
+         btnTGPChangePass.addEventListener('click', function() {
+             const modalEl = document.getElementById('modalTGPChangePass');
+             if (modalEl && typeof bootstrap !== 'undefined') {
+                 const modal = new bootstrap.Modal(modalEl);
+                 modal.show();
+             }
+         });
+     }
     
-    document.getElementById('btn-confirm-login')?.addEventListener('click', () => {
-        const user = document.getElementById('login-user')?.value;
-        const pass = document.getElementById('login-password')?.value;
-        const errorEl = document.getElementById('login-error');
-        if (login(user, pass)) {
-            bootstrap.Modal.getInstance(document.getElementById('modalTGPLogin'))?.hide();
-            document.getElementById('login-password').value = '';
-            if (errorEl) errorEl.classList.add('d-none');
-        } else {
-            if (errorEl) errorEl.classList.remove('d-none');
-        }
-    });
+     // Botón "Confirmar Cambio de Clave"
+     const btnConfirmChangePass = document.getElementById('btn-confirm-changepass');
+     if (btnConfirmChangePass) {
+         btnConfirmChangePass.addEventListener('click', doChangePass);
+     }
     
-    // Logout
-    document.getElementById('btn-tgp-logout')?.addEventListener('click', logout);
+     // Cambio de usuario en el dropdown
+     const userSelect = document.getElementById('portfolio-user-select');
+     if (userSelect) {
+         userSelect.addEventListener('change', function() {
+             currentUser = this.value;
+             localStorage.setItem('smarttrading_user', currentUser);
+             // Cargar portafolio del usuario desde localStorage (con sufijo correcto)
+             userPortfolio.BTC = parseFloat(localStorage.getItem(`portfolio_btc_${currentUser}`)) || 0;
+             userPortfolio.PAXG = parseFloat(localStorage.getItem(`portfolio_paxg_${currentUser}`)) || 0;
+             userPortfolio.USDT = parseFloat(localStorage.getItem(`portfolio_usdt_${currentUser}`)) || 0;
+             updatePortfolioUI();
+         });
+     }
     
-    // Cambiar clave
-    document.getElementById('btn-tgp-changepass')?.addEventListener('click', () => {
-        const modal = new bootstrap.Modal(document.getElementById('modalTGPChangePass'));
-        modal.show();
-    });
+     // Botón "Guardar Operación del Guardián" (en el banner)
+     const btnSaveTGP = document.getElementById('btn-save-tgp-trade');
+     if (btnSaveTGP) {
+         btnSaveTGP.addEventListener('click', openSaveTradeModal);
+     }
     
-    document.getElementById('btn-confirm-changepass')?.addEventListener('click', () => {
-        const oldPass = document.getElementById('changepass-old')?.value;
-        const newPass = document.getElementById('changepass-new')?.value;
-        const errorEl = document.getElementById('changepass-error');
-        const user = currentUser || getAuthenticatedUser();
-        if (changePassword(user, oldPass, newPass)) {
-            bootstrap.Modal.getInstance(document.getElementById('modalTGPChangePass'))?.hide();
-            document.getElementById('changepass-old').value = '';
-            document.getElementById('changepass-new').value = '';
-            if (errorEl) errorEl.classList.add('d-none');
-            if (typeof showToast === 'function') showToast('Clave cambiada', 'success');
-        } else {
-            if (errorEl) errorEl.classList.remove('d-none');
-        }
-    });
+     // Botón "Guardar" dentro del modal
+     const btnConfirmSave = document.getElementById('btn-confirm-save-trade');
+     if (btnConfirmSave) {
+         btnConfirmSave.addEventListener('click', confirmSaveTrade);
+     }
     
-    // Guardar portafolio
-    document.getElementById('btn-save-portfolio')?.addEventListener('click', savePortfolioToLocal);
-    
-    // Guardar operación del TGP
-    document.getElementById('btn-save-tgp-trade')?.addEventListener('click', openSaveTradeModal);
-    document.getElementById('btn-confirm-save-trade')?.addEventListener('click', confirmSaveTrade);
-    
-    // ====== FIN EVENT LISTENERS TGP ======
+     // ====== FIN EVENT LISTENERS TGP ======
     
 
 
@@ -920,12 +1030,33 @@ window.runCompleteAnalysis = function() {
     window.showToast('🔍 Iniciando análisis completo...', 'info');
     
     // Usar el wrapper universal (Spot o Futuros según window.IS_FUTURES_PAGE)
-    const req = window.buildAnalyzeURL(symbol, interval);
-    const fetchOpts = req.method === 'POST' 
-        ? { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(req.body) }
-        : { method: 'GET' };
-    
-    fetch(req.url, fetchOpts)
+    // ====== TGP: Usar /api/analyze-with-portfolio en Spot para obtener recomendación del Guardián ======
+    let fetchUrl, fetchOpts;
+    if (window.IS_FUTURES_PAGE) {
+        // Futuros: endpoint normal sin TGP
+        const req = window.buildAnalyzeURL(symbol, interval);
+        fetchUrl = req.url;
+        fetchOpts = req.method === 'POST'
+            ? { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(req.body) }
+            : { method: 'GET' };
+    } else {
+        // Spot: usar endpoint con portafolio para obtener TGP
+        fetchUrl = '/api/analyze-with-portfolio';
+        fetchOpts = {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                symbol: symbol,
+                timeframe: interval,
+                user: currentUser,
+                portfolio: userPortfolio,
+                prices: lastPrices
+            })
+        };
+    }
+    // ====== FIN TGP ======
+
+    fetch(fetchUrl, fetchOpts)
         .then(response => {
             if (!response.ok) {
                 return response.json().then(err => {
@@ -937,6 +1068,29 @@ window.runCompleteAnalysis = function() {
         .then(data => {
             if (data.success && data.data) {
                 window.currentAnalysis = data.data;
+
+                // ============ ACTUALIZAR PRECIOS PARA PORTAFOLIO ============ (posiblemente se requiere un TAB
+                const price = data.data.current_price || 0;
+                if (price > 0) {
+                    lastPrices[symbol] = price;
+                    if (symbol === 'BTC-USDT') lastPrices['BTC-USDT'] = price;
+                    if (symbol === 'PAXG-USDT') lastPrices['PAXG-USDT'] = price;
+                    if (symbol === 'PAXG-BTC' && data.data.correlation?.paxg_price) {
+                        lastPrices['PAXG-USDT'] = data.data.correlation.paxg_price;
+                    }
+                }
+                // Si hay precio de PAXG en correlación, guardarlo también
+                if (data.data.correlation && data.data.correlation.paxg_price) {
+                    lastPrices['PAXG-USDT'] = data.data.correlation.paxg_price;
+                }
+                // Actualizar UI de portafolio con precios frescos
+                updatePortfolioUI();
+                // ============ FIN ACTUALIZAR PRECIOS ============  
+                // ============ TGP: MOSTRAR RECOMENDACIÓN DEL GUARDIÁN ============
+                if (data.tgp) {
+                    displayTGPResult(data.tgp);
+                }
+                // ============ FIN TGP ============
                 
                 // ============ ACTUALIZAR TODOS LOS GRÁFICOS (SOLO CON PAR ACTUAL) ============
                 if (typeof window.updateAllCharts === 'function') {
@@ -1177,16 +1331,20 @@ function getInstantRecommendation() {
             }
            
             // ====== TGP: Mostrar recomendación del Guardián ======
+            // ====== TGP: Mostrar recomendación del Guardián ======
             if (data.tgp) {
                 displayTGPResult(data.tgp);
-                if (data.current_price) {
-                    lastPrices[selectedSymbol || symbol] = data.current_price;
-                }
-                if (data.correlation && data.correlation.paxg_price) {
-                    lastPrices['PAXG-USDT'] = data.correlation.paxg_price;
-                }
-                updatePortfolioUI();
             }
+            if (data.current_price) {
+                lastPrices[symbol] = data.current_price;
+                if (symbol === 'BTC-USDT') lastPrices['BTC-USDT'] = data.current_price;
+                if (symbol === 'PAXG-USDT') lastPrices['PAXG-USDT'] = data.current_price;
+            }
+            if (data.correlation && data.correlation.paxg_price) {
+                lastPrices['PAXG-USDT'] = data.correlation.paxg_price;
+            }
+            updatePortfolioUI();
+            // ====== FIN TGP ======
             // ====== FIN TGP ======
         })
         .catch(error => console.error('Error:', error));
