@@ -19987,17 +19987,18 @@ def api_saved_signals_list():
 
 @app.route('/api/saved_signals', methods=['POST'])
 def api_saved_signals_create():
-    """Crea una nueva señal guardada.
-    
-    Body JSON: symbol, timeframe, action, entry, stop_loss, take_profit,
-    leverage, investment_usdt, [confidence, candle_timestamp, original_*, notes]
-    
-    v22.9.1: propaga el error REAL de saved_signals (antes decía siempre
-    'No se pudo guardar (verifica datos)' que no ayudaba a diagnosticar).
-    """
     try:
         from saved_signals import create_saved_signal
         data = request.get_json() or {}
+        
+        # v22.10: Solo usuarios autenticados pueden guardar
+        user = data.get('user_name') or data.get('user') or 'Invitado'
+        if user == 'Invitado':
+            return jsonify({'success': False, 'error': 'Debes iniciar sesión para guardar señales'}), 401
+        
+        # Agregar usuario a los datos si no está
+        data['user_name'] = user
+        
         result, error_msg = create_saved_signal(data)
         if not result:
             return jsonify({
