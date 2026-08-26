@@ -819,28 +819,42 @@ window.confirmSaveSignal = async function() {
         confidence: confidence,
         candle_timestamp: new Date().toISOString()
     };
+
+    console.log('📤 Payload a enviar:', payload);
+
     try {
         const response = await fetch('/api/saved_signals', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
         });
+
+        console.log('📥 Status:', response.status, response.statusText);
+
+        // Si la respuesta NO es OK, leer el texto del error
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('❌ Error del servidor:', errorText);
+            showToast('Error del servidor: ' + (errorText || response.statusText), 'error');
+            return;
+        }
+
         const data = await response.json();
+        console.log('📥 Respuesta:', data);
+
         if (data.success) {
-            showToast('Señal guardada en Mi Portafolio', 'success');
+            showToast('✅ Señal guardada en Mi Portafolio', 'success');
             bootstrap.Modal.getInstance(document.getElementById('saveSignalModal'))?.hide();
-            // Recargar señales guardadas si existe la función
             if (typeof window.loadSavedSignals === 'function') window.loadSavedSignals();
-            // Limpiar la señal de la vela anterior para no confundir con la siguiente
             window.selectedPreviousSignal = null;
         } else {
-            showToast('Error: ' + (data.error || 'No se pudo guardar'), 'error');
+            showToast('❌ Error: ' + (data.error || 'No se pudo guardar'), 'error');
         }
     } catch (e) {
-        showToast('Error de conexión al guardar', 'error');
+        console.error('❌ Error fetch:', e);
+        showToast('❌ Error de red: ' + e.message, 'error');
     }
 };
-
 // ====== FIN GUARDAR SEÑALES FUTUROS ======    
 
 // ====== CARGAR SEÑALES GUARDADAS (SOLO DEL USUARIO AUTENTICADO) ======
