@@ -19982,31 +19982,34 @@ def api_saved_signals_list():
         return jsonify({'success': False, 'error': str(e)[:200], 'signals': [], 'total': 0}), 200
 
 
-@app.route('/api/saved_signals', methods=['POST'])
-def api_saved_signals_create():
+@app.route('/api/saved_signals', methods=['GET'])
+def api_saved_signals_list():
+    """Lista señales guardadas. Por defecto excluye 'deleted'.
+
+    Query params:
+      status: 'active,entry_touched' (coma) para filtrar. Default: todas menos deleted.
+      limit: máximo a devolver (default 200)
+      user: filtrar por nombre de usuario (Willer/Danilo)
+    """
     try:
-        from saved_signals import create_saved_signal
-        data = request.get_json() or {}
+        from saved_signals import list_saved_signals
+        limit = int(request.args.get('limit', 200))
+        limit = max(1, min(500, limit))
+        status_raw = request.args.get('status', '')
+        status_filter = [s.strip() for s in status_raw.split(',') if s.strip()] if status_raw else None
         
-        # v22.10: Solo usuarios autenticados pueden guardar
-        user = data.get('user_name') or data.get('user') or 'Invitado'
-        if user == 'Invitado':
-            return jsonify({'success': False, 'error': 'Debes iniciar sesión para guardar señales'}), 401
-        
-        data['user_name'] = user  # <-- AGREGAR ESTO
-        
-        result, error_msg = create_saved_signal(data)
-        if not result:
-            return jsonify({
-                'success': False,
-                'error': error_msg or 'No se pudo guardar (motivo desconocido)'
-            }), 200
-        return jsonify({'success': True, 'signal': result})
+        # v22.10: Filtrar por usuario autenticado
+        user = request.args.get('user') or request.headers.get('X-User-Name') or 'Invitado'
+
+        signals = list_saved_signals(status_filter=status_filter, limit=limit, user_name=user)
+        return jsonify({
+            'success': True,
+            'total': len(signals),
+            'signals': signals,
+        })
     except Exception as e:
-        print(f"❌ api_saved_signals_create: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)[:250]}), 200
+        print(f"❌ api_saved_signals_list: {e}")
+        return jsonify({'success': False, 'error': str(e)[:200], 'signals': [], 'total': 0}), 200
 
 
 @app.route('/api/saved_signals/<signal_id>', methods=['GET'])
