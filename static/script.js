@@ -771,6 +771,7 @@ window.openSaveSignalModal = function() {
     }
 };
 
+window.confirmSaveSignal = async function() {
     const user = getAuthenticatedUser() || currentUser;
 
     // PRIORIDAD 1: Usar la señal de la vela anterior si existe
