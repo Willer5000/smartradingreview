@@ -253,6 +253,10 @@ function doLogin() {
         }
 
         updatePortfolioUI();
+        // Cargar señales guardadas del usuario
+        if (typeof window.loadSavedSignals === 'function') {
+            window.loadSavedSignals();
+        }
         if (typeof showToast === 'function') showToast(`Bienvenido, ${user}`, 'success');
         if (errorEl) errorEl.classList.add('d-none');
     } else {
@@ -659,6 +663,10 @@ async function confirmSaveTrade() {
              userPortfolio.PAXG = parseFloat(localStorage.getItem(`portfolio_paxg_${currentUser}`)) || 0;
              userPortfolio.USDT = parseFloat(localStorage.getItem(`portfolio_usdt_${currentUser}`)) || 0;
              updatePortfolioUI();
+            // Cargar señales guardadas si está autenticado
+            if (isAuthenticated() && typeof window.loadSavedSignals === 'function') {
+                window.loadSavedSignals();
+            }             
          });
      }
     
@@ -690,35 +698,54 @@ window.openSaveSignalModal = function() {
         return;
     }
 
-    // Obtener datos de la señal actual del análisis
+    // PRIORIDAD 1: Usar la señal de la vela anterior si está seleccionada
+    const prevSignal = window.selectedPreviousSignal;
+    
+    // PRIORIDAD 2: Usar el análisis actual del par
     const analysis = window.currentAnalysis;
     
-    // La estructura real es: analysis.decision + analysis.levels
-    // NO analysis.recommendation
-    if (!analysis || !analysis.decision || !analysis.levels) {
-        showToast('No hay señal activa para guardar. Esperá a que termine el análisis.', 'warning');
+    let source = null;
+    let sourceType = '';
+    
+    if (prevSignal && prevSignal.decision && (prevSignal.decision.includes('LONG') || prevSignal.decision.includes('SHORT') || prevSignal.decision.includes('COMPRA') || prevSignal.decision.includes('VENTA'))) {
+        source = prevSignal;
+        sourceType = 'previous';
+    } else if (analysis && analysis.decision && analysis.levels) {
+        source = {
+            symbol: analysis.symbol || window.currentSymbol,
+            timeframe: analysis.timeframe || window.currentInterval,
+            decision: analysis.decision.action,
+            confidence: analysis.decision.confidence,
+            entry: analysis.levels.entry,
+            stop_loss: analysis.levels.stop_loss,
+            take_profit: analysis.levels.take_profit,
+            leverage: analysis.levels.leverage
+        };
+        sourceType = 'current';
+    }
+    
+    if (!source) {
+        showToast('No hay señal activa para guardar', 'warning');
         return;
     }
 
-    const decision = analysis.decision;
-    const levels = analysis.levels;
-
-    // Determinar acción (LONG/SHORT para futuros)
+    // Determinar acción (LONG/SHORT)
     let action = 'LONG';
-    if (decision.action === 'SHORT' || decision.action === 'VENTA_SPOT') {
+    const rawAction = source.decision || '';
+    if (rawAction.includes('SHORT') || rawAction.includes('VENTA')) {
         action = 'SHORT';
-    } else if (decision.action === 'LONG' || decision.action === 'COMPRA_SPOT') {
+    } else if (rawAction.includes('LONG') || rawAction.includes('COMPRA')) {
         action = 'LONG';
     } else {
-        showToast('La señal actual es ' + decision.action + ' - no se puede guardar', 'warning');
+        showToast('La señal actual es ' + rawAction + ' - no se puede guardar', 'warning');
         return;
     }
 
     // Llenar el modal
-    document.getElementById('ss-entry').value = levels.entry || 0;
-    document.getElementById('ss-sl').value = levels.stop_loss || 0;
-    document.getElementById('ss-tp').value = levels.take_profit || 0;
-    document.getElementById('ss-leverage').value = levels.leverage || 1;
+    document.getElementById('ss-entry').value = source.entry || 0;
+    document.getElementById('ss-sl').value = source.stop_loss || 0;
+    document.getElementById('ss-tp').value = source.take_profit || 0;
+    document.getElementById('ss-leverage').value = source.leverage || 1;
     document.getElementById('ss-investment').value = 10;
 
     // Info de la señal
@@ -726,8 +753,8 @@ window.openSaveSignalModal = function() {
     if (infoEl) {
         infoEl.innerHTML = `
             <div class="alert alert-info">
-                <strong>${analysis.symbol || window.currentSymbol}</strong> - ${action}<br>
-                <small>Confianza: ${decision.confidence || 0}% | Timeframe: ${analysis.timeframe || window.currentInterval}</small>
+                <strong>${source.symbol || window.currentSymbol}</strong> - ${action}<br>
+                <small>Confianza: ${source.confidence || 0}% | Timeframe: ${source.timeframe || window.currentInterval} | Fuente: ${sourceType === 'previous' ? 'Vela Anterior' : 'Análisis Actual'}</small>
             </div>
         `;
     }
@@ -757,21 +784,44 @@ window.confirmSaveSignal = async function() {
         action = 'SHORT';
     }
 
+    const user = getAuthenticatedUser() || currentUser;
+    
+    // Usar la señal de la vela anterior si existe, sino el análisis actual
+    const prevSignal = window.selectedPreviousSignal;
+    const analysis = window.currentAnalysis;
+    
+    let symbol, timeframe, action, confidence;
+    
+    if (prevSignal && prevSignal.symbol) {
+        symbol = prevSignal.symbol;
+        timeframe = prevSignal.timeframe;
+        const rawAction = prevSignal.decision || '';
+        action = rawAction.includes('SHORT') || rawAction.includes('VENTA') ? 'SHORT' : 'LONG';
+        confidence = prevSignal.confidence || 0;
+    } else {
+        const decision = analysis?.decision || {};
+        const levels = analysis?.levels || {};
+        symbol = analysis?.symbol || window.currentSymbol;
+        timeframe = analysis?.timeframe || window.currentInterval;
+        const rawAction = decision.action || 'LONG';
+        action = rawAction === 'SHORT' || rawAction === 'VENTA_SPOT' ? 'SHORT' : 'LONG';
+        confidence = decision.confidence || 0;
+    }
+
     const payload = {
         user_name: user,
-        symbol: window.currentSymbol,
-        timeframe: window.currentInterval,
-        action: action,  // <-- LONG o SHORT (lo que espera el backend)
+        symbol: symbol,
+        timeframe: timeframe,
+        action: action,
         entry: parseFloat(document.getElementById('ss-entry')?.value) || 0,
         stop_loss: parseFloat(document.getElementById('ss-sl')?.value) || 0,
         take_profit: parseFloat(document.getElementById('ss-tp')?.value) || 0,
         leverage: parseInt(document.getElementById('ss-leverage')?.value) || 1,
         investment_usdt: parseFloat(document.getElementById('ss-investment')?.value) || 10,
         notes: document.getElementById('ss-notes')?.value || '',
-        confidence: decision.confidence || 0,
+        confidence: confidence,
         candle_timestamp: new Date().toISOString()
     };
-
     try {
         const response = await fetch('/api/saved_signals', {
             method: 'POST',
@@ -6592,6 +6642,9 @@ window.updatePreviousSignals = function updatePreviousSignals() {
 
 // ============ MOSTRAR JUSTIFICACIÓN DE SEÑAL ANTERIOR ============
 window.showPreviousSignalJustification = function(senal) {
+    // Guardar la señal seleccionada para poder guardarla después
+    window.selectedPreviousSignal = senal;
+    
     const modalBody = document.getElementById('prev-signal-details');
     if (!modalBody) return;
     
