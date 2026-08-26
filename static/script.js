@@ -874,10 +874,10 @@ function loadInitialData() {
     
     // Ejecutar análisis completo
     try {
-        ();
+        runCompleteAnalysis();
         console.log('✅ Análisis completo iniciado');
     } catch (e) {
-        console.error('❌ Error en :', e);
+        console.error('❌ Error en runCompleteAnalysis:', e); 
     }
     
     // ============ Cargar señales activas (NUEVO) ============
