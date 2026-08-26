@@ -175,6 +175,7 @@ def create_saved_signal(data: Dict) -> Optional[Dict]:
             'status': 'active',
             'entry_touched': False,
             'notes': str(data.get('notes', '') or '')[:500],
+            'user_name': str(data.get('user_name', data.get('user', 'Invitado'))).strip(),
         }
         
         # ============ INSERT ============
@@ -215,7 +216,8 @@ def create_saved_signal(data: Dict) -> Optional[Dict]:
 
 
 def list_saved_signals(status_filter: Optional[List[str]] = None,
-                        limit: int = 200) -> List[Dict]:
+                        limit: int = 200,
+                        user_name: Optional[str] = None) -> List[Dict]:
     """
     Lista señales guardadas.
     
@@ -229,6 +231,8 @@ def list_saved_signals(status_filter: Optional[List[str]] = None,
     try:
         def _op():
             q = db.client.table('saved_signals').select('*')
+            if user_name:
+                q = q.eq('user_name', user_name)
             if status_filter is not None:
                 q = q.in_('status', status_filter)
             else:
