@@ -93,19 +93,20 @@ function saveUserPortfolio(user, portfolio) {
 }
 
 function isAuthenticated() {
-    return localStorage.getItem('tgp_authenticated') === 'true';
+    return localStorage.getItem('tgp_logged_in') === 'true';
 }
 
 function getAuthenticatedUser() {
-    return localStorage.getItem('tgp_user');
+    return localStorage.getItem('tgp_session_user');
 }
 
 function login(user, password) {
     const correctPass = getUserPassword(user);
     if (correctPass && password === correctPass) {
         currentUser = user;
-        localStorage.setItem('tgp_authenticated', 'true');
-        localStorage.setItem('tgp_user', user);
+        localStorage.setItem('tgp_logged_in', 'true');        // <-- UNIFICAR
+        localStorage.setItem('tgp_session_user', user);       // <-- UNIFICAR
+        localStorage.setItem('smarttrading_user', user);
         userPortfolio = getUserPortfolio(user);
         updatePortfolioUI();
         return true;
@@ -114,10 +115,11 @@ function login(user, password) {
 }
 
 function logout() {
-    currentUser = null;
+    currentUser = 'Invitado';
     userPortfolio = { BTC: 0, PAXG: 0, USDT: 0 };
-    localStorage.removeItem('tgp_authenticated');
-    localStorage.removeItem('tgp_user');
+    localStorage.removeItem('tgp_logged_in');           // <-- UNIFICAR
+    localStorage.removeItem('tgp_session_user');        // <-- UNIFICAR
+    localStorage.removeItem('smarttrading_user');
     updatePortfolioUI();
 }
 
@@ -134,6 +136,15 @@ function updatePortfolioUI() {
     const loginPrompt = document.getElementById('portfolio-login-prompt');
     const portfolioForm = document.getElementById('portfolio-form');
     const userDisplay = document.getElementById('portfolio-user-display');
+    const userSelect = document.getElementById('portfolio-user-select');
+    if (userSelect) {
+        if (isAuthenticated()) {
+            userSelect.style.display = 'block';
+            userSelect.value = currentUser || getAuthenticatedUser();
+        } else {
+            userSelect.style.display = 'none';
+        }
+    }    
     
     if (!loginPrompt || !portfolioForm) return;
     
@@ -255,7 +266,9 @@ function doLogin() {
 function doLogout() {
     isLoggedIn = false;
     localStorage.removeItem('tgp_logged_in');
-    // No borramos tgp_session_user ni el portafolio, solo cerramos la sesión visual
+    localStorage.removeItem('tgp_authenticated');  // <-- AGREGAR: limpiar key vieja
+    localStorage.removeItem('tgp_session_user');
+    // No borramos el portafolio, solo cerramos la sesión visual
     updatePortfolioUI();
     if (typeof showToast === 'function') showToast('Sesión cerrada', 'info');
 }
@@ -742,6 +755,55 @@ window.confirmSaveSignal = async function() {
 
 // ====== FIN GUARDAR SEÑALES FUTUROS ======    
 
+// ====== CARGAR SEÑALES GUARDADAS (SOLO DEL USUARIO AUTENTICADO) ======
+
+window.loadSavedSignals = async function() {
+    if (!isAuthenticated()) {
+        console.log('No autenticado, ocultando señales guardadas');
+        const card = document.getElementById('saved-signals-card');
+        if (card) card.style.display = 'none';
+        return;
+    }
+
+    const user = getAuthenticatedUser() || currentUser || 'Invitado';
+    
+    try {
+        const response = await fetch('/api/saved_signals?user=' + encodeURIComponent(user));
+        const data = await response.json();
+        
+        if (data.success && data.signals) {
+            const listEl = document.getElementById('saved-signals-list');
+            const card = document.getElementById('saved-signals-card');
+            
+            if (listEl) {
+                listEl.innerHTML = '';
+                if (data.signals.length === 0) {
+                    listEl.innerHTML = '<div class="text-center text-muted py-3">No tenés señales guardadas</div>';
+                } else {
+                    data.signals.forEach(sig => {
+                        const item = document.createElement('div');
+                        item.className = 'list-group-item bg-dark text-light border-secondary';
+                        item.innerHTML = `
+                            <div class="d-flex justify-content-between">
+                                <span>${sig.symbol} - ${sig.action}</span>
+                                <span class="badge bg-${sig.status === 'active' ? 'success' : 'secondary'}">${sig.status}</span>
+                            </div>
+                            <small class="text-muted">Entry: ${sig.entry} | SL: ${sig.stop_loss} | TP: ${sig.take_profit}</small>
+                        `;
+                        listEl.appendChild(item);
+                    });
+                }
+            }
+            
+            if (card) card.style.display = 'block';
+        }
+    } catch (e) {
+        console.error('Error cargando señales guardadas:', e);
+    }
+};
+
+// ====== FIN CARGAR SEÑALES ======
+    
 
 
 
@@ -898,7 +960,14 @@ function loadInitialData() {
     } catch (e) {
         console.error('❌ Error en updateActiveSignals:', e);
     }
-    
+    // Cargar señales guardadas del usuario
+    try {
+        if (typeof window.loadSavedSignals === 'function') {
+            window.loadSavedSignals();
+        }
+    } catch (e) {
+        console.error('❌ Error en loadSavedSignals:', e);
+    }    
     // ============ Inicializar correlación con datos mock (para pruebas) ============
     setTimeout(function() {
         try {
@@ -1221,44 +1290,57 @@ window.runCompleteAnalysis = function() {
 function getInstantRecommendation() {
     const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
     const interval = document.getElementById('interval-select')?.value || '1D';
-    
-    // ====== TGP: Enviar portafolio al análisis ======
+
+    // AbortController para timeout de 15 segundos
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+
     fetch('/api/analyze-with-portfolio', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
             symbol: symbol,
             timeframe: interval,
-            user: currentUser,
+            user: currentUser || 'Invitado',
             portfolio: userPortfolio,
             prices: lastPrices
         })
     })
-    // ====== FIN TGP ======
-        .then(response => response.json())
-        .then(data => {
-            if (data.success && data.data) {
-                updateInstantRecommendation(data.data);
-            }
-           
-            // ====== TGP: Mostrar recomendación del Guardián ======
-            // ====== TGP: Mostrar recomendación del Guardián ======
-            if (data.tgp) {
-                displayTGPResult(data.tgp);
-            }
-            if (data.current_price) {
-                lastPrices[symbol] = data.current_price;
-                if (symbol === 'BTC-USDT') lastPrices['BTC-USDT'] = data.current_price;
-                if (symbol === 'PAXG-USDT') lastPrices['PAXG-USDT'] = data.current_price;
-            }
-            if (data.correlation && data.correlation.paxg_price) {
-                lastPrices['PAXG-USDT'] = data.correlation.paxg_price;
-            }
-            updatePortfolioUI();
-            // ====== FIN TGP ======
-            // ====== FIN TGP ======
-        })
-        .catch(error => console.error('Error:', error));
+    .then(response => {
+        clearTimeout(timeoutId);
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        return response.json();
+    })
+    .then(data => {
+        if (data.success && data.data) {
+            updateInstantRecommendation(data.data);
+        }
+        if (data.tgp) {
+            displayTGPResult(data.tgp);
+            console.log('✅ TGP mostrado:', data.tgp.action);
+        } else {
+            console.warn('⚠️ Respuesta sin TGP:', data);
+        }
+        if (data.current_price) {
+            lastPrices[symbol] = data.current_price;
+            if (symbol === 'BTC-USDT') lastPrices['BTC-USDT'] = data.current_price;
+            if (symbol === 'PAXG-USDT') lastPrices['PAXG-USDT'] = data.current_price;
+        }
+        if (data.correlation && data.correlation.paxg_price) {
+            lastPrices['PAXG-USDT'] = data.correlation.paxg_price;
+        }
+        updatePortfolioUI();
+    })
+    .catch(error => {
+        clearTimeout(timeoutId);
+        if (error.name === 'AbortError') {
+            console.warn('⏱️ TGP timeout (15s) - el backend tardó demasiado');
+        } else {
+            console.error('❌ Error TGP:', error);
+        }
+        // No bloquear la UI si el TGP falla
+    });
 }
 
 function generateMockAnalysis(symbol, interval) {
