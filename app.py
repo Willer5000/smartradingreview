@@ -19959,28 +19959,6 @@ def _collect_frontend_signals():
 # ============================================================================
 # v22.9: SEÑALES GUARDADAS (solo FUTUROS) — CRUD + KPIs
 # ============================================================================
-@app.route('/api/saved_signals', methods=['GET'])
-def api_saved_signals_list():
-    try:
-        from saved_signals import list_saved_signals
-        status_filter = request.args.get('status')
-        limit = request.args.get('limit', 200, type=int)
-        
-        # v22.10: Filtrar por usuario autenticado
-        user = request.args.get('user') or 'Invitado'
-        if status_filter:
-            status_filter = status_filter.split(',')
-        
-        signals = list_saved_signals(status_filter=status_filter, limit=limit, user_name=user)
-        return jsonify({
-            'success': True,
-            'total': len(signals),
-            'signals': signals,
-        })
-    except Exception as e:
-        print(f"❌ api_saved_signals_list: {e}")
-        return jsonify({'success': False, 'error': str(e)[:200], 'signals': [], 'total': 0}), 200
-
 
 @app.route('/api/saved_signals', methods=['GET'])
 def api_saved_signals_list():
