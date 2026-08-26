@@ -22795,7 +22795,10 @@ def api_analyze_with_portfolio():
         print(f"   Precios: BTC={prices.get('BTC-USDT')}, PAXG={prices.get('PAXG-USDT')}")
 
         # ====== AGREGAR ESTO ======
-        trading_system = TradingExpertSystem()  # ← Crear la instancia aquí
+        # Usar instancia cacheada para no saturar recursos
+        if not hasattr(api_analyze_with_portfolio, '_trading_system'):
+            api_analyze_with_portfolio._trading_system = TradingExpertSystem()
+        trading_system = api_analyze_with_portfolio._trading_system
         # ==========================
         
         # 1. Análisis normal del sistema (9 traders + moderador)
