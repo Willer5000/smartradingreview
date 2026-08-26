@@ -19961,19 +19961,13 @@ def _collect_frontend_signals():
 # ============================================================================
 @app.route('/api/saved_signals', methods=['GET'])
 def api_saved_signals_list():
-    """Lista señales guardadas. Por defecto excluye 'deleted'.
-    
-    Query params:
-      status: 'active,entry_touched' (coma) para filtrar. Default: todas menos deleted.
-      limit: máximo a devolver (default 200)
-    """
     try:
         from saved_signals import list_saved_signals
         status_filter = request.args.get('status')
         limit = request.args.get('limit', 200, type=int)
         
         # v22.10: Filtrar por usuario autenticado
-        user = request.args.get('user') or request.headers.get('X-User-Name') or 'Invitado'
+        user = request.args.get('user') or 'Invitado'
         if status_filter:
             status_filter = status_filter.split(',')
         
