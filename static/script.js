@@ -773,18 +773,6 @@ window.confirmSaveSignal = async function() {
     }
 
     const user = getAuthenticatedUser() || currentUser;
-    const analysis = window.currentAnalysis;
-    const decision = analysis?.decision || {};
-    const levels = analysis?.levels || {};
-    
-    // Determinar acción correcta
-    let action = 'LONG';
-    const rawAction = decision.action || 'LONG';
-    if (rawAction === 'SHORT' || rawAction === 'VENTA_SPOT') {
-        action = 'SHORT';
-    }
-
-    const user = getAuthenticatedUser() || currentUser;
     
     // Usar la señal de la vela anterior si existe, sino el análisis actual
     const prevSignal = window.selectedPreviousSignal;
