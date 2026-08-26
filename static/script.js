@@ -17,15 +17,6 @@ const DEFAULT_PASSWORDS = { 'Willer': '1234', 'Danilo': '1234' };
 
 
 
-// ====== VARIABLES DEL GUARDIÁN DE PORTAFOLIO (TGP) ======
-let currentUser = localStorage.getItem('smarttrading_user') || 'Willer';
-let userPortfolio = {
-    BTC: parseFloat(localStorage.getItem('portfolio_btc')) || 0.00158007,
-    PAXG: parseFloat(localStorage.getItem('portfolio_paxg')) || 0.23673009,
-    USDT: parseFloat(localStorage.getItem('portfolio_usdt')) || 0
-};
-let lastPrices = { 'BTC-USDT': 0, 'PAXG-USDT': 0 };
-let lastTGPResult = null;
 // ====== FIN VARIABLES TGP ======
 
 // Helper global: nunca mostrar confianza > 100% (defensa contra datos viejos).
