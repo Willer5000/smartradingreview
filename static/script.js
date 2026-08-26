@@ -1070,22 +1070,21 @@ window.runCompleteAnalysis = function() {
                 window.currentAnalysis = data.data;
 
                 // ============ ACTUALIZAR PRECIOS PARA PORTAFOLIO ============ (posiblemente se requiere un TAB
-                const price = data.data.current_price || 0;
-                if (price > 0) {
-                    lastPrices[symbol] = price;
-                    if (symbol === 'BTC-USDT') lastPrices['BTC-USDT'] = price;
-                    if (symbol === 'PAXG-USDT') lastPrices['PAXG-USDT'] = price;
+                // ============ ACTUALIZAR PRECIOS PARA PORTAFOLIO ============
+                const currentPrice = data.data.current_price || 0;
+                if (currentPrice > 0) {
+                    lastPrices[symbol] = currentPrice;
+                    if (symbol === 'BTC-USDT') lastPrices['BTC-USDT'] = currentPrice;
+                    if (symbol === 'PAXG-USDT') lastPrices['PAXG-USDT'] = currentPrice;
                     if (symbol === 'PAXG-BTC' && data.data.correlation?.paxg_price) {
                         lastPrices['PAXG-USDT'] = data.data.correlation.paxg_price;
                     }
                 }
-                // Si hay precio de PAXG en correlación, guardarlo también
                 if (data.data.correlation && data.data.correlation.paxg_price) {
                     lastPrices['PAXG-USDT'] = data.data.correlation.paxg_price;
                 }
-                // Actualizar UI de portafolio con precios frescos
                 updatePortfolioUI();
-                // ============ FIN ACTUALIZAR PRECIOS ============  
+                // ============ FIN ACTUALIZAR PRECIOS ============
                 // ============ TGP: MOSTRAR RECOMENDACIÓN DEL GUARDIÁN ============
                 if (data.tgp) {
                     displayTGPResult(data.tgp);
