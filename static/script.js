@@ -682,7 +682,6 @@ async function confirmSaveTrade() {
 window.openSaveSignalModal = function() {
     if (!isAuthenticated()) {
         showToast('Debes iniciar sesión para guardar señales', 'warning');
-        // Mostrar modal de login
         const modalEl = document.getElementById('modalTGPLogin');
         if (modalEl && typeof bootstrap !== 'undefined') {
             const modal = new bootstrap.Modal(modalEl);
@@ -693,17 +692,45 @@ window.openSaveSignalModal = function() {
 
     // Obtener datos de la señal actual del análisis
     const analysis = window.currentAnalysis;
-    if (!analysis || !analysis.recommendation) {
-        showToast('No hay señal activa para guardar', 'warning');
+    
+    // La estructura real es: analysis.decision + analysis.levels
+    // NO analysis.recommendation
+    if (!analysis || !analysis.decision || !analysis.levels) {
+        showToast('No hay señal activa para guardar. Esperá a que termine el análisis.', 'warning');
         return;
     }
 
-    const rec = analysis.recommendation;
-    document.getElementById('ss-entry').value = rec.entry_price || 0;
-    document.getElementById('ss-sl').value = rec.stop_loss || 0;
-    document.getElementById('ss-tp').value = rec.take_profit || 0;
-    document.getElementById('ss-leverage').value = rec.leverage || 1;
-    document.getElementById('ss-investment').value = 10; // tu default
+    const decision = analysis.decision;
+    const levels = analysis.levels;
+
+    // Determinar acción (LONG/SHORT para futuros)
+    let action = 'LONG';
+    if (decision.action === 'SHORT' || decision.action === 'VENTA_SPOT') {
+        action = 'SHORT';
+    } else if (decision.action === 'LONG' || decision.action === 'COMPRA_SPOT') {
+        action = 'LONG';
+    } else {
+        showToast('La señal actual es ' + decision.action + ' - no se puede guardar', 'warning');
+        return;
+    }
+
+    // Llenar el modal
+    document.getElementById('ss-entry').value = levels.entry || 0;
+    document.getElementById('ss-sl').value = levels.stop_loss || 0;
+    document.getElementById('ss-tp').value = levels.take_profit || 0;
+    document.getElementById('ss-leverage').value = levels.leverage || 1;
+    document.getElementById('ss-investment').value = 10;
+
+    // Info de la señal
+    const infoEl = document.getElementById('save-signal-info');
+    if (infoEl) {
+        infoEl.innerHTML = `
+            <div class="alert alert-info">
+                <strong>${analysis.symbol || window.currentSymbol}</strong> - ${action}<br>
+                <small>Confianza: ${decision.confidence || 0}% | Timeframe: ${analysis.timeframe || window.currentInterval}</small>
+            </div>
+        `;
+    }
 
     const modalEl = document.getElementById('saveSignalModal');
     if (modalEl && typeof bootstrap !== 'undefined') {
@@ -719,17 +746,29 @@ window.confirmSaveSignal = async function() {
     }
 
     const user = getAuthenticatedUser() || currentUser;
+    const analysis = window.currentAnalysis;
+    const decision = analysis?.decision || {};
+    const levels = analysis?.levels || {};
+    
+    // Determinar acción correcta
+    let action = 'LONG';
+    const rawAction = decision.action || 'LONG';
+    if (rawAction === 'SHORT' || rawAction === 'VENTA_SPOT') {
+        action = 'SHORT';
+    }
+
     const payload = {
-        user_name: user,  // <-- IMPORTANTE: enviar usuario
+        user_name: user,
         symbol: window.currentSymbol,
         timeframe: window.currentInterval,
-        action: document.getElementById('ss-action')?.value || 'LONG',
-        entry: parseFloat(document.getElementById('ss-entry').value) || 0,
-        stop_loss: parseFloat(document.getElementById('ss-sl').value) || 0,
-        take_profit: parseFloat(document.getElementById('ss-tp').value) || 0,
-        leverage: parseInt(document.getElementById('ss-leverage').value) || 1,
-        investment_usdt: parseFloat(document.getElementById('ss-investment').value) || 10,
+        action: action,  // <-- LONG o SHORT (lo que espera el backend)
+        entry: parseFloat(document.getElementById('ss-entry')?.value) || 0,
+        stop_loss: parseFloat(document.getElementById('ss-sl')?.value) || 0,
+        take_profit: parseFloat(document.getElementById('ss-tp')?.value) || 0,
+        leverage: parseInt(document.getElementById('ss-leverage')?.value) || 1,
+        investment_usdt: parseFloat(document.getElementById('ss-investment')?.value) || 10,
         notes: document.getElementById('ss-notes')?.value || '',
+        confidence: decision.confidence || 0,
         candle_timestamp: new Date().toISOString()
     };
 
