@@ -165,13 +165,15 @@ function updatePortfolioUI() {
     const total = btcValue + paxgValue + usdtValue;
 
     // Actualizar valores individuales en USD (debajo de cada input)
+    // Actualizar valores individuales en USD (ocultos por ahora, solo porcentajes)
     const valBtcEl = document.getElementById('val-btc');
     const valPaxgEl = document.getElementById('val-paxg');
-    if (valBtcEl) valBtcEl.textContent = '≈ $' + btcValue.toFixed(2);
-    if (valPaxgEl) valPaxgEl.textContent = '≈ $' + paxgValue.toFixed(2);
-
     const totalEl = document.getElementById('portfolio-total-usd');
-    if (totalEl) totalEl.textContent = '$' + total.toFixed(2);
+    
+    // Ocultar valores absolutos en USD (solo mostrar porcentajes)
+    if (valBtcEl) valBtcEl.style.display = 'none';
+    if (valPaxgEl) valPaxgEl.style.display = 'none';
+    if (totalEl) totalEl.style.display = 'none';
     
     if (total > 0) {
         const pctBtc = (btcValue / total * 100).toFixed(1);
@@ -361,7 +363,7 @@ document.addEventListener('DOMContentLoaded', function() {
         symbolSelect.addEventListener('change', function() {
             currentSymbol = this.value;
             currentInterval = document.getElementById('interval-select')?.value || '1D';
-            runCompleteAnalysis();
+            ();
         });
     }
     
@@ -369,7 +371,7 @@ document.addEventListener('DOMContentLoaded', function() {
         intervalSelect.addEventListener('change', function() {
             currentInterval = this.value;
             currentSymbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
-            runCompleteAnalysis();
+            ();
         });
     }
     
@@ -384,92 +386,6 @@ document.addEventListener('DOMContentLoaded', function() {
     
 // ====== FUNCIONES DEL GUARDIÁN DE PORTAFOLIO (TGP) ======
 
-function updatePortfolioUI() {
-    // --- ACTUALIZAR ESTADO DE LOGIN EN EL PANEL ---
-    const loginPrompt = document.getElementById('portfolio-login-prompt');
-    const portfolioForm = document.getElementById('portfolio-form');
-    const userDisplay = document.getElementById('portfolio-user-display');
-    const userSelect = document.getElementById('portfolio-user-select');
-
-    if (loginPrompt && portfolioForm) {
-        if (isLoggedIn) {
-            loginPrompt.classList.add('d-none');
-            portfolioForm.classList.remove('d-none');
-            if (userDisplay) userDisplay.textContent = currentUser;
-            if (userSelect) userSelect.value = currentUser;
-        } else {
-            loginPrompt.classList.remove('d-none');
-            portfolioForm.classList.add('d-none');
-            if (userDisplay) userDisplay.textContent = 'Invitado';
-        }
-    }
-    // --- FIN ESTADO LOGIN ---
-
-    const btcInput = document.getElementById('portfolio-btc');
-    const paxgInput = document.getElementById('portfolio-paxg');
-    const usdtInput = document.getElementById('portfolio-usdt');
-    if (!btcInput || !paxgInput || !usdtInput) return;
-    // ... resto de la función sigue igual ...
- 
-    btcInput.value = userPortfolio.BTC.toFixed(8);
-    paxgInput.value = userPortfolio.PAXG.toFixed(8);
-    usdtInput.value = userPortfolio.USDT.toFixed(2);
-    if (userSelect) userSelect.value = currentUser;
-    
-    const btcPrice = lastPrices['BTC-USDT'] || 78800;
-    const paxgPrice = lastPrices['PAXG-USDT'] || 2650;
-    
-    const btcValue = userPortfolio.BTC * btcPrice;
-    const paxgValue = userPortfolio.PAXG * paxgPrice;
-    const usdtValue = userPortfolio.USDT;
-    const total = btcValue + paxgValue + usdtValue;
-    
-    const totalEl = document.getElementById('portfolio-total-usd');
-    if (totalEl) totalEl.textContent = '$' + total.toFixed(2);
-    
-    if (total > 0) {
-        const pctBtc = (btcValue / total * 100).toFixed(1);
-        const pctPaxg = (paxgValue / total * 100).toFixed(1);
-        const pctUsdt = (usdtValue / total * 100).toFixed(1);
-        
-        const pctBtcEl = document.getElementById('pct-btc');
-        const pctPaxgEl = document.getElementById('pct-paxg');
-        const pctUsdtEl = document.getElementById('pct-usdt');
-        if (pctBtcEl) pctBtcEl.textContent = pctBtc + '%';
-        if (pctPaxgEl) pctPaxgEl.textContent = pctPaxg + '%';
-        if (pctUsdtEl) pctUsdtEl.textContent = pctUsdt + '%';
-        
-        const barBtc = document.getElementById('bar-btc');
-        const barPaxg = document.getElementById('bar-paxg');
-        const barUsdt = document.getElementById('bar-usdt');
-        if (barBtc) barBtc.style.width = pctBtc + '%';
-        if (barPaxg) barPaxg.style.width = pctPaxg + '%';
-        if (barUsdt) barUsdt.style.width = pctUsdt + '%';
-        
-        const stateBadge = document.getElementById('portfolio-state');
-        if (stateBadge) {
-            if (usdtValue / total >= 0.80) {
-                stateBadge.className = 'mt-2 badge bg-success';
-                stateBadge.textContent = '🟢 Todo en Efectivo';
-            } else if (paxgValue / total >= 0.75) {
-                stateBadge.className = 'mt-2 badge bg-info';
-                stateBadge.textContent = '🥇 Concentrado en Oro';
-            } else if (btcValue / total >= 0.75) {
-                stateBadge.className = 'mt-2 badge bg-warning';
-                stateBadge.textContent = '⚠️ Concentrado en BTC';
-            } else if (usdtValue / total <= 0.05) {
-                stateBadge.className = 'mt-2 badge bg-secondary';
-                stateBadge.textContent = '💧 Sin Efectivo';
-            } else {
-                stateBadge.className = 'mt-2 badge bg-primary';
-                stateBadge.textContent = '⚖️ Balanceado';
-            }
-        }
-    } else {
-        const stateBadge = document.getElementById('portfolio-state');
-        if (stateBadge) stateBadge.textContent = 'Portafolio vacío';
-    }
-}
 
 function savePortfolioToLocal() {
     const btcInput = document.getElementById('portfolio-btc');
@@ -746,7 +662,85 @@ async function confirmSaveTrade() {
      }
     
      // ====== FIN EVENT LISTENERS TGP ======
-    
+
+
+// ====== GUARDAR SEÑALES DE FUTUROS (SOLO AUTENTICADOS) ======
+
+window.openSaveSignalModal = function() {
+    if (!isAuthenticated()) {
+        showToast('Debes iniciar sesión para guardar señales', 'warning');
+        // Mostrar modal de login
+        const modalEl = document.getElementById('modalTGPLogin');
+        if (modalEl && typeof bootstrap !== 'undefined') {
+            const modal = new bootstrap.Modal(modalEl);
+            modal.show();
+        }
+        return;
+    }
+
+    // Obtener datos de la señal actual del análisis
+    const analysis = window.currentAnalysis;
+    if (!analysis || !analysis.recommendation) {
+        showToast('No hay señal activa para guardar', 'warning');
+        return;
+    }
+
+    const rec = analysis.recommendation;
+    document.getElementById('ss-entry').value = rec.entry_price || 0;
+    document.getElementById('ss-sl').value = rec.stop_loss || 0;
+    document.getElementById('ss-tp').value = rec.take_profit || 0;
+    document.getElementById('ss-leverage').value = rec.leverage || 1;
+    document.getElementById('ss-investment').value = 10; // tu default
+
+    const modalEl = document.getElementById('saveSignalModal');
+    if (modalEl && typeof bootstrap !== 'undefined') {
+        const modal = new bootstrap.Modal(modalEl);
+        modal.show();
+    }
+};
+
+window.confirmSaveSignal = async function() {
+    if (!isAuthenticated()) {
+        showToast('Sesión requerida', 'error');
+        return;
+    }
+
+    const user = getAuthenticatedUser() || currentUser;
+    const payload = {
+        user_name: user,  // <-- IMPORTANTE: enviar usuario
+        symbol: window.currentSymbol,
+        timeframe: window.currentInterval,
+        action: document.getElementById('ss-action')?.value || 'LONG',
+        entry: parseFloat(document.getElementById('ss-entry').value) || 0,
+        stop_loss: parseFloat(document.getElementById('ss-sl').value) || 0,
+        take_profit: parseFloat(document.getElementById('ss-tp').value) || 0,
+        leverage: parseInt(document.getElementById('ss-leverage').value) || 1,
+        investment_usdt: parseFloat(document.getElementById('ss-investment').value) || 10,
+        notes: document.getElementById('ss-notes')?.value || '',
+        candle_timestamp: new Date().toISOString()
+    };
+
+    try {
+        const response = await fetch('/api/saved_signals', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        if (data.success) {
+            showToast('Señal guardada en Mi Portafolio', 'success');
+            bootstrap.Modal.getInstance(document.getElementById('saveSignalModal'))?.hide();
+            // Recargar señales guardadas si existe la función
+            if (typeof window.loadSavedSignals === 'function') window.loadSavedSignals();
+        } else {
+            showToast('Error: ' + (data.error || 'No se pudo guardar'), 'error');
+        }
+    } catch (e) {
+        showToast('Error de conexión al guardar', 'error');
+    }
+};
+
+// ====== FIN GUARDAR SEÑALES FUTUROS ======    
 
 
 
@@ -880,10 +874,10 @@ function loadInitialData() {
     
     // Ejecutar análisis completo
     try {
-        runCompleteAnalysis();
+        ();
         console.log('✅ Análisis completo iniciado');
     } catch (e) {
-        console.error('❌ Error en runCompleteAnalysis:', e);
+        console.error('❌ Error en :', e);
     }
     
     // ============ Cargar señales activas (NUEVO) ============
@@ -1023,38 +1017,7 @@ window.runCompleteAnalysis = function() {
                 if (typeof window.updateAllCharts === 'function') {
                     window.updateAllCharts(data.data);
                 }
-                // ============ TGP: LLAMADA SEPARADA AL GUARDIÁN ============
-                // Solo en Spot, después de que el análisis principal terminó
-                if (!window.IS_FUTURES_PAGE) {
-                    fetch('/api/analyze-with-portfolio', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            symbol: symbol,
-                            timeframe: interval,
-                            user: currentUser,
-                            portfolio: userPortfolio,
-                            prices: lastPrices
-                        })
-                    })
-                    .then(r => r.ok ? r.json() : Promise.reject(r.statusText))
-                    .then(tgpData => {
-                        if (tgpData.tgp) {
-                            displayTGPResult(tgpData.tgp);
-                        }
-                        if (tgpData.current_price) {
-                            lastPrices[symbol] = tgpData.current_price;
-                            if (symbol === 'BTC-USDT') lastPrices['BTC-USDT'] = tgpData.current_price;
-                            if (symbol === 'PAXG-USDT') lastPrices['PAXG-USDT'] = tgpData.current_price;
-                        }
-                        if (tgpData.correlation && tgpData.correlation.paxg_price) {
-                            lastPrices['PAXG-USDT'] = tgpData.correlation.paxg_price;
-                        }
-                        updatePortfolioUI();
-                    })
-                    .catch(err => console.warn('TGP no disponible:', err));
-                }
-                // ============ FIN TGP ============                
+          
                 if (typeof window.updateCandleChart === 'function') {
                     window.updateCandleChart(data.data);
                 }
@@ -1157,19 +1120,9 @@ window.runCompleteAnalysis = function() {
                 }
                 
                 // Hacer fetch en paralelo para los otros pares
-                const promesas = otrosPares.map(par => 
-// DESPUÉS:
-                    fetch('/api/analyze-with-portfolio', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            symbol: par,
-                            timeframe: interval,
-                            user: currentUser,
-                            portfolio: userPortfolio,
-                            prices: lastPrices
-                        })
-                    })
+                // Hacer fetch en paralelo para los otros pares (USAR ENDPOINT RÁPIDO, no el de TGP)
+                const promesas = otrosPares.map(par =>
+                    fetch(`/api/analyze?symbol=${encodeURIComponent(par)}&interval=${encodeURIComponent(interval)}`)
                         .then(res => res.json())
                         .then(res => {
                             if (res.success && res.data) {
