@@ -363,7 +363,7 @@ document.addEventListener('DOMContentLoaded', function() {
         symbolSelect.addEventListener('change', function() {
             currentSymbol = this.value;
             currentInterval = document.getElementById('interval-select')?.value || '1D';
-            ();
+            runCompleteAnalysis();
         });
     }
     
@@ -371,7 +371,7 @@ document.addEventListener('DOMContentLoaded', function() {
         intervalSelect.addEventListener('change', function() {
             currentInterval = this.value;
             currentSymbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
-            ();
+            runCompleteAnalysis();
         });
     }
     
