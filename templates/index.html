@@ -2068,51 +2068,95 @@
             
             const trace = {
                 x: last4Dates,
-                open: last4Open,
-                high: last4High,
-                low: last4Low,
-                close: last4Close,
+                open: last4Open.map(Number),
+                high: last4High.map(Number),
+                low: last4Low.map(Number),
+                close: last4Close.map(Number),
                 type: 'candlestick',
                 name: 'Patrón 4V',
-                increasing: {line: {color: increasingColor, width: 1.5}, fillcolor: increasingColor},
-                decreasing: {line: {color: decreasingColor, width: 1.5}, fillcolor: decreasingColor},
-                showlegend: false,
-                hoverinfo: 'none',
-                whiskerwidth: 0.8
+                increasing: {
+                    line: {
+                        color: '#00C076',
+                        width: 1.5
+                    },
+                    fillcolor: '#00C076'
+                },
+                decreasing: {
+                    line: {
+                        color: '#FF5B5B',
+                        width: 1.5
+                    },
+                    fillcolor: '#FF5B5B'
+                },
+                showlegend: false
+            };
+            
+            const chartFont = {
+                family: 'Arial',
+                size: 10,
+                color: '#FFFFFF'
             };
             
             const layout = {
                 paper_bgcolor: 'rgba(0,0,0,0)',
                 plot_bgcolor: 'rgba(0,0,0,0)',
-                margin: {l: 1, r: 1, t: 1, b: 1},
-                font: {family: 'Arial', size: 10, color: 'white'},
+            
+                margin: {
+                    l: 2,
+                    r: 2,
+                    t: 2,
+                    b: 2
+                },
+            
+                font: chartFont,
+            
+                hoverlabel: {
+                    font: chartFont
+                },
+            
+                legend: {
+                    font: chartFont
+                },
+            
                 xaxis: {
+                    type: 'date',
                     visible: false,
                     showgrid: false,
                     zeroline: false,
                     showline: false,
                     showticklabels: false,
-                    range: [last4Dates[0].getTime() - 3600000, last4Dates[last4Dates.length - 1].getTime() + 3600000],
-                    type: 'date'
+                    fixedrange: true,
+                    tickfont: chartFont,
+                    range: [
+                        last4Dates[0].getTime() - 3600000,
+                        last4Dates[last4Dates.length - 1].getTime() + 3600000
+                    ]
                 },
+            
                 yaxis: {
                     visible: false,
                     showgrid: false,
                     zeroline: false,
                     showline: false,
                     showticklabels: false,
-                    range: [minPrice - padding, maxPrice + padding]
+                    fixedrange: true,
+                    tickfont: chartFont,
+                    range: [
+                        minPrice - padding,
+                        maxPrice + padding
+                    ]
                 },
+            
                 height: 150,
-                showlegend: false,
-                hovermode: false
+                showlegend: false
             };
             
             const config = {
                 displayModeBar: false,
                 displaylogo: false,
                 responsive: true,
-                staticPlot: true
+                scrollZoom: false,
+                doubleClick: false
             };
             
             try {
@@ -2224,8 +2268,13 @@
             
             // Calcular máximos y mínimos para escala ajustada
             // Filtrar valores inválidos (NaN, null, undefined) que causan el bug del 'font'
-            const validHighs = last40High.filter(v => Number.isFinite(v));
-            const validLows = last40Low.filter(v => Number.isFinite(v));
+            const validHighs = last40High
+                .map(Number)
+                .filter(Number.isFinite);
+            
+            const validLows = last40Low
+                .map(Number)
+                .filter(Number.isFinite);
             if (validHighs.length < 40 || validLows.length < 40) return;
             
             const maxPrice = Math.max(...validHighs);
@@ -2235,50 +2284,98 @@
             
             const trace = {
                 x: last40Dates,
-                open: last40Open,
-                high: last40High,
-                low: last40Low,
-                close: last40Close,
+                open: last40Open.map(Number),
+                high: last40High.map(Number),
+                low: last40Low.map(Number),
+                close: last40Close.map(Number),
                 type: 'candlestick',
                 name: 'Formación 40V',
-                increasing: {line: {color: '#00C076', width: 0.8}, fillcolor: '#00C076'},
-                decreasing: {line: {color: '#FF5B5B', width: 0.8}, fillcolor: '#FF5B5B'},
-                showlegend: false,
-                hoverinfo: 'none'
+            
+                increasing: {
+                    line: {
+                        color: '#00C076',
+                        width: 0.8
+                    },
+                    fillcolor: '#00C076'
+                },
+            
+                decreasing: {
+                    line: {
+                        color: '#FF5B5B',
+                        width: 0.8
+                    },
+                    fillcolor: '#FF5B5B'
+                },
+            
+                showlegend: false
+            };
+            
+            const chartFont = {
+                family: 'Arial',
+                size: 10,
+                color: '#FFFFFF'
             };
             
             const layout = {
                 paper_bgcolor: 'rgba(0,0,0,0)',
                 plot_bgcolor: 'rgba(0,0,0,0)',
-                margin: {l: 2, r: 2, t: 2, b: 2},
-                font: {family: 'Arial', size: 10, color: 'white'},
+            
+                margin: {
+                    l: 2,
+                    r: 2,
+                    t: 2,
+                    b: 2
+                },
+            
+                font: chartFont,
+            
+                hoverlabel: {
+                    font: chartFont
+                },
+            
+                legend: {
+                    font: chartFont
+                },
+            
                 xaxis: {
+                    type: 'date',
                     visible: false,
                     showgrid: false,
                     zeroline: false,
                     showline: false,
                     showticklabels: false,
-                    range: [last40Dates[0].getTime(), last40Dates[last40Dates.length - 1].getTime()],
-                    type: 'date'
+                    fixedrange: true,
+                    tickfont: chartFont,
+                    range: [
+                        last40Dates[0].getTime(),
+                        last40Dates[last40Dates.length - 1].getTime()
+                    ]
                 },
+            
                 yaxis: {
                     visible: false,
                     showgrid: false,
                     zeroline: false,
                     showline: false,
                     showticklabels: false,
-                    range: [minPrice - padding, maxPrice + padding]
+                    fixedrange: true,
+                    tickfont: chartFont,
+                    range: [
+                        minPrice - padding,
+                        maxPrice + padding
+                    ]
                 },
+            
                 height: 200,
-                showlegend: false,
-                hovermode: false
+                showlegend: false
             };
             
             const config = {
                 displayModeBar: false,
                 displaylogo: false,
                 responsive: true,
-                staticPlot: true
+                scrollZoom: false,
+                doubleClick: false
             };
             
             try {
