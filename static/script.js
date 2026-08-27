@@ -1012,6 +1012,8 @@ window.confirmSaveSignal = async function() {
         showToast('Error de red: ' + e.message, 'error');
     }
 };
+// ====== CIERRE CORRECTO DEL IF SOLO FUTUROS ======
+}
 // ====== FIN GUARDAR SEÑALES FUTUROS ======    
 
 // ====== CARGAR SEÑALES GUARDADAS (SOLO DEL USUARIO AUTENTICADO) ======
@@ -7768,8 +7770,6 @@ const TIMEFRAMES = {
 };
 
 
-// ============ CIERRE DEL BLOQUE SPOT ============
-}
 
 // ============================================================
 // EJECUTAR CARGA INICIAL DESPUÉS DE DEFINIR TODAS LAS FUNCIONES
