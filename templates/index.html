@@ -2382,7 +2382,7 @@
         };
 
         // ============ INTERVALOS DE ACTUALIZACIÓN - VERSIÓN CORREGIDA ============
-        window.startUpdateIntervals = function() {
+        function startUpdateIntervals() {
             // 1. ANÁLISIS COMPLETO - Cada 5 minutos
             setInterval(function() {
                 if (typeof window.runCompleteAnalysis === 'function') {
