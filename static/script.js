@@ -508,8 +508,13 @@ function toggleIndicator(indicator, show) {
     loadIndicatorOrder();
     
     // ============ CARGA INICIAL ============
-    console.log('🚀 Ejecutando loadInitialData...');
-    loadInitialData();
+    if (!window.__SMARTTRADING_INITIALIZED__) {
+        window.__SMARTTRADING_INITIALIZED__ = true;
+        console.log('🚀 Ejecutando loadInitialData...');
+        loadInitialData();
+    } else {
+        console.log('ℹ️ SmartTrading ya fue inicializado por otro módulo.');
+    }
     // Las funciones se inicializan al final del DOMContentLoaded (ver más abajo)
 
     
