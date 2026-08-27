@@ -767,14 +767,7 @@ document.addEventListener('DOMContentLoaded', function() {
         insertReviewTraderPanel();
     }, 800);
     // ============ INICIALIZAR ANÁLISIS PRINCIPAL DE FUTUROS ============
-    setTimeout(() => {
-        if (typeof window.loadInitialData === 'function') {
-            console.log('🚀 FUTUROS: ejecutando loadInitialData()');
-            window.loadInitialData();
-        } else {
-            console.error('❌ FUTUROS: window.loadInitialData no está disponible');
-        }
-    }, 1000);    
+
     // Refrescar panel review cada 3 min (v15: reduce carga en Render Free)
     setInterval(() => {
         if (typeof window.refreshReviewPanel === 'function') window.refreshReviewPanel();
