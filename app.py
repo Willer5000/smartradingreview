@@ -19989,6 +19989,40 @@ def api_saved_signals_list():
         print(f"❌ api_saved_signals_list: {e}")
         return jsonify({'success': False, 'error': str(e)[:200], 'signals': [], 'total': 0}), 200
 
+@app.route('/api/saved_signals', methods=['POST'])
+def api_saved_signals_create():
+    """Crea una nueva señal guardada."""
+    try:
+        from saved_signals import create_saved_signal
+        data = request.get_json() or {}
+        
+        # v22.10: Solo usuarios autenticados pueden guardar
+        user = data.get('user_name') or data.get('user') or 'Invitado'
+        if user == 'Invitado':
+            return jsonify({'success': False, 'error': 'Debes iniciar sesión para guardar señales'}), 401
+        
+        # Agregar usuario a los datos
+        data['user_name'] = user
+        
+        # Asegurar que el campo candle_timestamp esté presente
+        if not data.get('candle_timestamp'):
+            data['candle_timestamp'] = datetime.now().isoformat()
+        
+        result, error_msg = create_saved_signal(data)
+        if error_msg:
+            return jsonify({'success': False, 'error': error_msg}), 400
+        
+        return jsonify({
+            'success': True,
+            'signal': result,
+            'message': 'Señal guardada correctamente'
+        })
+    except Exception as e:
+        print(f"❌ Error creando señal: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)[:200]}), 500
+
 
 @app.route('/api/saved_signals/<signal_id>', methods=['GET'])
 def api_saved_signals_get(signal_id):
