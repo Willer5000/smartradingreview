@@ -193,7 +193,7 @@
                      tienen más confianza estadística. Se actualizan cada 5 min. -->
                 <div class="d-flex justify-content-end align-items-center gap-2 flex-wrap">
                     <span class="text-muted small">
-                        <i class="fas fa-brain me-1 text-info"></i>Rendimiento de señales del frontend:
+                        <i class="fas fa-brain me-1 text-info"></i>Rendimiento de señales :
                     </span>
                     <span id="header-kpi-winrate" 
                           class="badge bg-secondary" 
@@ -1979,7 +1979,7 @@
 
     <!-- Scripts -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
+    <script src="https://cdn.plot.ly/plotly-3.7.0.min.js"></script>
     <script src="{{ url_for('static', filename='script.js') }}"></script>
     <!-- Script de Futuros (Fase 6) - Añade panel lateral ReviewTrader en /futures -->
     {% if is_futures %}
@@ -2031,6 +2031,11 @@
             // Convertir fechas a objetos Date
             const dateObjects = dates.map(d => new Date(d));
             
+            if (dateObjects.some(d => Number.isNaN(d.getTime()))) {
+                console.warn('⚠️ Formación 40V: fechas inválidas');
+                return;
+            }
+                        
             // Últimas 4 velas
             const last4Dates = dateObjects.slice(-4);
             const last4Open = open.slice(-4);
@@ -2039,9 +2044,23 @@
             const last4Close = close.slice(-4);
             
             // Calcular máximos y mínimos para escala ajustada
-            const maxPrice = Math.max(...last4High);
-            const minPrice = Math.min(...last4Low);
-            const padding = (maxPrice - minPrice) * 0.15;
+            const validHighs = last4High.filter(v => Number.isFinite(Number(v)));
+            const validLows = last4Low.filter(v => Number.isFinite(Number(v)));
+            
+            if (validHighs.length !== 4 || validLows.length !== 4) {
+                console.warn('⚠️ Patrón 4V: datos OHLC inválidos');
+                return;
+            }
+            
+            const maxPrice = Math.max(...validHighs.map(Number));
+            const minPrice = Math.min(...validLows.map(Number));
+            
+            if (!Number.isFinite(maxPrice) || !Number.isFinite(minPrice) || maxPrice <= minPrice) {
+                console.warn('⚠️ Patrón 4V: rango de precios inválido');
+                return;
+            }
+            
+            const padding = Math.max((maxPrice - minPrice) * 0.15, Number.EPSILON);
             
             // Crear colores personalizados para velas
             const increasingColor = '#00C076';
@@ -2085,7 +2104,6 @@
                     range: [minPrice - padding, maxPrice + padding]
                 },
                 height: 150,
-                width: null,
                 showlegend: false,
                 hovermode: false
             };
@@ -2100,7 +2118,10 @@
             try {
                 Plotly.newPlot('pattern-4-chart', [trace], layout, config);
             } catch (e) {
-                console.error('Error creando gráfico de 4 velas:', e);
+                console.error('❌ Error creando gráfico de 4 velas:', e);
+                console.error('Trace:', trace);
+                console.error('Layout:', layout);
+                console.error('Config:', config);
             }
             
             // Actualizar información del patrón
@@ -2189,6 +2210,11 @@
             // Convertir fechas a objetos Date
             const dateObjects = dates.map(d => new Date(d));
             
+            if (dateObjects.some(d => Number.isNaN(d.getTime()))) {
+                console.warn('⚠️ Patrón 4V: fechas inválidas');
+                return;
+            }
+            
             // Últimas 40 velas
             const last40Dates = dateObjects.slice(-40);
             const last40Open = open.slice(-40);
@@ -2244,7 +2270,6 @@
                     range: [minPrice - padding, maxPrice + padding]
                 },
                 height: 200,
-                width: null,
                 showlegend: false,
                 hovermode: false
             };
@@ -2259,7 +2284,10 @@
             try {
                 Plotly.newPlot('formation-40-chart', [trace], layout, config);
             } catch (e) {
-                console.error('Error creando gráfico de 40 velas:', e);
+                console.error('❌ Error creando gráfico de 40 velas:', e);
+                console.error('Trace:', trace);
+                console.error('Layout:', layout);
+                console.error('Config:', config);
             }
             
             // Actualizar información de la formación
