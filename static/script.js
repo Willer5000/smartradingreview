@@ -7772,11 +7772,6 @@ const TIMEFRAMES = {'4h': {'name': '4 Horas'}, '12h': {'name': '12 Horas'}, '1D'
 // Exponer función globalmente
 window.updateFearGreedChart = updateFearGreedChart;
 
-// ============ FUNCIÓN DE EMERGENCIA PARA CORRELACIÓN ============
-// Esta función se ejecutará CADA VEZ que se cargue la página
-// ============ SOLUCIÓN DEFINITIVA PARA CORRELACIÓN ============
-// ============ SOLUCIÓN ULTRA DEFINITIVA PARA CORRELACIÓN ============
-// ============ SOLUCIÓN MANUAL DIRECTA PARA CORRELACIÓN ============
-// ============ SOLUCIÓN DEFINITIVA COMBINADA ============
-// ============ SOLUCIÓN FINAL Y DEFINITIVA ============
-// ============ CIERRES FALTANTES (arreglo syntax error) ============
+// ============ CIERRE DEL DOMContentLoaded ============
+});  // Cierra document.addEventListener('DOMContentLoaded', function() {
+// ============ FIN DEL ARCHIVO ============
