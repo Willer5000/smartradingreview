@@ -900,9 +900,16 @@ window.openSaveSignalModal = function(sig) {
     document.getElementById('ss-investment').value = 10;
     document.getElementById('ss-leverage').value = sig.leverage || 1;
     document.getElementById('ss-leverage-hint').textContent = `Sugerido por el sistema: ${sig.leverage || 1}x`;
-    document.getElementById('ss-entry').value = sig.entry || sig.entry_price || '';
-    document.getElementById('ss-sl').value = sig.stop_loss || '';
-    document.getElementById('ss-tp').value = sig.take_profit || '';
+    
+    // Fallback: si no hay entry/sl/tp en la señal, usar el precio actual del mercado como base
+    const currentPrice = window.lastPrices?.[sig.symbol] || window.currentAnalysis?.current_price || 0;
+    const defaultEntry = currentPrice > 0 ? currentPrice.toFixed(2) : '';
+    const defaultSL = currentPrice > 0 ? (currentPrice * 0.95).toFixed(2) : '';  // 5% abajo
+    const defaultTP = currentPrice > 0 ? (currentPrice * 1.10).toFixed(2) : '';  // 10% arriba
+    
+    document.getElementById('ss-entry').value = sig.entry || sig.entry_price || defaultEntry;
+    document.getElementById('ss-sl').value = sig.stop_loss || defaultSL;
+    document.getElementById('ss-tp').value = sig.take_profit || defaultTP;
     document.getElementById('ss-notes').value = '';
     // v22.9.4: fecha/hora de ingreso — default = ahora en zona local del navegador
     document.getElementById('ss-entry-at').value = _nowLocalDatetimeInput();
