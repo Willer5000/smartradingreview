@@ -509,15 +509,15 @@ function toggleIndicator(indicator, show) {
     
     // Llamar loadInitialData solo cuando esté disponible (hoisting no funciona en este archivo masivo)
     // ============ INICIALIZAR DATOS ============
-    if (typeof window.loadInitialData === 'function') {
-        window.loadInitialData();
+    if (typeof loadInitialData === 'function') {
+        loadInitialData();
     } else {
-        console.warn('⏳ window.loadInitialData aún no está disponible.');
+        console.warn('⏳ loadInitialData aún no disponible, reintentando...');
         setTimeout(function() {
-            if (typeof window.loadInitialData === 'function') {
-                window.loadInitialData();
+            if (typeof loadInitialData === 'function') {
+                loadInitialData();
             } else {
-                console.error('❌ window.loadInitialData no está disponible.');
+                console.error('❌ loadInitialData no está disponible.');
             }
         }, 500);
     }
@@ -1088,7 +1088,7 @@ window.loadSavedSignals = async function() {
 
 
 // ============ FUNCIONES PRINCIPALES ============
-window.loadInitialData = function() {
+function loadInitialData() {
     console.log('📥 Cargando datos iniciales...');
     
     // Obtener recomendación instantánea
@@ -7780,37 +7780,8 @@ const TIMEFRAMES = {
     '1W': {'name': '1 Semana'}
 };
 
-// ============ EXPORTAR FUNCIONES AL ÁMBITO GLOBAL ============
-
-// Inicialización
-window.loadInitialData = loadInitialData;
-
-// Análisis principal
-window.runCompleteAnalysis = runCompleteAnalysis;
-
-// Gráficos principales
-window.updateCandleChart = updateCandleChart;
-window.updateAllCharts = updateAllCharts;
-
-// Gráfico Fear & Greed
-window.updateFearGreedChart = updateFearGreedChart;
-
-// Utilidades usadas desde index.html
-window.getIntervalName = getIntervalName;
-window.showToast = showToast;
-
-// Indicadores / controles
-window.initializeEventListeners = initializeEventListeners;
-window.initializeDragAndDrop = initializeDragAndDrop;
-window.loadIndicatorOrder = loadIndicatorOrder;
-
-// Reloj / estado
-window.updateBoliviaClock = updateBoliviaClock;
-window.updateCalendarInfo = updateCalendarInfo;
-window.updateSystemStatus = updateSystemStatus;
 
 // ============ CIERRE DEL BLOQUE SPOT ============
-}
 }
 // ============ CIERRE DEL DOMContentLoaded ============
 });  // Cierra document.addEventListener('DOMContentLoaded', function() {
