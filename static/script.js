@@ -7765,3 +7765,8 @@ window.updateFearGreedChart = updateFearGreedChart;
 // ============ SOLUCIÓN MANUAL DIRECTA PARA CORRELACIÓN ============
 // ============ SOLUCIÓN DEFINITIVA COMBINADA ============
 // ============ SOLUCIÓN FINAL Y DEFINITIVA ============
+// ============ CIERRES FALTANTES (arreglo syntax error) ============
+
+}  // <-- Cierra el 'if (!window.IS_FUTURES_PAGE) {' de L691
+
+});  // <-- Cierra el 'document.addEventListener('DOMContentLoaded', function() {' de L373
