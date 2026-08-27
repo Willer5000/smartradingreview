@@ -958,11 +958,6 @@ window.loadSavedSignals = async function() {
 };
 
 // ====== FIN CARGAR SEÑALES ======
-    
-
-
-
-});
 
 // ============ EVENT LISTENERS ============
 function initializeEventListeners() {
