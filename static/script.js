@@ -508,18 +508,19 @@ function toggleIndicator(indicator, show) {
     loadIndicatorOrder();
     
     // Llamar loadInitialData solo cuando esté disponible (hoisting no funciona en este archivo masivo)
-    if (typeof loadInitialData === 'function') {
-        loadInitialData();
+    // ============ INICIALIZAR DATOS ============
+    if (typeof window.loadInitialData === 'function') {
+        window.loadInitialData();
     } else {
-        console.warn('⏳ loadInitialData aún no disponible, reintentando en 500ms...');
-        setTimeout(function checkLoadInitialData() {
-            if (typeof loadInitialData === 'function') {
-                loadInitialData();
+        console.warn('⏳ window.loadInitialData aún no está disponible.');
+        setTimeout(function() {
+            if (typeof window.loadInitialData === 'function') {
+                window.loadInitialData();
             } else {
-                console.error('❌ loadInitialData nunca se definió. Revisa que no haya errores de sintaxis entre L509 y L1077.');
+                console.error('❌ window.loadInitialData no está disponible.');
             }
         }, 500);
-    } 
+    }
     // Las funciones se inicializan al final del DOMContentLoaded (ver más abajo)
 
     
@@ -1087,7 +1088,7 @@ window.loadSavedSignals = async function() {
 
 
 // ============ FUNCIONES PRINCIPALES ============
-function loadInitialData() {
+window.loadInitialData = function() {
     console.log('📥 Cargando datos iniciales...');
     
     // Obtener recomendación instantánea
@@ -1611,7 +1612,7 @@ function generateMockData(n, basePrice) {
 }
 
 // ============ GRÁFICO PRINCIPAL - VELAS + EMAs + Soportes/Resistencias ============
-function updateCandleChart(data) {
+window.updateCandleChart = function(data) {
     const chartDiv = document.getElementById('candle-chart');
     if (!chartDiv || !data.df) return;
     
@@ -5427,7 +5428,7 @@ function calculateEMA(prices, period) {
 }
 
 // ============ UPDATE ALL CHARTS ============
-function updateAllCharts(data) {
+window.updateAllCharts = function(data) {
     if (!data || !data.df) {
         console.warn('No hay datos para actualizar gráficos');
         return;
@@ -7766,12 +7767,50 @@ function updateCharts(data) {
 }
 
 // ============ CONSTANTES ============
-const SYMBOLS = {'BTC-USDT': {'name': 'BTC/USDT'}, 'PAXG-USDT': {'name': 'PAXG/USDT'}, 'PAXG-BTC': {'name': 'PAXG/BTC'}};
-const TIMEFRAMES = {'4h': {'name': '4 Horas'}, '12h': {'name': '12 Horas'}, '1D': {'name': '1 Día'}, '1W': {'name': '1 Semana'}};
+const SYMBOLS = {
+    'BTC-USDT': {'name': 'BTC/USDT'},
+    'PAXG-USDT': {'name': 'PAXG/USDT'},
+    'PAXG-BTC': {'name': 'PAXG/BTC'}
+};
 
-// Exponer función globalmente
+const TIMEFRAMES = {
+    '4h': {'name': '4 Horas'},
+    '12h': {'name': '12 Horas'},
+    '1D': {'name': '1 Día'},
+    '1W': {'name': '1 Semana'}
+};
+
+// ============ EXPORTAR FUNCIONES AL ÁMBITO GLOBAL ============
+
+// Inicialización
+window.loadInitialData = loadInitialData;
+
+// Análisis principal
+window.runCompleteAnalysis = runCompleteAnalysis;
+
+// Gráficos principales
+window.updateCandleChart = updateCandleChart;
+window.updateAllCharts = updateAllCharts;
+
+// Gráfico Fear & Greed
 window.updateFearGreedChart = updateFearGreedChart;
+
+// Utilidades usadas desde index.html
+window.getIntervalName = getIntervalName;
+window.showToast = showToast;
+
+// Indicadores / controles
+window.initializeEventListeners = initializeEventListeners;
+window.initializeDragAndDrop = initializeDragAndDrop;
+window.loadIndicatorOrder = loadIndicatorOrder;
+
+// Reloj / estado
+window.updateBoliviaClock = updateBoliviaClock;
+window.updateCalendarInfo = updateCalendarInfo;
+window.updateSystemStatus = updateSystemStatus;
+
 // ============ CIERRE DEL BLOQUE SPOT ============
+}
 }
 // ============ CIERRE DEL DOMContentLoaded ============
 });  // Cierra document.addEventListener('DOMContentLoaded', function() {
