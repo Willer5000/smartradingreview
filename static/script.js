@@ -507,20 +507,9 @@ function toggleIndicator(indicator, show) {
     initializeDragAndDrop();
     loadIndicatorOrder();
     
-    // Llamar loadInitialData solo cuando esté disponible (hoisting no funciona en este archivo masivo)
-    // ============ INICIALIZAR DATOS ============
-    if (typeof loadInitialData === 'function') {
-        loadInitialData();
-    } else {
-        console.warn('⏳ loadInitialData aún no disponible, reintentando...');
-        setTimeout(function() {
-            if (typeof loadInitialData === 'function') {
-                loadInitialData();
-            } else {
-                console.error('❌ loadInitialData no está disponible.');
-            }
-        }, 500);
-    }
+    // ============ CARGA INICIAL ============
+    console.log('🚀 Ejecutando loadInitialData...');
+    loadInitialData();
     // Las funciones se inicializan al final del DOMContentLoaded (ver más abajo)
 
     
@@ -1088,7 +1077,7 @@ window.loadSavedSignals = async function() {
 
 
 // ============ FUNCIONES PRINCIPALES ============
-function loadInitialData() {
+window.loadInitialData = function() {
     console.log('📥 Cargando datos iniciales...');
     
     // Obtener recomendación instantánea
