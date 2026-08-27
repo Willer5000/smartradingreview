@@ -1442,13 +1442,13 @@ window.runCompleteAnalysis = function() {
         });
 };
 
-function getInstantRecommendation() {
+function getInstantRecommendation(attempt = 1) {
     const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
     const interval = document.getElementById('interval-select')?.value || '1D';
 
-    // AbortController para timeout de 15 segundos
+    // 45 segundos de timeout (Render gratuito tarda ~30-40s la primera vez)
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000); //30 segundos
+    const timeoutId = setTimeout(() => controller.abort(), 45000);
 
     fetch('/api/analyze-with-portfolio', {
         method: 'POST',
@@ -1468,21 +1468,14 @@ function getInstantRecommendation() {
         return response.json();
     })
     .then(data => {
-        console.log('📥 TGP response:', data);
-        if (data.tgp) {
-            console.log('✅ TGP found:', data.tgp.action);
-            displayTGPResult(data.tgp);
-        } else {
-            console.warn('⚠️ No TGP in response');
-        }
         if (data.success && data.data) {
             updateInstantRecommendation(data.data);
         }
         if (data.tgp) {
             displayTGPResult(data.tgp);
-            console.log('✅ TGP mostrado:', data.tgp.action);
+            console.log('✅ TGP mostrado:', data.tgp.action, data.tgp.reason.substring(0, 50));
         } else {
-            console.warn('⚠️ Respuesta sin TGP. Keys:', Object.keys(data));
+            console.warn('⚠️ Respuesta sin TGP:', data);
         }
         if (data.current_price) {
             lastPrices[symbol] = data.current_price;
@@ -1497,9 +1490,16 @@ function getInstantRecommendation() {
     .catch(error => {
         clearTimeout(timeoutId);
         if (error.name === 'AbortError') {
-            console.warn('⏱️ TGP timeout (15s)');
+            console.warn('⏱️ TGP timeout (45s) - intento', attempt);
+            // Retry automático hasta 2 veces
+            if (attempt < 3) {
+                console.log('🔄 Reintentando TGP en 5 segundos...');
+                setTimeout(() => getInstantRecommendation(attempt + 1), 5000);
+            } else {
+                console.error('❌ TGP falló después de 3 intentos');
+            }
         } else {
-            console.error('❌ TGP error:', error);
+            console.error('❌ Error TGP:', error);
         }
     });
 }
