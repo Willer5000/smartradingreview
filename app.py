@@ -22803,13 +22803,32 @@ def api_analyze_with_portfolio():
         print(f"   Portafolio: BTC={portfolio.get('BTC',0)}, PAXG={portfolio.get('PAXG',0)}, USDT={portfolio.get('USDT',0)}")
         print(f"   Precios: BTC={prices.get('BTC-USDT')}, PAXG={prices.get('PAXG-USDT')}")
 
-        # ====== AGREGAR ESTO ======
+        # ====== CACHE DE RESULTADO (5 minutos) ======
+        cache_key = f"{symbol}_{timeframe}"
+        cache_ts = getattr(api_analyze_with_portfolio, '_cache_ts', {})
+        cache_data = getattr(api_analyze_with_portfolio, '_cache_data', {})
+        
+        from time import time
+        now = time()
+        if cache_key in cache_ts and (now - cache_ts[cache_key]) < 300:  # 5 minutos
+            print(f"   💾 Cache hit: {cache_key} ({int(now - cache_ts[cache_key])}s ago)")
+            result = cache_data[cache_key].copy()
+            # Recalcular TGP con datos frescos del usuario (portafolio puede cambiar)
+            tgp_result = portfolio_guardian.analyze(
+                user=user, portfolio=portfolio, prices=prices, system_analysis=result
+            )
+            result['tgp'] = tgp_result
+            result['user'] = user
+            print(f"\n   🛡️ TGP (cache): {tgp_result['action']} | Conf: {tgp_result['confidence']}%")
+            print(f"{'='*60}\n")
+            return jsonify(result)
+        # ============================================
+
         # Usar instancia cacheada para no saturar recursos
         if not hasattr(api_analyze_with_portfolio, '_trading_system'):
             api_analyze_with_portfolio._trading_system = TradingExpertSystem()
         trading_system = api_analyze_with_portfolio._trading_system
-        # ==========================
-        
+
         # 1. Análisis normal del sistema (9 traders + moderador)
         result = trading_system.analyze_full_market(symbol, timeframe)
 
@@ -22834,7 +22853,7 @@ def api_analyze_with_portfolio():
 
         print(f"\n   🛡️ TGP: {tgp_result['action']} | Conf: {tgp_result['confidence']}%")
         print(f"   🛡️ Razón: {tgp_result['reason'][:80]}...")
-        
+
         # === ALERTA TGP A TELEGRAM (solo urgente) ===
         should_alert, alert_reason = should_send_tgp_alert(tgp_result, user)
         if should_alert:
@@ -22842,9 +22861,16 @@ def api_analyze_with_portfolio():
             send_tgp_telegram_alert(tgp_result, user, symbol, timeframe, prices)
         else:
             print(f"   📱 TGP Telegram: No urgente. Sin alerta.")
-        
+
+        # ====== GUARDAR EN CACHE ======
+        cache_ts[cache_key] = now
+        cache_data[cache_key] = result.copy()
+        api_analyze_with_portfolio._cache_ts = cache_ts
+        api_analyze_with_portfolio._cache_data = cache_data
+        # ==============================
+
         print(f"{'='*60}\n")
-        
+
         return jsonify(result)
 
     except Exception as e:
@@ -22852,7 +22878,6 @@ def api_analyze_with_portfolio():
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
-
 
 # ============================================================================
 # Paso 3: NUEVO ENDPOINT /api/save-spot-trade
