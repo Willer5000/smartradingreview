@@ -462,7 +462,8 @@ window.updatePreviousSignals = function() {
                 html += `
                     <div class="list-group-item bg-dark text-white border-secondary ${opacity}"
                          style="cursor: pointer;"
-                         onclick='window.showFuturesPrevJustif(${JSON.stringify(sig).replace(/'/g, "\\'")})'>
+                         data-signal='${JSON.stringify(sig).replace(/'/g, "\\'")}'
+                         onclick="const s=JSON.parse(this.getAttribute('data-signal')); window.showFuturesPrevJustif(s);">
                         <!-- Fila 1 -->
                         <div class="d-flex justify-content-between align-items-center">
                             <div>
@@ -839,34 +840,48 @@ window._currentSavedSignal = null;
 
 // ============ Botón GUARDAR en modal de justificación ============
 // Solo visible en la página de FUTUROS. Se hace visible cuando showFuturesPrevJustif se ejecuta.
+// ============ Botón GUARDAR en modal de justificación ============
+// Solo visible en la página de FUTUROS. Se hace visible cuando showFuturesPrevJustif se ejecuta.
 (function _wrapShowPrevJustif() {
     if (!window.IS_FUTURES_PAGE) return;
     const original = window.showFuturesPrevJustif;
     if (typeof original !== 'function') return;
-    
+
     window.showFuturesPrevJustif = function(sig) {
+        // Guardar la señal en una variable global PERO también pasarla directamente al botón
         window._currentPrevSignal = sig;
         original(sig);
-        // Mostrar el botón GUARDAR (está oculto por default)
+        
+        // Configurar el botón GUARDAR para que pase la señal DIRECTAMENTE
         setTimeout(() => {
             const btn = document.getElementById('btn-save-signal');
-            if (btn) btn.style.display = 'inline-block';
+            if (btn) {
+                btn.style.display = 'inline-block';
+                // PASAR sig DIRECTAMENTE - no depender de window._currentPrevSignal
+                btn.onclick = function() {
+                    window.openSaveSignalModal(sig);
+                };
+            }
         }, 150);
     };
 })();
 
 // ============ Abrir modal "Guardar señal" ============
-window.openSaveSignalModal = function() {
-    const sig = window._currentPrevSignal;
+// ============ Abrir modal "Guardar señal" ============
+window.openSaveSignalModal = function(sig) {
+    // Si no recibe parámetro, fallback a la variable global (compatibilidad)
+    if (!sig) {
+        sig = window._currentPrevSignal;
+    }
     if (!sig) {
         showToast('No hay señal seleccionada', 'warning');
         return;
     }
-    
+
     // Cerrar el modal actual de justificación
     const prevModal = bootstrap.Modal.getInstance(document.getElementById('prevSignalModal'));
     if (prevModal) prevModal.hide();
-    
+
     // Prefijar inputs con los valores sugeridos por el sistema
     const info = document.getElementById('save-signal-info');
     if (info) {
@@ -875,34 +890,33 @@ window.openSaveSignalModal = function() {
         info.innerHTML = `
             <div class="d-flex align-items-center mb-2">
                 <span class="badge bg-${badgeClass} p-2 me-3">${emoji} ${sig.action}</span>
-                <strong>${sig.symbol.replace('-', '/')}</strong>
+                <strong>${(sig.symbol || '???').replace('-', '/')}</strong>
                 <span class="badge bg-dark ms-2">${sig.timeframe}</span>
-                <span class="badge bg-secondary ms-2">Confianza ${Math.round(sig.confidence)}%</span>
+                <span class="badge bg-secondary ms-2">Confianza ${Math.round(sig.confidence || 0)}%</span>
             </div>
         `;
     }
-    
+
     document.getElementById('ss-investment').value = 10;
     document.getElementById('ss-leverage').value = sig.leverage || 1;
     document.getElementById('ss-leverage-hint').textContent = `Sugerido por el sistema: ${sig.leverage || 1}x`;
-    document.getElementById('ss-entry').value = sig.entry || '';
+    document.getElementById('ss-entry').value = sig.entry || sig.entry_price || '';
     document.getElementById('ss-sl').value = sig.stop_loss || '';
     document.getElementById('ss-tp').value = sig.take_profit || '';
     document.getElementById('ss-notes').value = '';
     // v22.9.4: fecha/hora de ingreso — default = ahora en zona local del navegador
     document.getElementById('ss-entry-at').value = _nowLocalDatetimeInput();
-    
+
     // Habilitar preview del cálculo
     _updateSaveCalcPreview();
     ['ss-investment', 'ss-leverage', 'ss-entry', 'ss-sl', 'ss-tp'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.addEventListener('input', _updateSaveCalcPreview);
     });
-    
+
     const modal = new bootstrap.Modal(document.getElementById('saveSignalModal'));
     modal.show();
 };
-
 function _updateSaveCalcPreview() {
     const sig = window._currentPrevSignal;
     if (!sig) return;
@@ -966,8 +980,12 @@ function _localDatetimeToISO(dtLocal) {
 }
 
 window.confirmSaveSignal = async function() {
+    // Usar la señal que se pasó al abrir el modal (guardada en _currentPrevSignal)
     const sig = window._currentPrevSignal;
-    if (!sig) return;
+    if (!sig) {
+        showToast('No hay señal seleccionada', 'warning');
+        return;
+    }
     
     const investment = parseFloat(document.getElementById('ss-investment').value);
     const leverage = parseInt(document.getElementById('ss-leverage').value);
