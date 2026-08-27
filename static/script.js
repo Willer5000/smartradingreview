@@ -901,7 +901,7 @@ window.loadSavedSignals = async function() {
         }
         return;
     }
-    
+
     // Resto de la función para spot sigue igual...
     if (!isAuthenticated()) {
         console.log('No autenticado, ocultando señales guardadas');
@@ -909,19 +909,17 @@ window.loadSavedSignals = async function() {
         if (card) card.style.display = 'none';
         return;
     }
-    // ... resto sin cambios
-};
 
     const user = getAuthenticatedUser() || currentUser || 'Invitado';
-    
+
     try {
         const response = await fetch('/api/saved_signals?user=' + encodeURIComponent(user));
         const data = await response.json();
-        
+
         if (data.success && data.signals) {
             const listEl = document.getElementById('saved-signals-list');
             const card = document.getElementById('saved-signals-card');
-            
+
             if (listEl) {
                 listEl.innerHTML = '';
                 if (data.signals.length === 0) {
@@ -941,7 +939,7 @@ window.loadSavedSignals = async function() {
                     });
                 }
             }
-            
+
             if (card) card.style.display = 'block';
         }
     } catch (e) {
