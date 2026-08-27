@@ -781,54 +781,77 @@ window.openSaveSignalModal = function() {
 
 window.confirmSaveSignal = async function() {
     const user = getAuthenticatedUser() || currentUser;
+    if (!user || user === 'Invitado') {
+        showToast('Debes iniciar sesión para guardar señales', 'warning');
+        return;
+    }
 
     // PRIORIDAD 1: Usar la señal de la vela anterior si existe
-    let symbol, timeframe, action, confidence, entry, stop_loss, take_profit, leverage;
+    // futures.js usa _currentPrevSignal, script.js usa selectedPreviousSignal
+    let source = window._currentPrevSignal || window.selectedPreviousSignal || null;
+    let sourceType = 'previous';
 
-    if (window.selectedPreviousSignal) {
-        const s = window.selectedPreviousSignal;
-        symbol = s.symbol;
-        timeframe = s.timeframe;
-        const rawAction = String(s.decision || '').toUpperCase();
-        action = rawAction.includes('SHORT') || rawAction.includes('VENTA') ? 'SHORT' : 'LONG';
-        confidence = s.confidence || 0;
-        entry = s.entry || s.entry_price || 0;
-        stop_loss = s.stop_loss || 0;
-        take_profit = s.take_profit || 0;
-        leverage = s.leverage || 1;
-        console.log('💾 Guardando señal de vela anterior:', symbol, action);
-    } else {
+    // Si no hay señal anterior, usar análisis actual
+    if (!source) {
         const analysis = window.currentAnalysis;
-        const decision = analysis?.decision || {};
-        const levels = analysis?.levels || {};
-        symbol = analysis?.symbol || window.currentSymbol;
-        timeframe = analysis?.timeframe || window.currentInterval;
-        const rawAction = String(decision.action || 'LONG').toUpperCase();
-        action = rawAction.includes('SHORT') || rawAction.includes('VENTA') ? 'SHORT' : 'LONG';
-        confidence = decision.confidence || 0;
-        entry = levels.entry || 0;
-        stop_loss = levels.stop_loss || 0;
-        take_profit = levels.take_profit || 0;
-        leverage = levels.leverage || 1;
-        console.log('💾 Guardando señal actual:', symbol, action);
+        if (!analysis || !analysis.decision || !analysis.levels) {
+            showToast('No hay señal activa para guardar', 'warning');
+            return;
+        }
+        source = {
+            symbol: analysis.symbol || window.currentSymbol,
+            timeframe: analysis.timeframe || window.currentInterval,
+            decision: analysis.decision.action,
+            confidence: analysis.decision.confidence,
+            entry: analysis.levels.entry,
+            stop_loss: analysis.levels.stop_loss,
+            take_profit: analysis.levels.take_profit,
+            leverage: analysis.levels.leverage,
+            candle_timestamp: new Date().toISOString()
+        };
+        sourceType = 'current';
+    }
+
+    // Leer valores del modal (permitir edición por el usuario)
+    const entry = parseFloat(document.getElementById('ss-entry')?.value) || source.entry || source.entry_price || 0;
+    const stop_loss = parseFloat(document.getElementById('ss-sl')?.value) || source.stop_loss || 0;
+    const take_profit = parseFloat(document.getElementById('ss-tp')?.value) || source.take_profit || 0;
+    const leverage = parseInt(document.getElementById('ss-leverage')?.value) || source.leverage || 1;
+    const investment = parseFloat(document.getElementById('ss-investment')?.value) || 10;
+    const notes = document.getElementById('ss-notes')?.value || '';
+    
+    // Fecha/hora de entrada (del input o ahora)
+    const entryAtLocal = document.getElementById('ss-entry-at')?.value;
+    let entryAtISO = null;
+    if (entryAtLocal) {
+        const d = new Date(entryAtLocal);
+        if (!isNaN(d.getTime())) entryAtISO = d.toISOString();
+    }
+
+    // Determinar acción LONG/SHORT
+    let action = 'LONG';
+    const rawAction = String(source.decision || source.action || 'LONG').toUpperCase();
+    if (rawAction.includes('SHORT') || rawAction.includes('VENTA') || rawAction.includes('SELL')) {
+        action = 'SHORT';
     }
 
     const payload = {
         user_name: user,
-        symbol: symbol,
-        timeframe: timeframe,
+        symbol: source.symbol || window.currentSymbol,
+        timeframe: source.timeframe || window.currentInterval,
         action: action,
-        entry: parseFloat(document.getElementById('ss-entry')?.value) || entry || 0,
-        stop_loss: parseFloat(document.getElementById('ss-sl')?.value) || stop_loss || 0,
-        take_profit: parseFloat(document.getElementById('ss-tp')?.value) || take_profit || 0,
-        leverage: parseInt(document.getElementById('ss-leverage')?.value) || leverage || 1,
-        investment_usdt: parseFloat(document.getElementById('ss-investment')?.value) || 10,
-        notes: document.getElementById('ss-notes')?.value || '',
-        confidence: confidence,
-        candle_timestamp: new Date().toISOString()
+        confidence: source.confidence || 0,
+        entry: entry,
+        stop_loss: stop_loss,
+        take_profit: take_profit,
+        leverage: leverage,
+        investment_usdt: investment,
+        notes: notes,
+        entry_at: entryAtISO,
+        candle_timestamp: source.candle_timestamp || new Date().toISOString()
     };
 
-    console.log('📤 Payload a enviar:', payload);
+    console.log('📤 Payload:', payload);
 
     try {
         const response = await fetch('/api/saved_signals', {
@@ -837,30 +860,32 @@ window.confirmSaveSignal = async function() {
             body: JSON.stringify(payload)
         });
 
-        console.log('📥 Status:', response.status, response.statusText);
-
-        // Si la respuesta NO es OK, leer el texto del error
         if (!response.ok) {
             const errorText = await response.text();
-            console.error('❌ Error del servidor:', errorText);
-            showToast('Error del servidor: ' + (errorText || response.statusText), 'error');
+            console.error('❌ Server error:', response.status, errorText);
+            showToast('Error ' + response.status + ': ' + errorText, 'error');
             return;
         }
 
         const data = await response.json();
-        console.log('📥 Respuesta:', data);
-
         if (data.success) {
-            showToast('✅ Señal guardada en Mi Portafolio', 'success');
+            showToast('✅ Señal guardada: ' + payload.symbol, 'success');
             bootstrap.Modal.getInstance(document.getElementById('saveSignalModal'))?.hide();
-            if (typeof window.loadSavedSignals === 'function') window.loadSavedSignals();
+            // Limpiar señales seleccionadas
             window.selectedPreviousSignal = null;
+            window._currentPrevSignal = null;
+            // Refrescar lista (usar la de futures.js si existe, sino la de script.js)
+            if (typeof window.updateSavedSignalsList === 'function') {
+                window.updateSavedSignalsList();
+            } else if (typeof window.loadSavedSignals === 'function') {
+                window.loadSavedSignals();
+            }
         } else {
-            showToast('❌ Error: ' + (data.error || 'No se pudo guardar'), 'error');
+            showToast('❌ ' + (data.error || 'No se pudo guardar'), 'error');
         }
     } catch (e) {
-        console.error('❌ Error fetch:', e);
-        showToast('❌ Error de red: ' + e.message, 'error');
+        console.error('❌ Fetch error:', e);
+        showToast('Error de red: ' + e.message, 'error');
     }
 };
 // ====== FIN GUARDAR SEÑALES FUTUROS ======    
@@ -868,12 +893,24 @@ window.confirmSaveSignal = async function() {
 // ====== CARGAR SEÑALES GUARDADAS (SOLO DEL USUARIO AUTENTICADO) ======
 
 window.loadSavedSignals = async function() {
+    // En futuros, dejar que futures.js maneje el renderizado
+    if (window.IS_FUTURES_PAGE) {
+        console.log('Futuros: delegando a updateSavedSignalsList');
+        if (typeof window.updateSavedSignalsList === 'function') {
+            window.updateSavedSignalsList();
+        }
+        return;
+    }
+    
+    // Resto de la función para spot sigue igual...
     if (!isAuthenticated()) {
         console.log('No autenticado, ocultando señales guardadas');
         const card = document.getElementById('saved-signals-card');
         if (card) card.style.display = 'none';
         return;
     }
+    // ... resto sin cambios
+};
 
     const user = getAuthenticatedUser() || currentUser || 'Invitado';
     
@@ -1425,6 +1462,13 @@ function getInstantRecommendation() {
         return response.json();
     })
     .then(data => {
+        console.log('📥 TGP response:', data);
+        if (data.tgp) {
+            console.log('✅ TGP found:', data.tgp.action);
+            displayTGPResult(data.tgp);
+        } else {
+            console.warn('⚠️ No TGP in response');
+        }
         if (data.success && data.data) {
             updateInstantRecommendation(data.data);
         }
@@ -1447,11 +1491,10 @@ function getInstantRecommendation() {
     .catch(error => {
         clearTimeout(timeoutId);
         if (error.name === 'AbortError') {
-            console.warn('⏱️ TGP timeout (15s) - el backend tardó demasiado');
+            console.warn('⏱️ TGP timeout (15s)');
         } else {
-            console.error('❌ Error TGP:', error);
+            console.error('❌ TGP error:', error);
         }
-        // No bloquear la UI si el TGP falla
     });
 }
 
