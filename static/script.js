@@ -391,11 +391,124 @@ document.addEventListener('DOMContentLoaded', function() {
             runCompleteAnalysis();
         });
     }
+// ============ EVENT LISTENERS ============
+function initializeEventListeners() {
+    document.querySelectorAll('.btn-collapse').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const card = this.closest('.indicator-card');
+            const content = card.querySelector('.indicator-content');
+            const isCollapsed = this.getAttribute('data-collapsed') === 'true';
+            
+            if (isCollapsed) {
+                content.style.display = 'block';
+                this.innerHTML = '<i class="fas fa-minus"></i>';
+                this.setAttribute('data-collapsed', 'false');
+            } else {
+                content.style.display = 'none';
+                this.innerHTML = '<i class="fas fa-plus"></i>';
+                this.setAttribute('data-collapsed', 'true');
+            }
+        });
+    });
     
+    document.querySelectorAll('.btn-move').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const card = this.closest('.indicator-card');
+            const container = document.getElementById('indicators-container');
+            const direction = this.getAttribute('data-direction');
+            const cards = Array.from(container.children);
+            const index = cards.indexOf(card);
+            
+            if (direction === 'up' && index > 0) {
+                container.insertBefore(card, cards[index - 1]);
+            } else if (direction === 'down' && index < cards.length - 1) {
+                container.insertBefore(cards[index + 1], card);
+            }
+            saveIndicatorOrder();
+        });
+    });
+    
+    document.querySelectorAll('.indicator-control').forEach(control => {
+        control.addEventListener('change', function() {
+            const indicator = this.id.replace('show-', '');
+            toggleIndicator(indicator, this.checked);
+        });
+    });
+}
+
+function initializeDragAndDrop() {
+    const container = document.getElementById('indicators-container');
+    if (!container) return;
+    
+    let draggedItem = null;
+    
+    container.addEventListener('dragstart', (e) => {
+        draggedItem = e.target.closest('.indicator-card');
+        if (draggedItem) {
+            draggedItem.style.opacity = '0.5';
+            e.dataTransfer.effectAllowed = 'move';
+        }
+    });
+    
+    container.addEventListener('dragend', (e) => {
+        if (draggedItem) {
+            draggedItem.style.opacity = '';
+            draggedItem = null;
+        }
+    });
+    
+    container.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+    });
+    
+    container.addEventListener('drop', (e) => {
+        e.preventDefault();
+        const target = e.target.closest('.indicator-card');
+        if (draggedItem && target && draggedItem !== target) {
+            container.insertBefore(draggedItem, target.nextSibling);
+            saveIndicatorOrder();
+        }
+    });
+}
+
+function saveIndicatorOrder() {
+    const container = document.getElementById('indicators-container');
+    if (!container) return;
+    const cards = Array.from(container.children);
+    const order = cards.map(card => card.getAttribute('data-indicator'));
+    localStorage.setItem('indicator_order', JSON.stringify(order));
+}
+
+function loadIndicatorOrder() {
+    const savedOrder = localStorage.getItem('indicator_order');
+    if (!savedOrder) return;
+    try {
+        const order = JSON.parse(savedOrder);
+        const container = document.getElementById('indicators-container');
+        if (!container) return;
+        const cards = Array.from(container.children);
+        order.reverse().forEach(indicatorId => {
+            const card = cards.find(c => c.getAttribute('data-indicator') === indicatorId);
+            if (card) container.insertBefore(card, container.firstChild);
+        });
+    } catch (e) {
+        console.error('Error loading indicator order:', e);
+    }
+}
+
+function toggleIndicator(indicator, show) {
+    const cards = document.querySelectorAll(`.indicator-card[data-indicator="${indicator}"]`);
+    cards.forEach(card => {
+        card.style.display = show ? 'block' : 'none';
+    });
+}
     initializeEventListeners();
     initializeDragAndDrop();
     loadIndicatorOrder();
-    loadInitialData();
+    loadInitialData();    
+    // Las funciones se inicializan al final del DOMContentLoaded (ver más abajo)
+
     
     setInterval(updateBoliviaClock, 1000);
     setInterval(updateCalendarInfo, 60000);
@@ -959,118 +1072,6 @@ window.loadSavedSignals = async function() {
 
 // ====== FIN CARGAR SEÑALES ======
 
-// ============ EVENT LISTENERS ============
-function initializeEventListeners() {
-    document.querySelectorAll('.btn-collapse').forEach(btn => {
-        btn.addEventListener('click', function() {
-            const card = this.closest('.indicator-card');
-            const content = card.querySelector('.indicator-content');
-            const isCollapsed = this.getAttribute('data-collapsed') === 'true';
-            
-            if (isCollapsed) {
-                content.style.display = 'block';
-                this.innerHTML = '<i class="fas fa-minus"></i>';
-                this.setAttribute('data-collapsed', 'false');
-            } else {
-                content.style.display = 'none';
-                this.innerHTML = '<i class="fas fa-plus"></i>';
-                this.setAttribute('data-collapsed', 'true');
-            }
-        });
-    });
-    
-    document.querySelectorAll('.btn-move').forEach(btn => {
-        btn.addEventListener('click', function() {
-            const card = this.closest('.indicator-card');
-            const container = document.getElementById('indicators-container');
-            const direction = this.getAttribute('data-direction');
-            const cards = Array.from(container.children);
-            const index = cards.indexOf(card);
-            
-            if (direction === 'up' && index > 0) {
-                container.insertBefore(card, cards[index - 1]);
-            } else if (direction === 'down' && index < cards.length - 1) {
-                container.insertBefore(cards[index + 1], card);
-            }
-            saveIndicatorOrder();
-        });
-    });
-    
-    document.querySelectorAll('.indicator-control').forEach(control => {
-        control.addEventListener('change', function() {
-            const indicator = this.id.replace('show-', '');
-            toggleIndicator(indicator, this.checked);
-        });
-    });
-}
-
-function initializeDragAndDrop() {
-    const container = document.getElementById('indicators-container');
-    if (!container) return;
-    
-    let draggedItem = null;
-    
-    container.addEventListener('dragstart', (e) => {
-        draggedItem = e.target.closest('.indicator-card');
-        if (draggedItem) {
-            draggedItem.style.opacity = '0.5';
-            e.dataTransfer.effectAllowed = 'move';
-        }
-    });
-    
-    container.addEventListener('dragend', (e) => {
-        if (draggedItem) {
-            draggedItem.style.opacity = '';
-            draggedItem = null;
-        }
-    });
-    
-    container.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        e.dataTransfer.dropEffect = 'move';
-    });
-    
-    container.addEventListener('drop', (e) => {
-        e.preventDefault();
-        const target = e.target.closest('.indicator-card');
-        if (draggedItem && target && draggedItem !== target) {
-            container.insertBefore(draggedItem, target.nextSibling);
-            saveIndicatorOrder();
-        }
-    });
-}
-
-function saveIndicatorOrder() {
-    const container = document.getElementById('indicators-container');
-    if (!container) return;
-    const cards = Array.from(container.children);
-    const order = cards.map(card => card.getAttribute('data-indicator'));
-    localStorage.setItem('indicator_order', JSON.stringify(order));
-}
-
-function loadIndicatorOrder() {
-    const savedOrder = localStorage.getItem('indicator_order');
-    if (!savedOrder) return;
-    try {
-        const order = JSON.parse(savedOrder);
-        const container = document.getElementById('indicators-container');
-        if (!container) return;
-        const cards = Array.from(container.children);
-        order.reverse().forEach(indicatorId => {
-            const card = cards.find(c => c.getAttribute('data-indicator') === indicatorId);
-            if (card) container.insertBefore(card, container.firstChild);
-        });
-    } catch (e) {
-        console.error('Error loading indicator order:', e);
-    }
-}
-
-function toggleIndicator(indicator, show) {
-    const cards = document.querySelectorAll(`.indicator-card[data-indicator="${indicator}"]`);
-    cards.forEach(card => {
-        card.style.display = show ? 'block' : 'none';
-    });
-}
 
 // ============ FUNCIONES PRINCIPALES ============
 function loadInitialData() {
