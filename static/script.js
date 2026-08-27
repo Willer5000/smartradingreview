@@ -507,15 +507,8 @@ function toggleIndicator(indicator, show) {
     initializeDragAndDrop();
     loadIndicatorOrder();
     
-    // ============ CARGA INICIAL ============
-    if (!window.__SMARTTRADING_INITIALIZED__) {
-        window.__SMARTTRADING_INITIALIZED__ = true;
-        console.log('🚀 Ejecutando loadInitialData...');
-        loadInitialData();
-    } else {
-        console.log('ℹ️ SmartTrading ya fue inicializado por otro módulo.');
-    }
-    // Las funciones se inicializan al final del DOMContentLoaded (ver más abajo)
+    // La carga inicial se ejecutará al final del archivo,
+    // después de que todas las funciones hayan sido definidas.
 
     
     setInterval(updateBoliviaClock, 1000);
@@ -7777,6 +7770,21 @@ const TIMEFRAMES = {
 
 // ============ CIERRE DEL BLOQUE SPOT ============
 }
+
+// ============================================================
+// EJECUTAR CARGA INICIAL DESPUÉS DE DEFINIR TODAS LAS FUNCIONES
+// ============================================================
+if (!window.__SMARTTRADING_INITIALIZED__) {
+    window.__SMARTTRADING_INITIALIZED__ = true;
+
+    console.log('🚀 Ejecutando loadInitialData después de inicializar funciones...');
+
+    if (typeof window.loadInitialData === 'function') {
+        window.loadInitialData();
+    } else {
+        console.error('❌ ERROR CRÍTICO: window.loadInitialData no fue definida.');
+    }
+}
+
 // ============ CIERRE DEL DOMContentLoaded ============
-});  // Cierra document.addEventListener('DOMContentLoaded', function() {
-// ============ FIN DEL ARCHIVO ============
+});
