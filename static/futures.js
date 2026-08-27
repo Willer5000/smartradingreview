@@ -986,7 +986,19 @@ window.confirmSaveSignal = async function() {
         showToast('No hay señal seleccionada', 'warning');
         return;
     }
+
+    // OBTENER USUARIO AUTENTICADO
+    const user = (typeof getAuthenticatedUser === 'function' && getAuthenticatedUser()) 
+              || (typeof currentUser !== 'undefined' && currentUser) 
+              || localStorage.getItem('tgp_session_user') 
+              || localStorage.getItem('smarttrading_user') 
+              || 'Invitado';
     
+    if (user === 'Invitado') {
+        showToast('Debes iniciar sesión para guardar señales', 'warning');
+        return;
+    }
+
     const investment = parseFloat(document.getElementById('ss-investment').value);
     const leverage = parseInt(document.getElementById('ss-leverage').value);
     const entry = parseFloat(document.getElementById('ss-entry').value);
@@ -995,13 +1007,14 @@ window.confirmSaveSignal = async function() {
     const notes = document.getElementById('ss-notes').value || '';
     const entryAtLocal = document.getElementById('ss-entry-at').value;
     const entryAtISO = _localDatetimeToISO(entryAtLocal);
-    
+
     if (!(investment > 0) || !(leverage > 0) || !(entry > 0) || !(sl > 0) || !(tp > 0)) {
         showToast('Todos los campos deben ser mayores que 0', 'warning');
         return;
     }
-    
+
     const payload = {
+        user_name: user,  // <-- AGREGADO: enviar usuario autenticado
         symbol: sig.symbol,
         timeframe: sig.timeframe,
         action: sig.action,
@@ -1014,16 +1027,27 @@ window.confirmSaveSignal = async function() {
         original_take_profit: sig.take_profit,
         original_leverage: sig.leverage,
         candle_timestamp: sig.candle_timestamp,
-        entry_at: entryAtISO,   // v22.9.4: fecha/hora del usuario
+        entry_at: entryAtISO,
         notes,
     };
-    
+
+    console.log('📤 Guardando señal:', payload);
+
     try {
         const res = await fetch('/api/saved_signals', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(payload),
         });
+
+        // MANEJO DE ERRORES HTTP
+        if (!res.ok) {
+            const errorText = await res.text();
+            console.error('❌ HTTP error:', res.status, errorText);
+            showToast('Error ' + res.status + ': ' + (errorText || 'No autorizado'), 'error');
+            return;
+        }
+
         const json = await res.json();
         if (json.success) {
             showToast('✅ Señal guardada correctamente', 'success');
@@ -1034,10 +1058,10 @@ window.confirmSaveSignal = async function() {
             showToast('Error: ' + (json.error || 'no se pudo guardar'), 'danger');
         }
     } catch (e) {
+        console.error('❌ Fetch error:', e);
         showToast('Error de red: ' + e.message, 'danger');
     }
 };
-
 // ============ Refrescar lista y KPIs ============
 window.updateSavedSignalsList = async function() {
     if (!window.IS_FUTURES_PAGE) return;
@@ -1081,7 +1105,12 @@ window.updateSavedSignalsList = async function() {
         }
         
         // Lista de todas (activas + cerradas recientes)
-        const lRes = await fetch('/api/saved_signals?limit=100');
+        const user = (typeof getAuthenticatedUser === 'function' && getAuthenticatedUser()) 
+                  || (typeof currentUser !== 'undefined' && currentUser) 
+                  || localStorage.getItem('tgp_session_user') 
+                  || localStorage.getItem('smarttrading_user') 
+                  || 'Invitado';
+        const lRes = await fetch('/api/saved_signals?limit=100&user=' + encodeURIComponent(user));
         const lJson = await lRes.json();
         if (!lJson.success) {
             list.innerHTML = `<div class="list-group-item bg-dark text-warning">Error: ${lJson.error || 'desconocido'}</div>`;
@@ -1211,6 +1240,13 @@ window.openSavedSignalDetail = async function(signalId) {
         `;
         
         // Renderizar el gráfico Plotly
+        // Renderizar el gráfico Plotly
+        if (c && c.time && c.time.length > 0) {
+            _renderSavedSignalChart(c, sig, currentPrice);
+        } else {
+            document.getElementById('saved-signal-chart').innerHTML = 
+                '<div class="alert alert-warning">No hay datos de velas para este par/timeframe</div>';
+        }              
         _renderSavedSignalChart(c, sig, currentPrice);
     } catch (e) {
         body.innerHTML = `<div class="alert alert-danger">Error: ${e.message}</div>`;
@@ -1218,12 +1254,29 @@ window.openSavedSignalDetail = async function(signalId) {
 };
 
 function _renderSavedSignalChart(candles, sig, currentPrice) {
+    // GUARDAS DEFENSIVAS
+    if (!candles || !candles.time || !Array.isArray(candles.time) || candles.time.length === 0) {
+        console.warn('⚠️ Datos de velas inválidos:', candles);
+        const chartDiv = document.getElementById('saved-signal-chart');
+        if (chartDiv) chartDiv.innerHTML = '<div class="alert alert-warning">No hay datos de velas disponibles</div>';
+        return;
+    }
+    if (!candles.open || !candles.high || !candles.low || !candles.close) {
+        console.warn('⚠️ Faltan datos OHLC:', candles);
+        return;
+    }
+    if (typeof Plotly === 'undefined' || !Plotly.newPlot) {
+        console.warn('⚠️ Plotly no disponible');
+        return;
+    }
+
     const times = candles.time;
     const entry = parseFloat(sig.entry);
     const sl = parseFloat(sig.stop_loss);
     const tp = parseFloat(sig.take_profit);
     const isLong = sig.action === 'LONG';
-    
+
+   
     // Rango X: primer a último candle + un poco de margen a la derecha
     const xStart = times[0];
     const xEnd = times[times.length - 1];
