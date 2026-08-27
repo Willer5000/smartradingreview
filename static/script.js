@@ -506,7 +506,20 @@ function toggleIndicator(indicator, show) {
     initializeEventListeners();
     initializeDragAndDrop();
     loadIndicatorOrder();
-    loadInitialData();    
+    
+    // Llamar loadInitialData solo cuando esté disponible (hoisting no funciona en este archivo masivo)
+    if (typeof loadInitialData === 'function') {
+        loadInitialData();
+    } else {
+        console.warn('⏳ loadInitialData aún no disponible, reintentando en 500ms...');
+        setTimeout(function checkLoadInitialData() {
+            if (typeof loadInitialData === 'function') {
+                loadInitialData();
+            } else {
+                console.error('❌ loadInitialData nunca se definió. Revisa que no haya errores de sintaxis entre L509 y L1077.');
+            }
+        }, 500);
+    } 
     // Las funciones se inicializan al final del DOMContentLoaded (ver más abajo)
 
     
@@ -7767,7 +7780,3 @@ window.updateFearGreedChart = updateFearGreedChart;
 // ============ SOLUCIÓN DEFINITIVA COMBINADA ============
 // ============ SOLUCIÓN FINAL Y DEFINITIVA ============
 // ============ CIERRES FALTANTES (arreglo syntax error) ============
-
-}  // <-- Cierra el 'if (!window.IS_FUTURES_PAGE) {' de L691
-
-});  // <-- Cierra el 'document.addEventListener('DOMContentLoaded', function() {' de L373
