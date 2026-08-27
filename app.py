@@ -22862,11 +22862,15 @@ def api_analyze_with_portfolio():
         else:
             print(f"   📱 TGP Telegram: No urgente. Sin alerta.")
 
-        # ====== GUARDAR EN CACHE ======
-        cache_ts[cache_key] = now
-        cache_data[cache_key] = result.copy()
-        api_analyze_with_portfolio._cache_ts = cache_ts
-        api_analyze_with_portfolio._cache_data = cache_data
+        # ====== GUARDAR EN CACHE (solo si hay TGP válido) ======
+        if tgp_result and tgp_result.get('action') and tgp_result.get('action') != 'HOLD':
+            cache_ts[cache_key] = now
+            cache_data[cache_key] = result.copy()
+            api_analyze_with_portfolio._cache_ts = cache_ts
+            api_analyze_with_portfolio._cache_data = cache_data
+            print(f"   💾 Cache guardado para {cache_key}")
+        else:
+            print(f"   ⚠️ No se guardó en caché: TGP vacío, inválido o HOLD")
         # ==============================
 
         print(f"{'='*60}\n")
