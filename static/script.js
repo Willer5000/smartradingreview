@@ -697,7 +697,15 @@ window.openSaveSignalModal = function() {
         }
         return;
     }
-
+    // En futuros, delegar a futures.js (que tiene la versión con parámetro sig)
+    if (window.IS_FUTURES_PAGE) {
+        console.log('Futuros: delegando openSaveSignalModal a futures.js');
+        // Si no hay señal seleccionada, mostrar warning
+        if (!window._currentPrevSignal) {
+            showToast('No hay señal seleccionada. Hacé clic primero en una señal de la vela anterior.', 'warning');
+        }
+        return;
+    }
     // DEBUG: ver qué tenemos disponible
     console.log('🔍 openSaveSignalModal - selectedPreviousSignal:', window.selectedPreviousSignal);
     console.log('🔍 openSaveSignalModal - currentAnalysis:', window.currentAnalysis);
