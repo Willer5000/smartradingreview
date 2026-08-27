@@ -687,16 +687,18 @@ async function confirmSaveTrade() {
 
 // ====== GUARDAR SEÑALES DE FUTUROS (SOLO AUTENTICADOS) ======
 
-window.openSaveSignalModal = function() {
-    if (!isAuthenticated()) {
-        showToast('Debes iniciar sesión para guardar señales', 'warning');
-        const modalEl = document.getElementById('modalTGPLogin');
-        if (modalEl && typeof bootstrap !== 'undefined') {
-            const modal = new bootstrap.Modal(modalEl);
-            modal.show();
+// En futuros, la función está en futures.js. En spot, usamos esta versión.
+if (!window.IS_FUTURES_PAGE) {
+    window.openSaveSignalModal = function() {
+        if (!isAuthenticated()) {
+            showToast('Debes iniciar sesión para guardar señales', 'warning');
+            const modalEl = document.getElementById('modalTGPLogin');
+            if (modalEl && typeof bootstrap !== 'undefined') {
+                const modal = new bootstrap.Modal(modalEl);
+                modal.show();
+            }
+            return;
         }
-        return;
-    }
     // En futuros, delegar a futures.js (que tiene la versión con parámetro sig)
     if (window.IS_FUTURES_PAGE) {
         console.log('Futuros: delegando openSaveSignalModal a futures.js');
@@ -1459,7 +1461,8 @@ function getInstantRecommendation(attempt = 1) {
             timeframe: interval,
             user: currentUser || 'Invitado',
             portfolio: userPortfolio,
-            prices: lastPrices
+            prices: lastPrices,
+            _nocache: Date.now()  // <-- AGREGAR ESTO para evitar caché
         })
     })
     .then(response => {
