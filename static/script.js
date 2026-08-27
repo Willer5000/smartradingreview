@@ -753,6 +753,14 @@ window.openSaveSignalModal = function() {
     document.getElementById('ss-leverage').value = source.leverage || 1;
     document.getElementById('ss-investment').value = 10;
 
+    // Setear fecha/hora de entrada por defecto (ahora mismo)
+    const entryAtEl = document.getElementById('ss-entry-at');
+    if (entryAtEl) {
+        const now = new Date();
+        const pad = (n) => n.toString().padStart(2, '0');
+        const localISO = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`;
+        entryAtEl.value = localISO;
+    }
     // Info de la señal
     const infoEl = document.getElementById('save-signal-info');
     if (infoEl) {
@@ -1030,7 +1038,9 @@ function loadInitialData() {
     
     // Obtener recomendación instantánea
     try {
-        getInstantRecommendation();
+        if (!window.IS_FUTURES_PAGE) {
+            getInstantRecommendation();
+        }        
         console.log('✅ Recomendación instantánea solicitada');
     } catch (e) {
         console.error('❌ Error en getInstantRecommendation:', e);
@@ -1395,7 +1405,7 @@ function getInstantRecommendation() {
 
     // AbortController para timeout de 15 segundos
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    const timeoutId = setTimeout(() => controller.abort(), 30000); //30 segundos
 
     fetch('/api/analyze-with-portfolio', {
         method: 'POST',
@@ -1422,7 +1432,7 @@ function getInstantRecommendation() {
             displayTGPResult(data.tgp);
             console.log('✅ TGP mostrado:', data.tgp.action);
         } else {
-            console.warn('⚠️ Respuesta sin TGP:', data);
+            console.warn('⚠️ Respuesta sin TGP. Keys:', Object.keys(data));
         }
         if (data.current_price) {
             lastPrices[symbol] = data.current_price;
