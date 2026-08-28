@@ -11239,188 +11239,863 @@ class TradingExpertSystem:
         }.get(timeframe, (1.0, 3.0))
     
       
-    def _collect_tp_candidates(self, direction, structure, current_price, volatility, timeframe):
+    def _collect_tp_candidates(
+        self,
+        direction,
+        structure,
+        current_price,
+        volatility,
+        timeframe,
+        liquidation=None
+    ):
         """
-        Recolecta TODOS los niveles candidatos para TP desde Smart Money.
-        
-        direction: 'long' (buscar niveles ARRIBA del precio) o 'short' (ABAJO)
-        Retorna: lista de {'price', 'source', 'strength', 'confluence_count'}
+        Recolecta candidatos de TP orientados a estructura y liquidez.
+    
+        PRIORIDAD:
+    
+        LONG:
+            1. Liquidity pools SHORT por encima
+            2. Bearish Order Blocks
+            3. Bearish FVG
+            4. Swing highs / resistencias
+            5. HVN / VAH
+            6. Fibonacci extensions
+    
+        SHORT:
+            1. Liquidity pools LONG por debajo
+            2. Bullish Order Blocks
+            3. Bullish FVG
+            4. Swing lows / soportes
+            5. HVN / VAL
+            6. Fibonacci retracements
+    
+        IMPORTANTE:
+        - Nunca se agregan TP del lado incorrecto.
+        - Los liquidation bins son usados como objetivos potenciales.
+        - No se realizan llamadas externas.
         """
+    
         candidates = []
-        atr = volatility.get('atr', current_price * 0.02) or (current_price * 0.02)
-        
+    
+        atr = float(
+            volatility.get(
+                'atr',
+                current_price * 0.02
+            )
+            or (
+                current_price * 0.02
+            )
+        )
+    
+        # ==============================================================
+        # LIQUIDITY POOLS
+        # ==============================================================
+        active_bins = []
+    
+        if isinstance(liquidation, dict):
+            active_bins = (
+                liquidation.get(
+                    'active_bins',
+                    []
+                )
+                or []
+            )
+    
+        for bin_data in active_bins:
+    
+            if not isinstance(bin_data, dict):
+                continue
+    
+            side = str(
+                bin_data.get('side', '')
+            ).lower()
+    
+            top = float(
+                bin_data.get('price_top', 0)
+                or 0
+            )
+    
+            bottom = float(
+                bin_data.get('price_bottom', 0)
+                or 0
+            )
+    
+            weight = float(
+                bin_data.get('max_weight', 0)
+                or bin_data.get('weight', 0)
+                or 0
+            )
+    
+            if top <= 0 or bottom <= 0:
+                continue
+    
+            center = (
+                top + bottom
+            ) / 2
+    
+            # ==========================================================
+            # LONG
+            # ==========================================================
+            if (
+                direction == 'long'
+                and side == 'short'
+                and center > current_price
+            ):
+    
+                distance_pct = (
+                    (center - current_price)
+                    / current_price
+                    * 100
+                )
+    
+                # No usar pools excesivamente lejanos.
+                # Hasta ~6 ATR es suficiente para un objetivo operativo.
+                distance_atr = (
+                    (center - current_price)
+                    / atr
+                    if atr > 0
+                    else 999
+                )
+    
+                if distance_atr <= 6:
+    
+                    candidates.append({
+                        'price': center,
+                        'source': (
+                            f"Liquidity Pool SHORT "
+                            f"${center:.2f}"
+                        ),
+                        'strength': 3,
+                        'volume_ratio': 1.0,
+                        'type': 'liquidity',
+                        'liquidity_side': 'short',
+                        'liquidity_weight': weight,
+                        'distance_atr': distance_atr,
+                        'distance_pct': distance_pct
+                    })
+    
+            # ==========================================================
+            # SHORT
+            # ==========================================================
+            elif (
+                direction == 'short'
+                and side == 'long'
+                and center < current_price
+            ):
+    
+                distance_pct = (
+                    (current_price - center)
+                    / current_price
+                    * 100
+                )
+    
+                distance_atr = (
+                    (current_price - center)
+                    / atr
+                    if atr > 0
+                    else 999
+                )
+    
+                if distance_atr <= 6:
+    
+                    candidates.append({
+                        'price': center,
+                        'source': (
+                            f"Liquidity Pool LONG "
+                            f"${center:.2f}"
+                        ),
+                        'strength': 3,
+                        'volume_ratio': 1.0,
+                        'type': 'liquidity',
+                        'liquidity_side': 'long',
+                        'liquidity_weight': weight,
+                        'distance_atr': distance_atr,
+                        'distance_pct': distance_pct
+                    })
+    
+        # ==============================================================
+        # LONG
+        # ==============================================================
         if direction == 'long':
-            # 1. Order Blocks BAJISTAS por encima (donde el precio revierte hacia abajo)
-            for ob in structure.get('order_blocks', []):
+    
+            # ----------------------------------------------------------
+            # 1. ORDER BLOCK BAJISTA
+            # ----------------------------------------------------------
+            for ob in (
+                structure.get(
+                    'order_blocks',
+                    []
+                )
+                or []
+            ):
+    
                 if not isinstance(ob, dict):
                     continue
-                if ob.get('type') == 'bearish':
-                    price_range = ob.get('price_range', [0, 0])
-                    if len(price_range) >= 2 and price_range[0] > current_price:
-                        # Entrada al OB bajista (parte inferior del rango) es donde puede rechazar
-                        target_price = price_range[0]
-                        strength = ob.get('strength', 'moderate')
-                        candidates.append({
-                            'price': target_price,
-                            'source': f"Order Block bajista ${target_price:.2f}",
-                            'strength': 3 if strength == 'strong' else 2,
-                            'volume_ratio': ob.get('volume_ratio', 1.0),
-                            'type': 'ob'
-                        })
-            
-            # 2. FVGs bajistas por encima (sin rellenar)
-            for fvg in structure.get('fair_value_gaps', []):
-                if not isinstance(fvg, dict) or fvg.get('filled', True):
+    
+                if ob.get('type') != 'bearish':
                     continue
-                if fvg.get('type') == 'bearish':
-                    gap_bottom = fvg.get('gap_bottom', 0)
-                    if gap_bottom > current_price:
+    
+                price_range = ob.get(
+                    'price_range',
+                    [0, 0]
+                )
+    
+                if (
+                    not isinstance(
+                        price_range,
+                        (list, tuple)
+                    )
+                    or len(price_range) < 2
+                ):
+                    continue
+    
+                try:
+                    ob_low = float(
+                        price_range[0]
+                    )
+                    ob_high = float(
+                        price_range[1]
+                    )
+                except (
+                    TypeError,
+                    ValueError
+                ):
+                    continue
+    
+                # Para LONG el objetivo es la parte inferior
+                # del OB bajista, donde puede aparecer rechazo.
+                target_price = ob_low
+    
+                if target_price <= current_price:
+                    continue
+    
+                strength = (
+                    3
+                    if ob.get('strength')
+                    == 'strong'
+                    else 2
+                )
+    
+                candidates.append({
+                    'price': target_price,
+                    'source': (
+                        f"Bearish OB "
+                        f"${target_price:.2f}"
+                    ),
+                    'strength': strength,
+                    'volume_ratio': float(
+                        ob.get(
+                            'volume_ratio',
+                            1.0
+                        )
+                        or 1.0
+                    ),
+                    'type': 'ob'
+                })
+    
+            # ----------------------------------------------------------
+            # 2. FVG BAJISTA
+            # ----------------------------------------------------------
+            for fvg in (
+                structure.get(
+                    'fair_value_gaps',
+                    []
+                )
+                or []
+            ):
+    
+                if not isinstance(fvg, dict):
+                    continue
+    
+                if fvg.get(
+                    'filled',
+                    True
+                ):
+                    continue
+    
+                if fvg.get(
+                    'type'
+                ) != 'bearish':
+                    continue
+    
+                try:
+                    target_price = float(
+                        fvg.get(
+                            'gap_bottom',
+                            0
+                        )
+                        or 0
+                    )
+                except (
+                    TypeError,
+                    ValueError
+                ):
+                    continue
+    
+                if target_price <= current_price:
+                    continue
+    
+                candidates.append({
+                    'price': target_price,
+                    'source': (
+                        f"Bearish FVG "
+                        f"${target_price:.2f}"
+                    ),
+                    'strength': (
+                        2
+                        if fvg.get(
+                            'strength'
+                        ) == 'strong'
+                        else 1
+                    ),
+                    'volume_ratio': float(
+                        fvg.get(
+                            'volume_ratio',
+                            1.0
+                        )
+                        or 1.0
+                    ),
+                    'type': 'fvg'
+                })
+    
+            # ----------------------------------------------------------
+            # 3. RESISTENCIAS
+            # ----------------------------------------------------------
+            for resistance in (
+                structure.get(
+                    'resistances',
+                    []
+                )
+                or []
+            ):
+    
+                try:
+                    resistance = float(
+                        resistance
+                    )
+                except (
+                    TypeError,
+                    ValueError
+                ):
+                    continue
+    
+                if resistance <= current_price:
+                    continue
+    
+                candidates.append({
+                    'price': resistance,
+                    'source': (
+                        f"Resistencia "
+                        f"${resistance:.2f}"
+                    ),
+                    'strength': 2,
+                    'volume_ratio': 1.0,
+                    'type': 'resistance'
+                })
+    
+            # ----------------------------------------------------------
+            # 4. SWING HIGHS
+            # ----------------------------------------------------------
+            for pivot in (
+                structure.get(
+                    'pivot_highs',
+                    []
+                )[-5:]
+                or []
+            ):
+    
+                if isinstance(pivot, dict):
+    
+                    try:
+                        pivot_price = float(
+                            pivot.get(
+                                'price',
+                                0
+                            )
+                            or 0
+                        )
+                    except (
+                        TypeError,
+                        ValueError
+                    ):
+                        continue
+    
+                    if pivot_price > current_price:
+    
                         candidates.append({
-                            'price': gap_bottom,
-                            'source': f"FVG bajista ${gap_bottom:.2f}",
-                            'strength': 2 if fvg.get('strength') == 'strong' else 1,
-                            'volume_ratio': fvg.get('volume_ratio', 1.0),
-                            'type': 'fvg'
-                        })
-            
-            # 3. Resistencias del análisis estructural
-            for r in structure.get('resistances', []):
-                if r and r > current_price:
-                    candidates.append({
-                        'price': r,
-                        'source': f"Resistencia ${r:.2f}",
-                        'strength': 2,
-                        'volume_ratio': 1.0,
-                        'type': 'resistance'
-                    })
-            
-            # 4. Extensiones Fibonacci
-            fib_ext = structure.get('fib_extensions', {}) or {}
-            for level_name, price in fib_ext.items():
-                if price and price > current_price:
-                    strength = 3 if level_name in ('1.618', '1.272') else 1
-                    candidates.append({
-                        'price': price,
-                        'source': f"Fibonacci {level_name}",
-                        'strength': strength,
-                        'volume_ratio': 1.0,
-                        'type': 'fib'
-                    })
-            
-            # 5. HVN (High Volume Nodes) por encima - fuerte magnetismo
-            vp = structure.get('volume_profile', {}) or {}
-            for hvn in vp.get('hvn_nodes', [])[:5]:
-                if isinstance(hvn, dict):
-                    hvn_price = hvn.get('price', 0)
-                    if hvn_price > current_price * 1.005:  # Al menos 0.5% arriba
-                        candidates.append({
-                            'price': hvn_price,
-                            'source': f"HVN ${hvn_price:.2f}",
+                            'price': pivot_price,
+                            'source': (
+                                f"Swing High "
+                                f"${pivot_price:.2f}"
+                            ),
                             'strength': 3,
-                            'volume_ratio': hvn.get('volume_ratio', 1.0),
-                            'type': 'hvn'
+                            'volume_ratio': 1.0,
+                            'type': 'swing'
                         })
-            
-            # 6. VAH (Value Area High) si está arriba
-            vah = vp.get('vah', 0)
-            if vah and vah > current_price:
+    
+            # ----------------------------------------------------------
+            # 5. FIB EXTENSIONS
+            # ----------------------------------------------------------
+            fib_ext = (
+                structure.get(
+                    'fib_extensions',
+                    {}
+                )
+                or {}
+            )
+    
+            for level_name, price in fib_ext.items():
+    
+                try:
+                    price = float(price)
+                except (
+                    TypeError,
+                    ValueError
+                ):
+                    continue
+    
+                if price <= current_price:
+                    continue
+    
+                strength = (
+                    3
+                    if str(level_name)
+                    in ('1.272', '1.618')
+                    else 1
+                )
+    
+                candidates.append({
+                    'price': price,
+                    'source': (
+                        f"Fibonacci {level_name}"
+                    ),
+                    'strength': strength,
+                    'volume_ratio': 1.0,
+                    'type': 'fib'
+                })
+    
+            # ----------------------------------------------------------
+            # 6. HVN ABOVE
+            # ----------------------------------------------------------
+            vp = (
+                structure.get(
+                    'volume_profile',
+                    {}
+                )
+                or {}
+            )
+    
+            for hvn in (
+                vp.get(
+                    'hvn_nodes',
+                    []
+                )[:5]
+                or []
+            ):
+    
+                if not isinstance(hvn, dict):
+                    continue
+    
+                try:
+                    hvn_price = float(
+                        hvn.get(
+                            'price',
+                            0
+                        )
+                        or 0
+                    )
+                except (
+                    TypeError,
+                    ValueError
+                ):
+                    continue
+    
+                if hvn_price <= current_price:
+                    continue
+    
+                candidates.append({
+                    'price': hvn_price,
+                    'source': (
+                        f"HVN "
+                        f"${hvn_price:.2f}"
+                    ),
+                    'strength': 3,
+                    'volume_ratio': float(
+                        hvn.get(
+                            'volume_ratio',
+                            1.0
+                        )
+                        or 1.0
+                    ),
+                    'type': 'hvn'
+                })
+    
+            # ----------------------------------------------------------
+            # 7. VAH
+            # ----------------------------------------------------------
+            vah = float(
+                vp.get(
+                    'vah',
+                    0
+                )
+                or 0
+            )
+    
+            if vah > current_price:
+    
                 candidates.append({
                     'price': vah,
-                    'source': f"VAH ${vah:.2f}",
+                    'source': (
+                        f"VAH "
+                        f"${vah:.2f}"
+                    ),
                     'strength': 2,
                     'volume_ratio': 1.0,
                     'type': 'va'
                 })
-            
-            # 7. Zonas de alta densidad de liquidaciones SHORT (arriba del precio)
-            # Estas son barreras donde muchos SHORTS serán liquidados si el precio sube
-            # → precio puede pararse ahí temporalmente
-            # (Se puede añadir después si se pasa liquidation)
-        
-        else:  # direction == 'short'
-            # Espejo: buscar niveles POR DEBAJO del precio
-            
-            # 1. Order Blocks ALCISTAS por debajo
-            for ob in structure.get('order_blocks', []):
+    
+        # ==============================================================
+        # SHORT
+        # ==============================================================
+        else:
+    
+            # ----------------------------------------------------------
+            # 1. ORDER BLOCK ALCISTA
+            # ----------------------------------------------------------
+            for ob in (
+                structure.get(
+                    'order_blocks',
+                    []
+                )
+                or []
+            ):
+    
                 if not isinstance(ob, dict):
                     continue
-                if ob.get('type') == 'bullish':
-                    price_range = ob.get('price_range', [0, 0])
-                    if len(price_range) >= 2 and price_range[1] < current_price:
-                        target_price = price_range[1]  # Parte superior del OB alcista
-                        strength = ob.get('strength', 'moderate')
-                        candidates.append({
-                            'price': target_price,
-                            'source': f"Order Block alcista ${target_price:.2f}",
-                            'strength': 3 if strength == 'strong' else 2,
-                            'volume_ratio': ob.get('volume_ratio', 1.0),
-                            'type': 'ob'
-                        })
-            
-            # 2. FVGs alcistas por debajo (sin rellenar)
-            for fvg in structure.get('fair_value_gaps', []):
-                if not isinstance(fvg, dict) or fvg.get('filled', True):
+    
+                if ob.get('type') != 'bullish':
                     continue
-                if fvg.get('type') == 'bullish':
-                    gap_top = fvg.get('gap_top', 0)
-                    if 0 < gap_top < current_price:
+    
+                price_range = ob.get(
+                    'price_range',
+                    [0, 0]
+                )
+    
+                if (
+                    not isinstance(
+                        price_range,
+                        (list, tuple)
+                    )
+                    or len(price_range) < 2
+                ):
+                    continue
+    
+                try:
+                    ob_low = float(
+                        price_range[0]
+                    )
+                    ob_high = float(
+                        price_range[1]
+                    )
+                except (
+                    TypeError,
+                    ValueError
+                ):
+                    continue
+    
+                target_price = ob_high
+    
+                if target_price >= current_price:
+                    continue
+    
+                strength = (
+                    3
+                    if ob.get('strength')
+                    == 'strong'
+                    else 2
+                )
+    
+                candidates.append({
+                    'price': target_price,
+                    'source': (
+                        f"Bullish OB "
+                        f"${target_price:.2f}"
+                    ),
+                    'strength': strength,
+                    'volume_ratio': float(
+                        ob.get(
+                            'volume_ratio',
+                            1.0
+                        )
+                        or 1.0
+                    ),
+                    'type': 'ob'
+                })
+    
+            # ----------------------------------------------------------
+            # 2. FVG ALCISTA
+            # ----------------------------------------------------------
+            for fvg in (
+                structure.get(
+                    'fair_value_gaps',
+                    []
+                )
+                or []
+            ):
+    
+                if not isinstance(fvg, dict):
+                    continue
+    
+                if fvg.get(
+                    'filled',
+                    True
+                ):
+                    continue
+    
+                if fvg.get(
+                    'type'
+                ) != 'bullish':
+                    continue
+    
+                try:
+                    target_price = float(
+                        fvg.get(
+                            'gap_top',
+                            0
+                        )
+                        or 0
+                    )
+                except (
+                    TypeError,
+                    ValueError
+                ):
+                    continue
+    
+                if target_price >= current_price:
+                    continue
+    
+                candidates.append({
+                    'price': target_price,
+                    'source': (
+                        f"Bullish FVG "
+                        f"${target_price:.2f}"
+                    ),
+                    'strength': (
+                        2
+                        if fvg.get(
+                            'strength'
+                        ) == 'strong'
+                        else 1
+                    ),
+                    'volume_ratio': float(
+                        fvg.get(
+                            'volume_ratio',
+                            1.0
+                        )
+                        or 1.0
+                    ),
+                    'type': 'fvg'
+                })
+    
+            # ----------------------------------------------------------
+            # 3. SOPORTES
+            # ----------------------------------------------------------
+            for support in (
+                structure.get(
+                    'supports',
+                    []
+                )
+                or []
+            ):
+    
+                try:
+                    support = float(
+                        support
+                    )
+                except (
+                    TypeError,
+                    ValueError
+                ):
+                    continue
+    
+                if support >= current_price:
+                    continue
+    
+                candidates.append({
+                    'price': support,
+                    'source': (
+                        f"Soporte "
+                        f"${support:.2f}"
+                    ),
+                    'strength': 2,
+                    'volume_ratio': 1.0,
+                    'type': 'support'
+                })
+    
+            # ----------------------------------------------------------
+            # 4. SWING LOWS
+            # ----------------------------------------------------------
+            for pivot in (
+                structure.get(
+                    'pivot_lows',
+                    []
+                )[-5:]
+                or []
+            ):
+    
+                if isinstance(pivot, dict):
+    
+                    try:
+                        pivot_price = float(
+                            pivot.get(
+                                'price',
+                                0
+                            )
+                            or 0
+                        )
+                    except (
+                        TypeError,
+                        ValueError
+                    ):
+                        continue
+    
+                    if pivot_price < current_price:
+    
                         candidates.append({
-                            'price': gap_top,
-                            'source': f"FVG alcista ${gap_top:.2f}",
-                            'strength': 2 if fvg.get('strength') == 'strong' else 1,
-                            'volume_ratio': fvg.get('volume_ratio', 1.0),
-                            'type': 'fvg'
-                        })
-            
-            # 3. Soportes
-            for s in structure.get('supports', []):
-                if s and s < current_price:
-                    candidates.append({
-                        'price': s,
-                        'source': f"Soporte ${s:.2f}",
-                        'strength': 2,
-                        'volume_ratio': 1.0,
-                        'type': 'support'
-                    })
-            
-            # 4. Fibonacci (retrocesos hacia abajo)
-            fib = structure.get('fib_levels', {}) or {}
-            for level_name, price in fib.items():
-                if price and price < current_price:
-                    strength = 3 if level_name in ('0.618', '0.786') else 1
-                    candidates.append({
-                        'price': price,
-                        'source': f"Fibonacci {level_name}",
-                        'strength': strength,
-                        'volume_ratio': 1.0,
-                        'type': 'fib'
-                    })
-            
-            # 5. HVN por debajo
-            vp = structure.get('volume_profile', {}) or {}
-            for hvn in vp.get('hvn_nodes', [])[:5]:
-                if isinstance(hvn, dict):
-                    hvn_price = hvn.get('price', 0)
-                    if 0 < hvn_price < current_price * 0.995:
-                        candidates.append({
-                            'price': hvn_price,
-                            'source': f"HVN ${hvn_price:.2f}",
+                            'price': pivot_price,
+                            'source': (
+                                f"Swing Low "
+                                f"${pivot_price:.2f}"
+                            ),
                             'strength': 3,
-                            'volume_ratio': hvn.get('volume_ratio', 1.0),
-                            'type': 'hvn'
+                            'volume_ratio': 1.0,
+                            'type': 'swing'
                         })
-            
-            # 6. VAL (Value Area Low)
-            val = vp.get('val', 0)
-            if val and val < current_price:
+    
+            # ----------------------------------------------------------
+            # 5. FIB LEVELS
+            # ----------------------------------------------------------
+            fib = (
+                structure.get(
+                    'fib_levels',
+                    {}
+                )
+                or {}
+            )
+    
+            for level_name, price in fib.items():
+    
+                try:
+                    price = float(price)
+                except (
+                    TypeError,
+                    ValueError
+                ):
+                    continue
+    
+                if price >= current_price:
+                    continue
+    
+                strength = (
+                    3
+                    if str(level_name)
+                    in ('0.618', '0.786')
+                    else 1
+                )
+    
+                candidates.append({
+                    'price': price,
+                    'source': (
+                        f"Fibonacci {level_name}"
+                    ),
+                    'strength': strength,
+                    'volume_ratio': 1.0,
+                    'type': 'fib'
+                })
+    
+            # ----------------------------------------------------------
+            # 6. HVN BELOW
+            # ----------------------------------------------------------
+            vp = (
+                structure.get(
+                    'volume_profile',
+                    {}
+                )
+                or {}
+            )
+    
+            for hvn in (
+                vp.get(
+                    'hvn_nodes',
+                    []
+                )[:5]
+                or []
+            ):
+    
+                if not isinstance(hvn, dict):
+                    continue
+    
+                try:
+                    hvn_price = float(
+                        hvn.get(
+                            'price',
+                            0
+                        )
+                        or 0
+                    )
+                except (
+                    TypeError,
+                    ValueError
+                ):
+                    continue
+    
+                if hvn_price >= current_price:
+                    continue
+    
+                candidates.append({
+                    'price': hvn_price,
+                    'source': (
+                        f"HVN "
+                        f"${hvn_price:.2f}"
+                    ),
+                    'strength': 3,
+                    'volume_ratio': float(
+                        hvn.get(
+                            'volume_ratio',
+                            1.0
+                        )
+                        or 1.0
+                    ),
+                    'type': 'hvn'
+                })
+    
+            # ----------------------------------------------------------
+            # 7. VAL
+            # ----------------------------------------------------------
+            val = float(
+                vp.get(
+                    'val',
+                    0
+                )
+                or 0
+            )
+    
+            if (
+                val > 0
+                and val < current_price
+            ):
+    
                 candidates.append({
                     'price': val,
-                    'source': f"VAL ${val:.2f}",
+                    'source': (
+                        f"VAL "
+                        f"${val:.2f}"
+                    ),
                     'strength': 2,
                     'volume_ratio': 1.0,
                     'type': 'va'
                 })
-        
+    
         return candidates
     
     def _collect_sl_candidates(self, direction, structure, current_price, volatility, timeframe):
@@ -11675,70 +12350,342 @@ class TradingExpertSystem:
         
         return candidates
     
-    def _score_tp_candidate(self, candidate, entry, direction, all_candidates,
-                             min_distance_pct, sl_distance_pct=None):
+    def _score_tp_candidate(
+        self,
+        candidate,
+        entry,
+        direction,
+        all_candidates,
+        min_distance_pct,
+        sl_distance_pct=None
+    ):
         """
-        Puntúa un candidato de TP.
-        
-        v23 (Parte A1+A2): scoring con dos mejoras críticas:
-        - MIN distance ahora se calcula como múltiplo del SL (1.8×SL) por
-          fuera de esta función. Aquí solo se descarta si distance < min.
-        - distance_score NO es lineal saturada; es una CAMPANA centrada
-          en 2.5×SL_distance (rentable + probable). Se penalizan TPs
-          absurdos (más de 6×SL) porque son fantasiosos aunque tengan
-          confluencia. Antes: TP a 30% valía igual que TP a 10%.
-        
-        score = (distance_score × 0.45) + (probability_score × 0.55)
+        Puntúa la calidad del TP.
+    
+        Prioridad:
+    
+        1. Liquidity target
+        2. Confluencia estructural
+        3. Distancia realista
+        4. Fuerza del nivel
+        5. Volumen
+    
+        NO es una probabilidad estadística.
+        Es un QUALITY SCORE 0-100.
         """
-        price = candidate['price']
-        distance_pct = abs(price - entry) / entry * 100 if entry > 0 else 0
-        
-        # Descartar si NO cumple distancia mínima
-        if distance_pct < min_distance_pct:
+    
+        try:
+    
+            price = float(
+                candidate.get(
+                    'price',
+                    0
+                )
+                or 0
+            )
+    
+            if (
+                price <= 0
+                or entry <= 0
+            ):
+                return -1
+    
+            # ==========================================================
+            # DIRECCIÓN
+            # ==========================================================
+            if direction == 'long':
+    
+                if price <= entry:
+                    return -1
+    
+            else:
+    
+                if price >= entry:
+                    return -1
+    
+            # ==========================================================
+            # DISTANCIA
+            # ==========================================================
+            distance_pct = (
+                abs(price - entry)
+                / entry
+                * 100
+            )
+    
+            if (
+                min_distance_pct > 0
+                and distance_pct < min_distance_pct
+            ):
+                return -1
+    
+            # ==========================================================
+            # ATR / RR
+            # ==========================================================
+            rr = 0.0
+    
+            if (
+                sl_distance_pct
+                and sl_distance_pct > 0
+            ):
+                rr = (
+                    distance_pct
+                    / sl_distance_pct
+                )
+    
+                # Nunca aceptar TP con RR por debajo de 1.8.
+                if rr < 1.8:
+                    return -1
+    
+            # ==========================================================
+            # DISTANCE SCORE
+            # ==========================================================
+            if (
+                sl_distance_pct
+                and sl_distance_pct > 0
+            ):
+    
+                optimal_distance = (
+                    2.5
+                    * sl_distance_pct
+                )
+    
+                max_reasonable = (
+                    4.5
+                    * sl_distance_pct
+                )
+    
+            else:
+    
+                optimal_distance = (
+                    max(
+                        min_distance_pct
+                        * 1.5,
+                        1.0
+                    )
+                )
+    
+                max_reasonable = (
+                    optimal_distance * 2.0
+                )
+    
+            if distance_pct <= optimal_distance:
+    
+                distance_score = (
+                    100
+                    * (
+                        distance_pct
+                        / max(
+                            optimal_distance,
+                            0.001
+                        )
+                    )
+                )
+    
+            elif distance_pct <= max_reasonable:
+    
+                excess_ratio = (
+                    distance_pct
+                    - optimal_distance
+                ) / max(
+                    max_reasonable
+                    - optimal_distance,
+                    0.001
+                )
+    
+                distance_score = (
+                    100
+                    - 60
+                    * excess_ratio
+                )
+    
+            else:
+    
+                # Objetivo demasiado lejano.
+                distance_score = max(
+                    10,
+                    40
+                    - (
+                        distance_pct
+                        - max_reasonable
+                    ) * 3
+                )
+    
+            # ==========================================================
+            # FUERZA
+            # ==========================================================
+            strength = float(
+                candidate.get(
+                    'strength',
+                    1
+                )
+                or 1
+            )
+    
+            strength_score = min(
+                30,
+                (strength / 3)
+                * 30
+            )
+    
+            # ==========================================================
+            # VOLUMEN
+            # ==========================================================
+            volume_ratio = float(
+                candidate.get(
+                    'volume_ratio',
+                    1.0
+                )
+                or 1.0
+            )
+    
+            volume_score = min(
+                15,
+                max(
+                    0,
+                    (volume_ratio - 1)
+                    * 10
+                )
+            )
+    
+            # ==========================================================
+            # CONFLUENCIA
+            # ==========================================================
+            confluence = 0
+    
+            for other in all_candidates:
+    
+                if other is candidate:
+                    continue
+    
+                try:
+                    other_price = float(
+                        other.get(
+                            'price',
+                            0
+                        )
+                        or 0
+                    )
+                except (
+                    TypeError,
+                    ValueError
+                ):
+                    continue
+    
+                if other_price <= 0:
+                    continue
+    
+                distance_between = (
+                    abs(
+                        other_price
+                        - price
+                    )
+                    / price
+                    * 100
+                )
+    
+                # Niveles a menos de 0.35% cuentan
+                # como zona de confluencia.
+                if distance_between <= 0.35:
+                    confluence += 1
+    
+            confluence_score = min(
+                20,
+                confluence * 5
+            )
+    
+            # ==========================================================
+            # LIQUIDITY BONUS
+            # ==========================================================
+            liquidity_bonus = 0
+    
+            if candidate.get(
+                'type'
+            ) == 'liquidity':
+    
+                weight = float(
+                    candidate.get(
+                        'liquidity_weight',
+                        0
+                    )
+                    or 0
+                )
+    
+                # El peso es relativo al resto de bins.
+                if weight > 100_000_000:
+                    liquidity_bonus = 25
+                elif weight > 50_000_000:
+                    liquidity_bonus = 20
+                elif weight > 10_000_000:
+                    liquidity_bonus = 15
+                elif weight > 1_000_000:
+                    liquidity_bonus = 10
+                else:
+                    liquidity_bonus = 5
+    
+            # ==========================================================
+            # TP DEMASIADO CERCA DE ENTRY
+            # ==========================================================
+            proximity_penalty = 0
+    
+            if (
+                sl_distance_pct
+                and sl_distance_pct > 0
+            ):
+    
+                if rr < 2.0:
+                    proximity_penalty = 15
+                elif rr < 2.25:
+                    proximity_penalty = 8
+    
+            # ==========================================================
+            # TP DEMASIADO LEJOS
+            # ==========================================================
+            far_penalty = 0
+    
+            if rr > 4.5:
+                far_penalty = min(
+                    20,
+                    int(
+                        (rr - 4.5)
+                        * 5
+                    )
+                )
+    
+            # ==========================================================
+            # SCORE FINAL
+            # ==========================================================
+            score = (
+                distance_score * 0.30
+                +
+                strength_score * 0.15
+                +
+                volume_score * 0.10
+                +
+                confluence_score * 0.20
+                +
+                liquidity_bonus * 0.25
+            )
+    
+            score -= (
+                proximity_penalty
+                + far_penalty
+            )
+    
+            return max(
+                0,
+                min(
+                    100,
+                    score
+                )
+            )
+    
+        except Exception as e:
+    
+            print(
+                f"⚠️ Error _score_tp_candidate: {e}"
+            )
+    
             return -1
-        
-        # ============ DISTANCE SCORE (campana centrada en 2.5×SL) ============
-        # Si tenemos sl_distance_pct, la campana se centra en 2.5× ese valor
-        # (RR objetivo ~2.5). Si no, usamos min_distance_pct como referencia.
-        if sl_distance_pct and sl_distance_pct > 0:
-            optimal_distance = 2.5 * sl_distance_pct
-            max_reasonable = 4.5 * sl_distance_pct  # más allá = fantasioso
-        else:
-            optimal_distance = 2.5 * min_distance_pct
-            max_reasonable = 6.0 * min_distance_pct
-        
-        if distance_pct <= optimal_distance:
-            # Rampa ascendente 0 → 100 hasta el óptimo
-            distance_score = 100 * (distance_pct / optimal_distance)
-        elif distance_pct <= max_reasonable:
-            # Bajada gradual 100 → 40 después del óptimo
-            excess_ratio = (distance_pct - optimal_distance) / (max_reasonable - optimal_distance)
-            distance_score = 100 - (60 * excess_ratio)
-        else:
-            # Muy lejos → penalización fuerte, pero no descarta (por si es único)
-            distance_score = max(10, 40 - (distance_pct - max_reasonable) * 3)
-        
-        # ============ PROBABILITY SCORE (fuerza + volumen + confluencia) ============
-        strength = candidate.get('strength', 1)
-        volume_ratio = candidate.get('volume_ratio', 1.0)
-        
-        # Confluencia: contar otros candidatos cercanos (±0.5%)
-        confluence = 0
-        for other in all_candidates:
-            if other is candidate:
-                continue
-            other_price = other['price']
-            if abs(other_price - price) / price < 0.005:
-                confluence += 1
-        
-        strength_score = (strength / 3) * 30
-        volume_score = min(20, (volume_ratio - 1) * 10)
-        confluence_score = min(50, confluence * 15)
-        
-        probability_score = strength_score + max(0, volume_score) + confluence_score
-        
-        total_score = (distance_score * 0.45) + (probability_score * 0.55)
-        return total_score
     
     def _score_sl_candidate(self, candidate, entry, direction, timeframe, max_distance_pct, atr):
         """
@@ -11815,9 +12762,19 @@ class TradingExpertSystem:
         return total_score
     
   
-    def _select_optimal_tp(self, direction, structure, current_price, volatility,
-                            timeframe, leverage=1, is_futures=False,
-                            sl_price=None):
+    def _select_optimal_tp(
+        self,
+        direction,
+        structure,
+        entry,
+        current_price,
+        volatility,
+        timeframe,
+        leverage=1,
+        is_futures=False,
+        sl_price=None,
+        liquidation=None
+    ):
         """
         Selecciona el TP óptimo: rentable + probable.
         
@@ -11827,14 +12784,35 @@ class TradingExpertSystem:
         
         Retorna: (tp_price, tp_source, tp_score) o (None, msg, 0)
         """
-        candidates = self._collect_tp_candidates(direction, structure, current_price, volatility, timeframe)
+        candidates = self._collect_tp_candidates(
+            direction,
+            structure,
+            current_price,
+            volatility,
+            timeframe,
+            liquidation=liquidation
+        )
         if not candidates:
             return None, "Sin candidatos de TP", 0
         
         # ============ Calcular MIN distance como múltiplo del SL ============
         sl_distance_pct = None
-        if sl_price and sl_price > 0 and current_price > 0:
-            sl_distance_pct = abs(current_price - sl_price) / current_price * 100
+        if (
+            sl_price
+            and sl_price > 0
+            and current_price > 0
+        ):
+        
+            # El riesgo real de una operación se calcula
+            # desde ENTRY, no desde el precio actual.
+            # Como este método recibe current_price como
+            # referencia histórica del entry, usamos sl_price
+            # sólo como distancia de seguridad aquí.
+            sl_distance_pct = (
+                abs(entry - sl_price)
+                / entry
+                * 100
+            )
             # v23: TP mínimo = 1.8×SL (garantiza RR ≥ 1.8, breakeven WR ~36%)
             min_distance_from_sl = 1.8 * sl_distance_pct
             # Piso absoluto para cubrir comisiones + slippage (0.4%)
@@ -11847,8 +12825,12 @@ class TradingExpertSystem:
         scored = []
         for c in candidates:
             score = self._score_tp_candidate(
-                c, current_price, direction, candidates,
-                min_distance, sl_distance_pct=sl_distance_pct
+                c,
+                entry,
+                direction,
+                candidates,
+                min_distance,
+                sl_distance_pct=sl_distance_pct
             )
             if score > 0:
                 scored.append((c, score))
@@ -11863,13 +12845,35 @@ class TradingExpertSystem:
         # v24 (Propuesta 2): Techo duro RR máximo 4.5
         best_price = best[0]['price']
         best_source = best[0]['source']
+        if (
+            best[0].get('type')
+            == 'liquidity'
+        ):
+        
+            best_source = (
+                f"{best_source} "
+                f"[TARGET LIQUIDITY]"
+            )
         best_score = best[1]
         
         if sl_price and sl_price > 0 and current_price > 0:
             sl_dist = abs(current_price - sl_price) / current_price * 100
             tp_dist = abs(best_price - current_price) / current_price * 100
             rr = tp_dist / sl_dist if sl_dist > 0 else 0
+            # ==============================================================
+            # CALIDAD DEL RR
+            # ==============================================================
+            if rr < 1.8:
+                return (
+                    None,
+                    f"RR insuficiente {rr:.2f}",
+                    0
+                )
             
+            if rr > 4.5:
+                print(
+                    f"   ⚠️ TP demasiado lejano: RR {rr:.2f}"
+                )           
             if rr > 4.5:
                 # Buscar candidato intermedio con RR entre 2.5 y 4.5
                 intermediate = None
@@ -11886,15 +12890,34 @@ class TradingExpertSystem:
                     best_score = intermediate[1]
                     print(f"   ✅ TP ajustado: RR {c_rr:.2f} (dentro de rango realista)")
                 else:
-                    # Sintetizar TP a 3.0×SL (RR 1:3, realista y rentable)
-                    if direction in ['COMPRA_SPOT', 'LONG', 'long', 'buy']:
-                        synthetic_tp = current_price * (1 + 3.0 * sl_dist / 100)
-                    else:
-                        synthetic_tp = current_price * (1 - 3.0 * sl_dist / 100)
-                    best_price = synthetic_tp
-                    best_source = 'synthetic_3xSL_v24'
-                    best_score = 70
-                    print(f"   ⚠️ TP sintético generado: RR 1:3.0 (ningún candidato Smart Money era realista)")
+                    # ==================================================
+                    # NO INVENTAR UN TP 3×SL AUTOMÁTICAMENTE
+                    # ==================================================
+                    #
+                    # Si no existe un objetivo estructural razonable
+                    # dentro de RR 2.5–4.5, preferimos:
+                    #
+                    #    NO OPERAR
+                    #
+                    # antes que crear artificialmente un TP.
+                    #
+                    # Esto es especialmente importante en FUTUROS,
+                    # donde un TP fantasioso puede producir señales
+                    # aparentemente rentables pero con muy baja
+                    # probabilidad real de alcanzarse.
+                    # ==================================================
+
+                    print(
+                        "   ⚠️ TP rechazado: "
+                        "ningún objetivo estructural razonable "
+                        "dentro de RR 2.5–4.5"
+                    )
+
+                    return (
+                        None,
+                        "Sin TP estructural realista",
+                        0
+                    )
         
         return best_price, best_source, best_score
 
@@ -12926,9 +13949,16 @@ class TradingExpertSystem:
             
             # 2. SELECCIONAR TP ÓPTIMO con SL como referencia (RR mín 1.8)
             tp_price, tp_source, tp_score = self._select_optimal_tp(
-                direction, structure, current_price, volatility, timeframe,
-                leverage=leverage, is_futures=is_futures,
-                sl_price=sl_price   # v23: TP mín = 1.8×SL
+                direction,
+                structure,
+                entry,
+                current_price,
+                volatility,
+                timeframe,
+                leverage=leverage,
+                is_futures=is_futures,
+                sl_price=sl_price,
+                liquidation=liquidation
             )
             if tp_price is None:
                 print(f"   ⚠️ RECHAZADO: {tp_source}")
@@ -12971,14 +14001,37 @@ class TradingExpertSystem:
                 'tp_source': tp_source,
                 'sl_source': sl_source,
                 'tp_probability': round(tp_score / 100, 2),
+                'tp_quality_score': round(
+                    tp_score,
+                    1
+                ),
+                'tp_quality_label': (
+                    'PREMIUM'
+                    if tp_score >= 80
+                    else 'ALTA'
+                    if tp_score >= 70
+                    else 'MEDIA'
+                    if tp_score >= 55
+                    else 'BAJA'
+                ),
                 'sl_reliability': round(sl_score / 100, 2),
                 'min_tp_distance_pct': self._calculate_min_tp_distance_pct(timeframe, leverage, is_futures),
                 'rejected_reason': None
             }
             
-            print(f"   ✅ TP: ${levels['take_profit']:.4f} ({tp_source}, score {tp_score:.0f})")
+            print(
+                f"   ✅ TP: "
+                f"${levels['take_profit']:.4f} "
+                f"({tp_source}, "
+                f"quality {tp_score:.0f}/100)"
+            )
             print(f"   ✅ SL: ${levels['stop_loss']:.4f} ({sl_source}, score {sl_score:.0f})")
-            print(f"   ✅ R/R: 1:{rr:.2f} | Leverage: {leverage}x | Size: {suggested_size*100:.0f}%")
+            print(
+                f"   ✅ R/R: 1:{rr:.2f} "
+                f"| TP quality: {tp_score:.0f}/100 "
+                f"| Leverage: {leverage}x "
+                f"| Size: {suggested_size*100:.0f}%"
+            )
             
             return levels
             
