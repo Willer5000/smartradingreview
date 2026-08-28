@@ -257,28 +257,59 @@ window.loadGlobalStats = async function() {
 
 window.updateActiveSignals = async function() {
 
-    if (!window.IS_FUTURES_PAGE) {
-        return;
+    // futures.js solo se carga en /futures.
+    // No dependemos de IS_FUTURES_PAGE para evitar salidas prematuras.
+    console.log('🔵 ACTIVE: función llamada');
+
+    // Asegurar que el estado exista aunque otro script
+    // lo haya eliminado o reinicializado.
+    if (!window._futuresSignalsState) {
+        window._futuresSignalsState = {
+            activeLoading: false,
+            previousLoading: false,
+            activeTimer: null,
+            previousTimer: null
+        };
     }
 
-    const signalsList = document.getElementById('active-signals-list');
-    const signalsCount = document.getElementById('active-signals-count');
+    const signalsList =
+        document.getElementById('active-signals-list');
+
+    const signalsCount =
+        document.getElementById('active-signals-count');
+
+    console.log('🔎 ACTIVE estado inicial:', {
+        isFuturesPage: window.IS_FUTURES_PAGE,
+        state: window._futuresSignalsState,
+        hasList: !!signalsList,
+        hasCount: !!signalsCount
+    });
 
     if (!signalsList) {
-        console.error('❌ ACTIVE: no existe #active-signals-list');
+        console.error(
+            '❌ ACTIVE: no existe #active-signals-list'
+        );
         return;
     }
 
-    // Evitar DOS requests simultáneos.
+    // Si ya hay una petición, no crear otra.
     if (window._futuresSignalsState.activeLoading) {
-        console.log('⏳ ACTIVE: request anterior todavía en curso.');
-        return;
+        console.warn(
+            '⚠️ ACTIVE: petición anterior marcada como activa.'
+        );
+
+        // IMPORTANTE:
+        // No nos quedamos bloqueados para siempre.
+        // Como no tenemos referencia al fetch anterior,
+        // liberamos el estado y permitimos una nueva consulta.
+        window._futuresSignalsState.activeLoading = false;
     }
 
     window._futuresSignalsState.activeLoading = true;
 
-    console.log('🚀 ACTIVE: iniciando consulta...');
-
+    console.log(
+        '🚀 ACTIVE: iniciando consulta...'
+    );
     signalsList.innerHTML = `
         <div class="list-group-item bg-dark text-info text-center py-3">
             <div class="spinner-border spinner-border-sm me-2"></div>
@@ -656,8 +687,16 @@ window.updateActiveSignals = async function() {
 
 window.updatePreviousSignals = async function() {
 
-    if (!window.IS_FUTURES_PAGE) {
-        return;
+    // futures.js solo se carga en /futures.
+    console.log('🟣 PREVIOUS: función llamada');
+
+    if (!window._futuresSignalsState) {
+        window._futuresSignalsState = {
+            activeLoading: false,
+            previousLoading: false,
+            activeTimer: null,
+            previousTimer: null
+        };
     }
 
     const signalsList =
@@ -670,6 +709,23 @@ window.updatePreviousSignals = async function() {
             'prev-signals-count'
         );
 
+    console.log(
+        '🔎 PREVIOUS estado inicial:',
+        {
+            isFuturesPage:
+                window.IS_FUTURES_PAGE,
+
+            state:
+                window._futuresSignalsState,
+
+            hasList:
+                !!signalsList,
+
+            hasCount:
+                !!signalsCount
+        }
+    );
+
     if (!signalsList) {
         console.error(
             '❌ PREVIOUS: no existe #prev-signals-list'
@@ -677,17 +733,18 @@ window.updatePreviousSignals = async function() {
         return;
     }
 
-    // Evitar requests simultáneos.
     if (
         window._futuresSignalsState
             .previousLoading
     ) {
 
-        console.log(
-            '⏳ PREVIOUS: request anterior todavía en curso.'
+        console.warn(
+            '⚠️ PREVIOUS: petición anterior marcada como activa.'
         );
 
-        return;
+        // Evitar bloqueo permanente.
+        window._futuresSignalsState
+            .previousLoading = false;
     }
 
     window._futuresSignalsState
