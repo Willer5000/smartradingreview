@@ -13,6 +13,7 @@
 # - Tolerante a fallos: si Supabase no está disponible, retorna neutralidad
 
 import logging
+import math
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
@@ -37,7 +38,46 @@ MIN_SAMPLE_SIZE_GENERAL = 25      # Para stats generales necesitamos más muestr
 WIN_RATE_WINNER = 60.0            # % para considerar estrategia "ganadora"
 WIN_RATE_LOSER = 40.0             # % para considerar estrategia "perdedora"
 DEGRADATION_THRESHOLD = 15.0      # Caída de win rate en últimas 20 vs histórico
+# ============================================================================
+# APRENDIZAJE CUANTITATIVO — FASE 6
+# ============================================================================
 
+# Priorizamos RENTABILIDAD REAL sobre Win Rate aislado.
+MIN_EXPECTANCY_ACTIONABLE = 0.05
+
+# Expectancy >= este valor se considera claramente positiva.
+MIN_EXPECTANCY_STRONG = 0.20
+
+# RR mínimo aceptable para una estrategia de trading.
+MIN_REALIZED_RR = 1.20
+
+# Muestra mínima para que el ReviewTrader pueda ejercer autoridad.
+MIN_SAMPLE_ACTIONABLE = 10
+
+# Muestra robusta.
+MIN_SAMPLE_STRONG = 25
+
+# Prior estadístico para evitar que 3/3 = 100% se considere una certeza.
+BAYESIAN_PRIOR_WEIGHT = 8
+
+# Para combinaciones evitamos combinaciones gigantes.
+MAX_COMBINATION_STRATEGIES = 4
+
+# Sólo las estrategias de estructura/liquidez más relevantes participan
+# del setup SMC aprendido.
+SMC_STRATEGY_KEYWORDS = (
+    'LIQUIDITY',
+    'SWEEP',
+    'STOP_HUNT',
+    'ORDER_BLOCK',
+    'FVG',
+    'FAIR_VALUE',
+    'POC',
+    'HVN',
+    'VALUE_AREA',
+    'PULLBACK',
+    'CONFLUENCIA'
+)
 # Umbrales para oportunidades perdidas
 MISSED_OPP_THRESHOLD_PCT = 2.0    # Movimiento a favor >2% para considerar oportunidad perdida
 MISSED_OPP_MIN_CANDLES = 3        # Debe mantenerse al menos 3 velas para no ser un spike
@@ -250,7 +290,108 @@ class ReviewTrader:
             context['sentiment_bias'] = sentiment.get('sentiment_bias', 'neutral')
         
         context['rotation_signal'] = correlation.get('rotation_signal', 'NEUTRAL')
-        
+        # ==============================================================
+        # FASE 6 — CONTEXTO DE EJECUCIÓN
+        # ==============================================================
+        #
+        # Estos datos NO cambian ninguna decisión.
+        # Se guardan para que ReviewTrader pueda aprender
+        # posteriormente qué calidad de entrada/SL/TP produce
+        # mejores resultados reales.
+        # ==============================================================
+
+        levels = analysis.get(
+            'levels',
+            {}
+        ) or {}
+
+        def _safe_float(value, default=0.0):
+            try:
+                return float(
+                    value
+                    if value is not None
+                    else default
+                )
+            except (
+                TypeError,
+                ValueError
+            ):
+                return default
+
+        context['execution'] = {
+            'entry_score': _safe_float(
+                levels.get(
+                    'entry_score',
+                    0
+                )
+            ),
+
+            'execution_safety': _safe_float(
+                levels.get(
+                    'execution_safety',
+                    levels.get(
+                        'execution_safety_score',
+                        0
+                    )
+                )
+            ),
+
+            'sl_reliability': _safe_float(
+                levels.get(
+                    'sl_reliability',
+                    0
+                )
+            ),
+
+            'tp_quality_score': _safe_float(
+                levels.get(
+                    'tp_quality_score',
+                    0
+                )
+            ),
+
+            'risk_reward': _safe_float(
+                levels.get(
+                    'risk_reward',
+                    0
+                )
+            ),
+
+            'sl_distance_pct': _safe_float(
+                levels.get(
+                    'sl_distance_pct',
+                    0
+                )
+            ),
+
+            'tp_distance_pct': _safe_float(
+                levels.get(
+                    'tp_distance_pct',
+                    0
+                )
+            ),
+
+            'entry_source': str(
+                levels.get(
+                    'entry_source',
+                    ''
+                ) or ''
+            ),
+
+            'sl_source': str(
+                levels.get(
+                    'sl_source',
+                    ''
+                ) or ''
+            ),
+
+            'tp_source': str(
+                levels.get(
+                    'tp_source',
+                    ''
+                ) or ''
+            )
+        }        
         return context
     
     # ========================================================================
@@ -584,284 +725,2160 @@ class ReviewTrader:
             return [r['strategy_name'] for r in (response.data or [])]
         except Exception:
             return []
-    
+    # ========================================================================
+    # MÉTRICAS CUANTITATIVAS — FASE 6
+    # ========================================================================
+
+    def _calculate_real_trade_metrics(
+        self,
+        signal: Dict
+    ) -> Optional[Dict]:
+        """
+        Calcula las métricas reales de una señal resuelta.
+
+        NO asume RR=2.
+
+        Para una señal:
+            LONG/SHORT + TP → R positivo igual al RR planificado.
+            LONG/SHORT + SL → R = -1.
+
+        Esto permite calcular expectancy real del setup.
+        """
+
+        try:
+
+            status = str(
+                signal.get(
+                    'status',
+                    ''
+                )
+            ).lower()
+
+            if status not in (
+                'tp_hit',
+                'sl_hit'
+            ):
+                return None
+
+            entry = float(
+                signal.get(
+                    'entry_price',
+                    0
+                )
+                or 0
+            )
+
+            sl = float(
+                signal.get(
+                    'stop_loss',
+                    0
+                )
+                or 0
+            )
+
+            tp = float(
+                signal.get(
+                    'take_profit',
+                    0
+                )
+                or 0
+            )
+
+            if (
+                entry <= 0
+                or sl <= 0
+                or tp <= 0
+            ):
+                return None
+
+            risk_pct = (
+                abs(
+                    entry - sl
+                )
+                / entry
+                * 100
+            )
+
+            reward_pct = (
+                abs(
+                    tp - entry
+                )
+                / entry
+                * 100
+            )
+
+            if risk_pct <= 0:
+                return None
+
+            planned_rr = (
+                reward_pct
+                / risk_pct
+            )
+
+            if status == 'tp_hit':
+
+                realized_r = planned_rr
+
+                realized_pct = reward_pct
+
+            else:
+
+                realized_r = -1.0
+
+                realized_pct = -risk_pct
+
+            leverage = float(
+                signal.get(
+                    'leverage',
+                    1
+                )
+                or 1
+            )
+
+            context = signal.get(
+                'context',
+                {}
+            )
+
+            if not isinstance(
+                context,
+                dict
+            ):
+                context = {}
+
+            execution = context.get(
+                'execution',
+                {}
+            )
+
+            if not isinstance(
+                execution,
+                dict
+            ):
+                execution = {}
+
+            def safe_float(
+                value,
+                default=0.0
+            ):
+
+                try:
+
+                    return float(
+                        value
+                        if value is not None
+                        else default
+                    )
+
+                except (
+                    TypeError,
+                    ValueError
+                ):
+
+                    return default
+
+            execution_safety = safe_float(
+                execution.get(
+                    'execution_safety',
+                    0
+                )
+            )
+
+            entry_score = safe_float(
+                execution.get(
+                    'entry_score',
+                    0
+                )
+            )
+
+            sl_quality = safe_float(
+                execution.get(
+                    'sl_reliability',
+                    0
+                )
+            )
+
+            tp_quality = safe_float(
+                execution.get(
+                    'tp_quality_score',
+                    0
+                )
+            )
+
+            # Normalizamos SL reliability 0-1 → 0-100.
+            if (
+                0
+                < sl_quality
+                <= 1
+            ):
+                sl_quality *= 100
+
+            # ROI aproximado sobre margen para Futuros.
+            margin_roi_pct = (
+                realized_pct
+                * leverage
+                if (
+                    signal.get(
+                        'system_type'
+                    ) == 'futures'
+                    and leverage > 0
+                )
+                else realized_pct
+            )
+
+            return {
+                'planned_rr': planned_rr,
+                'realized_r': realized_r,
+                'realized_pct': realized_pct,
+                'risk_pct': risk_pct,
+                'reward_pct': reward_pct,
+                'margin_roi_pct': margin_roi_pct,
+                'execution_safety': execution_safety,
+                'entry_score': entry_score,
+                'sl_quality': sl_quality,
+                'tp_quality': tp_quality
+            }
+
+        except Exception as e:
+
+            logger.debug(
+                f"No se pudieron calcular métricas reales: {e}"
+            )
+
+            return None    
     # ========================================================================
     # 4. RECALCULAR ESTADÍSTICAS
     # ========================================================================
     
     def recalculate_stats(self) -> Dict:
         """
-        Recalcula todas las estadísticas específicas y generales a partir del historial.
-        Se ejecuta idealmente 1 vez al día.
+        Recalcula estadísticas reales.
+
+        FASE 6:
+
+        - Win Rate real
+        - Avg Win %
+        - Avg Loss %
+        - Avg R
+        - Avg RR
+        - Expectancy real
+        - Degradación
+        - Calidad de ENTRY
+        - Calidad de SL
+        - Calidad de TP
+        - Temporalidad
+        - Símbolo
+        - Acción
+        - Estrategias
+        - Combinaciones SMC
+
+        NO asume RR fijo.
         """
+
         if not self.db.enabled:
-            return {'specific': 0, 'general': 0}
-        
-        print(f"\n{'='*60}")
-        print(f"📊 [REVIEW] Recalculando estadísticas...")
-        print(f"{'='*60}")
-        
-        # Obtener todas las señales con resultado
-        signals_data = self.db.get_signals_for_stats(days_back=90)
-        
+            return {
+                'specific': 0,
+                'general': 0
+            }
+
+        print(
+            f"\n{'=' * 60}"
+        )
+
+        print(
+            "📊 [REVIEW] Recalculando estadísticas CUANTITATIVAS..."
+        )
+
+        print(
+            f"{'=' * 60}"
+        )
+
+        signals_data = (
+            self.db.get_signals_for_stats(
+                days_back=90
+            )
+        )
+
         if not signals_data:
-            print("   ⚠️ No hay señales suficientes para calcular estadísticas")
-            return {'specific': 0, 'general': 0}
-        
-        print(f"   📈 Procesando {len(signals_data)} señales con resultado...")
-        
-        # ============ ESTADÍSTICAS ESPECÍFICAS (par + TF + acción + estrategia) ============
-        # Diccionario indexado por (symbol, timeframe, action, strategy)
-        specific_stats = defaultdict(lambda: {
-            'wins': 0, 'losses': 0, 'expired': 0,
-            'win_pcts': [], 'loss_pcts': [], 'rrs': [],
-            'recent_20': []  # (result_win_boolean, timestamp)
-        })
-        
-        # ============ ESTADÍSTICAS GENERALES (agregado por estrategia) ============
-        general_stats = defaultdict(lambda: {
-            'wins': 0, 'losses': 0,
-            'rrs': [],
-            'by_symbol': defaultdict(lambda: {'wins': 0, 'losses': 0}),
-            'by_timeframe': defaultdict(lambda: {'wins': 0, 'losses': 0}),
-            'recent_20': []
-        })
-        
+
+            print(
+                "   ⚠️ No hay señales suficientes"
+            )
+
+            return {
+                'specific': 0,
+                'general': 0
+            }
+
+        print(
+            f"   📈 Procesando "
+            f"{len(signals_data)} señales..."
+        )
+
+        # ==============================================================
+        # ESTADÍSTICAS ESPECÍFICAS
+        # ==============================================================
+        specific_stats = defaultdict(
+            lambda: {
+                'wins': 0,
+                'losses': 0,
+                'expired': 0,
+
+                'sum_win_pct': 0.0,
+                'sum_loss_pct': 0.0,
+
+                'sum_win_r': 0.0,
+                'sum_loss_r': 0.0,
+
+                'sum_rr': 0.0,
+
+                'sum_execution_safety': 0.0,
+                'count_execution_safety': 0,
+
+                'sum_entry_score': 0.0,
+                'count_entry_score': 0,
+
+                'sum_sl_quality': 0.0,
+                'count_sl_quality': 0,
+
+                'sum_tp_quality': 0.0,
+                'count_tp_quality': 0,
+
+                'recent_20': [],
+
+                'combination_results': defaultdict(
+                    lambda: {
+                        'wins': 0,
+                        'losses': 0,
+                        'sum_r': 0.0
+                    }
+                )
+            }
+        )
+
+        # ==============================================================
+        # ESTADÍSTICAS GENERALES POR ESTRATEGIA
+        # ==============================================================
+        general_stats = defaultdict(
+            lambda: {
+                'wins': 0,
+                'losses': 0,
+
+                'sum_win_pct': 0.0,
+                'sum_loss_pct': 0.0,
+
+                'sum_win_r': 0.0,
+                'sum_loss_r': 0.0,
+
+                'sum_rr': 0.0,
+
+                'by_symbol': defaultdict(
+                    lambda: {
+                        'wins': 0,
+                        'losses': 0,
+                        'sum_r': 0.0
+                    }
+                ),
+
+                'by_timeframe': defaultdict(
+                    lambda: {
+                        'wins': 0,
+                        'losses': 0,
+                        'sum_r': 0.0
+                    }
+                ),
+
+                'recent_20': []
+            }
+        )
+
+        # ==============================================================
+        # PROCESAR SEÑALES
+        # ==============================================================
         for signal in signals_data:
+
             try:
-                status = signal.get('status')
-                if status not in ('tp_hit', 'sl_hit', 'expired', 'missed_opportunity'):
+
+                status = str(
+                    signal.get(
+                        'status',
+                        ''
+                    )
+                ).lower()
+
+                # ------------------------------------------------------
+                # Expired no es WIN ni LOSS.
+                # Missed Opportunity tampoco.
+                # ------------------------------------------------------
+                if status == 'expired':
+
+                    # Lo contabilizamos solamente para
+                    # información de cobertura.
+                    signal_indicators = (
+                        signal.get(
+                            'signal_indicators',
+                            []
+                        )
+                        or []
+                    )
+
+                    strategies = [
+                        si.get(
+                            'strategy_name'
+                        )
+
+                        for si
+                        in signal_indicators
+
+                        if isinstance(si, dict)
+                        and si.get(
+                            'strategy_name'
+                        )
+                    ]
+
+                    for strategy in set(
+                        strategies
+                    ):
+
+                        symbol = signal.get(
+                            'symbol'
+                        )
+
+                        timeframe = signal.get(
+                            'timeframe'
+                        )
+
+                        action = signal.get(
+                            'action_normalized'
+                        )
+
+                        key = (
+                            symbol,
+                            timeframe,
+                            action,
+                            strategy
+                        )
+
+                        specific_stats[key][
+                            'expired'
+                        ] += 1
+
                     continue
-                
-                symbol = signal.get('symbol')
-                timeframe = signal.get('timeframe')
-                action = signal.get('action_normalized')
-                
-                # Extraer estrategias de la señal
-                signal_indicators = signal.get('signal_indicators', [])
-                if not isinstance(signal_indicators, list):
-                    signal_indicators = []
-                strategies = [si.get('strategy_name') for si in signal_indicators if si.get('strategy_name')]
-                
+
+                # ------------------------------------------------------
+                # Sólo resultados reales.
+                # ------------------------------------------------------
+                metrics = (
+                    self._calculate_real_trade_metrics(
+                        signal
+                    )
+                )
+
+                if not metrics:
+                    continue
+
+                if status not in (
+                    'tp_hit',
+                    'sl_hit'
+                ):
+                    continue
+
+                symbol = signal.get(
+                    'symbol'
+                )
+
+                timeframe = signal.get(
+                    'timeframe'
+                )
+
+                action = signal.get(
+                    'action_normalized'
+                )
+
+                is_win = (
+                    status == 'tp_hit'
+                )
+
+                signal_indicators = (
+                    signal.get(
+                        'signal_indicators',
+                        []
+                    )
+                    or []
+                )
+
+                strategies = sorted(
+                    {
+                        si.get(
+                            'strategy_name'
+                        )
+                        for si
+                        in signal_indicators
+
+                        if isinstance(si, dict)
+                        and si.get(
+                            'strategy_name'
+                        )
+                    }
+                )
+
                 if not strategies:
                     continue
-                
-                # Extraer PnL del resultado
-                pnl_pct = 0
-                # Necesitamos consultar signal_results por separado si el join no lo trae
-                # Por simplicidad, calculamos a partir de status
-                is_win = status == 'tp_hit'
-                is_loss = status == 'sl_hit'
-                
-                # Para cada estrategia detectada en esta señal
+
+                # ======================================================
+                # PERFIL SMC DE LA SEÑAL
+                # ======================================================
+
+                smc_strategies = [
+                    s.upper()
+                    for s in strategies
+
+                    if any(
+                        key in s.upper()
+                        for key
+                        in SMC_STRATEGY_KEYWORDS
+                    )
+                ]
+
+                # Evitar combinaciones gigantes.
+                smc_strategies = sorted(
+                    set(
+                        smc_strategies
+                    )
+                )[
+                    :MAX_COMBINATION_STRATEGIES
+                ]
+
+                context = signal.get(
+                    'context',
+                    {}
+                )
+
+                if not isinstance(
+                    context,
+                    dict
+                ):
+                    context = {}
+
+                execution = context.get(
+                    'execution',
+                    {}
+                )
+
+                if not isinstance(
+                    execution,
+                    dict
+                ):
+                    execution = {}
+
+                safety = float(
+                    execution.get(
+                        'execution_safety',
+                        0
+                    )
+                    or 0
+                )
+
+                entry_score = float(
+                    execution.get(
+                        'entry_score',
+                        0
+                    )
+                    or 0
+                )
+
+                sl_quality = float(
+                    execution.get(
+                        'sl_reliability',
+                        0
+                    )
+                    or 0
+                )
+
+                tp_quality = float(
+                    execution.get(
+                        'tp_quality_score',
+                        0
+                    )
+                    or 0
+                )
+
+                if (
+                    0
+                    < sl_quality
+                    <= 1
+                ):
+                    sl_quality *= 100
+
+                # ------------------------------------------------------
+                # BUCKETS
+                # ------------------------------------------------------
+                safety_bucket = (
+                    f"SAFETY_"
+                    f"{int(safety // 10) * 10}"
+                    if safety > 0
+                    else "SAFETY_UNKNOWN"
+                )
+
+                entry_bucket = (
+                    f"ENTRY_"
+                    f"{int(entry_score // 10) * 10}"
+                    if entry_score > 0
+                    else "ENTRY_UNKNOWN"
+                )
+
+                sl_bucket = (
+                    f"SL_"
+                    f"{int(sl_quality // 10) * 10}"
+                    if sl_quality > 0
+                    else "SL_UNKNOWN"
+                )
+
+                tp_bucket = (
+                    f"TP_"
+                    f"{int(tp_quality // 10) * 10}"
+                    if tp_quality > 0
+                    else "TP_UNKNOWN"
+                )
+
+                # ======================================================
+                # PROCESAR CADA ESTRATEGIA
+                # ======================================================
+
                 for strategy in strategies:
-                    # Stats específicas
-                    key = (symbol, timeframe, action, strategy)
+
+                    key = (
+                        symbol,
+                        timeframe,
+                        action,
+                        strategy
+                    )
+
+                    data = specific_stats[key]
+
                     if is_win:
-                        specific_stats[key]['wins'] += 1
-                    elif is_loss:
-                        specific_stats[key]['losses'] += 1
-                    elif status == 'expired':
-                        specific_stats[key]['expired'] += 1
-                    
-                    specific_stats[key]['recent_20'].append((is_win, signal.get('created_at')))
-                    
-                    # Stats generales
+
+                        data['wins'] += 1
+
+                        data['sum_win_pct'] += (
+                            metrics[
+                                'realized_pct'
+                            ]
+                        )
+
+                        data['sum_win_r'] += (
+                            metrics[
+                                'realized_r'
+                            ]
+                        )
+
+                    else:
+
+                        data['losses'] += 1
+
+                        data['sum_loss_pct'] += (
+                            abs(
+                                metrics[
+                                    'realized_pct'
+                                ]
+                            )
+                        )
+
+                        data['sum_loss_r'] += (
+                            abs(
+                                metrics[
+                                    'realized_r'
+                                ]
+                            )
+                        )
+
+                    data['sum_rr'] += (
+                        metrics[
+                            'planned_rr'
+                        ]
+                    )
+
+                    if safety > 0:
+
+                        data[
+                            'sum_execution_safety'
+                        ] += safety
+
+                        data[
+                            'count_execution_safety'
+                        ] += 1
+
+                    if entry_score > 0:
+
+                        data[
+                            'sum_entry_score'
+                        ] += entry_score
+
+                        data[
+                            'count_entry_score'
+                        ] += 1
+
+                    if sl_quality > 0:
+
+                        data[
+                            'sum_sl_quality'
+                        ] += sl_quality
+
+                        data[
+                            'count_sl_quality'
+                        ] += 1
+
+                    if tp_quality > 0:
+
+                        data[
+                            'sum_tp_quality'
+                        ] += tp_quality
+
+                        data[
+                            'count_tp_quality'
+                        ] += 1
+
+                    data[
+                        'recent_20'
+                    ].append(
+                        (
+                            is_win,
+                            signal.get(
+                                'created_at'
+                            )
+                        )
+                    )
+
+                    # ==================================================
+                    # COMBINACIÓN SMC
+                    # ==================================================
+                    if smc_strategies:
+
+                        signature = (
+                            '|'.join(
+                                smc_strategies
+                            )
+                            + f"|{safety_bucket}"
+                            + f"|{entry_bucket}"
+                            + f"|{sl_bucket}"
+                            + f"|{tp_bucket}"
+                        )
+
+                        combo = data[
+                            'combination_results'
+                        ][signature]
+
+                        if is_win:
+                            combo['wins'] += 1
+
+                        else:
+                            combo['losses'] += 1
+
+                        combo['sum_r'] += (
+                            metrics[
+                                'realized_r'
+                            ]
+                        )
+
+                    # ==================================================
+                    # GENERAL
+                    # ==================================================
+                    g = general_stats[
+                        strategy
+                    ]
+
                     if is_win:
-                        general_stats[strategy]['wins'] += 1
-                        general_stats[strategy]['by_symbol'][symbol]['wins'] += 1
-                        general_stats[strategy]['by_timeframe'][timeframe]['wins'] += 1
-                    elif is_loss:
-                        general_stats[strategy]['losses'] += 1
-                        general_stats[strategy]['by_symbol'][symbol]['losses'] += 1
-                        general_stats[strategy]['by_timeframe'][timeframe]['losses'] += 1
-                    
-                    general_stats[strategy]['recent_20'].append((is_win, signal.get('created_at')))
-                    
+
+                        g['wins'] += 1
+
+                        g[
+                            'sum_win_pct'
+                        ] += metrics[
+                            'realized_pct'
+                        ]
+
+                        g[
+                            'sum_win_r'
+                        ] += metrics[
+                            'realized_r'
+                        ]
+
+                        g[
+                            'by_symbol'
+                        ][symbol]['wins'] += 1
+
+                        g[
+                            'by_symbol'
+                        ][symbol]['sum_r'] += (
+                            metrics[
+                                'realized_r'
+                            ]
+                        )
+
+                        g[
+                            'by_timeframe'
+                        ][timeframe]['wins'] += 1
+
+                        g[
+                            'by_timeframe'
+                        ][timeframe]['sum_r'] += (
+                            metrics[
+                                'realized_r'
+                            ]
+                        )
+
+                    else:
+
+                        g['losses'] += 1
+
+                        g[
+                            'sum_loss_pct'
+                        ] += abs(
+                            metrics[
+                                'realized_pct'
+                            ]
+                        )
+
+                        g[
+                            'sum_loss_r'
+                        ] += abs(
+                            metrics[
+                                'realized_r'
+                            ]
+                        )
+
+                        g[
+                            'by_symbol'
+                        ][symbol]['losses'] += 1
+
+                        g[
+                            'by_symbol'
+                        ][symbol]['sum_r'] += (
+                            metrics[
+                                'realized_r'
+                            ]
+                        )
+
+                        g[
+                            'by_timeframe'
+                        ][timeframe]['losses'] += 1
+
+                        g[
+                            'by_timeframe'
+                        ][timeframe]['sum_r'] += (
+                            metrics[
+                                'realized_r'
+                            ]
+                        )
+
+                    g[
+                        'sum_rr'
+                    ] += metrics[
+                        'planned_rr'
+                    ]
+
+                    g[
+                        'recent_20'
+                    ].append(
+                        (
+                            is_win,
+                            signal.get(
+                                'created_at'
+                            )
+                        )
+                    )
+
             except Exception as e:
-                logger.error(f"Error procesando señal: {e}")
-        
-        # ============ TRANSFORMAR A FORMATO DE TABLA ============
+
+                logger.error(
+                    f"Error procesando señal: {e}"
+                )
+
+        # ==============================================================
+        # TRANSFORMAR ESPECÍFICAS
+        # ==============================================================
         specific_rows = []
-        for (symbol, tf, action, strategy), data in specific_stats.items():
-            total_resolved = data['wins'] + data['losses']
-            if total_resolved == 0:
+
+        for (
+            symbol,
+            tf,
+            action,
+            strategy
+        ), data in specific_stats.items():
+
+            wins = data[
+                'wins'
+            ]
+
+            losses = data[
+                'losses'
+            ]
+
+            resolved = (
+                wins
+                + losses
+            )
+
+            if resolved <= 0:
                 continue
-            
-            win_rate = (data['wins'] / total_resolved) * 100
-            
-            # Win rate de las últimas 20 (para detectar degradación)
-            recent = sorted(data['recent_20'], key=lambda x: x[1] or '', reverse=True)[:20]
-            recent_wins = sum(1 for r in recent if r[0])
-            recent_total = len(recent)
-            last_20_win_rate = (recent_wins / recent_total * 100) if recent_total > 0 else win_rate
-            
-            is_degrading = (win_rate - last_20_win_rate) > DEGRADATION_THRESHOLD
-            
-            # Expectancy simplificada (asumimos R/R promedio 2:1 hasta tener datos exactos)
-            avg_rr = 2.0
-            expectancy = ((win_rate / 100) * avg_rr) - ((1 - win_rate / 100) * 1)
-            
+
+            win_rate = (
+                wins
+                / resolved
+                * 100
+            )
+
+            avg_win_pct = (
+                data[
+                    'sum_win_pct'
+                ]
+                / wins
+                if wins > 0
+                else 0
+            )
+
+            avg_loss_pct = (
+                data[
+                    'sum_loss_pct'
+                ]
+                / losses
+                if losses > 0
+                else 0
+            )
+
+            avg_win_r = (
+                data[
+                    'sum_win_r'
+                ]
+                / wins
+                if wins > 0
+                else 0
+            )
+
+            avg_loss_r = (
+                data[
+                    'sum_loss_r'
+                ]
+                / losses
+                if losses > 0
+                else 0
+            )
+
+            avg_rr = (
+                data[
+                    'sum_rr'
+                ]
+                / resolved
+            )
+
+            expectancy = (
+                (
+                    wins
+                    / resolved
+                )
+                * avg_win_r
+                -
+                (
+                    losses
+                    / resolved
+                )
+                * avg_loss_r
+            )
+
+            # ==========================================================
+            # ÚLTIMAS 20 RESUELTAS
+            # ==========================================================
+            recent = sorted(
+                data[
+                    'recent_20'
+                ],
+                key=lambda x:
+                    x[1] or '',
+                reverse=True
+            )[:20]
+
+            recent_total = len(
+                recent
+            )
+
+            recent_wins = sum(
+                1
+                for r in recent
+                if r[0]
+            )
+
+            last_20_wr = (
+                recent_wins
+                / recent_total
+                * 100
+                if recent_total
+                else win_rate
+            )
+
+            is_degrading = (
+                win_rate
+                - last_20_wr
+                > DEGRADATION_THRESHOLD
+            )
+
+            # ==========================================================
+            # CALIDAD DE MUESTRA
+            # ==========================================================
+            sample_strength = min(
+                1.0,
+                resolved / 30.0
+            )
+
+            adjusted_wr = (
+                (
+                    win_rate * resolved
+                )
+                +
+                (
+                    50.0
+                    * BAYESIAN_PRIOR_WEIGHT
+                )
+            ) / (
+                resolved
+                + BAYESIAN_PRIOR_WEIGHT
+            )
+
+            execution_safety = (
+                data[
+                    'sum_execution_safety'
+                ]
+                / data[
+                    'count_execution_safety'
+                ]
+                if data[
+                    'count_execution_safety'
+                ] > 0
+                else 0
+            )
+
+            entry_score = (
+                data[
+                    'sum_entry_score'
+                ]
+                / data[
+                    'count_entry_score'
+                ]
+                if data[
+                    'count_entry_score'
+                ] > 0
+                else 0
+            )
+
+            sl_quality = (
+                data[
+                    'sum_sl_quality'
+                ]
+                / data[
+                    'count_sl_quality'
+                ]
+                if data[
+                    'count_sl_quality'
+                ] > 0
+                else 0
+            )
+
+            tp_quality = (
+                data[
+                    'sum_tp_quality'
+                ]
+                / data[
+                    'count_tp_quality'
+                ]
+                if data[
+                    'count_tp_quality'
+                ] > 0
+                else 0
+            )
+
+            # ==========================================================
+            # COMBINACIONES
+            # ==========================================================
+            best_combinations = []
+
+            for (
+                signature,
+                combo
+            ) in data[
+                'combination_results'
+            ].items():
+
+                combo_n = (
+                    combo['wins']
+                    + combo['losses']
+                )
+
+                if combo_n < 3:
+                    continue
+
+                combo_wr = (
+                    combo['wins']
+                    / combo_n
+                    * 100
+                )
+
+                combo_exp = (
+                    combo[
+                        'sum_r'
+                    ]
+                    / combo_n
+                )
+
+                best_combinations.append({
+                    'setup': signature,
+                    'sample': combo_n,
+                    'win_rate': round(
+                        combo_wr,
+                        2
+                    ),
+                    'expectancy_r': round(
+                        combo_exp,
+                        3
+                    )
+                })
+
+            best_combinations.sort(
+                key=lambda x: (
+                    -x[
+                        'expectancy_r'
+                    ],
+                    -x[
+                        'sample'
+                    ]
+                )
+            )
+
+            best_combinations = (
+                best_combinations[:5]
+            )
+
             specific_rows.append({
                 'symbol': symbol,
                 'timeframe': tf,
                 'action': action,
                 'strategy': strategy,
-                'total_signals': total_resolved + data['expired'],
-                'wins': data['wins'],
-                'losses': data['losses'],
-                'expired': data['expired'],
-                'win_rate': round(win_rate, 2),
-                'avg_win_pct': 0,  # Se puede calcular si hay datos de PnL
-                'avg_loss_pct': 0,
-                'avg_rr': avg_rr,
-                'expectancy': round(expectancy, 4),
-                'last_20_win_rate': round(last_20_win_rate, 2),
-                'is_degrading': is_degrading,
-                'last_updated': datetime.utcnow().isoformat()
+
+                'total_signals':
+                    resolved
+                    + data[
+                        'expired'
+                    ],
+
+                'wins': wins,
+                'losses': losses,
+                'expired':
+                    data[
+                        'expired'
+                    ],
+
+                'win_rate':
+                    round(
+                        win_rate,
+                        2
+                    ),
+
+                'avg_win_pct':
+                    round(
+                        avg_win_pct,
+                        4
+                    ),
+
+                'avg_loss_pct':
+                    round(
+                        avg_loss_pct,
+                        4
+                    ),
+
+                'avg_rr':
+                    round(
+                        avg_rr,
+                        3
+                    ),
+
+                'expectancy':
+                    round(
+                        expectancy,
+                        4
+                    ),
+
+                'last_20_win_rate':
+                    round(
+                        last_20_wr,
+                        2
+                    ),
+
+                'is_degrading':
+                    is_degrading,
+
+                # Campos JSONB existentes no se pueden usar aquí,
+                # por eso estas métricas se incorporarán a
+                # review_recommendations.
+                '_adjusted_wr':
+                    round(
+                        adjusted_wr,
+                        2
+                    ),
+
+                '_sample_strength':
+                    round(
+                        sample_strength,
+                        3
+                    ),
+
+                '_execution_safety':
+                    round(
+                        execution_safety,
+                        2
+                    ),
+
+                '_entry_score':
+                    round(
+                        entry_score,
+                        2
+                    ),
+
+                '_sl_quality':
+                    round(
+                        sl_quality,
+                        2
+                    ),
+
+                '_tp_quality':
+                    round(
+                        tp_quality,
+                        2
+                    ),
+
+                '_best_combinations':
+                    best_combinations,
+
+                '_avg_win_r':
+                    round(
+                        avg_win_r,
+                        3
+                    ),
+
+                '_avg_loss_r':
+                    round(
+                        avg_loss_r,
+                        3
+                    ),
+
+                'last_updated':
+                    datetime.utcnow().isoformat()
             })
-        
+
+        # ==============================================================
+        # GENERALES
+        # ==============================================================
         general_rows = []
+
         for strategy, data in general_stats.items():
-            total = data['wins'] + data['losses']
-            if total == 0:
+
+            wins = data[
+                'wins'
+            ]
+
+            losses = data[
+                'losses'
+            ]
+
+            total = (
+                wins
+                + losses
+            )
+
+            if total <= 0:
                 continue
-            
-            win_rate = (data['wins'] / total) * 100
-            avg_rr = 2.0
-            expectancy = ((win_rate / 100) * avg_rr) - ((1 - win_rate / 100) * 1)
-            
-            # Best/worst symbols
+
+            win_rate = (
+                wins
+                / total
+                * 100
+            )
+
+            avg_win_r = (
+                data[
+                    'sum_win_r'
+                ]
+                / wins
+                if wins
+                else 0
+            )
+
+            avg_loss_r = (
+                data[
+                    'sum_loss_r'
+                ]
+                / losses
+                if losses
+                else 0
+            )
+
+            avg_rr = (
+                data[
+                    'sum_rr'
+                ]
+                / total
+            )
+
+            expectancy = (
+                (
+                    wins
+                    / total
+                )
+                * avg_win_r
+                -
+                (
+                    losses
+                    / total
+                )
+                * avg_loss_r
+            )
+
+            # ----------------------------------------------------------
+            # SÍMBOLOS
+            # ----------------------------------------------------------
             symbol_scores = {}
-            for sym, ss in data['by_symbol'].items():
-                if ss['wins'] + ss['losses'] > 0:
-                    symbol_scores[sym] = (ss['wins'] / (ss['wins'] + ss['losses'])) * 100
-            
-            best_symbols = sorted(symbol_scores.items(), key=lambda x: -x[1])[:3]
-            worst_symbols = sorted(symbol_scores.items(), key=lambda x: x[1])[:3]
-            
-            # Best/worst timeframes
+
+            for sym, stats in data[
+                'by_symbol'
+            ].items():
+
+                n = (
+                    stats['wins']
+                    + stats['losses']
+                )
+
+                if n < 3:
+                    continue
+
+                wr = (
+                    stats['wins']
+                    / n
+                    * 100
+                )
+
+                exp = (
+                    stats['sum_r']
+                    / n
+                )
+
+                symbol_scores[
+                    sym
+                ] = {
+                    'win_rate': wr,
+                    'expectancy': exp,
+                    'sample': n
+                }
+
+            best_symbols = sorted(
+                symbol_scores.items(),
+                key=lambda x: (
+                    -x[1]['expectancy'],
+                    -x[1]['sample']
+                )
+            )[:3]
+
+            worst_symbols = sorted(
+                symbol_scores.items(),
+                key=lambda x: (
+                    x[1]['expectancy'],
+                    -x[1]['sample']
+                )
+            )[:3]
+
+            # ----------------------------------------------------------
+            # TEMPORALIDADES
+            # ----------------------------------------------------------
             tf_scores = {}
-            for tf, ts in data['by_timeframe'].items():
-                if ts['wins'] + ts['losses'] > 0:
-                    tf_scores[tf] = (ts['wins'] / (ts['wins'] + ts['losses'])) * 100
-            
-            best_tfs = sorted(tf_scores.items(), key=lambda x: -x[1])[:3]
-            worst_tfs = sorted(tf_scores.items(), key=lambda x: x[1])[:3]
-            
-            # Degradación general
-            recent = sorted(data['recent_20'], key=lambda x: x[1] or '', reverse=True)[:20]
-            recent_wins = sum(1 for r in recent if r[0])
-            recent_total = len(recent)
-            last_20_wr = (recent_wins / recent_total * 100) if recent_total > 0 else win_rate
-            is_degrading = (win_rate - last_20_wr) > DEGRADATION_THRESHOLD
-            
+
+            for tf, stats in data[
+                'by_timeframe'
+            ].items():
+
+                n = (
+                    stats['wins']
+                    + stats['losses']
+                )
+
+                if n < 3:
+                    continue
+
+                wr = (
+                    stats['wins']
+                    / n
+                    * 100
+                )
+
+                exp = (
+                    stats['sum_r']
+                    / n
+                )
+
+                # Score ajustado por tamaño de muestra.
+                strength = min(
+                    1.0,
+                    n / 20.0
+                )
+
+                score = (
+                    exp
+                    * (
+                        0.50
+                        + 0.50
+                        * strength
+                    )
+                )
+
+                tf_scores[
+                    tf
+                ] = {
+                    'win_rate': wr,
+                    'expectancy': exp,
+                    'sample': n,
+                    'score': score
+                }
+
+            best_tfs = sorted(
+                tf_scores.items(),
+                key=lambda x: (
+                    -x[1]['score'],
+                    -x[1]['sample']
+                )
+            )[:3]
+
+            worst_tfs = sorted(
+                tf_scores.items(),
+                key=lambda x: (
+                    x[1]['score'],
+                    -x[1]['sample']
+                )
+            )[:3]
+
+            # ----------------------------------------------------------
+            # DEGRADACIÓN
+            # ----------------------------------------------------------
+            recent = sorted(
+                data[
+                    'recent_20'
+                ],
+                key=lambda x:
+                    x[1] or '',
+                reverse=True
+            )[:20]
+
+            recent_total = len(
+                recent
+            )
+
+            recent_wins = sum(
+                1
+                for r in recent
+                if r[0]
+            )
+
+            last_20_wr = (
+                recent_wins
+                / recent_total
+                * 100
+                if recent_total
+                else win_rate
+            )
+
+            is_degrading = (
+                win_rate
+                - last_20_wr
+                > DEGRADATION_THRESHOLD
+            )
+
             general_rows.append({
                 'strategy': strategy,
                 'total_signals': total,
-                'wins': data['wins'],
-                'losses': data['losses'],
-                'win_rate': round(win_rate, 2),
-                'avg_rr': avg_rr,
-                'expectancy': round(expectancy, 4),
-                'best_symbols': [s[0] for s in best_symbols],
-                'worst_symbols': [s[0] for s in worst_symbols],
-                'best_timeframes': [t[0] for t in best_tfs],
-                'worst_timeframes': [t[0] for t in worst_tfs],
-                'is_degrading': is_degrading,
-                'last_updated': datetime.utcnow().isoformat()
+                'wins': wins,
+                'losses': losses,
+                'win_rate': round(
+                    win_rate,
+                    2
+                ),
+
+                'avg_rr': round(
+                    avg_rr,
+                    3
+                ),
+
+                'expectancy': round(
+                    expectancy,
+                    4
+                ),
+
+                'best_symbols': [
+                    {
+                        'symbol': item[0],
+                        'win_rate': round(
+                            item[1]['win_rate'],
+                            2
+                        ),
+                        'expectancy': round(
+                            item[1]['expectancy'],
+                            4
+                        ),
+                        'sample': item[1]['sample']
+                    }
+
+                    for item
+                    in best_symbols
+                ],
+
+                'worst_symbols': [
+                    {
+                        'symbol': item[0],
+                        'win_rate': round(
+                            item[1]['win_rate'],
+                            2
+                        ),
+                        'expectancy': round(
+                            item[1]['expectancy'],
+                            4
+                        ),
+                        'sample': item[1]['sample']
+                    }
+
+                    for item
+                    in worst_symbols
+                ],
+
+                'best_timeframes': [
+                    {
+                        'timeframe': item[0],
+                        'win_rate': round(
+                            item[1]['win_rate'],
+                            2
+                        ),
+                        'expectancy': round(
+                            item[1]['expectancy'],
+                            4
+                        ),
+                        'sample': item[1]['sample']
+                    }
+
+                    for item
+                    in best_tfs
+                ],
+
+                'worst_timeframes': [
+                    {
+                        'timeframe': item[0],
+                        'win_rate': round(
+                            item[1]['win_rate'],
+                            2
+                        ),
+                        'expectancy': round(
+                            item[1]['expectancy'],
+                            4
+                        ),
+                        'sample': item[1]['sample']
+                    }
+
+                    for item
+                    in worst_tfs
+                ],
+
+                'is_degrading':
+                    is_degrading,
+
+                'last_updated':
+                    datetime.utcnow().isoformat()
             })
-        
-        # Guardar en base de datos
+
+        # ==============================================================
+        # GUARDAR
+        # ==============================================================
         if specific_rows:
-            self.db.upsert_strategy_stats(specific_rows, general=False)
+
+            # Quitamos campos internos antes de enviarlos a Supabase.
+            db_specific_rows = []
+
+            for row in specific_rows:
+
+                clean = {
+                    k: v
+                    for k, v in row.items()
+                    if not k.startswith('_')
+                }
+
+                db_specific_rows.append(
+                    clean
+                )
+
+            self.db.upsert_strategy_stats(
+                db_specific_rows,
+                general=False
+            )
+
         if general_rows:
-            self.db.upsert_strategy_stats(general_rows, general=True)
-        
-        print(f"   ✅ Stats específicas actualizadas: {len(specific_rows)} filas")
-        print(f"   ✅ Stats generales actualizadas: {len(general_rows)} filas")
-        print(f"{'='*60}\n")
-        
-        # Generar recomendaciones cacheadas
-        self._generate_recommendations(specific_rows, general_rows)
-        
-        return {'specific': len(specific_rows), 'general': len(general_rows)}
+
+            self.db.upsert_strategy_stats(
+                general_rows,
+                general=True
+            )
+
+        print(
+            f"   ✅ Stats específicas: "
+            f"{len(specific_rows)}"
+        )
+
+        print(
+            f"   ✅ Stats generales: "
+            f"{len(general_rows)}"
+        )
+
+        print(
+            f"{'=' * 60}\n"
+        )
+
+        # ==============================================================
+        # RECOMENDACIONES
+        # ==============================================================
+        self._generate_recommendations(
+            specific_rows,
+            general_rows
+        )
+
+        return {
+            'specific':
+                len(specific_rows),
+            'general':
+                len(general_rows)
+        }
     
-    def _generate_recommendations(self, specific_rows: List[Dict], general_rows: List[Dict]):
-        """Genera recomendaciones pre-calculadas para consumo rápido del frontend"""
+    def _generate_recommendations(
+        self,
+        specific_rows: List[Dict],
+        general_rows: List[Dict]
+    ):
+        """
+        Genera recomendaciones utilizando:
+
+        - Expectancy REAL
+        - Win Rate
+        - Tamaño de muestra
+        - Degradación
+        - Calidad ENTRY
+        - Calidad SL
+        - Calidad TP
+        - Combinaciones SMC
+
+        No utiliza RR fijo.
+        """
+
         if not self.db.enabled:
             return
-        
+
         try:
-            # Agrupar stats específicas por (symbol, timeframe, action)
-            grouped = defaultdict(list)
+
+            grouped = defaultdict(
+                list
+            )
+
             for row in specific_rows:
-                key = (row['symbol'], row['timeframe'], row['action'])
-                grouped[key].append(row)
-            
+
+                grouped[
+                    (
+                        row['symbol'],
+                        row['timeframe'],
+                        row['action']
+                    )
+                ].append(
+                    row
+                )
+
             recs_generated = 0
-            
-            for (symbol, timeframe, action), rows in grouped.items():
+
+            for (
+                symbol,
+                timeframe,
+                action
+            ), rows in grouped.items():
+
                 if action == 'NO_OPERAR':
                     continue
-                
-                # Ordenar por expectancy
-                rows_sorted = sorted(rows, key=lambda r: -r['expectancy'])
-                
-                # Ganadoras: expectancy > 0 y win_rate > 55 y sample >= MIN_SAMPLE_SIZE
-                winners = [r for r in rows_sorted 
-                          if r['win_rate'] >= WIN_RATE_WINNER 
-                          and r['total_signals'] >= MIN_SAMPLE_SIZE
-                          and not r['is_degrading']][:5]
-                
-                # Perdedoras
-                losers = [r for r in rows_sorted 
-                         if (r['win_rate'] < WIN_RATE_LOSER or r['is_degrading'])
-                         and r['total_signals'] >= MIN_SAMPLE_SIZE][:5]
-                
-                # Multiplicador basado en el mejor win rate ganador
+
+                # ======================================================
+                # ELEGIBILIDAD
+                # ======================================================
+                actionable = []
+
+                for row in rows:
+
+                    sample = (
+                        row['wins']
+                        + row['losses']
+                    )
+
+                    expectancy = float(
+                        row.get(
+                            'expectancy',
+                            0
+                        )
+                        or 0
+                    )
+
+                    wr = float(
+                        row.get(
+                            'win_rate',
+                            0
+                        )
+                        or 0
+                    )
+
+                    degrading = bool(
+                        row.get(
+                            'is_degrading',
+                            False
+                        )
+                    )
+
+                    if sample < MIN_SAMPLE_ACTIONABLE:
+                        continue
+
+                    # Una estrategia no entra como ganadora sólo
+                    # por tener WR alto.
+                    #
+                    # Debe tener expectancy positiva.
+                    if expectancy <= (
+                        MIN_EXPECTANCY_ACTIONABLE
+                    ):
+                        continue
+
+                    if degrading:
+                        continue
+
+                    row['_quality_score'] = (
+                        expectancy * 60
+                        +
+                        min(
+                            25,
+                            max(
+                                0,
+                                wr - 50
+                            )
+                        )
+                        +
+                        min(
+                            15,
+                            sample
+                            / 2
+                        )
+                    )
+
+                    actionable.append(
+                        row
+                    )
+
+                # ======================================================
+                # ORDENAR POR CALIDAD REAL
+                # ======================================================
+                actionable.sort(
+                    key=lambda r: (
+                        -r.get(
+                            '_quality_score',
+                            0
+                        ),
+                        -r['expectancy'],
+                        -r['win_rate'],
+                        -(
+                            r['wins']
+                            + r['losses']
+                        )
+                    )
+                )
+
+                winners = actionable[:5]
+
+                # ======================================================
+                # PERDEDORAS
+                # ======================================================
+                losers = []
+
+                for row in rows:
+
+                    sample = (
+                        row['wins']
+                        + row['losses']
+                    )
+
+                    expectancy = float(
+                        row.get(
+                            'expectancy',
+                            0
+                        )
+                        or 0
+                    )
+
+                    degrading = bool(
+                        row.get(
+                            'is_degrading',
+                            False
+                        )
+                    )
+
+                    if sample < MIN_SAMPLE_ACTIONABLE:
+                        continue
+
+                    if (
+                        expectancy
+                        <= -0.10
+                        or degrading
+                    ):
+                        losers.append(
+                            row
+                        )
+
+                losers.sort(
+                    key=lambda r: (
+                        r['expectancy'],
+                        r['win_rate']
+                    )
+                )
+
+                losers = losers[:5]
+
+                # ======================================================
+                # RESULTADO DE LA RECOMENDACIÓN
+                # ======================================================
                 if winners:
-                    best_wr = winners[0]['win_rate']
-                    multiplier = self._calculate_multiplier(best_wr)
-                    avg_wr = sum(r['win_rate'] for r in winners) / len(winners)
-                    avg_exp = sum(r['expectancy'] for r in winners) / len(winners)
-                    sample_total = sum(r['total_signals'] for r in winners)
+
+                    best = winners[0]
+
+                    best_wr = float(
+                        best['win_rate']
+                    )
+
+                    multiplier = (
+                        self._calculate_multiplier(
+                            best_wr
+                        )
+                    )
+
+                    avg_wr = (
+                        sum(
+                            r['win_rate']
+                            for r in winners
+                        )
+                        /
+                        len(winners)
+                    )
+
+                    avg_exp = (
+                        sum(
+                            r['expectancy']
+                            for r in winners
+                        )
+                        /
+                        len(winners)
+                    )
+
+                    avg_rr = (
+                        sum(
+                            r['avg_rr']
+                            for r in winners
+                        )
+                        /
+                        len(winners)
+                    )
+
+                    sample_total = sum(
+                        r['wins']
+                        + r['losses']
+                        for r in winners
+                    )
+
+                    # Combinaciones aprendidas.
+                    combinations = []
+
+                    for row in winners:
+
+                        for combo in row.get(
+                            '_best_combinations',
+                            []
+                        ):
+
+                            if (
+                                combo[
+                                    'expectancy_r'
+                                ]
+                                <= 0
+                            ):
+                                continue
+
+                            combinations.append({
+                                'strategy':
+                                    row[
+                                        'strategy'
+                                    ],
+
+                                'setup':
+                                    combo[
+                                        'setup'
+                                    ],
+
+                                'sample':
+                                    combo[
+                                        'sample'
+                                    ],
+
+                                'win_rate':
+                                    combo[
+                                        'win_rate'
+                                    ],
+
+                                'expectancy_r':
+                                    combo[
+                                        'expectancy_r'
+                                    ],
+
+                                'entry_score':
+                                    row.get(
+                                        '_entry_score',
+                                        0
+                                    ),
+
+                                'sl_quality':
+                                    row.get(
+                                        '_sl_quality',
+                                        0
+                                    ),
+
+                                'tp_quality':
+                                    row.get(
+                                        '_tp_quality',
+                                        0
+                                    )
+                            })
+
+                    combinations.sort(
+                        key=lambda x: (
+                            -x[
+                                'expectancy_r'
+                            ],
+                            -x[
+                                'sample'
+                            ]
+                        )
+                    )
+
+                    combinations = (
+                        combinations[:10]
+                    )
+
                 else:
-                    multiplier = MULTIPLIER_NEUTRAL
+
+                    multiplier = (
+                        MULTIPLIER_NEUTRAL
+                    )
+
                     avg_wr = 0
                     avg_exp = 0
+                    avg_rr = 0
                     sample_total = 0
-                
+                    combinations = []
+
+                # ======================================================
+                # TEMPORALIDAD — ESTE TF
+                # ======================================================
+                #
+                # Una temporalidad no será considerada "buena"
+                # solamente porque tenga 100% con 3 muestras.
+                #
+                # Para su recomendación usamos:
+                #   expectancy +
+                #   muestra +
+                #   estabilidad
+                # ======================================================
+
+                timeframe_status = (
+                    'INSUFICIENTE'
+                )
+
+                if sample_total >= MIN_SAMPLE_ACTIONABLE:
+
+                    if avg_exp >= (
+                        MIN_EXPECTANCY_STRONG
+                    ):
+
+                        timeframe_status = (
+                            'FAVORABLE'
+                        )
+
+                    elif avg_exp > 0:
+
+                        timeframe_status = (
+                            'VIGILAR'
+                        )
+
+                    else:
+
+                        timeframe_status = (
+                            'EVITAR'
+                        )
+
+                # ======================================================
+                # CONSTRUIR NOTES
+                # ======================================================
+                notes = (
+                    self._build_notes(
+                        winners,
+                        losers
+                    )
+                )
+
+                notes += (
+                    f" | TF={timeframe_status}"
+                )
+
+                notes += (
+                    f" | AvgRR={avg_rr:.2f}"
+                )
+
+                notes += (
+                    f" | Exp={avg_exp:+.3f}R"
+                )
+
                 rec_data = {
-                    'symbol': symbol,
-                    'timeframe': timeframe,
-                    'action': action,
+                    'symbol':
+                        symbol,
+
+                    'timeframe':
+                        timeframe,
+
+                    'action':
+                        action,
+
                     'winning_strategies': [
-                        {'strategy': r['strategy'], 'win_rate': r['win_rate'], 
-                         'sample': r['total_signals'], 'rr': r['avg_rr']}
-                        for r in winners
+                        {
+                            'strategy':
+                                r['strategy'],
+
+                            'win_rate':
+                                r['win_rate'],
+
+                            'sample':
+                                r[
+                                    'wins'
+                                ]
+                                + r[
+                                    'losses'
+                                ],
+
+                            'rr':
+                                r['avg_rr'],
+
+                            'expectancy':
+                                r['expectancy'],
+
+                            'entry_score':
+                                r.get(
+                                    '_entry_score',
+                                    0
+                                ),
+
+                            'sl_quality':
+                                r.get(
+                                    '_sl_quality',
+                                    0
+                                ),
+
+                            'tp_quality':
+                                r.get(
+                                    '_tp_quality',
+                                    0
+                                )
+                        }
+
+                        for r
+                        in winners
                     ],
+
                     'losing_strategies': [
-                        {'strategy': r['strategy'], 'win_rate': r['win_rate'],
-                         'sample': r['total_signals'], 'degrading': r['is_degrading']}
-                        for r in losers
+                        {
+                            'strategy':
+                                r['strategy'],
+
+                            'win_rate':
+                                r['win_rate'],
+
+                            'sample':
+                                r[
+                                    'wins'
+                                ]
+                                + r[
+                                    'losses'
+                                ],
+
+                            'expectancy':
+                                r['expectancy'],
+
+                            'degrading':
+                                r[
+                                    'is_degrading'
+                                ]
+                        }
+
+                        for r
+                        in losers
                     ],
-                    'best_combinations': [],  # TODO en versión futura
-                    'win_rate': round(avg_wr, 2),
-                    'expectancy': round(avg_exp, 4),
-                    'sample_size': sample_total,
-                    'multiplier': multiplier,
-                    'leverage': self._suggest_leverage(timeframe, avg_wr),
-                    'notes': self._build_notes(winners, losers)
+
+                    'best_combinations':
+                        combinations,
+
+                    'win_rate':
+                        round(
+                            avg_wr,
+                            2
+                        ),
+
+                    'expectancy':
+                        round(
+                            avg_exp,
+                            4
+                        ),
+
+                    'sample_size':
+                        sample_total,
+
+                    'multiplier':
+                        multiplier,
+
+                    # Se conserva por compatibilidad.
+                    # NO debe utilizarse como leverage real.
+                    'leverage':
+                        1,
+
+                    'notes':
+                        notes
                 }
-                
-                self.db.upsert_recommendation(rec_data)
+
+                self.db.upsert_recommendation(
+                    rec_data
+                )
+
                 recs_generated += 1
-            
-            print(f"   ✅ Recomendaciones cacheadas: {recs_generated}")
-            
+
+            print(
+                f"   ✅ Recomendaciones cuantitativas: "
+                f"{recs_generated}"
+            )
+
         except Exception as e:
-            logger.error(f"Error generando recomendaciones: {e}")
+
+            logger.error(
+                f"Error generando recomendaciones cuantitativas: {e}"
+            )
     
     def _calculate_multiplier(self, win_rate: float) -> float:
         """
@@ -1167,56 +3184,269 @@ class ReviewTrader:
         
         return sorted(list(strategies))
     
-    def _evaluate_match(self, active: List[str], recommendation: Optional[Dict]) -> float:
+    def _evaluate_match(
+        self,
+        active: List[str],
+        recommendation: Optional[Dict]
+    ) -> float:
         """
-        Evalúa qué tanto coinciden las estrategias activas con las ganadoras históricas.
-        Retorna un score 0-100.
+        Evalúa coincidencia histórica usando:
+
+        - Win Rate
+        - Expectancy REAL
+        - Tamaño de muestra
+        - Calidad del setup
+
+        No confunde WR alto con rentabilidad.
         """
+
         if not recommendation:
             return 0
-        
-        winning = recommendation.get('winning_strategies', [])
+
+        winning = recommendation.get(
+            'winning_strategies',
+            []
+        )
+
         if not winning:
             return 0
-        
-        winner_names = {w.get('strategy', '').upper() for w in winning if isinstance(w, dict)}
-        active_set = {s.upper() for s in active}
-        
-        matches = active_set & winner_names
-        
-        if not matches:
+
+        active_set = {
+            s.upper()
+            for s in active
+        }
+
+        total_score = 0.0
+        matches = 0
+
+        for winner in winning:
+
+            if not isinstance(
+                winner,
+                dict
+            ):
+                continue
+
+            strategy = str(
+                winner.get(
+                    'strategy',
+                    ''
+                )
+            ).upper()
+
+            if strategy not in active_set:
+                continue
+
+            wr = float(
+                winner.get(
+                    'win_rate',
+                    0
+                )
+                or 0
+            )
+
+            expectancy = float(
+                winner.get(
+                    'expectancy',
+                    0
+                )
+                or 0
+            )
+
+            sample = int(
+                winner.get(
+                    'sample',
+                    0
+                )
+                or 0
+            )
+
+            # ----------------------------------------------------------
+            # SCORE WR
+            # ----------------------------------------------------------
+            wr_score = min(
+                100,
+                max(
+                    0,
+                    wr
+                )
+            )
+
+            # ----------------------------------------------------------
+            # SCORE EXPECTANCY
+            # ----------------------------------------------------------
+            #
+            # 0R      = 50
+            # +0.5R   = 75
+            # +1.0R   = 100
+            # negativo = penalización
+            # ----------------------------------------------------------
+            expectancy_score = (
+                50
+                + expectancy * 50
+            )
+
+            expectancy_score = max(
+                0,
+                min(
+                    100,
+                    expectancy_score
+                )
+            )
+
+            # ----------------------------------------------------------
+            # CONFIANZA POR MUESTRA
+            # ----------------------------------------------------------
+            sample_factor = min(
+                1.0,
+                sample / 30.0
+            )
+
+            # ----------------------------------------------------------
+            # SCORE DEL SETUP
+            # ----------------------------------------------------------
+            strategy_score = (
+                wr_score * 0.35
+                +
+                expectancy_score * 0.45
+                +
+                (
+                    sample_factor
+                    * 100
+                    * 0.20
+                )
+            )
+
+            total_score += strategy_score
+            matches += 1
+
+        if matches <= 0:
             return 0
-        
-        # Score: promedio de win_rates de las estrategias que coinciden
-        matching_wrs = []
-        for w in winning:
-            if isinstance(w, dict) and w.get('strategy', '').upper() in matches:
-                matching_wrs.append(w.get('win_rate', 0))
-        
-        if matching_wrs:
-            avg_wr = sum(matching_wrs) / len(matching_wrs)
-            # Bonus por múltiples coincidencias
-            bonus = min(15, (len(matches) - 1) * 5)
-            return min(95, avg_wr + bonus)
-        
-        return 0
+
+        # Bonus pequeño por múltiples coincidencias.
+        bonus = min(
+            15,
+            (matches - 1) * 5
+        )
+
+        return min(
+            95,
+            (
+                total_score
+                / matches
+            )
+            + bonus
+        )
     
-    def _detect_loser_pattern(self, active: List[str], rec_long: Optional[Dict], 
-                              rec_short: Optional[Dict]) -> bool:
-        """Detecta si las estrategias activas coinciden con patrones perdedores"""
-        all_losers = set()
-        
-        for rec in [rec_long, rec_short]:
-            if rec:
-                for l in rec.get('losing_strategies', []):
-                    if isinstance(l, dict):
-                        all_losers.add(l.get('strategy', '').upper())
-        
-        active_set = {s.upper() for s in active}
-        matches = active_set & all_losers
-        
-        # Si al menos 2 estrategias activas son perdedoras conocidas
-        return len(matches) >= 2
+    def _detect_loser_pattern(
+        self,
+        active: List[str],
+        rec_long: Optional[Dict],
+        rec_short: Optional[Dict]
+    ) -> bool:
+        """
+        Detecta patrones históricamente perdedores.
+
+        Un patrón sólo cuenta como perdedor si además de
+        tener suficiente muestra presenta expectancy negativa
+        o degradación importante.
+        """
+
+        all_losers = {}
+
+        for rec in (
+            rec_long,
+            rec_short
+        ):
+
+            if not rec:
+                continue
+
+            for losing in rec.get(
+                'losing_strategies',
+                []
+            ):
+
+                if not isinstance(
+                    losing,
+                    dict
+                ):
+                    continue
+
+                name = str(
+                    losing.get(
+                        'strategy',
+                        ''
+                    )
+                ).upper()
+
+                if not name:
+                    continue
+
+                sample = int(
+                    losing.get(
+                        'sample',
+                        0
+                    )
+                    or 0
+                )
+
+                expectancy = float(
+                    losing.get(
+                        'expectancy',
+                        0
+                    )
+                    or 0
+                )
+
+                degrading = bool(
+                    losing.get(
+                        'degrading',
+                        False
+                    )
+                )
+
+                all_losers[
+                    name
+                ] = (
+                    sample,
+                    expectancy,
+                    degrading
+                )
+
+        active_set = {
+            s.upper()
+            for s in active
+        }
+
+        strong_loser_matches = 0
+
+        for strategy in (
+            active_set
+            & set(
+                all_losers.keys()
+            )
+        ):
+
+            sample, expectancy, degrading = (
+                all_losers[
+                    strategy
+                ]
+            )
+
+            if sample < MIN_SAMPLE_ACTIONABLE:
+                continue
+
+            if (
+                expectancy <= -0.10
+                or degrading
+            ):
+                strong_loser_matches += 1
+
+        return (
+            strong_loser_matches
+            >= 2
+        )
     
     # ========================================================================
     # OPTIMIZACIONES DE VOLUMEN (Fase 2.5)
