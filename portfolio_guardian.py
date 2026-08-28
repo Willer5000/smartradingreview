@@ -62,11 +62,59 @@ class PortfolioGuardian:
             valuation = self._value_portfolio(portfolio, prices)
             total = valuation['total']
 
-            if total <= 10:
+            # ------------------------------------------------------------------
+            # VALIDACIÓN REAL DEL PORTAFOLIO
+            # ------------------------------------------------------------------
+            # NO confundir:
+            #   - portfolio realmente vacío
+            #   - portfolio con activos pero precios temporalmente no disponibles
+            #
+            # Un usuario puede tener BTC/PAXG > $10 aunque el precio no haya
+            # llegado correctamente desde el frontend.
+            # ------------------------------------------------------------------
+            
+            btc_amt = float(portfolio.get('BTC', 0) or 0)
+            paxg_amt = float(portfolio.get('PAXG', 0) or 0)
+            usdt_amt = float(portfolio.get('USDT', 0) or 0)
+            
+            has_assets = btc_amt > 0 or paxg_amt > 0 or usdt_amt > 0
+            
+            # Si verdaderamente no posee nada
+            if not has_assets:
                 return self._build_response(
                     action='HOLD',
-                    reason='Portafolio vacío o insignificante (< $10). No hay nada que gestionar.',
+                    reason='Portafolio realmente vacío. No hay activos disponibles para gestionar.',
                     confidence=100,
+                    portfolio=portfolio,
+                    valuation=valuation
+                )
+            
+            # Si hay activos pero la valoración es cero, NO decir que está vacío.
+            # Es un problema de datos de precios que debe ser visible.
+            if valuation['total'] <= 0:
+                return self._build_response(
+                    action='HOLD',
+                    reason=(
+                        'El portafolio contiene activos, pero no se pudieron obtener '
+                        'precios válidos para valorarlo. No se ejecutará ninguna '
+                        'recomendación hasta recuperar precios confiables.'
+                    ),
+                    confidence=100,
+                    portfolio=portfolio,
+                    valuation=valuation
+                )
+            
+            # Portafolios muy pequeños pueden no ser operables por comisiones/
+            # mínimos de exchange, pero siguen siendo un portafolio real.
+            if valuation['total'] <= 10:
+                return self._build_response(
+                    action='HOLD',
+                    reason=(
+                        f'Portafolio operativo muy pequeño (${valuation["total"]:.2f}). '
+                        'Se conserva el capital y se evita recomendar operaciones '
+                        'que puedan ser ineficientes por comisiones o mínimos de mercado.'
+                    ),
+                    confidence=90,
                     portfolio=portfolio,
                     valuation=valuation
                 )
@@ -138,17 +186,43 @@ class PortfolioGuardian:
 
     def _value_portfolio(self, portfolio, prices):
         """Convierte cantidades a valores en USDT y porcentajes."""
-        btc_price  = float(prices.get('BTC-USDT', 0) or 0)
-        paxg_price = float(prices.get('PAXG-USDT', 0) or 0)
-
-        btc_amt  = float(portfolio.get('BTC', 0) or 0)
+    
+        prices = prices or {}
+        portfolio = portfolio or {}
+    
+        # Precio actual
+        btc_price = float(
+            prices.get('BTC-USDT')
+            or prices.get('BTC')
+            or 0
+        )
+    
+        paxg_price = float(
+            prices.get('PAXG-USDT')
+            or prices.get('PAXG')
+            or 0
+        )
+    
+        # Precio histórico guardado junto al portfolio.
+        # Solo se utiliza como fallback cuando no hay precio actual.
+        if btc_price <= 0:
+            btc_price = float(
+                portfolio.get('btc_price_at_update', 0) or 0
+            )
+    
+        if paxg_price <= 0:
+            paxg_price = float(
+                portfolio.get('paxg_price_at_update', 0) or 0
+            )
+    
+        btc_amt = float(portfolio.get('BTC', 0) or 0)
         paxg_amt = float(portfolio.get('PAXG', 0) or 0)
         usdt_amt = float(portfolio.get('USDT', 0) or 0)
-
-        btc_value  = btc_amt * btc_price
+    
+        btc_value = btc_amt * btc_price
         paxg_value = paxg_amt * paxg_price
         total = btc_value + paxg_value + usdt_amt
-
+    
         if total > 0:
             pct_btc  = btc_value / total
             pct_paxg = paxg_value / total
