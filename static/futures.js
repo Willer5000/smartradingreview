@@ -5,6 +5,16 @@
 
 console.log('🚀 futures.js cargado - modo Futuros activo');
 
+// ============================================================================
+// CONTROL DE CARGA DE SEÑALES FUTUROS
+// Evita peticiones simultáneas al mismo caché pesado.
+// ============================================================================
+window._futuresSignalsState = {
+    activeLoading: false,
+    previousLoading: false,
+    activeTimer: null,
+    previousTimer: null
+};
 // Helper global: nunca mostrar confianza > 100% (defensa contra datos viejos).
 function fmtConfidence(c) {
     const n = Number(c) || 0;
@@ -245,15 +255,23 @@ window.loadGlobalStats = async function() {
 // Solo se ejecuta si estamos en /futures. Usa /api/futures/signals/active
 // que retorna SOLO las 5 cripto × 6 TF × LONG/SHORT
 
-window.updateActiveSignals = function() {
+window.updateActiveSignals = async function() {
     if (!window.IS_FUTURES_PAGE) {
-        // No estamos en futuros - dejar que script.js maneje spot
         return;
     }
-    
+
     const signalsList = document.getElementById('active-signals-list');
     const signalsCount = document.getElementById('active-signals-count');
+
     if (!signalsList) return;
+
+    // Evitar peticiones simultáneas.
+    if (window._futuresSignalsState.activeLoading) {
+        console.log('⏳ Active Futures: petición anterior todavía en curso. Se omite.');
+        return;
+    }
+
+    window._futuresSignalsState.activeLoading = true;
     
     if (!window.futuresActiveLoaded) {
         signalsList.innerHTML = `
@@ -298,6 +316,7 @@ window.updateActiveSignals = function() {
             }
             
             window.futuresActiveLoaded = true;
+            window._futuresSignalsState.activeLoading = false;
             
             const signals = json.signals || [];
             if (signalsCount) {
@@ -351,6 +370,7 @@ window.updateActiveSignals = function() {
             signalsList.innerHTML = html;
         })
         .catch(err => {
+            window._futuresSignalsState.activeLoading = false;
             clearTimeout(timeoutASId);
             console.error('Error futures active:', err);
             const isAbort = err.name === 'AbortError';
@@ -373,12 +393,21 @@ window.updateActiveSignals = function() {
 
 window.updatePreviousSignals = function() {
     if (!window.IS_FUTURES_PAGE) {
-        return; // deja que script.js maneje spot
+        return;
     }
-    
+
     const signalsList = document.getElementById('prev-signals-list');
     const signalsCount = document.getElementById('prev-signals-count');
+
     if (!signalsList) return;
+
+    // Evitar peticiones simultáneas.
+    if (window._futuresSignalsState.previousLoading) {
+        console.log('⏳ Previous Futures: petición anterior todavía en curso. Se omite.');
+        return;
+    }
+
+    window._futuresSignalsState.previousLoading = true;
     
     if (!window.futuresPrevLoaded) {
         signalsList.innerHTML = `
@@ -416,14 +445,19 @@ window.updatePreviousSignals = function() {
                     <div class="list-group-item bg-dark text-info text-center py-3">
                         <div class="spinner-border spinner-border-sm me-2"></div>
                         <i class="fas fa-fire me-1"></i>
-                        Servidor calentando caché...<br>
-                        <small class="text-muted">Primera carga: 4-5 min (30 análisis). Refresco automático en 60s.</small>
+                        Servidor preparando análisis de futuros...<br>
+                        <small class="text-muted">
+                            Los datos aparecerán automáticamente cuando termine el análisis.
+                        </small>
                     </div>
                 `;
-                if (signalsCount) { signalsCount.textContent = '0'; signalsCount.className = 'badge bg-info'; }
-                setTimeout(() => {
-                    if (typeof window.updatePreviousSignals === 'function') window.updatePreviousSignals();
-                }, 60000);
+            
+                if (signalsCount) {
+                    signalsCount.textContent = '0';
+                    signalsCount.className = 'badge bg-info';
+                }
+            
+                window._futuresSignalsState.activeLoading = false;
                 return;
             }
             
@@ -436,8 +470,11 @@ window.updatePreviousSignals = function() {
             }
             
             if (signals.length === 0) {
-                signalsList.innerHTML = '<div class="list-group-item bg-dark text-muted text-center py-3">Sin señales LONG/SHORT en la vela anterior</div>';
+                signalsList.innerHTML =
+                    '<div class="list-group-item bg-dark text-muted text-center py-3">Sin señales LONG/SHORT en la vela anterior</div>';
+            
                 window.futuresPrevLoaded = true;
+                window._futuresSignalsState.previousLoading = false;
                 return;
             }
             
@@ -496,29 +533,23 @@ window.updatePreviousSignals = function() {
             window.futuresPrevLoaded = true;
         })
         .catch(err => {
+            window._futuresSignalsState.previousLoading = false;
+        
             clearTimeout(timeoutId);
             console.error('Error futures previous:', err);
+        
             const isAbort = err.name === 'AbortError';
-            const errMsg = isAbort 
-                ? 'El servidor está calentando la caché (primera vez tarda ~2 min). Reintentando en 30s...'
+        
+            const errMsg = isAbort
+                ? 'El servidor está preparando el análisis de futuros. Se volverá a consultar automáticamente.'
                 : `Error: ${err.message || 'conexión perdida'}`;
-            
+        
             signalsList.innerHTML = `
                 <div class="list-group-item bg-dark text-warning text-center py-3">
                     <i class="fas fa-hourglass-half me-1"></i>
                     ${errMsg}
                 </div>
             `;
-            
-            // Auto-retry en 30s si fue timeout
-            if (isAbort) {
-                setTimeout(() => {
-                    if (typeof window.updatePreviousSignals === 'function') {
-                        console.log('🔄 Reintentando updatePreviousSignals después de timeout...');
-                        window.updatePreviousSignals();
-                    }
-                }, 60000);
-            }
         });
 };
 
@@ -780,15 +811,22 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Cargar señales activas y anteriores inmediatamente (con delay para que
     // futures.js termine de sobrescribir window.updateActiveSignals y updatePreviousSignals)
-    setTimeout(() => {
+    setTimeout(async () => {
+    
         if (typeof window.updateActiveSignals === 'function') {
             console.log('🚀 futures.js: cargando señales activas iniciales');
             window.updateActiveSignals();
         }
-        if (typeof window.updatePreviousSignals === 'function') {
-            console.log('🚀 futures.js: cargando señales anteriores iniciales');
-            window.updatePreviousSignals();
-        }
+    
+        // Dar prioridad a la lista de señales activas.
+        // La lista anterior utiliza el mismo caché pesado de 30 análisis.
+        setTimeout(() => {
+            if (typeof window.updatePreviousSignals === 'function') {
+                console.log('📜 futures.js: cargando señales de vela anterior');
+                window.updatePreviousSignals();
+            }
+        }, 5000);
+    
     }, 1200);
     
     // Refrescar señales activas cada 2 min (v15: reduce carga)
