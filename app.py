@@ -20957,9 +20957,20 @@ def _get_or_refresh_futures_analysis(force_wait=False):
     # TTL 15 min: el warm-up corre cada 10 min (v15), así que damos 5 min
     # de margen antes de considerar el caché stale (evita gaps de datos).
     if cache['data'] is not None and age < 900:
+    
         d = dict(cache['data'])
-        d['warming_up'] = False
+    
+        d['warming_up'] = bool(
+            cache.get('running', False)
+        )
+    
         d['cache_age'] = int(age)
+    
+        with cache['lock']:
+            d['progress'] = dict(
+                cache.get('progress', {})
+            )
+    
         return d
     
     # Cache stale → refresh en background y devolver lo que haya
