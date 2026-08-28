@@ -1198,7 +1198,20 @@ window.updatePreviousSignals = async function() {
         );
     }
 };
+// ============================================================================
+// GUARDAR REFERENCIAS DE LAS FUNCIONES PROPIAS DE FUTUROS
+// ============================================================================
+// script.js define posteriormente sus propias versiones Spot dentro de
+// DOMContentLoaded y puede sobrescribir window.updateActiveSignals y
+// window.updatePreviousSignals.
+// Guardamos aquí las funciones correctas de Futuros para restaurarlas después.
+// ============================================================================
 
+window._futuresUpdateActiveSignals =
+    window.updateActiveSignals;
+
+window._futuresUpdatePreviousSignals =
+    window.updatePreviousSignals;
 
 // Modal específico de justificación (vela anterior futuros)
 window.showFuturesPrevJustif = function(sig) {
@@ -1440,6 +1453,43 @@ function renderFuturesCorrelation(payload) {
 // ============================================================================
 
 document.addEventListener('DOMContentLoaded', function() {
+    // =========================================================================
+    // RESTAURAR LAS FUNCIONES DE FUTUROS
+    // =========================================================================
+    // script.js registra su propio DOMContentLoaded antes que futures.js y
+    // puede sobrescribir temporalmente estas funciones con la versión Spot.
+    // Aquí restauramos explícitamente las versiones de Futuros.
+    // =========================================================================
+
+    if (
+        typeof window._futuresUpdateActiveSignals === 'function'
+    ) {
+        window.updateActiveSignals =
+            window._futuresUpdateActiveSignals;
+
+        console.log(
+            '✅ FUTUROS: updateActiveSignals restaurada'
+        );
+    } else {
+        console.error(
+            '❌ FUTUROS: no existe _futuresUpdateActiveSignals'
+        );
+    }
+
+    if (
+        typeof window._futuresUpdatePreviousSignals === 'function'
+    ) {
+        window.updatePreviousSignals =
+            window._futuresUpdatePreviousSignals;
+
+        console.log(
+            '✅ FUTUROS: updatePreviousSignals restaurada'
+        );
+    } else {
+        console.error(
+            '❌ FUTUROS: no existe _futuresUpdatePreviousSignals'
+        );
+    }
     setTimeout(() => {
         insertReviewTraderPanel();
     }, 800);
