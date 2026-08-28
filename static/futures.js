@@ -294,24 +294,52 @@ window.updateActiveSignals = async function() {
         })
         .then(json => {
             if (!json.success) {
-                signalsList.innerHTML = `<div class="list-group-item bg-dark text-danger text-center py-3">Error: ${json.error || 'desconocido'}</div>`;
+            
+                // Liberar lock también en caso de error del servidor.
+                window._futuresSignalsState.activeLoading = false;
+            
+                signalsList.innerHTML = `
+                    <div class="list-group-item bg-dark text-danger text-center py-3">
+                        Error: ${json.error || 'desconocido'}
+                    </div>
+                `;
+            
                 return;
             }
             
-            // Si el servidor está calentando el caché, mostrar mensaje y reintentar
+            // Si el servidor está calentando el caché
             if (json.warming_up && (!json.signals || json.signals.length === 0)) {
+            
+                // MUY IMPORTANTE:
+                // La petición HTTP ya terminó, por lo que debemos liberar
+                // el lock antes de programar el siguiente intento.
+                window._futuresSignalsState.activeLoading = false;
+            
                 signalsList.innerHTML = `
                     <div class="list-group-item bg-dark text-info text-center py-3">
                         <div class="spinner-border spinner-border-sm me-2"></div>
                         <i class="fas fa-fire me-1"></i>
-                        Servidor calentando caché...<br>
-                        <small class="text-muted">Primera carga: 4-5 min (30 análisis). Refresco automático en 60s.</small>
+                        Servidor preparando análisis de futuros...<br>
+                        <small class="text-muted">
+                            Analizando 5 criptos × 6 temporalidades.
+                            Se actualizará automáticamente.
+                        </small>
                     </div>
                 `;
-                if (signalsCount) { signalsCount.textContent = '0'; signalsCount.className = 'badge bg-info'; }
+            
+                if (signalsCount) {
+                    signalsCount.textContent = '0';
+                    signalsCount.className = 'badge bg-info';
+                }
+            
+                // Reintentar después de que el backend haya tenido tiempo
+                // de completar parte del warm-up.
                 setTimeout(() => {
-                    if (typeof window.updateActiveSignals === 'function') window.updateActiveSignals();
-                }, 60000);
+                    if (typeof window.updateActiveSignals === 'function') {
+                        window.updateActiveSignals();
+                    }
+                }, 30000);
+            
                 return;
             }
             
@@ -325,7 +353,10 @@ window.updateActiveSignals = async function() {
             }
             
             if (signals.length === 0) {
-                signalsList.innerHTML = '<div class="list-group-item bg-dark text-muted text-center py-3">Sin señales LONG/SHORT activas en este momento</div>';
+                signalsList.innerHTML =
+                    '<div class="list-group-item bg-dark text-muted text-center py-3">Sin señales LONG/SHORT activas en este momento</div>';
+            
+                window._futuresSignalsState.activeLoading = false;
                 return;
             }
             
@@ -434,20 +465,39 @@ window.updatePreviousSignals = function() {
         })
         .then(json => {
             if (!json.success) {
-                signalsList.innerHTML = `<div class="list-group-item bg-dark text-warning text-center py-3">⚠️ ${json.error || 'Error del servidor'}</div>`;
-                if (signalsCount) { signalsCount.textContent = '0'; signalsCount.className = 'badge bg-secondary'; }
+            
+                // Liberar lock siempre que la petición termine con error.
+                window._futuresSignalsState.previousLoading = false;
+            
+                signalsList.innerHTML = `
+                    <div class="list-group-item bg-dark text-warning text-center py-3">
+                        ⚠️ ${json.error || 'Error del servidor'}
+                    </div>
+                `;
+            
+                if (signalsCount) {
+                    signalsCount.textContent = '0';
+                    signalsCount.className = 'badge bg-secondary';
+                }
+            
                 return;
             }
-            
+
             // Si el servidor está calentando el caché
             if (json.warming_up && (!json.signals || json.signals.length === 0)) {
+            
+                // IMPORTANTE:
+                // Este panel usa previousLoading, NO activeLoading.
+                window._futuresSignalsState.previousLoading = false;
+            
                 signalsList.innerHTML = `
                     <div class="list-group-item bg-dark text-info text-center py-3">
                         <div class="spinner-border spinner-border-sm me-2"></div>
                         <i class="fas fa-fire me-1"></i>
                         Servidor preparando análisis de futuros...<br>
                         <small class="text-muted">
-                            Los datos aparecerán automáticamente cuando termine el análisis.
+                            Analizando las 30 combinaciones.
+                            Se volverá a consultar automáticamente.
                         </small>
                     </div>
                 `;
@@ -457,7 +507,13 @@ window.updatePreviousSignals = function() {
                     signalsCount.className = 'badge bg-info';
                 }
             
-                window._futuresSignalsState.activeLoading = false;
+                // Reintentar automáticamente mientras termina el warm-up.
+                setTimeout(() => {
+                    if (typeof window.updatePreviousSignals === 'function') {
+                        window.updatePreviousSignals();
+                    }
+                }, 30000);
+            
                 return;
             }
             
