@@ -11837,246 +11837,833 @@ class TradingExpertSystem:
         scored.sort(key=lambda x: -x[1])
         best = scored[0]
         return best[0]['price'], best[0]['source'], best[1]
+
+    def _build_smc_entry_context(
+        self,
+        direction,
+        structure,
+        current_price,
+        previous_close,
+        volatility,
+        liquidation=None
+    ):
+        """
+        Construye un contexto SMC ligero para seleccionar ENTRY.
     
-    def _select_optimal_entry(self, direction, structure, current_price, previous_close, volatility, timeframe):
+        IMPORTANTE:
+        - No llama a APIs.
+        - No calcula indicadores nuevos.
+        - Usa únicamente datos que el análisis principal
+          ya calculó.
+        - Sólo inspecciona las últimas velas necesarias.
+    
+        Esto mantiene el coste muy bajo para Render Free.
         """
-        Selecciona el ENTRY óptimo respetando la filosofía Smart Money.
-        
-        REGLAS DURAS:
-          - LONG / COMPRA:  entry <= previous_close  (retroceso; nunca comprar arriba)
-          - SHORT / VENTA:  entry >= previous_close  (rebote; nunca vender abajo)
-        
-        Fuentes usadas (mismo pool que TP/SL para coherencia):
-          - Order Blocks alcistas (LONG) / bajistas (SHORT) cerca del precio
-          - Fair Value Gaps sin rellenar en el lado del retroceso
-          - Fibonacci retracement (0.382, 0.5, 0.618) del último swing
-          - Soportes (LONG) / Resistencias (SHORT) inmediatos
-          - Value Area POC si está en el lado correcto
-          - ATR fallback: previous_close ± 0.5*ATR (si no hay zonas)
-        
-        Retorna: (entry_price, entry_source, entry_score)
+    
+        try:
+            atr = float(
+                volatility.get('atr', current_price * 0.02)
+                or (current_price * 0.02)
+            )
+    
+            # ----------------------------------------------------------
+            # DATA OHLCV YA EXISTENTE
+            # ----------------------------------------------------------
+            df = structure.get('df', {}) or {}
+    
+            highs = df.get('high', []) or []
+            lows = df.get('low', []) or []
+            opens = df.get('open', []) or []
+            closes = df.get('close', []) or []
+    
+            n = min(
+                len(highs),
+                len(lows),
+                len(opens),
+                len(closes)
+            )
+    
+            # Sólo necesitamos las últimas 8 velas.
+            start = max(0, n - 8)
+    
+            highs = [float(x) for x in highs[start:n]]
+            lows = [float(x) for x in lows[start:n]]
+            opens = [float(x) for x in opens[start:n]]
+            closes = [float(x) for x in closes[start:n]]
+    
+            sweep = False
+            mss = False
+            displacement = False
+    
+            # ----------------------------------------------------------
+            # LIQUIDITY SWEEP
+            # ----------------------------------------------------------
+            if len(closes) >= 5:
+    
+                last_high = highs[-1]
+                last_low = lows[-1]
+                last_close = closes[-1]
+    
+                previous_high = max(highs[-5:-1])
+                previous_low = min(lows[-5:-1])
+    
+                if direction == 'long':
+                    # Barrido de mínimos + recuperación
+                    sweep = (
+                        last_low < previous_low
+                        and last_close > previous_low
+                    )
+    
+                else:
+                    # Barrido de máximos + rechazo
+                    sweep = (
+                        last_high > previous_high
+                        and last_close < previous_high
+                    )
+    
+            # ----------------------------------------------------------
+            # MSS / BOS ligero
+            # ----------------------------------------------------------
+            if len(closes) >= 4:
+    
+                last_close = closes[-1]
+    
+                local_high = max(highs[-4:-1])
+                local_low = min(lows[-4:-1])
+    
+                if direction == 'long':
+                    mss = last_close > local_high
+                else:
+                    mss = last_close < local_low
+    
+            # ----------------------------------------------------------
+            # DISPLACEMENT
+            # ----------------------------------------------------------
+            if len(closes) >= 5:
+    
+                bodies = [
+                    abs(closes[i] - opens[i])
+                    for i in range(len(closes) - 1)
+                ]
+    
+                bodies = [b for b in bodies if b > 0]
+    
+                if bodies:
+                    avg_body = sum(bodies) / len(bodies)
+                    last_body = abs(closes[-1] - opens[-1])
+    
+                    bullish_body = closes[-1] > opens[-1]
+                    bearish_body = closes[-1] < opens[-1]
+    
+                    if direction == 'long':
+                        displacement = (
+                            bullish_body
+                            and last_body >= max(
+                                avg_body * 1.5,
+                                atr * 0.60
+                            )
+                        )
+                    else:
+                        displacement = (
+                            bearish_body
+                            and last_body >= max(
+                                avg_body * 1.5,
+                                atr * 0.60
+                            )
+                        )
+    
+            # ----------------------------------------------------------
+            # LIQUIDITY POOL RELEVANTE
+            # ----------------------------------------------------------
+            active_bins = []
+    
+            if isinstance(liquidation, dict):
+                active_bins = liquidation.get('active_bins', []) or []
+    
+            relevant_pool_distance = None
+            relevant_pool_weight = 0.0
+            relevant_pool_price = None
+    
+            for bin_data in active_bins:
+    
+                if not isinstance(bin_data, dict):
+                    continue
+    
+                side = str(
+                    bin_data.get('side', '')
+                ).lower()
+    
+                top = float(
+                    bin_data.get('price_top', 0) or 0
+                )
+    
+                bottom = float(
+                    bin_data.get('price_bottom', 0) or 0
+                )
+    
+                weight = float(
+                    bin_data.get('max_weight', 0)
+                    or bin_data.get('weight', 0)
+                    or 0
+                )
+    
+                center = (top + bottom) / 2
+    
+                if center <= 0:
+                    continue
+    
+                # LONG busca liquidez de posiciones LONG debajo.
+                # SHORT busca liquidez de posiciones SHORT arriba.
+                if direction == 'long':
+                    relevant = (
+                        side == 'long'
+                        and center < previous_close
+                    )
+                else:
+                    relevant = (
+                        side == 'short'
+                        and center > previous_close
+                    )
+    
+                if not relevant:
+                    continue
+    
+                distance = abs(previous_close - center)
+    
+                if (
+                    relevant_pool_distance is None
+                    or distance < relevant_pool_distance
+                ):
+                    relevant_pool_distance = distance
+                    relevant_pool_weight = weight
+                    relevant_pool_price = center
+    
+            # ----------------------------------------------------------
+            # RESULTADO
+            # ----------------------------------------------------------
+            pool_near = (
+                relevant_pool_distance is not None
+                and relevant_pool_distance <= atr * 1.5
+            )
+    
+            return {
+                'sweep': sweep,
+                'mss': mss,
+                'displacement': displacement,
+                'liquidity_pool_near': pool_near,
+                'liquidity_pool_price': relevant_pool_price,
+                'liquidity_pool_distance': relevant_pool_distance,
+                'liquidity_pool_weight': relevant_pool_weight
+            }
+    
+        except Exception as e:
+    
+            print(
+                f"⚠️ _build_smc_entry_context: {e}"
+            )
+    
+            return {
+                'sweep': False,
+                'mss': False,
+                'displacement': False,
+                'liquidity_pool_near': False,
+                'liquidity_pool_price': None,
+                'liquidity_pool_distance': None,
+                'liquidity_pool_weight': 0
+            }    
+    def _select_optimal_entry(
+        self,
+        direction,
+        structure,
+        current_price,
+        previous_close,
+        volatility,
+        timeframe,
+        liquidation=None
+    ):
         """
-        atr = volatility.get('atr', current_price * 0.02) or (current_price * 0.02)
-        candidates = []  # [{'price', 'source', 'strength'}]
-        
-        # Base: NUNCA arriba del cierre anterior en LONG, NUNCA abajo en SHORT
+        Selección Smart Money del ENTRY.
+    
+        Prioridad:
+    
+        1. Liquidity pool
+        2. Liquidity sweep
+        3. MSS/BOS
+        4. Displacement
+        5. POI: OB/FVG/S/R/POC
+        6. Distancia
+    
+        La proximidad ya NO es el criterio principal.
+    
+        Restricciones duras:
+        - LONG: entry <= previous_close
+        - SHORT: entry >= previous_close
+        - retroceso mínimo basado en ATR
+        - distancia máxima razonable
+    
+        IMPORTANTE:
+        No modifica votos ni traders.
+        Sólo decide la calidad de ejecución.
+        """
+    
+        atr = float(
+            volatility.get(
+                'atr',
+                current_price * 0.02
+            )
+            or (current_price * 0.02)
+        )
+    
+        candidates = []
+    
+        # ==========================================================
+        # CONTEXTO SMC
+        # ==========================================================
+        smc = self._build_smc_entry_context(
+            direction,
+            structure,
+            current_price,
+            previous_close,
+            volatility,
+            liquidation
+        )
+    
+        # ==========================================================
+        # RANGO PERMITIDO
+        # ==========================================================
+        atr_pct = (
+            atr / previous_close * 100
+            if previous_close > 0
+            else 0.5
+        )
+    
+        min_dist_pct = max(
+            0.15,
+            0.30 * atr_pct
+        )
+    
+        max_dist_pct = 5.0
+    
         if direction == 'long':
-            ceiling = previous_close  # entry <= previous_close
+            ceiling = previous_close
         else:
-            floor = previous_close  # entry >= previous_close
-        
+            floor = previous_close
+    
+        # ==========================================================
+        # ORDER BLOCKS
+        # ==========================================================
+        for ob in structure.get('order_blocks', []) or []:
+    
+            if not isinstance(ob, dict):
+                continue
+    
+            ob_type = ob.get('type')
+            pr = ob.get('price_range', [0, 0])
+    
+            if not isinstance(pr, (list, tuple)) or len(pr) < 2:
+                continue
+    
+            if direction == 'long' and ob_type == 'bullish':
+    
+                target = (
+                    float(pr[1])
+                    if pr[1] > 0
+                    else float(pr[0])
+                )
+    
+                if 0 < target <= ceiling:
+    
+                    candidates.append({
+                        'price': target,
+                        'source': 'Order Block alcista',
+                        'type': 'ob',
+                        'strength': (
+                            3
+                            if ob.get('strength') == 'strong'
+                            else 2
+                        )
+                    })
+    
+            elif direction == 'short' and ob_type == 'bearish':
+    
+                target = (
+                    float(pr[0])
+                    if pr[0] > 0
+                    else float(pr[1])
+                )
+    
+                if target >= floor:
+    
+                    candidates.append({
+                        'price': target,
+                        'source': 'Order Block bajista',
+                        'type': 'ob',
+                        'strength': (
+                            3
+                            if ob.get('strength') == 'strong'
+                            else 2
+                        )
+                    })
+    
+        # ==========================================================
+        # FAIR VALUE GAPS
+        # ==========================================================
+        for fvg in structure.get(
+            'fair_value_gaps',
+            []
+        ) or []:
+    
+            if not isinstance(fvg, dict):
+                continue
+    
+            if fvg.get('filled', True):
+                continue
+    
+            if direction == 'long' and fvg.get('type') == 'bullish':
+    
+                target = float(
+                    fvg.get('gap_top', 0)
+                    or 0
+                )
+    
+                if 0 < target <= ceiling:
+    
+                    candidates.append({
+                        'price': target,
+                        'source': 'FVG alcista',
+                        'type': 'fvg',
+                        'strength': (
+                            2
+                            if fvg.get('strength') == 'strong'
+                            else 1
+                        )
+                    })
+    
+            elif direction == 'short' and fvg.get('type') == 'bearish':
+    
+                target = float(
+                    fvg.get('gap_bottom', 0)
+                    or 0
+                )
+    
+                if target >= floor:
+    
+                    candidates.append({
+                        'price': target,
+                        'source': 'FVG bajista',
+                        'type': 'fvg',
+                        'strength': (
+                            2
+                            if fvg.get('strength') == 'strong'
+                            else 1
+                        )
+                    })
+    
+        # ==========================================================
+        # SOPORTE / RESISTENCIA
+        # ==========================================================
         if direction == 'long':
-            # 1. Order Blocks ALCISTAS por debajo (o al nivel) del cierre anterior
-            for ob in structure.get('order_blocks', []) or []:
-                if not isinstance(ob, dict):
-                    continue
-                if ob.get('type') == 'bullish':
-                    pr = ob.get('price_range', [0, 0])
-                    if len(pr) >= 2:
-                        # Parte alta del OB alcista = mejor zona de compra por rebote
-                        target = pr[1] if pr[1] > 0 else pr[0]
-                        if 0 < target <= ceiling:
-                            candidates.append({
-                                'price': target,
-                                'source': f'Order Block alcista ${target:.4f}',
-                                'strength': 3 if ob.get('strength') == 'strong' else 2,
-                            })
-            
-            # 2. FVGs alcistas sin rellenar por debajo del cierre
-            for fvg in structure.get('fair_value_gaps', []) or []:
-                if not isinstance(fvg, dict) or fvg.get('filled', True):
-                    continue
-                if fvg.get('type') == 'bullish':
-                    gap_top = fvg.get('gap_top', 0)
-                    if 0 < gap_top <= ceiling:
-                        candidates.append({
-                            'price': gap_top,
-                            'source': f'FVG alcista ${gap_top:.4f}',
-                            'strength': 2 if fvg.get('strength') == 'strong' else 1,
-                        })
-            
-            # 3. Soportes cercanos por debajo del cierre
-            for s in structure.get('supports', []) or []:
-                if s and 0 < s <= ceiling:
+    
+            for price in structure.get(
+                'supports',
+                []
+            ) or []:
+    
+                price = float(price or 0)
+    
+                if 0 < price <= ceiling:
+    
                     candidates.append({
-                        'price': s,
-                        'source': f'Soporte ${s:.4f}',
-                        'strength': 2,
+                        'price': price,
+                        'source': 'Soporte',
+                        'type': 'support',
+                        'strength': 2
                     })
-            
-            # 4. Fibonacci retracement (0.382, 0.5, 0.618) — pullbacks clásicos
-            fib_ret = structure.get('fib_retracements', {}) or structure.get('fibonacci', {}) or {}
-            for level, price in fib_ret.items():
-                if not price:
-                    continue
-                level_str = str(level)
-                if level_str in ('0.382', '0.5', '0.618') and 0 < price <= ceiling:
-                    strength = 3 if level_str == '0.618' else 2
+    
+        else:
+    
+            for price in structure.get(
+                'resistances',
+                []
+            ) or []:
+    
+                price = float(price or 0)
+    
+                if price >= floor:
+    
                     candidates.append({
-                        'price': float(price),
-                        'source': f'Fibonacci {level_str}',
-                        'strength': strength,
+                        'price': price,
+                        'source': 'Resistencia',
+                        'type': 'resistance',
+                        'strength': 2
                     })
-            
-            # 5. Value Area / POC del perfil de volumen si está debajo del cierre
-            vp = structure.get('volume_profile', {}) or {}
-            poc = vp.get('poc')
-            if poc and 0 < poc <= ceiling:
+    
+        # ==========================================================
+        # FIBONACCI
+        # ==========================================================
+        fib_ret = (
+            structure.get(
+                'fib_retracements',
+                {}
+            )
+            or structure.get(
+                'fibonacci',
+                {}
+            )
+            or {}
+        )
+    
+        for level, price in fib_ret.items():
+    
+            if not price:
+                continue
+    
+            try:
+                price = float(price)
+            except (TypeError, ValueError):
+                continue
+    
+            level_str = str(level)
+    
+            if level_str not in (
+                '0.382',
+                '0.5',
+                '0.618'
+            ):
+                continue
+    
+            if direction == 'long' and price <= ceiling:
+    
                 candidates.append({
-                    'price': float(poc),
-                    'source': f'POC (Point of Control) ${poc:.4f}',
-                    'strength': 3,
+                    'price': price,
+                    'source': f'Fibonacci {level_str}',
+                    'type': 'fib',
+                    'strength': (
+                        3
+                        if level_str == '0.618'
+                        else 2
+                    )
                 })
-            
-            # 6. ATR fallback: retroceso de 0.5 ATR desde el cierre anterior
-            atr_entry = previous_close - 0.5 * atr
-            if atr_entry > 0:
+    
+            elif direction == 'short' and price >= floor:
+    
                 candidates.append({
-                    'price': atr_entry,
-                    'source': f'Retroceso 0.5·ATR desde cierre anterior',
-                    'strength': 1,
+                    'price': price,
+                    'source': f'Fibonacci {level_str}',
+                    'type': 'fib',
+                    'strength': (
+                        3
+                        if level_str == '0.618'
+                        else 2
+                    )
                 })
-        
-        else:  # SHORT
-            # 1. Order Blocks BAJISTAS por encima del cierre
-            for ob in structure.get('order_blocks', []) or []:
-                if not isinstance(ob, dict):
-                    continue
-                if ob.get('type') == 'bearish':
-                    pr = ob.get('price_range', [0, 0])
-                    if len(pr) >= 2:
-                        # Parte baja del OB bajista = mejor zona de venta por rechazo
-                        target = pr[0] if pr[0] > 0 else pr[1]
-                        if target >= floor:
-                            candidates.append({
-                                'price': target,
-                                'source': f'Order Block bajista ${target:.4f}',
-                                'strength': 3 if ob.get('strength') == 'strong' else 2,
-                            })
-            
-            # 2. FVGs bajistas sin rellenar por encima
-            for fvg in structure.get('fair_value_gaps', []) or []:
-                if not isinstance(fvg, dict) or fvg.get('filled', True):
-                    continue
-                if fvg.get('type') == 'bearish':
-                    gap_bottom = fvg.get('gap_bottom', 0)
-                    if gap_bottom >= floor:
-                        candidates.append({
-                            'price': gap_bottom,
-                            'source': f'FVG bajista ${gap_bottom:.4f}',
-                            'strength': 2 if fvg.get('strength') == 'strong' else 1,
-                        })
-            
-            # 3. Resistencias por encima del cierre
-            for r in structure.get('resistances', []) or []:
-                if r and r >= floor:
-                    candidates.append({
-                        'price': r,
-                        'source': f'Resistencia ${r:.4f}',
-                        'strength': 2,
-                    })
-            
-            # 4. Fibonacci retracement en el lado de arriba
-            fib_ret = structure.get('fib_retracements', {}) or structure.get('fibonacci', {}) or {}
-            for level, price in fib_ret.items():
-                if not price:
-                    continue
-                level_str = str(level)
-                if level_str in ('0.382', '0.5', '0.618') and price >= floor:
-                    strength = 3 if level_str == '0.618' else 2
-                    candidates.append({
-                        'price': float(price),
-                        'source': f'Fibonacci {level_str}',
-                        'strength': strength,
-                    })
-            
-            # 5. POC si está arriba
-            vp = structure.get('volume_profile', {}) or {}
-            poc = vp.get('poc')
-            if poc and poc >= floor:
-                candidates.append({
-                    'price': float(poc),
-                    'source': f'POC (Point of Control) ${poc:.4f}',
-                    'strength': 3,
-                })
-            
-            # 6. ATR fallback: rebote de 0.5 ATR sobre el cierre anterior
-            atr_entry = previous_close + 0.5 * atr
+    
+        # ==========================================================
+        # POC
+        # ==========================================================
+        vp = structure.get(
+            'volume_profile',
+            {}
+        ) or {}
+    
+        poc = float(
+            vp.get('poc', 0)
+            or 0
+        )
+    
+        if direction == 'long' and 0 < poc <= ceiling:
+    
             candidates.append({
-                'price': atr_entry,
-                'source': f'Rebote 0.5·ATR desde cierre anterior',
-                'strength': 1,
+                'price': poc,
+                'source': 'POC',
+                'type': 'poc',
+                'strength': 3
             })
-        
-        if not candidates:
-            # Último recurso: usar previous_close exacto
-            return previous_close, 'Cierre anterior (sin zonas técnicas)', 30
-        
-        # ============ v23 (Parte A5): retroceso mínimo obligatorio ============
-        # El entry NUNCA puede estar exactamente en previous_close. Debe haber
-        # un retroceso mínimo de 0.3×ATR para que el precio tenga que "venir
-        # a nosotros" antes de disparar la operación. Filosofía Smart Money:
-        # no perseguir precio, esperar zona.
-        #
-        # Antes: MIN_DIST_PCT = 0.1% (muy pegado, aceptaba prácticamente el
-        # cierre exacto). Consecuencia: precio abría, hacía un tick contra
-        # el trader, tocaba el SL casi apretado y salía perdiendo.
-        # Ahora: MIN_DIST_ABS = 0.3×ATR (típicamente 0.3-1% según volatilidad).
-        atr_pct_dist = (atr / previous_close) * 100 if previous_close > 0 else 0.5
-        MIN_DIST_PCT = max(0.15, 0.3 * atr_pct_dist)  # 0.3×ATR o 0.15% mínimo absoluto
-        MAX_DIST_PCT = 5.0  # tampoco tan lejano que sea inalcanzable
-        
-        # Filtrar candidatos por rango de distancia razonable
+    
+        elif direction == 'short' and poc >= floor:
+    
+            candidates.append({
+                'price': poc,
+                'source': 'POC',
+                'type': 'poc',
+                'strength': 3
+            })
+    
+        # ==========================================================
+        # ATR FALLBACK
+        # ==========================================================
+        if direction == 'long':
+    
+            candidates.append({
+                'price': previous_close - 0.5 * atr,
+                'source': 'ATR fallback',
+                'type': 'atr',
+                'strength': 1
+            })
+    
+        else:
+    
+            candidates.append({
+                'price': previous_close + 0.5 * atr,
+                'source': 'ATR fallback',
+                'type': 'atr',
+                'strength': 1
+            })
+    
+        # ==========================================================
+        # FILTRAR DISTANCIA
+        # ==========================================================
         valid = []
-        for c in candidates:
-            price = c['price']
+    
+        for candidate in candidates:
+    
+            price = float(
+                candidate.get('price', 0)
+                or 0
+            )
+    
             if price <= 0:
                 continue
-            dist_pct = abs(previous_close - price) / previous_close * 100
-            c['_dist_pct'] = dist_pct  # guardar para debug
-            c['_dist_abs'] = abs(previous_close - price)
-            if MIN_DIST_PCT <= dist_pct <= MAX_DIST_PCT:
-                valid.append(c)
-        
-        # v23: si el filtro estricto vacía la lista, forzar retroceso ATR
-        # (nunca aceptar previous_close exacto — es lo que causaba SL rápido).
+    
+            dist_pct = (
+                abs(previous_close - price)
+                / previous_close
+                * 100
+                if previous_close > 0
+                else 999
+            )
+    
+            if (
+                dist_pct < min_dist_pct
+                or dist_pct > max_dist_pct
+            ):
+                continue
+    
+            candidate['_dist_pct'] = dist_pct
+            candidate['_dist_atr'] = (
+                abs(previous_close - price)
+                / atr
+                if atr > 0
+                else 999
+            )
+    
+            valid.append(candidate)
+    
+        # ==========================================================
+        # FALLBACK SINTÉTICO
+        # ==========================================================
         if not valid:
-            # Sintetizar entry a exactamente MIN_DIST_PCT del previous_close
+    
             if direction == 'long':
-                synthetic_entry = previous_close * (1 - MIN_DIST_PCT / 100)
+    
+                synthetic_entry = (
+                    previous_close
+                    * (1 - min_dist_pct / 100)
+                )
+    
             else:
-                synthetic_entry = previous_close * (1 + MIN_DIST_PCT / 100)
-            return synthetic_entry, f'Retroceso {MIN_DIST_PCT:.2f}% (ATR sintético)', 40
-        
-        # ORDENAR POR PROXIMIDAD (ascendente por distancia absoluta al cierre anterior)
-        # Empate → preferir zona con mayor strength
-        valid.sort(key=lambda c: (c['_dist_abs'], -c.get('strength', 1)))
+    
+                synthetic_entry = (
+                    previous_close
+                    * (1 + min_dist_pct / 100)
+                )
+    
+            return (
+                synthetic_entry,
+                f'Retroceso {min_dist_pct:.2f}% ATR sintético',
+                40
+            )
+    
+        # ==========================================================
+        # PUNTUACIÓN SMC
+        # ==========================================================
+        type_scores = {
+            'ob': 28,
+            'fvg': 22,
+            'support': 18,
+            'resistance': 18,
+            'poc': 17,
+            'fib': 12,
+            'atr': 5
+        }
+    
+        for candidate in valid:
+    
+            score = type_scores.get(
+                candidate.get('type'),
+                5
+            )
+    
+            # ------------------------------------------------------
+            # FUERZA DE LA ZONA
+            # ------------------------------------------------------
+            score += min(
+                9,
+                candidate.get('strength', 1) * 3
+            )
+    
+            # ------------------------------------------------------
+            # DISTANCIA
+            # ------------------------------------------------------
+            d_atr = candidate['_dist_atr']
+    
+            if 0.30 <= d_atr <= 1.50:
+                score += 12
+            elif 1.50 < d_atr <= 2.50:
+                score += 8
+            elif 2.50 < d_atr <= 3.50:
+                score += 3
+    
+            # ------------------------------------------------------
+            # LIQUIDITY POOL
+            # ------------------------------------------------------
+            pool_price = smc.get(
+                'liquidity_pool_price'
+            )
+    
+            pool_distance = smc.get(
+                'liquidity_pool_distance'
+            )
+    
+            if (
+                pool_price
+                and pool_distance is not None
+            ):
+    
+                candidate_to_pool = abs(
+                    candidate['price']
+                    - pool_price
+                )
+    
+                # Queremos que exista liquidez cerca,
+                # pero no comprar/vender literalmente dentro del pool.
+                if (
+                    0.20 * atr
+                    <= candidate_to_pool
+                    <= 1.50 * atr
+                ):
+                    score += 15
+    
+                elif candidate_to_pool < 0.20 * atr:
+                    score -= 8
+    
+            # ------------------------------------------------------
+            # SWEEP
+            # ------------------------------------------------------
+            if smc.get('sweep'):
+                score += 18
+    
+            # ------------------------------------------------------
+            # MSS / BOS
+            # ------------------------------------------------------
+            if smc.get('mss'):
+                score += 12
+    
+            # ------------------------------------------------------
+            # DISPLACEMENT
+            # ------------------------------------------------------
+            if smc.get('displacement'):
+                score += 12
+    
+            candidate['_smc_score'] = min(
+                100,
+                max(0, score)
+            )
+    
+        # ==========================================================
+        # CONFLUENCIA ENTRE POIs
+        # ==========================================================
+        for i, candidate in enumerate(valid):
+    
+            confluence = 0
+    
+            for j, other in enumerate(valid):
+    
+                if i == j:
+                    continue
+    
+                distance = abs(
+                    candidate['price']
+                    - other['price']
+                )
+    
+                if (
+                    atr > 0
+                    and distance <= atr * 0.35
+                ):
+                    confluence += 1
+    
+            if confluence > 0:
+    
+                candidate['_smc_score'] = min(
+                    100,
+                    candidate['_smc_score']
+                    + min(10, confluence * 5)
+                )
+    
+        # ==========================================================
+        # ELEGIR POR SMC SCORE
+        # ==========================================================
+        valid.sort(
+            key=lambda c: (
+                -c['_smc_score'],
+                c['_dist_atr']
+            )
+        )
+    
         best = valid[0]
-        
-        # Score informativo (para UI): distancia + fuerza
-        dist_pct = best['_dist_pct']
-        if dist_pct < 0.3:
-            base_score = 70
-        elif dist_pct < 1.0:
-            base_score = 90
-        elif dist_pct < 2.0:
-            base_score = 80
-        elif dist_pct < 3.0:
-            base_score = 60
-        else:
-            base_score = 40
-        best_score = min(100, base_score + best.get('strength', 1) * 5)
-        
-        return best['price'], best['source'], best_score
+    
+        score = int(
+            round(
+                best['_smc_score']
+            )
+        )
+    
+        # ==========================================================
+        # ETIQUETA EXPLICATIVA
+        # ==========================================================
+        tags = [
+            best['source']
+        ]
+    
+        if smc.get('liquidity_pool_near'):
+            tags.append('Liquidity')
+    
+        if smc.get('sweep'):
+            tags.append('Sweep')
+    
+        if smc.get('mss'):
+            tags.append('MSS/BOS')
+    
+        if smc.get('displacement'):
+            tags.append('Displacement')
+    
+        source = (
+            f"{' + '.join(tags)} "
+            f"[SMC {score}/100]"
+        )
+    
+        return (
+            best['price'],
+            source,
+            score
+        )
     
     def calculate_entry_levels(self, decision, trend, momentum, volatility, structure, symbol, timeframe, liquidation=None):
         """
         Calcula niveles de entrada, SL y TP.
         
-        FASE 3: UN SOLO TP (el más rentable Y realista) + SL óptimo (protector y poco probable de toque).
-        FASE 4: ENTRY inteligente con retroceso (LONG) / rebote (SHORT) usando zonas técnicas.
+        FASE 2:
+        ENTRY Smart Money:
+        Liquidity → Sweep → MSS/BOS → Displacement → POI.
         
-        Si no hay un TP/SL válido o el R/R es < 1:1.5 → devuelve rejected_reason.
+        FASE 3:
+        Un solo TP: rentable y realista.
+        
+        FASE 4:
+        SL protector, estructural y con baja probabilidad de toque.
+        
+        La lógica de los traders y sus pesos no se modifica.
         """
         try:
             current_price = structure.get('current_price', 0)
@@ -12108,7 +12695,13 @@ class TradingExpertSystem:
             
             # ============ SELECCIONAR ENTRY ÓPTIMO (retroceso/rebote) ============
             entry, entry_source, entry_score = self._select_optimal_entry(
-                direction, structure, current_price, previous_close, volatility, timeframe
+                direction,
+                structure,
+                current_price,
+                previous_close,
+                volatility,
+                timeframe,
+                liquidation=liquidation
             )
             
             # ============ GARANTÍA DURA de la regla del usuario ============
@@ -13812,7 +14405,14 @@ class TradingExpertSystem:
                 print(f"💰 Calculando niveles para {accion_consenso}...")
                 try:
                     levels = self.calculate_entry_levels(
-                        accion_consenso, trend, momentum, volatility, structure, symbol, timeframe
+                        accion_consenso,
+                        trend,
+                        momentum,
+                        volatility,
+                        structure,
+                        symbol,
+                        timeframe,
+                        liquidation=liquidation_data
                     )
                     
                     # Ajustar tamaño por convicción
@@ -16499,6 +17099,11 @@ class LiquidationHeatmap:
         self.frozen_bins = []
         self.price_history = []
         
+        # Índice de la última vela histórica ya utilizada para
+        # comprobar bins. Esto evita recorrer TODO el historial
+        # en cada petición.
+        self._last_history_scan_idx = -1
+        
         # Estadísticas
         self.total_events = 0
         self.last_event_timestamp = None
@@ -16527,6 +17132,11 @@ class LiquidationHeatmap:
             })
         
         self.history_loaded = True
+        
+        # La primera llamada a get_heatmap_data() debe poder
+        # realizar la validación histórica inicial.
+        self._last_history_scan_idx = -1
+        
         print(f"   ✅ Historial cargado: {len(self.price_history)} velas")
     
     def get_step_size(self, price):
@@ -16580,7 +17190,26 @@ class LiquidationHeatmap:
         self.current_timestamp = df['time'].iloc[current_idx]
         if isinstance(self.current_timestamp, str):
             self.current_timestamp = datetime.fromisoformat(self.current_timestamp.replace('Z', '+00:00'))
+        # ==============================================================
+        # HISTORIAL INCREMENTAL
+        # ==============================================================
+        # load_price_history() carga el histórico inicial.
+        # A partir de aquí sólo añadimos la nueva vela si realmente
+        # es posterior a la última almacenada.
+        if (
+            not self.price_history
+            or self.price_history[-1]['timestamp'] != self.current_timestamp
+        ):
+            self.price_history.append({
+                'timestamp': self.current_timestamp,
+                'high': float(high),
+                'low': float(low)
+            })
         
+            print(
+                f"   ➕ Historial incremental: "
+                f"{len(self.price_history)} velas"
+            )        
         # Volumen en millones
         volume_m = volume / 1000
         print(f"   📊 Volumen: {volume:.2f}K = {volume_m:.2f}M USD")
@@ -16779,23 +17408,90 @@ class LiquidationHeatmap:
             print(f"   📅 Rango historial: {first_ts} a {last_ts}")
         
         # ============ REPROCESAR BINS CONTRA TODO EL HISTORIAL ============
+        # ==============================================================
+        # VALIDACIÓN HISTÓRICA INCREMENTAL
+        # ==============================================================
+        # Primera ejecución:
+        #     revisa el histórico disponible.
+        #
+        # Siguientes ejecuciones:
+        #     solamente revisa velas que aparecieron después de la
+        #     última comprobación.
+        #
+        # Esto evita el coste O(bins × historial) repetido en cada
+        # petición y es especialmente importante en Render Free.
+        # ==============================================================
+        
         nuevos_congelados = 0
         frozen_antes = len(self.frozen_bins)
-        bins_verificados = 0
         
-        for bin_obj in self.all_bins[:]:
-            if bin_obj.frozen:
-                continue
-            
-            bins_verificados += 1
-            tocado, ts_tocado = self._check_bin_against_history(bin_obj)
-            
-            if tocado:
-                bin_obj.frozen = True
-                bin_obj.frozen_at = ts_tocado
-                self.all_bins.remove(bin_obj)
-                self.frozen_bins.append(bin_obj)
-                nuevos_congelados += 1
+        scan_start = max(0, self._last_history_scan_idx + 1)
+        scan_end = len(self.price_history)
+        
+        bins_verificados = 0
+        velas_nuevas = max(0, scan_end - scan_start)
+        
+        if velas_nuevas > 0:
+        
+            for bin_obj in self.all_bins[:]:
+        
+                if bin_obj.frozen:
+                    continue
+        
+                bins_verificados += 1
+                tocado = False
+                ts_tocado = None
+        
+                # Sólo comprobar desde la última vela procesada.
+                for idx in range(scan_start, scan_end):
+        
+                    price_point = self.price_history[idx]
+        
+                    # Un bin no puede ser tocado antes de haber sido creado.
+                    if price_point['timestamp'] <= bin_obj.created_at:
+                        continue
+        
+                    if self._check_bin_touched(
+                        bin_obj,
+                        price_point['high'],
+                        price_point['low'],
+                        idx
+                    ):
+                        tocado = True
+                        ts_tocado = price_point['timestamp']
+                        break
+        
+                if tocado:
+                    bin_obj.frozen = True
+                    bin_obj.frozen_at = ts_tocado
+        
+                    self.all_bins.remove(bin_obj)
+                    self.frozen_bins.append(bin_obj)
+        
+                    nuevos_congelados += 1
+        
+                    if nuevos_congelados % 5 == 0:
+                        ts_str = (
+                            ts_tocado.strftime('%Y-%m-%d')
+                            if ts_tocado
+                            else 'desconocido'
+                        )
+        
+                        print(
+                            f"   ✅ [{self.timeframe}] +5 bins congelados "
+                            f"(total: {nuevos_congelados}) - "
+                            f"último: ${bin_obj.price_top:.2f} "
+                            f"en {ts_str}"
+                        )
+        
+        # Marcar las velas actuales como ya procesadas.
+        self._last_history_scan_idx = len(self.price_history) - 1
+        
+        print(
+            f"   ⚡ Heatmap incremental: "
+            f"{velas_nuevas} vela(s) nuevas, "
+            f"{bins_verificados} bins revisados"
+        )
                 
                 if nuevos_congelados % 5 == 0:
                     ts_str = ts_tocado.strftime('%Y-%m-%d') if ts_tocado else 'desconocido'
