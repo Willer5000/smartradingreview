@@ -1459,9 +1459,20 @@ function getInstantRecommendation(attempt = 1) {
             symbol: symbol,
             timeframe: interval,
             user: currentUser || 'Invitado',
-            portfolio: userPortfolio,
-            prices: lastPrices,
-            _nocache: Date.now()  // <-- AGREGAR ESTO para evitar caché
+            portfolio: {
+                BTC: Number(userPortfolio.BTC || 0),
+                PAXG: Number(userPortfolio.PAXG || 0),
+                USDT: Number(userPortfolio.USDT || 0),
+        
+                // Últimos precios conocidos como respaldo
+                btc_price_at_update: Number(lastPrices['BTC-USDT'] || 0),
+                paxg_price_at_update: Number(lastPrices['PAXG-USDT'] || 0)
+            },
+            prices: {
+                'BTC-USDT': Number(lastPrices['BTC-USDT'] || 0),
+                'PAXG-USDT': Number(lastPrices['PAXG-USDT'] || 0)
+            },
+            _nocache: Date.now()
         })
     })
     .then(response => {
