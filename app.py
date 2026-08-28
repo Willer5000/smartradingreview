@@ -20845,43 +20845,57 @@ def _get_or_refresh_futures_analysis(force_wait=False):
 
 
 def _trigger_futures_refresh_async():
-    """Dispara el refresh del caché en un thread separado. No bloquea."""
+    """Dispara un único refresh del caché en background."""
     global _futures_analysis_cache
     cache = _futures_analysis_cache
-    
-    if cache['running']:
-        return  # Ya hay uno corriendo
-    
-    def _do_refresh():
-        with cache['lock']:
-            if cache['running']:
-                return
-            cache['running'] = True
-            try:
-                print(f"\n🔄 [BG] Refrescando análisis futuros paralelo...")
-                start = time.time()
-                data = _analyze_futures_all_parallel()
-                elapsed = time.time() - start
-                print(f"✅ [BG] Análisis paralelo completado en {elapsed:.1f}s "
-                      f"({len(data.get('analysis', {}))} pares, "
-                      f"{len(data.get('errors', []))} errores)")
-                cache['data'] = data
-                cache['ts'] = time.time()
-                # v22.9.3: persistir a disco para sobrevivir reciclos de worker
-                try:
-                    _save_futures_cache_to_disk()
-                except Exception as save_err:
-                    print(f"⚠️ [FUT] Snapshot save falló: {save_err}")
-            except Exception as e:
-                print(f"❌ [BG] Error refrescando futuros: {e}")
-                import traceback
-                traceback.print_exc()
-            finally:
-                cache['running'] = False
-    
-    t = threading.Thread(target=_do_refresh, daemon=True, name='futures-refresh')
-    t.start()
 
+    # Reservar el refresh ANTES de crear el thread.
+    # Esto evita que dos requests HTTP creen dos warm-ups simultáneos.
+    with cache['lock']:
+        if cache['running']:
+            return
+
+        cache['running'] = True
+
+    def _do_refresh():
+        try:
+            print(f"\n🔄 [BG] Refrescando análisis futuros...")
+            start = time.time()
+
+            data = _analyze_futures_all_parallel()
+
+            elapsed = time.time() - start
+
+            print(
+                f"✅ [BG] Análisis futuros completado en {elapsed:.1f}s "
+                f"({len(data.get('analysis', {}))} pares, "
+                f"{len(data.get('errors', []))} errores)"
+            )
+
+            cache['data'] = data
+            cache['ts'] = time.time()
+
+            try:
+                _save_futures_cache_to_disk()
+            except Exception as save_err:
+                print(f"⚠️ [FUT] Snapshot save falló: {save_err}")
+
+        except Exception as e:
+            print(f"❌ [BG] Error refrescando futuros: {e}")
+
+            import traceback
+            traceback.print_exc()
+
+        finally:
+            with cache['lock']:
+                cache['running'] = False
+
+    t = threading.Thread(
+        target=_do_refresh,
+        daemon=True,
+        name='futures-refresh'
+    )
+    t.start()
 
 def _start_futures_warmup():
     """Al arrancar la app, disparar un análisis inicial en background."""
