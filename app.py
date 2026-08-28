@@ -17415,11 +17415,12 @@ class LiquidationHeatmap:
         #     revisa el histórico disponible.
         #
         # Siguientes ejecuciones:
-        #     solamente revisa velas que aparecieron después de la
-        #     última comprobación.
+        #     sólo revisa las velas nuevas.
         #
-        # Esto evita el coste O(bins × historial) repetido en cada
-        # petición y es especialmente importante en Render Free.
+        # Esto evita repetir:
+        #     bins × historial completo
+        #
+        # en cada petición.
         # ==============================================================
         
         nuevos_congelados = 0
@@ -17439,15 +17440,15 @@ class LiquidationHeatmap:
                     continue
         
                 bins_verificados += 1
+        
                 tocado = False
                 ts_tocado = None
         
-                # Sólo comprobar desde la última vela procesada.
                 for idx in range(scan_start, scan_end):
         
                     price_point = self.price_history[idx]
         
-                    # Un bin no puede ser tocado antes de haber sido creado.
+                    # No evaluar velas anteriores a la creación del bin.
                     if price_point['timestamp'] <= bin_obj.created_at:
                         continue
         
@@ -17462,6 +17463,7 @@ class LiquidationHeatmap:
                         break
         
                 if tocado:
+        
                     bin_obj.frozen = True
                     bin_obj.frozen_at = ts_tocado
         
@@ -17471,20 +17473,23 @@ class LiquidationHeatmap:
                     nuevos_congelados += 1
         
                     if nuevos_congelados % 5 == 0:
-                        ts_str = (
-                            ts_tocado.strftime('%Y-%m-%d')
-                            if ts_tocado
-                            else 'desconocido'
-                        )
+        
+                        if ts_tocado:
+                            try:
+                                ts_str = ts_tocado.strftime('%Y-%m-%d')
+                            except Exception:
+                                ts_str = str(ts_tocado)
+                        else:
+                            ts_str = 'desconocido'
         
                         print(
-                            f"   ✅ [{self.timeframe}] +5 bins congelados "
-                            f"(total: {nuevos_congelados}) - "
-                            f"último: ${bin_obj.price_top:.2f} "
-                            f"en {ts_str}"
+                            f"   ✅ [{self.timeframe}] "
+                            f"{nuevos_congelados} bins congelados "
+                            f"(último: ${bin_obj.price_top:.2f} "
+                            f"en {ts_str})"
                         )
         
-        # Marcar las velas actuales como ya procesadas.
+        # Marcar las velas procesadas.
         self._last_history_scan_idx = len(self.price_history) - 1
         
         print(
@@ -17492,10 +17497,6 @@ class LiquidationHeatmap:
             f"{velas_nuevas} vela(s) nuevas, "
             f"{bins_verificados} bins revisados"
         )
-                
-                if nuevos_congelados % 5 == 0:
-                    ts_str = ts_tocado.strftime('%Y-%m-%d') if ts_tocado else 'desconocido'
-                    print(f"   ✅ [{self.timeframe}] +5 bins congelados (total: {nuevos_congelados}) - último: ${bin_obj.price_top:.2f} en {ts_str}")
         
         # CAP anti-OOM: mantener solo los últimos 300 frozen_bins.
         if len(self.frozen_bins) > 300:
