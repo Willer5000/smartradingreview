@@ -310,35 +310,69 @@ window.updateActiveSignals = async function() {
             // Si el servidor está calentando el caché
             if (json.warming_up && (!json.signals || json.signals.length === 0)) {
             
-                // MUY IMPORTANTE:
-                // La petición HTTP ya terminó, por lo que debemos liberar
-                // el lock antes de programar el siguiente intento.
                 window._futuresSignalsState.activeLoading = false;
+            
+                const progress = json.progress || {};
+                const completed = Number(progress.completed || 0);
+                const total = Number(progress.total || 30);
+                const current = progress.current || 'Analizando...';
             
                 signalsList.innerHTML = `
                     <div class="list-group-item bg-dark text-info text-center py-3">
+            
                         <div class="spinner-border spinner-border-sm me-2"></div>
-                        <i class="fas fa-fire me-1"></i>
-                        Servidor preparando análisis de futuros...<br>
+            
+                        <strong>
+                            Analizando futuros: ${completed}/${total}
+                        </strong>
+            
+                        <br>
+            
                         <small class="text-muted">
-                            Analizando 5 criptos × 6 temporalidades.
-                            Se actualizará automáticamente.
+                            ${current}
                         </small>
+            
+                        <div class="progress mt-2"
+                             style="height: 5px;">
+            
+                            <div
+                                class="progress-bar bg-info"
+                                role="progressbar"
+                                style="width: ${
+                                    total > 0
+                                        ? Math.min(
+                                            100,
+                                            (completed / total) * 100
+                                        )
+                                        : 0
+                                }%;">
+                            </div>
+            
+                        </div>
+            
                     </div>
                 `;
             
                 if (signalsCount) {
-                    signalsCount.textContent = '0';
-                    signalsCount.className = 'badge bg-info';
+                    signalsCount.textContent =
+                        completed > 0
+                            ? `${completed}/${total}`
+                            : '0';
+            
+                    signalsCount.className =
+                        'badge bg-info';
                 }
             
-                // Reintentar después de que el backend haya tenido tiempo
-                // de completar parte del warm-up.
                 setTimeout(() => {
-                    if (typeof window.updateActiveSignals === 'function') {
+            
+                    if (
+                        typeof window.updateActiveSignals ===
+                        'function'
+                    ) {
                         window.updateActiveSignals();
                     }
-                }, 30000);
+            
+                }, 15000);
             
                 return;
             }
@@ -409,11 +443,6 @@ window.updateActiveSignals = async function() {
                 ? 'Servidor calentando caché (~2 min). Reintentando en 30s...'
                 : `Error: ${err.message || 'conexión perdida'}`;
             signalsList.innerHTML = `<div class="list-group-item bg-dark text-warning text-center py-3"><i class="fas fa-hourglass-half me-1"></i>${errMsg}</div>`;
-            if (isAbort) {
-                setTimeout(() => {
-                    if (typeof window.updateActiveSignals === 'function') window.updateActiveSignals();
-                }, 60000);
-            }
         });
 };
 
@@ -486,33 +515,69 @@ window.updatePreviousSignals = function() {
             // Si el servidor está calentando el caché
             if (json.warming_up && (!json.signals || json.signals.length === 0)) {
             
-                // IMPORTANTE:
-                // Este panel usa previousLoading, NO activeLoading.
                 window._futuresSignalsState.previousLoading = false;
+            
+                const progress = json.progress || {};
+                const completed = Number(progress.completed || 0);
+                const total = Number(progress.total || 30);
+                const current = progress.current || 'Analizando...';
             
                 signalsList.innerHTML = `
                     <div class="list-group-item bg-dark text-info text-center py-3">
+            
                         <div class="spinner-border spinner-border-sm me-2"></div>
-                        <i class="fas fa-fire me-1"></i>
-                        Servidor preparando análisis de futuros...<br>
+            
+                        <strong>
+                            Preparando vela anterior: ${completed}/${total}
+                        </strong>
+            
+                        <br>
+            
                         <small class="text-muted">
-                            Analizando las 30 combinaciones.
-                            Se volverá a consultar automáticamente.
+                            ${current}
                         </small>
+            
+                        <div class="progress mt-2"
+                             style="height: 5px;">
+            
+                            <div
+                                class="progress-bar bg-warning"
+                                role="progressbar"
+                                style="width: ${
+                                    total > 0
+                                        ? Math.min(
+                                            100,
+                                            (completed / total) * 100
+                                        )
+                                        : 0
+                                }%;">
+                            </div>
+            
+                        </div>
+            
                     </div>
                 `;
             
                 if (signalsCount) {
-                    signalsCount.textContent = '0';
-                    signalsCount.className = 'badge bg-info';
+                    signalsCount.textContent =
+                        completed > 0
+                            ? `${completed}/${total}`
+                            : '0';
+            
+                    signalsCount.className =
+                        'badge bg-info';
                 }
             
-                // Reintentar automáticamente mientras termina el warm-up.
                 setTimeout(() => {
-                    if (typeof window.updatePreviousSignals === 'function') {
+            
+                    if (
+                        typeof window.updatePreviousSignals ===
+                        'function'
+                    ) {
                         window.updatePreviousSignals();
                     }
-                }, 30000);
+            
+                }, 15000);
             
                 return;
             }
