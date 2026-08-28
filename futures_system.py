@@ -75,12 +75,12 @@ FUTURES_KUCOIN_INTERVALS = {
 # El mínimo operativo siempre puede ser 1x.
 #
 LEVERAGE_RANGES = {
-    '5m':  (1, 40),
-    '15m': (1, 30),
-    '30m': (1, 25),
-    '1h':  (1, 25),
-    '2h':  (1, 15),
-    '4h':  (1, 10),
+    '5m':  (25, 100),
+    '15m': (20, 70),
+    '30m': (15, 50),
+    '1h':  (10, 35),
+    '2h':  (8, 25),
+    '4h':  (5, 20),
 }
 # ============================================================================
 # ECONOMÍA DE FUTUROS — CONFIGURACIÓN
@@ -1512,7 +1512,61 @@ class FuturesAnalysis(TradingExpertSystem):
                     f"${target_net_profit:.4f}"
                 )
             )
-    
+        # ==============================================================
+        # OPERACIÓN APROBADA
+        # ==============================================================
+        # Si llegamos hasta aquí:
+        #
+        #   ✅ ENTRY válido
+        #   ✅ SL válido
+        #   ✅ TP válido
+        #   ✅ Execution Safety suficiente
+        #   ✅ leverage económicamente viable
+        #   ✅ ROI suficiente
+        #   ✅ beneficio neto suficiente
+        #
+        # Debemos devolver los niveles calculados.
+        # ==============================================================
+
+        levels['leverage'] = int(
+            optimal_leverage
+        )
+
+        levels['execution_safety'] = round(
+            safety_score,
+            1
+        )
+
+        levels['execution_safety_label'] = (
+            safety_label
+        )
+
+        levels['risk_control'] = {
+            'max_loss_pct_margin': float(
+                FUTURES_RISK_CONFIG[
+                    'max_loss_pct_margin'
+                ]
+            ),
+            'margin_usdt': float(
+                FUTURES_RISK_CONFIG[
+                    'default_margin_usdt'
+                ]
+            ),
+            'estimated_loss_sl_usdt': round(
+                loss_sl_usdt,
+                4
+            ),
+            'estimated_cost_usdt': round(
+                estimated_cost_usdt,
+                4
+            ),
+            'net_profit_tp_usdt': round(
+                net_profit_tp_usdt,
+                4
+            )
+        }
+
+        return levels    
     # ========================================================================
     # ANÁLISIS COMPLETO DE FUTUROS
     # ========================================================================
