@@ -69,7 +69,51 @@ LEVERAGE_RANGES = {
     '2h':  (5,  15),
     '4h':  (5,  10),   # posiciones más largas, movimientos amplios
 }
+# ============================================================================
+# ECONOMÍA DE FUTUROS — CONFIGURACIÓN
+# ============================================================================
+# El usuario trabaja normalmente con márgenes pequeños (~10 USDT).
+#
+# IMPORTANTE:
+# El leverage no se determina únicamente por confianza.
+# Debe ser viable después de costes y estar limitado por el riesgo del SL.
+# ============================================================================
 
+FUTURES_RISK_CONFIG = {
+
+    # Margen habitual utilizado por el usuario.
+    'default_margin_usdt': 10.0,
+
+    # Beneficio neto mínimo deseado por operación.
+    # No significa que todas las operaciones deban alcanzar esto:
+    # sólo define el mínimo económico para considerar una entrada.
+    'target_net_profit_usdt': 0.50,
+
+    # Coste ida + vuelta estimado.
+    #
+    # DEBES reemplazar este valor por el coste REAL de tu exchange
+    # incluyendo comisión y un margen prudente para slippage.
+    #
+    # Ejemplo ilustrativo: 0.12% = 0.0012
+    'round_trip_cost_pct': 0.0012,
+
+    # Máxima pérdida prevista sobre el margen.
+    #
+    # No es una garantía de pérdida máxima real.
+    # Slippage, gaps y liquidación pueden producir diferencias.
+    'max_loss_pct_margin': 10.0,
+
+    # Leverage máximo absoluto que el sistema permitirá.
+    # Después también se aplicará el máximo específico del TF.
+    'absolute_max_leverage': 70,
+
+    # Porcentaje mínimo del score de seguridad necesario para
+    # poder abrir futuros.
+    'minimum_execution_safety': 65.0,
+
+    # Con seguridad muy elevada se permite acercarse más al máximo.
+    'high_safety_threshold': 90.0,
+}
 
 def _leverage_in_valid_range(leverage: int, timeframe: str) -> bool:
     """
@@ -196,17 +240,235 @@ class FuturesAnalysis(TradingExpertSystem):
     # ========================================================================
     # CÁLCULO DE APALANCAMIENTO ÓPTIMO
     # ========================================================================
+    def _calculate_economic_leverage(
+        self,
+        margin_usdt,
+        tp_distance_pct,
+        sl_distance_pct,
+        execution_safety,
+        timeframe
+    ):
+        """
+        Determina el rango de leverage económicamente viable.
     
+        El leverage debe cumplir simultáneamente:
+    
+        1. Ser suficiente para que el TP produzca utilidad neta mínima.
+        2. No superar la pérdida máxima permitida por el SL.
+        3. Respetar la seguridad real de ejecución.
+        4. Respetar el máximo del timeframe.
+        5. Respetar el techo absoluto del sistema.
+    
+        Si no existe un leverage que cumpla las condiciones,
+        devuelve None y la operación debe rechazarse.
+        """
+    
+        try:
+    
+            margin = float(
+                margin_usdt
+                or FUTURES_RISK_CONFIG['default_margin_usdt']
+            )
+    
+            tp_pct = abs(float(tp_distance_pct or 0))
+            sl_pct = abs(float(sl_distance_pct or 0))
+            safety = max(
+                0.0,
+                min(100.0, float(execution_safety or 0))
+            )
+    
+            if (
+                margin <= 0
+                or tp_pct <= 0
+                or sl_pct <= 0
+            ):
+                return None
+    
+            # --------------------------------------------------------------
+            # COSTE TOTAL ESTIMADO
+            # --------------------------------------------------------------
+            round_trip_cost = float(
+                FUTURES_RISK_CONFIG['round_trip_cost_pct']
+            )
+    
+            # --------------------------------------------------------------
+            # LEVERAGE MÍNIMO ECONÓMICO
+            # --------------------------------------------------------------
+            #
+            # profit_net ≈ margin × leverage ×
+            #              (TP% - costes%)
+            #
+            # Por tanto:
+            #
+            # leverage >= target_profit /
+            #              (margin × (TP% - costes%))
+            #
+            edge_after_cost = (
+                tp_pct / 100.0
+                - round_trip_cost
+            )
+    
+            if edge_after_cost <= 0:
+                return None
+    
+            target_profit = float(
+                FUTURES_RISK_CONFIG[
+                    'target_net_profit_usdt'
+                ]
+            )
+    
+            min_leverage_economic = (
+                target_profit
+                / (margin * edge_after_cost)
+            )
+    
+            # --------------------------------------------------------------
+            # LEVERAGE MÁXIMO POR RIESGO DEL SL
+            # --------------------------------------------------------------
+            max_loss_pct = float(
+                FUTURES_RISK_CONFIG[
+                    'max_loss_pct_margin'
+                ]
+            )
+    
+            max_leverage_by_risk = (
+                max_loss_pct
+                / sl_pct
+            )
+    
+            # --------------------------------------------------------------
+            # LEVERAGE MÁXIMO POR TEMPORALIDAD
+            # --------------------------------------------------------------
+            _, tf_max = LEVERAGE_RANGES.get(
+                timeframe,
+                (1, 10)
+            )
+    
+            absolute_max = float(
+                FUTURES_RISK_CONFIG[
+                    'absolute_max_leverage'
+                ]
+            )
+    
+            max_leverage = min(
+                float(tf_max),
+                absolute_max
+            )
+    
+            # --------------------------------------------------------------
+            # MODULACIÓN POR SEGURIDAD REAL
+            # --------------------------------------------------------------
+            #
+            # No hacemos:
+            # safety 90 -> 90x
+            #
+            # Hacemos:
+            # safety bajo -> menor proporción del techo
+            # safety alto -> puede aproximarse al techo
+            #
+            # El riesgo del SL sigue siendo una restricción dura.
+            #
+            security_factor = (
+                0.25
+                + 0.75 * (safety / 100.0)
+            )
+    
+            if safety >= FUTURES_RISK_CONFIG[
+                'high_safety_threshold'
+            ]:
+                security_factor = min(
+                    1.0,
+                    security_factor + 0.05
+                )
+    
+            max_leverage_by_security = (
+                max_leverage
+                * security_factor
+            )
+    
+            # --------------------------------------------------------------
+            # LEVERAGE MÁXIMO FINAL
+            # --------------------------------------------------------------
+            final_max_leverage = min(
+                max_leverage_by_risk,
+                max_leverage_by_security,
+                max_leverage
+            )
+    
+            # --------------------------------------------------------------
+            # ¿ES ECONÓMICAMENTE VIABLE?
+            # --------------------------------------------------------------
+            if (
+                min_leverage_economic
+                > final_max_leverage
+            ):
+                return None
+    
+            # Leverage objetivo:
+            # suficiente para que la operación sea útil,
+            # pero no mayor de lo necesario.
+            leverage = max(
+                min_leverage_economic,
+                min(
+                    final_max_leverage,
+                    final_max_leverage * 0.75
+                    + min_leverage_economic * 0.25
+                )
+            )
+    
+            leverage = int(
+                round(leverage)
+            )
+    
+            leverage = max(
+                1,
+                min(
+                    int(final_max_leverage),
+                    leverage
+                )
+            )
+    
+            return {
+                'leverage': leverage,
+                'min_economic': round(
+                    min_leverage_economic,
+                    2
+                ),
+                'max_by_risk': round(
+                    max_leverage_by_risk,
+                    2
+                ),
+                'max_by_security': round(
+                    max_leverage_by_security,
+                    2
+                ),
+                'max_by_timeframe': int(
+                    tf_max
+                ),
+                'security_factor': round(
+                    security_factor,
+                    3
+                ),
+                'economically_viable': True
+            }
+    
+        except Exception as e:
+    
+            logger.warning(
+                f"Error en cálculo económico de leverage: {e}"
+            )
+    
+            return None    
     def calculate_optimal_leverage(self, timeframe: str, atr_pct: float, 
                                     confidence: float, review_multiplier: float = 1.0,
                                     sl_distance_pct: float = None,
-                                    max_loss_pct_of_margin: float = 20.0) -> int:
+                                    max_loss_pct_of_margin: float = 10.0) -> int:
         """
         Calcula el apalancamiento óptimo para futuros.
         
         v23 (Parte A4): NUEVA REGLA — el leverage ahora se calcula para que,
         si el SL se toca, la pérdida en el margen NO supere max_loss_pct_of_margin
-        (default 20%). Esto significa que con 10 USDT invertidos, la pérdida
+        (default 10%). Esto significa que con 10 USDT invertidos, la pérdida
         máxima si toca SL es 2 USDT.
         
         Fórmula matemática:
@@ -345,9 +607,12 @@ class FuturesAnalysis(TradingExpertSystem):
             sl_distance_pct = abs(entry_price - sl_price) / entry_price * 100
         
         optimal_leverage = self.calculate_optimal_leverage(
-            timeframe, atr_pct, confidence, review_multiplier,
+            timeframe,
+            atr_pct,
+            confidence,
+            review_multiplier,
             sl_distance_pct=sl_distance_pct,
-            max_loss_pct_of_margin=20.0
+            max_loss_pct_of_margin=10.0
         )
         
         levels['leverage'] = optimal_leverage
