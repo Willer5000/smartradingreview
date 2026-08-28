@@ -55,19 +55,32 @@ FUTURES_KUCOIN_INTERVALS = {
     '4h': '4hour'
 }
 
-# Rangos de apalancamiento por temporalidad (según requerimientos del usuario)
-# Filosofía: TFs cortos → más leverage (movimientos rápidos, menos volatilidad
-# acumulada); TFs largos → menos leverage (más ATR, más riesgo de wick).
-# El usuario invierte 10 USDT en futuros: por debajo del min de cada TF la
-# señal NO es rentable (comisiones + slippage se comen la operación) y se
-# DESCARTA automáticamente por el filtro de leverage en los endpoints.
+# ============================================================================
+# RANGOS DE LEVERAGE POR TEMPORALIDAD
+# ============================================================================
+#
+# IMPORTANTE:
+# Estos valores son TECHOS, NO mínimos obligatorios.
+#
+# El leverage final se determinará posteriormente usando:
+#
+#   1. Execution Safety
+#   2. Distancia del SL
+#   3. Calidad del TP
+#   4. RR
+#   5. Costes
+#   6. Temporalidad
+#   7. Viabilidad económica con el margen
+#
+# El mínimo operativo siempre puede ser 1x.
+#
 LEVERAGE_RANGES = {
-    '5m':  (15, 40),   # scalping muy rápido, ATR bajo
-    '15m': (10, 30),
-    '30m': (8,  25),   # intermedio entre 15m y 1h
-    '1h':  (7,  25),
-    '2h':  (5,  15),
-    '4h':  (5,  10),   # posiciones más largas, movimientos amplios
+    '5m':  (1, 40),
+    '15m': (1, 30),
+    '30m': (1, 25),
+    '1h':  (1, 25),
+    '2h':  (1, 15),
+    '4h':  (1, 10),
 }
 # ============================================================================
 # ECONOMÍA DE FUTUROS — CONFIGURACIÓN
@@ -115,19 +128,38 @@ FUTURES_RISK_CONFIG = {
     'high_safety_threshold': 90.0,
 }
 
-def _leverage_in_valid_range(leverage: int, timeframe: str) -> bool:
+def _leverage_in_valid_range(
+    leverage: int,
+    timeframe: str
+) -> bool:
     """
-    Verifica si un leverage está dentro del rango válido para ese TF.
-    Se usa como filtro en los endpoints de futures para descartar señales
-    con leverage insuficiente (típicamente x1-x4) que no son rentables
-    con capital reducido (10 USDT).
+    Valida únicamente el límite superior de leverage.
+
+    El mínimo ya NO es un requisito por temporalidad.
+    La viabilidad económica determina si una operación
+    realmente necesita más leverage.
+
+    Returns:
+        True  -> leverage operativo permitido
+        False -> leverage fuera del techo
     """
+
     try:
-        lev = int(leverage) if leverage is not None else 0
-    except (TypeError, ValueError):
+        lev = int(leverage)
+    except (
+        TypeError,
+        ValueError
+    ):
         return False
-    lo, hi = LEVERAGE_RANGES.get(timeframe, (1, 100))
-    return lo <= lev <= hi
+
+    _, max_leverage = LEVERAGE_RANGES.get(
+        timeframe,
+        (1, 10)
+    )
+
+    return (
+        1 <= lev <= max_leverage
+    )
 
 
 # ============================================================================
@@ -236,7 +268,370 @@ class FuturesAnalysis(TradingExpertSystem):
         except Exception as e:
             print(f"Error generando fallback: {e}")
             return None
+            
+    def _calculate_execution_safety(
+        self,
+        levels: Dict,
+        trend: Dict,
+        momentum: Dict,
+        structure: Dict,
+        timeframe: str
+    ) -> Dict:
+        """
+        Calcula la SEGURIDAD DE EJECUCIÓN de una señal de futuros.
     
+        IMPORTANTE:
+        Este score NO es una probabilidad matemática.
+    
+        Representa calidad de ejecución:
+    
+            ENTRY
+            SL
+            TP
+            RR
+            SMC
+            estructura
+            temporalidad
+    
+        La confianza del comité NO participa directamente.
+    
+        El score será recalibrado estadísticamente por ReviewTrader
+        en una fase posterior.
+        """
+    
+        try:
+    
+            # ==============================================================
+            # SCORES BASE
+            # ==============================================================
+    
+            entry_score = float(
+                levels.get(
+                    'entry_score',
+                    0
+                )
+                or 0
+            )
+    
+            tp_quality = float(
+                levels.get(
+                    'tp_quality_score',
+                    0
+                )
+                or 0
+            )
+    
+            sl_reliability_raw = float(
+                levels.get(
+                    'sl_reliability',
+                    0
+                )
+                or 0
+            )
+    
+            # app.py entrega actualmente sl_reliability
+            # normalizado 0-1.
+            if sl_reliability_raw <= 1:
+                sl_quality = (
+                    sl_reliability_raw * 100
+                )
+            else:
+                sl_quality = sl_reliability_raw
+    
+            rr = float(
+                levels.get(
+                    'risk_reward',
+                    0
+                )
+                or 0
+            )
+    
+            # ==============================================================
+            # 1. ENTRY SMC
+            # ==============================================================
+            entry_component = max(
+                0,
+                min(
+                    100,
+                    entry_score
+                )
+            )
+    
+            # ==============================================================
+            # 2. SL
+            # ==============================================================
+            sl_component = max(
+                0,
+                min(
+                    100,
+                    sl_quality
+                )
+            )
+    
+            # ==============================================================
+            # 3. TP
+            # ==============================================================
+            tp_component = max(
+                0,
+                min(
+                    100,
+                    tp_quality
+                )
+            )
+    
+            # ==============================================================
+            # 4. RR
+            # ==============================================================
+            if rr < 1.8:
+                rr_component = 0
+    
+            elif rr < 2.0:
+                rr_component = 45
+    
+            elif rr < 2.5:
+                rr_component = 65
+    
+            elif rr < 3.0:
+                rr_component = 80
+    
+            elif rr < 3.5:
+                rr_component = 90
+    
+            elif rr <= 4.5:
+                rr_component = 100
+    
+            else:
+                # Un RR demasiado grande suele implicar
+                # un TP excesivamente lejano.
+                rr_component = 65
+    
+            # ==============================================================
+            # 5. CONDICIONES ESTRUCTURALES
+            # ==============================================================
+            structure_component = 50
+    
+            if isinstance(
+                structure,
+                dict
+            ):
+    
+                order_blocks = structure.get(
+                    'order_blocks',
+                    []
+                ) or []
+    
+                fvgs = structure.get(
+                    'fair_value_gaps',
+                    []
+                ) or []
+    
+                sweeps = structure.get(
+                    'liquidity_sweeps',
+                    []
+                ) or []
+    
+                if order_blocks:
+                    structure_component += 10
+    
+                if fvgs:
+                    structure_component += 10
+    
+                if sweeps:
+                    structure_component += 15
+    
+            structure_component = min(
+                100,
+                structure_component
+            )
+    
+            # ==============================================================
+            # 6. MOMENTUM / TREND
+            # ==============================================================
+            trend_component = 50
+    
+            if isinstance(
+                trend,
+                dict
+            ):
+    
+                adx = float(
+                    trend.get(
+                        'adx',
+                        0
+                    )
+                    or 0
+                )
+    
+                if adx >= 30:
+                    trend_component += 20
+    
+                elif adx >= 25:
+                    trend_component += 10
+    
+                elif adx < 15:
+                    trend_component -= 20
+    
+            if isinstance(
+                momentum,
+                dict
+            ):
+    
+                momentum_direction = str(
+                    momentum.get(
+                        'direction',
+                        ''
+                    )
+                ).lower()
+    
+                if momentum_direction in (
+                    'bullish',
+                    'bearish'
+                ):
+                    trend_component += 10
+    
+            trend_component = max(
+                0,
+                min(
+                    100,
+                    trend_component
+                )
+            )
+    
+            # ==============================================================
+            # 7. FACTOR TEMPORAL
+            # ==============================================================
+            #
+            # Basado provisionalmente en el histórico del sistema:
+            #
+            # 4h = mejor desempeño
+            # 30m = segunda zona relativamente mejor
+            # 5m = peor
+            #
+            # NO es una probabilidad.
+            #
+            timeframe_factor = {
+                '5m': 0.55,
+                '15m': 0.70,
+                '30m': 0.78,
+                '1h': 0.60,
+                '2h': 0.65,
+                '4h': 0.95,
+            }.get(
+                timeframe,
+                0.70
+            )
+    
+            timeframe_component = (
+                timeframe_factor
+                * 100
+            )
+    
+            # ==============================================================
+            # SCORE FINAL
+            # ==============================================================
+            #
+            # Pesos:
+            #
+            # ENTRY SMC       25%
+            # SL              20%
+            # TP              15%
+            # RR              15%
+            # estructura      10%
+            # tendencia       5%
+            # temporalidad    10%
+            #
+            score = (
+                entry_component * 0.25
+                + sl_component * 0.20
+                + tp_component * 0.15
+                + rr_component * 0.15
+                + structure_component * 0.10
+                + trend_component * 0.05
+                + timeframe_component * 0.10
+            )
+    
+            score = max(
+                0,
+                min(
+                    100,
+                    score
+                )
+            )
+    
+            # ==============================================================
+            # CLASIFICACIÓN
+            # ==============================================================
+            if score >= 85:
+                label = 'PREMIUM'
+    
+            elif score >= 75:
+                label = 'ALTA'
+    
+            elif score >= 65:
+                label = 'VALIDA'
+    
+            elif score >= 55:
+                label = 'BAJA'
+    
+            else:
+                label = 'RECHAZAR'
+    
+            return {
+                'score': round(
+                    score,
+                    1
+                ),
+                'label': label,
+    
+                'components': {
+                    'entry_smc': round(
+                        entry_component,
+                        1
+                    ),
+                    'sl': round(
+                        sl_component,
+                        1
+                    ),
+                    'tp': round(
+                        tp_component,
+                        1
+                    ),
+                    'rr': round(
+                        rr_component,
+                        1
+                    ),
+                    'structure': round(
+                        structure_component,
+                        1
+                    ),
+                    'trend': round(
+                        trend_component,
+                        1
+                    ),
+                    'timeframe': round(
+                        timeframe_component,
+                        1
+                    )
+                },
+    
+                'timeframe_factor': round(
+                    timeframe_factor,
+                    3
+                )
+            }
+    
+        except Exception as e:
+    
+            logger.warning(
+                f"Error calculando execution safety: {e}"
+            )
+    
+            return {
+                'score': 0,
+                'label': 'RECHAZAR',
+                'components': {},
+                'timeframe_factor': 0
+            }    
     # ========================================================================
     # CÁLCULO DE APALANCAMIENTO ÓPTIMO
     # ========================================================================
@@ -459,104 +854,294 @@ class FuturesAnalysis(TradingExpertSystem):
             )
     
             return None    
-    def calculate_optimal_leverage(self, timeframe: str, atr_pct: float, 
-                                    confidence: float, review_multiplier: float = 1.0,
-                                    sl_distance_pct: float = None,
-                                    max_loss_pct_of_margin: float = 10.0) -> int:
+   
+    def calculate_optimal_leverage(
+        self,
+        timeframe: str,
+        atr_pct: float,
+        confidence: float,
+        review_multiplier: float = 1.0,
+        sl_distance_pct: float = None,
+        max_loss_pct_of_margin: float = 10.0,
+        execution_safety: float = 0.0,
+        tp_distance_pct: float = None,
+        margin_usdt: float = None
+    ) -> int:
+
         """
-        Calcula el apalancamiento óptimo para futuros.
+        Calcula el leverage dinámico de futuros.
         
-        v23 (Parte A4): NUEVA REGLA — el leverage ahora se calcula para que,
-        si el SL se toca, la pérdida en el margen NO supere max_loss_pct_of_margin
-        (default 10%). Esto significa que con 10 USDT invertidos, la pérdida
-        máxima si toca SL es 2 USDT.
+        El leverage final NO depende directamente de confidence.
         
-        Fórmula matemática:
-          leverage_seguro = max_loss_pct_of_margin / sl_distance_pct
+        Se determina mediante:
         
-        Ejemplo:
-          - SL a 3% del entry, tolerancia 20%: leverage_seguro = 20/3 = 6.67 → 6x
-          - SL a 1.5% del entry: leverage_seguro = 20/1.5 = 13.3 → 13x
-          - SL a 0.5% (muy apretado): leverage_seguro = 20/0.5 = 40x (cap por TF)
+            - Execution Safety
+            - distancia del SL
+            - distancia del TP
+            - coste operativo
+            - temporalidad
+            - techo de leverage
         
-        Este leverage se toma como TECHO DURO. El leverage final es el MÍNIMO
-        entre: (a) fórmula clásica por ATR + confianza + review, (b) el techo
-        seguro por SL. Nunca podrá excederse aunque los otros factores lo pidan.
+        La seguridad del SL limita el leverage máximo.
         
-        Args:
-            timeframe: '5m', '15m', ..., '4h'
-            atr_pct: ATR como porcentaje del precio (ej: 1.5 para 1.5%)
-            confidence: 0-100
-            review_multiplier: multiplicador del ReviewTrader (0.5x-1.5x)
-            sl_distance_pct: distancia del SL al entry en % (para tope de riesgo)
-            max_loss_pct_of_margin: % máximo del margen a arriesgar (default 20%)
+        La rentabilidad mínima determina el leverage mínimo
+        económicamente necesario.
+        
+        Si el leverage mínimo económico supera el máximo seguro:
+            → NO OPERAR.
+        
+        El objetivo es que una operación con margen pequeño
+        (~10 USDT) siga siendo económicamente útil sin aumentar
+        artificialmente el riesgo.
         """
-        # 1. Rango base
-        lo, hi = LEVERAGE_RANGES.get(timeframe, (2, 5))
-        
-        # 2. Ajuste por volatilidad (a más ATR, menos leverage)
-        if atr_pct <= 0:
-            atr_pct = 1.0
-        base_by_atr = 20.0 / atr_pct
-        base_by_atr = max(lo, min(hi, base_by_atr))
-        
-        # 3. Factor de confianza (0.6 - 1.0)
-        confidence_factor = max(0.6, min(1.0, confidence / 100))
-        
-        # 4. Factor del ReviewTrader (limitado 0.6 - 1.4)
-        review_factor = max(0.6, min(1.4, review_multiplier))
-        
-        # 5. Combinar factores clásicos
-        leverage_raw = base_by_atr * confidence_factor * review_factor
-        leverage_classic = int(round(leverage_raw))
-        leverage_classic = max(lo, min(hi, leverage_classic))
-        
-        # 6. v23 PARTE A4: techo seguro por SL — clave del control de riesgo
-        if sl_distance_pct is not None and sl_distance_pct > 0:
-            safe_leverage = int(max_loss_pct_of_margin / sl_distance_pct)
-            safe_leverage = max(1, safe_leverage)
-            # El leverage final es el MÍNIMO entre clásico y seguro
-            leverage = min(leverage_classic, safe_leverage)
-        else:
-            # Sin SL: usar clásico
-            leverage = leverage_classic
-        
-        # 7. Aplicar rangos duros del TF (nunca fuera del rango del TF)
-        leverage = max(lo, min(hi, leverage))
-        
-        # 8. Regla de precaución extrema: ATR > 5% → reducir a la mitad
-        if atr_pct > 5.0:
-            leverage = max(2, int(leverage * 0.5))
-        
-        return leverage
     
-    def calculate_roi_futures(self, entry: float, tp: float, sl: float, leverage: int, 
-                              direction: str) -> Dict:
+        economic = self._calculate_economic_leverage(
+            margin_usdt=(
+                margin_usdt
+                or FUTURES_RISK_CONFIG[
+                    'default_margin_usdt'
+                ]
+            ),
+            tp_distance_pct=(
+                tp_distance_pct
+                or 0
+            ),
+            sl_distance_pct=(
+                sl_distance_pct
+                or 0
+            ),
+            execution_safety=execution_safety,
+            timeframe=timeframe
+        )
+    
+        if not economic:
+    
+            return 0
+    
+        return int(
+            economic.get(
+                'leverage',
+                0
+            )
+        )
+    
+    def calculate_roi_futures(
+        self,
+        entry: float,
+        tp: float,
+        sl: float,
+        leverage: int,
+        direction: str
+    ) -> Dict:
         """
         Calcula el ROI potencial de una operación de futuros.
-        
-        ROI positivo = ganancia potencial si toca TP
-        ROI negativo = pérdida potencial si toca SL
+    
+        ROI positivo = ganancia potencial si toca TP.
+        ROI negativo = pérdida potencial si toca SL.
+    
+        Además calcula una estimación monetaria basada en el
+        margen de referencia configurado para Futuros.
+    
+        IMPORTANTE:
+        - El ROI es sobre el margen.
+        - Los importes USDT son estimaciones brutas.
+        - Las comisiones/slippage se descuentan posteriormente
+          en calculate_entry_levels().
         """
-        if entry <= 0:
-            return {'roi_tp': 0, 'roi_sl': 0}
-        
+    
+        # ==============================================================
+        # VALIDACIÓN BÁSICA
+        # ==============================================================
+    
+        if entry <= 0 or leverage <= 0:
+            return {
+                'roi_tp': 0,
+                'roi_sl': 0,
+                'move_tp_pct': 0,
+                'move_sl_pct': 0,
+                'profit_tp_usdt': 0,
+                'loss_sl_usdt': 0
+            }
+    
+        if tp <= 0 or sl <= 0:
+            return {
+                'roi_tp': 0,
+                'roi_sl': 0,
+                'move_tp_pct': 0,
+                'move_sl_pct': 0,
+                'profit_tp_usdt': 0,
+                'loss_sl_usdt': 0
+            }
+    
+        # ==============================================================
+        # MOVIMIENTO DEL PRECIO
+        # ==============================================================
+    
         if direction == 'long':
-            move_tp = (tp - entry) / entry * 100
-            move_sl = (entry - sl) / entry * 100
+    
+            move_tp = (
+                (tp - entry)
+                / entry
+                * 100
+            )
+    
+            move_sl = (
+                (entry - sl)
+                / entry
+                * 100
+            )
+    
         else:
-            move_tp = (entry - tp) / entry * 100
-            move_sl = (sl - entry) / entry * 100
-        
-        # ROI = movimiento porcentual × apalancamiento
-        roi_tp = move_tp * leverage
-        roi_sl = -move_sl * leverage  # Negativo porque es pérdida
-        
+    
+            move_tp = (
+                (entry - tp)
+                / entry
+                * 100
+            )
+    
+            move_sl = (
+                (sl - entry)
+                / entry
+                * 100
+            )
+    
+        # ==============================================================
+        # VALIDAR QUE TP Y SL ESTÉN DEL LADO CORRECTO
+        # ==============================================================
+    
+        if move_tp < 0:
+            move_tp = 0
+    
+        if move_sl < 0:
+            move_sl = 0
+    
+        # ==============================================================
+        # ROI SOBRE EL MARGEN
+        # ==============================================================
+    
+        # ROI TP = movimiento × leverage
+        roi_tp = (
+            move_tp
+            * leverage
+        )
+    
+        # ROI SL siempre se muestra negativo
+        roi_sl = (
+            -move_sl
+            * leverage
+        )
+    
+        # ==============================================================
+        # MARGEN DE REFERENCIA
+        # ==============================================================
+    
+        # El sistema actualmente trabaja con una configuración
+        # de margen por defecto para poder estimar el resultado
+        # monetario.
+        #
+        # Más adelante Fase 5B:
+        # utilizaremos el margen REAL de cada señal.
+        try:
+    
+            margin_usdt = float(
+                FUTURES_RISK_CONFIG.get(
+                    'default_margin_usdt',
+                    10.0
+                )
+            )
+    
+        except (
+            TypeError,
+            ValueError,
+            AttributeError
+        ):
+    
+            margin_usdt = 10.0
+    
+        if margin_usdt <= 0:
+            margin_usdt = 10.0
+    
+        # ==============================================================
+        # NOTIONAL
+        # ==============================================================
+    
+        # Ejemplo:
+        #
+        # margen = 10 USDT
+        # leverage = 8x
+        #
+        # notional = 80 USDT
+        #
+        notional_usdt = (
+            margin_usdt
+            * leverage
+        )
+    
+        # ==============================================================
+        # GANANCIA BRUTA EN TP
+        # ==============================================================
+    
+        profit_tp_usdt = (
+            notional_usdt
+            * (move_tp / 100.0)
+        )
+    
+        # ==============================================================
+        # PÉRDIDA BRUTA EN SL
+        # ==============================================================
+    
+        loss_sl_usdt = (
+            notional_usdt
+            * (move_sl / 100.0)
+        )
+    
+        # ==============================================================
+        # RESULTADO
+        # ==============================================================
+    
         return {
-            'roi_tp': round(roi_tp, 2),
-            'roi_sl': round(roi_sl, 2),
-            'move_tp_pct': round(move_tp, 2),
-            'move_sl_pct': round(move_sl, 2)
+            'roi_tp': round(
+                roi_tp,
+                2
+            ),
+    
+            'roi_sl': round(
+                roi_sl,
+                2
+            ),
+    
+            'move_tp_pct': round(
+                move_tp,
+                2
+            ),
+    
+            'move_sl_pct': round(
+                move_sl,
+                2
+            ),
+    
+            # Ganancia bruta estimada si toca TP
+            'profit_tp_usdt': round(
+                profit_tp_usdt,
+                4
+            ),
+    
+            # Pérdida bruta estimada si toca SL
+            'loss_sl_usdt': round(
+                loss_sl_usdt,
+                4
+            ),
+    
+            # Información adicional útil para debug/UI
+            'margin_usdt': round(
+                margin_usdt,
+                4
+            ),
+    
+            'notional_usdt': round(
+                notional_usdt,
+                4
+            )
         }
     
     # ========================================================================
@@ -593,61 +1178,340 @@ class FuturesAnalysis(TradingExpertSystem):
         if levels.get('rejected_reason'):
             return levels
         
-        # ============ AJUSTAR APALANCAMIENTO PARA FUTUROS (v23 A4) ============
-        atr_pct = volatility.get('atr_pct', 1.0)
-        confidence = 70  # Se ajustará cuando venga del Moderador
-        review_multiplier = getattr(self, '_current_review_multiplier', 1.0)
+        # ==============================================================
+        # FASE 5 — EXECUTION SAFETY
+        # ==============================================================
         
-        # v23 PARTE A4: pasar sl_distance_pct para que el leverage NUNCA
-        # cause pérdida > 20% del margen si se toca SL.
-        entry_price = float(levels.get('entry', 0) or 0)
-        sl_price = float(levels.get('stop_loss', 0) or 0)
-        sl_distance_pct = None
-        if entry_price > 0 and sl_price > 0:
-            sl_distance_pct = abs(entry_price - sl_price) / entry_price * 100
-        
-        optimal_leverage = self.calculate_optimal_leverage(
-            timeframe,
-            atr_pct,
-            confidence,
-            review_multiplier,
-            sl_distance_pct=sl_distance_pct,
-            max_loss_pct_of_margin=10.0
+        atr_pct = float(
+            volatility.get(
+                'atr_pct',
+                1.0
+            )
+            or 1.0
         )
         
-        levels['leverage'] = optimal_leverage
-        levels['sl_distance_pct'] = round(sl_distance_pct, 3) if sl_distance_pct else None
+        review_multiplier = getattr(
+            self,
+            '_current_review_multiplier',
+            1.0
+        )
         
+        entry_price = float(
+            levels.get(
+                'entry',
+                0
+            )
+            or 0
+        )
+        
+        sl_price = float(
+            levels.get(
+                'stop_loss',
+                0
+            )
+            or 0
+        )
+        
+        tp_price = float(
+            levels.get(
+                'take_profit',
+                0
+            )
+            or 0
+        )
+        
+        sl_distance_pct = None
+        tp_distance_pct = None
+        
+        if (
+            entry_price > 0
+            and sl_price > 0
+        ):
+            sl_distance_pct = (
+                abs(
+                    entry_price
+                    - sl_price
+                )
+                / entry_price
+                * 100
+            )
+        
+        if (
+            entry_price > 0
+            and tp_price > 0
+        ):
+            tp_distance_pct = (
+                abs(
+                    tp_price
+                    - entry_price
+                )
+                / entry_price
+                * 100
+            )
+        
+        # ==============================================================
+        # SEGURIDAD REAL DE EJECUCIÓN
+        # ==============================================================
+        execution_safety = (
+            self._calculate_execution_safety(
+                levels=levels,
+                trend=trend or {},
+                momentum=momentum or {},
+                structure=structure or {},
+                timeframe=timeframe
+            )
+        )
+        
+        safety_score = float(
+            execution_safety.get(
+                'score',
+                0
+            )
+        )
+        
+        safety_label = execution_safety.get(
+            'label',
+            'RECHAZAR'
+        )
+        
+        print(
+            f"   🛡️ Execution Safety: "
+            f"{safety_score:.1f}/100 "
+            f"({safety_label})"
+        )
+        
+        # ==============================================================
+        # FILTRO DURO DE SEGURIDAD
+        # ==============================================================
+        minimum_safety = float(
+            FUTURES_RISK_CONFIG[
+                'minimum_execution_safety'
+            ]
+        )
+        
+        if safety_score < minimum_safety:
+        
+            print(
+                f"   ❌ FUTUROS RECHAZADO: "
+                f"Execution Safety "
+                f"{safety_score:.1f} < "
+                f"{minimum_safety:.1f}"
+            )
+        
+            return self._build_rejected_levels(
+                entry_price,
+                symbol,
+                (
+                    f"Execution Safety insuficiente "
+                    f"({safety_score:.1f}/100)"
+                )
+            )
+        
+        # ==============================================================
+        # LEVERAGE ECONÓMICO
+        # ==============================================================
+        optimal_leverage = (
+            self.calculate_optimal_leverage(
+                timeframe=timeframe,
+                atr_pct=atr_pct,
+                confidence=0,  # deliberadamente NO usado
+                review_multiplier=review_multiplier,
+                sl_distance_pct=sl_distance_pct,
+                max_loss_pct_of_margin=float(
+                    FUTURES_RISK_CONFIG[
+                        'max_loss_pct_margin'
+                    ]
+                ),
+                execution_safety=safety_score,
+                tp_distance_pct=tp_distance_pct,
+                margin_usdt=float(
+                    FUTURES_RISK_CONFIG[
+                        'default_margin_usdt'
+                    ]
+                )
+            )
+        )
+        
+        if optimal_leverage <= 0:
+        
+            print(
+                "   ❌ FUTUROS RECHAZADO: "
+                "No existe leverage simultáneamente "
+                "seguro y económicamente viable."
+            )
+        
+            return self._build_rejected_levels(
+                entry_price,
+                symbol,
+                (
+                    "No existe leverage que cumpla "
+                    "seguridad + riesgo + rentabilidad"
+                )
+            )
+                
         # ============ CALCULAR ROI POTENCIAL ============
         direction = 'long' if decision == 'LONG' else 'short'
+        
         roi = self.calculate_roi_futures(
-            levels['entry'], levels['take_profit'], levels['stop_loss'],
-            optimal_leverage, direction
+            levels['entry'],
+            levels['take_profit'],
+            levels['stop_loss'],
+            optimal_leverage,
+            direction
         )
         
         levels.update(roi)
         levels['is_futures'] = True
         
-        # ============ VALIDACIÓN ADICIONAL: ROI MÍNIMO ============
-        min_roi_tp = 5.0
+        
+        # ==============================================================
+        # FASE 5 — VALIDACIÓN ECONÓMICA REAL
+        # ==============================================================
+        #
+        # Ya no basta con:
+        #
+        #     ROI TP > 5%
+        #
+        # porque una operación puede mostrar ROI atractivo y,
+        # después de comisiones, seguir siendo poco rentable.
+        #
+        # Ahora comprobamos:
+        #
+        #     1. ROI bruto suficiente
+        #     2. coste estimado
+        #     3. beneficio neto estimado
+        #     4. pérdida estimada en USDT
+        # ==============================================================
+        
+        min_roi_tp = 8.0
+        
         if roi['roi_tp'] < min_roi_tp:
-            print(f"   ⚠️ RECHAZADO (futuros): ROI potencial {roi['roi_tp']:.1f}% < mínimo {min_roi_tp}%")
-            return self._build_rejected_levels(
-                levels['entry'], symbol, 
-                f"ROI potencial {roi['roi_tp']:.1f}% < {min_roi_tp}% mínimo"
+        
+            print(
+                f"   ⚠️ RECHAZADO (futuros): "
+                f"ROI potencial "
+                f"{roi['roi_tp']:.1f}% "
+                f"< mínimo {min_roi_tp:.1f}%"
             )
         
-        # v23: verificar que roi_sl (pérdida) esté acotado (≤ 20% del margen)
-        # Este check es informativo; el leverage ya se limitó en A4.
-        if roi['roi_sl'] < -25.0:
-            print(f"   ⚠️ Aviso: ROI SL {roi['roi_sl']:.1f}% supera -25% del margen. "
-                  f"Leverage {optimal_leverage}x, SL dist {sl_distance_pct:.2f}%")
+            return self._build_rejected_levels(
+                levels['entry'],
+                symbol,
+                (
+                    f"ROI potencial "
+                    f"{roi['roi_tp']:.1f}% "
+                    f"< {min_roi_tp:.1f}% mínimo"
+                )
+            )
         
-        print(f"   ✅ FUTUROS - Leverage: {optimal_leverage}x | ROI TP: +{roi['roi_tp']:.1f}% | "
-              f"ROI SL: {roi['roi_sl']:.1f}% | SL dist: {sl_distance_pct:.2f}%" if sl_distance_pct else
-              f"   ✅ FUTUROS - Leverage: {optimal_leverage}x | ROI TP: +{roi['roi_tp']:.1f}% | ROI SL: {roi['roi_sl']:.1f}%")
         
-        return levels
+        # ==============================================================
+        # COSTE ESTIMADO DE LA OPERACIÓN
+        # ==============================================================
+        round_trip_cost = float(
+            FUTURES_RISK_CONFIG.get(
+                'round_trip_cost_pct',
+                0.0012
+            )
+        )
+        
+        margin_usdt = float(
+            FUTURES_RISK_CONFIG.get(
+                'default_margin_usdt',
+                10.0
+            )
+        )
+        
+        notional = (
+            margin_usdt
+            * optimal_leverage
+        )
+        
+        estimated_cost_usdt = (
+            notional
+            * round_trip_cost
+        )
+        
+        
+        # ==============================================================
+        # BENEFICIO NETO ESTIMADO EN TP
+        # ==============================================================
+        profit_tp_usdt = float(
+            roi.get(
+                'profit_tp_usdt',
+                0
+            )
+            or 0
+        )
+        
+        net_profit_tp_usdt = (
+            profit_tp_usdt
+            - estimated_cost_usdt
+        )
+        
+        levels['estimated_cost_usdt'] = round(
+            estimated_cost_usdt,
+            4
+        )
+        
+        levels['net_profit_tp_usdt'] = round(
+            net_profit_tp_usdt,
+            4
+        )
+        
+        
+        # ==============================================================
+        # PÉRDIDA ESTIMADA EN SL
+        # ==============================================================
+        loss_sl_usdt = abs(
+            float(
+                roi.get(
+                    'loss_sl_usdt',
+                    0
+                )
+                or 0
+            )
+        )
+        
+        levels['estimated_loss_sl_usdt'] = round(
+            loss_sl_usdt,
+            4
+        )
+        
+        
+        # ==============================================================
+        # BENEFICIO NETO MÍNIMO
+        # ==============================================================
+        target_net_profit = float(
+            FUTURES_RISK_CONFIG.get(
+                'target_net_profit_usdt',
+                0.50
+            )
+        )
+        
+        if (
+            net_profit_tp_usdt
+            < target_net_profit
+        ):
+        
+            print(
+                f"   ❌ FUTUROS RECHAZADO: "
+                f"beneficio neto estimado "
+                f"${net_profit_tp_usdt:.4f} "
+                f"< objetivo "
+                f"${target_net_profit:.4f}"
+            )
+        
+            return self._build_rejected_levels(
+                levels['entry'],
+                symbol,
+                (
+                    f"Beneficio neto estimado "
+                    f"${net_profit_tp_usdt:.4f} "
+                    f"< objetivo "
+                    f"${target_net_profit:.4f}"
+                )
+            )
     
     # ========================================================================
     # ANÁLISIS COMPLETO DE FUTUROS
