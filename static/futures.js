@@ -256,6 +256,7 @@ window.loadGlobalStats = async function() {
 // que retorna SOLO las 5 cripto × 6 TF × LONG/SHORT
 
 window.updateActiveSignals = async function() {
+
     if (!window.IS_FUTURES_PAGE) {
         return;
     }
@@ -263,187 +264,389 @@ window.updateActiveSignals = async function() {
     const signalsList = document.getElementById('active-signals-list');
     const signalsCount = document.getElementById('active-signals-count');
 
-    if (!signalsList) return;
+    if (!signalsList) {
+        console.error('❌ ACTIVE: no existe #active-signals-list');
+        return;
+    }
 
-    // Evitar peticiones simultáneas.
+    // Evitar DOS requests simultáneos.
     if (window._futuresSignalsState.activeLoading) {
-        console.log('⏳ Active Futures: petición anterior todavía en curso. Se omite.');
+        console.log('⏳ ACTIVE: request anterior todavía en curso.');
         return;
     }
 
     window._futuresSignalsState.activeLoading = true;
-    
-    if (!window.futuresActiveLoaded) {
+
+    console.log('🚀 ACTIVE: iniciando consulta...');
+
+    signalsList.innerHTML = `
+        <div class="list-group-item bg-dark text-info text-center py-3">
+            <div class="spinner-border spinner-border-sm me-2"></div>
+            Consultando servidor de Futuros...
+        </div>
+    `;
+
+    if (signalsCount) {
+        signalsCount.textContent = '...';
+        signalsCount.className = 'badge bg-info';
+    }
+
+    const startedAt = performance.now();
+
+    try {
+
+        const response = await fetch(
+            '/api/futures/signals/active?min_confidence=60&_ts=' + Date.now(),
+            {
+                method: 'GET',
+                cache: 'no-store',
+                headers: {
+                    'Cache-Control': 'no-cache'
+                }
+            }
+        );
+
+        const elapsed = (
+            (performance.now() - startedAt) / 1000
+        ).toFixed(1);
+
+        console.log(
+            `📥 ACTIVE HTTP ${response.status} en ${elapsed}s`
+        );
+
+        if (!response.ok) {
+
+            const text = await response.text();
+
+            throw new Error(
+                `HTTP ${response.status}: ${text.substring(0, 500)}`
+            );
+        }
+
+        const json = await response.json();
+
+        console.log('📦 ACTIVE JSON:', json);
+
+        // ------------------------------------------------------------
+        // ERROR DEL BACKEND
+        // ------------------------------------------------------------
+        if (!json.success) {
+
+            signalsList.innerHTML = `
+                <div class="list-group-item bg-dark text-danger text-center py-3">
+
+                    <strong>❌ Error del servidor</strong>
+
+                    <br>
+
+                    <small>
+                        ${json.error || 'Error desconocido'}
+                    </small>
+
+                </div>
+            `;
+
+            if (signalsCount) {
+                signalsCount.textContent = 'ERR';
+                signalsCount.className = 'badge bg-danger';
+            }
+
+            return;
+        }
+
+        const signals = Array.isArray(json.signals)
+            ? json.signals
+            : [];
+
+        const progress = json.progress || {};
+
+        const completed = Number(
+            progress.completed || 0
+        );
+
+        const total = Number(
+            progress.total || 30
+        );
+
+        const running = Boolean(
+            json.running ||
+            json.warming_up
+        );
+
+        console.log(
+            '📊 ACTIVE:',
+            {
+                signals: signals.length,
+                completed,
+                total,
+                running
+            }
+        );
+
+        // ------------------------------------------------------------
+        // SERVIDOR TODAVÍA PROCESANDO
+        // ------------------------------------------------------------
+        if (running) {
+
+            const pct = total > 0
+                ? Math.min(
+                    100,
+                    (completed / total) * 100
+                )
+                : 0;
+
+            signalsList.innerHTML = `
+                <div class="list-group-item bg-dark text-info text-center py-3">
+
+                    <div class="spinner-border spinner-border-sm me-2"></div>
+
+                    <strong>
+                        Analizando Futuros: ${completed}/${total}
+                    </strong>
+
+                    <br>
+
+                    <small class="text-muted">
+                        ${progress.current || 'Preparando análisis...'}
+                    </small>
+
+                    <div class="progress mt-2"
+                         style="height: 6px;">
+
+                        <div
+                            class="progress-bar bg-info"
+                            style="width: ${pct}%;">
+                        </div>
+
+                    </div>
+
+                    <small class="d-block mt-2 text-secondary">
+                        Resultado recibido del servidor en ${elapsed}s
+                    </small>
+
+                </div>
+            `;
+
+            if (signalsCount) {
+                signalsCount.textContent =
+                    `${completed}/${total}`;
+
+                signalsCount.className =
+                    'badge bg-info';
+            }
+
+            return;
+        }
+
+        // ------------------------------------------------------------
+        // SERVIDOR TERMINÓ
+        // ------------------------------------------------------------
+        window.futuresActiveLoaded = true;
+
+        if (signalsCount) {
+
+            signalsCount.textContent =
+                String(signals.length);
+
+            signalsCount.className =
+                `badge bg-${
+                    signals.length > 0
+                        ? 'success'
+                        : 'secondary'
+                }`;
+        }
+
+        // ------------------------------------------------------------
+        // SIN SEÑALES
+        // ------------------------------------------------------------
+        if (signals.length === 0) {
+
+            signalsList.innerHTML = `
+                <div class="list-group-item bg-dark text-warning text-center py-3">
+
+                    <strong>
+                        ✅ Análisis de Futuros completado
+                    </strong>
+
+                    <br>
+
+                    <small>
+                        No hay señales LONG/SHORT que superen
+                        los filtros actuales.
+                    </small>
+
+                    <br>
+
+                    <small class="text-muted">
+                        ${completed}/${total} análisis procesados.
+                    </small>
+
+                </div>
+            `;
+
+            return;
+        }
+
+        // ------------------------------------------------------------
+        // RENDER DE SEÑALES
+        // ------------------------------------------------------------
+        let html = '';
+
+        signals.forEach(sig => {
+
+            const isLong =
+                sig.action === 'LONG';
+
+            const badgeColor =
+                isLong
+                    ? 'success'
+                    : 'danger';
+
+            const icon =
+                isLong
+                    ? '📈'
+                    : '📉';
+
+            const symbolName =
+                String(sig.symbol || '')
+                    .replace('-', '/');
+
+            const confidence =
+                Number(sig.confidence || 0);
+
+            const leverage =
+                Number(sig.leverage || 1);
+
+            const rr =
+                Number(sig.risk_reward || 0);
+
+            const roiTp =
+                Number(sig.roi_tp || 0);
+
+            const roiSl =
+                Number(sig.roi_sl || 0);
+
+            html += `
+                <div
+                    class="list-group-item bg-dark text-white border-secondary"
+                    style="cursor:pointer;"
+                    onclick="window.changeToSignal(
+                        '${sig.symbol}',
+                        '${sig.timeframe}'
+                    )"
+                >
+
+                    <div class="d-flex justify-content-between align-items-center">
+
+                        <div>
+
+                            <span class="badge bg-${badgeColor} me-2">
+                                ${icon} ${sig.action}
+                            </span>
+
+                            <strong>
+                                ${symbolName}
+                            </strong>
+
+                            <span class="badge bg-dark ms-1">
+                                ${sig.timeframe}
+                            </span>
+
+                        </div>
+
+                        <span class="badge bg-warning text-dark">
+                            ${Math.max(
+                                0,
+                                Math.min(
+                                    100,
+                                    confidence
+                                )
+                            ).toFixed(0)}%
+                        </span>
+
+                    </div>
+
+                    <div
+                        class="mt-2 d-flex justify-content-between align-items-center"
+                        style="font-size:0.75rem;"
+                    >
+
+                        <div>
+
+                            <span class="badge bg-secondary me-1">
+                                Lev ${leverage}x
+                            </span>
+
+                            <span class="badge bg-dark">
+                                R/R 1:${rr.toFixed(1)}
+                            </span>
+
+                        </div>
+
+                        <div>
+
+                            <span class="text-success">
+                                TP ${roiTp >= 0 ? '+' : ''}${roiTp.toFixed(1)}%
+                            </span>
+
+                            <span class="mx-1 text-muted">
+                                |
+                            </span>
+
+                            <span class="text-danger">
+                                SL ${roiSl.toFixed(1)}%
+                            </span>
+
+                        </div>
+
+                    </div>
+
+                </div>
+            `;
+        });
+
+        signalsList.innerHTML = html;
+
+    } catch (err) {
+
+        console.error(
+            '❌ ACTIVE FETCH:',
+            err
+        );
+
         signalsList.innerHTML = `
-            <div class="list-group-item bg-dark text-muted text-center py-3">
-                <div class="spinner-border spinner-border-sm text-warning me-2"></div>
-                Escaneando 5 cripto × 6 TF...
+            <div class="list-group-item bg-dark text-danger text-center py-3">
+
+                <strong>
+                    ❌ No se pudo consultar Futuros
+                </strong>
+
+                <br>
+
+                <small>
+                    ${err.message || 'Error de conexión'}
+                </small>
+
             </div>
         `;
+
+        if (signalsCount) {
+
+            signalsCount.textContent =
+                'ERR';
+
+            signalsCount.className =
+                'badge bg-danger';
+        }
+
+    } finally {
+
+        window._futuresSignalsState.activeLoading = false;
+
+        console.log(
+            '🏁 ACTIVE: request finalizado.'
+        );
     }
-    
-    // Fetch con timeout de 3 min
-    const controllerAS = new AbortController();
-    const timeoutASId = setTimeout(() => controllerAS.abort(), 180000);
-    
-    fetch('/api/futures/signals/active?min_confidence=60', { signal: controllerAS.signal })
-        .then(r => {
-            clearTimeout(timeoutASId);
-            if (!r.ok) throw new Error(`HTTP ${r.status}`);
-            return r.json();
-        })
-        .then(json => {
-            if (!json.success) {
-            
-                // Liberar lock también en caso de error del servidor.
-                window._futuresSignalsState.activeLoading = false;
-            
-                signalsList.innerHTML = `
-                    <div class="list-group-item bg-dark text-danger text-center py-3">
-                        Error: ${json.error || 'desconocido'}
-                    </div>
-                `;
-            
-                return;
-            }
-            
-            // Si el servidor está calentando el caché
-            if (json.warming_up && (!json.signals || json.signals.length === 0)) {
-            
-                window._futuresSignalsState.activeLoading = false;
-            
-                const progress = json.progress || {};
-                const completed = Number(progress.completed || 0);
-                const total = Number(progress.total || 30);
-                const current = progress.current || 'Analizando...';
-            
-                signalsList.innerHTML = `
-                    <div class="list-group-item bg-dark text-info text-center py-3">
-            
-                        <div class="spinner-border spinner-border-sm me-2"></div>
-            
-                        <strong>
-                            Analizando futuros: ${completed}/${total}
-                        </strong>
-            
-                        <br>
-            
-                        <small class="text-muted">
-                            ${current}
-                        </small>
-            
-                        <div class="progress mt-2"
-                             style="height: 5px;">
-            
-                            <div
-                                class="progress-bar bg-info"
-                                role="progressbar"
-                                style="width: ${
-                                    total > 0
-                                        ? Math.min(
-                                            100,
-                                            (completed / total) * 100
-                                        )
-                                        : 0
-                                }%;">
-                            </div>
-            
-                        </div>
-            
-                    </div>
-                `;
-            
-                if (signalsCount) {
-                    signalsCount.textContent =
-                        completed > 0
-                            ? `${completed}/${total}`
-                            : '0';
-            
-                    signalsCount.className =
-                        'badge bg-info';
-                }
-            
-                setTimeout(() => {
-            
-                    if (
-                        typeof window.updateActiveSignals ===
-                        'function'
-                    ) {
-                        window.updateActiveSignals();
-                    }
-            
-                }, 15000);
-            
-                return;
-            }
-            
-            window.futuresActiveLoaded = true;
-            window._futuresSignalsState.activeLoading = false;
-            
-            const signals = json.signals || [];
-            if (signalsCount) {
-                signalsCount.textContent = signals.length;
-                signalsCount.className = `badge bg-${signals.length > 0 ? 'success' : 'secondary'}`;
-            }
-            
-            if (signals.length === 0) {
-                signalsList.innerHTML =
-                    '<div class="list-group-item bg-dark text-muted text-center py-3">Sin señales LONG/SHORT activas en este momento</div>';
-            
-                window._futuresSignalsState.activeLoading = false;
-                return;
-            }
-            
-            let html = '';
-            signals.forEach(sig => {
-                const isLong = sig.action === 'LONG';
-                const badgeColor = isLong ? 'success' : 'danger';
-                const icon = isLong ? '📈' : '📉';
-                const symbolName = sig.symbol.replace('-', '/');
-                
-                html += `
-                    <div class="list-group-item bg-dark text-white border-secondary" 
-                         style="cursor: pointer;"
-                         onclick="window.changeToSignal('${sig.symbol}', '${sig.timeframe}')"
-                         onmouseover="this.style.backgroundColor='#1a1e24'"
-                         onmouseout="this.style.backgroundColor=''">
-                        <!-- Fila 1: acción + confianza -->
-                        <div class="d-flex justify-content-between align-items-center">
-                            <div>
-                                <span class="badge bg-${badgeColor} me-2">${icon} ${sig.action}</span>
-                                <strong>${symbolName}</strong>
-                                <span class="badge bg-dark ms-1">${sig.timeframe}</span>
-                            </div>
-                            <span class="badge bg-warning text-dark">${fmtConfidence(sig.confidence)}%</span>
-                        </div>
-                        <!-- Fila 2: leverage + R/R + ROI -->
-                        <div class="mt-2 d-flex justify-content-between align-items-center" style="font-size: 0.75rem;">
-                            <div>
-                                <span class="badge bg-secondary me-1">Lev ${sig.leverage}x</span>
-                                <span class="badge bg-dark">R/R 1:${sig.risk_reward.toFixed(1)}</span>
-                            </div>
-                            <div>
-                                <span class="text-success">TP ${futFormatPct(sig.roi_tp, 1)}</span>
-                                <span class="mx-1 text-muted">|</span>
-                                <span class="text-danger">SL ${futFormatPct(sig.roi_sl, 1)}</span>
-                            </div>
-                        </div>
-                    </div>
-                `;
-            });
-            
-            signalsList.innerHTML = html;
-        })
-        .catch(err => {
-            window._futuresSignalsState.activeLoading = false;
-            clearTimeout(timeoutASId);
-            console.error('Error futures active:', err);
-            const isAbort = err.name === 'AbortError';
-            const errMsg = isAbort 
-                ? 'Servidor calentando caché (~2 min). Reintentando en 30s...'
-                : `Error: ${err.message || 'conexión perdida'}`;
-            signalsList.innerHTML = `<div class="list-group-item bg-dark text-warning text-center py-3"><i class="fas fa-hourglass-half me-1"></i>${errMsg}</div>`;
-        });
 };
 
 
@@ -451,227 +654,492 @@ window.updateActiveSignals = async function() {
 // SOBREESCRIBIR: updatePreviousSignals (vela ANTERIOR — estática)
 // ============================================================================
 
-window.updatePreviousSignals = function() {
+window.updatePreviousSignals = async function() {
+
     if (!window.IS_FUTURES_PAGE) {
         return;
     }
 
-    const signalsList = document.getElementById('prev-signals-list');
-    const signalsCount = document.getElementById('prev-signals-count');
+    const signalsList =
+        document.getElementById(
+            'prev-signals-list'
+        );
 
-    if (!signalsList) return;
+    const signalsCount =
+        document.getElementById(
+            'prev-signals-count'
+        );
 
-    // Evitar peticiones simultáneas.
-    if (window._futuresSignalsState.previousLoading) {
-        console.log('⏳ Previous Futures: petición anterior todavía en curso. Se omite.');
+    if (!signalsList) {
+        console.error(
+            '❌ PREVIOUS: no existe #prev-signals-list'
+        );
         return;
     }
 
-    window._futuresSignalsState.previousLoading = true;
-    
-    if (!window.futuresPrevLoaded) {
-        signalsList.innerHTML = `
-            <div class="list-group-item bg-dark text-muted text-center py-3">
-                <div class="spinner-border spinner-border-sm text-warning me-2"></div>
-                Cargando señales de la vela anterior...
-                <div class="small mt-2 text-info">
-                    <i class="fas fa-info-circle me-1"></i>
-                    El primer análisis puede tardar hasta 2 minutos (se cachea 5 min)
-                </div>
-            </div>
-        `;
+    // Evitar requests simultáneos.
+    if (
+        window._futuresSignalsState
+            .previousLoading
+    ) {
+
+        console.log(
+            '⏳ PREVIOUS: request anterior todavía en curso.'
+        );
+
+        return;
     }
-    
-    // Fetch con timeout largo (3 minutos)
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 180000);
-    
-    fetch('/api/futures/signals/previous?min_confidence=55', { signal: controller.signal })
-        .then(r => {
-            clearTimeout(timeoutId);
-            if (!r.ok) throw new Error(`HTTP ${r.status}`);
-            return r.json();
-        })
-        .then(json => {
-            if (!json.success) {
-            
-                // Liberar lock siempre que la petición termine con error.
-                window._futuresSignalsState.previousLoading = false;
-            
-                signalsList.innerHTML = `
-                    <div class="list-group-item bg-dark text-warning text-center py-3">
-                        ⚠️ ${json.error || 'Error del servidor'}
-                    </div>
-                `;
-            
-                if (signalsCount) {
-                    signalsCount.textContent = '0';
-                    signalsCount.className = 'badge bg-secondary';
+
+    window._futuresSignalsState
+        .previousLoading = true;
+
+    console.log(
+        '🚀 PREVIOUS: iniciando consulta...'
+    );
+
+    signalsList.innerHTML = `
+        <div class="list-group-item bg-dark text-info text-center py-3">
+
+            <div class="spinner-border spinner-border-sm me-2"></div>
+
+            Consultando vela anterior...
+
+        </div>
+    `;
+
+    if (signalsCount) {
+
+        signalsCount.textContent =
+            '...';
+
+        signalsCount.className =
+            'badge bg-info';
+    }
+
+    const startedAt =
+        performance.now();
+
+    try {
+
+        const response = await fetch(
+            '/api/futures/signals/previous?min_confidence=55&_ts='
+            + Date.now(),
+            {
+                method: 'GET',
+                cache: 'no-store',
+                headers: {
+                    'Cache-Control': 'no-cache'
                 }
-            
-                return;
+            }
+        );
+
+        const elapsed =
+            (
+                (performance.now() -
+                    startedAt) / 1000
+            ).toFixed(1);
+
+        console.log(
+            `📥 PREVIOUS HTTP ${response.status} en ${elapsed}s`
+        );
+
+        if (!response.ok) {
+
+            const text =
+                await response.text();
+
+            throw new Error(
+                `HTTP ${response.status}: ${text.substring(0, 500)}`
+            );
+        }
+
+        const json =
+            await response.json();
+
+        console.log(
+            '📦 PREVIOUS JSON:',
+            json
+        );
+
+        if (!json.success) {
+
+            signalsList.innerHTML = `
+                <div class="list-group-item bg-dark text-danger text-center py-3">
+
+                    <strong>
+                        ❌ Error del servidor
+                    </strong>
+
+                    <br>
+
+                    <small>
+                        ${json.error || 'Error desconocido'}
+                    </small>
+
+                </div>
+            `;
+
+            if (signalsCount) {
+
+                signalsCount.textContent =
+                    'ERR';
+
+                signalsCount.className =
+                    'badge bg-danger';
             }
 
-            // Si el servidor está calentando el caché
-            if (json.warming_up && (!json.signals || json.signals.length === 0)) {
-            
-                window._futuresSignalsState.previousLoading = false;
-            
-                const progress = json.progress || {};
-                const completed = Number(progress.completed || 0);
-                const total = Number(progress.total || 30);
-                const current = progress.current || 'Analizando...';
-            
-                signalsList.innerHTML = `
-                    <div class="list-group-item bg-dark text-info text-center py-3">
-            
-                        <div class="spinner-border spinner-border-sm me-2"></div>
-            
-                        <strong>
-                            Preparando vela anterior: ${completed}/${total}
-                        </strong>
-            
-                        <br>
-            
-                        <small class="text-muted">
-                            ${current}
-                        </small>
-            
-                        <div class="progress mt-2"
-                             style="height: 5px;">
-            
-                            <div
-                                class="progress-bar bg-warning"
-                                role="progressbar"
-                                style="width: ${
-                                    total > 0
-                                        ? Math.min(
-                                            100,
-                                            (completed / total) * 100
-                                        )
-                                        : 0
-                                }%;">
-                            </div>
-            
-                        </div>
-            
-                    </div>
-                `;
-            
-                if (signalsCount) {
-                    signalsCount.textContent =
-                        completed > 0
-                            ? `${completed}/${total}`
-                            : '0';
-            
-                    signalsCount.className =
-                        'badge bg-info';
-                }
-            
-                setTimeout(() => {
-            
-                    if (
-                        typeof window.updatePreviousSignals ===
-                        'function'
-                    ) {
-                        window.updatePreviousSignals();
-                    }
-            
-                }, 15000);
-            
-                return;
+            return;
+        }
+
+        const signals =
+            Array.isArray(json.signals)
+                ? json.signals
+                : [];
+
+        const progress =
+            json.progress || {};
+
+        const completed =
+            Number(
+                progress.completed || 0
+            );
+
+        const total =
+            Number(
+                progress.total || 30
+            );
+
+        const running =
+            Boolean(
+                json.running ||
+                json.warming_up
+            );
+
+        console.log(
+            '📊 PREVIOUS:',
+            {
+                signals: signals.length,
+                completed,
+                total,
+                running
             }
-            
-            const signals = json.signals || [];
-            const activeCount = json.active_count || 0;
-            
+        );
+
+        // ------------------------------------------------------------
+        // SERVIDOR TODAVÍA TRABAJANDO
+        // ------------------------------------------------------------
+        if (running) {
+
+            const pct =
+                total > 0
+                    ? Math.min(
+                        100,
+                        (completed / total) * 100
+                    )
+                    : 0;
+
+            signalsList.innerHTML = `
+                <div class="list-group-item bg-dark text-info text-center py-3">
+
+                    <div class="spinner-border spinner-border-sm me-2"></div>
+
+                    <strong>
+                        Analizando vela anterior:
+                        ${completed}/${total}
+                    </strong>
+
+                    <br>
+
+                    <small class="text-muted">
+                        ${progress.current || 'Preparando análisis...'}
+                    </small>
+
+                    <div
+                        class="progress mt-2"
+                        style="height:6px;"
+                    >
+
+                        <div
+                            class="progress-bar bg-warning"
+                            style="width:${pct}%;">
+                        </div>
+
+                    </div>
+
+                    <small
+                        class="d-block mt-2 text-secondary"
+                    >
+                        Respuesta recibida en ${elapsed}s
+                    </small>
+
+                </div>
+            `;
+
             if (signalsCount) {
-                signalsCount.textContent = activeCount;
-                signalsCount.className = `badge bg-${activeCount > 0 ? 'warning' : 'secondary'}`;
+
+                signalsCount.textContent =
+                    `${completed}/${total}`;
+
+                signalsCount.className =
+                    'badge bg-info';
             }
-            
-            if (signals.length === 0) {
-                signalsList.innerHTML =
-                    '<div class="list-group-item bg-dark text-muted text-center py-3">Sin señales LONG/SHORT en la vela anterior</div>';
-            
-                window.futuresPrevLoaded = true;
-                window._futuresSignalsState.previousLoading = false;
-                return;
-            }
-            
-            let html = '';
-            signals.forEach(sig => {
-                const isLong = sig.action === 'LONG';
-                const badgeColor = isLong ? 'success' : 'danger';
-                const icon = isLong ? '📈' : '📉';
-                const symbolName = sig.symbol.replace('-', '/');
-                const inactive = sig.activa !== 1;
-                const opacity = inactive ? 'opacity-50' : '';
-                
-                let statusBadge = '';
-                if (sig.resultado === 'tp_hit') {
-                    statusBadge = '<span class="badge bg-success">✅ TP</span>';
-                } else if (sig.resultado === 'sl_hit') {
-                    statusBadge = '<span class="badge bg-danger">❌ SL</span>';
-                } else {
-                    statusBadge = '<span class="badge bg-warning text-dark">⏱️ Activa</span>';
-                }
-                
-                html += `
-                    <div class="list-group-item bg-dark text-white border-secondary ${opacity}"
-                         style="cursor: pointer;"
-                         data-signal='${JSON.stringify(sig).replace(/'/g, "\\'")}'
-                         onclick="const s=JSON.parse(this.getAttribute('data-signal')); window.showFuturesPrevJustif(s);">
-                        <!-- Fila 1 -->
-                        <div class="d-flex justify-content-between align-items-center">
-                            <div>
-                                <span class="badge bg-${badgeColor} me-2">${icon} ${sig.action}</span>
-                                <strong>${symbolName}</strong>
-                                <span class="badge bg-dark ms-1">${sig.timeframe}</span>
-                            </div>
-                            <div>
-                                ${statusBadge}
-                                <span class="badge bg-secondary ms-1">${fmtConfidence(sig.confidence)}%</span>
-                            </div>
-                        </div>
-                        <!-- Fila 2 -->
-                        <div class="mt-2 d-flex justify-content-between" style="font-size: 0.72rem;">
-                            <div>
-                                <span class="badge bg-dark me-1">Lev ${sig.leverage}x</span>
-                                <span class="badge bg-dark">R/R 1:${sig.risk_reward.toFixed(1)}</span>
-                            </div>
-                            <div>
-                                <span class="text-success">TP ${futFormatPct(sig.roi_tp, 1)}</span>
-                                <span class="mx-1 text-muted">·</span>
-                                <span class="text-danger">SL ${futFormatPct(sig.roi_sl, 1)}</span>
-                            </div>
-                        </div>
-                    </div>
-                `;
-            });
-            
-            signalsList.innerHTML = html;
-            window.futuresPrevLoaded = true;
-        })
-        .catch(err => {
-            window._futuresSignalsState.previousLoading = false;
-        
-            clearTimeout(timeoutId);
-            console.error('Error futures previous:', err);
-        
-            const isAbort = err.name === 'AbortError';
-        
-            const errMsg = isAbort
-                ? 'El servidor está preparando el análisis de futuros. Se volverá a consultar automáticamente.'
-                : `Error: ${err.message || 'conexión perdida'}`;
-        
+
+            return;
+        }
+
+        // ------------------------------------------------------------
+        // SERVIDOR TERMINÓ
+        // ------------------------------------------------------------
+        window.futuresPrevLoaded =
+            true;
+
+        if (signalsCount) {
+
+            signalsCount.textContent =
+                String(signals.length);
+
+            signalsCount.className =
+                `badge bg-${
+                    signals.length > 0
+                        ? 'warning'
+                        : 'secondary'
+                }`;
+        }
+
+        // ------------------------------------------------------------
+        // SIN SEÑALES
+        // ------------------------------------------------------------
+        if (signals.length === 0) {
+
             signalsList.innerHTML = `
                 <div class="list-group-item bg-dark text-warning text-center py-3">
-                    <i class="fas fa-hourglass-half me-1"></i>
-                    ${errMsg}
+
+                    <strong>
+                        ✅ Análisis completado
+                    </strong>
+
+                    <br>
+
+                    <small>
+                        No hay señales LONG/SHORT
+                        para la vela anterior.
+                    </small>
+
+                    <br>
+
+                    <small class="text-muted">
+                        ${completed}/${total} análisis procesados.
+                    </small>
+
+                </div>
+            `;
+
+            return;
+        }
+
+        // ------------------------------------------------------------
+        // RENDER
+        // ------------------------------------------------------------
+        let html = '';
+
+        signals.forEach(sig => {
+
+            const isLong =
+                sig.action === 'LONG';
+
+            const badgeColor =
+                isLong
+                    ? 'success'
+                    : 'danger';
+
+            const icon =
+                isLong
+                    ? '📈'
+                    : '📉';
+
+            const symbolName =
+                String(sig.symbol || '')
+                    .replace('-', '/');
+
+            const confidence =
+                Number(sig.confidence || 0);
+
+            const leverage =
+                Number(sig.leverage || 1);
+
+            const rr =
+                Number(sig.risk_reward || 0);
+
+            const roiTp =
+                Number(sig.roi_tp || 0);
+
+            const roiSl =
+                Number(sig.roi_sl || 0);
+
+            let statusBadge =
+                '<span class="badge bg-warning text-dark">⏱️ Activa</span>';
+
+            if (
+                sig.resultado === 'tp_hit'
+            ) {
+
+                statusBadge =
+                    '<span class="badge bg-success">✅ TP</span>';
+
+            } else if (
+                sig.resultado === 'sl_hit'
+            ) {
+
+                statusBadge =
+                    '<span class="badge bg-danger">❌ SL</span>';
+            }
+
+            const inactive =
+                sig.activa !== 1;
+
+            const opacity =
+                inactive
+                    ? 'opacity-50'
+                    : '';
+
+            const signalData =
+                JSON.stringify(sig)
+                    .replace(/'/g, "\\'");
+
+            html += `
+                <div
+                    class="list-group-item bg-dark text-white border-secondary ${opacity}"
+                    style="cursor:pointer;"
+                    data-signal='${signalData}'
+                    onclick="
+                        const s =
+                            JSON.parse(
+                                this.getAttribute('data-signal')
+                            );
+
+                        window.showFuturesPrevJustif(s);
+                    "
+                >
+
+                    <div class="d-flex justify-content-between align-items-center">
+
+                        <div>
+
+                            <span class="badge bg-${badgeColor} me-2">
+                                ${icon} ${sig.action}
+                            </span>
+
+                            <strong>
+                                ${symbolName}
+                            </strong>
+
+                            <span class="badge bg-dark ms-1">
+                                ${sig.timeframe}
+                            </span>
+
+                        </div>
+
+                        <div>
+                            ${statusBadge}
+
+                            <span
+                                class="badge bg-secondary ms-1"
+                            >
+                                ${Math.max(
+                                    0,
+                                    Math.min(
+                                        100,
+                                        confidence
+                                    )
+                                ).toFixed(0)}%
+                            </span>
+                        </div>
+
+                    </div>
+
+                    <div
+                        class="mt-2 d-flex justify-content-between"
+                        style="font-size:0.72rem;"
+                    >
+
+                        <div>
+
+                            <span class="badge bg-dark me-1">
+                                Lev ${leverage}x
+                            </span>
+
+                            <span class="badge bg-dark">
+                                R/R 1:${rr.toFixed(1)}
+                            </span>
+
+                        </div>
+
+                        <div>
+
+                            <span class="text-success">
+                                TP ${roiTp >= 0 ? '+' : ''}${roiTp.toFixed(1)}%
+                            </span>
+
+                            <span class="mx-1 text-muted">
+                                |
+                            </span>
+
+                            <span class="text-danger">
+                                SL ${roiSl.toFixed(1)}%
+                            </span>
+
+                        </div>
+
+                    </div>
+
                 </div>
             `;
         });
+
+        signalsList.innerHTML =
+            html;
+
+    } catch (err) {
+
+        console.error(
+            '❌ PREVIOUS FETCH:',
+            err
+        );
+
+        signalsList.innerHTML = `
+            <div class="list-group-item bg-dark text-danger text-center py-3">
+
+                <strong>
+                    ❌ No se pudo consultar la vela anterior
+                </strong>
+
+                <br>
+
+                <small>
+                    ${err.message || 'Error de conexión'}
+                </small>
+
+            </div>
+        `;
+
+        if (signalsCount) {
+
+            signalsCount.textContent =
+                'ERR';
+
+            signalsCount.className =
+                'badge bg-danger';
+        }
+
+    } finally {
+
+        window._futuresSignalsState
+            .previousLoading = false;
+
+        console.log(
+            '🏁 PREVIOUS: request finalizado.'
+        );
+    }
 };
 
 
