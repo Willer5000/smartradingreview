@@ -20615,7 +20615,20 @@ from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
 # cache se perdía → durante ~2 min (warmup) el frontend veía lista vacía y
 # las alertas ENTRY_TOCADO no podían dispararse. Ahora: al arrancar el nuevo
 # worker se carga el snapshot desde /tmp/ y el frontend tiene datos inmediatos.
-_futures_analysis_cache = {'data': None, 'ts': 0, 'lock': threading.Lock(), 'running': False}
+_futures_analysis_cache = {
+    'data': None,
+    'ts': 0,
+    'running': False,
+    'progress': {
+        'total': 0,
+        'completed': 0,
+        'current': None,
+        'started_at': None,
+        'last_completed': None,
+        'errors': 0
+    },
+    'lock': threading.Lock(),
+}
 _futures_correlation_cache = {'data': None, 'ts': 0, 'key': None}
 
 _FUTURES_CACHE_FILE = os.environ.get('FUTURES_CACHE_FILE', '/tmp/futures_analysis_cache.json')
@@ -20754,47 +20767,174 @@ _load_futures_cache_from_disk()
 
 def _analyze_futures_all_parallel():
     """
-    Analiza en paralelo las 30 combinaciones (5 cripto × 6 TF).
-    Retorna dict {(symbol, timeframe): result_dict}
+    Ejecuta los 30 análisis de Futuros de forma secuencial para limitar memoria,
+    pero publica cada resultado en el caché inmediatamente.
+
+    Objetivo:
+    - No esperar a 30/30 para entregar señales.
+    - Permitir que Active/Previous consuman resultados parciales.
+    - Registrar progreso real para diagnóstico.
+    - Si una combinación falla, las demás continúan.
     """
+    global _futures_analysis_cache
+
     futures = _get_futures_system()
+
     if futures is None:
-        return {}
-    
+        return {
+            'analysis': {},
+            'errors': ['FuturesSystem no disponible']
+        }
+
     from futures_system import FUTURES_SYMBOLS, FUTURES_TIMEFRAMES
-    
-    # OPTIMIZACIONES DE MEMORIA (Render Free 512MB):
-    # 1. TODOS los TFs del sistema futures (5m, 15m, 30m, 1h, 2h, 4h) para que
-    #    el frontend siempre tenga datos. El monitor de entries filtra
-    #    internamente los TFs relevantes.
-    # 2. Ejecución SECUENCIAL (1 análisis a la vez, no paralelo) → ~50MB pico.
-    # 3. gc.collect() cada 3 análisis para liberar DataFrames.
-    # 4. Se elimina 'df' del resultado — el frontend no lo necesita en el
-    #    payload compacto de futuros.
-    combos = [(s, tf) for s in FUTURES_SYMBOLS.keys() for tf in FUTURES_TIMEFRAMES.keys()]
+
+    combos = [
+        (symbol, timeframe)
+        for symbol in FUTURES_SYMBOLS.keys()
+        for timeframe in FUTURES_TIMEFRAMES.keys()
+    ]
+
     results = {}
     errors = []
-    
+
+    total = len(combos)
+
+    # Estado global de progreso
+    cache = _futures_analysis_cache
+
+    with cache['lock']:
+        cache['progress'] = {
+            'total': total,
+            'completed': 0,
+            'current': None,
+            'started_at': time.time(),
+            'last_completed': None,
+            'errors': 0
+        }
+
     import gc
-    # Ejecución SECUENCIAL - más lenta pero mucho más suave con la memoria
-    for symbol, tf in combos:
+
+    for index, (symbol, timeframe) in enumerate(combos, start=1):
+
+        combo_name = f"{symbol} {timeframe}"
+
+        with cache['lock']:
+            cache['progress']['current'] = combo_name
+
+        print(
+            f"🔎 [FUT {index}/{total}] Analizando "
+            f"{symbol} {timeframe}..."
+        )
+
         try:
-            r = futures.analyze_futures_market(symbol, tf)
-            # Liberar memoria del df crudo (ocupa varios MB por análisis)
-            if isinstance(r, dict) and 'df' in r:
-                _df = r.pop('df', None)
+
+            r = futures.analyze_futures_market(
+                symbol,
+                timeframe
+            )
+
+            if not isinstance(r, dict):
+                raise ValueError(
+                    f"Resultado inválido para {combo_name}"
+                )
+
+            # ---------------------------------------------------------
+            # IMPORTANTE:
+            # El DataFrame completo no debe quedarse en el caché
+            # porque consume demasiada memoria en Render.
+            # ---------------------------------------------------------
+            if 'df' in r:
+            
+                _df = r.get('df')
+            
+                # Guardar únicamente el timestamp de la vela anterior.
+                # No guardamos el DataFrame completo.
+                try:
+            
+                    if isinstance(_df, dict):
+            
+                        times = _df.get('time', [])
+            
+                        if isinstance(times, list) and len(times) >= 2:
+            
+                            r['previous_candle_timestamp'] = str(
+                                times[-2]
+                            )
+            
+                except Exception as ts_error:
+            
+                    print(
+                        f"⚠️ [FUT] No se pudo obtener timestamp "
+                        f"{combo_name}: {ts_error}"
+                    )
+            
+                # Ahora sí eliminar el DataFrame pesado.
+                r.pop('df', None)
+            
                 del _df
-            results[(symbol, tf)] = r
+
+            results[(symbol, timeframe)] = r
+
+            # ---------------------------------------------------------
+            # PUBLICAR EL RESULTADO INMEDIATAMENTE
+            # ---------------------------------------------------------
+            partial_data = {
+                'analysis': dict(results),
+                'errors': list(errors)
+            }
+
+            with cache['lock']:
+                cache['data'] = partial_data
+
+                cache['progress']['completed'] = index
+                cache['progress']['last_completed'] = combo_name
+                cache['progress']['errors'] = len(errors)
+
+            print(
+                f"✅ [FUT {index}/{total}] "
+                f"{combo_name} completado"
+            )
+
         except Exception as e:
-            errors.append(f"{symbol} {tf}: {str(e)[:120]}")
-            continue
-        
-        # gc cada 3 análisis para liberar memoria acumulada
-        if (len(results) + len(errors)) % 3 == 0:
+
+            error_text = (
+                f"{combo_name}: {str(e)[:200]}"
+            )
+
+            errors.append(error_text)
+
+            with cache['lock']:
+
+                cache['progress']['completed'] = index
+                cache['progress']['last_completed'] = combo_name
+                cache['progress']['errors'] = len(errors)
+
+            print(
+                f"❌ [FUT {index}/{total}] "
+                f"{error_text}"
+            )
+
+        # Garbage collector cada 3 análisis
+        if index % 3 == 0:
             gc.collect()
-    
-    gc.collect()  # gc final
-    return {'analysis': results, 'errors': errors}
+
+    gc.collect()
+
+    with cache['lock']:
+        cache['progress']['current'] = None
+        cache['progress']['completed'] = total
+        cache['progress']['errors'] = len(errors)
+
+    print(
+        f"🏁 [FUT] Análisis completo: "
+        f"{len(results)}/{total} resultados, "
+        f"{len(errors)} errores."
+    )
+
+    return {
+        'analysis': results,
+        'errors': errors
+    }
 
 
 def _get_or_refresh_futures_analysis(force_wait=False):
@@ -21057,9 +21197,27 @@ def api_futures_debug():
                 }
         except Exception:
             pass
+
+        with _futures_analysis_cache['lock']:
+        
+            progress = dict(
+                _futures_analysis_cache.get(
+                    'progress',
+                    {}
+                )
+            )
+        
+            running = bool(
+                _futures_analysis_cache.get(
+                    'running',
+                    False
+                )
+            )
         
         return jsonify({
             'success': True,
+            'running': running,
+            'progress': progress,
             'warming_up': warming_up,
             'cache_age_seconds': cache_age,
             'stale': bool(cache.get('stale', False)),
@@ -21138,12 +21296,12 @@ def api_futures_signals_previous():
                     activa = 0
                     resultado = 'tp_hit'
             
-            # Timestamp de la vela anterior
-            candle_ts = None
-            df_dict = result.get('df', {})
-            times = df_dict.get('time', [])
-            if len(times) >= 2:
-                candle_ts = str(times[-2])
+            # Timestamp de la vela anterior.
+            # El DataFrame fue eliminado para ahorrar memoria;
+            # el timestamp se conserva en el resultado compacto.
+            candle_ts = result.get(
+                'previous_candle_timestamp'
+            )
             
             # Justificación (truncada) para que el monitor de entries y el
             # frontend puedan mostrarla sin re-analizar.
