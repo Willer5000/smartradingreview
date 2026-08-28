@@ -11481,8 +11481,58 @@ class TradingExpertSystem:
                             'strength': 2,
                             'type': 'fvg'
                         })
-            
-            # 4. Debajo del soporte más cercano
+            # ==========================================================
+            # 4. DETRÁS DE LIQUIDITY SWEEP ALCISTA
+            # ==========================================================
+            # Un sweep bullish representa un barrido de liquidez
+            # por debajo de un mínimo seguido de recuperación.
+            #
+            # Para LONG, el SL preferente debe quedar POR DEBAJO
+            # de ese sweep, no encima de él.
+            # ==========================================================
+            liquidity_sweeps = structure.get(
+                'liquidity_sweeps',
+                []
+            ) or []
+
+            for sweep in liquidity_sweeps[-5:]:
+
+                if not isinstance(sweep, dict):
+                    continue
+
+                if sweep.get('type') != 'bullish':
+                    continue
+
+                sweep_level = float(
+                    sweep.get('sweep_level', 0)
+                    or 0
+                )
+
+                if sweep_level <= 0:
+                    continue
+
+                if sweep_level >= current_price:
+                    continue
+
+                # Buffer pequeño detrás del sweep.
+                # No queremos colocar exactamente el SL
+                # sobre el mínimo barrido.
+                sweep_sl = (
+                    sweep_level
+                    - atr * 0.25
+                )
+
+                candidates.append({
+                    'price': sweep_sl,
+                    'source': (
+                        f"Detrás Liquidity Sweep "
+                        f"${sweep_level:.2f}"
+                    ),
+                    'strength': 3,
+                    'type': 'sweep',
+                    'sweep_level': sweep_level
+                })           
+            # 5. Debajo del soporte más cercano
             nearest_support = structure.get('nearest_support')
             if nearest_support and nearest_support < current_price:
                 candidates.append({
@@ -11492,7 +11542,7 @@ class TradingExpertSystem:
                     'type': 'support'
                 })
             
-            # 5. Debajo del VAL (Value Area Low)
+            # 6. Debajo del VAL (Value Area Low)
             vp = structure.get('volume_profile', {}) or {}
             val = vp.get('val', 0)
             if val and val < current_price:
@@ -11503,7 +11553,7 @@ class TradingExpertSystem:
                     'type': 'va'
                 })
             
-            # 6. Fallback: entry - 2 * ATR
+            # 7. Fallback: entry - 2 * ATR
             candidates.append({
                 'price': current_price - atr * 2.0,
                 'source': f"ATR fallback (-2×ATR)",
@@ -11525,7 +11575,50 @@ class TradingExpertSystem:
                             'strength': 3,
                             'type': 'swing'
                         })
-            
+
+            # ==========================================================
+            # DETRÁS DE LIQUIDITY SWEEP BAJISTA
+            # ==========================================================
+            liquidity_sweeps = structure.get(
+                'liquidity_sweeps',
+                []
+            ) or []
+
+            for sweep in liquidity_sweeps[-5:]:
+
+                if not isinstance(sweep, dict):
+                    continue
+
+                if sweep.get('type') != 'bearish':
+                    continue
+
+                sweep_level = float(
+                    sweep.get('sweep_level', 0)
+                    or 0
+                )
+
+                if sweep_level <= 0:
+                    continue
+
+                if sweep_level <= current_price:
+                    continue
+
+                sweep_sl = (
+                    sweep_level
+                    + atr * 0.25
+                )
+
+                candidates.append({
+                    'price': sweep_sl,
+                    'source': (
+                        f"Detrás Liquidity Sweep "
+                        f"${sweep_level:.2f}"
+                    ),
+                    'strength': 3,
+                    'type': 'sweep',
+                    'sweep_level': sweep_level
+                })            
+
             for ob in structure.get('order_blocks', []):
                 if not isinstance(ob, dict):
                     continue
@@ -11693,13 +11786,14 @@ class TradingExpertSystem:
         strength_score = (strength / 3) * 60
         
         type_bonus = {
+            'sweep': 50,
             'swing': 40,
             'ob': 35,
             'fvg': 25,
             'support': 30,
             'resistance': 30,
             'va': 20,
-            'atr': 5   # ATR fallback: menos fiable
+            'atr': 5
         }
         type_score = type_bonus.get(candidate.get('type', 'atr'), 10)
         
@@ -11808,35 +11902,116 @@ class TradingExpertSystem:
     
     
     
-    def _select_optimal_sl(self, direction, structure, current_price, volatility, timeframe):
+    def _select_optimal_sl(
+        self,
+        direction,
+        structure,
+        entry,
+        volatility,
+        timeframe,
+        current_price=None
+    ):
         """
-        Selecciona el SL óptimo: protector + poco probable de toque.
-        
-        Retorna: (sl_price, sl_source, sl_score)
+        Selecciona el SL óptimo usando el ENTRY REAL.
+    
+        Prioridad:
+    
+        1. Invalidación estructural
+        2. Liquidity sweep
+        3. Swing
+        4. Order Block
+        5. FVG
+        6. Soporte/resistencia
+        7. ATR fallback
+    
+        El SL no debe colocarse simplemente por distancia ATR.
+        Debe quedar detrás de la zona que invalida la tesis.
         """
-        max_distance = self._calculate_max_sl_distance_pct(timeframe)
-        atr = volatility.get('atr', current_price * 0.02) or (current_price * 0.02)
-        candidates = self._collect_sl_candidates(direction, structure, current_price, volatility, timeframe)
-        
+    
+        reference_price = (
+            float(entry)
+            if entry and entry > 0
+            else float(current_price or 0)
+        )
+    
+        max_distance = self._calculate_max_sl_distance_pct(
+            timeframe
+        )
+    
+        atr = volatility.get(
+            'atr',
+            reference_price * 0.02
+        ) or (
+            reference_price * 0.02
+        )
+    
+        candidates = self._collect_sl_candidates(
+            direction,
+            structure,
+            reference_price,
+            volatility,
+            timeframe
+        )
+    
         if not candidates:
-            # SIEMPRE hay al menos el ATR fallback — nunca debería llegar aquí
-            atr_price = (current_price - atr * 2) if direction == 'long' else (current_price + atr * 2)
-            return atr_price, "ATR fallback", 30
-        
+    
+            atr_price = (
+                reference_price - atr * 2
+                if direction == 'long'
+                else reference_price + atr * 2
+            )
+    
+            return (
+                atr_price,
+                "ATR fallback",
+                30
+            )
+    
         scored = []
+    
         for c in candidates:
-            score = self._score_sl_candidate(c, current_price, direction, timeframe, max_distance, atr)
+    
+            score = self._score_sl_candidate(
+                c,
+                reference_price,
+                direction,
+                timeframe,
+                max_distance,
+                atr
+            )
+    
             if score > 0:
-                scored.append((c, score))
-        
+    
+                scored.append(
+                    (c, score)
+                )
+    
         if not scored:
-            # Fallback: usar el ATR
-            atr_price = (current_price - atr * 2) if direction == 'long' else (current_price + atr * 2)
-            return atr_price, "ATR fallback (sin candidatos válidos)", 30
-        
-        scored.sort(key=lambda x: -x[1])
+    
+            atr_price = (
+                reference_price - atr * 2
+                if direction == 'long'
+                else reference_price + atr * 2
+            )
+    
+            return (
+                atr_price,
+                "ATR fallback (sin candidatos válidos)",
+                30
+            )
+    
+        # Mejor puntuación estructural.
+        scored.sort(
+            key=lambda x: -x[1]
+        )
+    
         best = scored[0]
-        return best[0]['price'], best[0]['source'], best[1]
+    
+        return (
+            best[0]['price'],
+            best[0]['source'],
+            best[1]
+        )
 
     def _build_smc_entry_context(
         self,
@@ -12738,7 +12913,12 @@ class TradingExpertSystem:
             
             # 1. SELECCIONAR SL ÓPTIMO (sweet spot 2.0-3.5×ATR)
             sl_price, sl_source, sl_score = self._select_optimal_sl(
-                direction, structure, current_price, volatility, timeframe
+                direction,
+                structure,
+                entry,
+                volatility,
+                timeframe,
+                current_price=current_price
             )
             if sl_price is None:
                 print(f"   ⚠️ RECHAZADO: sin SL válido")
