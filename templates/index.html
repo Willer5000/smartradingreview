@@ -3148,8 +3148,198 @@
             setInterval(window.updateSystemKPIs, 300000);  // KPIs del sistema cada 5 min
             
             // ============ INICIAR INTERVALOS DE VELAS Y PRECIO ============
-            window.startUpdateIntervals();
-        });
+            if (typeof window.startUpdateIntervals === 'function') {
+                window.startUpdateIntervals();
+            } else {
+                console.warn('⚠️ startUpdateIntervals no está disponible');
+            }
+            
+            // ============================================================================
+            // INICIALIZACIÓN FORZADA DE PANELES DE FUTUROS
+            // ============================================================================
+            // Este bloque se ejecuta desde el DOMContentLoaded PRINCIPAL de index.html.
+            // Así no dependemos exclusivamente del listener de futures.js.
+            // ============================================================================
+            
+            if (window.IS_FUTURES_PAGE === true) {
+            
+                console.log('🚀 INDEX: página Futuros detectada');
+            
+                setTimeout(() => {
+            
+                    console.log(
+                        '🔎 INDEX: comprobando funciones de señales de Futuros',
+                        {
+                            active:
+                                typeof window.updateActiveSignals,
+            
+                            previous:
+                                typeof window.updatePreviousSignals
+                        }
+                    );
+            
+                    // ------------------------------------------------------------
+                    // SEÑALES ACTIVAS
+                    // ------------------------------------------------------------
+                    if (
+                        typeof window.updateActiveSignals ===
+                        'function'
+                    ) {
+            
+                        console.log(
+                            '🚀 INDEX: ejecutando updateActiveSignals()'
+                        );
+            
+                        try {
+                            window.updateActiveSignals();
+                        } catch (error) {
+            
+                            console.error(
+                                '❌ INDEX: error en updateActiveSignals:',
+                                error
+                            );
+            
+                            const el =
+                                document.getElementById(
+                                    'active-signals-list'
+                                );
+            
+                            if (el) {
+            
+                                el.innerHTML = `
+                                    <div class="list-group-item bg-dark text-danger text-center py-3">
+            
+                                        <strong>
+                                            ❌ Error iniciando señales activas
+                                        </strong>
+            
+                                        <br>
+            
+                                        <small>
+                                            ${error.message || error}
+                                        </small>
+            
+                                    </div>
+                                `;
+                            }
+                        }
+            
+                    } else {
+            
+                        console.error(
+                            '❌ INDEX: updateActiveSignals NO existe'
+                        );
+            
+                        const el =
+                            document.getElementById(
+                                'active-signals-list'
+                            );
+            
+                        if (el) {
+            
+                            el.innerHTML = `
+                                <div class="list-group-item bg-dark text-danger text-center py-3">
+            
+                                    <strong>
+                                        ❌ futures.js no inicializó las señales activas
+                                    </strong>
+            
+                                    <br>
+            
+                                    <small>
+                                        updateActiveSignals no está disponible.
+                                    </small>
+            
+                                </div>
+                            `;
+                        }
+                    }
+            
+                    // ------------------------------------------------------------
+                    // SEÑALES DE LA VELA ANTERIOR
+                    // ------------------------------------------------------------
+                    setTimeout(() => {
+            
+                        if (
+                            typeof window.updatePreviousSignals ===
+                            'function'
+                        ) {
+            
+                            console.log(
+                                '📜 INDEX: ejecutando updatePreviousSignals()'
+                            );
+            
+                            try {
+                                window.updatePreviousSignals();
+                            } catch (error) {
+            
+                                console.error(
+                                    '❌ INDEX: error en updatePreviousSignals:',
+                                    error
+                                );
+            
+                                const el =
+                                    document.getElementById(
+                                        'prev-signals-list'
+                                    );
+            
+                                if (el) {
+            
+                                    el.innerHTML = `
+                                        <div class="list-group-item bg-dark text-danger text-center py-3">
+            
+                                            <strong>
+                                                ❌ Error iniciando señales anteriores
+                                            </strong>
+            
+                                            <br>
+            
+                                            <small>
+                                                ${error.message || error}
+                                            </small>
+            
+                                        </div>
+                                    `;
+                                }
+                            }
+            
+                        } else {
+            
+                            console.error(
+                                '❌ INDEX: updatePreviousSignals NO existe'
+                            );
+            
+                            const el =
+                                document.getElementById(
+                                    'prev-signals-list'
+                                );
+            
+                            if (el) {
+            
+                                el.innerHTML = `
+                                    <div class="list-group-item bg-dark text-danger text-center py-3">
+            
+                                        <strong>
+                                            ❌ futures.js no inicializó las señales anteriores
+                                        </strong>
+            
+                                        <br>
+            
+                                        <small>
+                                            updatePreviousSignals no está disponible.
+                                        </small>
+            
+                                    </div>
+                                `;
+                            }
+                        }
+            
+                    }, 1000);
+            
+                }, 1500);
+            }
+            
+            });
     </script>
     <!-- ============ FIRMA DEL DESARROLLADOR ============ -->
     <footer class="container-fluid bg-dark border-top border-secondary py-3 mt-4">
