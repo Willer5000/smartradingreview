@@ -22978,7 +22978,31 @@ def api_analyze_with_portfolio():
         timeframe = data.get('timeframe', '1h')
         user = data.get('user', 'Invitado')
         portfolio = data.get('portfolio', {})
-        prices = data.get('prices', {})
+        # ==============================================================
+        # PRECIOS PARA TGP — VALIDACIÓN SERVER-SIDE
+        # ==============================================================
+        prices = data.get('prices', {}) or {}
+
+        # No confiar exclusivamente en lastPrices del navegador.
+        # Si falta BTC o PAXG, obtener el precio de KuCoin desde backend.
+        try:
+            if (
+                float(prices.get('BTC-USDT', 0) or 0) <= 0
+                or float(prices.get('PAXG-USDT', 0) or 0) <= 0
+            ):
+                print("🛡️ TGP: precios incompletos desde frontend. Recuperando precios server-side...")
+
+                btc_df = expert_system.get_kucoin_data('BTC-USDT', '1h')
+                paxg_df = expert_system.get_kucoin_data('PAXG-USDT', '1h')
+
+                if btc_df is not None and len(btc_df) > 0:
+                    prices['BTC-USDT'] = float(btc_df['close'].iloc[-1])
+
+                if paxg_df is not None and len(paxg_df) > 0:
+                    prices['PAXG-USDT'] = float(paxg_df['close'].iloc[-1])
+
+        except Exception as price_error:
+            print(f"⚠️ TGP: no se pudieron recuperar precios server-side: {price_error}")
 
         print(f"\n{'='*60}")
         print(f"👤 {user} - Análisis con Portafolio")
