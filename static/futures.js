@@ -2000,23 +2000,102 @@ window.updateSavedSignalsList = async function() {
                 } else if (
                     guardian.action
                     === 'EXIT'
-                ) {                    
-                     guardianHtml = `
-                        <div class="mt-2">
-                            <span class="badge bg-danger">
-                                🛡️ Guardian: SALIR
-                            </span>
-                            <div class="small text-danger mt-1">
-                                ${guardian.reason || ''}
+                ) {
+                
+                    guardianHtml = `
+                        <div class="mt-2 p-2 border border-danger rounded">
+                
+                            <div class="mb-2">
+                                <span class="badge bg-danger">
+                                    🛡️ Guardian: SALIR
+                                </span>
+                
+                                <span class="badge bg-dark ms-1">
+                                    Deterioro:
+                                    ${Number(
+                                        guardian.deterioration_score || 0
+                                    ).toFixed(0)}/100
+                                </span>
+                            </div>
+                
+                            <div class="small text-light">
+                
+                                <div class="mb-1">
+                                    ⏱️ <strong>Tiempo:</strong>
+                                    ${Number(
+                                        guardian.elapsed_minutes || 0
+                                    ).toFixed(0)} min
+                                </div>
+                
+                                <div class="mb-1">
+                                    📈 <strong>MFE:</strong>
+                                    +${Number(
+                                        guardian.mfe_pct || 0
+                                    ).toFixed(3)}%
+                                </div>
+                
+                                <div class="mb-1">
+                                    📉 <strong>MAE:</strong>
+                                    -${Number(
+                                        guardian.mae_pct || 0
+                                    ).toFixed(3)}%
+                                </div>
+                
+                                <div class="mb-1">
+                                    🎯 <strong>Avance favorable:</strong>
+                                    ${Number(
+                                        guardian.favorable_pct || 0
+                                    ).toFixed(3)}%
+                                </div>
+                
+                                <div class="mb-1">
+                                    ⚠️ <strong>Movimiento adverso:</strong>
+                                    ${Number(
+                                        guardian.adverse_pct || 0
+                                    ).toFixed(3)}%
+                                </div>
+                
+                                <div class="mb-1">
+                                    🎯 <strong>Distancia restante a TP:</strong>
+                                    ${Number(
+                                        guardian.remaining_to_tp_pct || 0
+                                    ).toFixed(3)}%
+                                </div>
+                
+                                <div class="mb-1">
+                                    🛡️ <strong>Distancia al SL:</strong>
+                                    ${Number(
+                                        guardian.sl_distance_pct || 0
+                                    ).toFixed(3)}%
+                                </div>
+                
+                                <div class="mb-1">
+                                    🎯 <strong>Objetivo total:</strong>
+                                    ${Number(
+                                        guardian.tp_distance_pct || 0
+                                    ).toFixed(3)}%
+                                </div>
+                
+                                <div class="mb-1">
+                                    ⚡ <strong>Leverage:</strong>
+                                    ${Number(
+                                        guardian.leverage || 0
+                                    ).toFixed(0)}x
+                                </div>
+                
+                                <div class="mt-2 text-danger">
+                                    ${guardian.reason || ''}
+                                </div>
+                
                             </div>
                         </div>
                     `;
-        
+                
                 } else if (
                     guardian.action
                     === 'REDUCE'
                 ) {
-        
+                
                     guardianHtml = `
                         <div class="mt-2">
                             <span class="badge bg-warning text-dark">
@@ -2027,14 +2106,56 @@ window.updateSavedSignalsList = async function() {
                             </div>
                         </div>
                     `;
-        
+                
                 } else {
-        
+                
                     guardianHtml = `
-                        <div class="mt-2">
-                            <span class="badge bg-success">
-                                🛡️ Guardian: MANTENER
-                            </span>
+                        <div class="mt-2 p-2 border border-success rounded">
+                
+                            <div class="mb-2">
+                                <span class="badge bg-success">
+                                    🛡️ Guardian: MANTENER
+                                </span>
+                            </div>
+                
+                            <div class="small text-light">
+                
+                                <div class="mb-1">
+                                    ⏱️ <strong>Tiempo:</strong>
+                                    ${Number(
+                                        guardian.elapsed_minutes || 0
+                                    ).toFixed(0)} min
+                                </div>
+                
+                                <div class="mb-1">
+                                    📈 <strong>MFE:</strong>
+                                    +${Number(
+                                        guardian.mfe_pct || 0
+                                    ).toFixed(3)}%
+                                </div>
+                
+                                <div class="mb-1">
+                                    📉 <strong>MAE:</strong>
+                                    -${Number(
+                                        guardian.mae_pct || 0
+                                    ).toFixed(3)}%
+                                </div>
+                
+                                <div class="mb-1">
+                                    🎯 <strong>TP restante:</strong>
+                                    ${Number(
+                                        guardian.remaining_to_tp_pct || 0
+                                    ).toFixed(3)}%
+                                </div>
+                
+                                <div class="mb-1">
+                                    📊 <strong>Deterioro:</strong>
+                                    ${Number(
+                                        guardian.deterioration_score || 0
+                                    ).toFixed(0)}/100
+                                </div>
+                
+                            </div>
                         </div>
                     `;
                 }
