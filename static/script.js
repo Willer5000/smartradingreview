@@ -1817,65 +1817,110 @@ function getInstantRecommendation(attempt = 1) {
         return response.json();
     })
     .then(data => {
+
         // ============================================================
-        // RESULTADO DEL ANÁLISIS
+        // NORMALIZAR RESPUESTA DEL BACKEND
         // ============================================================
+        //
+        // app.py puede devolver:
+        //
+        //   1) { success: true, ...resultado... }
+        //
+        // o:
+        //
+        //   2) { success: true, data: {...resultado...} }
+        //
+        // El frontend debe aceptar ambos formatos.
         //
         // IMPORTANTE:
-        // "NO_OPERAR" es una decisión válida del sistema.
-        // No debe tratarse como error.
-        //
-        // Sólo consideramos error cuando:
-        //   - success === false
-        //   - no existe data
-        //   - o existe error técnico.
+        // NO_OPERAR y ESPERAR son decisiones válidas.
+        // NO deben considerarse errores.
+        // ============================================================
+        
+        const analysisData =
+            data?.data
+            || data?.system_result
+            || (
+                data?.decision
+                    ? data
+                    : null
+            );
+        
+        const analysisSuccess =
+            data?.success === true
+            || (
+                analysisData
+                && analysisData.decision
+            );
+        
+        const analysisAction =
+            analysisData?.decision?.action
+            || 'NO_OPERAR';
+        
+        // ============================================================
+        // ANÁLISIS VÁLIDO
         // ============================================================
         
         if (
-            data.success
-            && data.data
+            analysisSuccess
+            && analysisData
+            && analysisData.decision
         ) {
         
-            updateInstantRecommendation(
-                data.data
-            );
+            // Guardar análisis actual
+            window.currentAnalysis =
+                analysisData;
         
-            const action =
-                data.data.decision?.action
-                || 'NO_OPERAR';
+            // Actualizar recomendación principal
+            if (
+                typeof window.updateInstantRecommendation
+                === 'function'
+            ) {
         
-            console.log(
-                '✅ Análisis válido:',
-                action
-            );
-        
-        } else if (
-            data.data
-            && data.data.decision
-            && data.data.decision.action
-        ) {
+                window.updateInstantRecommendation(
+                    analysisData
+                );
+            }
         
             // --------------------------------------------------------
-            // Caso defensivo:
-            // El backend puede entregar un análisis válido aunque
-            // alguna capa haya marcado success=false.
-            //
-            // Si hay decisión real, NO mostrar "Análisis no disponible".
+            // NO_OPERAR / ESPERAR NO SON ERRORES
             // --------------------------------------------------------
         
-            updateInstantRecommendation(
-                data.data
-            );
+            if (
+                analysisAction === 'NO_OPERAR'
+                || analysisAction === 'ESPERAR'
+            ) {
         
-            console.log(
-                '✅ Análisis recibido con decisión:',
-                data.data.decision.action
-            );
+                console.log(
+                    '⏸️ Decisión válida del sistema:',
+                    analysisAction
+                );
+        
+                console.log(
+                    '📝 Justificación:',
+                    analysisData.message
+                    || analysisData.decision?.reason
+                    || ''
+                );
+        
+            } else {
+        
+                console.log(
+                    '✅ Análisis válido:',
+                    analysisAction
+                );
+            }
         
         } else {
         
+            // ========================================================
+            // ERROR REAL
+            // ========================================================
+        
             const errorMessage =
-                data.error
+                data?.error
+                || data?.message
+                || data?.system_result?.error
                 || 'Error desconocido';
         
             console.error(
