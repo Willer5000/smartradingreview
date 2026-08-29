@@ -1226,10 +1226,18 @@ class PortfolioGuardian:
         if safety <= 1:
             safety *= 100
     
+        # ==============================================================
+        # FASE 7B — FUERZA DEL RATIO
+        # ==============================================================
+        #
+        # Confidence del comité sólo aporta contexto.
+        # La ejecución/estructura tiene mayor peso.
+        # ==============================================================
+        
         strength = (
-            confidence * 0.55
+            safety * 0.65
             +
-            safety * 0.45
+            confidence * 0.35
         )
     
         if action in (
