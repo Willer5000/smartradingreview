@@ -25817,6 +25817,16 @@ def api_analyze_with_portfolio():
                 _tgp_snapshot_get()
             )
             
+            # ==============================================================
+            # TGP MULTI-TIMEFRAME
+            # ==============================================================
+            
+            market_snapshots = (
+                _get_tgp_market_snapshots(
+                    fallback_result=result
+                )
+            )
+            
             tgp_result = (
                 portfolio_guardian
                 .analyze_multi_timeframe(
@@ -25848,18 +25858,32 @@ def api_analyze_with_portfolio():
                 'system_result': result
             }), 500
 
-        # 2. Análisis del TGP (INDEPENDIENTE)
-        tgp_result = portfolio_guardian.analyze(
-            user=user,
-            portfolio=portfolio,
-            prices=prices,
-            system_analysis=result
+        # ==============================================================
+        # 2. TGP MULTI-TIMEFRAME
+        # ==============================================================
+        
+        market_snapshots = (
+            _get_tgp_market_snapshots(
+                fallback_result=result
+            )
+        )
+        
+        tgp_result = (
+            portfolio_guardian
+            .analyze_multi_timeframe(
+                user=user,
+                portfolio=portfolio,
+                prices=prices,
+                market_snapshots=market_snapshots
+            )
         )
 
         # 3. Merge: agregar TGP al resultado original
         result['tgp'] = tgp_result
         result['user'] = user
-
+        result['tgp_market_snapshots'] = (
+            market_snapshots
+        )
         print(f"\n   🛡️ TGP: {tgp_result['action']} | Conf: {tgp_result['confidence']}%")
         print(f"   🛡️ Razón: {tgp_result['reason'][:80]}...")
 
@@ -25872,7 +25896,12 @@ def api_analyze_with_portfolio():
             print(f"   📱 TGP Telegram: No urgente. Sin alerta.")
 
         # ====== GUARDAR EN CACHE (solo si hay TGP válido) ======
-        if tgp_result and tgp_result.get('action') and tgp_result.get('action') != 'HOLD':
+        if (
+            tgp_result
+            and tgp_result.get(
+                'action'
+            )
+):
             cache_ts[cache_key] = now
             cache_data[cache_key] = result.copy()
             api_analyze_with_portfolio._cache_ts = cache_ts
