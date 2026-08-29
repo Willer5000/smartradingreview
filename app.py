@@ -22999,9 +22999,22 @@ def api_futures_position_guardian():
                 candles = {
                     'close': [
                         float(v)
-                        for v
-                        in recent[
+                        for v in recent[
                             'close'
+                        ].tolist()
+                    ],
+                
+                    'high': [
+                        float(v)
+                        for v in recent[
+                            'high'
+                        ].tolist()
+                    ],
+                
+                    'low': [
+                        float(v)
+                        for v in recent[
+                            'low'
                         ].tolist()
                     ]
                 }
