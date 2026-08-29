@@ -1951,16 +1951,30 @@ window.updateSavedSignalsList = async function() {
             let guardianHtml = '';
         
             if (
-                s.status === 'entry_touched'
-                && guardian.action
+                guardian.action
             ) {
-        
                 if (
                     guardian.action
-                    === 'EXIT'
+                    === 'WAIT_ENTRY'
                 ) {
-        
+                
                     guardianHtml = `
+                        <div class="mt-2">
+                            <span class="badge bg-info">
+                                🛡️ Guardian: ESPERANDO ENTRY
+                            </span>
+                
+                            <div class="small text-info mt-1">
+                                ${guardian.reason || ''}
+                            </div>
+                        </div>
+                    `;
+                
+                } else if (
+                    guardian.action
+                    === 'EXIT'
+                ) {                    
+                     guardianHtml = `
                         <div class="mt-2">
                             <span class="badge bg-danger">
                                 🛡️ Guardian: SALIR
