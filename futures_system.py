@@ -1685,14 +1685,16 @@ class FuturesAnalysis(TradingExpertSystem):
                 (1, 10)
             )
         
-            return self._build_rejected_levels(
-                entry_price,
-                symbol,
+            return self._mark_levels_non_executable(
+                levels,
                 (
-                    f"Leverage {optimal_leverage}x "
+                    f"Leverage recomendado "
+                    f"{optimal_leverage}x "
                     f"fuera del rango operativo "
-                    f"{min_tf}x-{max_tf}x para {timeframe}"
-                )
+                    f"{min_tf}x-{max_tf}x "
+                    f"para {timeframe}"
+                ),
+                recommended_leverage=optimal_leverage
             )
         return levels    
     # ========================================================================
