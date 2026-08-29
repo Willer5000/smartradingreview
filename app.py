@@ -201,695 +201,437 @@ def _analysis_cache_put(key, data):
 
 
 def get_analysis_cache_stats() -> dict:
-    # ============================================================================
-    # CACHÉ COMPACTO PARA TGP MULTI-TIMEFRAME
-    # ============================================================================
-    #
-    # NO guarda DataFrames.
-    # NO guarda OHLCV.
-    # NO duplica el análisis completo.
-    #
-    # Sólo almacena los datos necesarios para que el TGP razone
-    # sobre BTC/PAXG/PAXG-BTC en 4h/12h/1D/1W.
-    #
-    # Coste de memoria: muy pequeño comparado con _ANALYSIS_CACHE.
-    # ============================================================================
-    
-    _TGP_SPOT_TIMEFRAMES = (
-        '4h',
-        '12h',
-        '1D',
-        '1W'
-    )
-    
-    _TGP_SPOT_SYMBOLS = (
-        'BTC-USDT',
-        'PAXG-USDT',
-        'PAXG-BTC'
-    )
-    
-    _TGP_MARKET_SNAPSHOT = {}
-    _TGP_MARKET_SNAPSHOT_LOCK = _threading_analysis_cache.Lock()
-    
-    
-    def _make_tgp_market_snapshot(result):
-        """
-        Reduce un resultado completo de TradingExpertSystem
-        a un snapshot pequeño para PortfolioGuardian.
-    
-        NO conservar DataFrame.
-        """
-    
-        if not isinstance(
-            result,
-            dict
-        ):
-            return None
-    
-        if not result.get(
-            'success'
-        ):
-            return None
-    
-        symbol = result.get(
-            'symbol'
-        )
-    
-        timeframe = result.get(
-            'timeframe'
-        )
-    
-        if (
-            symbol
-            not in _TGP_SPOT_SYMBOLS
-            or timeframe
-            not in _TGP_SPOT_TIMEFRAMES
-        ):
-            return None
-    
-        decision = result.get(
-            'decision',
-            {}
-        ) or {}
-    
-        levels = result.get(
-            'levels',
-            {}
-        ) or {}
-    
-        trend = result.get(
-            'trend',
-            {}
-        ) or {}
-    
-        momentum = result.get(
-            'momentum',
-            {}
-        ) or {}
-    
-        structure = result.get(
-            'structure',
-            {}
-        ) or {}
-    
-        correlation = result.get(
-            'correlation',
-            {}
-        ) or {}
-    
-        # Timestamp de vela anterior.
-        candle_timestamp = (
-            result.get(
-                'previous_candle_timestamp'
-            )
-        )
-    
-        if not candle_timestamp:
-    
-            df_dict = (
-                result.get(
-                    'df',
-                    {}
-                )
-                or {}
-            )
-    
-            times = (
-                df_dict.get(
-                    'time',
-                    []
-                )
-                if isinstance(
-                    df_dict,
-                    dict
-                )
-                else []
-            )
-    
-            if len(times) >= 2:
-    
-                candle_timestamp = str(
-                    times[-2]
-                )
-    
-        def count_list(key):
-    
-            value = structure.get(
-                key,
-                []
-            )
-    
-            return (
-                len(value)
-                if isinstance(
-                    value,
-                    (list, tuple)
-                )
-                else 0
-            )
-    
-        return {
-            'success': True,
-    
-            'symbol': symbol,
-            'timeframe': timeframe,
-    
-            'decision': {
-                'action': str(
-                    decision.get(
-                        'action',
-                        'NO_OPERAR'
-                    )
-                ),
-                'confidence': float(
-                    decision.get(
-                        'confidence',
-                        0
-                    )
-                    or 0
-                )
-            },
-    
-            'levels': {
-                'execution_safety': float(
-                    levels.get(
-                        'execution_safety',
-                        0
-                    )
-                    or 0
-                ),
-                'entry_score': float(
-                    levels.get(
-                        'entry_score',
-                        0
-                    )
-                    or 0
-                ),
-                'tp_quality_score': float(
-                    levels.get(
-                        'tp_quality_score',
-                        0
-                    )
-                    or 0
-                ),
-                'sl_reliability': float(
-                    levels.get(
-                        'sl_reliability',
-                        0
-                    )
-                    or 0
-                )
-            },
-    
-            'trend': {
-                'direction': str(
-                    trend.get(
-                        'direction',
-                        'neutral'
-                    )
-                ),
-                'adx': float(
-                    trend.get(
-                        'adx',
-                        0
-                    )
-                    or 0
-                )
-            },
-    
-            'momentum': {
-                'direction': str(
-                    momentum.get(
-                        'direction',
-                        'neutral'
-                    )
-                )
-            },
-    
-            'structure': {
-                'order_blocks_count':
-                    count_list(
-                        'order_blocks'
-                    ),
-    
-                'fair_value_gaps_count':
-                    count_list(
-                        'fair_value_gaps'
-                    ),
-    
-                'liquidity_sweeps_count':
-                    count_list(
-                        'liquidity_sweeps'
-                    )
-            },
-    
-            'correlation': {
-                'rotation_signal': str(
-                    correlation.get(
-                        'rotation_signal',
-                        'NEUTRAL'
-                    )
-                )
-            },
-    
-            'current_price': float(
-                result.get(
-                    'current_price',
-                    0
-                )
-                or 0
-            ),
-    
-            'candle_timestamp':
-                candle_timestamp,
-    
-            'timestamp': str(
-                result.get(
-                    'timestamp',
-                    ''
-                )
-            )
-        }
-    
-    
-    def _tgp_snapshot_put(result):
-        """Guarda sólo el resumen necesario para el TGP."""
-    
-        snapshot = _make_tgp_market_snapshot(
-            result
-        )
-    
-        if not snapshot:
-            return
-    
-        key = (
-            snapshot['symbol'],
-            snapshot['timeframe']
-        )
-    
-        with _TGP_MARKET_SNAPSHOT_LOCK:
-    
-            _TGP_MARKET_SNAPSHOT[
-                key
-            ] = snapshot
-    
-    
-    def _tgp_snapshot_get():
-        """
-        Retorna snapshots organizados:
-    
-            {
-                '4h': {
-                    'BTC-USDT': {...},
-                    ...
-                },
-                ...
-            }
-        """
-    
-        output = {}
-    
-        with _TGP_MARKET_SNAPSHOT_LOCK:
-    
-            for (
-                symbol,
-                timeframe
-            ), snapshot in (
-                _TGP_MARKET_SNAPSHOT.items()
-            ):
-    
-                output.setdefault(
-                    timeframe,
-                    {}
-                )[symbol] = dict(
-                    snapshot
-                )
-    
-        return output
+    """
+    Estadísticas del caché principal de análisis.
+
+    IMPORTANTE:
+    Esta función sólo devuelve estadísticas.
+    Las funciones del TGP están definidas FUERA de esta función
+    para que puedan ser utilizadas desde cualquier endpoint.
+    """
     with _ANALYSIS_CACHE_LOCK:
-        total = _ANALYSIS_CACHE_STATS['hits'] + _ANALYSIS_CACHE_STATS['misses']
-        hit_rate = (_ANALYSIS_CACHE_STATS['hits'] / total * 100) if total > 0 else 0.0
+        total = (
+            _ANALYSIS_CACHE_STATS['hits']
+            + _ANALYSIS_CACHE_STATS['misses']
+        )
+
+        hit_rate = (
+            _ANALYSIS_CACHE_STATS['hits']
+            / total
+            * 100
+        ) if total > 0 else 0.0
+
         return {
             'entries': len(_ANALYSIS_CACHE),
             'hits': _ANALYSIS_CACHE_STATS['hits'],
             'misses': _ANALYSIS_CACHE_STATS['misses'],
-            'hit_rate_pct': round(hit_rate, 1),
+            'hit_rate_pct': round(
+                hit_rate,
+                1
+            )
         }
-    # ============================================================================
-    # TGP — SNAPSHOT MULTI-TIMEFRAME COMPACTO
-    # ============================================================================
-    #
-    # NO recalcula el mercado.
-    # NO hace llamadas adicionales.
-    # Lee únicamente análisis que ya están en _ANALYSIS_CACHE.
-    #
-    # Esto es importante para Render Free:
-    # 512 MB RAM / 0.1 CPU.
-    # ============================================================================
-    
-    _TGP_SPOT_TIMEFRAMES = (
-        '4h',
-        '12h',
-        '1D',
-        '1W',
+
+
+# ============================================================================
+# TGP — SNAPSHOT MULTI-TIMEFRAME COMPACTO
+# ============================================================================
+#
+# IMPORTANTE:
+# Todo este bloque está a NIVEL GLOBAL.
+#
+# NO está dentro de get_analysis_cache_stats().
+#
+# El TGP reutiliza el _ANALYSIS_CACHE existente y NO recalcula el mercado.
+# ============================================================================
+
+_TGP_SPOT_TIMEFRAMES = (
+    '4h',
+    '12h',
+    '1D',
+    '1W'
+)
+
+_TGP_SPOT_SYMBOLS = (
+    'BTC-USDT',
+    'PAXG-USDT',
+    'PAXG-BTC'
+)
+
+
+def _compact_tgp_analysis(
+    result
+):
+    """
+    Reduce un análisis completo a un snapshot pequeño.
+
+    NO conserva:
+        - DataFrames
+        - OHLCV
+        - arrays grandes
+        - gráficos
+        - listas completas de indicadores
+
+    Esto mantiene bajo el consumo de RAM.
+    """
+
+    if not isinstance(
+        result,
+        dict
+    ):
+        return None
+
+    if not result.get(
+        'success'
+    ):
+        return None
+
+    symbol = result.get(
+        'symbol'
     )
-    
-    _TGP_SPOT_SYMBOLS = (
-        'BTC-USDT',
-        'PAXG-USDT',
-        'PAXG-BTC',
+
+    timeframe = result.get(
+        'timeframe'
     )
-    
-    
-    def _compact_tgp_analysis(result):
-        """
-        Reduce un resultado completo a los datos necesarios
-        para el TGP.
-    
-        No conserva:
-            - DataFrame completo
-            - OHLCV completo
-            - arrays de indicadores
-            - gráficos
-            - patrones completos
-    
-        Sólo conserva información de decisión.
-        """
-    
-        if not isinstance(result, dict):
-            return None
-    
-        if not result.get('success'):
-            return None
-    
-        symbol = result.get('symbol')
-        timeframe = result.get('timeframe')
-    
-        if symbol not in _TGP_SPOT_SYMBOLS:
-            return None
-    
-        if timeframe not in _TGP_SPOT_TIMEFRAMES:
-            return None
-    
-        decision = (
-            result.get(
-                'decision',
-                {}
-            )
-            or {}
+
+    if symbol not in _TGP_SPOT_SYMBOLS:
+        return None
+
+    if timeframe not in _TGP_SPOT_TIMEFRAMES:
+        return None
+
+    decision = (
+        result.get(
+            'decision',
+            {}
         )
-    
-        levels = (
-            result.get(
-                'levels',
-                {}
-            )
-            or {}
+        or {}
+    )
+
+    levels = (
+        result.get(
+            'levels',
+            {}
         )
-    
-        trend = (
-            result.get(
-                'trend',
-                {}
-            )
-            or {}
+        or {}
+    )
+
+    trend = (
+        result.get(
+            'trend',
+            {}
         )
-    
-        momentum = (
-            result.get(
-                'momentum',
-                {}
-            )
-            or {}
+        or {}
+    )
+
+    momentum = (
+        result.get(
+            'momentum',
+            {}
         )
-    
-        structure = (
-            result.get(
-                'structure',
-                {}
-            )
-            or {}
+        or {}
+    )
+
+    structure = (
+        result.get(
+            'structure',
+            {}
         )
-    
-        correlation = (
-            result.get(
-                'correlation',
-                {}
-            )
-            or {}
+        or {}
+    )
+
+    correlation = (
+        result.get(
+            'correlation',
+            {}
         )
-    
-        return {
-            'success': True,
-    
-            'symbol': symbol,
-    
-            'timeframe': timeframe,
-    
-            'decision': {
-                'action': str(
-                    decision.get(
-                        'action',
-                        'NO_OPERAR'
-                    )
-                ),
-                'confidence': float(
-                    decision.get(
-                        'confidence',
-                        0
-                    )
-                    or 0
-                ),
-            },
-    
-            'levels': {
-                'execution_safety': float(
-                    levels.get(
-                        'execution_safety',
-                        0
-                    )
-                    or 0
-                ),
-    
-                'entry_score': float(
-                    levels.get(
-                        'entry_score',
-                        0
-                    )
-                    or 0
-                ),
-    
-                'tp_quality_score': float(
-                    levels.get(
-                        'tp_quality_score',
-                        0
-                    )
-                    or 0
-                ),
-    
-                'sl_reliability': float(
-                    levels.get(
-                        'sl_reliability',
-                        0
-                    )
-                    or 0
-                ),
-    
-                'risk_reward': float(
-                    levels.get(
-                        'risk_reward',
-                        0
-                    )
-                    or 0
-                ),
-            },
-    
-            'trend': {
-                'direction': str(
-                    trend.get(
-                        'direction',
-                        'neutral'
-                    )
-                ),
-                'adx': float(
-                    trend.get(
-                        'adx',
-                        0
-                    )
-                    or 0
-                ),
-            },
-    
-            'momentum': {
-                'direction': str(
-                    momentum.get(
-                        'direction',
-                        'neutral'
-                    )
-                ),
-            },
-    
-            'structure': {
-                # IMPORTANTE:
-                # guardamos números, no listas.
-                'order_blocks_count': len(
-                    structure.get(
-                        'order_blocks',
-                        []
-                    )
-                    or []
+        or {}
+    )
+
+    def _count(
+        value
+    ):
+        if isinstance(
+            value,
+            (list, tuple)
+        ):
+            return len(value)
+
+        return 0
+
+    return {
+
+        'success': True,
+
+        'symbol':
+            symbol,
+
+        'timeframe':
+            timeframe,
+
+        'decision': {
+
+            'action': str(
+                decision.get(
+                    'action',
+                    'NO_OPERAR'
                 )
-                if isinstance(
-                    structure.get(
-                        'order_blocks',
-                        []
-                    ),
-                    (list, tuple)
+            ),
+
+            'confidence': float(
+                decision.get(
+                    'confidence',
+                    0
                 )
-                else 0,
-    
-                'fair_value_gaps_count': len(
-                    structure.get(
-                        'fair_value_gaps',
-                        []
-                    )
-                    or []
-                )
-                if isinstance(
-                    structure.get(
-                        'fair_value_gaps',
-                        []
-                    ),
-                    (list, tuple)
-                )
-                else 0,
-    
-                'liquidity_sweeps_count': len(
-                    structure.get(
-                        'liquidity_sweeps',
-                        []
-                    )
-                    or []
-                )
-                if isinstance(
-                    structure.get(
-                        'liquidity_sweeps',
-                        []
-                    ),
-                    (list, tuple)
-                )
-                else 0,
-            },
-    
-            'correlation': {
-                'rotation_signal': str(
-                    correlation.get(
-                        'rotation_signal',
-                        'NEUTRAL'
-                    )
-                ),
-            },
-    
-            'current_price': float(
-                result.get(
-                    'current_price',
+                or 0
+            )
+        },
+
+        'levels': {
+
+            'execution_safety': float(
+                levels.get(
+                    'execution_safety',
                     0
                 )
                 or 0
             ),
-    
-            'timestamp': str(
-                result.get(
-                    'timestamp',
-                    ''
+
+            'entry_score': float(
+                levels.get(
+                    'entry_score',
+                    0
+                )
+                or 0
+            ),
+
+            'tp_quality_score': float(
+                levels.get(
+                    'tp_quality_score',
+                    0
+                )
+                or 0
+            ),
+
+            'sl_reliability': float(
+                levels.get(
+                    'sl_reliability',
+                    0
+                )
+                or 0
+            ),
+
+            'risk_reward': float(
+                levels.get(
+                    'risk_reward',
+                    0
+                )
+                or 0
+            )
+        },
+
+        'trend': {
+
+            'direction': str(
+                trend.get(
+                    'direction',
+                    'neutral'
                 )
             ),
-        }
-    
-    
-    def _get_tgp_market_snapshots(
-        fallback_result=None
-    ):
-        """
-        Construye snapshots de:
-    
-            BTC-USDT
-            PAXG-USDT
-            PAXG-BTC
-    
-        para:
-    
-            4h
-            12h
-            1D
-            1W
-    
-        reutilizando _ANALYSIS_CACHE.
-    
-        Si el análisis actual todavía no está en cache,
-        fallback_result permite introducirlo sin otro cálculo.
-        """
-    
-        result = {}
-    
-        with _ANALYSIS_CACHE_LOCK:
-    
-            for (
-                symbol,
-                timeframe
-            ), cache_entry in _ANALYSIS_CACHE.items():
-    
-                if (
-                    symbol
-                    not in _TGP_SPOT_SYMBOLS
-                ):
-                    continue
-    
-                if (
-                    timeframe
-                    not in _TGP_SPOT_TIMEFRAMES
-                ):
-                    continue
-    
-                compact = _compact_tgp_analysis(
-                    cache_entry.get(
-                        'data'
+
+            'adx': float(
+                trend.get(
+                    'adx',
+                    0
+                )
+                or 0
+            )
+        },
+
+        'momentum': {
+
+            'direction': str(
+                momentum.get(
+                    'direction',
+                    'neutral'
+                )
+            )
+        },
+
+        'structure': {
+
+            'order_blocks_count':
+                _count(
+                    structure.get(
+                        'order_blocks',
+                        []
+                    )
+                ),
+
+            'fair_value_gaps_count':
+                _count(
+                    structure.get(
+                        'fair_value_gaps',
+                        []
+                    )
+                ),
+
+            'liquidity_sweeps_count':
+                _count(
+                    structure.get(
+                        'liquidity_sweeps',
+                        []
                     )
                 )
-    
-                if not compact:
-                    continue
-    
-                result.setdefault(
-                    timeframe,
-                    {}
-                )[symbol] = compact
-    
-        # ==============================================================
-        # Añadir el análisis actual si todavía no está cacheado.
-        # ==============================================================
-    
-        compact_current = _compact_tgp_analysis(
+        },
+
+        'correlation': {
+
+            'rotation_signal': str(
+                correlation.get(
+                    'rotation_signal',
+                    'NEUTRAL'
+                )
+            )
+        },
+
+        'current_price': float(
+            result.get(
+                'current_price',
+                0
+            )
+            or 0
+        ),
+
+        'candle_timestamp': str(
+            result.get(
+                'previous_candle_timestamp',
+                ''
+            )
+            or ''
+        ),
+
+        'timestamp': str(
+            result.get(
+                'timestamp',
+                ''
+            )
+            or ''
+        )
+    }
+
+
+def _get_tgp_market_snapshots(
+    fallback_result=None
+):
+    """
+    Obtiene el estado disponible del mercado para el TGP.
+
+    FUENTE:
+        _ANALYSIS_CACHE
+
+    TF:
+        4h
+        12h
+        1D
+        1W
+
+    Símbolos:
+        BTC-USDT
+        PAXG-USDT
+        PAXG-BTC
+
+    No ejecuta análisis.
+    No hace llamadas a Internet.
+    No recalcula indicadores.
+    """
+
+    snapshots = {}
+
+    with _ANALYSIS_CACHE_LOCK:
+
+        cache_items = list(
+            _ANALYSIS_CACHE.items()
+        )
+
+    for (
+        key,
+        cache_entry
+    ) in cache_items:
+
+        try:
+
+            symbol, timeframe = key
+
+        except (
+            TypeError,
+            ValueError
+        ):
+
+            continue
+
+        if (
+            symbol
+            not in _TGP_SPOT_SYMBOLS
+        ):
+            continue
+
+        if (
+            timeframe
+            not in _TGP_SPOT_TIMEFRAMES
+        ):
+            continue
+
+        if not isinstance(
+            cache_entry,
+            dict
+        ):
+            continue
+
+        compact = _compact_tgp_analysis(
+            cache_entry.get(
+                'data'
+            )
+        )
+
+        if not compact:
+            continue
+
+        snapshots.setdefault(
+            timeframe,
+            {}
+        )[symbol] = compact
+
+    # ==============================================================
+    # Incluir el análisis que acaba de producirse aunque todavía
+    # no aparezca en el caché.
+    # ==============================================================
+
+    compact_current = (
+        _compact_tgp_analysis(
             fallback_result
         )
-    
-        if compact_current:
-    
-            tf = compact_current[
+    )
+
+    if compact_current:
+
+        timeframe = (
+            compact_current[
                 'timeframe'
             ]
-    
-            sym = compact_current[
+        )
+
+        symbol = (
+            compact_current[
                 'symbol'
             ]
-    
-            result.setdefault(
-                tf,
-                {}
-            )[sym] = compact_current
-    
-        return result
+        )
 
+        snapshots.setdefault(
+            timeframe,
+            {}
+        )[symbol] = compact_current
+
+    return snapshots
 
 
         
@@ -16887,35 +16629,8 @@ class TradingExpertSystem:
             # Guardar en caché de análisis (solo si es la variante "estándar")
             if _cache_key is not None:
                 try:
-                    _analysis_cache_put(_cache_key, resultado_final)
-                    # ==========================================================
-                    # TGP MULTI-TIMEFRAME — SNAPSHOT LIGERO
-                    # ==========================================================
-                    #
-                    # No copia DataFrames.
-                    # No ejecuta cálculos adicionales.
-                    # Sólo conserva:
-                    #
-                    # BTC / PAXG / ratio
-                    # 4h / 12h / 1D / 1W
-                    #
-                    # para que PortfolioGuardian pueda comparar escenarios.
-                    # ==========================================================
-    
-                    try:
-                        _tgp_snapshot_put(
-                            resultado_final
-                        )
-                    except Exception as _tgp_cache_error:
-                        print(
-                            f"⚠️ TGP snapshot no guardado: "
-                            f"{_tgp_cache_error}"
-                    )
-                except Exception:
-                    pass
-
-                try:
-                    _tgp_snapshot_put(
+                    _analysis_cache_put(
+                        _cache_key,
                         resultado_final
                     )
                 except Exception:
@@ -26090,20 +25805,15 @@ def api_analyze_with_portfolio():
             print(f"   💾 Cache hit: {cache_key} ({int(now - cache_ts[cache_key])}s ago)")
             result = cache_data[cache_key].copy()
             # Recalcular TGP con datos frescos del usuario (portafolio puede cambiar)
+
             # ==============================================================
             # FASE 7B — TGP MULTI-TIMEFRAME
             # ==============================================================
             
-            # Guardar el análisis que acaba de producirse en el snapshot.
-            try:
-                _tgp_snapshot_put(
-                    result
-                )
-            except Exception:
-                pass
-            
             market_snapshots = (
-                _tgp_snapshot_get()
+                _get_tgp_market_snapshots(
+                    fallback_result=result
+                )
             )
             
             # ==============================================================
@@ -26170,9 +25880,7 @@ def api_analyze_with_portfolio():
         # 3. Merge: agregar TGP al resultado original
         result['tgp'] = tgp_result
         result['user'] = user
-        result['tgp_market_snapshots'] = (
-            market_snapshots
-        )
+
         print(f"\n   🛡️ TGP: {tgp_result['action']} | Conf: {tgp_result['confidence']}%")
         print(f"   🛡️ Razón: {tgp_result['reason'][:80]}...")
 
@@ -26197,7 +25905,9 @@ def api_analyze_with_portfolio():
             api_analyze_with_portfolio._cache_data = cache_data
             print(f"   💾 Cache guardado para {cache_key}")
         else:
-            print(f"   ⚠️ No se guardó en caché: TGP vacío, inválido o HOLD")
+            print(
+                f"   ⚠️ No se guardó en caché: TGP vacío o inválido"
+            )
         # ==============================
 
         print(f"{'='*60}\n")
