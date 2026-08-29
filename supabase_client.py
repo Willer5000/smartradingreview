@@ -1009,6 +1009,19 @@ class SupabaseClient:
 # from supabase_client import supabase_db
 supabase_db = SupabaseClient()
 
+# Alias de compatibilidad.
+#
+# Parte del código actual de app.py utiliza:
+#
+#     from supabase_client import supabase_client
+#
+# mientras que este módulo históricamente expone:
+#
+#     supabase_db
+#
+# Ambos nombres apuntan al MISMO singleton.
+supabase_client = supabase_db
+
 if supabase_db.enabled:
     health = supabase_db.health_check()
     print(f"✅ Tablas verificadas: {sum(1 for v in health['tables_ok'].values() if v)}/{len(health['tables_ok'])}")
