@@ -390,6 +390,8 @@ window.updateActiveSignals = async function() {
             : [];
 
         const progress = json.progress || {};
+        const filterStats =
+            json.filter_stats || null;
 
         const completed = Number(
             progress.completed || 0
@@ -504,6 +506,28 @@ window.updateActiveSignals = async function() {
                     <small>
                         No hay señales LONG/SHORT que superen
                         los filtros actuales.
+                        ${
+                            filterStats
+                                ? `
+                                <div class="small text-secondary mt-2">
+                                    Procesados:
+                                    ${filterStats.total_processed || 0}
+                                    ·
+                                    NO_OPERAR:
+                                    ${filterStats.non_directional || 0}
+                                    ·
+                                    Confianza:
+                                    ${filterStats.low_confidence || 0}
+                                    ·
+                                    Niveles inválidos:
+                                    ${filterStats.invalid_levels || 0}
+                                    ·
+                                    Leverage:
+                                    ${filterStats.leverage_out_of_range || 0}
+                                </div>
+                                `
+                                : ''
+                        }
                     </small>
 
                     <br>
