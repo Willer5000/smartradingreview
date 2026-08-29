@@ -2,6 +2,7 @@
 # Versión 1.0 - Implementación completa sin atajos
 
 import os
+import uuid
 import json
 import time
 import math
@@ -23512,13 +23513,36 @@ def _save_futures_cache_to_disk():
             'data': serial_data,
         }
         import json
-        tmp_path = _FUTURES_CACHE_FILE + '.tmp'
+        tmp_path = (
+            f"{_FUTURES_CACHE_FILE}."
+            f"{os.getpid()}."
+            f"{uuid.uuid4().hex}.tmp"
+        )
         with open(tmp_path, 'w') as f:
             json.dump(payload, f)
         os.replace(tmp_path, _FUTURES_CACHE_FILE)
         print(f"💾 [FUT] Snapshot guardado ({len(serial_data.get('analysis_serial', {}))} pares)")
     except Exception as e:
-        print(f"⚠️ [FUT] Error guardando snapshot: {e}")
+    
+        print(
+            f"⚠️ [FUT] Error guardando snapshot: {e}"
+        )
+    
+        try:
+    
+            if (
+                'tmp_path' in locals()
+                and os.path.exists(
+                    tmp_path
+                )
+            ):
+    
+                os.remove(
+                    tmp_path
+                )
+    
+        except Exception:
+            pass
 
 
 # Cargar al importar el módulo (una vez por worker)
@@ -23763,11 +23787,21 @@ def _trigger_futures_refresh_async():
     # Reservar el refresh ANTES de crear el thread.
     # Esto evita que dos requests HTTP creen dos warm-ups simultáneos.
     with cache['lock']:
+    
         if cache['running']:
+    
+            print(
+                "⏭️ [FUT] Refresh ya en ejecución; "
+                "se ignora nueva solicitud."
+            )
+    
             return
-
+    
         cache['running'] = True
-
+    
+        cache['progress']['current'] = (
+            'INICIANDO'
+        )
     def _do_refresh():
         try:
             print(f"\n🔄 [BG] Refrescando análisis futuros...")
