@@ -1844,7 +1844,7 @@ class PortfolioGuardian:
                     usdt_available
                     - (
                         total
-                        * MIN_RESERVE_PCTS[
+                        * self.MIN_RESERVE_PCTS[
                             'USDT'
                         ]
                     )
@@ -1911,7 +1911,7 @@ class PortfolioGuardian:
                     usdt_available
                     - (
                         total
-                        * MIN_RESERVE_PCTS[
+                        * self.MIN_RESERVE_PCTS[
                             'USDT'
                         ]
                     )
@@ -2028,9 +2028,9 @@ class PortfolioGuardian:
             )
     
             rec['reserves'] = {
-                'BTC': MIN_RESERVE_PCTS['BTC'],
-                'PAXG': MIN_RESERVE_PCTS['PAXG'],
-                'USDT': MIN_RESERVE_PCTS['USDT']
+                'BTC': self.MIN_RESERVE_PCTS['BTC'],
+                'PAXG': self.MIN_RESERVE_PCTS['PAXG'],
+                'USDT': self.MIN_RESERVE_PCTS['USDT']
             }
     
             return rec
