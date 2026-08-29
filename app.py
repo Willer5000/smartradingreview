@@ -22880,6 +22880,259 @@ def api_saved_signals_delete(signal_id):
         print(f"❌ api_saved_signals_delete: {e}")
         return jsonify({'success': False, 'error': str(e)[:200]}), 200
 
+# ============================================================================
+# FUTURES POSITION GUARDIAN
+# ============================================================================
+@app.route(
+    '/api/futures/position-guardian',
+    methods=['GET']
+)
+def api_futures_position_guardian():
+    """
+    Evalúa las posiciones FUTURES abiertas del usuario.
+
+    Importante:
+    - Sólo recomienda.
+    - NO modifica Supabase.
+    - NO cierra posiciones.
+    - Agrupa por symbol/timeframe para minimizar llamadas de mercado.
+    """
+
+    try:
+
+        from saved_signals import (
+            list_saved_signals
+        )
+
+        user = (
+            request.args.get(
+                'user'
+            )
+            or request.headers.get(
+                'X-User-Name'
+            )
+            or 'Invitado'
+        )
+
+        signals = list_saved_signals(
+            status_filter=[
+                'entry_touched'
+            ],
+            limit=50,
+            user_name=user
+        )
+
+        if not signals:
+
+            return jsonify({
+                'success': True,
+                'user': user,
+                'positions': [],
+                'count': 0
+            })
+
+        # ==============================================================
+        # AGRUPAR PARA NO REPETIR PETICIONES
+        # ==============================================================
+
+        grouped = {}
+
+        for sig in signals:
+
+            symbol = sig.get(
+                'symbol'
+            )
+
+            timeframe = sig.get(
+                'timeframe'
+            )
+
+            if not symbol or not timeframe:
+                continue
+
+            key = (
+                symbol,
+                timeframe
+            )
+
+            grouped.setdefault(
+                key,
+                []
+            ).append(
+                sig
+            )
+
+        positions = []
+
+        # ==============================================================
+        # UNA SOLA PETICIÓN POR SYMBOL/TF
+        # ==============================================================
+
+        for (
+            symbol,
+            timeframe
+        ), group in grouped.items():
+
+            try:
+
+                df = expert_system.get_kucoin_data(
+                    symbol,
+                    timeframe
+                )
+
+                if (
+                    df is None
+                    or len(df) < 8
+                ):
+                    continue
+
+                # Sólo las últimas 20 velas.
+                # No necesitamos más.
+                recent = (
+                    df.tail(
+                        20
+                    )
+                    .copy()
+                )
+
+                candles = {
+                    'close': [
+                        float(v)
+                        for v
+                        in recent[
+                            'close'
+                        ].tolist()
+                    ]
+                }
+
+                current_price = float(
+                    recent[
+                        'close'
+                    ].iloc[-1]
+                )
+
+                for sig in group:
+
+                    advice = (
+                        portfolio_guardian
+                        .evaluate_futures_position(
+                            signal=sig,
+                            current_price=current_price,
+                            candles=candles
+                        )
+                    )
+
+                    positions.append({
+                        'signal_id':
+                            sig.get('id'),
+
+                        'symbol':
+                            symbol,
+
+                        'timeframe':
+                            timeframe,
+
+                        'action':
+                            sig.get(
+                                'action'
+                            ),
+
+                        'entry':
+                            sig.get(
+                                'entry'
+                            ),
+
+                        'stop_loss':
+                            sig.get(
+                                'stop_loss'
+                            ),
+
+                        'take_profit':
+                            sig.get(
+                                'take_profit'
+                            ),
+
+                        'leverage':
+                            sig.get(
+                                'leverage'
+                            ),
+
+                        'investment_usdt':
+                            sig.get(
+                                'investment_usdt'
+                            ),
+
+                        'current_price':
+                            current_price,
+
+                        'guardian':
+                            advice
+                    })
+
+            except Exception as e:
+
+                print(
+                    f'⚠️ Position Guardian '
+                    f'{symbol} {timeframe}: {e}'
+                )
+
+        # ==============================================================
+        # RESUMEN
+        # ==============================================================
+
+        exit_count = sum(
+            1
+            for p in positions
+            if p[
+                'guardian'
+            ].get(
+                'action'
+            ) == 'EXIT'
+        )
+
+        reduce_count = sum(
+            1
+            for p in positions
+            if p[
+                'guardian'
+            ].get(
+                'action'
+            ) == 'REDUCE'
+        )
+
+        return jsonify({
+            'success': True,
+            'user': user,
+
+            'positions':
+                positions,
+
+            'count':
+                len(positions),
+
+            'exit_count':
+                exit_count,
+
+            'reduce_count':
+                reduce_count,
+
+            'generated_at':
+                datetime.now(
+                    bolivia_tz
+                ).isoformat()
+        })
+
+    except Exception as e:
+
+        print(
+            f'❌ Position Guardian: {e}'
+        )
+
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'positions': []
+        }), 200
 
 @app.route('/api/saved_signals/kpis', methods=['GET'])
 def api_saved_signals_kpis():
