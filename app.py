@@ -23883,7 +23883,18 @@ def api_futures_signals_active():
         warming_up = cache.get('warming_up', False)
         
         active_signals = []
-        for (symbol, tf), result in cache['analysis'].items():
+        filter_stats = {
+            'total_processed': 0,
+            'non_directional': 0,
+            'low_confidence': 0,
+            'invalid_levels': 0,
+            'leverage_out_of_range': 0,
+            'accepted': 0
+        }
+        for (symbol, tf), result in cache['analysis'].items(): 
+            filter_stats[
+                'total_processed'
+            ] += 1
             if not result or not result.get('success'):
                 continue
             
@@ -23891,12 +23902,60 @@ def api_futures_signals_active():
             action = decision.get('action', 'NO_OPERAR')
             confidence = decision.get('confidence', 0)
             
-            if action not in ('LONG', 'SHORT'):
+            if action not in (
+                'LONG',
+                'SHORT'
+            ):
+            
+                filter_stats[
+                    'non_directional'
+                ] += 1
+            
                 continue
             if confidence < min_conf:
+            
+                filter_stats[
+                    'low_confidence'
+                ] += 1
+            
                 continue
             
             levels = result.get('levels', {})
+            entry = float(
+                levels.get(
+                    'entry',
+                    0
+                )
+                or 0
+            )
+            
+            sl_price = float(
+                levels.get(
+                    'stop_loss',
+                    0
+                )
+                or 0
+            )
+            
+            tp_price = float(
+                levels.get(
+                    'take_profit',
+                    0
+                )
+                or 0
+            )
+            
+            if (
+                entry <= 0
+                or sl_price <= 0
+                or tp_price <= 0
+            ):
+            
+                filter_stats[
+                    'invalid_levels'
+                ] += 1
+            
+                continue
             leverage = int(levels.get('leverage', 1))
             
             # FILTRO POR RANGO DE LEVERAGE (regla del usuario):
@@ -23905,11 +23964,21 @@ def api_futures_signals_active():
             # rentables después de comisiones + slippage.
             try:
                 from futures_system import _leverage_in_valid_range
-                if not _leverage_in_valid_range(leverage, tf):
+                if not _leverage_in_valid_range(
+                    leverage,
+                    tf
+                ):
+                
+                    filter_stats[
+                        'leverage_out_of_range'
+                    ] += 1
+                
                     continue
             except Exception:
                 pass
-            
+            filter_stats[
+                'accepted'
+            ] += 1            
             active_signals.append({
                 'symbol': symbol,
                 'timeframe': tf,
@@ -23929,14 +23998,93 @@ def api_futures_signals_active():
         
         active_signals.sort(key=lambda x: -x['confidence'])
         
+        # ==============================================================
+        # PROGRESO REAL DEL ANALIZADOR
+        # ==============================================================
+        
+        with _futures_analysis_cache['lock']:
+            _progress = dict(
+                _futures_analysis_cache.get(
+                    'progress',
+                    {}
+                )
+            )
+        
         return jsonify({
             'success': True,
-            'warming_up': warming_up,
-            'cache_age': cache.get('cache_age', 0),
-            'total': len(active_signals),
-            'signals': active_signals,
-            'errors': cache.get('errors') or None,
-            'timestamp': datetime.now(bolivia_tz).isoformat()
+        
+            'warming_up':
+                warming_up,
+        
+            'running':
+                bool(
+                    cache.get(
+                        'running',
+                        False
+                    )
+                ),
+            'filter_stats':
+                filter_stats,        
+            'cache_age':
+                cache.get(
+                    'cache_age',
+                    0
+                ),
+        
+            'total':
+                len(active_signals),
+        
+            'signals':
+                active_signals,
+        
+            'progress': {
+                'total':
+                    int(
+                        _progress.get(
+                            'total',
+                            30
+                        )
+                        or 30
+                    ),
+        
+                'completed':
+                    int(
+                        _progress.get(
+                            'completed',
+                            0
+                        )
+                        or 0
+                    ),
+        
+                'current':
+                    _progress.get(
+                        'current'
+                    ),
+        
+                'last_completed':
+                    _progress.get(
+                        'last_completed'
+                    ),
+        
+                'errors':
+                    int(
+                        _progress.get(
+                            'errors',
+                            0
+                        )
+                        or 0
+                    )
+            },
+        
+            'errors':
+                cache.get(
+                    'errors'
+                ) or None,
+        
+            'timestamp':
+                datetime.now(
+                    bolivia_tz
+                ).isoformat()
         })
     except Exception as e:
         import traceback
@@ -24052,8 +24200,18 @@ def api_futures_signals_previous():
         warming_up = cache.get('warming_up', False)
         
         previous_signals = []
-        
-        for (symbol, tf), result in cache['analysis'].items():
+        filter_stats = {
+            'total_processed': 0,
+            'non_directional': 0,
+            'low_confidence': 0,
+            'invalid_levels': 0,
+            'leverage_out_of_range': 0,
+            'accepted': 0
+        }        
+        for (symbol, tf), result in cache['analysis'].items(): 
+            filter_stats[
+                'total_processed'
+            ] += 1
             if not result or not result.get('success'):
                 continue
             
@@ -24061,19 +24219,75 @@ def api_futures_signals_previous():
             action = decision.get('action', 'NO_OPERAR')
             confidence = decision.get('confidence', 0)
             
-            if action not in ('LONG', 'SHORT'):
+            if action not in (
+                'LONG',
+                'SHORT'
+            ):
+            
+                filter_stats[
+                    'non_directional'
+                ] += 1
+            
                 continue
             if confidence < min_conf:
+            
+                filter_stats[
+                    'low_confidence'
+                ] += 1
+            
                 continue
             
             levels = result.get('levels', {})
+            entry = float(
+                levels.get(
+                    'entry',
+                    0
+                )
+                or 0
+            )
+            
+            sl_price = float(
+                levels.get(
+                    'stop_loss',
+                    0
+                )
+                or 0
+            )
+            
+            tp_price = float(
+                levels.get(
+                    'take_profit',
+                    0
+                )
+                or 0
+            )
+            
+            if (
+                entry <= 0
+                or sl_price <= 0
+                or tp_price <= 0
+            ):
+            
+                filter_stats[
+                    'invalid_levels'
+                ] += 1
+            
+                continue
             leverage = int(levels.get('leverage', 1))
             
             # FILTRO POR RANGO DE LEVERAGE (regla del usuario):
             # Descartar señales con apalancamiento insuficiente para el TF.
             try:
                 from futures_system import _leverage_in_valid_range
-                if not _leverage_in_valid_range(leverage, tf):
+                if not _leverage_in_valid_range(
+                    leverage,
+                    tf
+                ):
+                
+                    filter_stats[
+                        'leverage_out_of_range'
+                    ] += 1
+                
                     continue
             except Exception:
                 pass
@@ -24112,7 +24326,9 @@ def api_futures_signals_previous():
             # frontend puedan mostrarla sin re-analizar.
             _msg_raw = result.get('message', '') or ''
             _msg_short = (_msg_raw[:800] + '...') if len(_msg_raw) > 800 else _msg_raw
-            
+            filter_stats[
+                'accepted'
+            ] += 1            
             previous_signals.append({
                 'symbol': symbol,
                 'timeframe': tf,
@@ -24137,15 +24353,101 @@ def api_futures_signals_previous():
         # Ordenar: activas primero, luego por confianza
         previous_signals.sort(key=lambda x: (-x['activa'], -x['confidence']))
         
+        # ==============================================================
+        # PROGRESO REAL DEL ANALIZADOR
+        # ==============================================================
+        
+        with _futures_analysis_cache['lock']:
+            _progress = dict(
+                _futures_analysis_cache.get(
+                    'progress',
+                    {}
+                )
+            )
+        
         return jsonify({
             'success': True,
-            'warming_up': warming_up,
-            'cache_age': cache.get('cache_age', 0),
-            'total': len(previous_signals),
-            'active_count': sum(1 for s in previous_signals if s['activa'] == 1),
-            'signals': previous_signals,
-            'errors': cache.get('errors') or None,
-            'timestamp': datetime.now(bolivia_tz).isoformat()
+        
+            'warming_up':
+                warming_up,
+        
+            'running':
+                bool(
+                    cache.get(
+                        'running',
+                        False
+                    )
+                ),
+            'filter_stats':
+                filter_stats,        
+            'cache_age':
+                cache.get(
+                    'cache_age',
+                    0
+                ),
+        
+            'total':
+                len(previous_signals),
+        
+            'active_count':
+                sum(
+                    1
+                    for s
+                    in previous_signals
+                    if s['activa'] == 1
+                ),
+        
+            'signals':
+                previous_signals,
+        
+            'progress': {
+                'total':
+                    int(
+                        _progress.get(
+                            'total',
+                            30
+                        )
+                        or 30
+                    ),
+        
+                'completed':
+                    int(
+                        _progress.get(
+                            'completed',
+                            0
+                        )
+                        or 0
+                    ),
+        
+                'current':
+                    _progress.get(
+                        'current'
+                    ),
+        
+                'last_completed':
+                    _progress.get(
+                        'last_completed'
+                    ),
+        
+                'errors':
+                    int(
+                        _progress.get(
+                            'errors',
+                            0
+                        )
+                        or 0
+                    )
+            },
+        
+            'errors':
+                cache.get(
+                    'errors'
+                ) or None,
+        
+            'timestamp':
+                datetime.now(
+                    bolivia_tz
+                ).isoformat()
         })
     except Exception as e:
         import traceback
