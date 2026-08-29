@@ -14,7 +14,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from io import BytesIO, StringIO
 import pytz
-from flask import Flask, render_template, jsonify, request, send_file
+from flask import Flask, render_template, jsonify, request, send_file, session
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import warnings
@@ -55,7 +55,78 @@ from portfolio_guardian import portfolio_guardian
 # ============================================================================
 
 app = Flask(__name__)
+# ============================================================================
+# AUTENTICACIÓN SERVER-SIDE
+# ============================================================================
+# La identidad del usuario NO se acepta desde el navegador.
+# El usuario autenticado queda almacenado en la sesión Flask.
+#
+# IMPORTANTE:
+# Las contraseñas se configuran exclusivamente mediante variables de entorno
+# en Render. Nunca se guardan en GitHub.
+# ============================================================================
 
+app.secret_key = os.getenv(
+    'SMARTRADING_SESSION_SECRET'
+)
+
+if not app.secret_key:
+    # Fallback para desarrollo local.
+    # En Render DEBE existir SMARTRADING_SESSION_SECRET.
+    import secrets
+    app.secret_key = secrets.token_hex(32)
+
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SECURE'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_PERMANENT'] = False
+
+
+def _auth_users():
+    """
+    Usuarios permitidos.
+
+    Las contraseñas viven exclusivamente en variables de entorno.
+    """
+    return {
+        'Willer': os.getenv('SMARTRADING_PASSWORD_WILLER', ''),
+        'Danilo': os.getenv('SMARTRADING_PASSWORD_DANILO', ''),
+    }
+
+
+def _authenticated_user():
+    """
+    Devuelve el usuario autenticado en la sesión Flask.
+    Nunca utiliza valores enviados por el navegador.
+    """
+    user = session.get('authenticated_user')
+
+    if not user:
+        return None
+
+    users = _auth_users()
+
+    if user not in users:
+        session.clear()
+        return None
+
+    return user
+
+
+def _require_auth():
+    """
+    Helper común para APIs privadas.
+    """
+    user = _authenticated_user()
+
+    if not user:
+        return jsonify({
+            'success': False,
+            'authenticated': False,
+            'error': 'Autenticación requerida'
+        }), 401
+
+    return user
 # ============================================================================
 # COMPRESIÓN GZIP DE RESPUESTAS (reduce bandwidth ~70% en JSON grandes)
 # ============================================================================
@@ -21661,7 +21732,92 @@ class Moderador:
 # ============================================================================
 # RUTAS DE LA APLICACIÓN FLASK
 # ============================================================================
+# ============================================================================
+# AUTENTICACIÓN
+# ============================================================================
 
+@app.route('/api/auth/me', methods=['GET'])
+def api_auth_me():
+    """
+    Devuelve únicamente el estado de la sesión actual.
+    No acepta usuario por query/body.
+    """
+    user = _authenticated_user()
+
+    if not user:
+        return jsonify({
+            'success': True,
+            'authenticated': False,
+            'user': None
+        })
+
+    return jsonify({
+        'success': True,
+        'authenticated': True,
+        'user': user
+    })
+
+
+@app.route('/api/auth/login', methods=['POST'])
+def api_auth_login():
+    """
+    Autenticación server-side.
+
+    Body:
+        {
+            "user": "Willer",
+            "password": "..."
+        }
+    """
+    import hmac
+
+    data = request.get_json(silent=True) or {}
+
+    user = str(data.get('user', '')).strip()
+    password = str(data.get('password', ''))
+
+    users = _auth_users()
+    expected_password = users.get(user, '')
+
+    if (
+        not user
+        or not expected_password
+        or not hmac.compare_digest(
+            password,
+            expected_password
+        )
+    ):
+        session.clear()
+
+        return jsonify({
+            'success': False,
+            'authenticated': False,
+            'error': 'Usuario o contraseña incorrectos'
+        }), 401
+
+    session.clear()
+    session['authenticated_user'] = user
+    session.permanent = False
+
+    return jsonify({
+        'success': True,
+        'authenticated': True,
+        'user': user
+    })
+
+
+@app.route('/api/auth/logout', methods=['POST'])
+def api_auth_logout():
+    """
+    Cierra la sesión del usuario.
+    """
+    session.clear()
+
+    return jsonify({
+        'success': True,
+        'authenticated': False,
+        'user': None
+    })
 @app.route('/')
 def index():
     return render_template('index.html', is_futures=False)
@@ -22450,9 +22606,22 @@ def api_saved_signals_list():
         status_filter = [s.strip() for s in status_raw.split(',') if s.strip()] if status_raw else None
         
         # v22.10: Filtrar por usuario autenticado
-        user = request.args.get('user') or request.headers.get('X-User-Name') or 'Invitado'
+        user = _authenticated_user()
 
-        signals = list_saved_signals(status_filter=status_filter, limit=limit, user_name=user)
+        if not user:
+            return jsonify({
+                'success': False,
+                'authenticated': False,
+                'error': 'Debes iniciar sesión.',
+                'signals': [],
+                'total': 0
+            }), 401
+
+        signals = list_saved_signals(
+            status_filter=status_filter,
+            limit=limit,
+            user_name=user
+        )
         return jsonify({
             'success': True,
             'total': len(signals),
@@ -22470,8 +22639,14 @@ def api_saved_signals_create():
         data = request.get_json() or {}
         
         # v22.10: Solo usuarios autenticados pueden guardar
-        user = data.get('user_name') or data.get('user') or 'Invitado'
-        if user == 'Invitado':
+        user = _authenticated_user()
+
+        if not user:
+            return jsonify({
+                'success': False,
+                'authenticated': False,
+                'error': 'Debes iniciar sesión para guardar señales.'
+            }), 401
             return jsonify({'success': False, 'error': 'Debes iniciar sesión para guardar señales'}), 401
         
         # Agregar usuario a los datos
@@ -22502,9 +22677,22 @@ def api_saved_signals_get(signal_id):
     """Retorna una señal guardada por id."""
     try:
         from saved_signals import get_saved_signal
+        user = _authenticated_user()
+        
+        if not user:
+            return jsonify({
+                'success': False,
+                'authenticated': False,
+                'error': 'Debes iniciar sesión.'
+            }), 401
+        
         sig = get_saved_signal(signal_id)
-        if not sig:
-            return jsonify({'success': False, 'error': 'No encontrada'}), 200
+        
+        if not sig or sig.get('user_name') != user:
+            return jsonify({
+                'success': False,
+                'error': 'No encontrada'
+            }), 404
         return jsonify({'success': True, 'signal': sig})
     except Exception as e:
         print(f"❌ api_saved_signals_get: {e}")
@@ -22517,8 +22705,31 @@ def api_saved_signals_update(signal_id):
     investment_usdt, notes."""
     try:
         from saved_signals import update_saved_signal
-        data = request.get_json() or {}
-        result = update_saved_signal(signal_id, data)
+        user = _authenticated_user()
+
+        if not user:
+            return jsonify({
+                'success': False,
+                'authenticated': False,
+                'error': 'Debes iniciar sesión.'
+            }), 401
+
+        current = get_saved_signal(signal_id)
+
+        if not current or current.get('user_name') != user:
+            return jsonify({
+                'success': False,
+                'error': 'No encontrada'
+            }), 404
+
+        data = request.get_json(
+            silent=True
+        ) or {}
+
+        result = update_saved_signal(
+            signal_id,
+            data
+        )
         if not result:
             return jsonify({'success': False, 'error': 'No editable o no encontrada'}), 200
         return jsonify({'success': True, 'signal': result})
@@ -22535,9 +22746,22 @@ def api_saved_signals_close(signal_id):
     """
     try:
         from saved_signals import get_saved_signal, close_saved_signal_manual
+        user = _authenticated_user()
+
+        if not user:
+            return jsonify({
+                'success': False,
+                'authenticated': False,
+                'error': 'Debes iniciar sesión.'
+            }), 401
+
         sig = get_saved_signal(signal_id)
-        if not sig:
-            return jsonify({'success': False, 'error': 'No encontrada'}), 200
+
+        if not sig or sig.get('user_name') != user:
+            return jsonify({
+                'success': False,
+                'error': 'No encontrada'
+            }), 404
         
         data = request.get_json() or {}
         current_price = data.get('current_price')
@@ -22566,7 +22790,23 @@ def api_saved_signals_close(signal_id):
 def api_saved_signals_delete(signal_id):
     """Elimina permanentemente (soft delete: status='deleted')."""
     try:
-        from saved_signals import delete_saved_signal
+        from saved_signals import delete_saved_signal, get_saved_signal
+        user = _authenticated_user()
+
+        if not user:
+            return jsonify({
+                'success': False,
+                'authenticated': False,
+                'error': 'Debes iniciar sesión.'
+            }), 401
+
+        sig = get_saved_signal(signal_id)
+
+        if not sig or sig.get('user_name') != user:
+            return jsonify({
+                'success': False,
+                'error': 'No encontrada'
+            }), 404        
         ok = delete_saved_signal(signal_id)
         return jsonify({'success': bool(ok)})
     except Exception as e:
@@ -22597,15 +22837,15 @@ def api_futures_position_guardian():
             list_saved_signals
         )
 
-        user = (
-            request.args.get(
-                'user'
-            )
-            or request.headers.get(
-                'X-User-Name'
-            )
-            or 'Invitado'
-        )
+        user = _authenticated_user()
+
+        if not user:
+            return jsonify({
+                'success': False,
+                'authenticated': False,
+                'error': 'Debes iniciar sesión.',
+                'positions': []
+            }), 401
 
         signals = list_saved_signals(
             status_filter=[
@@ -26115,20 +26355,28 @@ def api_analyze_with_portfolio():
             )
         )
 
-        user = str(
-            data.get(
-                'user',
-                'Invitado'
-            )
-        )
+        # ==============================================================
+        # IDENTIDAD Y PORTFOLIO SERVER-SIDE
+        # ==============================================================
 
-        portfolio = (
-            data.get(
-                'portfolio',
-                {}
-            )
-            or {}
-        )
+        authenticated_user = _authenticated_user()
+
+        if not authenticated_user:
+            return jsonify({
+                'success': False,
+                'authenticated': False,
+                'error': 'Debes iniciar sesión para utilizar el TGP.'
+            }), 401
+
+        user = authenticated_user
+
+        # El portfolio JAMÁS se toma del navegador.
+        # Se recupera desde Supabase utilizando la identidad de la sesión.
+        from supabase_client import supabase_client
+
+        portfolio = supabase_client.get_user_portfolio(
+            authenticated_user
+        ) or {}
 
         # ==============================================================
         # 2. PRECIOS
@@ -27099,20 +27347,46 @@ def api_analyze_with_portfolio():
 def api_save_spot_trade():
     """Guarda una operación spot ejecutada por el usuario."""
     try:
-        data = request.get_json() or {}
+        data = request.get_json(
+            silent=True
+        ) or {}
+
+        authenticated_user = _authenticated_user()
+
+        if not authenticated_user:
+            return jsonify({
+                'success': False,
+                'authenticated': False,
+                'error': 'Debes iniciar sesión para guardar operaciones.'
+            }), 401
 
         trade_data = {
-            'user_name': data.get('user', 'Invitado'),
+            'user_name': authenticated_user,
             'symbol': data.get('symbol', ''),
-            'action': data.get('action', ''),  # BUY_BTC, SELL_PAXG, SWAP_PAXG_TO_BTC, etc.
-            'entry_price': float(data.get('entry_price', 0)),
-            'amount_crypto': float(data.get('amount_crypto', 0)),
-            'amount_usd': float(data.get('amount_usd', 0)),
+            'action': data.get('action', ''),
+            'entry_price': float(
+                data.get('entry_price', 0)
+            ),
+            'amount_crypto': float(
+                data.get('amount_crypto', 0)
+            ),
+            'amount_usd': float(
+                data.get('amount_usd', 0)
+            ),
             'source_asset': data.get('source_asset', ''),
             'target_asset': data.get('target_asset', ''),
-            'system_signal_action': data.get('system_signal_action', ''),
-            'tgp_recommendation': data.get('tgp_recommendation', ''),
-            'timeframe': data.get('timeframe', ''),
+            'system_signal_action': data.get(
+                'system_signal_action',
+                ''
+            ),
+            'tgp_recommendation': data.get(
+                'tgp_recommendation',
+                ''
+            ),
+            'timeframe': data.get(
+                'timeframe',
+                ''
+            ),
             'status': 'OPEN',
             'opened_at': datetime.now().isoformat(),
         }
@@ -27146,28 +27420,110 @@ def api_save_spot_trade():
 
 @app.route('/api/user-portfolio', methods=['GET', 'POST'])
 def api_user_portfolio():
-    """GET: Obtiene portafolio del usuario. POST: Actualiza portafolio."""
+    """
+    Portfolio estrictamente asociado al usuario autenticado.
+
+    GET:
+        devuelve el portfolio del usuario de la sesión.
+
+    POST:
+        actualiza el portfolio del usuario de la sesión.
+
+    El navegador NO puede elegir otro usuario.
+    """
+
     from supabase_client import supabase_client
 
-    if request.method == 'GET':
-        user = request.args.get('user', 'Invitado')
-        portfolio = supabase_client.get_user_portfolio(user)
-        return jsonify({'success': True, 'portfolio': portfolio})
+    authenticated_user = _authenticated_user()
 
-    else:  # POST
-        data = request.get_json() or {}
-        user = data.get('user', 'Invitado')
+    if not authenticated_user:
+        return jsonify({
+            'success': False,
+            'authenticated': False,
+            'error': 'Debes iniciar sesión para acceder al portfolio.'
+        }), 401
+
+    try:
+        if request.method == 'GET':
+            portfolio = supabase_client.get_user_portfolio(
+                authenticated_user
+            )
+
+            return jsonify({
+                'success': True,
+                'authenticated': True,
+                'user': authenticated_user,
+                'portfolio': portfolio or {
+                    'BTC': 0,
+                    'PAXG': 0,
+                    'USDT': 0
+                }
+            })
+
+        data = request.get_json(
+            silent=True
+        ) or {}
+
+        btc = max(
+            0.0,
+            float(data.get('BTC', 0) or 0)
+        )
+
+        paxg = max(
+            0.0,
+            float(data.get('PAXG', 0) or 0)
+        )
+
+        usdt = max(
+            0.0,
+            float(data.get('USDT', 0) or 0)
+        )
+
         portfolio_data = {
-            'user_name': user,
-            'btc_amount': float(data.get('BTC', 0)),
-            'paxg_amount': float(data.get('PAXG', 0)),
-            'usdt_amount': float(data.get('USDT', 0)),
-            'btc_price_at_update': float(data.get('btc_price', 0)),
-            'paxg_price_at_update': float(data.get('paxg_price', 0)),
+            'user_name': authenticated_user,
+            'btc_amount': btc,
+            'paxg_amount': paxg,
+            'usdt_amount': usdt,
+            'btc_price_at_update': float(
+                data.get('btc_price', 0) or 0
+            ),
+            'paxg_price_at_update': float(
+                data.get('paxg_price', 0) or 0
+            ),
         }
-        supabase_client.upsert_user_portfolio(portfolio_data)
-        return jsonify({'success': True, 'user': user})
 
+        saved = supabase_client.upsert_user_portfolio(
+            portfolio_data
+        )
+
+        if not saved:
+            return jsonify({
+                'success': False,
+                'authenticated': True,
+                'error': 'No se pudo guardar el portfolio.'
+            }), 500
+
+        portfolio = supabase_client.get_user_portfolio(
+            authenticated_user
+        )
+
+        return jsonify({
+            'success': True,
+            'authenticated': True,
+            'user': authenticated_user,
+            'portfolio': portfolio
+        })
+
+    except Exception as e:
+        print(
+            f"❌ Error /api/user-portfolio: {e}"
+        )
+
+        return jsonify({
+            'success': False,
+            'authenticated': True,
+            'error': str(e)[:200]
+        }), 500
 
 # ============================================================================
 # Paso 5: NUEVO ENDPOINT /api/user-stats
