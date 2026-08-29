@@ -25770,22 +25770,193 @@ def api_analyze_with_portfolio():
         # No confiar exclusivamente en lastPrices del navegador.
         # Si falta BTC o PAXG, obtener el precio de KuCoin desde backend.
         try:
-            if (
-                float(prices.get('BTC-USDT', 0) or 0) <= 0
-                or float(prices.get('PAXG-USDT', 0) or 0) <= 0
+             if (
+                float(
+                    prices.get(
+                        'BTC-USDT',
+                        0
+                    )
+                    or 0
+                ) <= 0
+                or
+                float(
+                    prices.get(
+                        'PAXG-USDT',
+                        0
+                    )
+                    or 0
+                ) <= 0
             ):
-                print("🛡️ TGP: precios incompletos desde frontend. Recuperando precios server-side...")
-
-                btc_df = expert_system.get_kucoin_data('BTC-USDT', '1h')
-                paxg_df = expert_system.get_kucoin_data('PAXG-USDT', '1h')
-
-                if btc_df is not None and len(btc_df) > 0:
-                    prices['BTC-USDT'] = float(btc_df['close'].iloc[-1])
-
-                if paxg_df is not None and len(paxg_df) > 0:
-                    prices['PAXG-USDT'] = float(paxg_df['close'].iloc[-1])
-
-        except Exception as price_error:
+            
+                print(
+                    "🛡️ TGP: precios incompletos "
+                    "desde frontend. Intentando reutilizar "
+                    "análisis/cache antes de hacer una petición externa..."
+                )
+            
+                # ==============================================================
+                # 1. Intentar reutilizar los análisis existentes
+                # ==============================================================
+            
+                with _ANALYSIS_CACHE_LOCK:
+            
+                    cache_copy = list(
+                        _ANALYSIS_CACHE.items()
+                    )
+            
+                for (
+                    key,
+                    cache_entry
+                ) in cache_copy:
+            
+                    try:
+            
+                        cached_symbol, cached_tf = key
+            
+                    except (
+                        TypeError,
+                        ValueError
+                    ):
+            
+                        continue
+            
+                    if (
+                        cached_symbol
+                        not in (
+                            'BTC-USDT',
+                            'PAXG-USDT'
+                        )
+                    ):
+                        continue
+            
+                    if not isinstance(
+                        cache_entry,
+                        dict
+                    ):
+                        continue
+            
+                    cached_result = (
+                        cache_entry.get(
+                            'data'
+                        )
+                        or {}
+                    )
+            
+                    cached_price = float(
+                        cached_result.get(
+                            'current_price',
+                            0
+                        )
+                        or 0
+                    )
+            
+                    if cached_price <= 0:
+                        continue
+            
+                    if (
+                        cached_symbol
+                        == 'BTC-USDT'
+                        and float(
+                            prices.get(
+                                'BTC-USDT',
+                                0
+                            )
+                            or 0
+                        ) <= 0
+                    ):
+            
+                        prices[
+                            'BTC-USDT'
+                        ] = cached_price
+            
+                    elif (
+                        cached_symbol
+                        == 'PAXG-USDT'
+                        and float(
+                            prices.get(
+                                'PAXG-USDT',
+                                0
+                            )
+                            or 0
+                        ) <= 0
+                    ):
+            
+                        prices[
+                            'PAXG-USDT'
+                        ] = cached_price
+            
+                # ==============================================================
+                # 2. Sólo si todavía faltan precios,
+                #    pedirlos al exchange.
+                # ==============================================================
+            
+                try:
+            
+                    if float(
+                        prices.get(
+                            'BTC-USDT',
+                            0
+                        )
+                        or 0
+                    ) <= 0:
+            
+                        btc_df = (
+                            expert_system
+                            .get_kucoin_data(
+                                'BTC-USDT',
+                                '1h'
+                            )
+                        )
+            
+                        if (
+                            btc_df is not None
+                            and len(btc_df) > 0
+                        ):
+            
+                            prices[
+                                'BTC-USDT'
+                            ] = float(
+                                btc_df[
+                                    'close'
+                                ].iloc[-1]
+                            )
+            
+                    if float(
+                        prices.get(
+                            'PAXG-USDT',
+                            0
+                        )
+                        or 0
+                    ) <= 0:
+            
+                        paxg_df = (
+                            expert_system
+                            .get_kucoin_data(
+                                'PAXG-USDT',
+                                '1h'
+                            )
+                        )
+            
+                        if (
+                            paxg_df is not None
+                            and len(paxg_df) > 0
+                        ):
+            
+                            prices[
+                                'PAXG-USDT'
+                            ] = float(
+                                paxg_df[
+                                    'close'
+                                ].iloc[-1]
+                            )
+            
+                except Exception as price_error:
+            
+                    print(
+                        f"⚠️ TGP: no se pudieron recuperar "
+                        f"precios server-side: "
+                        f"{price_error}"
+                    )
             print(f"⚠️ TGP: no se pudieron recuperar precios server-side: {price_error}")
 
         print(f"\n{'='*60}")
