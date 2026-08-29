@@ -22916,6 +22916,7 @@ def api_futures_position_guardian():
 
         signals = list_saved_signals(
             status_filter=[
+                'active',
                 'entry_touched'
             ],
             limit=50,
@@ -23013,14 +23014,35 @@ def api_futures_position_guardian():
 
                 for sig in group:
 
-                    advice = (
-                        portfolio_guardian
-                        .evaluate_futures_position(
-                            signal=sig,
-                            current_price=current_price,
-                            candles=candles
+                    # ==============================================================
+                    # FUTURES POSITION GUARDIAN
+                    # ==============================================================
+                    
+                    if (
+                        sig.get('status')
+                        == 'entry_touched'
+                    ):
+                    
+                        advice = (
+                            portfolio_guardian
+                            .evaluate_futures_position(
+                                signal=sig,
+                                current_price=current_price,
+                                candles=candles
+                            )
                         )
-                    )
+                    
+                    else:
+                    
+                        advice = {
+                            'action': 'WAIT_ENTRY',
+                            'severity': 'NONE',
+                            'reason': (
+                                'La señal todavía no ha tocado el ENTRY. '
+                                'El Guardian comenzará a gestionar la posición '
+                                'cuando la operación quede realmente activa.'
+                            )
+                        }
 
                     positions.append({
                         'signal_id':
