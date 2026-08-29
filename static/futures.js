@@ -1933,7 +1933,10 @@ window.updateSavedSignalsList = async function() {
                 s.action === 'LONG'
                     ? '📈'
                     : '📉';
-        
+            const bgColor =
+                s.action === 'LONG'
+                    ? 'success'
+                    : 'danger';        
             const statusBadge =
                 _statusBadge(
                     s.status,
@@ -2120,14 +2123,25 @@ window.openSavedSignalDetail = async function(signalId) {
         `;
         
         // Renderizar el gráfico Plotly
-        // Renderizar el gráfico Plotly
-        if (c && c.time && c.time.length > 0) {
-            _renderSavedSignalChart(c, sig, currentPrice);
+        if (
+            c
+            && c.time
+            && c.time.length > 0
+        ) {
+        
+            _renderSavedSignalChart(
+                c,
+                sig,
+                currentPrice
+            );
+        
         } else {
-            document.getElementById('saved-signal-chart').innerHTML = 
+        
+            document.getElementById(
+                'saved-signal-chart'
+            ).innerHTML =
                 '<div class="alert alert-warning">No hay datos de velas para este par/timeframe</div>';
-        }              
-        _renderSavedSignalChart(c, sig, currentPrice);
+        }
     } catch (e) {
         body.innerHTML = `<div class="alert alert-danger">Error: ${e.message}</div>`;
     }
