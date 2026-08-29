@@ -1190,7 +1190,19 @@ window.loadInitialData = function() {
 
 // ============ FUNCIÓN PRINCIPAL - ANÁLISIS COMPLETO CON VISTA GLOBAL ============
 window.runCompleteAnalysis = function() {
-    const cfg = window.PAGE_CONFIG || { defaultSymbol: 'BTC-USDT', defaultTimeframe: '1D' };
+    const cfg =
+        window.PAGE_CONFIG
+        || (
+            window.IS_FUTURES_PAGE
+                ? {
+                    defaultSymbol: 'BTC-USDT',
+                    defaultTimeframe: '1h'
+                }
+                : {
+                    defaultSymbol: 'BTC-USDT',
+                    defaultTimeframe: '1D'
+                }
+        );
     const symbol = document.getElementById('symbol-select')?.value || cfg.defaultSymbol;
     const interval = document.getElementById('interval-select')?.value || cfg.defaultTimeframe;
     
