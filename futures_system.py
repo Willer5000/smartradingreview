@@ -1634,6 +1634,26 @@ class FuturesAnalysis(TradingExpertSystem):
                     'max_loss_pct_margin'
                 ]
             ),
+            'leverage': int(
+                optimal_leverage
+            ),
+            
+            'leverage_min_tf': int(
+                LEVERAGE_RANGES[
+                    timeframe
+                ][0]
+            ),
+            
+            'leverage_max_tf': int(
+                LEVERAGE_RANGES[
+                    timeframe
+                ][1]
+            ),
+            
+            'leverage_policy': (
+                f"{LEVERAGE_RANGES[timeframe][0]}x-"
+                f"{LEVERAGE_RANGES[timeframe][1]}x"
+            ),
             'margin_usdt': float(
                 FUTURES_RISK_CONFIG[
                     'default_margin_usdt'
@@ -1652,7 +1672,28 @@ class FuturesAnalysis(TradingExpertSystem):
                 4
             )
         }
-
+        # ==============================================================
+        # VALIDACIÓN FINAL DEL LEVERAGE
+        # ==============================================================
+        if not _leverage_in_valid_range(
+            int(optimal_leverage),
+            timeframe
+        ):
+        
+            min_tf, max_tf = LEVERAGE_RANGES.get(
+                timeframe,
+                (1, 10)
+            )
+        
+            return self._build_rejected_levels(
+                entry_price,
+                symbol,
+                (
+                    f"Leverage {optimal_leverage}x "
+                    f"fuera del rango operativo "
+                    f"{min_tf}x-{max_tf}x para {timeframe}"
+                )
+            )
         return levels    
     # ========================================================================
     # ANÁLISIS COMPLETO DE FUTUROS
