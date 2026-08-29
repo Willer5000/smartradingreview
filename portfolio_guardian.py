@@ -1111,19 +1111,37 @@ class PortfolioGuardian:
         # ==============================================================
     
         structure_bonus = 0.0
-    
-        if structure.get(
-            'order_blocks'
+        
+        if (
+            structure.get(
+                'order_blocks_count',
+                0
+            ) > 0
+            or structure.get(
+                'order_blocks'
+            )
         ):
             structure_bonus += 5
-    
-        if structure.get(
-            'fair_value_gaps'
+        
+        if (
+            structure.get(
+                'fair_value_gaps_count',
+                0
+            ) > 0
+            or structure.get(
+                'fair_value_gaps'
+            )
         ):
             structure_bonus += 5
-    
-        if structure.get(
-            'liquidity_sweeps'
+        
+        if (
+            structure.get(
+                'liquidity_sweeps_count',
+                0
+            ) > 0
+            or structure.get(
+                'liquidity_sweeps'
+            )
         ):
             structure_bonus += 8
     
