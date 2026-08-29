@@ -2128,7 +2128,174 @@ class PortfolioGuardian:
                 raw_size
             )
         )
-
+    def _calculate_futures_excursion(
+        self,
+        signal,
+        highs,
+        lows
+    ):
+        """
+        Calcula MFE/MAE de la ventana disponible.
+    
+        MFE:
+            máximo movimiento favorable.
+    
+        MAE:
+            máximo movimiento adverso.
+    
+        No es todavía el MFE/MAE histórico completo desde
+        entry_at; es la excursión observable en la ventana
+        de velas entregada al Guardian.
+        """
+    
+        try:
+    
+            action = str(
+                signal.get(
+                    'action',
+                    ''
+                )
+            ).upper()
+    
+            entry = float(
+                signal.get(
+                    'entry',
+                    0
+                )
+                or 0
+            )
+    
+            if (
+                entry <= 0
+                or not highs
+                or not lows
+            ):
+                return {
+                    'mfe_pct': 0.0,
+                    'mae_pct': 0.0,
+                    'mfe_price': entry,
+                    'mae_price': entry
+                }
+    
+            highs = [
+                float(x)
+                for x in highs
+                if x is not None
+            ]
+    
+            lows = [
+                float(x)
+                for x in lows
+                if x is not None
+            ]
+    
+            if not highs or not lows:
+                return {
+                    'mfe_pct': 0.0,
+                    'mae_pct': 0.0,
+                    'mfe_price': entry,
+                    'mae_price': entry
+                }
+    
+            if action == 'LONG':
+    
+                mfe_price = max(
+                    highs
+                )
+    
+                mae_price = min(
+                    lows
+                )
+    
+                mfe_pct = max(
+                    0.0,
+                    (
+                        mfe_price
+                        - entry
+                    )
+                    / entry
+                    * 100
+                )
+    
+                mae_pct = max(
+                    0.0,
+                    (
+                        entry
+                        - mae_price
+                    )
+                    / entry
+                    * 100
+                )
+    
+            else:
+    
+                mfe_price = min(
+                    lows
+                )
+    
+                mae_price = max(
+                    highs
+                )
+    
+                mfe_pct = max(
+                    0.0,
+                    (
+                        entry
+                        - mfe_price
+                    )
+                    / entry
+                    * 100
+                )
+    
+                mae_pct = max(
+                    0.0,
+                    (
+                        mae_price
+                        - entry
+                    )
+                    / entry
+                    * 100
+                )
+    
+            return {
+                'mfe_pct': round(
+                    mfe_pct,
+                    4
+                ),
+    
+                'mae_pct': round(
+                    mae_pct,
+                    4
+                ),
+    
+                'mfe_price':
+                    mfe_price,
+    
+                'mae_price':
+                    mae_price
+            }
+    
+        except Exception as e:
+    
+            logger.debug(
+                f'Excursión Futures: {e}'
+            )
+    
+            return {
+                'mfe_pct': 0.0,
+                'mae_pct': 0.0,
+                'mfe_price':
+                    signal.get(
+                        'entry',
+                        0
+                    ),
+    
+                'mae_price':
+                    signal.get(
+                        'entry',
+                        0
+                    )
+            }
     def evaluate_futures_position(
         self,
         signal,
@@ -2463,7 +2630,33 @@ class PortfolioGuardian:
             closes = closes[-20:]
             highs = highs[-20:]
             lows = lows[-20:]
-    
+            # ==============================================================
+            # MFE / MAE OBSERVABLE
+            # ==============================================================
+            
+            excursion = (
+                self._calculate_futures_excursion(
+                    signal=signal,
+                    highs=highs,
+                    lows=lows
+                )
+            )
+            
+            mfe_pct = excursion[
+                'mfe_pct'
+            ]
+            
+            mae_pct = excursion[
+                'mae_pct'
+            ]
+            
+            mfe_price = excursion[
+                'mfe_price'
+            ]
+            
+            mae_price = excursion[
+                'mae_price'
+            ]    
             # ==========================================================
             # MFE / MAE DE LA VENTANA DISPONIBLE
             # ==========================================================
@@ -2658,10 +2851,40 @@ class PortfolioGuardian:
             if stagnant:
     
                 deterioration_score += 30
+                # ==============================================================
+                # MFE INSUFICIENTE
+                # ==============================================================
+                
+                # Si la operación ya lleva un tiempo razonable pero
+                # prácticamente nunca consiguió avanzar a favor,
+                # aumenta la probabilidad de salida preventiva.
+                
+                expected_progress = max(
+                    0.20,
+                    tp_distance_pct * 0.20
+                )
+                
+                if (
+                    elapsed_minutes >= moderate_minutes
+                    and mfe_pct < expected_progress
+                ):
+                
+                    deterioration_score += 20                
     
             if momentum_against:
     
                 deterioration_score += 30
+                # ==============================================================
+                # MAE ELEVADO SIN RECUPERACIÓN
+                # ==============================================================
+                
+                if (
+                    elapsed_minutes >= moderate_minutes
+                    and mae_pct >= sl_distance_pct * 0.75
+                    and mfe_pct < tp_distance_pct * 0.25
+                ):
+                
+                    deterioration_score += 20
     
             if structure_deteriorated:
     
@@ -2755,13 +2978,27 @@ class PortfolioGuardian:
                 return {
                     'action': 'EXIT',
                     'severity': 'HIGH',
-    
+                    'mfe_pct':
+                        mfe_pct,
+                    
+                    'mae_pct':
+                        mae_pct,
+                    
+                    'mfe_price':
+                        mfe_price,
+                    
+                    'mae_price':
+                        mae_price,    
+
                     'reason': (
-                        f'La posición {action} presenta '
-                        f'deterioro significativo. '
-                        f'Lleva {elapsed_minutes:.0f} min '
-                        f'sin progreso suficiente hacia TP '
-                        f'y existen señales técnicas contrarias.'
+                        f'La posición {action} lleva '
+                        f'{elapsed_minutes:.0f} min. '
+                        f'MFE observado: {mfe_pct:.2f}%. '
+                        f'MAE observado: {mae_pct:.2f}%. '
+                        f'El progreso hacia TP es insuficiente '
+                        f'y se detecta deterioro técnico. '
+                        f'Se recomienda evaluar cierre antes de '
+                        f'que la posición alcance el SL.'
                     ),
     
                     **metrics
@@ -2776,12 +3013,23 @@ class PortfolioGuardian:
                 return {
                     'action': 'REDUCE',
                     'severity': 'MEDIUM',
-    
+                    'mfe_pct':
+                        mfe_pct,
+                    
+                    'mae_pct':
+                        mae_pct,
+                    
+                    'mfe_price':
+                        mfe_price,
+                    
+                    'mae_price':
+                        mae_price,    
                     'reason': (
-                        f'La posición {action} muestra '
-                        f'estancamiento o deterioro técnico. '
-                        f'Conviene considerar reducción parcial '
-                        f'o protección del beneficio.'
+                        f'La posición {action} presenta '
+                        f'MFE {mfe_pct:.2f}% y MAE {mae_pct:.2f}%. '
+                        f'La estructura/momentum muestran deterioro '
+                        f'moderado. Conviene considerar reducción '
+                        f'parcial o protección de la posición.'
                     ),
     
                     **metrics
@@ -2794,14 +3042,23 @@ class PortfolioGuardian:
             return {
                 'action': 'HOLD',
                 'severity': 'NONE',
-    
+                'mfe_pct':
+                    mfe_pct,
+                
+                'mae_pct':
+                    mae_pct,
+                
+                'mfe_price':
+                    mfe_price,
+                
+                'mae_price':
+                    mae_price,    
                 'reason': (
-                    f'La tesis {action} permanece vigente. '
-                    f'Progreso favorable: '
-                    f'{favorable_pct:.2f}%. '
-                    f'MFE: {mfe_pct:.2f}%. '
-                    f'No se detecta deterioro suficiente '
-                    f'para recomendar salida anticipada.'
+                    f'La tesis continúa vigente. '
+                    f'MFE observado: {mfe_pct:.2f}%. '
+                    f'MAE observado: {mae_pct:.2f}%. '
+                    f'No existe deterioro suficiente para '
+                    f'justificar una salida anticipada.'
                 ),
     
                 **metrics
