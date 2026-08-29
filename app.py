@@ -25719,7 +25719,6 @@ try:
 except Exception as _start_err:
     print(f"⚠️ Error arrancando threads background: {_start_err}")
 
-```python
 # ============================================================================
 # FASE 7B — ENDPOINT /api/analyze-with-portfolio
 # ============================================================================
