@@ -1602,31 +1602,52 @@ class PortfolioGuardian:
             # CONFIRMACIÓN MAYOR
             # --------------------------------------------------------------
     
-            higher_btc = all(
-                timeframe_results.get(
-                    tf,
-                    {}
-                ).get(
-                    'preference'
-                ) != 'PAXG'
-    
-                for tf
-                in ('1D', '1W')
+            # ==============================================================
+            # CONTEXTO DE TEMPORALIDADES MAYORES
+            # ==============================================================
+            
+            higher_timeframes = [
+                tf
+                for tf in (
+                    '1D',
+                    '1W'
+                )
                 if tf in timeframe_results
-            )
-    
-            higher_paxg = all(
-                timeframe_results.get(
-                    tf,
-                    {}
-                ).get(
-                    'preference'
-                ) != 'BTC'
-    
-                for tf
-                in ('1D', '1W')
-                if tf in timeframe_results
-            )
+            ]
+            
+            # --------------------------------------------------------------
+            # Si no existe ningún TF mayor disponible, NO asumir
+            # automáticamente que está confirmado.
+            # --------------------------------------------------------------
+            
+            if higher_timeframes:
+            
+                higher_btc = all(
+                    timeframe_results[
+                        tf
+                    ].get(
+                        'preference'
+                    ) != 'PAXG'
+            
+                    for tf
+                    in higher_timeframes
+                )
+            
+                higher_paxg = all(
+                    timeframe_results[
+                        tf
+                    ].get(
+                        'preference'
+                    ) != 'BTC'
+            
+                    for tf
+                    in higher_timeframes
+                )
+            
+            else:
+            
+                higher_btc = False
+                higher_paxg = False
     
             # ==============================================================
             # DECISIÓN DE ROTACIÓN
