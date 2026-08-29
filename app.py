@@ -14041,21 +14041,62 @@ class TradingExpertSystem:
             traceback.print_exc()
             return self._get_default_levels(current_price if 'current_price' in locals() else 0, symbol)
     
-    def _build_rejected_levels(self, current_price, symbol, reason):
-        """Construye una respuesta de niveles rechazados. La acción se degradará a NO_OPERAR."""
+    def _build_rejected_levels(
+        self,
+        current_price,
+        symbol,
+        reason
+    ):
+        """
+        Construye una respuesta EXPLÍCITAMENTE RECHAZADA.
+    
+        IMPORTANTE:
+        Una operación rechazada NO debe parecer una señal activa.
+    
+        Por eso:
+            leverage = 0
+            risk_reward = 0
+            TP = 0
+            SL = 0
+            rejected_reason = motivo
+    
+        El frontend puede entonces ocultarla o mostrarla
+        correctamente como NO_OPERAR.
+        """
+    
         return {
-            'entry': self._round_price(current_price, symbol),
-            'stop_loss': self._round_price(current_price * 0.97, symbol),
-            'take_profit': self._round_price(current_price * 1.03, symbol),
-            'leverage': 1,
+            'entry': self._round_price(
+                current_price,
+                symbol
+            ),
+    
+            'stop_loss': 0,
+    
+            'take_profit': 0,
+    
+            'leverage': 0,
+    
             'risk_reward': 0,
+    
             'suggested_size': 0,
-            'tp_source': 'Rechazado',
-            'sl_source': 'Rechazado',
+    
+            'tp_source': 'RECHAZADO',
+    
+            'sl_source': 'RECHAZADO',
+    
             'tp_probability': 0,
+    
             'sl_reliability': 0,
+    
             'min_tp_distance_pct': 0,
-            'rejected_reason': reason
+    
+            'execution_safety': 0,
+    
+            'execution_safety_label': 'RECHAZAR',
+    
+            'rejected_reason': reason,
+    
+            'is_rejected': True
         }
     
     def _round_price(self, price, symbol):
@@ -14067,26 +14108,62 @@ class TradingExpertSystem:
         else:
             return round(price, 2)
     
-    def _get_default_levels(self, current_price, symbol):
-        """Niveles por defecto cuando falla el cálculo o no aplica trading (NO_OPERAR)"""
+    def _get_default_levels(
+        self,
+        current_price,
+        symbol
+    ):
+        """
+        Niveles neutros cuando no existe una operación válida.
+    
+        IMPORTANTE:
+        No generar TP/SL ficticios.
+        Si no hay operación, no hay niveles operables.
+        """
+    
         if current_price == 0:
-            current_price = 50000 if symbol == 'BTC-USDT' else 2000 if symbol == 'PAXG-USDT' else 0.04
-        
-        levels = {
-            'entry': self._round_price(current_price, symbol),
-            'stop_loss': self._round_price(current_price * 0.97, symbol),
-            'take_profit': self._round_price(current_price * 1.03, symbol),
-            'leverage': 1,
+            current_price = (
+                50000
+                if symbol == 'BTC-USDT'
+                else 2000
+                if symbol == 'PAXG-USDT'
+                else 0.04
+            )
+    
+        return {
+            'entry': self._round_price(
+                current_price,
+                symbol
+            ),
+    
+            'stop_loss': 0,
+    
+            'take_profit': 0,
+    
+            'leverage': 0,
+    
             'risk_reward': 0,
+    
             'suggested_size': 0,
+    
             'tp_source': 'N/A',
+    
             'sl_source': 'N/A',
+    
             'tp_probability': 0,
+    
             'sl_reliability': 0,
+    
             'min_tp_distance_pct': 0,
-            'rejected_reason': None
+    
+            'execution_safety': 0,
+    
+            'execution_safety_label': 'N/A',
+    
+            'rejected_reason': None,
+    
+            'is_rejected': True
         }
-        return levels
     # === FIN calculate_entry_levels (FASE 3) ===
     
     # ========================================================================
