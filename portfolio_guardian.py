@@ -2372,7 +2372,42 @@ class PortfolioGuardian:
             # ==============================================================
     
             closes = []
-    
+            highs = []
+            lows = []
+            
+            if isinstance(
+                candles,
+                dict
+            ):
+            
+                highs = [
+                    float(x)
+                    for x
+                    in (
+                        candles.get(
+                            'high',
+                            []
+                        )
+                        or []
+                    )
+                    if x is not None
+                ]
+            
+                lows = [
+                    float(x)
+                    for x
+                    in (
+                        candles.get(
+                            'low',
+                            []
+                        )
+                        or []
+                    )
+                    if x is not None
+                ]
+            
+            highs = highs[-20:]
+            lows = lows[-20:]    
             if isinstance(
                 candles,
                 dict
