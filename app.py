@@ -14098,6 +14098,66 @@ class TradingExpertSystem:
     
             'is_rejected': True
         }
+
+    def _mark_levels_non_executable(
+        self,
+        levels,
+        reason,
+        recommended_leverage=None
+    ):
+        """
+        Marca una configuración como NO EJECUTABLE para Futuros,
+        pero conserva ENTRY / SL / TP / RR y toda la información
+        técnica calculada.
+    
+        IMPORTANTE:
+    
+            NO EJECUTABLE != NO EXISTE ANÁLISIS
+    
+        El usuario debe poder consultar los niveles recomendados,
+        aunque el setup no cumpla el mínimo operativo de leverage
+        requerido por su timeframe.
+        """
+    
+        result = dict(levels or {})
+    
+        # Conservar el leverage calculado por el motor.
+        # Si se proporciona uno explícito, utilizarlo.
+        if recommended_leverage is not None:
+    
+            try:
+                result['leverage'] = int(
+                    recommended_leverage
+                )
+            except (
+                TypeError,
+                ValueError
+            ):
+                pass
+    
+        # ==============================================================
+        # ESTADO DE EJECUCIÓN
+        # ==============================================================
+    
+        result['is_rejected'] = True
+        result['is_executable'] = False
+        result['publication_status'] = 'ANALYSIS_ONLY'
+    
+        result['rejected_reason'] = reason
+    
+        # ==============================================================
+        # IMPORTANTE:
+        # NO modificar:
+        #
+        # entry
+        # stop_loss
+        # take_profit
+        # risk_reward
+        #
+        # porque siguen siendo técnicamente válidos.
+        # ==============================================================
+    
+        return result
     
     def _round_price(self, price, symbol):
         """Redondear precio según el símbolo"""
