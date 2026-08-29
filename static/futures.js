@@ -1886,13 +1886,118 @@ window.updateSavedSignalsList = async function() {
                 </div>`;
             return;
         }
+        // =============================================================
+        // FUTURES POSITION GUARDIAN
+        // =============================================================
+        // Una sola petición para todas las posiciones abiertas.
+        // El backend agrupa por símbolo + timeframe.
+        // =============================================================
         
+        let guardianBySignal = {};
+        
+        try {
+            const gRes = await fetch(
+                '/api/futures/position-guardian?user='
+                + encodeURIComponent(user)
+                + '&_ts='
+                + Date.now(),
+                {
+                    cache: 'no-store'
+                }
+            );
+        
+            const gJson = await gRes.json();
+        
+            if (gJson.success) {
+        
+                (gJson.positions || []).forEach(
+                    p => {
+                        guardianBySignal[
+                            p.signal_id
+                        ] = p.guardian || {};
+                    }
+                );
+            }
+        
+        } catch (guardianError) {
+        
+            console.warn(
+                '⚠️ Futures Guardian no disponible:',
+                guardianError
+            );
+        }        
         let html = '';
         signals.forEach(s => {
-            const emoji = s.action === 'LONG' ? '📈' : '📉';
-            const statusBadge = _statusBadge(s.status, s.entry_touched);
-            const pnlDisplay = _formatPnl(s);
-            const bgColor = s.action === 'LONG' ? 'success' : 'danger';
+        
+            const emoji =
+                s.action === 'LONG'
+                    ? '📈'
+                    : '📉';
+        
+            const statusBadge =
+                _statusBadge(
+                    s.status,
+                    s.entry_touched
+                );
+        
+            const pnlDisplay =
+                _formatPnl(s);
+        
+            const guardian =
+                guardianBySignal[
+                    s.id
+                ] || {};
+        
+            let guardianHtml = '';
+        
+            if (
+                s.status === 'entry_touched'
+                && guardian.action
+            ) {
+        
+                if (
+                    guardian.action
+                    === 'EXIT'
+                ) {
+        
+                    guardianHtml = `
+                        <div class="mt-2">
+                            <span class="badge bg-danger">
+                                🛡️ Guardian: SALIR
+                            </span>
+                            <div class="small text-danger mt-1">
+                                ${guardian.reason || ''}
+                            </div>
+                        </div>
+                    `;
+        
+                } else if (
+                    guardian.action
+                    === 'REDUCE'
+                ) {
+        
+                    guardianHtml = `
+                        <div class="mt-2">
+                            <span class="badge bg-warning text-dark">
+                                🛡️ Guardian: REDUCIR / PROTEGER
+                            </span>
+                            <div class="small text-warning mt-1">
+                                ${guardian.reason || ''}
+                            </div>
+                        </div>
+                    `;
+        
+                } else {
+        
+                    guardianHtml = `
+                        <div class="mt-2">
+                            <span class="badge bg-success">
+                                🛡️ Guardian: MANTENER
+                            </span>
+                        </div>
+                    `;
+                }
+            }
             
             html += `
                 <a href="#" class="list-group-item list-group-item-action bg-dark text-white"
@@ -1910,6 +2015,7 @@ window.updateSavedSignalsList = async function() {
                             ${pnlDisplay}
                         </div>
                     </div>
+                    ${guardianHtml}
                 </a>
             `;
         });
