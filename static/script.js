@@ -1346,7 +1346,37 @@ window.runCompleteAnalysis = function() {
             return data;
         })
         .then(data => {
-            if (data.success && data.data) {
+        
+            // ============================================================
+            // NORMALIZAR RESPUESTA DEL BACKEND
+            // ============================================================
+            // /api/analyze-with-portfolio puede devolver:
+            //
+            // 1) { success: true, data: {...} }
+            //
+            // o directamente:
+            //
+            // 2) { success: true, decision: {...}, levels: {...}, ... }
+            //
+            // En ambos casos debemos considerar válida la respuesta
+            // mientras exista una decisión del sistema.
+            // ============================================================
+        
+            if (
+                data
+                && data.success === true
+                && !data.data
+                && data.decision
+            ) {
+        
+                data.data = data;
+            }
+        
+            if (
+                data
+                && data.success === true
+                && data.data
+            ) {
                 window.currentAnalysis = data.data;
                 // ============================================================
                 // MOSTRAR TGP
@@ -1847,10 +1877,13 @@ function getInstantRecommendation(attempt = 1) {
             );
         
         const analysisSuccess =
-            data?.success === true
+            (
+                data?.success === true
+                && !!analysisData
+            )
             || (
-                analysisData
-                && analysisData.decision
+                !!analysisData
+                && !!analysisData.decision
             );
         
         const analysisAction =
