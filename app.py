@@ -26465,43 +26465,153 @@ def api_analyze_with_portfolio():
                 ] = compact
 
         # ==============================================================
-        # 11. TGP MULTI-TIMEFRAME
+        # 11. TGP MULTI-TIMEFRAME — BLINDADO
         # ==============================================================
-
+        #
+        # El TGP es una capa de gestión de portfolio.
+        # NO debe tumbar el análisis principal si falla.
+        #
+        # Flujo:
+        #
+        #   análisis principal ✅
+        #          ↓
+        #       TGP multi-TF
+        #          ↓
+        #       si falla
+        #          ↓
+        #       fallback TGP básico
+        #          ↓
+        #       si también falla
+        #          ↓
+        #       HOLD seguro
+        #
+        # ==============================================================
+        
         print(
-            "   🛡️ Ejecutando "
-            "TGP Multi-Timeframe..."
+            "   🛡️ Ejecutando TGP Multi-Timeframe..."
         )
-
-        tgp_result = (
-            portfolio_guardian
-            .analyze_multi_timeframe(
-                user=user,
-                portfolio=portfolio,
-                prices=prices,
-                market_snapshots=(
-                    market_snapshots
+        
+        tgp_result = None
+        
+        try:
+        
+            tgp_result = (
+                portfolio_guardian
+                .analyze_multi_timeframe(
+                    user=user,
+                    portfolio=portfolio,
+                    prices=prices,
+                    market_snapshots=(
+                        market_snapshots
+                    )
                 )
             )
-        )
-
+        
+            print(
+                "   ✅ TGP Multi-Timeframe completado"
+            )
+        
+        except Exception as tgp_error:
+        
+            print(
+                "   ⚠️ Error TGP Multi-Timeframe: "
+                f"{tgp_error}"
+            )
+        
+            import traceback
+        
+            traceback.print_exc()
+        
+            # ==========================================================
+            # FALLBACK
+            # ==========================================================
+            #
+            # Si el nuevo TGP falla, utilizamos el Guardian clásico
+            # sobre el análisis actual.
+            #
+            # Esto permite que Spot siga funcionando mientras se
+            # diagnostica el problema del TGP.
+            # ==========================================================
+        
+            try:
+        
+                tgp_result = (
+                    portfolio_guardian
+                    .analyze(
+                        user=user,
+                        portfolio=portfolio,
+                        prices=prices,
+                        system_analysis=result
+                    )
+                )
+        
+                print(
+                    "   ✅ TGP fallback clásico completado"
+                )
+        
+            except Exception as fallback_error:
+        
+                print(
+                    "   ❌ TGP fallback también falló: "
+                    f"{fallback_error}"
+                )
+        
+                traceback.print_exc()
+        
+                # ======================================================
+                # FALLBACK FINAL
+                # ======================================================
+        
+                tgp_result = {
+                    'action': 'HOLD',
+        
+                    'reason': (
+                        'El análisis principal se completó, '
+                        'pero el Guardián de Portafolio no pudo '
+                        'evaluarse temporalmente.'
+                    ),
+        
+                    'confidence': 0,
+        
+                    'veto': False,
+        
+                    'tgp_available': False,
+        
+                    'tgp_error': str(
+                        fallback_error
+                    )
+                }
+        
+        # ==============================================================
+        # VALIDACIÓN FINAL DEL TGP
+        # ==============================================================
+        
         if not isinstance(
             tgp_result,
             dict
         ):
-
+        
             tgp_result = {
-
-                'action':
-                    'HOLD',
-
-                'confidence':
-                    0,
-
-                'reason':
+        
+                'action': 'HOLD',
+        
+                'reason': (
                     'El TGP no devolvió una respuesta válida.'
+                ),
+        
+                'confidence': 0,
+        
+                'veto': False,
+        
+                'tgp_available': False
             }
-
+        
+        else:
+        
+            tgp_result.setdefault(
+                'tgp_available',
+                True
+            )
         # ==============================================================
         # 12. MERGE
         # ==============================================================
@@ -26544,7 +26654,15 @@ def api_analyze_with_portfolio():
             f"| Conf: "
             f"{tgp_result.get('confidence', 0)}%"
         )
-
+        if not tgp_result.get(
+            'tgp_available',
+            True
+        ):
+        
+            print(
+                "   ⚠️ TGP actualmente no disponible; "
+                "análisis principal continúa operativo."
+            )
         reason_text = str(
             tgp_result.get(
                 'reason',
