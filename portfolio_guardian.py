@@ -1473,11 +1473,11 @@ class PortfolioGuardian:
                 # DIRECCIÓN DEL TF
                 # ==========================================================
     
-                if relative_edge >= ROTATION_EDGE_THRESHOLD:
+                if relative_edge >= self.ROTATION_EDGE_THRESHOLD:
     
                     preference = 'BTC'
     
-                elif relative_edge <= -ROTATION_EDGE_THRESHOLD:
+                elif relative_edge <= -self.ROTATION_EDGE_THRESHOLD:
     
                     preference = 'PAXG'
     
@@ -1539,7 +1539,7 @@ class PortfolioGuardian:
     
                 if (
                     relative_edge
-                    >= ROTATION_EDGE_THRESHOLD
+                    >= self.ROTATION_EDGE_THRESHOLD
                 ):
                     btc_edges.append(
                         tf
@@ -1547,7 +1547,7 @@ class PortfolioGuardian:
     
                 elif (
                     relative_edge
-                    <= -ROTATION_EDGE_THRESHOLD
+                    <= -self.ROTATION_EDGE_THRESHOLD
                 ):
                     paxg_edges.append(
                         tf
@@ -1668,7 +1668,7 @@ class PortfolioGuardian:
     
             if (
                 btc_count
-                >= MIN_ROTATION_TIMEFRAMES
+                >= self.MIN_ROTATION_TIMEFRAMES
             ) and higher_btc:
     
                 # ----------------------------------------------------------
@@ -1677,7 +1677,7 @@ class PortfolioGuardian:
     
                 if (
                     pct_paxg
-                    > MIN_RESERVE_PCTS['PAXG']
+                    > self.MIN_RESERVE_PCTS['PAXG']
                     and paxg_available > 0
                 ):
     
@@ -1760,13 +1760,13 @@ class PortfolioGuardian:
             if (
                 action == 'HOLD'
                 and paxg_count
-                >= MIN_ROTATION_TIMEFRAMES
+                >= self.MIN_ROTATION_TIMEFRAMES
                 and higher_paxg
             ):
     
                 if (
                     pct_btc
-                    > MIN_RESERVE_PCTS['BTC']
+                    > self.MIN_RESERVE_PCTS['BTC']
                     and btc_available > 0
                 ):
     
@@ -1835,7 +1835,7 @@ class PortfolioGuardian:
             if (
                 action == 'HOLD'
                 and btc_count
-                >= MIN_ROTATION_TIMEFRAMES
+                >= self.MIN_ROTATION_TIMEFRAMES
                 and usdt_available > 0
             ):
     
@@ -1902,7 +1902,7 @@ class PortfolioGuardian:
             if (
                 action == 'HOLD'
                 and paxg_count
-                >= MIN_ROTATION_TIMEFRAMES
+                >= self.MIN_ROTATION_TIMEFRAMES
                 and usdt_available > 0
             ):
     
@@ -2085,11 +2085,11 @@ class PortfolioGuardian:
         # LÍMITE POR RESERVA ESTRATÉGICA
         # ==============================================================
         
-        reserve_pct = MIN_RESERVE_PCTS.get(
+        reserve_pct = self.MIN_RESERVE_PCTS.get(
             source_asset,
             0.0
         )
-        
+                
         # Si la fuente ya está en o por debajo de la reserva,
         # no se puede seguir vendiendo/cambiando.
         if current_pct <= reserve_pct:
