@@ -27397,9 +27397,13 @@ def api_save_spot_trade():
 
         # Actualizar portafolio del usuario
         portfolio_update = data.get('portfolio_update', {})
+
         if portfolio_update:
             supabase_client.upsert_user_portfolio({
-                'user_name': data.get('user', 'Invitado'),
+                # IMPORTANTE:
+                # Nunca utilizar data.get('user').
+                # El propietario real es el usuario autenticado.
+                'user_name': authenticated_user,
                 'btc_amount': portfolio_update.get('BTC', 0),
                 'paxg_amount': portfolio_update.get('PAXG', 0),
                 'usdt_amount': portfolio_update.get('USDT', 0),
@@ -27531,16 +27535,35 @@ def api_user_portfolio():
 
 @app.route('/api/user-stats', methods=['GET'])
 def api_user_stats():
-    """Estadísticas personales de trading del usuario."""
+    """Estadísticas personales del usuario autenticado."""
     try:
         from supabase_client import supabase_client
-        user = request.args.get('user', 'Invitado')
+
+        user = _authenticated_user()
+
+        if not user:
+            return jsonify({
+                'success': False,
+                'authenticated': False,
+                'error': 'Debes iniciar sesión.'
+            }), 401
 
         stats = supabase_client.get_user_trade_stats(user)
-        return jsonify({'success': True, 'user': user, 'stats': stats})
+
+        return jsonify({
+            'success': True,
+            'authenticated': True,
+            'user': user,
+            'stats': stats
+        })
 
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        print(f"❌ Error /api/user-stats: {e}")
+
+        return jsonify({
+            'success': False,
+            'error': str(e)[:200]
+        }), 500
 
 # ============================================================================
 # ALERTAS INDEPENDIENTES DEL TGP (Trader Guardián de Portafolio)
