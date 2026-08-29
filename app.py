@@ -535,6 +535,364 @@ def get_analysis_cache_stats() -> dict:
             'misses': _ANALYSIS_CACHE_STATS['misses'],
             'hit_rate_pct': round(hit_rate, 1),
         }
+    # ============================================================================
+    # TGP — SNAPSHOT MULTI-TIMEFRAME COMPACTO
+    # ============================================================================
+    #
+    # NO recalcula el mercado.
+    # NO hace llamadas adicionales.
+    # Lee únicamente análisis que ya están en _ANALYSIS_CACHE.
+    #
+    # Esto es importante para Render Free:
+    # 512 MB RAM / 0.1 CPU.
+    # ============================================================================
+    
+    _TGP_SPOT_TIMEFRAMES = (
+        '4h',
+        '12h',
+        '1D',
+        '1W',
+    )
+    
+    _TGP_SPOT_SYMBOLS = (
+        'BTC-USDT',
+        'PAXG-USDT',
+        'PAXG-BTC',
+    )
+    
+    
+    def _compact_tgp_analysis(result):
+        """
+        Reduce un resultado completo a los datos necesarios
+        para el TGP.
+    
+        No conserva:
+            - DataFrame completo
+            - OHLCV completo
+            - arrays de indicadores
+            - gráficos
+            - patrones completos
+    
+        Sólo conserva información de decisión.
+        """
+    
+        if not isinstance(result, dict):
+            return None
+    
+        if not result.get('success'):
+            return None
+    
+        symbol = result.get('symbol')
+        timeframe = result.get('timeframe')
+    
+        if symbol not in _TGP_SPOT_SYMBOLS:
+            return None
+    
+        if timeframe not in _TGP_SPOT_TIMEFRAMES:
+            return None
+    
+        decision = (
+            result.get(
+                'decision',
+                {}
+            )
+            or {}
+        )
+    
+        levels = (
+            result.get(
+                'levels',
+                {}
+            )
+            or {}
+        )
+    
+        trend = (
+            result.get(
+                'trend',
+                {}
+            )
+            or {}
+        )
+    
+        momentum = (
+            result.get(
+                'momentum',
+                {}
+            )
+            or {}
+        )
+    
+        structure = (
+            result.get(
+                'structure',
+                {}
+            )
+            or {}
+        )
+    
+        correlation = (
+            result.get(
+                'correlation',
+                {}
+            )
+            or {}
+        )
+    
+        return {
+            'success': True,
+    
+            'symbol': symbol,
+    
+            'timeframe': timeframe,
+    
+            'decision': {
+                'action': str(
+                    decision.get(
+                        'action',
+                        'NO_OPERAR'
+                    )
+                ),
+                'confidence': float(
+                    decision.get(
+                        'confidence',
+                        0
+                    )
+                    or 0
+                ),
+            },
+    
+            'levels': {
+                'execution_safety': float(
+                    levels.get(
+                        'execution_safety',
+                        0
+                    )
+                    or 0
+                ),
+    
+                'entry_score': float(
+                    levels.get(
+                        'entry_score',
+                        0
+                    )
+                    or 0
+                ),
+    
+                'tp_quality_score': float(
+                    levels.get(
+                        'tp_quality_score',
+                        0
+                    )
+                    or 0
+                ),
+    
+                'sl_reliability': float(
+                    levels.get(
+                        'sl_reliability',
+                        0
+                    )
+                    or 0
+                ),
+    
+                'risk_reward': float(
+                    levels.get(
+                        'risk_reward',
+                        0
+                    )
+                    or 0
+                ),
+            },
+    
+            'trend': {
+                'direction': str(
+                    trend.get(
+                        'direction',
+                        'neutral'
+                    )
+                ),
+                'adx': float(
+                    trend.get(
+                        'adx',
+                        0
+                    )
+                    or 0
+                ),
+            },
+    
+            'momentum': {
+                'direction': str(
+                    momentum.get(
+                        'direction',
+                        'neutral'
+                    )
+                ),
+            },
+    
+            'structure': {
+                # IMPORTANTE:
+                # guardamos números, no listas.
+                'order_blocks_count': len(
+                    structure.get(
+                        'order_blocks',
+                        []
+                    )
+                    or []
+                )
+                if isinstance(
+                    structure.get(
+                        'order_blocks',
+                        []
+                    ),
+                    (list, tuple)
+                )
+                else 0,
+    
+                'fair_value_gaps_count': len(
+                    structure.get(
+                        'fair_value_gaps',
+                        []
+                    )
+                    or []
+                )
+                if isinstance(
+                    structure.get(
+                        'fair_value_gaps',
+                        []
+                    ),
+                    (list, tuple)
+                )
+                else 0,
+    
+                'liquidity_sweeps_count': len(
+                    structure.get(
+                        'liquidity_sweeps',
+                        []
+                    )
+                    or []
+                )
+                if isinstance(
+                    structure.get(
+                        'liquidity_sweeps',
+                        []
+                    ),
+                    (list, tuple)
+                )
+                else 0,
+            },
+    
+            'correlation': {
+                'rotation_signal': str(
+                    correlation.get(
+                        'rotation_signal',
+                        'NEUTRAL'
+                    )
+                ),
+            },
+    
+            'current_price': float(
+                result.get(
+                    'current_price',
+                    0
+                )
+                or 0
+            ),
+    
+            'timestamp': str(
+                result.get(
+                    'timestamp',
+                    ''
+                )
+            ),
+        }
+    
+    
+    def _get_tgp_market_snapshots(
+        fallback_result=None
+    ):
+        """
+        Construye snapshots de:
+    
+            BTC-USDT
+            PAXG-USDT
+            PAXG-BTC
+    
+        para:
+    
+            4h
+            12h
+            1D
+            1W
+    
+        reutilizando _ANALYSIS_CACHE.
+    
+        Si el análisis actual todavía no está en cache,
+        fallback_result permite introducirlo sin otro cálculo.
+        """
+    
+        result = {}
+    
+        with _ANALYSIS_CACHE_LOCK:
+    
+            for (
+                symbol,
+                timeframe
+            ), cache_entry in _ANALYSIS_CACHE.items():
+    
+                if (
+                    symbol
+                    not in _TGP_SPOT_SYMBOLS
+                ):
+                    continue
+    
+                if (
+                    timeframe
+                    not in _TGP_SPOT_TIMEFRAMES
+                ):
+                    continue
+    
+                compact = _compact_tgp_analysis(
+                    cache_entry.get(
+                        'data'
+                    )
+                )
+    
+                if not compact:
+                    continue
+    
+                result.setdefault(
+                    timeframe,
+                    {}
+                )[symbol] = compact
+    
+        # ==============================================================
+        # Añadir el análisis actual si todavía no está cacheado.
+        # ==============================================================
+    
+        compact_current = _compact_tgp_analysis(
+            fallback_result
+        )
+    
+        if compact_current:
+    
+            tf = compact_current[
+                'timeframe'
+            ]
+    
+            sym = compact_current[
+                'symbol'
+            ]
+    
+            result.setdefault(
+                tf,
+                {}
+            )[sym] = compact_current
+    
+        return result
+
+
+
+        
 
 # ============================================================================
 # CLASE PRINCIPAL: SISTEMA EXPERTO DE TRADING
