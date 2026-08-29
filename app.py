@@ -199,7 +199,6 @@ def _analysis_cache_put(key, data):
             for k in to_remove:
                 _ANALYSIS_CACHE.pop(k, None)
 
-
 def get_analysis_cache_stats() -> dict:
     """Devuelve estadísticas del caché de análisis."""
     with _ANALYSIS_CACHE_LOCK:
@@ -215,43 +214,43 @@ def get_analysis_cache_stats() -> dict:
         ) if total > 0 else 0.0
 
         return {
-            'entries': len(_ANALYSIS_CACHE),
-            'hits': _ANALYSIS_CACHE_STATS['hits'],
-            'misses': _ANALYSIS_CACHE_STATS['misses'],
+            'entries': len(
+                _ANALYSIS_CACHE
+            ),
+            'hits': _ANALYSIS_CACHE_STATS[
+                'hits'
+            ],
+            'misses': _ANALYSIS_CACHE_STATS[
+                'misses'
+            ],
             'hit_rate_pct': round(
                 hit_rate,
                 1
             ),
         }
 
-
 # ============================================================================
 # TGP — SNAPSHOT MULTI-TIMEFRAME COMPACTO
 # ============================================================================
 #
-# Estas funciones DEBEN estar a nivel GLOBAL.
+# IMPORTANTE:
+# Estas variables DEBEN estar fuera de get_analysis_cache_stats().
 #
-# NO deben estar indentadas dentro de get_analysis_cache_stats().
-#
-# El TGP utiliza únicamente snapshots pequeños de los análisis que ya existen
-# en _ANALYSIS_CACHE.
-#
-# No recalcula el mercado.
-# No crea DataFrames.
-# No realiza llamadas adicionales.
+# El TGP no recalcula el mercado.
+# Utiliza solamente resultados de análisis ya realizados.
 # ============================================================================
 
 _TGP_SPOT_TIMEFRAMES = (
     '4h',
     '12h',
     '1D',
-    '1W',
+    '1W'
 )
 
 _TGP_SPOT_SYMBOLS = (
     'BTC-USDT',
     'PAXG-USDT',
-    'PAXG-BTC',
+    'PAXG-BTC'
 )
 
 _TGP_MARKET_SNAPSHOT = {}
@@ -263,8 +262,11 @@ _TGP_MARKET_SNAPSHOT_LOCK = (
 
 def _compact_tgp_analysis(result):
     """
-    Reduce un resultado completo de TradingExpertSystem
-    a un snapshot pequeño para PortfolioGuardian.
+    Reduce un análisis completo a un snapshot muy pequeño.
+
+    NO conserva DataFrames.
+    NO conserva OHLCV completo.
+    NO recalcula indicadores.
     """
 
     if not isinstance(
@@ -346,27 +348,22 @@ def _compact_tgp_analysis(result):
         or {}
     )
 
-    def _count_list(
-        value
-    ):
-        if isinstance(
-            value,
-            (list, tuple)
-        ):
-            return len(value)
-
-        return 0
+    def _count(value):
+        return (
+            len(value)
+            if isinstance(
+                value,
+                (list, tuple)
+            )
+            else 0
+        )
 
     return {
+        'success': True,
 
-        'success':
-            True,
+        'symbol': symbol,
 
-        'symbol':
-            symbol,
-
-        'timeframe':
-            timeframe,
+        'timeframe': timeframe,
 
         'decision': {
             'action': str(
@@ -382,7 +379,7 @@ def _compact_tgp_analysis(result):
                     0
                 )
                 or 0
-            ),
+            )
         },
 
         'levels': {
@@ -424,7 +421,7 @@ def _compact_tgp_analysis(result):
                     0
                 )
                 or 0
-            ),
+            )
         },
 
         'trend': {
@@ -441,7 +438,7 @@ def _compact_tgp_analysis(result):
                     0
                 )
                 or 0
-            ),
+            )
         },
 
         'momentum': {
@@ -450,12 +447,12 @@ def _compact_tgp_analysis(result):
                     'direction',
                     'neutral'
                 )
-            ),
+            )
         },
 
         'structure': {
             'order_blocks_count':
-                _count_list(
+                _count(
                     structure.get(
                         'order_blocks',
                         []
@@ -463,7 +460,7 @@ def _compact_tgp_analysis(result):
                 ),
 
             'fair_value_gaps_count':
-                _count_list(
+                _count(
                     structure.get(
                         'fair_value_gaps',
                         []
@@ -471,12 +468,12 @@ def _compact_tgp_analysis(result):
                 ),
 
             'liquidity_sweeps_count':
-                _count_list(
+                _count(
                     structure.get(
                         'liquidity_sweeps',
                         []
                     )
-                ),
+                )
         },
 
         'correlation': {
@@ -485,7 +482,7 @@ def _compact_tgp_analysis(result):
                     'rotation_signal',
                     'NEUTRAL'
                 )
-            ),
+            )
         },
 
         'current_price': float(
@@ -501,15 +498,13 @@ def _compact_tgp_analysis(result):
                 'timestamp',
                 ''
             )
-        ),
+        )
     }
 
 
-def _tgp_snapshot_put(
-    result
-):
+def _tgp_snapshot_put(result):
     """
-    Guarda un snapshot pequeño en memoria.
+    Guarda un snapshot compacto.
     """
 
     snapshot = _compact_tgp_analysis(
@@ -531,41 +526,24 @@ def _tgp_snapshot_put(
         ] = snapshot
 
 
-def _tgp_snapshot_get():
-    """
-    Retorna snapshots agrupados por timeframe.
-    """
-
-    output = {}
-
-    with _TGP_MARKET_SNAPSHOT_LOCK:
-
-        for (
-            symbol,
-            timeframe
-        ), snapshot in (
-            _TGP_MARKET_SNAPSHOT.items()
-        ):
-
-            output.setdefault(
-                timeframe,
-                {}
-            )[symbol] = dict(
-                snapshot
-            )
-
-    return output
-
-
 def _get_tgp_market_snapshots(
     fallback_result=None
 ):
     """
-    Obtiene snapshots multi-timeframe
-    reutilizando _ANALYSIS_CACHE.
+    Recupera los snapshots disponibles para:
 
-    IMPORTANTE:
-    No ejecuta nuevos análisis.
+        4h
+        12h
+        1D
+        1W
+
+    y:
+
+        BTC-USDT
+        PAXG-USDT
+        PAXG-BTC
+
+    No realiza ningún análisis nuevo.
     """
 
     result = {}
@@ -607,37 +585,32 @@ def _get_tgp_market_snapshots(
                 {}
             )[symbol] = compact
 
-    # ==============================================================
-    # Añadir análisis actual
-    # ==============================================================
+    # --------------------------------------------------------------
+    # Agregar análisis actual por si aún no está en caché
+    # --------------------------------------------------------------
 
-    compact_current = (
+    current = (
         _compact_tgp_analysis(
             fallback_result
         )
     )
 
-    if compact_current:
+    if current:
 
-        tf = compact_current[
+        tf = current[
             'timeframe'
         ]
 
-        sym = compact_current[
+        symbol = current[
             'symbol'
         ]
 
         result.setdefault(
             tf,
             {}
-        )[sym] = compact_current
+        )[symbol] = current
 
     return result
-
-
-# ============================================================================
-# CLASE PRINCIPAL: SISTEMA EXPERTO DE TRADING
-# ============================================================================
 
 # ============================================================================
 # CLASE PRINCIPAL: SISTEMA EXPERTO DE TRADING
@@ -25746,298 +25719,922 @@ try:
 except Exception as _start_err:
     print(f"⚠️ Error arrancando threads background: {_start_err}")
 
+```python
 # ============================================================================
-# Paso 2: NUEVO ENDPOINT /api/analyze-with-portfolio
+# FASE 7B — ENDPOINT /api/analyze-with-portfolio
 # ============================================================================
-# Busca donde terminan los endpoints de app.py (probablemente cerca del final,
-# antes de "if __name__ == '__main__':").
-# Agrega este endpoint completo:
+#
+# Funciones:
+#
+# 1. Ejecuta/recupera el análisis normal del sistema.
+# 2. Valora el portfolio del usuario.
+# 3. Construye snapshots compactos de Spot:
+#
+#       BTC-USDT
+#       PAXG-USDT
+#       PAXG-BTC
+#
+#    en:
+#
+#       4h
+#       12h
+#       1D
+#       1W
+#
+# 4. Ejecuta el TGP multi-timeframe.
+#
+# IMPORTANTE:
+# - No hace 12 análisis adicionales.
+# - Reutiliza _ANALYSIS_CACHE.
+# - El snapshot contiene solamente información ligera.
+# - No se envían DataFrames al TGP.
+# ============================================================================
 
-@app.route('/api/analyze-with-portfolio', methods=['POST'])
+@app.route(
+    '/api/analyze-with-portfolio',
+    methods=['POST']
+)
 def api_analyze_with_portfolio():
-    """
-    Endpoint que analiza el mercado Y evalúa el portafolio del usuario.
-    Retorna la señal del sistema + la recomendación independiente del TGP.
-    """
-    try:
-        data = request.get_json() or {}
-        symbol = data.get('symbol', 'BTC-USDT')
-        timeframe = data.get('timeframe', '1h')
-        user = data.get('user', 'Invitado')
-        portfolio = data.get('portfolio', {})
-        # ==============================================================
-        # PRECIOS PARA TGP — VALIDACIÓN SERVER-SIDE
-        # ==============================================================
-        prices = data.get('prices', {}) or {}
 
+    try:
+
+        # ==============================================================
+        # 1. DATOS RECIBIDOS
+        # ==============================================================
+
+        data = request.get_json(
+            silent=True
+        ) or {}
+
+        symbol = str(
+            data.get(
+                'symbol',
+                'BTC-USDT'
+            )
+        )
+
+        timeframe = str(
+            data.get(
+                'timeframe',
+                '4h'
+            )
+        )
+
+        user = str(
+            data.get(
+                'user',
+                'Invitado'
+            )
+        )
+
+        portfolio = (
+            data.get(
+                'portfolio',
+                {}
+            )
+            or {}
+        )
+
+        # ==============================================================
+        # 2. PRECIOS
+        # ==============================================================
+
+        prices = (
+            data.get(
+                'prices',
+                {}
+            )
+            or {}
+        )
+
+        # ==============================================================
+        # 3. VALIDACIÓN SERVER-SIDE DE PRECIOS
+        # ==============================================================
+        #
         # No confiar exclusivamente en lastPrices del navegador.
-        # Si falta BTC o PAXG, obtener el precio de KuCoin desde backend.
+        # Sólo consultar mercado si realmente falta un precio.
+        # ==============================================================
+
         try:
-             if (
-                float(
-                    prices.get(
-                        'BTC-USDT',
-                        0
-                    )
-                    or 0
-                ) <= 0
-                or
-                float(
-                    prices.get(
-                        'PAXG-USDT',
-                        0
-                    )
-                    or 0
-                ) <= 0
+
+            btc_price = float(
+                prices.get(
+                    'BTC-USDT',
+                    0
+                )
+                or 0
+            )
+
+            paxg_price = float(
+                prices.get(
+                    'PAXG-USDT',
+                    0
+                )
+                or 0
+            )
+
+            if (
+                btc_price <= 0
+                or paxg_price <= 0
             ):
-            
+
                 print(
                     "🛡️ TGP: precios incompletos "
-                    "desde frontend. Intentando reutilizar "
-                    "análisis/cache antes de hacer una petición externa..."
+                    "desde frontend. "
+                    "Intentando recuperación server-side..."
                 )
-            
-                # ==============================================================
-                # 1. Intentar reutilizar los análisis existentes
-                # ==============================================================
-            
-                with _ANALYSIS_CACHE_LOCK:
-            
-                    cache_copy = list(
-                        _ANALYSIS_CACHE.items()
+
+                # Usar el experto global ya existente.
+                btc_df = expert_system.get_kucoin_data(
+                    'BTC-USDT',
+                    '1h'
+                )
+
+                paxg_df = expert_system.get_kucoin_data(
+                    'PAXG-USDT',
+                    '1h'
+                )
+
+                if (
+                    btc_df is not None
+                    and len(btc_df) > 0
+                ):
+
+                    prices[
+                        'BTC-USDT'
+                    ] = float(
+                        btc_df[
+                            'close'
+                        ].iloc[-1]
                     )
-            
-                for (
-                    key,
-                    cache_entry
-                ) in cache_copy:
-            
-                    try:
-            
-                        cached_symbol, cached_tf = key
-            
-                    except (
-                        TypeError,
-                        ValueError
-                    ):
-            
-                        continue
-            
-                    if (
-                        cached_symbol
-                        not in (
-                            'BTC-USDT',
-                            'PAXG-USDT'
-                        )
-                    ):
-                        continue
-            
-                    if not isinstance(
-                        cache_entry,
-                        dict
-                    ):
-                        continue
-            
-                    cached_result = (
-                        cache_entry.get(
-                            'data'
-                        )
-                        or {}
+
+                if (
+                    paxg_df is not None
+                    and len(paxg_df) > 0
+                ):
+
+                    prices[
+                        'PAXG-USDT'
+                    ] = float(
+                        paxg_df[
+                            'close'
+                        ].iloc[-1]
                     )
-            
-                    cached_price = float(
-                        cached_result.get(
+
+        except Exception as price_error:
+
+            print(
+                "⚠️ TGP: error recuperando "
+                f"precios server-side: {price_error}"
+            )
+
+        # ==============================================================
+        # 4. LOG INICIAL
+        # ==============================================================
+
+        print(
+            f"\n{'=' * 60}"
+        )
+
+        print(
+            f"👤 {user} - Análisis con Portafolio"
+        )
+
+        print(
+            f"{'=' * 60}"
+        )
+
+        print(
+            "   Portafolio: "
+            f"BTC={portfolio.get('BTC', 0)}, "
+            f"PAXG={portfolio.get('PAXG', 0)}, "
+            f"USDT={portfolio.get('USDT', 0)}"
+        )
+
+        print(
+            "   Precios: "
+            f"BTC={prices.get('BTC-USDT')}, "
+            f"PAXG={prices.get('PAXG-USDT')}"
+        )
+
+        # ==============================================================
+        # 5. CACHE DEL ENDPOINT
+        # ==============================================================
+
+        cache_key = (
+            f"{symbol}_{timeframe}"
+        )
+
+        cache_ts = getattr(
+            api_analyze_with_portfolio,
+            '_cache_ts',
+            {}
+        )
+
+        cache_data = getattr(
+            api_analyze_with_portfolio,
+            '_cache_data',
+            {}
+        )
+
+        now = time.time()
+
+        # ==============================================================
+        # ==============================================================
+        # FUNCIÓN LOCAL: SNAPSHOT COMPACTO
+        # ==============================================================
+        #
+        # Se define DENTRO del endpoint deliberadamente.
+        #
+        # Así evitamos depender de funciones que puedan quedar
+        # accidentalmente dentro de otro bloque por problemas
+        # de indentación al editar GitHub Web.
+        #
+        # No crea DataFrames.
+        # No llama APIs.
+        # ==============================================================
+        # ==============================================================
+
+        def _compact_tgp_snapshot(
+            analysis_result
+        ):
+
+            if not isinstance(
+                analysis_result,
+                dict
+            ):
+                return None
+
+            if not analysis_result.get(
+                'success'
+            ):
+                return None
+
+            snap_symbol = (
+                analysis_result.get(
+                    'symbol'
+                )
+            )
+
+            snap_tf = (
+                analysis_result.get(
+                    'timeframe'
+                )
+            )
+
+            if snap_symbol not in (
+                'BTC-USDT',
+                'PAXG-USDT',
+                'PAXG-BTC'
+            ):
+                return None
+
+            if snap_tf not in (
+                '4h',
+                '12h',
+                '1D',
+                '1W'
+            ):
+                return None
+
+            decision = (
+                analysis_result.get(
+                    'decision',
+                    {}
+                )
+                or {}
+            )
+
+            levels = (
+                analysis_result.get(
+                    'levels',
+                    {}
+                )
+                or {}
+            )
+
+            trend = (
+                analysis_result.get(
+                    'trend',
+                    {}
+                )
+                or {}
+            )
+
+            momentum = (
+                analysis_result.get(
+                    'momentum',
+                    {}
+                )
+                or {}
+            )
+
+            structure = (
+                analysis_result.get(
+                    'structure',
+                    {}
+                )
+                or {}
+            )
+
+            correlation = (
+                analysis_result.get(
+                    'correlation',
+                    {}
+                )
+                or {}
+            )
+
+            def _num(
+                value,
+                default=0.0
+            ):
+
+                try:
+
+                    return float(
+                        value
+                        if value is not None
+                        else default
+                    )
+
+                except (
+                    TypeError,
+                    ValueError
+                ):
+
+                    return default
+
+            def _count(
+                value
+            ):
+
+                if isinstance(
+                    value,
+                    (list, tuple)
+                ):
+                    return len(
+                        value
+                    )
+
+                return 0
+
+            return {
+
+                'success': True,
+
+                'symbol':
+                    snap_symbol,
+
+                'timeframe':
+                    snap_tf,
+
+                'decision': {
+
+                    'action': str(
+                        decision.get(
+                            'action',
+                            'NO_OPERAR'
+                        )
+                    ),
+
+                    'confidence':
+                        _num(
+                            decision.get(
+                                'confidence',
+                                0
+                            )
+                        )
+                },
+
+                'levels': {
+
+                    'execution_safety':
+                        _num(
+                            levels.get(
+                                'execution_safety',
+                                0
+                            )
+                        ),
+
+                    'entry_score':
+                        _num(
+                            levels.get(
+                                'entry_score',
+                                0
+                            )
+                        ),
+
+                    'tp_quality_score':
+                        _num(
+                            levels.get(
+                                'tp_quality_score',
+                                0
+                            )
+                        ),
+
+                    'sl_reliability':
+                        _num(
+                            levels.get(
+                                'sl_reliability',
+                                0
+                            )
+                        ),
+
+                    'risk_reward':
+                        _num(
+                            levels.get(
+                                'risk_reward',
+                                0
+                            )
+                        )
+                },
+
+                'trend': {
+
+                    'direction':
+                        str(
+                            trend.get(
+                                'direction',
+                                'neutral'
+                            )
+                        ),
+
+                    'adx':
+                        _num(
+                            trend.get(
+                                'adx',
+                                0
+                            )
+                        )
+                },
+
+                'momentum': {
+
+                    'direction':
+                        str(
+                            momentum.get(
+                                'direction',
+                                'neutral'
+                            )
+                        )
+                },
+
+                'structure': {
+
+                    'order_blocks_count':
+                        _count(
+                            structure.get(
+                                'order_blocks',
+                                []
+                            )
+                        ),
+
+                    'fair_value_gaps_count':
+                        _count(
+                            structure.get(
+                                'fair_value_gaps',
+                                []
+                            )
+                        ),
+
+                    'liquidity_sweeps_count':
+                        _count(
+                            structure.get(
+                                'liquidity_sweeps',
+                                []
+                            )
+                        )
+                },
+
+                'correlation': {
+
+                    'rotation_signal':
+                        str(
+                            correlation.get(
+                                'rotation_signal',
+                                'NEUTRAL'
+                            )
+                        )
+                },
+
+                'current_price':
+                    _num(
+                        analysis_result.get(
                             'current_price',
                             0
                         )
-                        or 0
                     )
-            
-                    if cached_price <= 0:
-                        continue
-            
-                    if (
-                        cached_symbol
-                        == 'BTC-USDT'
-                        and float(
-                            prices.get(
-                                'BTC-USDT',
-                                0
-                            )
-                            or 0
-                        ) <= 0
-                    ):
-            
-                        prices[
-                            'BTC-USDT'
-                        ] = cached_price
-            
-                    elif (
-                        cached_symbol
-                        == 'PAXG-USDT'
-                        and float(
-                            prices.get(
-                                'PAXG-USDT',
-                                0
-                            )
-                            or 0
-                        ) <= 0
-                    ):
-            
-                        prices[
-                            'PAXG-USDT'
-                        ] = cached_price
-            
-                # ==============================================================
-                # 2. Sólo si todavía faltan precios,
-                #    pedirlos al exchange.
-                # ==============================================================
-            
-                try:
-            
-                    if float(
-                        prices.get(
-                            'BTC-USDT',
-                            0
-                        )
-                        or 0
-                    ) <= 0:
-            
-                        btc_df = (
-                            expert_system
-                            .get_kucoin_data(
-                                'BTC-USDT',
-                                '1h'
-                            )
-                        )
-            
-                        if (
-                            btc_df is not None
-                            and len(btc_df) > 0
-                        ):
-            
-                            prices[
-                                'BTC-USDT'
-                            ] = float(
-                                btc_df[
-                                    'close'
-                                ].iloc[-1]
-                            )
-            
-                    if float(
-                        prices.get(
-                            'PAXG-USDT',
-                            0
-                        )
-                        or 0
-                    ) <= 0:
-            
-                        paxg_df = (
-                            expert_system
-                            .get_kucoin_data(
-                                'PAXG-USDT',
-                                '1h'
-                            )
-                        )
-            
-                        if (
-                            paxg_df is not None
-                            and len(paxg_df) > 0
-                        ):
-            
-                            prices[
-                                'PAXG-USDT'
-                            ] = float(
-                                paxg_df[
-                                    'close'
-                                ].iloc[-1]
-                            )
-            
-                except Exception as price_error:
-            
-                    print(
-                        f"⚠️ TGP: no se pudieron recuperar "
-                        f"precios server-side: "
-                        f"{price_error}"
-                    )
+            }
 
-        print(f"\n{'='*60}")
-        print(f"👤 {user} - Análisis con Portafolio")
-        print(f"{'='*60}")
-        print(f"   Portafolio: BTC={portfolio.get('BTC',0)}, PAXG={portfolio.get('PAXG',0)}, USDT={portfolio.get('USDT',0)}")
-        print(f"   Precios: BTC={prices.get('BTC-USDT')}, PAXG={prices.get('PAXG-USDT')}")
+        # ==============================================================
+        # 6. CONSTRUIR SNAPSHOTS MULTI-TIMEFRAME
+        # ==============================================================
 
-        # ====== CACHE DE RESULTADO (5 minutos) ======
-        cache_key = f"{symbol}_{timeframe}"
-        cache_ts = getattr(api_analyze_with_portfolio, '_cache_ts', {})
-        cache_data = getattr(api_analyze_with_portfolio, '_cache_data', {})
-        
-        from time import time
-        now = time()
-        if cache_key in cache_ts and (now - cache_ts[cache_key]) < 300:  # 5 minutos
-            print(f"   💾 Cache hit: {cache_key} ({int(now - cache_ts[cache_key])}s ago)")
-            result = cache_data[cache_key].copy()
-            # Recalcular TGP con datos frescos del usuario (portafolio puede cambiar)
+        market_snapshots = {}
 
-            # ==============================================================
-            # TGP MULTI-TIMEFRAME
-            # ==============================================================
-            
-            try:
-            
-                _tgp_snapshot_put(
-                    result
+        # --------------------------------------------------------------
+        # 6A. Leer los resultados ya cacheados
+        # --------------------------------------------------------------
+
+        with _ANALYSIS_CACHE_LOCK:
+
+            cached_items = list(
+                _ANALYSIS_CACHE.items()
+            )
+
+        for (
+            cache_symbol,
+            cache_tf
+        ), cache_entry in cached_items:
+
+            if cache_symbol not in (
+                'BTC-USDT',
+                'PAXG-USDT',
+                'PAXG-BTC'
+            ):
+                continue
+
+            if cache_tf not in (
+                '4h',
+                '12h',
+                '1D',
+                '1W'
+            ):
+                continue
+
+            cached_analysis = (
+                cache_entry.get(
+                    'data'
                 )
-            
-            except Exception as _snapshot_error:
-            
+                if isinstance(
+                    cache_entry,
+                    dict
+                )
+                else None
+            )
+
+            compact = (
+                _compact_tgp_snapshot(
+                    cached_analysis
+                )
+            )
+
+            if compact:
+
+                market_snapshots.setdefault(
+                    cache_tf,
+                    {}
+                )[
+                    cache_symbol
+                ] = compact
+
+        # --------------------------------------------------------------
+        # 6B. Añadir el análisis actual
+        # --------------------------------------------------------------
+
+        # ==============================================================
+        # 6B. El análisis actual se agregará después de obtenerlo.
+        # ==============================================================
+        # En este punto result todavía puede no existir.
+        # Se añadirá después de ejecutar el análisis normal.
+
+        # ==============================================================
+        # 7. CACHE HIT
+        # ==============================================================
+
+        if (
+            cache_key in cache_ts
+            and (
+                now
+                - cache_ts[
+                    cache_key
+                ]
+            ) < 300
+        ):
+
+            print(
+                f"   💾 Cache hit: "
+                f"{cache_key} "
+                f"({int(now - cache_ts[cache_key])}s ago)"
+            )
+
+            result = dict(
+                cache_data[
+                    cache_key
+                ]
+            )
+
+        else:
+
+            # ==========================================================
+            # 8. ANÁLISIS NORMAL DEL SISTEMA
+            # ==========================================================
+
+            if not hasattr(
+                api_analyze_with_portfolio,
+                '_trading_system'
+            ):
+
+                api_analyze_with_portfolio._trading_system = (
+                    TradingExpertSystem()
+                )
+
+            trading_system = (
+                api_analyze_with_portfolio
+                ._trading_system
+            )
+
+            print(
+                f"   🧠 Analizando "
+                f"{symbol} {timeframe}..."
+            )
+
+            result = (
+                trading_system
+                .analyze_full_market(
+                    symbol,
+                    timeframe
+                )
+            )
+
+            if (
+                not result
+                or not result.get(
+                    'success'
+                )
+            ):
+
+                return jsonify({
+                    'success': False,
+                    'error':
+                        'Análisis del sistema falló',
+                    'system_result':
+                        result
+                }), 500
+
+        # ==============================================================
+        # 9. ACTUALIZAR SNAPSHOT DEL ANÁLISIS ACTUAL
+        # ==============================================================
+
+        current_compact = (
+            _compact_tgp_snapshot(
+                result
+            )
+        )
+
+        if current_compact:
+
+            current_tf = (
+                current_compact[
+                    'timeframe'
+                ]
+            )
+
+            current_symbol = (
+                current_compact[
+                    'symbol'
+                ]
+            )
+
+            market_snapshots.setdefault(
+                current_tf,
+                {}
+            )[
+                current_symbol
+            ] = current_compact
+
+        # ==============================================================
+        # 10. RECONSTRUIR SNAPSHOTS DESDE CACHE
+        # ==============================================================
+        #
+        # Volvemos a leer el caché porque result puede haber sido
+        # recién generado y guardado posteriormente por
+        # analyze_full_market().
+        # ==============================================================
+
+        with _ANALYSIS_CACHE_LOCK:
+
+            cached_items = list(
+                _ANALYSIS_CACHE.items()
+            )
+
+        for (
+            cache_symbol,
+            cache_tf
+        ), cache_entry in cached_items:
+
+            if cache_symbol not in (
+                'BTC-USDT',
+                'PAXG-USDT',
+                'PAXG-BTC'
+            ):
+                continue
+
+            if cache_tf not in (
+                '4h',
+                '12h',
+                '1D',
+                '1W'
+            ):
+                continue
+
+            cached_analysis = (
+                cache_entry.get(
+                    'data'
+                )
+                if isinstance(
+                    cache_entry,
+                    dict
+                )
+                else None
+            )
+
+            compact = (
+                _compact_tgp_snapshot(
+                    cached_analysis
+                )
+            )
+
+            if compact:
+
+                market_snapshots.setdefault(
+                    cache_tf,
+                    {}
+                )[
+                    cache_symbol
+                ] = compact
+
+        # ==============================================================
+        # 11. TGP MULTI-TIMEFRAME
+        # ==============================================================
+
+        print(
+            "   🛡️ Ejecutando "
+            "TGP Multi-Timeframe..."
+        )
+
+        tgp_result = (
+            portfolio_guardian
+            .analyze_multi_timeframe(
+                user=user,
+                portfolio=portfolio,
+                prices=prices,
+                market_snapshots=(
+                    market_snapshots
+                )
+            )
+        )
+
+        if not isinstance(
+            tgp_result,
+            dict
+        ):
+
+            tgp_result = {
+
+                'action':
+                    'HOLD',
+
+                'confidence':
+                    0,
+
+                'reason':
+                    'El TGP no devolvió una respuesta válida.'
+            }
+
+        # ==============================================================
+        # 12. MERGE
+        # ==============================================================
+
+        result['tgp'] = (
+            tgp_result
+        )
+
+        result['user'] = user
+
+        # ==============================================================
+        # 13. CACHE DEL ENDPOINT
+        # ==============================================================
+
+        cache_ts[
+            cache_key
+        ] = now
+
+        cache_data[
+            cache_key
+        ] = dict(
+            result
+        )
+
+        api_analyze_with_portfolio._cache_ts = (
+            cache_ts
+        )
+
+        api_analyze_with_portfolio._cache_data = (
+            cache_data
+        )
+
+        # ==============================================================
+        # 14. LOG TGP
+        # ==============================================================
+
+        print(
+            f"   🛡️ TGP: "
+            f"{tgp_result.get('action', 'HOLD')} "
+            f"| Conf: "
+            f"{tgp_result.get('confidence', 0)}%"
+        )
+
+        reason_text = str(
+            tgp_result.get(
+                'reason',
+                ''
+            )
+        )
+
+        if reason_text:
+
+            print(
+                "   🛡️ Razón: "
+                f"{reason_text[:120]}..."
+            )
+
+        print(
+            "   📊 TF disponibles TGP: "
+            f"{list(market_snapshots.keys())}"
+        )
+
+        # ==============================================================
+        # 15. TELEGRAM — SÓLO SI ES URGENTE
+        # ==============================================================
+
+        try:
+
+            should_alert, alert_reason = (
+                should_send_tgp_alert(
+                    tgp_result,
+                    user
+                )
+            )
+
+            if should_alert:
+
                 print(
-                    f"⚠️ TGP snapshot: "
-                    f"{_snapshot_error}"
+                    "   📱 TGP Telegram: "
+                    f"{alert_reason} → Enviando..."
                 )
-            
-            market_snapshots = (
-                _get_tgp_market_snapshots(
-                    fallback_result=result
+
+                send_tgp_telegram_alert(
+                    tgp_result,
+                    user,
+                    symbol,
+                    timeframe,
+                    prices
                 )
+
+            else:
+
+                print(
+                    "   📱 TGP Telegram: "
+                    "No urgente. Sin alerta."
+                )
+
+        except Exception as telegram_error:
+
+            print(
+                "   ⚠️ Error alerta TGP: "
+                f"{telegram_error}"
             )
-            
-            tgp_result = (
-                portfolio_guardian
-                .analyze_multi_timeframe(
-                    user=user,
-                    portfolio=portfolio,
-                    prices=prices,
-                    market_snapshots=market_snapshots
-                )
-            )
-            result['tgp'] = tgp_result
-            result['user'] = user
-            print(f"\n   🛡️ TGP (cache): {tgp_result['action']} | Conf: {tgp_result['confidence']}%")
-            print(f"{'='*60}\n")
-            return jsonify(result)
-        # ============================================
 
-        # Usar instancia cacheada para no saturar recursos
-        if not hasattr(api_analyze_with_portfolio, '_trading_system'):
-            api_analyze_with_portfolio._trading_system = TradingExpertSystem()
-        trading_system = api_analyze_with_portfolio._trading_system
+        # ==============================================================
+        # 16. RESPUESTA
+        # ==============================================================
 
-        # 1. Análisis normal del sistema (9 traders + moderador)
-        result = trading_system.analyze_full_market(symbol, timeframe)
+        print(
+            f"{'=' * 60}\n"
+        )
 
-        if not result or not result.get('success'):
-            return jsonify({
-                'success': False,
-                'error': 'Análisis del sistema falló',
-                'system_result': result
-            }), 500
+        return jsonify(
+            result
+        )
 
     except Exception as e:
-        print(f"❌ Error en /api/analyze-with-portfolio: {e}")
+
+        print(
+            "❌ Error en "
+            "/api/analyze-with-portfolio: "
+            f"{e}"
+        )
+
         import traceback
+
         traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)}), 500
+
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
 # ============================================================================
 # Paso 3: NUEVO ENDPOINT /api/save-spot-trade
