@@ -5,366 +5,838 @@ let currentAnalysis = null;
 let currentSymbol = 'BTC-USDT';
 let currentInterval = '1D';
 
-// ====== VARIABLES DEL GUARDIÁN DE PORTAFOLIO (TGP) ======
-// --- SESIÓN PERSISTENTE ---
-function getTGPUserKey(suffix) {
-    const u = localStorage.getItem('tgp_session_user') || 'Willer';
-    return suffix ? `portfolio_${suffix}_${u}` : `portfolio_${suffix}`;
-}
+// ============================================================================
+// TGP — AUTENTICACIÓN Y PORTFOLIO SERVER-SIDE
+// ============================================================================
+//
+// REGLA:
+// - La identidad real proviene EXCLUSIVAMENTE de Flask Session.
+// - El navegador NO determina qué usuario está autenticado.
+// - El portfolio real proviene EXCLUSIVAMENTE del servidor/Supabase.
+// - localStorage NO se utiliza para autenticación ni portfolio.
+// ============================================================================
 
-let currentUser = localStorage.getItem('tgp_session_user') || localStorage.getItem('smarttrading_user') || 'Willer';
-let isLoggedIn = localStorage.getItem('tgp_logged_in') === 'true';
+let currentUser = null;
+let isLoggedIn = false;
 
-// Cargar portafolio del usuario actual (con clave por usuario)
-function loadUserPortfolio() {
-    const u = currentUser;
-    return {
-        BTC: parseFloat(localStorage.getItem(`portfolio_btc_${u}`)) || 0.00158007,
-        PAXG: parseFloat(localStorage.getItem(`portfolio_paxg_${u}`)) || 0.23673009,
-        USDT: parseFloat(localStorage.getItem(`portfolio_usdt_${u}`)) || 0
-    };
-}
+let userPortfolio = {
+    BTC: 0,
+    PAXG: 0,
+    USDT: 0
+};
 
-let userPortfolio = loadUserPortfolio();
-let lastPrices = { 'BTC-USDT': 0, 'PAXG-USDT': 0 };
+let lastPrices = {
+    'BTC-USDT': 0,
+    'PAXG-USDT': 0
+};
+
 let lastTGPResult = null;
-// ====== FIN VARIABLES TGP ======
 
-
-
-// ====== FIN VARIABLES TGP ======
-
-// Helper global: nunca mostrar confianza > 100% (defensa contra datos viejos).
-// Si futures.js ya lo definió, no lo sobreescribe.
-if (typeof window.fmtConfidence !== 'function') {
-    window.fmtConfidence = function(c) {
-        const n = Number(c) || 0;
-        return Math.max(0, Math.min(100, n)).toFixed(0);
-    };
-}
 
 // ============================================================================
-// HELPER UNIVERSAL PARA FETCH (Spot o Futuros según window.IS_FUTURES_PAGE)
+// ESTADO DE AUTENTICACIÓN
 // ============================================================================
-// Devuelve la URL correcta para hacer el análisis según si estamos en /futures
-// o en la página principal (Spot). Es transparente para el resto del código.
-window.buildAnalyzeURL = function(symbol, interval) {
-    if (window.IS_FUTURES_PAGE) {
-        // Para futuros usamos POST a /api/futures/analyze, pero seguimos
-        // exponiendo una URL "GET-like" aquí. El fetch real se hace más abajo.
-        return { url: '/api/futures/analyze', method: 'POST', body: { symbol, timeframe: interval } };
-    }
-    return { url: `/api/analyze?symbol=${symbol}&interval=${interval}`, method: 'GET', body: null };
-};
-
-// Wrapper de fetch que hace POST o GET según corresponda
-window.fetchAnalyze = async function(symbol, interval) {
-    const req = window.buildAnalyzeURL(symbol, interval);
-    const opts = {
-        method: req.method,
-        headers: { 'Content-Type': 'application/json' }
-    };
-    if (req.method === 'POST' && req.body) {
-        opts.body = JSON.stringify(req.body);
-    }
-    const response = await fetch(req.url, opts);
-    return response.json();
-};
-
-// ====== FUNCIONES DEL GUARDIÁN DE PORTAFOLIO (TGP) ======
-
-function getUserPassword(user) {
-    return localStorage.getItem('tgp_pass_' + user) || DEFAULT_PASSWORDS[user] || null;
-}
-
-function setUserPassword(user, newPass) {
-    localStorage.setItem('tgp_pass_' + user, newPass);
-}
-
-function getUserPortfolio(user) {
-    const key = 'tgp_portfolio_' + user;
-    const saved = localStorage.getItem(key);
-    if (saved) return JSON.parse(saved);
-    return { BTC: 0, PAXG: 0, USDT: 0 };
-}
-
-function saveUserPortfolio(user, portfolio) {
-    localStorage.setItem('tgp_portfolio_' + user, JSON.stringify(portfolio));
-}
 
 function isAuthenticated() {
-    return localStorage.getItem('tgp_logged_in') === 'true';
+    return isLoggedIn === true && !!currentUser;
 }
+
 
 function getAuthenticatedUser() {
-    return localStorage.getItem('tgp_session_user');
+    return currentUser;
 }
 
-function login(user, password) {
-    const correctPass = getUserPassword(user);
-    if (correctPass && password === correctPass) {
-        currentUser = user;
-        localStorage.setItem('tgp_logged_in', 'true');        // <-- UNIFICAR
-        localStorage.setItem('tgp_session_user', user);       // <-- UNIFICAR
-        localStorage.setItem('smarttrading_user', user);
-        userPortfolio = getUserPortfolio(user);
-        updatePortfolioUI();
-        return true;
+
+// ============================================================================
+// LIMPIAR DATOS PRIVADOS DEL FRONTEND
+// ============================================================================
+
+function clearPrivateUserState() {
+    currentUser = null;
+    isLoggedIn = false;
+
+    userPortfolio = {
+        BTC: 0,
+        PAXG: 0,
+        USDT: 0
+    };
+
+    lastTGPResult = null;
+
+    const loginPrompt =
+        document.getElementById('portfolio-login-prompt');
+
+    const portfolioForm =
+        document.getElementById('portfolio-form');
+
+    const userDisplay =
+        document.getElementById('portfolio-user-display');
+
+    const savedSignalsCard =
+        document.getElementById('saved-signals-card');
+
+    if (loginPrompt) {
+        loginPrompt.classList.remove('d-none');
     }
-    return false;
-}
 
-function logout() {
-    currentUser = 'Invitado';
-    userPortfolio = { BTC: 0, PAXG: 0, USDT: 0 };
-    localStorage.removeItem('tgp_logged_in');           // <-- UNIFICAR
-    localStorage.removeItem('tgp_session_user');        // <-- UNIFICAR
-    localStorage.removeItem('smarttrading_user');
-    updatePortfolioUI();
-}
-
-function changePassword(user, oldPass, newPass) {
-    const correctPass = getUserPassword(user);
-    if (correctPass && oldPass === correctPass) {
-        setUserPassword(user, newPass);
-        return true;
+    if (portfolioForm) {
+        portfolioForm.classList.add('d-none');
     }
-    return false;
+
+    if (userDisplay) {
+        userDisplay.textContent = 'Invitado';
+        userDisplay.className = 'badge bg-secondary';
+    }
+
+    if (savedSignalsCard) {
+        savedSignalsCard.style.display = 'none';
+    }
 }
+
+
+// ============================================================================
+// OBTENER SESIÓN REAL DEL SERVIDOR
+// ============================================================================
+
+async function refreshAuthenticationState() {
+    try {
+        const response = await fetch(
+            '/api/auth/me',
+            {
+                method: 'GET',
+                credentials: 'same-origin',
+                cache: 'no-store'
+            }
+        );
+
+        const data = await response.json();
+
+        if (
+            response.ok
+            && data.success === true
+            && data.authenticated === true
+            && data.user
+        ) {
+            currentUser = data.user;
+            isLoggedIn = true;
+
+            return true;
+        }
+
+        clearPrivateUserState();
+
+        return false;
+
+    } catch (error) {
+        console.error(
+            '❌ Error verificando sesión:',
+            error
+        );
+
+        clearPrivateUserState();
+
+        return false;
+    }
+}
+
+
+// ============================================================================
+// CARGAR PORTFOLIO REAL DESDE EL SERVIDOR
+// ============================================================================
+
+async function loadUserPortfolio() {
+    if (!isAuthenticated()) {
+        userPortfolio = {
+            BTC: 0,
+            PAXG: 0,
+            USDT: 0
+        };
+
+        return false;
+    }
+
+    try {
+        const response = await fetch(
+            '/api/user-portfolio',
+            {
+                method: 'GET',
+                credentials: 'same-origin',
+                cache: 'no-store'
+            }
+        );
+
+        const data = await response.json();
+
+        if (
+            response.ok
+            && data.success === true
+            && data.authenticated === true
+            && data.portfolio
+        ) {
+            userPortfolio = {
+                BTC: Number(
+                    data.portfolio.BTC
+                    ?? data.portfolio.btc_amount
+                    ?? 0
+                ),
+                PAXG: Number(
+                    data.portfolio.PAXG
+                    ?? data.portfolio.paxg_amount
+                    ?? 0
+                ),
+                USDT: Number(
+                    data.portfolio.USDT
+                    ?? data.portfolio.usdt_amount
+                    ?? 0
+                )
+            };
+
+            console.log(
+                '✅ Portfolio cargado para:',
+                currentUser
+            );
+
+            return true;
+        }
+
+        console.warn(
+            '⚠️ Portfolio no disponible para:',
+            currentUser
+        );
+
+        userPortfolio = {
+            BTC: 0,
+            PAXG: 0,
+            USDT: 0
+        };
+
+        return false;
+
+    } catch (error) {
+        console.error(
+            '❌ Error cargando portfolio:',
+            error
+        );
+
+        userPortfolio = {
+            BTC: 0,
+            PAXG: 0,
+            USDT: 0
+        };
+
+        return false;
+    }
+}
+
+
+// ============================================================================
+// GUARDAR PORTFOLIO REAL EN SERVIDOR
+// ============================================================================
+
+async function savePortfolioToLocal() {
+    if (!isAuthenticated()) {
+        showToast(
+            'Debes iniciar sesión para guardar el portafolio.',
+            'warning'
+        );
+        return false;
+    }
+
+    const btc =
+        Math.max(
+            0,
+            parseFloat(
+                document.getElementById('portfolio-btc')?.value
+            ) || 0
+        );
+
+    const paxg =
+        Math.max(
+            0,
+            parseFloat(
+                document.getElementById('portfolio-paxg')?.value
+            ) || 0
+        );
+
+    const usdt =
+        Math.max(
+            0,
+            parseFloat(
+                document.getElementById('portfolio-usdt')?.value
+            ) || 0
+        );
+
+    try {
+        const response = await fetch(
+            '/api/user-portfolio',
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                credentials: 'same-origin',
+                body: JSON.stringify({
+                    BTC: btc,
+                    PAXG: paxg,
+                    USDT: usdt,
+
+                    btc_price:
+                        Number(
+                            lastPrices['BTC-USDT'] || 0
+                        ),
+
+                    paxg_price:
+                        Number(
+                            lastPrices['PAXG-USDT'] || 0
+                        )
+                })
+            }
+        );
+
+        const data = await response.json();
+
+        if (
+            response.ok
+            && data.success === true
+            && data.authenticated === true
+            && data.portfolio
+        ) {
+            userPortfolio = {
+                BTC: Number(
+                    data.portfolio.BTC
+                    ?? data.portfolio.btc_amount
+                    ?? btc
+                ),
+
+                PAXG: Number(
+                    data.portfolio.PAXG
+                    ?? data.portfolio.paxg_amount
+                    ?? paxg
+                ),
+
+                USDT: Number(
+                    data.portfolio.USDT
+                    ?? data.portfolio.usdt_amount
+                    ?? usdt
+                )
+            };
+
+            updatePortfolioUI();
+
+            showToast(
+                'Portafolio guardado correctamente.',
+                'success'
+            );
+
+            console.log(
+                '✅ Portfolio persistido en servidor para:',
+                currentUser
+            );
+
+            return true;
+        }
+
+        throw new Error(
+            data.error
+            || 'No se pudo guardar el portafolio.'
+        );
+
+    } catch (error) {
+        console.error(
+            '❌ Error guardando portfolio:',
+            error
+        );
+
+        showToast(
+            '❌ No se pudo guardar el portafolio.',
+            'danger'
+        );
+
+        return false;
+    }
+}
+
+
+// ============================================================================
+// ACTUALIZAR INTERFAZ DEL PORTFOLIO
+// ============================================================================
 
 function updatePortfolioUI() {
-    const loginPrompt = document.getElementById('portfolio-login-prompt');
-    const portfolioForm = document.getElementById('portfolio-form');
-    const userDisplay = document.getElementById('portfolio-user-display');
-    const userSelect = document.getElementById('portfolio-user-select');
+    const loginPrompt =
+        document.getElementById(
+            'portfolio-login-prompt'
+        );
+
+    const portfolioForm =
+        document.getElementById(
+            'portfolio-form'
+        );
+
+    const userDisplay =
+        document.getElementById(
+            'portfolio-user-display'
+        );
+
+    const userSelect =
+        document.getElementById(
+            'portfolio-user-select'
+        );
+
+    // El selector de usuario ya NO participa del sistema.
     if (userSelect) {
-        if (isAuthenticated()) {
-            userSelect.style.display = 'block';
-            userSelect.value = currentUser || getAuthenticatedUser();
-        } else {
-            userSelect.style.display = 'none';
-        }
-    }    
-    
-    if (!loginPrompt || !portfolioForm) return;
-    
+        userSelect.style.display = 'none';
+        userSelect.disabled = true;
+    }
+
     if (!isAuthenticated()) {
-        loginPrompt.classList.remove('d-none');
-        portfolioForm.classList.add('d-none');
-        if (userDisplay) { userDisplay.textContent = 'Invitado'; userDisplay.className = 'badge bg-secondary'; }
+        if (loginPrompt) {
+            loginPrompt.classList.remove('d-none');
+        }
+
+        if (portfolioForm) {
+            portfolioForm.classList.add('d-none');
+        }
+
+        if (userDisplay) {
+            userDisplay.textContent = 'Invitado';
+            userDisplay.className =
+                'badge bg-secondary';
+        }
+
         return;
     }
-    
-    loginPrompt.classList.add('d-none');
-    portfolioForm.classList.remove('d-none');
-    if (userDisplay) { userDisplay.textContent = currentUser || getAuthenticatedUser(); userDisplay.className = 'badge bg-primary'; }
-    
-    const btcInput = document.getElementById('portfolio-btc');
-    const paxgInput = document.getElementById('portfolio-paxg');
-    const usdtInput = document.getElementById('portfolio-usdt');
-    
-    if (btcInput) btcInput.value = userPortfolio.BTC.toFixed(8);
-    if (paxgInput) paxgInput.value = userPortfolio.PAXG.toFixed(8);
-    if (usdtInput) usdtInput.value = userPortfolio.USDT.toFixed(2);
-    
-    const btcPrice = lastPrices['BTC-USDT'] || 78800;
-    const paxgPrice = lastPrices['PAXG-USDT'] || 2650;
 
-    const btcValue = userPortfolio.BTC * btcPrice;
-    const paxgValue = userPortfolio.PAXG * paxgPrice;
-    const usdtValue = userPortfolio.USDT;
-    const total = btcValue + paxgValue + usdtValue;
+    if (loginPrompt) {
+        loginPrompt.classList.add('d-none');
+    }
 
-    // Actualizar valores individuales en USD (debajo de cada input)
-    // Actualizar valores individuales en USD (ocultos por ahora, solo porcentajes)
-    const valBtcEl = document.getElementById('val-btc');
-    const valPaxgEl = document.getElementById('val-paxg');
-    const totalEl = document.getElementById('portfolio-total-usd');
-    
-    // Ocultar valores absolutos en USD (solo mostrar porcentajes)
-    if (valBtcEl) valBtcEl.style.display = 'none';
-    if (valPaxgEl) valPaxgEl.style.display = 'none';
-    if (totalEl) totalEl.style.display = 'none';
-    
+    if (portfolioForm) {
+        portfolioForm.classList.remove('d-none');
+    }
+
+    if (userDisplay) {
+        userDisplay.textContent = currentUser;
+        userDisplay.className =
+            'badge bg-primary';
+    }
+
+    const btcInput =
+        document.getElementById(
+            'portfolio-btc'
+        );
+
+    const paxgInput =
+        document.getElementById(
+            'portfolio-paxg'
+        );
+
+    const usdtInput =
+        document.getElementById(
+            'portfolio-usdt'
+        );
+
+    if (btcInput) {
+        btcInput.value =
+            Number(userPortfolio.BTC || 0)
+                .toFixed(8);
+    }
+
+    if (paxgInput) {
+        paxgInput.value =
+            Number(userPortfolio.PAXG || 0)
+                .toFixed(8);
+    }
+
+    if (usdtInput) {
+        usdtInput.value =
+            Number(userPortfolio.USDT || 0)
+                .toFixed(2);
+    }
+
+    const btcPrice =
+        Number(
+            lastPrices['BTC-USDT']
+            || 0
+        );
+
+    const paxgPrice =
+        Number(
+            lastPrices['PAXG-USDT']
+            || 0
+        );
+
+    const btcValue =
+        userPortfolio.BTC
+        * btcPrice;
+
+    const paxgValue =
+        userPortfolio.PAXG
+        * paxgPrice;
+
+    const usdtValue =
+        userPortfolio.USDT;
+
+    const total =
+        btcValue
+        + paxgValue
+        + usdtValue;
+
+    const valBtcEl =
+        document.getElementById('val-btc');
+
+    const valPaxgEl =
+        document.getElementById('val-paxg');
+
+    const totalEl =
+        document.getElementById(
+            'portfolio-total-usd'
+        );
+
+    if (valBtcEl) {
+        valBtcEl.style.display = 'none';
+    }
+
+    if (valPaxgEl) {
+        valPaxgEl.style.display = 'none';
+    }
+
+    if (totalEl) {
+        totalEl.style.display = 'none';
+    }
+
+    const pctBtcEl =
+        document.getElementById('pct-btc');
+
+    const pctPaxgEl =
+        document.getElementById('pct-paxg');
+
+    const pctUsdtEl =
+        document.getElementById('pct-usdt');
+
+    const barBtcEl =
+        document.getElementById('bar-btc');
+
+    const barPaxgEl =
+        document.getElementById('bar-paxg');
+
+    const barUsdtEl =
+        document.getElementById('bar-usdt');
+
+    const stateBadge =
+        document.getElementById('portfolio-state');
+
     if (total > 0) {
-        const pctBtc = (btcValue / total * 100).toFixed(1);
-        const pctPaxg = (paxgValue / total * 100).toFixed(1);
-        const pctUsdt = (usdtValue / total * 100).toFixed(1);
-        
-        document.getElementById('pct-btc').textContent = pctBtc + '%';
-        document.getElementById('pct-paxg').textContent = pctPaxg + '%';
-        document.getElementById('pct-usdt').textContent = pctUsdt + '%';
-        
-        document.getElementById('bar-btc').style.width = pctBtc + '%';
-        document.getElementById('bar-paxg').style.width = pctPaxg + '%';
-        document.getElementById('bar-usdt').style.width = pctUsdt + '%';
-        
-        const stateBadge = document.getElementById('portfolio-state');
-        if (usdtValue / total >= 0.80) { stateBadge.className = 'mt-2 badge bg-success'; stateBadge.textContent = '🟢 Todo en Efectivo'; }
-        else if (paxgValue / total >= 0.75) { stateBadge.className = 'mt-2 badge bg-info'; stateBadge.textContent = '🥇 Concentrado en Oro'; }
-        else if (btcValue / total >= 0.75) { stateBadge.className = 'mt-2 badge bg-warning'; stateBadge.textContent = '⚠️ Concentrado en BTC'; }
-        else if (usdtValue / total <= 0.05) { stateBadge.className = 'mt-2 badge bg-secondary'; stateBadge.textContent = '💧 Sin Efectivo'; }
-        else { stateBadge.className = 'mt-2 badge bg-primary'; stateBadge.textContent = '⚖️ Balanceado'; }
-    } else {
-        document.getElementById('portfolio-state').textContent = 'Portafolio vacío';
+        const pctBtc =
+            (btcValue / total * 100);
+
+        const pctPaxg =
+            (paxgValue / total * 100);
+
+        const pctUsdt =
+            (usdtValue / total * 100);
+
+        if (pctBtcEl) {
+            pctBtcEl.textContent =
+                pctBtc.toFixed(1) + '%';
+        }
+
+        if (pctPaxgEl) {
+            pctPaxgEl.textContent =
+                pctPaxg.toFixed(1) + '%';
+        }
+
+        if (pctUsdtEl) {
+            pctUsdtEl.textContent =
+                pctUsdt.toFixed(1) + '%';
+        }
+
+        if (barBtcEl) {
+            barBtcEl.style.width =
+                pctBtc + '%';
+        }
+
+        if (barPaxgEl) {
+            barPaxgEl.style.width =
+                pctPaxg + '%';
+        }
+
+        if (barUsdtEl) {
+            barUsdtEl.style.width =
+                pctUsdt + '%';
+        }
+
+        if (stateBadge) {
+            if (pctUsdt >= 80) {
+                stateBadge.className =
+                    'mt-2 badge bg-success';
+
+                stateBadge.textContent =
+                    '🟢 Todo en Efectivo';
+
+            } else if (pctPaxg >= 75) {
+                stateBadge.className =
+                    'mt-2 badge bg-info';
+
+                stateBadge.textContent =
+                    '🥇 Concentrado en Oro';
+
+            } else if (pctBtc >= 75) {
+                stateBadge.className =
+                    'mt-2 badge bg-warning';
+
+                stateBadge.textContent =
+                    '⚠️ Concentrado en BTC';
+
+            } else if (pctUsdt <= 5) {
+                stateBadge.className =
+                    'mt-2 badge bg-secondary';
+
+                stateBadge.textContent =
+                    '💧 Sin Efectivo';
+
+            } else {
+                stateBadge.className =
+                    'mt-2 badge bg-primary';
+
+                stateBadge.textContent =
+                    '⚖️ Balanceado';
+            }
+        }
+
+    } else if (stateBadge) {
+        stateBadge.className =
+            'mt-2 badge bg-secondary';
+
+        stateBadge.textContent =
+            'Portafolio vacío';
     }
 }
 
-function savePortfolioToLocal() {
-    if (!isAuthenticated()) return;
-    const btc = parseFloat(document.getElementById('portfolio-btc')?.value) || 0;
-    const paxg = parseFloat(document.getElementById('portfolio-paxg')?.value) || 0;
-    const usdt = parseFloat(document.getElementById('portfolio-usdt')?.value) || 0;
-    userPortfolio = { BTC: btc, PAXG: paxg, USDT: usdt };
-    saveUserPortfolio(currentUser || getAuthenticatedUser(), userPortfolio);
+
+// ============================================================================
+// SESIÓN COMPLETA
+// ============================================================================
+
+async function initTGPSession() {
+    clearPrivateUserState();
+
+    const authenticated =
+        await refreshAuthenticationState();
+
+    if (!authenticated) {
+        updatePortfolioUI();
+
+        return false;
+    }
+
+    await loadUserPortfolio();
+
     updatePortfolioUI();
-    if (typeof showToast === 'function') showToast('Portafolio guardado', 'success');
+
+    console.log(
+        '✅ Sesión Flask autenticada:',
+        currentUser
+    );
+
+    return true;
 }
 
 
-// ====== LOGIN / LOGOUT / CAMBIO DE CLAVE ======
+// ============================================================================
+// LOGIN REAL CONTRA FLASK
+// ============================================================================
 
-function initTGPSession() {
-    // Verificar sesión al cargar
-    isLoggedIn = localStorage.getItem('tgp_logged_in') === 'true';
-    currentUser = localStorage.getItem('tgp_session_user') || localStorage.getItem('smarttrading_user') || 'Willer';
-    userPortfolio = loadUserPortfolio();
-    updatePortfolioUI();
-}
+async function doLogin() {
+    const user =
+        document.getElementById(
+            'login-user'
+        )?.value?.trim();
 
-function doLogin() {
-    const user = document.getElementById('login-user')?.value || 'Willer';
-    const pass = document.getElementById('login-password')?.value || '';
-    const errorEl = document.getElementById('login-error');
+    const pass =
+        document.getElementById(
+            'login-password'
+        )?.value || '';
 
-    // Validación simple (clave 1234 para ambos)
-    if (pass === '1234') {
-        isLoggedIn = true;
-        currentUser = user;
-        localStorage.setItem('tgp_logged_in', 'true');
-        localStorage.setItem('tgp_session_user', user);
-        localStorage.setItem('smarttrading_user', user);
-        userPortfolio = loadUserPortfolio();
+    const errorEl =
+        document.getElementById(
+            'login-error'
+        );
 
-        // Cerrar modal
-        const modalEl = document.getElementById('modalTGPLogin');
-        if (modalEl && typeof bootstrap !== 'undefined') {
-            bootstrap.Modal.getInstance(modalEl)?.hide();
+    if (!user || !pass) {
+        if (errorEl) {
+            errorEl.textContent =
+                'Introduce usuario y contraseña.';
+
+            errorEl.classList.remove(
+                'd-none'
+            );
         }
+
+        return;
+    }
+
+    try {
+        const response =
+            await fetch(
+                '/api/auth/login',
+                {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type':
+                            'application/json'
+                    },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({
+                        user: user,
+                        password: pass
+                    })
+                }
+            );
+
+        const data =
+            await response.json();
+
+        if (
+            !response.ok
+            || data.success !== true
+            || data.authenticated !== true
+        ) {
+            throw new Error(
+                data.error
+                || 'Usuario o contraseña incorrectos.'
+            );
+        }
+
+        currentUser =
+            data.user;
+
+        isLoggedIn = true;
+
+        await loadUserPortfolio();
 
         updatePortfolioUI();
-        // Cargar señales guardadas del usuario
-        if (typeof window.loadSavedSignals === 'function') {
+
+        const modalEl =
+            document.getElementById(
+                'modalTGPLogin'
+            );
+
+        if (
+            modalEl
+            && typeof bootstrap !== 'undefined'
+        ) {
+            bootstrap.Modal
+                .getInstance(modalEl)
+                ?.hide();
+        }
+
+        if (errorEl) {
+            errorEl.classList.add(
+                'd-none'
+            );
+        }
+
+        showToast(
+            `Bienvenido, ${currentUser}`,
+            'success'
+        );
+
+        if (
+            typeof window.loadSavedSignals
+            === 'function'
+        ) {
             window.loadSavedSignals();
         }
-        if (typeof showToast === 'function') showToast(`Bienvenido, ${user}`, 'success');
-        if (errorEl) errorEl.classList.add('d-none');
-    } else {
+
+        // Ahora sí se puede iniciar el análisis privado.
+        if (
+            typeof window.loadInitialData
+            === 'function'
+            && !window.__SMARTTRADING_INITIALIZED__
+        ) {
+            window.loadInitialData();
+        }
+
+    } catch (error) {
+        console.error(
+            '❌ Error de autenticación:',
+            error
+        );
+
+        clearPrivateUserState();
+
+        updatePortfolioUI();
+
         if (errorEl) {
-            errorEl.textContent = 'Clave incorrecta';
-            errorEl.classList.remove('d-none');
+            errorEl.textContent =
+                error.message
+                || 'No se pudo iniciar sesión.';
+
+            errorEl.classList.remove(
+                'd-none'
+            );
         }
     }
 }
 
-function doLogout() {
-    isLoggedIn = false;
-    localStorage.removeItem('tgp_logged_in');
-    localStorage.removeItem('tgp_authenticated');  // <-- AGREGAR: limpiar key vieja
-    localStorage.removeItem('tgp_session_user');
-    // No borramos el portafolio, solo cerramos la sesión visual
-    updatePortfolioUI();
-    if (typeof showToast === 'function') showToast('Sesión cerrada', 'info');
+
+// ============================================================================
+// LOGOUT REAL CONTRA FLASK
+// ============================================================================
+
+async function doLogout() {
+    try {
+        await fetch(
+            '/api/auth/logout',
+            {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    'Content-Type':
+                        'application/json'
+                }
+            }
+        );
+
+    } catch (error) {
+        console.warn(
+            '⚠️ Error cerrando sesión:',
+            error
+        );
+
+    } finally {
+        clearPrivateUserState();
+        updatePortfolioUI();
+
+        showToast(
+            'Sesión cerrada.',
+            'info'
+        );
+    }
 }
+
+
+// ============================================================================
+// CAMBIO DE CLAVE
+// ============================================================================
+//
+// IMPORTANTE:
+// El cambio de contraseña NO se implementa todavía.
+// La autenticación ahora es server-side.
+// El antiguo sistema local no debe seguir funcionando.
+// ============================================================================
 
 function doChangePass() {
-    const oldPass = document.getElementById('changepass-old')?.value || '';
-    const newPass = document.getElementById('changepass-new')?.value || '';
-    const errorEl = document.getElementById('changepass-error');
-
-    if (oldPass !== '1234') {
-        if (errorEl) {
-            errorEl.textContent = 'Clave actual incorrecta';
-            errorEl.classList.remove('d-none');
-        }
-        return;
-    }
-    if (!newPass || newPass.length < 4) {
-        if (errorEl) {
-            errorEl.textContent = 'La nueva clave debe tener al menos 4 caracteres';
-            errorEl.classList.remove('d-none');
-        }
-        return;
-    }
-    // Guardar nueva clave en localStorage (por usuario)
-    localStorage.setItem(`tgp_pass_${currentUser}`, newPass);
-    if (errorEl) errorEl.classList.add('d-none');
-
-    const modalEl = document.getElementById('modalTGPChangePass');
-    if (modalEl && typeof bootstrap !== 'undefined') {
-        bootstrap.Modal.getInstance(modalEl)?.hide();
-    }
-    if (typeof showToast === 'function') showToast('Clave actualizada', 'success');
+    showToast(
+        'El cambio de contraseña se gestionará en el servidor.',
+        'info'
+    );
 }
 
-function getStoredPass(user) {
-    return localStorage.getItem(`tgp_pass_${user}`) || '1234';
-}
 
-// ====== FIN LOGIN / LOGOUT ======
-
-
-
-function openSaveTradeModal() {
-    if (!lastTGPResult || lastTGPResult.action === 'HOLD') return;
-    const tgp = lastTGPResult;
-    document.getElementById('trade-user').value = currentUser || getAuthenticatedUser() || 'Invitado';
-    document.getElementById('trade-action').value = formatAction(tgp.action);
-    document.getElementById('trade-amount').value = (tgp.amount_crypto || 0).toFixed(8) + ' ' + (tgp.source_asset || '');
-    document.getElementById('trade-value').value = '$' + (tgp.amount_usd || 0).toFixed(2);
-    document.getElementById('trade-entry-price').value = lastPrices['BTC-USDT'] || 0;
-    const after = tgp.portfolio_after || {};
-    const preview = document.getElementById('trade-portfolio-preview');
-    if (preview) preview.innerHTML = 'BTC: ' + (after.BTC || 0).toFixed(8) + ' | PAXG: ' + (after.PAXG || 0).toFixed(8) + ' | USDT: $' + (after.USDT || 0).toFixed(2);
-    const modalEl = document.getElementById('modalSaveSpotTrade');
-    if (modalEl && typeof bootstrap !== 'undefined') { new bootstrap.Modal(modalEl).show(); }
-}
-
-async function confirmSaveTrade() {
-    if (!lastTGPResult) return;
-    const tgp = lastTGPResult;
-    const entryPrice = parseFloat(document.getElementById('trade-entry-price')?.value) || 0;
-    const tradeData = {
-        user: currentUser || getAuthenticatedUser() || 'Invitado',
-        symbol: typeof currentSymbol !== 'undefined' ? currentSymbol : 'BTC-USDT',
-        action: tgp.action,
-        entry_price: entryPrice,
-        amount_crypto: tgp.amount_crypto || 0,
-        amount_usd: tgp.amount_usd || 0,
-        source_asset: tgp.source_asset,
-        target_asset: tgp.target_asset,
-        system_signal_action: tgp.system_signal ? tgp.system_signal.action : 'NO_OPERAR',
-        tgp_recommendation: tgp.reason,
-        timeframe: typeof currentInterval !== 'undefined' ? currentInterval : '1h',
-        portfolio_update: tgp.portfolio_after
-    };
-    try {
-        const response = await fetch('/api/save-spot-trade', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(tradeData) });
-        const result = await response.json();
-        if (result.success) {
-            userPortfolio = { ...tgp.portfolio_after };
-            saveUserPortfolio(currentUser || getAuthenticatedUser(), userPortfolio);
-            updatePortfolioUI();
-            if (typeof showToast === 'function') showToast('Operación guardada', 'success');
-            const modalEl = document.getElementById('modalSaveSpotTrade');
-            if (modalEl && typeof bootstrap !== 'undefined') bootstrap.Modal.getInstance(modalEl)?.hide();
-        } else {
-            if (typeof showToast === 'function') showToast('Error: ' + result.error, 'danger');
-        }
-    } catch (e) {
-        if (typeof showToast === 'function') showToast('Error de red', 'danger');
-    }
-}
+// ============================================================================
+// FIN AUTENTICACIÓN / TGP
+// ============================================================================
 
 // ====== FIN FUNCIONES TGP ======
 
@@ -524,29 +996,8 @@ function toggleIndicator(indicator, show) {
 // ====== FUNCIONES DEL GUARDIÁN DE PORTAFOLIO (TGP) ======
 
 
-function savePortfolioToLocal() {
-    const btcInput = document.getElementById('portfolio-btc');
-    const paxgInput = document.getElementById('portfolio-paxg');
-    const usdtInput = document.getElementById('portfolio-usdt');
-    const userSelect = document.getElementById('portfolio-user-select');
-
-    userPortfolio.BTC = parseFloat(btcInput?.value) || 0;
-    userPortfolio.PAXG = parseFloat(paxgInput?.value) || 0;
-    userPortfolio.USDT = parseFloat(usdtInput?.value) || 0;
-    currentUser = userSelect?.value || currentUser;
-
-    // Guardar con sufijo de usuario para que cada uno tenga su portafolio
-    localStorage.setItem('smarttrading_user', currentUser);
-    localStorage.setItem(`portfolio_btc_${currentUser}`, userPortfolio.BTC);
-    localStorage.setItem(`portfolio_paxg_${currentUser}`, userPortfolio.PAXG);
-    localStorage.setItem(`portfolio_usdt_${currentUser}`, userPortfolio.USDT);
-
-    updatePortfolioUI();
-
-    if (typeof showToast === 'function') {
-        showToast('Portafolio guardado para ' + currentUser, 'success');
-    }
-}
+// La función savePortfolioToLocal() ya está definida arriba.
+// Esta segunda definición NO debe existir.
 
 function displayTGPResult(tgp) {
     if (!tgp) return;
@@ -661,7 +1112,6 @@ async function confirmSaveTrade() {
     const entryPrice = parseFloat(document.getElementById('trade-entry-price')?.value) || 0;
     
     const tradeData = {
-        user: currentUser,
         symbol: typeof selectedSymbol !== 'undefined' ? selectedSymbol : 'BTC-USDT',
         action: tgp.action,
         entry_price: entryPrice,
@@ -684,8 +1134,16 @@ async function confirmSaveTrade() {
         const result = await response.json();
         
         if (result.success) {
-            userPortfolio = { ...tgp.portfolio_after };
-            savePortfolioToLocal();
+            userPortfolio = {
+                ...tgp.portfolio_after
+            };
+
+            updatePortfolioUI();
+
+            // El backend ya actualizó el portfolio
+            // asociado al usuario autenticado.
+            await loadUserPortfolio();
+
             updatePortfolioUI();
             if (typeof showToast === 'function') {
                 showToast('Operación guardada exitosamente', 'success');
@@ -713,8 +1171,8 @@ async function confirmSaveTrade() {
     
      // ====== EVENT LISTENERS DEL GUARDIÁN (TGP) ======
     
-     // Inicializar UI de portafolio al cargar la página (con sesión persistida)
-     initTGPSession();
+     // La sesión se inicializa una sola vez al final del archivo,
+     // después de que todas las funciones estén definidas.
     
      // Botón "Guardar Portafolio"
      const btnSavePortfolio = document.getElementById('btn-save-portfolio');
@@ -773,22 +1231,24 @@ async function confirmSaveTrade() {
      }
     
      // Cambio de usuario en el dropdown
-     const userSelect = document.getElementById('portfolio-user-select');
-     if (userSelect) {
-         userSelect.addEventListener('change', function() {
-             currentUser = this.value;
-             localStorage.setItem('smarttrading_user', currentUser);
-             // Cargar portafolio del usuario desde localStorage (con sufijo correcto)
-             userPortfolio.BTC = parseFloat(localStorage.getItem(`portfolio_btc_${currentUser}`)) || 0;
-             userPortfolio.PAXG = parseFloat(localStorage.getItem(`portfolio_paxg_${currentUser}`)) || 0;
-             userPortfolio.USDT = parseFloat(localStorage.getItem(`portfolio_usdt_${currentUser}`)) || 0;
-             updatePortfolioUI();
-            // Cargar señales guardadas si está autenticado
-            if (isAuthenticated() && typeof window.loadSavedSignals === 'function') {
-                window.loadSavedSignals();
-            }             
-         });
-     }
+      // ================================================================
+      // IDENTIDAD DEL USUARIO
+      // ================================================================
+      //
+      // El usuario autenticado NO puede cambiarse desde el portfolio.
+      // La identidad pertenece a la sesión Flask.
+      // El selector antiguo queda deshabilitado.
+      // ================================================================
+
+      const userSelect =
+          document.getElementById(
+              'portfolio-user-select'
+          );
+
+      if (userSelect) {
+          userSelect.style.display = 'none';
+          userSelect.disabled = true;
+      }
     
      // Botón "Guardar Operación del Guardián" (en el banner)
      const btnSaveTGP = document.getElementById('btn-save-tgp-trade');
@@ -1042,10 +1502,34 @@ window.loadSavedSignals = async function() {
         return;
     }
 
-    const user = getAuthenticatedUser() || currentUser || 'Invitado';
+    if (!isAuthenticated()) {
+        console.log(
+            '🔒 No autenticado: no se cargan señales privadas.'
+        );
+
+        const card =
+            document.getElementById(
+                'saved-signals-card'
+            );
+
+        if (card) {
+            card.style.display = 'none';
+        }
+
+        return;
+    }
 
     try {
-        const response = await fetch('/api/saved_signals?user=' + encodeURIComponent(user));
+        // La identidad viene exclusivamente de la sesión Flask.
+        // NO enviar ?user=...
+        const response = await fetch(
+            '/api/saved_signals',
+            {
+                method: 'GET',
+                credentials: 'same-origin',
+                cache: 'no-store'
+            }
+        );
         const data = await response.json();
 
         if (data.success && data.signals) {
@@ -1085,6 +1569,16 @@ window.loadSavedSignals = async function() {
 // ============ FUNCIONES PRINCIPALES ============
 window.loadInitialData = function() {
     console.log('📥 Cargando datos iniciales...');
+
+    if (!isAuthenticated()) {
+        console.log(
+            '🔒 Carga inicial detenida: usuario no autenticado.'
+        );
+
+        updatePortfolioUI();
+
+        return;
+    }
     
     // Obtener recomendación instantánea
     try {
@@ -1196,6 +1690,32 @@ window.loadInitialData = function() {
 
 // ============ FUNCIÓN PRINCIPAL - ANÁLISIS COMPLETO CON VISTA GLOBAL ============
 window.runCompleteAnalysis = function() {
+    // El análisis Spot con TGP utiliza datos privados del portfolio.
+    // Nunca debe ejecutarse sin una sesión Flask válida.
+    if (!isAuthenticated()) {
+        console.log(
+            '🔒 Análisis bloqueado: usuario no autenticado.'
+        );
+
+        const recommendationEl =
+            document.getElementById(
+                'system-recommendation'
+            );
+
+        if (recommendationEl) {
+            recommendationEl.innerHTML = `
+                <div class="alert alert-warning mb-0">
+                    <strong>🔐 Iniciar sesión requerida.</strong>
+                    <div class="small mt-2">
+                        Inicia sesión para utilizar el análisis personalizado y el TGP.
+                    </div>
+                </div>
+            `;
+        }
+
+        return;
+    }
+
     const cfg =
         window.PAGE_CONFIG
         || (
@@ -1242,35 +1762,6 @@ window.runCompleteAnalysis = function() {
             body: {
                 symbol: symbol,
                 timeframe: interval,
-                user: currentUser || 'Invitado',
-    
-                portfolio: {
-                    BTC: Number(
-                        userPortfolio.BTC || 0
-                    ),
-    
-                    PAXG: Number(
-                        userPortfolio.PAXG || 0
-                    ),
-    
-                    USDT: Number(
-                        userPortfolio.USDT || 0
-                    ),
-    
-                    btc_price_at_update:
-                        Number(
-                            lastPrices[
-                                'BTC-USDT'
-                            ] || 0
-                        ),
-    
-                    paxg_price_at_update:
-                        Number(
-                            lastPrices[
-                                'PAXG-USDT'
-                            ] || 0
-                        )
-                },
     
                 prices: {
                     'BTC-USDT':
@@ -1810,6 +2301,13 @@ window.runCompleteAnalysis = function() {
 };
 
 function getInstantRecommendation(attempt = 1) {
+    if (!isAuthenticated()) {
+        console.log(
+            '🔒 Recomendación instantánea bloqueada: no autenticado.'
+        );
+
+        return;
+    }    
     const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
     const interval = document.getElementById('interval-select')?.value || '1D';
 
@@ -1824,16 +2322,6 @@ function getInstantRecommendation(attempt = 1) {
         body: JSON.stringify({
             symbol: symbol,
             timeframe: interval,
-            user: currentUser || 'Invitado',
-            portfolio: {
-                BTC: Number(userPortfolio.BTC || 0),
-                PAXG: Number(userPortfolio.PAXG || 0),
-                USDT: Number(userPortfolio.USDT || 0),
-        
-                // Últimos precios conocidos como respaldo
-                btc_price_at_update: Number(lastPrices['BTC-USDT'] || 0),
-                paxg_price_at_update: Number(lastPrices['PAXG-USDT'] || 0)
-            },
             prices: {
                 'BTC-USDT': Number(lastPrices['BTC-USDT'] || 0),
                 'PAXG-USDT': Number(lastPrices['PAXG-USDT'] || 0)
@@ -1841,10 +2329,40 @@ function getInstantRecommendation(attempt = 1) {
             _nocache: Date.now()
         })
     })
-    .then(response => {
+    .then(async response => {
         clearTimeout(timeoutId);
-        if (!response.ok) throw new Error('HTTP ' + response.status);
-        return response.json();
+    
+        const responseText =
+            await response.text();
+    
+        let data = {};
+    
+        try {
+            data = responseText
+                ? JSON.parse(responseText)
+                : {};
+        } catch (parseError) {
+            data = {};
+        }
+    
+        if (response.status === 401) {
+            clearPrivateUserState();
+            updatePortfolioUI();
+    
+            throw new Error(
+                'Sesión no autenticada.'
+            );
+        }
+    
+        if (!response.ok) {
+            throw new Error(
+                data.error
+                || data.message
+                || `HTTP ${response.status}`
+            );
+        }
+    
+        return data;
     })
     .then(data => {
 
@@ -8406,16 +8924,68 @@ const TIMEFRAMES = {
 // ============================================================
 // EJECUTAR CARGA INICIAL DESPUÉS DE DEFINIR TODAS LAS FUNCIONES
 // ============================================================
-if (!window.__SMARTTRADING_INITIALIZED__) {
-    window.__SMARTTRADING_INITIALIZED__ = true;
+if (!window.__SMARTTRADING_AUTH_FLOW_INITIALIZED__) {
+    window.__SMARTTRADING_AUTH_FLOW_INITIALIZED__ = true;
 
-    console.log('🚀 Ejecutando loadInitialData después de inicializar funciones...');
+    console.log(
+        '🔐 Verificando sesión Flask antes de cargar el sistema...'
+    );
 
-    if (typeof window.loadInitialData === 'function') {
-        window.loadInitialData();
-    } else {
-        console.error('❌ ERROR CRÍTICO: window.loadInitialData no fue definida.');
-    }
+    initTGPSession()
+        .then(authenticated => {
+
+            if (!authenticated) {
+                console.log(
+                    '🔒 Usuario no autenticado. Sistema privado bloqueado.'
+                );
+
+                updatePortfolioUI();
+
+                const modalEl =
+                    document.getElementById(
+                        'modalTGPLogin'
+                    );
+
+                if (
+                    modalEl
+                    && typeof bootstrap !== 'undefined'
+                ) {
+                    const modal =
+                        new bootstrap.Modal(
+                            modalEl
+                        );
+
+                    modal.show();
+                }
+
+                return;
+            }
+
+            console.log(
+                '✅ Usuario autenticado:',
+                currentUser
+            );
+
+            if (
+                typeof window.loadInitialData
+                === 'function'
+            ) {
+                window.loadInitialData();
+            } else {
+                console.error(
+                    '❌ ERROR CRÍTICO: window.loadInitialData no fue definida.'
+                );
+            }
+        })
+        .catch(error => {
+            console.error(
+                '❌ Error inicializando autenticación:',
+                error
+            );
+
+            clearPrivateUserState();
+            updatePortfolioUI();
+        });
 }
 
 // ============ CIERRE DEL DOMContentLoaded ============
