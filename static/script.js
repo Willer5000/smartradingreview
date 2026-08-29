@@ -1589,42 +1589,131 @@ window.runCompleteAnalysis = function() {
                 
             } else {
             
-                const errorMessage =
-                    data?.error
-                    || data?.message
-                    || data?.system_result?.error
-                    || (
-                        response?.status
-                            ? `Error HTTP ${response.status}`
-                            : 'Error desconocido'
+                // ============================================================
+                // NO OPERAR / ESPERAR NO ES UN ERROR
+                // ============================================================
+                //
+                // El motor puede devolver una decisión válida de:
+                //
+                //     NO_OPERAR
+                //     ESPERAR
+                //
+                // junto con su justificación técnica.
+                //
+                // Eso debe mostrarse normalmente en la interfaz.
+                //
+                // Sólo debe considerarse error cuando realmente NO existe
+                // una decisión válida del sistema.
+                // ============================================================
+            
+                const decisionData =
+                    data?.data
+                    || data?.system_result
+                    || null;
+            
+                const decisionAction =
+                    decisionData?.decision?.action
+                    || decisionData?.action
+                    || '';
+            
+                const normalizedAction =
+                    String(
+                        decisionAction
+                    ).toUpperCase();
+            
+                const isValidDecision =
+                    normalizedAction === 'NO_OPERAR'
+                    || normalizedAction === 'ESPERAR'
+                    || normalizedAction === 'CAUTION'
+                    || normalizedAction === 'COMPRA_SPOT'
+                    || normalizedAction === 'VENTA_SPOT'
+                    || normalizedAction === 'LONG'
+                    || normalizedAction === 'SHORT';
+            
+                if (
+                    decisionData
+                    && isValidDecision
+                ) {
+            
+                    // --------------------------------------------------------
+                    // IMPORTANTE:
+                    // No mostrar error.
+                    // NO_OPERAR y ESPERAR son decisiones válidas.
+                    // --------------------------------------------------------
+            
+                    if (
+                        decisionData.decision
+                    ) {
+            
+                        updateInstantRecommendation(
+                            decisionData
+                        );
+            
+                    }
+            
+                    console.log(
+                        `✅ Decisión válida del sistema: ${normalizedAction}`
                     );
             
-                console.error(
-                    '❌ Análisis rechazado:',
-                    errorMessage
-                );
+                    // Actualizar TGP si viene incluido.
+                    if (
+                        data?.tgp
+                    ) {
             
-                const recommendationEl =
-                    document.getElementById(
-                        'system-recommendation'
+                        displayTGPResult(
+                            data.tgp
+                        );
+            
+                    }
+            
+                } else {
+            
+                    // ========================================================
+                    // ERROR REAL
+                    // ========================================================
+            
+                    const errorMessage =
+                        data?.error
+                        || data?.message
+                        || data?.system_result?.error
+                        || (
+                            response?.status
+                                ? `Error HTTP ${response.status}`
+                                : 'Error desconocido'
+                        );
+            
+                    console.error(
+                        '❌ Error real del análisis:',
+                        errorMessage
                     );
             
-                if (recommendationEl) {
+                    const recommendationEl =
+                        document.getElementById(
+                            'system-recommendation'
+                        );
             
-                    recommendationEl.innerHTML = `
-                        <div class="alert alert-warning mb-0">
-                            <strong>⚠️ Análisis no disponible.</strong>
-                            <div class="small mt-2">
-                                ${errorMessage}
+                    if (
+                        recommendationEl
+                    ) {
+            
+                        recommendationEl.innerHTML = `
+                            <div class="alert alert-danger mb-0">
+                                <strong>
+                                    ⚠️ No se pudo completar el análisis.
+                                </strong>
+            
+                                <div class="small mt-2">
+                                    ${errorMessage}
+                                </div>
                             </div>
-                        </div>
-                    `;
-                }
+                        `;
+                    }
             
-                window.showToast(
-                    '❌ ' + errorMessage,
-                    'warning'
-                );
+                    window.showToast(
+                        '❌ ' + errorMessage,
+                        'danger'
+                    );
+                }
             }
         })
         .catch(error => {
@@ -6673,11 +6762,64 @@ function updateInstantRecommendation(data) {
     const action = data.decision?.action || 'NO_OPERAR';
     const confidence = data.decision?.confidence || 0;
     
-    let badgeClass = 'bg-secondary', badgeText = 'ESPERANDO';
-    if (action === 'COMPRA_SPOT') { badgeClass = 'bg-success'; badgeText = 'COMPRA'; }
-    else if (action === 'VENTA_SPOT') { badgeClass = 'bg-danger'; badgeText = 'VENTA'; }
-    else if (action === 'LONG') { badgeClass = 'bg-info'; badgeText = 'LONG'; }
-    else if (action === 'SHORT') { badgeClass = 'bg-warning'; badgeText = 'SHORT'; }
+    let badgeClass = 'bg-secondary';
+    let badgeText = 'ESPERANDO';
+    
+    if (
+        action === 'COMPRA_SPOT'
+    ) {
+    
+        badgeClass = 'bg-success';
+        badgeText = 'COMPRA';
+    
+    }
+    else if (
+        action === 'VENTA_SPOT'
+    ) {
+    
+        badgeClass = 'bg-danger';
+        badgeText = 'VENTA';
+    
+    }
+    else if (
+        action === 'LONG'
+    ) {
+    
+        badgeClass = 'bg-info';
+        badgeText = 'LONG';
+    
+    }
+    else if (
+        action === 'SHORT'
+    ) {
+    
+        badgeClass = 'bg-warning';
+        badgeText = 'SHORT';
+    
+    }
+    else if (
+        action === 'NO_OPERAR'
+    ) {
+    
+        badgeClass = 'bg-secondary';
+        badgeText = 'NO OPERAR';
+    
+    }
+    else if (
+        action === 'ESPERAR'
+    ) {
+    
+        badgeClass = 'bg-warning';
+        badgeText = 'ESPERAR';
+    
+    }
+    else if (
+        action === 'CAUTION'
+    ) {
+    
+        badgeClass = 'bg-warning';
+        badgeText = 'PRECAUCIÓN';
+    }
     
     if (badge) badge.innerHTML = `<span class="badge ${badgeClass}">${badgeText}</span>`;
     if (actionEl) actionEl.textContent = action.replace('_', ' ');
@@ -6688,7 +6830,43 @@ function updateInstantRecommendation(data) {
     if (tpEl) tpEl.textContent = `$${data.levels?.take_profit?.toFixed(2) || '0.00'}`;
     if (leverageEl) leverageEl.textContent = `${data.levels?.leverage || 1}x`;
     if (timeframeEl) timeframeEl.textContent = getIntervalName(data.timeframe || '1D');
-    if (opTypeEl) opTypeEl.textContent = action === 'NO_OPERAR' ? 'Esperar' : action.replace('_', ' ');
+    if (
+        opTypeEl
+    ) {
+    
+        if (
+            action === 'NO_OPERAR'
+        ) {
+    
+            opTypeEl.textContent =
+                'No operar';
+    
+        }
+        else if (
+            action === 'ESPERAR'
+        ) {
+    
+            opTypeEl.textContent =
+                'Esperar confirmación';
+    
+        }
+        else if (
+            action === 'CAUTION'
+        ) {
+    
+            opTypeEl.textContent =
+                'Precaución';
+    
+        }
+        else {
+    
+            opTypeEl.textContent =
+                action.replace(
+                    '_',
+                    ' '
+                );
+        }
+    }
 }
 
 function updateAnalysisSummary(data) {
