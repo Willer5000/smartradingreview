@@ -32,7 +32,35 @@ class PortfolioGuardian:
     # Límites de concentración (alarmas)
     MAX_PCT = 0.75    # Nunca más del 75% en un solo activo
     MIN_PCT = 0.05    # Nunca menos del 5% en un activo (salvo USDT que puede ser 0)
-
+    # ============================================================================
+    # RESERVAS ESTRATÉGICAS
+    # ============================================================================
+    #
+    # El TGP puede rotar BTC ↔ PAXG y BTC/PAXG ↔ USDT,
+    # pero nunca debe permitir que una secuencia de recomendaciones
+    # termine vaciando completamente un activo estratégico.
+    #
+    # Estos valores NO son objetivos.
+    # Son PISOS DE PROTECCIÓN.
+    # ============================================================================
+    
+    MIN_RESERVE_PCTS = {
+        'BTC': 0.10,
+        'PAXG': 0.10,
+        'USDT': 0.05,
+    }
+    
+    # Para movimientos excepcionales se mantiene todavía el techo
+    # de concentración existente.
+    MAX_CONCENTRATION_PCT = 0.75
+    
+    # Diferencia mínima entre BTC y PAXG para considerar una
+    # rotación estratégica.
+    ROTATION_EDGE_THRESHOLD = 18.0
+    
+    # Número mínimo de temporalidades que deben favorecer
+    # una rotación antes de ejecutarla.
+    MIN_ROTATION_TIMEFRAMES = 2
     # Tamaños de operación
     MIN_TRADE_PCT = 0.08   # Mínimo 8% del activo fuente
     MAX_TRADE_PCT = 0.35   # Máximo 35% del activo fuente (nunca quedarse sin nada)
@@ -877,7 +905,1112 @@ class PortfolioGuardian:
     # ========================================================================
     # UTILIDADES
     # ========================================================================
-
+    def _score_market_snapshot(
+        self,
+        analysis,
+        asset
+    ):
+        """
+        Convierte un análisis de mercado en una puntuación
+        direccional para BTC o PAXG.
+    
+        Rango:
+            -100 = fuertemente desfavorable
+            +100 = fuertemente favorable
+    
+        NO representa probabilidad de ganar.
+        Es una puntuación comparativa de fortaleza.
+        """
+    
+        if not isinstance(
+            analysis,
+            dict
+        ):
+            return 0.0
+    
+        decision = analysis.get(
+            'decision',
+            {}
+        ) or {}
+    
+        action = str(
+            decision.get(
+                'action',
+                'NO_OPERAR'
+            )
+        ).upper()
+    
+        confidence = float(
+            decision.get(
+                'confidence',
+                0
+            )
+            or 0
+        )
+    
+        levels = analysis.get(
+            'levels',
+            {}
+        ) or {}
+    
+        execution_safety = float(
+            levels.get(
+                'execution_safety',
+                0
+            )
+            or 0
+        )
+    
+        if execution_safety <= 1:
+            execution_safety *= 100
+    
+        trend = analysis.get(
+            'trend',
+            {}
+        ) or {}
+    
+        trend_direction = str(
+            trend.get(
+                'direction',
+                'neutral'
+            )
+        ).lower()
+    
+        adx = float(
+            trend.get(
+                'adx',
+                0
+            )
+            or 0
+        )
+    
+        momentum = analysis.get(
+            'momentum',
+            {}
+        ) or {}
+    
+        momentum_direction = str(
+            momentum.get(
+                'direction',
+                'neutral'
+            )
+        ).lower()
+    
+        structure = analysis.get(
+            'structure',
+            {}
+        ) or {}
+    
+        # ==============================================================
+        # DIRECCIÓN
+        # ==============================================================
+    
+        direct_sign = 0.0
+    
+        if action in (
+            'COMPRA_SPOT',
+            'LONG'
+        ):
+    
+            direct_sign = 1.0
+    
+        elif action in (
+            'VENTA_SPOT',
+            'SHORT'
+        ):
+    
+            direct_sign = -1.0
+    
+        else:
+    
+            return 0.0
+    
+        # ==============================================================
+        # FUERZA DE LA SEÑAL
+        # ==============================================================
+    
+        confidence_score = max(
+            0.0,
+            min(
+                100.0,
+                confidence
+            )
+        )
+    
+        # No dejamos que confidence domine.
+        base_strength = (
+            confidence_score * 0.45
+            +
+            execution_safety * 0.30
+        )
+    
+        # ==============================================================
+        # TENDENCIA
+        # ==============================================================
+    
+        trend_bonus = 0.0
+    
+        if direct_sign > 0:
+    
+            if trend_direction in (
+                'bullish',
+                'alcista'
+            ):
+                trend_bonus += 12
+    
+            elif trend_direction in (
+                'bearish',
+                'bajista'
+            ):
+                trend_bonus -= 12
+    
+            if momentum_direction in (
+                'bullish',
+                'alcista'
+            ):
+                trend_bonus += 6
+    
+        else:
+    
+            if trend_direction in (
+                'bearish',
+                'bajista'
+            ):
+                trend_bonus += 12
+    
+            elif trend_direction in (
+                'bullish',
+                'alcista'
+            ):
+                trend_bonus -= 12
+    
+            if momentum_direction in (
+                'bearish',
+                'bajista'
+            ):
+                trend_bonus += 6
+    
+        # ==============================================================
+        # ADX
+        # ==============================================================
+    
+        if adx >= 30:
+            adx_factor = 1.10
+    
+        elif adx >= 25:
+            adx_factor = 1.05
+    
+        elif adx < 15:
+            adx_factor = 0.80
+    
+        else:
+            adx_factor = 0.95
+    
+        # ==============================================================
+        # ESTRUCTURA
+        # ==============================================================
+    
+        structure_bonus = 0.0
+    
+        if structure.get(
+            'order_blocks'
+        ):
+            structure_bonus += 5
+    
+        if structure.get(
+            'fair_value_gaps'
+        ):
+            structure_bonus += 5
+    
+        if structure.get(
+            'liquidity_sweeps'
+        ):
+            structure_bonus += 8
+    
+        # ==============================================================
+        # SCORE
+        # ==============================================================
+    
+        score = (
+            base_strength
+            + trend_bonus
+            + structure_bonus
+        )
+    
+        score *= adx_factor
+    
+        score *= direct_sign
+    
+        return max(
+            -100.0,
+            min(
+                100.0,
+                score
+            )
+        )
+    def _score_ratio_for_assets(
+        self,
+        analysis
+    ):
+        """
+        Interpreta PAXG-BTC.
+    
+        LONG/COMPRA_SPOT:
+            PAXG está siendo favorecido frente a BTC.
+    
+        SHORT/VENTA_SPOT:
+            BTC está siendo favorecido frente a PAXG.
+    
+        Devuelve:
+            +100 → BTC claramente favorecido
+            -100 → PAXG claramente favorecido
+        """
+    
+        if not isinstance(
+            analysis,
+            dict
+        ):
+            return 0.0
+    
+        decision = analysis.get(
+            'decision',
+            {}
+        ) or {}
+    
+        action = str(
+            decision.get(
+                'action',
+                'NO_OPERAR'
+            )
+        ).upper()
+    
+        confidence = float(
+            decision.get(
+                'confidence',
+                0
+            )
+            or 0
+        )
+    
+        levels = analysis.get(
+            'levels',
+            {}
+        ) or {}
+    
+        safety = float(
+            levels.get(
+                'execution_safety',
+                0
+            )
+            or 0
+        )
+    
+        if safety <= 1:
+            safety *= 100
+    
+        strength = (
+            confidence * 0.55
+            +
+            safety * 0.45
+        )
+    
+        if action in (
+            'SHORT',
+            'VENTA_SPOT'
+        ):
+    
+            return min(
+                100,
+                strength
+            )
+    
+        if action in (
+            'LONG',
+            'COMPRA_SPOT'
+        ):
+    
+            return max(
+                -100,
+                -strength
+            )
+    
+        return 0.0
+    def analyze_multi_timeframe(
+        self,
+        user,
+        portfolio,
+        prices,
+        market_snapshots
+    ):
+        """
+        TGP MULTI-TIMEFRAME.
+    
+        Analiza simultáneamente:
+    
+            BTC-USDT
+            PAXG-USDT
+            PAXG-BTC
+    
+        en:
+    
+            4h
+            12h
+            1D
+            1W
+    
+        No realiza llamadas de mercado.
+    
+        market_snapshots contiene resúmenes ya calculados por
+        TradingExpertSystem.
+    
+        Objetivos:
+    
+            1. proteger BTC
+            2. proteger PAXG
+            3. conservar liquidez estratégica
+            4. acumular satoshis
+            5. acumular USDT cuando corresponda
+            6. rotar BTC ↔ PAXG oportunamente
+            7. detectar la reversión después de una rotación
+        """
+    
+        try:
+    
+            # ==============================================================
+            # VALORACIÓN
+            # ==============================================================
+    
+            valuation = self._value_portfolio(
+                portfolio,
+                prices
+            )
+    
+            total = float(
+                valuation.get(
+                    'total',
+                    0
+                )
+                or 0
+            )
+    
+            if total <= 0:
+    
+                return self._build_response(
+                    action='HOLD',
+                    reason=(
+                        'El TGP no puede evaluar el portfolio '
+                        'porque no existe una valoración de mercado válida.'
+                    ),
+                    confidence=0,
+                    portfolio=portfolio,
+                    valuation=valuation
+                )
+    
+            pct_btc = float(
+                valuation.get(
+                    'pct_btc',
+                    0
+                )
+            )
+    
+            pct_paxg = float(
+                valuation.get(
+                    'pct_paxg',
+                    0
+                )
+            )
+    
+            pct_usdt = float(
+                valuation.get(
+                    'pct_usdt',
+                    0
+                )
+            )
+    
+            btc_available = float(
+                portfolio.get(
+                    'BTC',
+                    0
+                )
+                or 0
+            )
+    
+            paxg_available = float(
+                portfolio.get(
+                    'PAXG',
+                    0
+                )
+                or 0
+            )
+    
+            usdt_available = float(
+                portfolio.get(
+                    'USDT',
+                    0
+                )
+                or 0
+            )
+    
+            # ==============================================================
+            # TEMPORALIDADES SPOT
+            # ==============================================================
+    
+            timeframes = (
+                '4h',
+                '12h',
+                '1D',
+                '1W'
+            )
+    
+            timeframe_results = {}
+    
+            btc_edges = []
+            paxg_edges = []
+    
+            # ==============================================================
+            # EVALUAR CADA TF
+            # ==============================================================
+    
+            for tf in timeframes:
+    
+                tf_data = (
+                    market_snapshots.get(
+                        tf,
+                        {}
+                    )
+                    or {}
+                )
+    
+                btc_analysis = (
+                    tf_data.get(
+                        'BTC-USDT'
+                    )
+                )
+    
+                paxg_analysis = (
+                    tf_data.get(
+                        'PAXG-USDT'
+                    )
+                )
+    
+                ratio_analysis = (
+                    tf_data.get(
+                        'PAXG-BTC'
+                    )
+                )
+    
+                btc_score = (
+                    self._score_market_snapshot(
+                        btc_analysis,
+                        'BTC'
+                    )
+                )
+    
+                paxg_score = (
+                    self._score_market_snapshot(
+                        paxg_analysis,
+                        'PAXG'
+                    )
+                )
+    
+                ratio_btc_edge = (
+                    self._score_ratio_for_assets(
+                        ratio_analysis
+                    )
+                )
+    
+                # ==========================================================
+                # EDGE RELATIVO
+                # ==========================================================
+                #
+                # positivo → BTC
+                # negativo → PAXG
+                # ==========================================================
+    
+                relative_edge = (
+                    btc_score * 0.45
+                    -
+                    paxg_score * 0.30
+                    +
+                    ratio_btc_edge * 0.25
+                )
+    
+                relative_edge = max(
+                    -100,
+                    min(
+                        100,
+                        relative_edge
+                    )
+                )
+    
+                # ==========================================================
+                # DIRECCIÓN DEL TF
+                # ==========================================================
+    
+                if relative_edge >= ROTATION_EDGE_THRESHOLD:
+    
+                    preference = 'BTC'
+    
+                elif relative_edge <= -ROTATION_EDGE_THRESHOLD:
+    
+                    preference = 'PAXG'
+    
+                else:
+    
+                    preference = 'NEUTRAL'
+    
+                # ==========================================================
+                # CALIDAD DEL TF
+                # ==========================================================
+    
+                analyses_available = sum(
+                    1
+                    for x in (
+                        btc_analysis,
+                        paxg_analysis,
+                        ratio_analysis
+                    )
+                    if isinstance(
+                        x,
+                        dict
+                    )
+                )
+    
+                data_quality = (
+                    analyses_available
+                    / 3
+                    * 100
+                )
+    
+                timeframe_results[tf] = {
+                    'btc_score': round(
+                        btc_score,
+                        1
+                    ),
+    
+                    'paxg_score': round(
+                        paxg_score,
+                        1
+                    ),
+    
+                    'ratio_btc_edge': round(
+                        ratio_btc_edge,
+                        1
+                    ),
+    
+                    'relative_edge': round(
+                        relative_edge,
+                        1
+                    ),
+    
+                    'preference': preference,
+    
+                    'data_quality': round(
+                        data_quality,
+                        1
+                    )
+                }
+    
+                if (
+                    relative_edge
+                    >= ROTATION_EDGE_THRESHOLD
+                ):
+                    btc_edges.append(
+                        tf
+                    )
+    
+                elif (
+                    relative_edge
+                    <= -ROTATION_EDGE_THRESHOLD
+                ):
+                    paxg_edges.append(
+                        tf
+                    )
+    
+            # ==============================================================
+            # MEJOR TF
+            # ==============================================================
+    
+            valid_tf = [
+                (
+                    tf,
+                    data
+                )
+                for tf, data
+                in timeframe_results.items()
+                if data[
+                    'data_quality'
+                ] >= 66.0
+            ]
+    
+            if valid_tf:
+    
+                best_tf, best_tf_data = max(
+                    valid_tf,
+                    key=lambda x:
+                        abs(
+                            x[1][
+                                'relative_edge'
+                            ]
+                        )
+                )
+    
+            else:
+    
+                best_tf = None
+                best_tf_data = None
+    
+            # ==============================================================
+            # CONSENSO MULTI-TF
+            # ==============================================================
+    
+            btc_count = len(
+                btc_edges
+            )
+    
+            paxg_count = len(
+                paxg_edges
+            )
+    
+            # --------------------------------------------------------------
+            # CONFIRMACIÓN MAYOR
+            # --------------------------------------------------------------
+    
+            higher_btc = all(
+                timeframe_results.get(
+                    tf,
+                    {}
+                ).get(
+                    'preference'
+                ) != 'PAXG'
+    
+                for tf
+                in ('1D', '1W')
+                if tf in timeframe_results
+            )
+    
+            higher_paxg = all(
+                timeframe_results.get(
+                    tf,
+                    {}
+                ).get(
+                    'preference'
+                ) != 'BTC'
+    
+                for tf
+                in ('1D', '1W')
+                if tf in timeframe_results
+            )
+    
+            # ==============================================================
+            # DECISIÓN DE ROTACIÓN
+            # ==============================================================
+    
+            action = 'HOLD'
+            reason = ''
+            confidence = 50
+            trade_size = 0
+            amount_crypto = 0
+            amount_usd = 0
+            source_asset = None
+            target_asset = None
+    
+            # ==============================================================
+            # BTC
+            # ==============================================================
+    
+            if (
+                btc_count
+                >= MIN_ROTATION_TIMEFRAMES
+            ) and higher_btc:
+    
+                # ----------------------------------------------------------
+                # PAXG → BTC
+                # ----------------------------------------------------------
+    
+                if (
+                    pct_paxg
+                    > MIN_RESERVE_PCTS['PAXG']
+                    and paxg_available > 0
+                ):
+    
+                    size = self._calc_trade_size(
+                        'PAXG',
+                        75,
+                        pct_paxg,
+                        self.TARGET_PCTS['PAXG'],
+                        0.8
+                    )
+    
+                    if size > 0:
+    
+                        amount_crypto = (
+                            paxg_available
+                            * size
+                        )
+    
+                        amount_usd = (
+                            amount_crypto
+                            * valuation[
+                                'paxg_price'
+                            ]
+                        )
+    
+                        btc_price = (
+                            valuation[
+                                'btc_price'
+                            ]
+                        )
+    
+                        amount_btc = (
+                            amount_usd
+                            / btc_price
+                            if btc_price > 0
+                            else 0
+                        )
+    
+                        action = (
+                            'SWAP_PAXG_TO_BTC'
+                        )
+    
+                        trade_size = size
+    
+                        source_asset = 'PAXG'
+                        target_asset = 'BTC'
+    
+                        confidence = min(
+                            95,
+                            65
+                            + (
+                                btc_count
+                                * 5
+                            )
+                            + max(
+                                0,
+                                best_tf_data[
+                                    'relative_edge'
+                                ]
+                                if best_tf_data
+                                else 0
+                            ) * 0.10
+                        )
+    
+                        reason = (
+                            f'El TGP compara las cuatro '
+                            f'temporalidades Spot y encuentra '
+                            f'fortaleza relativa de BTC en '
+                            f'{btc_count}/4 TF. '
+                            f'Best TF={best_tf}. '
+                            f'La rotación PAXG→BTC busca '
+                            f'recuperar/acumular satoshis '
+                            f'sin vaciar la reserva de oro.'
+                        )
+    
+            # ==============================================================
+            # PAXG
+            # ==============================================================
+    
+            if (
+                action == 'HOLD'
+                and paxg_count
+                >= MIN_ROTATION_TIMEFRAMES
+                and higher_paxg
+            ):
+    
+                if (
+                    pct_btc
+                    > MIN_RESERVE_PCTS['BTC']
+                    and btc_available > 0
+                ):
+    
+                    size = self._calc_trade_size(
+                        'BTC',
+                        75,
+                        pct_btc,
+                        self.TARGET_PCTS['BTC'],
+                        0.8
+                    )
+    
+                    if size > 0:
+    
+                        amount_crypto = (
+                            btc_available
+                            * size
+                        )
+    
+                        amount_usd = (
+                            amount_crypto
+                            * valuation[
+                                'btc_price'
+                            ]
+                        )
+    
+                        action = (
+                            'SWAP_BTC_TO_PAXG'
+                        )
+    
+                        trade_size = size
+    
+                        source_asset = 'BTC'
+                        target_asset = 'PAXG'
+    
+                        confidence = min(
+                            95,
+                            65
+                            + (
+                                paxg_count
+                                * 5
+                            )
+                            + max(
+                                0,
+                                -best_tf_data[
+                                    'relative_edge'
+                                ]
+                                if best_tf_data
+                                else 0
+                            ) * 0.10
+                        )
+    
+                        reason = (
+                            f'El TGP compara las cuatro '
+                            f'temporalidades Spot y encuentra '
+                            f'fortaleza relativa de PAXG en '
+                            f'{paxg_count}/4 TF. '
+                            f'Best TF={best_tf}. '
+                            f'La rotación BTC→PAXG protege '
+                            f'capital ante un entorno favorable '
+                            f'al oro sin eliminar la reserva de BTC.'
+                        )
+    
+            # ==============================================================
+            # COMPRAR BTC CON USDT
+            # ==============================================================
+            if (
+                action == 'HOLD'
+                and btc_count
+                >= MIN_ROTATION_TIMEFRAMES
+                and usdt_available > 0
+            ):
+    
+                usable_usdt = max(
+                    0,
+                    usdt_available
+                    - (
+                        total
+                        * MIN_RESERVE_PCTS[
+                            'USDT'
+                        ]
+                    )
+                )
+    
+                if usable_usdt > 0:
+    
+                    size = min(
+                        0.35,
+                        max(
+                            0.08,
+                            btc_count / 10
+                        )
+                    )
+    
+                    amount_usd = (
+                        usable_usdt
+                        * size
+                    )
+    
+                    btc_price = (
+                        valuation[
+                            'btc_price'
+                        ]
+                    )
+    
+                    if btc_price > 0:
+    
+                        action = 'BUY_BTC'
+                        trade_size = size
+    
+                        amount_crypto = (
+                            amount_usd
+                            / btc_price
+                        )
+    
+                        source_asset = 'USDT'
+                        target_asset = 'BTC'
+    
+                        confidence = min(
+                            90,
+                            60 + btc_count * 7
+                        )
+    
+                        reason = (
+                            f'El TGP detecta ventaja '
+                            f'multitemporal de BTC y utiliza '
+                            f'USDT disponible sin consumir '
+                            f'la reserva mínima de liquidez.'
+                        )
+    
+            # ==============================================================
+            # COMPRAR PAXG CON USDT
+            # ==============================================================
+            if (
+                action == 'HOLD'
+                and paxg_count
+                >= MIN_ROTATION_TIMEFRAMES
+                and usdt_available > 0
+            ):
+    
+                usable_usdt = max(
+                    0,
+                    usdt_available
+                    - (
+                        total
+                        * MIN_RESERVE_PCTS[
+                            'USDT'
+                        ]
+                    )
+                )
+    
+                if usable_usdt > 0:
+    
+                    size = min(
+                        0.35,
+                        max(
+                            0.08,
+                            paxg_count / 10
+                        )
+                    )
+    
+                    amount_usd = (
+                        usable_usdt
+                        * size
+                    )
+    
+                    paxg_price = (
+                        valuation[
+                            'paxg_price'
+                        ]
+                    )
+    
+                    if paxg_price > 0:
+    
+                        action = 'BUY_PAXG'
+                        trade_size = size
+    
+                        amount_crypto = (
+                            amount_usd
+                            / paxg_price
+                        )
+    
+                        source_asset = 'USDT'
+                        target_asset = 'PAXG'
+    
+                        confidence = min(
+                            90,
+                            60 + paxg_count * 7
+                        )
+    
+                        reason = (
+                            f'El TGP detecta ventaja '
+                            f'multitemporal de PAXG y utiliza '
+                            f'USDT disponible sin eliminar '
+                            f'la reserva de liquidez.'
+                        )
+    
+            # ==============================================================
+            # NO HAY ROTACIÓN
+            # ==============================================================
+    
+            if action == 'HOLD':
+    
+                if best_tf:
+    
+                    reason = (
+                        f'No existe consenso suficiente '
+                        f'para rotación estratégica. '
+                        f'Mejor escenario actual: {best_tf} '
+                        f'con preferencia '
+                        f'{best_tf_data["preference"]}. '
+                        f'El TGP conserva BTC, PAXG y USDT '
+                        f'hasta que exista una ventaja relativa '
+                        f'más clara.'
+                    )
+    
+                else:
+    
+                    reason = (
+                        'No hay suficientes análisis Spot '
+                        'recientes para tomar una decisión '
+                        'multitemporal segura.'
+                    )
+    
+            # ==============================================================
+            # RESPUESTA
+            # ==============================================================
+    
+            rec = self._build_response(
+                action=action,
+                reason=reason,
+                confidence=confidence,
+                trade_size_pct=trade_size,
+                amount_crypto=amount_crypto,
+                amount_usd=amount_usd,
+                source_asset=source_asset,
+                target_asset=target_asset,
+                portfolio=portfolio,
+                valuation=valuation
+            )
+    
+            rec['timeframe_analysis'] = (
+                timeframe_results
+            )
+    
+            rec['best_timeframe'] = (
+                best_tf
+            )
+    
+            rec['btc_timeframe_count'] = (
+                btc_count
+            )
+    
+            rec['paxg_timeframe_count'] = (
+                paxg_count
+            )
+    
+            rec['tgp_mode'] = (
+                'MULTI_TIMEFRAME'
+            )
+    
+            rec['reserves'] = {
+                'BTC': MIN_RESERVE_PCTS['BTC'],
+                'PAXG': MIN_RESERVE_PCTS['PAXG'],
+                'USDT': MIN_RESERVE_PCTS['USDT']
+            }
+    
+            return rec
+    
+        except Exception as e:
+    
+            logger.error(
+                f"TGP multi-timeframe error: {e}"
+            )
+    
+            return self._build_response(
+                action='HOLD',
+                reason=(
+                    f'Error interno del TGP '
+                    f'multitemporal: {str(e)}'
+                ),
+                confidence=0,
+                portfolio=portfolio,
+                valuation=self._value_portfolio(
+                    portfolio,
+                    prices
+                )
+            )
+    # [pega aquí exactamente el código completo que te di
+    #  para analyze_multi_timeframe()]
+    # [pega aquí exactamente el código que te di para _score_ratio_for_assets]        
+    # [pega aquí exactamente el código que te di para _score_market_snapshot]
     def _calc_trade_size(self, source_asset, confidence, current_pct, target_pct, favorability):
         """
         Calcula el % del activo fuente a usar en la operación.
@@ -901,7 +2034,53 @@ class PortfolioGuardian:
         raw_size = deviation * conf_factor * fav_factor
 
         # Límites
-        return max(self.MIN_TRADE_PCT, min(self.MAX_TRADE_PCT, raw_size))
+        # ==============================================================
+        # LÍMITE POR RESERVA ESTRATÉGICA
+        # ==============================================================
+        
+        reserve_pct = MIN_RESERVE_PCTS.get(
+            source_asset,
+            0.0
+        )
+        
+        # Si la fuente ya está en o por debajo de la reserva,
+        # no se puede seguir vendiendo/cambiando.
+        if current_pct <= reserve_pct:
+        
+            return 0.0
+        
+        # Porcentaje máximo del ACTIVO FUENTE que podemos utilizar
+        # sin romper la reserva.
+        max_source_trade_pct = (
+            current_pct - reserve_pct
+        ) / current_pct
+        
+        max_source_trade_pct = max(
+            0.0,
+            min(
+                1.0,
+                max_source_trade_pct
+            )
+        )
+        
+        allowed_size = min(
+            self.MAX_TRADE_PCT,
+            max_source_trade_pct
+        )
+        
+        # Si ni siquiera alcanza el tamaño mínimo de operación,
+        # no recomendar operación.
+        if allowed_size < self.MIN_TRADE_PCT:
+        
+            return 0.0
+        
+        return min(
+            allowed_size,
+            max(
+                self.MIN_TRADE_PCT,
+                raw_size
+            )
+        )
 
     def _build_response(self, action, reason, confidence, portfolio, valuation,
                         trade_size_pct=0, amount_crypto=0, amount_usd=0,
