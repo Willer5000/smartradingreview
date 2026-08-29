@@ -118,7 +118,7 @@ FUTURES_RISK_CONFIG = {
 
     # Leverage máximo absoluto que el sistema permitirá.
     # Después también se aplicará el máximo específico del TF.
-    'absolute_max_leverage': 70,
+    'absolute_max_leverage': 100,
 
     # Porcentaje mínimo del score de seguridad necesario para
     # poder abrir futuros.
@@ -133,15 +133,20 @@ def _leverage_in_valid_range(
     timeframe: str
 ) -> bool:
     """
-    Valida únicamente el límite superior de leverage.
+    Valida el rango de leverage REAL exigido por el timeframe.
 
-    El mínimo ya NO es un requisito por temporalidad.
-    La viabilidad económica determina si una operación
-    realmente necesita más leverage.
+    Importante:
+    - El mínimo NO se fuerza.
+    - El mínimo es un REQUISITO para publicar la señal.
+    - Si el sistema sólo puede soportar menos del mínimo:
+      la señal debe ser rechazada.
 
-    Returns:
-        True  -> leverage operativo permitido
-        False -> leverage fuera del techo
+    Ejemplo:
+
+        4h → mínimo 5x
+        leverage calculado = 4x
+        → inválido
+        → NO OPERAR
     """
 
     try:
@@ -152,13 +157,15 @@ def _leverage_in_valid_range(
     ):
         return False
 
-    _, max_leverage = LEVERAGE_RANGES.get(
+    min_leverage, max_leverage = LEVERAGE_RANGES.get(
         timeframe,
         (1, 10)
     )
 
     return (
-        1 <= lev <= max_leverage
+        min_leverage
+        <= lev
+        <= max_leverage
     )
 
 
@@ -789,7 +796,72 @@ class FuturesAnalysis(TradingExpertSystem):
                 max_leverage_by_security,
                 max_leverage
             )
-    
+            
+            # --------------------------------------------------------------
+            # MÍNIMO EXIGIDO POR EL TIMEFRAME
+            # --------------------------------------------------------------
+            min_leverage_tf, _ = LEVERAGE_RANGES.get(
+                timeframe,
+                (1, 10)
+            )
+            
+            # --------------------------------------------------------------
+            # SI EL MERCADO NO PERMITE ALCANZAR EL MÍNIMO,
+            # NO EXISTE UNA OPERACIÓN VÁLIDA PARA ESTE SISTEMA.
+            # --------------------------------------------------------------
+            if (
+                final_max_leverage
+                < min_leverage_tf
+            ):
+            
+                logger.info(
+                    f"❌ FUTURES {timeframe}: "
+                    f"máximo seguro {final_max_leverage:.2f}x "
+                    f"< mínimo requerido {min_leverage_tf}x"
+                )
+            
+                return None
+            
+            # --------------------------------------------------------------
+            # REQUISITO MÍNIMO DEL TIMEFRAME
+            # --------------------------------------------------------------
+            min_leverage_tf, max_leverage_tf = LEVERAGE_RANGES.get(
+                timeframe,
+                (1, 10)
+            )
+            
+            # --------------------------------------------------------------
+            # MÁXIMO ABSOLUTO
+            # --------------------------------------------------------------
+            absolute_max = float(
+                FUTURES_RISK_CONFIG[
+                    'absolute_max_leverage'
+                ]
+            )
+            
+            max_leverage = min(
+                float(max_leverage_tf),
+                absolute_max
+            )
+            
+            # --------------------------------------------------------------
+            # ¿EL MÁXIMO SEGURO ALCANZA EL MÍNIMO DEL TF?
+            # --------------------------------------------------------------
+            if (
+                final_max_leverage
+                < min_leverage_tf
+            ):
+            
+                logger.info(
+                    f"FUTURES rechazado: "
+                    f"el riesgo real sólo permite "
+                    f"{final_max_leverage:.2f}x, "
+                    f"pero {timeframe} exige mínimo "
+                    f"{min_leverage_tf}x"
+                )
+            
+                return None
+            
             # --------------------------------------------------------------
             # ¿ES ECONÓMICAMENTE VIABLE?
             # --------------------------------------------------------------
@@ -802,12 +874,24 @@ class FuturesAnalysis(TradingExpertSystem):
             # Leverage objetivo:
             # suficiente para que la operación sea útil,
             # pero no mayor de lo necesario.
+            # ==============================================================
+            # LEVERAGE OBJETIVO
+            # ==============================================================
+            
+            leverage_target = (
+                final_max_leverage * 0.75
+                +
+                max(
+                    min_leverage_economic,
+                    float(min_leverage_tf)
+                ) * 0.25
+            )
+            
             leverage = max(
-                min_leverage_economic,
+                float(min_leverage_tf),
                 min(
                     final_max_leverage,
-                    final_max_leverage * 0.75
-                    + min_leverage_economic * 0.25
+                    leverage_target
                 )
             )
     
@@ -836,6 +920,9 @@ class FuturesAnalysis(TradingExpertSystem):
                 'max_by_security': round(
                     max_leverage_by_security,
                     2
+                ),
+                'min_by_timeframe': int(
+                    min_leverage_tf
                 ),
                 'max_by_timeframe': int(
                     tf_max
