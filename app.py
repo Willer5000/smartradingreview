@@ -201,14 +201,7 @@ def _analysis_cache_put(key, data):
 
 
 def get_analysis_cache_stats() -> dict:
-    """
-    Estadísticas del caché principal de análisis.
-
-    IMPORTANTE:
-    Esta función sólo devuelve estadísticas.
-    Las funciones del TGP están definidas FUERA de esta función
-    para que puedan ser utilizadas desde cualquier endpoint.
-    """
+    """Devuelve estadísticas del caché de análisis."""
     with _ANALYSIS_CACHE_LOCK:
         total = (
             _ANALYSIS_CACHE_STATS['hits']
@@ -228,7 +221,7 @@ def get_analysis_cache_stats() -> dict:
             'hit_rate_pct': round(
                 hit_rate,
                 1
-            )
+            ),
         }
 
 
@@ -236,42 +229,42 @@ def get_analysis_cache_stats() -> dict:
 # TGP — SNAPSHOT MULTI-TIMEFRAME COMPACTO
 # ============================================================================
 #
-# IMPORTANTE:
-# Todo este bloque está a NIVEL GLOBAL.
+# Estas funciones DEBEN estar a nivel GLOBAL.
 #
-# NO está dentro de get_analysis_cache_stats().
+# NO deben estar indentadas dentro de get_analysis_cache_stats().
 #
-# El TGP reutiliza el _ANALYSIS_CACHE existente y NO recalcula el mercado.
+# El TGP utiliza únicamente snapshots pequeños de los análisis que ya existen
+# en _ANALYSIS_CACHE.
+#
+# No recalcula el mercado.
+# No crea DataFrames.
+# No realiza llamadas adicionales.
 # ============================================================================
 
 _TGP_SPOT_TIMEFRAMES = (
     '4h',
     '12h',
     '1D',
-    '1W'
+    '1W',
 )
 
 _TGP_SPOT_SYMBOLS = (
     'BTC-USDT',
     'PAXG-USDT',
-    'PAXG-BTC'
+    'PAXG-BTC',
+)
+
+_TGP_MARKET_SNAPSHOT = {}
+
+_TGP_MARKET_SNAPSHOT_LOCK = (
+    _threading_analysis_cache.Lock()
 )
 
 
-def _compact_tgp_analysis(
-    result
-):
+def _compact_tgp_analysis(result):
     """
-    Reduce un análisis completo a un snapshot pequeño.
-
-    NO conserva:
-        - DataFrames
-        - OHLCV
-        - arrays grandes
-        - gráficos
-        - listas completas de indicadores
-
-    Esto mantiene bajo el consumo de RAM.
+    Reduce un resultado completo de TradingExpertSystem
+    a un snapshot pequeño para PortfolioGuardian.
     """
 
     if not isinstance(
@@ -293,10 +286,16 @@ def _compact_tgp_analysis(
         'timeframe'
     )
 
-    if symbol not in _TGP_SPOT_SYMBOLS:
+    if (
+        symbol
+        not in _TGP_SPOT_SYMBOLS
+    ):
         return None
 
-    if timeframe not in _TGP_SPOT_TIMEFRAMES:
+    if (
+        timeframe
+        not in _TGP_SPOT_TIMEFRAMES
+    ):
         return None
 
     decision = (
@@ -347,7 +346,7 @@ def _compact_tgp_analysis(
         or {}
     )
 
-    def _count(
+    def _count_list(
         value
     ):
         if isinstance(
@@ -360,7 +359,8 @@ def _compact_tgp_analysis(
 
     return {
 
-        'success': True,
+        'success':
+            True,
 
         'symbol':
             symbol,
@@ -369,7 +369,6 @@ def _compact_tgp_analysis(
             timeframe,
 
         'decision': {
-
             'action': str(
                 decision.get(
                     'action',
@@ -383,11 +382,10 @@ def _compact_tgp_analysis(
                     0
                 )
                 or 0
-            )
+            ),
         },
 
         'levels': {
-
             'execution_safety': float(
                 levels.get(
                     'execution_safety',
@@ -426,11 +424,10 @@ def _compact_tgp_analysis(
                     0
                 )
                 or 0
-            )
+            ),
         },
 
         'trend': {
-
             'direction': str(
                 trend.get(
                     'direction',
@@ -444,23 +441,21 @@ def _compact_tgp_analysis(
                     0
                 )
                 or 0
-            )
+            ),
         },
 
         'momentum': {
-
             'direction': str(
                 momentum.get(
                     'direction',
                     'neutral'
                 )
-            )
+            ),
         },
 
         'structure': {
-
             'order_blocks_count':
-                _count(
+                _count_list(
                     structure.get(
                         'order_blocks',
                         []
@@ -468,7 +463,7 @@ def _compact_tgp_analysis(
                 ),
 
             'fair_value_gaps_count':
-                _count(
+                _count_list(
                     structure.get(
                         'fair_value_gaps',
                         []
@@ -476,22 +471,21 @@ def _compact_tgp_analysis(
                 ),
 
             'liquidity_sweeps_count':
-                _count(
+                _count_list(
                     structure.get(
                         'liquidity_sweeps',
                         []
                     )
-                )
+                ),
         },
 
         'correlation': {
-
             'rotation_signal': str(
                 correlation.get(
                     'rotation_signal',
                     'NEUTRAL'
                 )
-            )
+            ),
         },
 
         'current_price': float(
@@ -502,108 +496,119 @@ def _compact_tgp_analysis(
             or 0
         ),
 
-        'candle_timestamp': str(
-            result.get(
-                'previous_candle_timestamp',
-                ''
-            )
-            or ''
-        ),
-
         'timestamp': str(
             result.get(
                 'timestamp',
                 ''
             )
-            or ''
-        )
+        ),
     }
+
+
+def _tgp_snapshot_put(
+    result
+):
+    """
+    Guarda un snapshot pequeño en memoria.
+    """
+
+    snapshot = _compact_tgp_analysis(
+        result
+    )
+
+    if not snapshot:
+        return
+
+    key = (
+        snapshot['symbol'],
+        snapshot['timeframe']
+    )
+
+    with _TGP_MARKET_SNAPSHOT_LOCK:
+
+        _TGP_MARKET_SNAPSHOT[
+            key
+        ] = snapshot
+
+
+def _tgp_snapshot_get():
+    """
+    Retorna snapshots agrupados por timeframe.
+    """
+
+    output = {}
+
+    with _TGP_MARKET_SNAPSHOT_LOCK:
+
+        for (
+            symbol,
+            timeframe
+        ), snapshot in (
+            _TGP_MARKET_SNAPSHOT.items()
+        ):
+
+            output.setdefault(
+                timeframe,
+                {}
+            )[symbol] = dict(
+                snapshot
+            )
+
+    return output
 
 
 def _get_tgp_market_snapshots(
     fallback_result=None
 ):
     """
-    Obtiene el estado disponible del mercado para el TGP.
+    Obtiene snapshots multi-timeframe
+    reutilizando _ANALYSIS_CACHE.
 
-    FUENTE:
-        _ANALYSIS_CACHE
-
-    TF:
-        4h
-        12h
-        1D
-        1W
-
-    Símbolos:
-        BTC-USDT
-        PAXG-USDT
-        PAXG-BTC
-
-    No ejecuta análisis.
-    No hace llamadas a Internet.
-    No recalcula indicadores.
+    IMPORTANTE:
+    No ejecuta nuevos análisis.
     """
 
-    snapshots = {}
+    result = {}
 
     with _ANALYSIS_CACHE_LOCK:
 
-        cache_items = list(
-            _ANALYSIS_CACHE.items()
-        )
-
-    for (
-        key,
-        cache_entry
-    ) in cache_items:
-
-        try:
-
-            symbol, timeframe = key
-
-        except (
-            TypeError,
-            ValueError
-        ):
-
-            continue
-
-        if (
-            symbol
-            not in _TGP_SPOT_SYMBOLS
-        ):
-            continue
-
-        if (
+        for (
+            symbol,
             timeframe
-            not in _TGP_SPOT_TIMEFRAMES
+        ), cache_entry in (
+            _ANALYSIS_CACHE.items()
         ):
-            continue
 
-        if not isinstance(
-            cache_entry,
-            dict
-        ):
-            continue
+            if (
+                symbol
+                not in _TGP_SPOT_SYMBOLS
+            ):
+                continue
 
-        compact = _compact_tgp_analysis(
-            cache_entry.get(
-                'data'
+            if (
+                timeframe
+                not in _TGP_SPOT_TIMEFRAMES
+            ):
+                continue
+
+            compact = (
+                _compact_tgp_analysis(
+                    cache_entry.get(
+                        'data'
+                    )
+                )
             )
-        )
 
-        if not compact:
-            continue
+            if not compact:
+                continue
 
-        snapshots.setdefault(
-            timeframe,
-            {}
-        )[symbol] = compact
+            result.setdefault(
+                timeframe,
+                {}
+            )[symbol] = compact
 
     # ==============================================================
-    # Incluir el análisis que acaba de producirse aunque todavía
-    # no aparezca en el caché.
+    # Añadir análisis actual
     # ==============================================================
 
     compact_current = (
@@ -614,27 +619,25 @@ def _get_tgp_market_snapshots(
 
     if compact_current:
 
-        timeframe = (
-            compact_current[
-                'timeframe'
-            ]
-        )
+        tf = compact_current[
+            'timeframe'
+        ]
 
-        symbol = (
-            compact_current[
-                'symbol'
-            ]
-        )
+        sym = compact_current[
+            'symbol'
+        ]
 
-        snapshots.setdefault(
-            timeframe,
+        result.setdefault(
+            tf,
             {}
-        )[symbol] = compact_current
+        )[sym] = compact_current
 
-    return snapshots
+    return result
 
 
-        
+# ============================================================================
+# CLASE PRINCIPAL: SISTEMA EXPERTO DE TRADING
+# ============================================================================
 
 # ============================================================================
 # CLASE PRINCIPAL: SISTEMA EXPERTO DE TRADING
@@ -25977,18 +25980,21 @@ def api_analyze_with_portfolio():
             # Recalcular TGP con datos frescos del usuario (portafolio puede cambiar)
 
             # ==============================================================
-            # FASE 7B — TGP MULTI-TIMEFRAME
-            # ==============================================================
-            
-            market_snapshots = (
-                _get_tgp_market_snapshots(
-                    fallback_result=result
-                )
-            )
-            
-            # ==============================================================
             # TGP MULTI-TIMEFRAME
             # ==============================================================
+            
+            try:
+            
+                _tgp_snapshot_put(
+                    result
+                )
+            
+            except Exception as _snapshot_error:
+            
+                print(
+                    f"⚠️ TGP snapshot: "
+                    f"{_snapshot_error}"
+                )
             
             market_snapshots = (
                 _get_tgp_market_snapshots(
@@ -26026,63 +26032,6 @@ def api_analyze_with_portfolio():
                 'error': 'Análisis del sistema falló',
                 'system_result': result
             }), 500
-
-        # ==============================================================
-        # 2. TGP MULTI-TIMEFRAME
-        # ==============================================================
-        
-        market_snapshots = (
-            _get_tgp_market_snapshots(
-                fallback_result=result
-            )
-        )
-        
-        tgp_result = (
-            portfolio_guardian
-            .analyze_multi_timeframe(
-                user=user,
-                portfolio=portfolio,
-                prices=prices,
-                market_snapshots=market_snapshots
-            )
-        )
-
-        # 3. Merge: agregar TGP al resultado original
-        result['tgp'] = tgp_result
-        result['user'] = user
-
-        print(f"\n   🛡️ TGP: {tgp_result['action']} | Conf: {tgp_result['confidence']}%")
-        print(f"   🛡️ Razón: {tgp_result['reason'][:80]}...")
-
-        # === ALERTA TGP A TELEGRAM (solo urgente) ===
-        should_alert, alert_reason = should_send_tgp_alert(tgp_result, user)
-        if should_alert:
-            print(f"   📱 TGP Telegram: {alert_reason} → Enviando alerta...")
-            send_tgp_telegram_alert(tgp_result, user, symbol, timeframe, prices)
-        else:
-            print(f"   📱 TGP Telegram: No urgente. Sin alerta.")
-
-        # ====== GUARDAR EN CACHE (solo si hay TGP válido) ======
-        if (
-            tgp_result
-            and tgp_result.get(
-                'action'
-            )
-):
-            cache_ts[cache_key] = now
-            cache_data[cache_key] = result.copy()
-            api_analyze_with_portfolio._cache_ts = cache_ts
-            api_analyze_with_portfolio._cache_data = cache_data
-            print(f"   💾 Cache guardado para {cache_key}")
-        else:
-            print(
-                f"   ⚠️ No se guardó en caché: TGP vacío o inválido"
-            )
-        # ==============================
-
-        print(f"{'='*60}\n")
-
-        return jsonify(result)
 
     except Exception as e:
         print(f"❌ Error en /api/analyze-with-portfolio: {e}")
