@@ -1728,14 +1728,132 @@ function getInstantRecommendation(attempt = 1) {
         return response.json();
     })
     .then(data => {
-        if (data.success && data.data) {
-            updateInstantRecommendation(data.data);
-        }
-        if (data.tgp) {
-            displayTGPResult(data.tgp);
-            console.log('✅ TGP mostrado:', data.tgp.action, data.tgp.reason.substring(0, 50));
+        // ============================================================
+        // RESULTADO DEL ANÁLISIS
+        // ============================================================
+        //
+        // IMPORTANTE:
+        // "NO_OPERAR" es una decisión válida del sistema.
+        // No debe tratarse como error.
+        //
+        // Sólo consideramos error cuando:
+        //   - success === false
+        //   - no existe data
+        //   - o existe error técnico.
+        // ============================================================
+        
+        if (
+            data.success
+            && data.data
+        ) {
+        
+            updateInstantRecommendation(
+                data.data
+            );
+        
+            const action =
+                data.data.decision?.action
+                || 'NO_OPERAR';
+        
+            console.log(
+                '✅ Análisis válido:',
+                action
+            );
+        
+        } else if (
+            data.data
+            && data.data.decision
+            && data.data.decision.action
+        ) {
+        
+            // --------------------------------------------------------
+            // Caso defensivo:
+            // El backend puede entregar un análisis válido aunque
+            // alguna capa haya marcado success=false.
+            //
+            // Si hay decisión real, NO mostrar "Análisis no disponible".
+            // --------------------------------------------------------
+        
+            updateInstantRecommendation(
+                data.data
+            );
+        
+            console.log(
+                '✅ Análisis recibido con decisión:',
+                data.data.decision.action
+            );
+        
         } else {
-            console.warn('⚠️ Respuesta sin TGP:', data);
+        
+            const errorMessage =
+                data.error
+                || 'Error desconocido';
+        
+            console.error(
+                '❌ Error real del análisis:',
+                errorMessage
+            );
+        
+            const recommendationEl =
+                document.getElementById(
+                    'system-recommendation'
+                );
+        
+            if (
+                recommendationEl
+            ) {
+        
+                recommendationEl.innerHTML = `
+                    <div class="alert alert-danger mb-0">
+        
+                        <strong>
+                            ⚠️ No se pudo completar el análisis.
+                        </strong>
+        
+                        <div class="small mt-2">
+                            ${errorMessage}
+                        </div>
+        
+                    </div>
+                `;
+            }
+        
+            window.showToast(
+                '❌ ' + errorMessage,
+                'danger'
+            );
+        }
+        
+        // ============================================================
+        // TGP
+        // ============================================================
+        
+        if (
+            data.tgp
+        ) {
+        
+            displayTGPResult(
+                data.tgp
+            );
+        
+            console.log(
+                '✅ TGP mostrado:',
+                data.tgp.action,
+                (
+                    data.tgp.reason
+                    || ''
+                ).substring(
+                    0,
+                    80
+                )
+            );
+        
+        } else {
+        
+            console.warn(
+                '⚠️ Respuesta sin TGP:',
+                data
+            );
         }
         if (data.current_price) {
             lastPrices[symbol] = data.current_price;
