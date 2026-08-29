@@ -379,7 +379,13 @@ document.addEventListener('DOMContentLoaded', function() {
     if (symbolSelect) {
         symbolSelect.addEventListener('change', function() {
             currentSymbol = this.value;
-            currentInterval = document.getElementById('interval-select')?.value || '1D';
+            currentInterval =
+                document.getElementById('interval-select')?.value
+                || (
+                    window.IS_FUTURES_PAGE
+                        ? '1h'
+                        : '1D'
+                );
             runCompleteAnalysis();
         });
     }
@@ -1307,13 +1313,37 @@ window.runCompleteAnalysis = function() {
         analysisRequest.url,
         fetchOpts
     )
-        .then(response => {
-            if (!response.ok) {
-                return response.json().then(err => {
-                    throw new Error(err.error || `Error HTTP ${response.status}`);
-                });
+        .then(async response => {
+        
+            const responseText =
+                await response.text();
+        
+            let data = {};
+        
+            try {
+                data = responseText
+                    ? JSON.parse(responseText)
+                    : {};
+            } catch (parseError) {
+        
+                data = {
+                    success: false,
+                    error:
+                        responseText
+                        || `Respuesta HTTP ${response.status}`
+                };
             }
-            return response.json();
+        
+            if (!response.ok) {
+        
+                throw new Error(
+                    data.error
+                    || data.message
+                    || `Error HTTP ${response.status}`
+                );
+            }
+        
+            return data;
         })
         .then(data => {
             if (data.success && data.data) {
@@ -1560,8 +1590,14 @@ window.runCompleteAnalysis = function() {
             } else {
             
                 const errorMessage =
-                    data.error
-                    || 'Error desconocido';
+                    data?.error
+                    || data?.message
+                    || data?.system_result?.error
+                    || (
+                        response?.status
+                            ? `Error HTTP ${response.status}`
+                            : 'Error desconocido'
+                    );
             
                 console.error(
                     '❌ Análisis rechazado:',
