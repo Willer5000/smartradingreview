@@ -2366,7 +2366,80 @@ class PortfolioGuardian:
                 / entry
                 * 100
             )
-    
+
+
+            # ==============================================================
+            # MFE / MAE INTRAVELA
+            # ==============================================================
+            
+            mfe_pct = 0.0
+            mae_pct = 0.0
+            
+            if (
+                len(highs) > 0
+                and len(lows) > 0
+            ):
+            
+                if action == 'LONG':
+            
+                    max_favorable_price = max(
+                        highs
+                    )
+            
+                    max_adverse_price = min(
+                        lows
+                    )
+            
+                    mfe_pct = max(
+                        0.0,
+                        (
+                            max_favorable_price
+                            - entry
+                        )
+                        / entry
+                        * 100
+                    )
+            
+                    mae_pct = max(
+                        0.0,
+                        (
+                            entry
+                            - max_adverse_price
+                        )
+                        / entry
+                        * 100
+                    )
+            
+                else:
+            
+                    max_favorable_price = min(
+                        lows
+                    )
+            
+                    max_adverse_price = max(
+                        highs
+                    )
+            
+                    mfe_pct = max(
+                        0.0,
+                        (
+                            entry
+                            - max_favorable_price
+                        )
+                        / entry
+                        * 100
+                    )
+            
+                    mae_pct = max(
+                        0.0,
+                        (
+                            max_adverse_price
+                            - entry
+                        )
+                        / entry
+                        * 100
+                    )
+            
             # ==============================================================
             # VELAS LIGERAS
             # ==============================================================
@@ -2618,6 +2691,30 @@ class PortfolioGuardian:
                         round(
                             remaining_to_tp_pct,
                             3
+                        ),
+                    
+                    'mfe_pct':
+                        round(
+                            mfe_pct,
+                            3
+                        ),
+                    
+                    'mae_pct':
+                        round(
+                            mae_pct,
+                            3
+                        ),
+                    
+                    'tp_distance_pct':
+                        round(
+                            tp_distance_pct,
+                            3
+                        ),
+                    
+                    'sl_distance_pct':
+                        round(
+                            sl_distance_pct,
+                            3
                         )
                 }
     
@@ -2656,6 +2753,31 @@ class PortfolioGuardian:
                         round(
                             remaining_to_tp_pct,
                             3
+                        ),
+                    
+                    'mfe_pct':
+                        round(
+                            mfe_pct,
+                            3
+                        ),
+                    
+                    'mae_pct':
+                        round(
+                            mae_pct,
+                            3
+                        ),
+                    
+                    'tp_distance_pct':
+                        round(
+                            tp_distance_pct,
+                            3
+                        ),
+                    
+                    'sl_distance_pct':
+                        round(
+                            sl_distance_pct,
+                            3
+                        )
                         )
                 }
     
@@ -2690,8 +2812,31 @@ class PortfolioGuardian:
                     round(
                         remaining_to_tp_pct,
                         3
+                    ),
+                
+                'mfe_pct':
+                    round(
+                        mfe_pct,
+                        3
+                    ),
+                
+                'mae_pct':
+                    round(
+                        mae_pct,
+                        3
+                    ),
+                
+                'tp_distance_pct':
+                    round(
+                        tp_distance_pct,
+                        3
+                    ),
+                
+                'sl_distance_pct':
+                    round(
+                        sl_distance_pct,
+                        3
                     )
-            }
     
         except Exception as e:
     
