@@ -2108,698 +2108,698 @@ class PortfolioGuardian:
             )
         )
 
-def evaluate_futures_position(
-    self,
-    signal,
-    current_price,
-    candles
-):
-    """
-    Futures Position Guardian.
-
-    Sólo asesora:
-        HOLD
-        REDUCE
-        EXIT
-        WAIT_ENTRY
-
-    NO ejecuta cierres automáticamente.
-
-    Evalúa:
-        - tiempo transcurrido
-        - progreso hacia TP
-        - distancia al SL
-        - momentum
-        - estructura
-        - MFE/MAE de la ventana disponible
-
-    Diseñado para ser ligero en Render Free.
-    """
-
-    try:
-
-        if not isinstance(signal, dict):
-
-            return {
-                'action': 'HOLD',
-                'severity': 'NONE',
-                'reason': 'Señal inválida.'
-            }
-
-        status = str(
-            signal.get(
-                'status',
-                ''
-            )
-        ).lower()
-
-        # ----------------------------------------------------------
-        # WAIT_ENTRY
-        # ----------------------------------------------------------
-        if status != 'entry_touched':
-
-            return {
-                'action': 'WAIT_ENTRY',
-                'severity': 'NONE',
-                'reason': (
-                    'La señal todavía no ha tocado el ENTRY. '
-                    'El Guardian comenzará a gestionar la posición '
-                    'cuando la entrada quede activada.'
-                )
-            }
-
-        action = str(
-            signal.get(
-                'action',
-                ''
-            )
-        ).upper()
-
-        entry = float(
-            signal.get(
-                'entry',
+    def evaluate_futures_position(
+        self,
+        signal,
+        current_price,
+        candles
+    ):
+        """
+        Futures Position Guardian.
+    
+        Sólo asesora:
+            HOLD
+            REDUCE
+            EXIT
+            WAIT_ENTRY
+    
+        NO ejecuta cierres automáticamente.
+    
+        Evalúa:
+            - tiempo transcurrido
+            - progreso hacia TP
+            - distancia al SL
+            - momentum
+            - estructura
+            - MFE/MAE de la ventana disponible
+    
+        Diseñado para ser ligero en Render Free.
+        """
+    
+        try:
+    
+            if not isinstance(signal, dict):
+    
+                return {
+                    'action': 'HOLD',
+                    'severity': 'NONE',
+                    'reason': 'Señal inválida.'
+                }
+    
+            status = str(
                 signal.get(
-                    'entry_price',
+                    'status',
+                    ''
+                )
+            ).lower()
+    
+            # ----------------------------------------------------------
+            # WAIT_ENTRY
+            # ----------------------------------------------------------
+            if status != 'entry_touched':
+    
+                return {
+                    'action': 'WAIT_ENTRY',
+                    'severity': 'NONE',
+                    'reason': (
+                        'La señal todavía no ha tocado el ENTRY. '
+                        'El Guardian comenzará a gestionar la posición '
+                        'cuando la entrada quede activada.'
+                    )
+                }
+    
+            action = str(
+                signal.get(
+                    'action',
+                    ''
+                )
+            ).upper()
+    
+            entry = float(
+                signal.get(
+                    'entry',
+                    signal.get(
+                        'entry_price',
+                        0
+                    )
+                )
+                or 0
+            )
+    
+            sl = float(
+                signal.get(
+                    'stop_loss',
                     0
                 )
+                or 0
             )
-            or 0
-        )
-
-        sl = float(
-            signal.get(
-                'stop_loss',
-                0
+    
+            tp = float(
+                signal.get(
+                    'take_profit',
+                    0
+                )
+                or 0
             )
-            or 0
-        )
-
-        tp = float(
-            signal.get(
-                'take_profit',
-                0
+    
+            leverage = float(
+                signal.get(
+                    'leverage',
+                    1
+                )
+                or 1
             )
-            or 0
-        )
-
-        leverage = float(
-            signal.get(
-                'leverage',
-                1
+    
+            if (
+                entry <= 0
+                or sl <= 0
+                or tp <= 0
+                or current_price <= 0
+            ):
+    
+                return {
+                    'action': 'HOLD',
+                    'severity': 'NONE',
+                    'reason': (
+                        'La posición no tiene ENTRY, SL, TP '
+                        'o precio actual válidos.'
+                    )
+                }
+    
+            # ==========================================================
+            # TIEMPO TRANSCURRIDO
+            # ==========================================================
+    
+            raw_entry_at = (
+                signal.get(
+                    'entry_at'
+                )
+                or signal.get(
+                    'created_at'
+                )
             )
-            or 1
-        )
-
-        if (
-            entry <= 0
-            or sl <= 0
-            or tp <= 0
-            or current_price <= 0
-        ):
-
+    
+            elapsed_minutes = 0.0
+    
+            if raw_entry_at:
+    
+                try:
+    
+                    from datetime import (
+                        datetime,
+                        timezone
+                    )
+    
+                    parsed = datetime.fromisoformat(
+                        str(
+                            raw_entry_at
+                        ).replace(
+                            'Z',
+                            '+00:00'
+                        )
+                    )
+    
+                    if parsed.tzinfo is None:
+    
+                        parsed = parsed.replace(
+                            tzinfo=timezone.utc
+                        )
+    
+                    elapsed_minutes = max(
+                        0.0,
+                        (
+                            datetime.now(
+                                timezone.utc
+                            )
+                            - parsed
+                        ).total_seconds()
+                        / 60.0
+                    )
+    
+                except Exception:
+    
+                    elapsed_minutes = 0.0
+    
+            timeframe = str(
+                signal.get(
+                    'timeframe',
+                    '1h'
+                )
+            )
+    
+            # ==========================================================
+            # TIEMPO MODERADO
+            # ==========================================================
+    
+            moderate_minutes = {
+    
+                '5m': 45,
+                '15m': 90,
+                '30m': 150,
+                '1h': 240,
+                '2h': 480,
+                '4h': 720
+    
+            }.get(
+                timeframe,
+                240
+            )
+    
+            # ==========================================================
+            # DISTANCIAS
+            # ==========================================================
+    
+            sl_distance_pct = (
+                abs(
+                    entry - sl
+                )
+                / entry
+                * 100
+            )
+    
+            tp_distance_pct = (
+                abs(
+                    tp - entry
+                )
+                / entry
+                * 100
+            )
+    
+            # ==========================================================
+            # PROGRESO ACTUAL
+            # ==========================================================
+    
+            if action == 'LONG':
+    
+                favorable_pct = max(
+                    0.0,
+                    (
+                        current_price
+                        - entry
+                    )
+                    / entry
+                    * 100
+                )
+    
+                adverse_pct = max(
+                    0.0,
+                    (
+                        entry
+                        - current_price
+                    )
+                    / entry
+                    * 100
+                )
+    
+                remaining_to_tp_pct = max(
+                    0.0,
+                    (
+                        tp
+                        - current_price
+                    )
+                    / entry
+                    * 100
+                )
+    
+            else:
+    
+                favorable_pct = max(
+                    0.0,
+                    (
+                        entry
+                        - current_price
+                    )
+                    / entry
+                    * 100
+                )
+    
+                adverse_pct = max(
+                    0.0,
+                    (
+                        current_price
+                        - entry
+                    )
+                    / entry
+                    * 100
+                )
+    
+                remaining_to_tp_pct = max(
+                    0.0,
+                    (
+                        current_price
+                        - tp
+                    )
+                    / entry
+                    * 100
+                )
+    
+            # ==========================================================
+            # VELAS
+            # ==========================================================
+    
+            closes = []
+            highs = []
+            lows = []
+    
+            if isinstance(candles, dict):
+    
+                closes = [
+                    float(x)
+                    for x in (
+                        candles.get(
+                            'close',
+                            []
+                        )
+                        or []
+                    )
+                    if x is not None
+                ]
+    
+                highs = [
+                    float(x)
+                    for x in (
+                        candles.get(
+                            'high',
+                            []
+                        )
+                        or []
+                    )
+                    if x is not None
+                ]
+    
+                lows = [
+                    float(x)
+                    for x in (
+                        candles.get(
+                            'low',
+                            []
+                        )
+                        or []
+                    )
+                    if x is not None
+                ]
+    
+            closes = closes[-20:]
+            highs = highs[-20:]
+            lows = lows[-20:]
+    
+            # ==========================================================
+            # MFE / MAE DE LA VENTANA DISPONIBLE
+            # ==========================================================
+    
+            mfe_pct = 0.0
+            mae_pct = 0.0
+    
+            if highs and lows:
+    
+                if action == 'LONG':
+    
+                    highest = max(
+                        highs
+                    )
+    
+                    lowest = min(
+                        lows
+                    )
+    
+                    mfe_pct = max(
+                        0.0,
+                        (
+                            highest
+                            - entry
+                        )
+                        / entry
+                        * 100
+                    )
+    
+                    mae_pct = max(
+                        0.0,
+                        (
+                            entry
+                            - lowest
+                        )
+                        / entry
+                        * 100
+                    )
+    
+                else:
+    
+                    lowest = min(
+                        lows
+                    )
+    
+                    highest = max(
+                        highs
+                    )
+    
+                    mfe_pct = max(
+                        0.0,
+                        (
+                            entry
+                            - lowest
+                        )
+                        / entry
+                        * 100
+                    )
+    
+                    mae_pct = max(
+                        0.0,
+                        (
+                            highest
+                            - entry
+                        )
+                        / entry
+                        * 100
+                    )
+    
+            # ==========================================================
+            # MOMENTUM RECIENTE
+            # ==========================================================
+    
+            recent_change_pct = 0.0
+            fast_avg = current_price
+            slow_avg = current_price
+    
+            if len(closes) >= 6:
+    
+                recent_change_pct = (
+                    (
+                        closes[-1]
+                        - closes[-6]
+                    )
+                    / closes[-6]
+                    * 100
+                )
+    
+                fast_values = closes[-5:]
+                slow_values = closes[-10:]
+    
+                fast_avg = (
+                    sum(
+                        fast_values
+                    )
+                    / len(
+                        fast_values
+                    )
+                )
+    
+                slow_avg = (
+                    sum(
+                        slow_values
+                    )
+                    / len(
+                        slow_values
+                    )
+                )
+    
+            # ==========================================================
+            # MOMENTUM CONTRARIO
+            # ==========================================================
+    
+            if action == 'LONG':
+    
+                momentum_against = (
+                    recent_change_pct < -0.20
+                    and fast_avg < slow_avg
+                )
+    
+            else:
+    
+                momentum_against = (
+                    recent_change_pct > 0.20
+                    and fast_avg > slow_avg
+                )
+    
+            # ==========================================================
+            # ESTANCAMIENTO
+            # ==========================================================
+    
+            min_progress = max(
+                0.15,
+                tp_distance_pct * 0.15
+            )
+    
+            stagnant = (
+                elapsed_minutes
+                >= moderate_minutes
+                and favorable_pct
+                < min_progress
+            )
+    
+            # ==========================================================
+            # DETERIORO ESTRUCTURAL SIMPLE
+            # ==========================================================
+    
+            structure_deteriorated = False
+    
+            if len(closes) >= 8:
+    
+                recent_high = max(
+                    closes[-5:]
+                )
+    
+                recent_low = min(
+                    closes[-5:]
+                )
+    
+                previous_high = max(
+                    closes[-10:-5]
+                )
+    
+                previous_low = min(
+                    closes[-10:-5]
+                )
+    
+                if action == 'LONG':
+    
+                    structure_deteriorated = (
+                        recent_high
+                        < previous_high
+                        and recent_low
+                        < previous_low
+                    )
+    
+                else:
+    
+                    structure_deteriorated = (
+                        recent_high
+                        > previous_high
+                        and recent_low
+                        > previous_low
+                    )
+    
+            # ==========================================================
+            # SCORE DE DETERIORO
+            # ==========================================================
+    
+            deterioration_score = 0
+    
+            if stagnant:
+    
+                deterioration_score += 30
+    
+            if momentum_against:
+    
+                deterioration_score += 30
+    
+            if structure_deteriorated:
+    
+                deterioration_score += 30
+    
+            if (
+                elapsed_minutes
+                >= moderate_minutes * 1.5
+                and favorable_pct
+                < max(
+                    0.20,
+                    tp_distance_pct * 0.20
+                )
+            ):
+    
+                deterioration_score += 15
+    
+            deterioration_score = min(
+                100,
+                deterioration_score
+            )
+    
+            # ==========================================================
+            # TEXTO COMÚN
+            # ==========================================================
+    
+            metrics = {
+                'deterioration_score':
+                    deterioration_score,
+    
+                'elapsed_minutes':
+                    round(
+                        elapsed_minutes,
+                        1
+                    ),
+    
+                'favorable_pct':
+                    round(
+                        favorable_pct,
+                        3
+                    ),
+    
+                'adverse_pct':
+                    round(
+                        adverse_pct,
+                        3
+                    ),
+    
+                'remaining_to_tp_pct':
+                    round(
+                        remaining_to_tp_pct,
+                        3
+                    ),
+    
+                'mfe_pct':
+                    round(
+                        mfe_pct,
+                        3
+                    ),
+    
+                'mae_pct':
+                    round(
+                        mae_pct,
+                        3
+                    ),
+    
+                'tp_distance_pct':
+                    round(
+                        tp_distance_pct,
+                        3
+                    ),
+    
+                'sl_distance_pct':
+                    round(
+                        sl_distance_pct,
+                        3
+                    ),
+    
+                'leverage':
+                    int(
+                        leverage
+                    )
+            }
+    
+            # ==========================================================
+            # EXIT
+            # ==========================================================
+    
+            if deterioration_score >= 75:
+    
+                return {
+                    'action': 'EXIT',
+                    'severity': 'HIGH',
+    
+                    'reason': (
+                        f'La posición {action} presenta '
+                        f'deterioro significativo. '
+                        f'Lleva {elapsed_minutes:.0f} min '
+                        f'sin progreso suficiente hacia TP '
+                        f'y existen señales técnicas contrarias.'
+                    ),
+    
+                    **metrics
+                }
+    
+            # ==========================================================
+            # REDUCE / PROTECT
+            # ==========================================================
+    
+            if deterioration_score >= 45:
+    
+                return {
+                    'action': 'REDUCE',
+                    'severity': 'MEDIUM',
+    
+                    'reason': (
+                        f'La posición {action} muestra '
+                        f'estancamiento o deterioro técnico. '
+                        f'Conviene considerar reducción parcial '
+                        f'o protección del beneficio.'
+                    ),
+    
+                    **metrics
+                }
+    
+            # ==========================================================
+            # HOLD
+            # ==========================================================
+    
+            return {
+                'action': 'HOLD',
+                'severity': 'NONE',
+    
+                'reason': (
+                    f'La tesis {action} permanece vigente. '
+                    f'Progreso favorable: '
+                    f'{favorable_pct:.2f}%. '
+                    f'MFE: {mfe_pct:.2f}%. '
+                    f'No se detecta deterioro suficiente '
+                    f'para recomendar salida anticipada.'
+                ),
+    
+                **metrics
+            }
+    
+        except Exception as e:
+    
+            logger.error(
+                f'Futures Position Guardian: {e}'
+            )
+    
             return {
                 'action': 'HOLD',
                 'severity': 'NONE',
                 'reason': (
-                    'La posición no tiene ENTRY, SL, TP '
-                    'o precio actual válidos.'
+                    'No se pudo evaluar la posición '
+                    'de forma segura.'
                 )
             }
-
-        # ==========================================================
-        # TIEMPO TRANSCURRIDO
-        # ==========================================================
-
-        raw_entry_at = (
-            signal.get(
-                'entry_at'
-            )
-            or signal.get(
-                'created_at'
-            )
-        )
-
-        elapsed_minutes = 0.0
-
-        if raw_entry_at:
-
-            try:
-
-                from datetime import (
-                    datetime,
-                    timezone
-                )
-
-                parsed = datetime.fromisoformat(
-                    str(
-                        raw_entry_at
-                    ).replace(
-                        'Z',
-                        '+00:00'
-                    )
-                )
-
-                if parsed.tzinfo is None:
-
-                    parsed = parsed.replace(
-                        tzinfo=timezone.utc
-                    )
-
-                elapsed_minutes = max(
-                    0.0,
-                    (
-                        datetime.now(
-                            timezone.utc
-                        )
-                        - parsed
-                    ).total_seconds()
-                    / 60.0
-                )
-
-            except Exception:
-
-                elapsed_minutes = 0.0
-
-        timeframe = str(
-            signal.get(
-                'timeframe',
-                '1h'
-            )
-        )
-
-        # ==========================================================
-        # TIEMPO MODERADO
-        # ==========================================================
-
-        moderate_minutes = {
-
-            '5m': 45,
-            '15m': 90,
-            '30m': 150,
-            '1h': 240,
-            '2h': 480,
-            '4h': 720
-
-        }.get(
-            timeframe,
-            240
-        )
-
-        # ==========================================================
-        # DISTANCIAS
-        # ==========================================================
-
-        sl_distance_pct = (
-            abs(
-                entry - sl
-            )
-            / entry
-            * 100
-        )
-
-        tp_distance_pct = (
-            abs(
-                tp - entry
-            )
-            / entry
-            * 100
-        )
-
-        # ==========================================================
-        # PROGRESO ACTUAL
-        # ==========================================================
-
-        if action == 'LONG':
-
-            favorable_pct = max(
-                0.0,
-                (
-                    current_price
-                    - entry
-                )
-                / entry
-                * 100
-            )
-
-            adverse_pct = max(
-                0.0,
-                (
-                    entry
-                    - current_price
-                )
-                / entry
-                * 100
-            )
-
-            remaining_to_tp_pct = max(
-                0.0,
-                (
-                    tp
-                    - current_price
-                )
-                / entry
-                * 100
-            )
-
-        else:
-
-            favorable_pct = max(
-                0.0,
-                (
-                    entry
-                    - current_price
-                )
-                / entry
-                * 100
-            )
-
-            adverse_pct = max(
-                0.0,
-                (
-                    current_price
-                    - entry
-                )
-                / entry
-                * 100
-            )
-
-            remaining_to_tp_pct = max(
-                0.0,
-                (
-                    current_price
-                    - tp
-                )
-                / entry
-                * 100
-            )
-
-        # ==========================================================
-        # VELAS
-        # ==========================================================
-
-        closes = []
-        highs = []
-        lows = []
-
-        if isinstance(candles, dict):
-
-            closes = [
-                float(x)
-                for x in (
-                    candles.get(
-                        'close',
-                        []
-                    )
-                    or []
-                )
-                if x is not None
-            ]
-
-            highs = [
-                float(x)
-                for x in (
-                    candles.get(
-                        'high',
-                        []
-                    )
-                    or []
-                )
-                if x is not None
-            ]
-
-            lows = [
-                float(x)
-                for x in (
-                    candles.get(
-                        'low',
-                        []
-                    )
-                    or []
-                )
-                if x is not None
-            ]
-
-        closes = closes[-20:]
-        highs = highs[-20:]
-        lows = lows[-20:]
-
-        # ==========================================================
-        # MFE / MAE DE LA VENTANA DISPONIBLE
-        # ==========================================================
-
-        mfe_pct = 0.0
-        mae_pct = 0.0
-
-        if highs and lows:
-
-            if action == 'LONG':
-
-                highest = max(
-                    highs
-                )
-
-                lowest = min(
-                    lows
-                )
-
-                mfe_pct = max(
-                    0.0,
-                    (
-                        highest
-                        - entry
-                    )
-                    / entry
-                    * 100
-                )
-
-                mae_pct = max(
-                    0.0,
-                    (
-                        entry
-                        - lowest
-                    )
-                    / entry
-                    * 100
-                )
-
-            else:
-
-                lowest = min(
-                    lows
-                )
-
-                highest = max(
-                    highs
-                )
-
-                mfe_pct = max(
-                    0.0,
-                    (
-                        entry
-                        - lowest
-                    )
-                    / entry
-                    * 100
-                )
-
-                mae_pct = max(
-                    0.0,
-                    (
-                        highest
-                        - entry
-                    )
-                    / entry
-                    * 100
-                )
-
-        # ==========================================================
-        # MOMENTUM RECIENTE
-        # ==========================================================
-
-        recent_change_pct = 0.0
-        fast_avg = current_price
-        slow_avg = current_price
-
-        if len(closes) >= 6:
-
-            recent_change_pct = (
-                (
-                    closes[-1]
-                    - closes[-6]
-                )
-                / closes[-6]
-                * 100
-            )
-
-            fast_values = closes[-5:]
-            slow_values = closes[-10:]
-
-            fast_avg = (
-                sum(
-                    fast_values
-                )
-                / len(
-                    fast_values
-                )
-            )
-
-            slow_avg = (
-                sum(
-                    slow_values
-                )
-                / len(
-                    slow_values
-                )
-            )
-
-        # ==========================================================
-        # MOMENTUM CONTRARIO
-        # ==========================================================
-
-        if action == 'LONG':
-
-            momentum_against = (
-                recent_change_pct < -0.20
-                and fast_avg < slow_avg
-            )
-
-        else:
-
-            momentum_against = (
-                recent_change_pct > 0.20
-                and fast_avg > slow_avg
-            )
-
-        # ==========================================================
-        # ESTANCAMIENTO
-        # ==========================================================
-
-        min_progress = max(
-            0.15,
-            tp_distance_pct * 0.15
-        )
-
-        stagnant = (
-            elapsed_minutes
-            >= moderate_minutes
-            and favorable_pct
-            < min_progress
-        )
-
-        # ==========================================================
-        # DETERIORO ESTRUCTURAL SIMPLE
-        # ==========================================================
-
-        structure_deteriorated = False
-
-        if len(closes) >= 8:
-
-            recent_high = max(
-                closes[-5:]
-            )
-
-            recent_low = min(
-                closes[-5:]
-            )
-
-            previous_high = max(
-                closes[-10:-5]
-            )
-
-            previous_low = min(
-                closes[-10:-5]
-            )
-
-            if action == 'LONG':
-
-                structure_deteriorated = (
-                    recent_high
-                    < previous_high
-                    and recent_low
-                    < previous_low
-                )
-
-            else:
-
-                structure_deteriorated = (
-                    recent_high
-                    > previous_high
-                    and recent_low
-                    > previous_low
-                )
-
-        # ==========================================================
-        # SCORE DE DETERIORO
-        # ==========================================================
-
-        deterioration_score = 0
-
-        if stagnant:
-
-            deterioration_score += 30
-
-        if momentum_against:
-
-            deterioration_score += 30
-
-        if structure_deteriorated:
-
-            deterioration_score += 30
-
-        if (
-            elapsed_minutes
-            >= moderate_minutes * 1.5
-            and favorable_pct
-            < max(
-                0.20,
-                tp_distance_pct * 0.20
-            )
-        ):
-
-            deterioration_score += 15
-
-        deterioration_score = min(
-            100,
-            deterioration_score
-        )
-
-        # ==========================================================
-        # TEXTO COMÚN
-        # ==========================================================
-
-        metrics = {
-            'deterioration_score':
-                deterioration_score,
-
-            'elapsed_minutes':
-                round(
-                    elapsed_minutes,
-                    1
-                ),
-
-            'favorable_pct':
-                round(
-                    favorable_pct,
-                    3
-                ),
-
-            'adverse_pct':
-                round(
-                    adverse_pct,
-                    3
-                ),
-
-            'remaining_to_tp_pct':
-                round(
-                    remaining_to_tp_pct,
-                    3
-                ),
-
-            'mfe_pct':
-                round(
-                    mfe_pct,
-                    3
-                ),
-
-            'mae_pct':
-                round(
-                    mae_pct,
-                    3
-                ),
-
-            'tp_distance_pct':
-                round(
-                    tp_distance_pct,
-                    3
-                ),
-
-            'sl_distance_pct':
-                round(
-                    sl_distance_pct,
-                    3
-                ),
-
-            'leverage':
-                int(
-                    leverage
-                )
-        }
-
-        # ==========================================================
-        # EXIT
-        # ==========================================================
-
-        if deterioration_score >= 75:
-
-            return {
-                'action': 'EXIT',
-                'severity': 'HIGH',
-
-                'reason': (
-                    f'La posición {action} presenta '
-                    f'deterioro significativo. '
-                    f'Lleva {elapsed_minutes:.0f} min '
-                    f'sin progreso suficiente hacia TP '
-                    f'y existen señales técnicas contrarias.'
-                ),
-
-                **metrics
-            }
-
-        # ==========================================================
-        # REDUCE / PROTECT
-        # ==========================================================
-
-        if deterioration_score >= 45:
-
-            return {
-                'action': 'REDUCE',
-                'severity': 'MEDIUM',
-
-                'reason': (
-                    f'La posición {action} muestra '
-                    f'estancamiento o deterioro técnico. '
-                    f'Conviene considerar reducción parcial '
-                    f'o protección del beneficio.'
-                ),
-
-                **metrics
-            }
-
-        # ==========================================================
-        # HOLD
-        # ==========================================================
-
-        return {
-            'action': 'HOLD',
-            'severity': 'NONE',
-
-            'reason': (
-                f'La tesis {action} permanece vigente. '
-                f'Progreso favorable: '
-                f'{favorable_pct:.2f}%. '
-                f'MFE: {mfe_pct:.2f}%. '
-                f'No se detecta deterioro suficiente '
-                f'para recomendar salida anticipada.'
-            ),
-
-            **metrics
-        }
-
-    except Exception as e:
-
-        logger.error(
-            f'Futures Position Guardian: {e}'
-        )
-
-        return {
-            'action': 'HOLD',
-            'severity': 'NONE',
-            'reason': (
-                'No se pudo evaluar la posición '
-                'de forma segura.'
-            )
-        }
     
     def _build_response(self, action, reason, confidence, portfolio, valuation,
                         trade_size_pct=0, amount_crypto=0, amount_usd=0,
