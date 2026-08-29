@@ -25957,7 +25957,6 @@ def api_analyze_with_portfolio():
                         f"precios server-side: "
                         f"{price_error}"
                     )
-            print(f"⚠️ TGP: no se pudieron recuperar precios server-side: {price_error}")
 
         print(f"\n{'='*60}")
         print(f"👤 {user} - Análisis con Portafolio")
