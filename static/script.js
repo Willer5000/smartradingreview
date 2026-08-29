@@ -1546,12 +1546,99 @@ window.runCompleteAnalysis = function() {
                 window.showToast('✅ Análisis completado', 'success');
                 
             } else {
-                window.showToast('❌ Error: ' + (data.error || 'Error desconocido'), 'danger');
+            
+                const errorMessage =
+                    data.error
+                    || 'Error desconocido';
+            
+                console.error(
+                    '❌ Análisis rechazado:',
+                    errorMessage
+                );
+            
+                const recommendationEl =
+                    document.getElementById(
+                        'system-recommendation'
+                    );
+            
+                if (recommendationEl) {
+            
+                    recommendationEl.innerHTML = `
+                        <div class="alert alert-warning mb-0">
+                            <strong>⚠️ Análisis no disponible.</strong>
+                            <div class="small mt-2">
+                                ${errorMessage}
+                            </div>
+                        </div>
+                    `;
+                }
+            
+                window.showToast(
+                    '❌ ' + errorMessage,
+                    'warning'
+                );
             }
         })
         .catch(error => {
-            console.error('Error en análisis:', error);
-            window.showToast('❌ Error de conexión con el servidor', 'danger');
+        
+            console.error(
+                '❌ Error en análisis:',
+                error
+            );
+        
+            // ============================================================
+            // EVITAR CARGA INFINITA EN LA INTERFAZ
+            // ============================================================
+        
+            const recommendationEl =
+                document.getElementById(
+                    'system-recommendation'
+                );
+        
+            if (recommendationEl) {
+        
+                recommendationEl.innerHTML = `
+                    <div class="alert alert-danger mb-0">
+                        <strong>⚠️ No se pudo completar el análisis.</strong>
+                        <div class="small mt-2">
+                            El servidor devolvió un error.
+                            Intenta nuevamente.
+                        </div>
+                    </div>
+                `;
+            }
+        
+            const summaryEl =
+                document.getElementById(
+                    'analysis-summary'
+                );
+        
+            if (summaryEl) {
+        
+                summaryEl.innerHTML = `
+                    <div class="text-center py-3 text-warning">
+                        ⚠️ Análisis temporalmente no disponible.
+                    </div>
+                `;
+            }
+        
+            // El banner TGP no debe mostrar una recomendación
+            // anterior como si perteneciera al análisis fallido.
+            const tgpBanner =
+                document.getElementById(
+                    'tgp-banner'
+                );
+        
+            if (tgpBanner) {
+                tgpBanner.classList.add(
+                    'd-none'
+                );
+            }
+        
+            window.showToast(
+                '❌ Error de conexión con el servidor',
+                'danger'
+            );
         });
 };
 
