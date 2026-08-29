@@ -1203,11 +1203,98 @@ window.runCompleteAnalysis = function() {
     // ====== TGP: Usar /api/analyze-with-portfolio en Spot para obtener recomendación del Guardián ======
     // Usar el wrapper universal (Spot o Futuros según window.IS_FUTURES_PAGE)
     const req = window.buildAnalyzeURL(symbol, interval);
-    const fetchOpts = req.method === 'POST'
-        ? { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(req.body) }
-        : { method: 'GET' };
+    // ============================================================
+    // TGP SPOT
+    // ============================================================
+    // Para Spot necesitamos /api/analyze-with-portfolio para que
+    // el resultado incluya la recomendación del Guardian.
+    //
+    // Futuros mantiene su endpoint normal.
+    // ============================================================
+    
+    let analysisRequest = req;
+    
+    if (
+        !window.IS_FUTURES_PAGE
+    ) {
+    
+        analysisRequest = {
+            url: '/api/analyze-with-portfolio',
+            method: 'POST',
+            body: {
+                symbol: symbol,
+                timeframe: interval,
+                user: currentUser || 'Invitado',
+    
+                portfolio: {
+                    BTC: Number(
+                        userPortfolio.BTC || 0
+                    ),
+    
+                    PAXG: Number(
+                        userPortfolio.PAXG || 0
+                    ),
+    
+                    USDT: Number(
+                        userPortfolio.USDT || 0
+                    ),
+    
+                    btc_price_at_update:
+                        Number(
+                            lastPrices[
+                                'BTC-USDT'
+                            ] || 0
+                        ),
+    
+                    paxg_price_at_update:
+                        Number(
+                            lastPrices[
+                                'PAXG-USDT'
+                            ] || 0
+                        )
+                },
+    
+                prices: {
+                    'BTC-USDT':
+                        Number(
+                            lastPrices[
+                                'BTC-USDT'
+                            ] || 0
+                        ),
+    
+                    'PAXG-USDT':
+                        Number(
+                            lastPrices[
+                                'PAXG-USDT'
+                            ] || 0
+                        )
+                },
+    
+                _nocache:
+                    Date.now()
+            }
+        };
+    }
+    const fetchOpts =
+        analysisRequest.method === 'POST'
+            ? {
+                method: 'POST',
+                headers: {
+                    'Content-Type':
+                        'application/json'
+                },
+                body: JSON.stringify(
+                    analysisRequest.body
+                )
+            }
+            : {
+                method: 'GET'
+            };
 
-    fetch(req.url, fetchOpts)
+    fetch(
+        analysisRequest.url,
+        fetchOpts
+    )
         .then(response => {
             if (!response.ok) {
                 return response.json().then(err => {
@@ -1219,7 +1306,32 @@ window.runCompleteAnalysis = function() {
         .then(data => {
             if (data.success && data.data) {
                 window.currentAnalysis = data.data;
-
+                // ============================================================
+                // MOSTRAR TGP
+                // ============================================================
+                
+                if (
+                    data.tgp
+                ) {
+                
+                    displayTGPResult(
+                        data.tgp
+                    );
+                
+                    console.log(
+                        '🛡️ TGP mostrado:',
+                        data.tgp.action,
+                        data.tgp.best_timeframe || '-'
+                    );
+                
+                } else if (
+                    !window.IS_FUTURES_PAGE
+                ) {
+                
+                    console.warn(
+                        '⚠️ El backend no devolvió TGP para Spot'
+                    );
+                }
                 // ============ ACTUALIZAR PRECIOS PARA PORTAFOLIO ============ (posiblemente se requiere un TAB
                 // ============ ACTUALIZAR PRECIOS PARA PORTAFOLIO ============
                 const currentPrice = data.data.current_price || 0;
