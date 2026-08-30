@@ -1495,13 +1495,21 @@ window.loadSavedSignals = async function() {
 
     // Resto de la función para spot sigue igual...
     if (!isAuthenticated()) {
-        console.log('No autenticado, ocultando señales guardadas');
-        const card = document.getElementById('saved-signals-card');
-        if (card) card.style.display = 'none';
+        console.log(
+            '🔒 No autenticado: no se cargan señales privadas.'
+        );
+
+        const card =
+            document.getElementById(
+                'saved-signals-card'
+            );
+
+        if (card) {
+            card.style.display = 'none';
+        }
+
         return;
     }
-
-    if (!isAuthenticated()) {
         console.log(
             '🔒 No autenticado: no se cargan señales privadas.'
         );
@@ -1577,16 +1585,6 @@ window.loadInitialData = function() {
         updatePortfolioUI();
 
         return;
-    }
-    
-    // Obtener recomendación instantánea
-    try {
-        if (!window.IS_FUTURES_PAGE) {
-            getInstantRecommendation();
-        }        
-        console.log('✅ Recomendación instantánea solicitada');
-    } catch (e) {
-        console.error('❌ Error en getInstantRecommendation:', e);
     }
     
     // Ejecutar análisis completo
@@ -1723,14 +1721,35 @@ window.buildAnalyzeURL = function(symbol, timeframe) {
             )
         ).trim();
 
+    const isFutures =
+        window.IS_FUTURES_PAGE === true;
+
     const endpoint =
-        window.IS_FUTURES_PAGE
+        isFutures
             ? '/api/futures/analyze'
             : '/api/analyze';
 
+    // IMPORTANTE:
+    // Futuros utiliza POST.
+    // Spot utiliza GET para el análisis normal.
+    //
+    // runCompleteAnalysis() reemplaza el endpoint de Spot
+    // por /api/analyze-with-portfolio, que también utiliza POST.
+
+    if (isFutures) {
+        return {
+            url: endpoint,
+            method: 'POST',
+            body: {
+                symbol: safeSymbol,
+                timeframe: safeTimeframe
+            }
+        };
+    }
+
     const params = new URLSearchParams({
         symbol: safeSymbol,
-        timeframe: safeTimeframe
+        interval: safeTimeframe
     });
 
     return {
@@ -1743,7 +1762,15 @@ window.buildAnalyzeURL = function(symbol, timeframe) {
 // ============ FUNCIÓN PRINCIPAL - ANÁLISIS COMPLETO CON VISTA GLOBAL ============
 
 window.runCompleteAnalysis = function() {
+    if (window.__SMARTTRADING_ANALYSIS_RUNNING__) {
+        console.log(
+            '⏳ Análisis ya en ejecución. Se evita duplicar la petición.'
+        );
 
+        return;
+    }
+
+    window.__SMARTTRADING_ANALYSIS_RUNNING__ = true;
     // El análisis Spot con TGP utiliza datos privados del portfolio.
     // Nunca debe ejecutarse sin una sesión Flask válida.
     if (!isAuthenticated()) {
@@ -2353,11 +2380,21 @@ window.runCompleteAnalysis = function() {
                 '❌ Error de conexión con el servidor',
                 'danger'
             );
+        .finally(() => {
+            window.__SMARTTRADING_ANALYSIS_RUNNING__ = false;
         });
 };
 
 function getInstantRecommendation(attempt = 1) {
+    if (window.__SMARTTRADING_ANALYSIS_RUNNING__) {
+        console.log(
+            '⏳ Análisis principal en ejecución. Se omite recomendación duplicada.'
+        );
 
+        return;
+    }
+
+    window.__SMARTTRADING_ANALYSIS_RUNNING__ = true;
     if (!isAuthenticated()) {
         console.log(
             '🔒 Recomendación instantánea no ejecutada: usuario no autenticado.'
@@ -7798,7 +7835,16 @@ window.changeToSignal = function(symbol, timeframe) {
 // Antes había dos (uno a 60s aquí + otro a 120s en la inicialización),
 // que causaban peticiones duplicadas al backend.
 setInterval(() => {
-    if (typeof window.updateActiveSignals === 'function') window.updateActiveSignals();
+    if (!isAuthenticated()) {
+        return;
+    }
+
+    if (
+        typeof window.updateActiveSignals
+        === 'function'
+    ) {
+        window.updateActiveSignals();
+    }
 }, 120000); // Cada 2 minutos
 
 
