@@ -1510,21 +1510,6 @@ window.loadSavedSignals = async function() {
 
         return;
     }
-        console.log(
-            '🔒 No autenticado: no se cargan señales privadas.'
-        );
-
-        const card =
-            document.getElementById(
-                'saved-signals-card'
-            );
-
-        if (card) {
-            card.style.display = 'none';
-        }
-
-        return;
-    }
 
     try {
         // La identidad viene exclusivamente de la sesión Flask.
@@ -1573,7 +1558,6 @@ window.loadSavedSignals = async function() {
 // ====== FIN CARGAR SEÑALES ======
 
 
-// ============ FUNCIONES PRINCIPALES ============
 // ============ FUNCIONES PRINCIPALES ============
 
 window.loadInitialData = function() {
