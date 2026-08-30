@@ -1574,8 +1574,16 @@ window.loadSavedSignals = async function() {
 
 
 // ============ FUNCIONES PRINCIPALES ============
+// ============ FUNCIONES PRINCIPALES ============
+
 window.loadInitialData = function() {
     console.log('📥 Cargando datos iniciales...');
+
+    // ========================================================================
+    // SEGURIDAD
+    // ========================================================================
+    // Ningún análisis privado se ejecuta sin una sesión Flask válida.
+    // ========================================================================
 
     if (!isAuthenticated()) {
         console.log(
@@ -1586,104 +1594,131 @@ window.loadInitialData = function() {
 
         return;
     }
-    
-    // Ejecutar análisis completo
+
+    // ========================================================================
+    // IMPORTANTE:
+    // Ejecutamos UN SOLO análisis completo al entrar.
+    //
+    // Antes se ejecutaban:
+    //
+    // 1. getInstantRecommendation()
+    // 2. runCompleteAnalysis()
+    // 3. updateActiveSignals()
+    //
+    // Eso podía generar múltiples análisis costosos al mismo tiempo.
+    //
+    // runCompleteAnalysis() ya actualiza:
+    //
+    // - análisis
+    // - gráficos
+    // - recomendación
+    // - TGP
+    // - precio
+    //
+    // Por eso NO necesitamos ejecutar otro TGP inmediato.
+    // ========================================================================
+
     try {
-        runCompleteAnalysis();
-        console.log('✅ Análisis completo iniciado');
-    } catch (e) {
-        console.error('❌ Error en runCompleteAnalysis:', e); 
-    }
-    
-    // ============ Cargar señales activas (NUEVO) ============
-    try {
-        if (typeof window.updateActiveSignals === 'function') {
-            // Intentar inmediatamente
-            window.updateActiveSignals();
-            
-            // NOTA: el setInterval periódico se define UNA sola vez más abajo
-            // (buscar "ACTUALIZAR SEÑALES PERIÓDICAMENTE"). Antes había DOS
-            // setIntervals (uno aquí a 120s, otro a 60s) que se solapaban
-            // y duplicaban las llamadas al backend.
-            
-            console.log('✅ Sistema de señales activas inicializado');
+        if (
+            typeof window.runCompleteAnalysis
+            === 'function'
+        ) {
+            window.runCompleteAnalysis();
+
+            console.log(
+                '✅ Análisis principal iniciado.'
+            );
+
         } else {
-            console.warn('⚠️ updateActiveSignals no está definida');
+            console.error(
+                '❌ runCompleteAnalysis no está disponible.'
+            );
         }
-    } catch (e) {
-        console.error('❌ Error en updateActiveSignals:', e);
+
+    } catch (error) {
+        console.error(
+            '❌ Error iniciando análisis principal:',
+            error
+        );
     }
-    // Cargar señales guardadas del usuario
+
+    // ========================================================================
+    // NO ejecutar aquí updateActiveSignals()
+    //
+    // Esa función realiza múltiples consultas de análisis y se actualizará
+    // mediante su temporizador propio.
+    // ========================================================================
+
+    // ========================================================================
+    // Señales guardadas
+    //
+    // Sólo se solicitan si existe la función y el usuario está autenticado.
+    // ========================================================================
+
     try {
-        if (typeof window.loadSavedSignals === 'function') {
+        if (
+            typeof window.loadSavedSignals
+            === 'function'
+        ) {
             window.loadSavedSignals();
+
+            console.log(
+                '✅ Señales guardadas solicitadas.'
+            );
         }
-    } catch (e) {
-        console.error('❌ Error en loadSavedSignals:', e);
-    }    
-    // ============ Inicializar correlación con datos mock (para pruebas) ============
+    } catch (error) {
+        console.error(
+            '❌ Error cargando señales guardadas:',
+            error
+        );
+    }
+
+    // ========================================================================
+    // CORRELACIÓN
+    // ========================================================================
+    //
+    // No hacemos análisis adicionales aquí.
+    // Solamente inicializamos la interfaz si la función ya existe.
+    // ========================================================================
+
     setTimeout(function() {
         try {
-            const mockData = {
-                correlation: {
-                    btc_analysis: { decision: { action: 'Cargando...' } },
-                    paxg_btc_analysis: { decision: { action: 'Cargando...' } },
-                    rotation_signal: 'NEUTRAL',
-                    weight_modifier: 1.0
-                }
-            };
-            if (typeof window.updateCorrelationInfo === 'function') {
-                window.updateCorrelationInfo(mockData);
-                console.log('✅ Correlación inicializada con mock');
-            } else {
-                console.warn('⚠️ updateCorrelationInfo no está definida');
+            if (
+                typeof window.updateCorrelationInfo
+                === 'function'
+            ) {
+                window.updateCorrelationInfo({});
+
+                console.log(
+                    '✅ Correlación inicializada.'
+                );
             }
-        } catch (e) {
-            console.error('❌ Error inicializando correlación:', e);
+        } catch (error) {
+            console.error(
+                '❌ Error inicializando correlación:',
+                error
+            );
         }
     }, 100);
-    
-    // ============ Inicializar gráfico Fear & Greed con datos mock ============
+
+    // ========================================================================
+    // FEAR & GREED
+    // ========================================================================
+    //
+    // NO generamos llamadas adicionales de mercado.
+    // El gráfico se actualizará cuando existan datos reales.
+    // ========================================================================
+
+    // ========================================================================
+    // HEARTBEAT
+    // ========================================================================
+
     setTimeout(function() {
-        try {
-            if (typeof window.updateFearGreedChart === 'function') {
-                // Crear datos mock para que el gráfico no se vea vacío
-                const mockSentiment = {
-                    sentiment: {
-                        available: true,
-                        current_value: 50,
-                        classification: 'Neutral',
-                        trend_7d_pct: 0,
-                        trend_30d_pct: 0,
-                        historical: [
-                            // Generar 30 días de datos históricos simulados
-                            ...Array.from({ length: 30 }, (_, i) => {
-                                const date = new Date();
-                                date.setDate(date.getDate() - (29 - i));
-                                return {
-                                    date: date.toISOString().split('T')[0],
-                                    value: 45 + Math.floor(Math.random() * 15)
-                                };
-                            })
-                        ]
-                    },
-                    timeframe: '1D'
-                };
-                window.updateFearGreedChart(mockSentiment);
-                console.log('✅ Fear & Greed inicializado con mock');
-            } else {
-                console.warn('⚠️ updateFearGreedChart no está definida');
-            }
-        } catch (e) {
-            console.error('❌ Error inicializando Fear & Greed:', e);
-        }
-    }, 500);
-    
-    // ============ Heartbeat para verificar que todo funciona ============
-    setTimeout(function() {
-        console.log('💓 Sistema inicializado correctamente');
-    }, 3000);
-}
+        console.log(
+            '💓 Sistema inicializado correctamente.'
+        );
+    }, 1000);
+};
 
 // ============================================================================
 // WRAPPER UNIVERSAL DE ANÁLISIS
@@ -1695,14 +1730,21 @@ window.loadInitialData = function() {
 // Futuros:
 //     /api/futures/analyze
 //
-// Esta función NO ejecuta el análisis.
-// Sólo construye la petición apropiada.
+// IMPORTANTE:
 //
-// Para Spot, runCompleteAnalysis() sustituirá posteriormente esta petición
-// por /api/analyze-with-portfolio porque necesita la capa TGP.
+// Spot:
+//     GET
+//
+// Futuros:
+//     POST
+//
+// runCompleteAnalysis() sustituye el endpoint de Spot por:
+//     /api/analyze-with-portfolio
+//
 // ============================================================================
 
 window.buildAnalyzeURL = function(symbol, timeframe) {
+
     const safeSymbol =
         String(
             symbol
@@ -1721,25 +1763,16 @@ window.buildAnalyzeURL = function(symbol, timeframe) {
             )
         ).trim();
 
-    const isFutures =
-        window.IS_FUTURES_PAGE === true;
+    // ========================================================================
+    // FUTUROS
+    // ========================================================================
 
-    const endpoint =
-        isFutures
-            ? '/api/futures/analyze'
-            : '/api/analyze';
+    if (window.IS_FUTURES_PAGE === true) {
 
-    // IMPORTANTE:
-    // Futuros utiliza POST.
-    // Spot utiliza GET para el análisis normal.
-    //
-    // runCompleteAnalysis() reemplaza el endpoint de Spot
-    // por /api/analyze-with-portfolio, que también utiliza POST.
-
-    if (isFutures) {
         return {
-            url: endpoint,
+            url: '/api/futures/analyze',
             method: 'POST',
+
             body: {
                 symbol: safeSymbol,
                 timeframe: safeTimeframe
@@ -1747,13 +1780,17 @@ window.buildAnalyzeURL = function(symbol, timeframe) {
         };
     }
 
+    // ========================================================================
+    // SPOT
+    // ========================================================================
+
     const params = new URLSearchParams({
         symbol: safeSymbol,
         interval: safeTimeframe
     });
 
     return {
-        url: `${endpoint}?${params.toString()}`,
+        url: `/api/analyze?${params.toString()}`,
         method: 'GET'
     };
 };
@@ -8176,7 +8213,31 @@ window.showPreviousSignalJustification = function(senal) {
 };
 
 // Actualizar cada 10 minutos
-setInterval(() => { if (typeof window.updatePreviousSignals === 'function') window.updatePreviousSignals(); }, 600000);
+// ============ ACTUALIZAR SEÑALES PERIÓDICAMENTE ============
+//
+// IMPORTANTE:
+// No ejecutar análisis privados si no existe sesión.
+// El intervalo es deliberadamente más conservador para Render Free.
+//
+// La carga inicial YA NO ejecuta updateActiveSignals().
+// Aquí sólo se refrescan periódicamente.
+//
+// ============================================================================
+
+setInterval(() => {
+
+    if (!isAuthenticated()) {
+        return;
+    }
+
+    if (
+        typeof window.updateActiveSignals
+        === 'function'
+    ) {
+        window.updateActiveSignals();
+    }
+
+}, 300000); // 5 minutos
 if (typeof window.updatePreviousSignals === 'function') window.updatePreviousSignals();
 
 
