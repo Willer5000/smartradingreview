@@ -40,7 +40,13 @@ let lastTGPResult = null;
 function isAuthenticated() {
     return isLoggedIn === true && !!currentUser;
 }
+window.isSmartTradingAuthenticated = function() {
+    return isAuthenticated();
+};
 
+window.getSmartTradingUser = function() {
+    return getAuthenticatedUser();
+};
 
 function getAuthenticatedUser() {
     return currentUser;
@@ -1569,14 +1575,20 @@ window.loadInitialData = function() {
     // Ningún análisis privado se ejecuta sin una sesión Flask válida.
     // ========================================================================
 
+    // ========================================================================
+    // SEGURIDAD
+    // ========================================================================
+    // El análisis técnico público puede ejecutarse sin login.
+    // Las funciones privadas de portfolio/TGP siguen dependiendo
+    // de la sesión Flask.
+    // ========================================================================
+
     if (!isAuthenticated()) {
         console.log(
-            '🔒 Carga inicial detenida: usuario no autenticado.'
+            '🔓 Usuario no autenticado: análisis público permitido.'
         );
 
         updatePortfolioUI();
-
-        return;
     }
 
     // ========================================================================
@@ -1792,31 +1804,6 @@ window.runCompleteAnalysis = function() {
     }
 
     window.__SMARTTRADING_ANALYSIS_RUNNING__ = true;
-    // El análisis Spot con TGP utiliza datos privados del portfolio.
-    // Nunca debe ejecutarse sin una sesión Flask válida.
-    if (!isAuthenticated()) {
-        console.log(
-            '🔒 Análisis bloqueado: usuario no autenticado.'
-        );
-
-        const recommendationEl =
-            document.getElementById(
-                'system-recommendation'
-            );
-
-        if (recommendationEl) {
-            recommendationEl.innerHTML = `
-                <div class="alert alert-warning mb-0">
-                    <strong>🔐 Iniciar sesión requerida.</strong>
-                    <div class="small mt-2">
-                        Inicia sesión para utilizar el análisis personalizado y el TGP.
-                    </div>
-                </div>
-            `;
-        }
-
-        return;
-    }
 
     const cfg =
         window.PAGE_CONFIG
@@ -1853,18 +1840,27 @@ window.runCompleteAnalysis = function() {
     // ============================================================
     
     let analysisRequest = req;
-    
+
+    // ============================================================
+    // SPOT AUTENTICADO
+    // ============================================================
+    // Con sesión: usar TGP / Portfolio Guardian.
+    // Sin sesión: usar análisis público normal.
+    // Futuros: siempre usar su endpoint propio.
+    // ============================================================
+
     if (
         !window.IS_FUTURES_PAGE
+        && isAuthenticated()
     ) {
-    
+
         analysisRequest = {
             url: '/api/analyze-with-portfolio',
             method: 'POST',
             body: {
                 symbol: symbol,
                 timeframe: interval,
-    
+
                 prices: {
                     'BTC-USDT':
                         Number(
@@ -1872,7 +1868,7 @@ window.runCompleteAnalysis = function() {
                                 'BTC-USDT'
                             ] || 0
                         ),
-    
+
                     'PAXG-USDT':
                         Number(
                             lastPrices[
@@ -1880,7 +1876,7 @@ window.runCompleteAnalysis = function() {
                             ] || 0
                         )
                 },
-    
+
                 _nocache:
                     Date.now()
             }
@@ -2342,65 +2338,61 @@ window.runCompleteAnalysis = function() {
             }
         })
         .catch(error => {
-        
+
             console.error(
                 '❌ Error en análisis:',
                 error
             );
-        
+
             // ============================================================
             // EVITAR CARGA INFINITA EN LA INTERFAZ
             // ============================================================
-        
+
             const recommendationEl =
                 document.getElementById(
                     'system-recommendation'
                 );
-        
+
             if (recommendationEl) {
-        
                 recommendationEl.innerHTML = `
                     <div class="alert alert-danger mb-0">
                         <strong>⚠️ No se pudo completar el análisis.</strong>
                         <div class="small mt-2">
-                            El servidor devolvió un error.
-                            Intenta nuevamente.
+                            ${error?.message || 'El servidor devolvió un error.'}
                         </div>
                     </div>
                 `;
             }
-        
+
             const summaryEl =
                 document.getElementById(
                     'analysis-summary'
                 );
-        
+
             if (summaryEl) {
-        
                 summaryEl.innerHTML = `
                     <div class="text-center py-3 text-warning">
                         ⚠️ Análisis temporalmente no disponible.
                     </div>
                 `;
             }
-        
-            // El banner TGP no debe mostrar una recomendación
-            // anterior como si perteneciera al análisis fallido.
+
             const tgpBanner =
                 document.getElementById(
                     'tgp-banner'
                 );
-        
+
             if (tgpBanner) {
                 tgpBanner.classList.add(
                     'd-none'
                 );
             }
-        
+
             window.showToast(
                 '❌ Error de conexión con el servidor',
                 'danger'
             );
+        })
         .finally(() => {
             window.__SMARTTRADING_ANALYSIS_RUNNING__ = false;
         });
