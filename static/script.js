@@ -1742,6 +1742,8 @@ window.buildAnalyzeURL = function(symbol, timeframe) {
    
 // ============ FUNCIÓN PRINCIPAL - ANÁLISIS COMPLETO CON VISTA GLOBAL ============
 
+window.runCompleteAnalysis = function() {
+
     // El análisis Spot con TGP utiliza datos privados del portfolio.
     // Nunca debe ejecutarse sin una sesión Flask válida.
     if (!isAuthenticated()) {
@@ -2355,20 +2357,14 @@ window.buildAnalyzeURL = function(symbol, timeframe) {
 };
 
 function getInstantRecommendation(attempt = 1) {
+
     if (!isAuthenticated()) {
         console.log(
             '🔒 Recomendación instantánea no ejecutada: usuario no autenticado.'
         );
 
         return;
-    }    
-    if (!isAuthenticated()) {
-        console.log(
-            '🔒 Recomendación instantánea bloqueada: no autenticado.'
-        );
-
-        return;
-    }    
+    }
     const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
     const interval = document.getElementById('interval-select')?.value || '1D';
 
@@ -2404,15 +2400,6 @@ function getInstantRecommendation(attempt = 1) {
                 : {};
         } catch (parseError) {
             data = {};
-        }
-    
-        if (response.status === 401) {
-            clearPrivateUserState();
-            updatePortfolioUI();
-    
-            throw new Error(
-                'Sesión no autenticada.'
-            );
         }
     
         if (response.status === 401) {
@@ -2625,11 +2612,20 @@ function getInstantRecommendation(attempt = 1) {
         if (error.name === 'AbortError') {
             console.warn('⏱️ TGP timeout (45s) - intento', attempt);
             // Retry automático hasta 2 veces
-            if (attempt < 3) {
-                console.log('🔄 Reintentando TGP en 5 segundos...');
-                setTimeout(() => getInstantRecommendation(attempt + 1), 5000);
+            if (attempt < 2) {
+                console.log(
+                    '🔄 Reintentando TGP una sola vez en 10 segundos...'
+                );
+
+                setTimeout(
+                    () => getInstantRecommendation(attempt + 1),
+                    10000
+                );
+
             } else {
-                console.error('❌ TGP falló después de 3 intentos');
+                console.error(
+                    '❌ TGP falló después de 2 intentos.'
+                );
             }
         } else {
             console.error('❌ Error TGP:', error);
