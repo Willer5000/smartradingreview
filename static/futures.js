@@ -1889,12 +1889,14 @@ window.updateSavedSignalsList = async function() {
         }
         
         // Lista de todas (activas + cerradas recientes)
-        const user = (typeof getAuthenticatedUser === 'function' && getAuthenticatedUser()) 
-                  || (typeof currentUser !== 'undefined' && currentUser) 
-                  || localStorage.getItem('tgp_session_user') 
-                  || localStorage.getItem('smarttrading_user') 
-                  || 'Invitado';
-        const lRes = await fetch('/api/saved_signals?limit=100&user=' + encodeURIComponent(user));
+        const lRes = await fetch(
+            '/api/saved_signals?limit=100',
+            {
+                method: 'GET',
+                credentials: 'same-origin',
+                cache: 'no-store'
+            }
+        );
         const lJson = await lRes.json();
         if (!lJson.success) {
             list.innerHTML = `<div class="list-group-item bg-dark text-warning">Error: ${lJson.error || 'desconocido'}</div>`;
