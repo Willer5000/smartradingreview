@@ -749,14 +749,13 @@ async function doLogin() {
         }
 
         // Ahora sí se puede iniciar el análisis privado.
+        // El flujo global de autenticación controla la carga inicial.
+        // Aquí sólo actualizamos la interfaz y las señales privadas.
         if (
-            typeof window.loadInitialData
-            === 'function'
-            && !window.__SMARTTRADING_INITIALIZED__
+            typeof window.loadSavedSignals === 'function'
         ) {
-            window.loadInitialData();
+            window.loadSavedSignals();
         }
-
     } catch (error) {
         console.error(
             '❌ Error de autenticación:',
@@ -1688,8 +1687,61 @@ window.loadInitialData = function() {
     }, 3000);
 }
 
+// ============================================================================
+// WRAPPER UNIVERSAL DE ANÁLISIS
+// ============================================================================
+//
+// Spot:
+//     /api/analyze
+//
+// Futuros:
+//     /api/futures/analyze
+//
+// Esta función NO ejecuta el análisis.
+// Sólo construye la petición apropiada.
+//
+// Para Spot, runCompleteAnalysis() sustituirá posteriormente esta petición
+// por /api/analyze-with-portfolio porque necesita la capa TGP.
+// ============================================================================
+
+window.buildAnalyzeURL = function(symbol, timeframe) {
+    const safeSymbol =
+        String(
+            symbol
+            || window.PAGE_CONFIG?.defaultSymbol
+            || 'BTC-USDT'
+        ).trim();
+
+    const safeTimeframe =
+        String(
+            timeframe
+            || window.PAGE_CONFIG?.defaultTimeframe
+            || (
+                window.IS_FUTURES_PAGE
+                    ? '1h'
+                    : '1D'
+            )
+        ).trim();
+
+    const endpoint =
+        window.IS_FUTURES_PAGE
+            ? '/api/futures/analyze'
+            : '/api/analyze';
+
+    const params = new URLSearchParams({
+        symbol: safeSymbol,
+        timeframe: safeTimeframe
+    });
+
+    return {
+        url: `${endpoint}?${params.toString()}`,
+        method: 'GET'
+    };
+};
+    
+   
 // ============ FUNCIÓN PRINCIPAL - ANÁLISIS COMPLETO CON VISTA GLOBAL ============
-window.runCompleteAnalysis = function() {
+
     // El análisis Spot con TGP utiliza datos privados del portfolio.
     // Nunca debe ejecutarse sin una sesión Flask válida.
     if (!isAuthenticated()) {
@@ -1788,6 +1840,7 @@ window.runCompleteAnalysis = function() {
         analysisRequest.method === 'POST'
             ? {
                 method: 'POST',
+                credentials: 'same-origin',
                 headers: {
                     'Content-Type':
                         'application/json'
@@ -1797,7 +1850,8 @@ window.runCompleteAnalysis = function() {
                 )
             }
             : {
-                method: 'GET'
+                method: 'GET',
+                credentials: 'same-origin'
             };
 
     fetch(
@@ -2303,6 +2357,13 @@ window.runCompleteAnalysis = function() {
 function getInstantRecommendation(attempt = 1) {
     if (!isAuthenticated()) {
         console.log(
+            '🔒 Recomendación instantánea no ejecutada: usuario no autenticado.'
+        );
+
+        return;
+    }    
+    if (!isAuthenticated()) {
+        console.log(
             '🔒 Recomendación instantánea bloqueada: no autenticado.'
         );
 
@@ -2354,11 +2415,20 @@ function getInstantRecommendation(attempt = 1) {
             );
         }
     
+        if (response.status === 401) {
+            clearPrivateUserState();
+            updatePortfolioUI();
+
+            throw new Error(
+                'Sesión no autenticada.'
+            );
+        }
+
         if (!response.ok) {
             throw new Error(
                 data.error
                 || data.message
-                || `HTTP ${response.status}`
+                || `Error HTTP ${response.status}`
             );
         }
     
@@ -7264,8 +7334,48 @@ function detectZoneConflict(activeZones, priceStatus, currentPrice) {
 
 
 // ============ FUNCIONES DE UTILIDAD ============
+
+/**
+ * Formatea confidence de forma segura.
+ *
+ * Reglas:
+ * - nunca menor que 0
+ * - nunca mayor que 100
+ * - siempre devuelve un entero para UI
+ *
+ * IMPORTANTE:
+ * confidence NO representa una probabilidad real.
+ * Esta función sólo controla su PRESENTACIÓN.
+ */
+function fmtConfidence(value) {
+    const numericValue = Number(value);
+
+    if (!Number.isFinite(numericValue)) {
+        return '0';
+    }
+
+    const boundedValue = Math.max(
+        0,
+        Math.min(
+            100,
+            numericValue
+        )
+    );
+
+    return boundedValue.toFixed(0);
+}
+
+window.fmtConfidence = fmtConfidence;
+
+
 function getIntervalName(interval) {
-    const names = {'4h': '4H', '12h': '12H', '1D': '1D', '1W': '1W'};
+    const names = {
+        '4h': '4H',
+        '12h': '12H',
+        '1D': '1D',
+        '1W': '1W'
+    };
+
     return names[interval] || interval;
 }
 // ============ FUNCIONES DE UI ============
@@ -7727,6 +7837,37 @@ function updateMarketAlerts(data) {
 window.updatePreviousSignals = function updatePreviousSignals() {
     // Si estamos en la página de Futuros, futures.js usa su propia lógica
     // (/api/futures/signals/previous en vez de /api/previous_signals que trae PAXG)
+    if (!isAuthenticated()) {
+        console.log(
+            '🔒 Señales anteriores privadas: usuario no autenticado.'
+        );
+
+        const signalsList =
+            document.getElementById(
+                'prev-signals-list'
+            );
+
+        const signalsCount =
+            document.getElementById(
+                'prev-signals-count'
+            );
+
+        if (signalsList) {
+            signalsList.innerHTML = `
+                <div class="list-group-item bg-dark text-muted text-center py-3">
+                    🔐 Inicia sesión para consultar tus señales.
+                </div>
+            `;
+        }
+
+        if (signalsCount) {
+            signalsCount.textContent = '0';
+            signalsCount.className =
+                'badge bg-secondary';
+        }
+
+        return;
+    }    
     if (window.IS_FUTURES_PAGE) {
         return;
     }
