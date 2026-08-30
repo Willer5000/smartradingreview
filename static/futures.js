@@ -1849,7 +1849,25 @@ window.confirmSaveSignal = async function() {
 // ============ Refrescar lista y KPIs ============
 window.updateSavedSignalsList = async function() {
     if (!window.IS_FUTURES_PAGE) return;
-    
+
+    if (
+        typeof window.isSmartTradingAuthenticated === 'function'
+        && !window.isSmartTradingAuthenticated()
+    ) {
+        console.log(
+            '🔒 Futuros: señales guardadas requieren sesión.'
+        );
+
+        const card =
+            document.getElementById('saved-signals-card');
+
+        if (card) {
+            card.style.display = 'none';
+        }
+
+        return;
+    }
+
     const card = document.getElementById('saved-signals-card');
     const list = document.getElementById('saved-signals-list');
     if (!card || !list) return;
@@ -1858,8 +1876,27 @@ window.updateSavedSignalsList = async function() {
     card.style.display = 'block';
     
     try {
+        const user =
+            typeof window.getSmartTradingUser === 'function'
+                ? window.getSmartTradingUser()
+                : null;
+
+        if (!user) {
+            console.log(
+                '🔒 Futuros: usuario no disponible.'
+            );
+            return;
+        }
+
         // KPIs propios
-        const kRes = await fetch('/api/saved_signals/kpis');
+        const kRes = await fetch(
+            '/api/saved_signals/kpis',
+            {
+                method: 'GET',
+                credentials: 'same-origin',
+                cache: 'no-store'
+            }
+        );
         const kJson = await kRes.json();
         if (kJson.success) {
             const k = kJson.data || {};
