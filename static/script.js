@@ -459,33 +459,85 @@ function updatePortfolioUI() {
                 .toFixed(2);
     }
 
+    // ============================================================
+    // VALORACIÓN DEL PORTFOLIO
+    // ============================================================
+    // Prioridad:
+    //
+    // 1. Valoración calculada por el TGP en servidor.
+    // 2. Precios locales solamente como fallback.
+    //
+    // Nunca permitir que un precio PAXG=0 convierta
+    // artificialmente el portfolio en BTC 100%.
+    // ============================================================
+
+    const tgpValuation =
+        lastTGPResult?.valuation || null;
+
     const btcPrice =
         Number(
-            lastPrices['BTC-USDT']
-            || 0
+            tgpValuation?.btc_price
+            ?? lastPrices['BTC-USDT']
+            ?? 0
         );
 
     const paxgPrice =
         Number(
-            lastPrices['PAXG-USDT']
-            || 0
+            tgpValuation?.paxg_price
+            ?? lastPrices['PAXG-USDT']
+            ?? 0
         );
 
-    const btcValue =
-        userPortfolio.BTC
-        * btcPrice;
+    let btcValue;
+    let paxgValue;
+    let usdtValue;
+    let total;
 
-    const paxgValue =
-        userPortfolio.PAXG
-        * paxgPrice;
+    if (
+        tgpValuation
+        && Number.isFinite(
+            Number(tgpValuation.total)
+        )
+        && Number(tgpValuation.total) > 0
+    ) {
+        btcValue =
+            Number(
+                tgpValuation.btc_value || 0
+            );
 
-    const usdtValue =
-        userPortfolio.USDT;
+        paxgValue =
+            Number(
+                tgpValuation.paxg_value || 0
+            );
 
-    const total =
-        btcValue
-        + paxgValue
-        + usdtValue;
+        usdtValue =
+            Number(
+                tgpValuation.usdt_value || 0
+            );
+
+        total =
+            Number(
+                tgpValuation.total
+            );
+
+    } else {
+
+        btcValue =
+            Number(userPortfolio.BTC || 0)
+            * btcPrice;
+
+        paxgValue =
+            Number(userPortfolio.PAXG || 0)
+            * paxgPrice;
+
+        usdtValue =
+            Number(userPortfolio.USDT || 0);
+
+        total =
+            btcValue
+            + paxgValue
+            + usdtValue;
+    }
 
     const valBtcEl =
         document.getElementById('val-btc');
@@ -1976,7 +2028,12 @@ window.runCompleteAnalysis = function() {
                 if (
                     data.tgp
                 ) {
-                
+                    // Guardar la valoración TGP para que
+                    // updatePortfolioUI() utilice exactamente
+                    // los mismos valores calculados por servidor.
+                    lastTGPResult =
+                        data.tgp;
+        
                     displayTGPResult(
                         data.tgp
                     );
@@ -2614,7 +2671,27 @@ function getInstantRecommendation(attempt = 1) {
             // Guardar análisis actual
             window.currentAnalysis =
                 analysisData;
-        
+            // ============================================================
+            // ASEGURAR NIVELES DE TRADING
+            // ============================================================
+
+            const levels =
+                analysisData.levels || {};
+
+            console.log(
+                '🎯 Niveles recibidos por frontend:',
+                {
+                    entry: levels.entry,
+                    stop_loss:
+                        levels.stop_loss,
+                    take_profit:
+                        levels.take_profit,
+                    risk_reward:
+                        levels.risk_reward,
+                    publication_status:
+                        levels.publication_status
+                }
+            );        
             // Actualizar recomendación principal
             if (
                 typeof window.updateInstantRecommendation
@@ -8122,7 +8199,7 @@ window.updatePreviousSignals = function updatePreviousSignals() {
                         <div class="mt-1">
                             <small class="text-${senal.activa === 1 ? bgColor : 'secondary'}">
                                 E: $${senal.entry?.toFixed(2) || '---'} | 
-                                SL: $${senal.stop_loss?.toFixed(2) || '---'}
+                                SL: $${     Number(senal.stop_loss) > 0         ? Number(senal.stop_loss).toFixed(2)         : 'NO DISPONIBLE' }
                             </small>
                         </div>
                     </div>
@@ -8231,13 +8308,13 @@ window.showPreviousSignalJustification = function(senal) {
                     <div class="col-md-4">
                         <div class="border-start border-3 border-danger ps-3">
                             <small class="text-muted d-block">STOP LOSS</small>
-                            <strong class="h5">$${senal.stop_loss?.toFixed(2) || '---'}</strong>
+                            <strong class="h5">$${     Number(senal.stop_loss) > 0         ? Number(senal.stop_loss).toFixed(2)         : 'NO DISPONIBLE' }</strong>
                         </div>
                     </div>
                     <div class="col-md-4">
                         <div class="border-start border-3 border-success ps-3">
                             <small class="text-muted d-block">TAKE PROFIT</small>
-                            <strong class="h5">$${senal.take_profit?.toFixed(2) || '---'}</strong>
+                            <strong class="h5">$${     Number(senal.take_profit) > 0         ? Number(senal.take_profit).toFixed(2)         : 'NO DISPONIBLE' }</strong>
                         </div>
                     </div>
                 </div>
