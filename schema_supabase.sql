@@ -71,6 +71,32 @@ CREATE TABLE IF NOT EXISTS signal_results (
     exit_timestamp TIMESTAMPTZ,
     pnl_pct NUMERIC(10, 4) DEFAULT 0,
     candles_to_result INTEGER DEFAULT 0,
+
+    -- ========================================================================
+    -- FASE 7D — MFE / MAE HISTÓRICO
+    -- ========================================================================
+    -- Maximum Favorable Excursion:
+    -- máximo movimiento favorable alcanzado antes de cerrar la operación.
+    --
+    -- Maximum Adverse Excursion:
+    -- máximo movimiento adverso soportado antes de cerrar la operación.
+    --
+    -- Se almacenan en precio, porcentaje y unidades R.
+    -- ========================================================================
+
+    mfe_price NUMERIC(20, 8) DEFAULT 0,
+    mae_price NUMERIC(20, 8) DEFAULT 0,
+
+    mfe_pct NUMERIC(10, 4) DEFAULT 0,
+    mae_pct NUMERIC(10, 4) DEFAULT 0,
+
+    mfe_r NUMERIC(10, 4) DEFAULT 0,
+    mae_r NUMERIC(10, 4) DEFAULT 0,
+
+    candles_to_mfe INTEGER DEFAULT 0,
+    candles_to_mae INTEGER DEFAULT 0,
+
+    notes TEXT,
     notes TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -78,6 +104,22 @@ CREATE TABLE IF NOT EXISTS signal_results (
 CREATE INDEX IF NOT EXISTS idx_sr_signal ON signal_results(signal_id);
 CREATE INDEX IF NOT EXISTS idx_sr_status ON signal_results(status);
 
+-- ============================================================================
+-- FASE 7D — MIGRACIÓN MFE / MAE
+-- ============================================================================
+-- CREATE TABLE IF NOT EXISTS no modifica tablas que ya existían.
+-- Por eso mantenemos también esta migración idempotente.
+-- ============================================================================
+
+ALTER TABLE IF EXISTS public.signal_results
+    ADD COLUMN IF NOT EXISTS mfe_price NUMERIC(20, 8) DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS mae_price NUMERIC(20, 8) DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS mfe_pct NUMERIC(10, 4) DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS mae_pct NUMERIC(10, 4) DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS mfe_r NUMERIC(10, 4) DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS mae_r NUMERIC(10, 4) DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS candles_to_mfe INTEGER DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS candles_to_mae INTEGER DEFAULT 0;
 
 -- ============================================================================
 -- TABLA 4: strategy_stats_specific (estadísticas por par + TF + acción + estrategia)
