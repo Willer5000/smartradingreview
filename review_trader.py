@@ -802,7 +802,7 @@ class ReviewTrader:
                                 pnl_pct,
 
                             'candles_to_result':
-                                idx,
+                                candle_number,
 
                             **metrics
                         }
@@ -854,7 +854,7 @@ class ReviewTrader:
                                 pnl_pct,
 
                             'candles_to_result':
-                                idx,
+                                candle_number,
 
                             **metrics
                         }
@@ -923,7 +923,7 @@ class ReviewTrader:
                                 pnl_pct,
 
                             'candles_to_result':
-                                idx,
+                                candle_number,
 
                             **metrics
                         }
@@ -975,7 +975,7 @@ class ReviewTrader:
                                 pnl_pct,
 
                             'candles_to_result':
-                                idx,
+                                candle_number,
 
                             **metrics
                         }
