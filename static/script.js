@@ -285,13 +285,13 @@ async function loadUserPortfolio() {
 // ============================================================================
 // GUARDAR PORTFOLIO REAL EN SERVIDOR
 // ============================================================================
-
 async function savePortfolioToLocal() {
     if (!isAuthenticated()) {
         showToast(
             'Debes iniciar sesión para guardar el portafolio.',
             'warning'
         );
+
         return false;
     }
 
@@ -299,7 +299,9 @@ async function savePortfolioToLocal() {
         Math.max(
             0,
             parseFloat(
-                document.getElementById('portfolio-btc')?.value
+                document.getElementById(
+                    'portfolio-btc'
+                )?.value
             ) || 0
         );
 
@@ -307,7 +309,9 @@ async function savePortfolioToLocal() {
         Math.max(
             0,
             parseFloat(
-                document.getElementById('portfolio-paxg')?.value
+                document.getElementById(
+                    'portfolio-paxg'
+                )?.value
             ) || 0
         );
 
@@ -315,38 +319,52 @@ async function savePortfolioToLocal() {
         Math.max(
             0,
             parseFloat(
-                document.getElementById('portfolio-usdt')?.value
+                document.getElementById(
+                    'portfolio-usdt'
+                )?.value
             ) || 0
         );
 
     try {
-        const response = await fetch(
-            '/api/user-portfolio',
-            {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                credentials: 'same-origin',
-                body: JSON.stringify({
-                    BTC: btc,
-                    PAXG: paxg,
-                    USDT: usdt,
+        const response =
+            await fetch(
+                '/api/user-portfolio',
+                {
+                    method: 'POST',
 
-                    btc_price:
-                        Number(
-                            lastPrices['BTC-USDT'] || 0
-                        ),
+                    headers: {
+                        'Content-Type':
+                            'application/json'
+                    },
 
-                    paxg_price:
-                        Number(
-                            lastPrices['PAXG-USDT'] || 0
-                        )
-                })
-            }
-        );
+                    credentials:
+                        'same-origin',
 
-        const data = await response.json();
+                    body:
+                        JSON.stringify({
+                            BTC: btc,
+                            PAXG: paxg,
+                            USDT: usdt,
+
+                            btc_price:
+                                Number(
+                                    lastPrices[
+                                        'BTC-USDT'
+                                    ] || 0
+                                ),
+
+                            paxg_price:
+                                Number(
+                                    lastPrices[
+                                        'PAXG-USDT'
+                                    ] || 0
+                                )
+                        })
+                }
+            );
+
+        const data =
+            await response.json();
 
         if (
             response.ok
@@ -355,36 +373,32 @@ async function savePortfolioToLocal() {
             && data.portfolio
         ) {
             userPortfolio = {
-                BTC: Number(
-                    data.portfolio.BTC
-                    ?? data.portfolio.btc_amount
-                    ?? btc
-                ),
+                BTC:
+                    Number(
+                        data.portfolio.BTC
+                        ?? data.portfolio.btc_amount
+                        ?? btc
+                    ),
 
-                PAXG: Number(
-                    data.portfolio.PAXG
-                    ?? data.portfolio.paxg_amount
-                    ?? paxg
-                ),
+                PAXG:
+                    Number(
+                        data.portfolio.PAXG
+                        ?? data.portfolio.paxg_amount
+                        ?? paxg
+                    ),
 
-                USDT: Number(
-                    data.portfolio.USDT
-                    ?? data.portfolio.usdt_amount
-                    ?? usdt
-                )
-userPortfolio = {
-``` citeturn820797view1
-
-
-### REEMPLÁZALO POR:
-
-```javascript
+                USDT:
+                    Number(
+                        data.portfolio.USDT
+                        ?? data.portfolio.usdt_amount
+                        ?? usdt
+                    )
             };
 
             // ============================================================
             // EL PORTFOLIO CAMBIÓ
             // ============================================================
-            // No utilizar una valoración TGP calculada con cantidades
+            // No reutilizar una valoración TGP calculada con cantidades
             // anteriores.
             // ============================================================
 
@@ -392,25 +406,39 @@ userPortfolio = {
 
             const savedBtcPrice =
                 Number(
-                    data.portfolio.btc_price_at_update
-                    || lastPrices['BTC-USDT']
+                    data.portfolio
+                        .btc_price_at_update
+                    || lastPrices[
+                        'BTC-USDT'
+                    ]
                     || 0
                 );
 
             const savedPaxgPrice =
                 Number(
-                    data.portfolio.paxg_price_at_update
-                    || lastPrices['PAXG-USDT']
+                    data.portfolio
+                        .paxg_price_at_update
+                    || lastPrices[
+                        'PAXG-USDT'
+                    ]
                     || 0
                 );
 
-            if (savedBtcPrice > 0) {
-                lastPrices['BTC-USDT'] =
+            if (
+                savedBtcPrice > 0
+            ) {
+                lastPrices[
+                    'BTC-USDT'
+                ] =
                     savedBtcPrice;
             }
 
-            if (savedPaxgPrice > 0) {
-                lastPrices['PAXG-USDT'] =
+            if (
+                savedPaxgPrice > 0
+            ) {
+                lastPrices[
+                    'PAXG-USDT'
+                ] =
                     savedPaxgPrice;
             }
 
@@ -448,7 +476,6 @@ userPortfolio = {
         return false;
     }
 }
-
 
 // ============================================================================
 // ACTUALIZAR INTERFAZ DEL PORTFOLIO
