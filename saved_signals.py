@@ -461,6 +461,442 @@ def _calculate_open_excursions(
         )
 
         return None
+
+def _calculate_trade_r(
+    signal: Dict,
+    exit_price: float
+) -> float:
+    """
+    Calcula el resultado de una salida en unidades R.
+
+    R = movimiento realizado / riesgo original.
+
+    LONG:
+        R positivo si exit > entry.
+
+    SHORT:
+        R positivo si exit < entry.
+    """
+
+    try:
+        action = str(
+            signal.get(
+                'action',
+                ''
+            )
+            or ''
+        ).upper()
+
+        entry = float(
+            signal.get(
+                'entry',
+                0
+            )
+            or 0
+        )
+
+        sl = float(
+            signal.get(
+                'stop_loss',
+                0
+            )
+            or 0
+        )
+
+        exit_price = float(
+            exit_price
+            or 0
+        )
+
+        if (
+            action not in (
+                'LONG',
+                'SHORT'
+            )
+            or entry <= 0
+            or sl <= 0
+            or exit_price <= 0
+        ):
+            return 0.0
+
+        risk_abs = abs(
+            entry - sl
+        )
+
+        if risk_abs <= 0:
+            return 0.0
+
+        if action == 'LONG':
+
+            realized = (
+                exit_price - entry
+            )
+
+        else:
+
+            realized = (
+                entry - exit_price
+            )
+
+        return round(
+            realized / risk_abs,
+            4
+        )
+
+    except Exception as e:
+
+        logger.warning(
+            f"_calculate_trade_r: {e}"
+        )
+
+        return 0.0
+
+
+def _build_early_exit_comparison(
+    signal: Dict,
+    actual_exit_price: float
+) -> Dict:
+    """
+    Compara el resultado real contra la primera salida
+    anticipada hipotética registrada por 7D.3.
+
+    NO altera el resultado real.
+    """
+
+    try:
+        actual_r = _calculate_trade_r(
+            signal,
+            actual_exit_price
+        )
+
+        result = {
+            'actual_close_r':
+                actual_r
+        }
+
+        candidate_at = (
+            signal.get(
+                'early_exit_candidate_at'
+            )
+        )
+
+        candidate_price = float(
+            signal.get(
+                'early_exit_candidate_price',
+                0
+            )
+            or 0
+        )
+
+        if (
+            not candidate_at
+            or candidate_price <= 0
+        ):
+            return result
+
+        candidate_r_raw = (
+            signal.get(
+                'early_exit_candidate_r'
+            )
+        )
+
+        if candidate_r_raw is None:
+
+            candidate_r = (
+                _calculate_trade_r(
+                    signal,
+                    candidate_price
+                )
+            )
+
+        else:
+
+            candidate_r = float(
+                candidate_r_raw
+                or 0
+            )
+
+        delta_r = (
+            candidate_r
+            - actual_r
+        )
+
+        result.update({
+            'early_exit_evaluated':
+                True,
+
+            'early_exit_delta_r':
+                round(
+                    delta_r,
+                    4
+                ),
+
+            'early_exit_would_help':
+                bool(
+                    delta_r > 0
+                )
+        })
+
+        return result
+
+    except Exception as e:
+
+        logger.warning(
+            f"_build_early_exit_comparison: {e}"
+        )
+
+        return {}
+
+
+def _observe_early_exit_shadow(
+    signal: Dict,
+    df_after,
+    start_ts,
+    excursion: Optional[Dict] = None
+) -> Optional[Dict]:
+    """
+    FASE 7D.3 — SHADOW MODE
+
+    Ejecuta el Futures Position Guardian sólo como observador.
+
+    Si el Guardian dice EXIT:
+        guarda esa PRIMERA oportunidad.
+
+    NO:
+        - cierra la operación,
+        - cambia status,
+        - cambia SL,
+        - cambia TP,
+        - cambia leverage,
+        - cambia el Guardian visible.
+
+    Reutiliza las mismas velas ya cargadas.
+    """
+
+    try:
+        import pandas as pd
+
+        # ==============================================================
+        # UNA SOLA OBSERVACIÓN EXIT POR OPERACIÓN
+        # ==============================================================
+
+        if signal.get(
+            'early_exit_candidate_at'
+        ):
+            return None
+
+        if str(
+            signal.get(
+                'status',
+                ''
+            )
+        ).lower() != 'entry_touched':
+
+            return None
+
+        if (
+            df_after is None
+            or len(df_after) < 8
+        ):
+            return None
+
+        # ==============================================================
+        # FILTRAR DESDE ENTRY TOUCHED
+        # ==============================================================
+
+        working = df_after
+
+        if (
+            start_ts is not None
+            and 'time' in working.columns
+        ):
+
+            df_time = pd.to_datetime(
+                working['time'],
+                utc=True
+            )
+
+            working = working[
+                df_time >= start_ts
+            ]
+
+        if len(working) < 8:
+            return None
+
+        # Sólo las últimas 20 velas.
+        recent = working.tail(
+            20
+        )
+
+        current_price = float(
+            recent[
+                'close'
+            ].iloc[-1]
+        )
+
+        if current_price <= 0:
+            return None
+
+        candles = {
+            'close': [
+                float(v)
+                for v in recent[
+                    'close'
+                ].tolist()
+            ],
+
+            'high': [
+                float(v)
+                for v in recent[
+                    'high'
+                ].tolist()
+            ],
+
+            'low': [
+                float(v)
+                for v in recent[
+                    'low'
+                ].tolist()
+            ]
+        }
+
+        # ==============================================================
+        # REUTILIZAR EL GUARDIAN EXISTENTE
+        # ==============================================================
+
+        from portfolio_guardian import (
+            portfolio_guardian
+        )
+
+        advice = (
+            portfolio_guardian
+            .evaluate_futures_position(
+                signal=signal,
+                current_price=current_price,
+                candles=candles
+            )
+        )
+
+        if not isinstance(
+            advice,
+            dict
+        ):
+            return None
+
+        if str(
+            advice.get(
+                'action',
+                ''
+            )
+        ).upper() != 'EXIT':
+
+            return None
+
+        # ==============================================================
+        # SNAPSHOT DEL MOMENTO DEL EXIT HIPOTÉTICO
+        # ==============================================================
+
+        excursion = (
+            excursion
+            if isinstance(
+                excursion,
+                dict
+            )
+            else {}
+        )
+
+        mfe_r = float(
+            excursion.get(
+                'mfe_r',
+                signal.get(
+                    'mfe_r',
+                    0
+                )
+            )
+            or 0
+        )
+
+        mae_r = float(
+            excursion.get(
+                'mae_r',
+                signal.get(
+                    'mae_r',
+                    0
+                )
+            )
+            or 0
+        )
+
+        candidate_r = (
+            _calculate_trade_r(
+                signal,
+                current_price
+            )
+        )
+
+        now_iso = (
+            datetime.utcnow()
+            .isoformat()
+        )
+
+        return {
+            'early_exit_candidate_at':
+                now_iso,
+
+            'early_exit_candidate_price':
+                round(
+                    current_price,
+                    8
+                ),
+
+            'early_exit_candidate_r':
+                candidate_r,
+
+            'early_exit_score':
+                round(
+                    float(
+                        advice.get(
+                            'deterioration_score',
+                            0
+                        )
+                        or 0
+                    ),
+                    2
+                ),
+
+            'early_exit_reason':
+                str(
+                    advice.get(
+                        'reason',
+                        ''
+                    )
+                    or ''
+                )[:1000],
+
+            'early_exit_mfe_r':
+                round(
+                    mfe_r,
+                    4
+                ),
+
+            'early_exit_mae_r':
+                round(
+                    mae_r,
+                    4
+                ),
+
+            'early_exit_evaluated':
+                False
+        }
+
+    except Exception as e:
+
+        logger.warning(
+            f"_observe_early_exit_shadow: {e}"
+        )
+
+        return None
+
 # ============================================================================
 # CRUD
 # ============================================================================
@@ -752,8 +1188,26 @@ def close_saved_signal_manual(signal_id: str, current_price: float) -> Optional[
             )
         else:
             # No tocó entry → no cuenta para PnL/winrate
-            pnl = {'pct': 0.0, 'usdt': 0.0}
-        
+            pnl = {
+                'pct': 0.0,
+                'usdt': 0.0
+            }
+
+        # ==============================================================
+        # FASE 7D.3
+        # ==============================================================
+        # Sólo existe R real si la posición llegó a activar Entry.
+        # ==============================================================
+
+        early_exit_comparison = (
+            _build_early_exit_comparison(
+                sig,
+                current_price
+            )
+            if entry_touched
+            else {}
+        )
+
         updates = {
             'status': 'closed_manual',
             'closed_at': datetime.utcnow().isoformat(),
@@ -761,7 +1215,13 @@ def close_saved_signal_manual(signal_id: str, current_price: float) -> Optional[
             'pnl_pct': pnl['pct'],
             'pnl_usdt': pnl['usdt'],
             'close_reason': 'manual',
-            'updated_at': datetime.utcnow().isoformat(),
+            'close_reason': 'manual',
+
+            **early_exit_comparison,
+
+            'updated_at':
+                datetime.utcnow()
+                .isoformat(),
         }
         
         def _op():
@@ -816,9 +1276,25 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
     """
     db = _get_db()
     if db is None:
-        return {'checked': 0, 'entry_touched': 0, 'tp_hit': 0, 'sl_hit': 0}
-    
-    stats = {'checked': 0, 'entry_touched': 0, 'tp_hit': 0, 'sl_hit': 0, 'errors': 0}
+        return {
+            'checked': 0,
+            'entry_touched': 0,
+            'tp_hit': 0,
+            'sl_hit': 0,
+            'mfe_mae_updated': 0,
+            'early_exit_observed': 0,
+            'errors': 0
+        }
+
+    stats = {
+        'checked': 0,
+        'entry_touched': 0,
+        'tp_hit': 0,
+        'sl_hit': 0,
+        'mfe_mae_updated': 0,
+        'early_exit_observed': 0,
+        'errors': 0
+    }
     
     try:
         actives = list_saved_signals(status_filter=['active', 'entry_touched'], limit=500)
@@ -1089,6 +1565,18 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                                 'close_reason':
                                     'sl_hit',
 
+                                # ======================================
+                                # FASE 7D.3
+                                # ======================================
+                                # Comparar el SL real contra la salida
+                                # anticipada hipotética, si existió.
+                                # ======================================
+
+                                **_build_early_exit_comparison(
+                                    sig,
+                                    sl
+                                ),
+
                                 'updated_at':
                                     datetime.utcnow()
                                     .isoformat(),
@@ -1145,6 +1633,11 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
 
                                 'close_reason':
                                     'tp_hit',
+
+                                **_build_early_exit_comparison(
+                                    sig,
+                                    tp
+                                ),
 
                                 'updated_at':
                                     datetime.utcnow()
@@ -1204,7 +1697,12 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                                     pnl['usdt'],
 
                                 'close_reason':
-                                    'sl_hit',
+                                    'tp_hit',
+
+                                **_build_early_exit_comparison(
+                                    sig,
+                                    tp
+                                ),
 
                                 'updated_at':
                                     datetime.utcnow()
@@ -1320,42 +1818,87 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                 )
 
                 # ============================================================
-                # EVITAR ESCRITURAS SUPABASE INNECESARIAS
+                # FASE 7D.3 — SHADOW EARLY EXIT
                 # ============================================================
                 #
-                # Sólo escribimos cuando aparece un nuevo MFE o MAE.
-                # Si el precio permanece dentro de los extremos anteriores:
-                # CERO escrituras nuevas.
+                # Se evalúa aunque MFE/MAE no hayan cambiado.
+                #
+                # Esto es importante:
+                # el deterioro puede venir de tiempo, momentum o estructura,
+                # no necesariamente de un nuevo extremo.
                 # ============================================================
 
-                if not changed:
-                    continue
+                shadow_exit = (
+                    _observe_early_exit_shadow(
+                        sig,
+                        df_after,
+                        excursion_start_ts,
+                        excursion
+                    )
+                )
+
+                # ============================================================
+                # AGRUPAR EN UNA SOLA ESCRITURA
+                # ============================================================
+
+                update_payload = {}
 
                 now_iso = (
                     datetime.utcnow()
                     .isoformat()
                 )
 
-                excursion[
-                    'last_excursion_at'
-                ] = now_iso
+                if changed:
 
-                excursion[
+                    update_payload.update(
+                        excursion
+                    )
+
+                    update_payload[
+                        'last_excursion_at'
+                    ] = now_iso
+
+                    stats[
+                        'mfe_mae_updated'
+                    ] += 1
+
+                if shadow_exit:
+
+                    update_payload.update(
+                        shadow_exit
+                    )
+
+                    stats[
+                        'early_exit_observed'
+                    ] += 1
+
+                    logger.info(
+                        f"👁️ EARLY EXIT SHADOW: "
+                        f"{symbol} {tf} {action} "
+                        f"@ {shadow_exit.get('early_exit_candidate_price')} "
+                        f"R={shadow_exit.get('early_exit_candidate_r')} "
+                        f"score={shadow_exit.get('early_exit_score')}"
+                    )
+
+                # ============================================================
+                # CERO CAMBIOS = CERO ESCRITURAS
+                # ============================================================
+
+                if not update_payload:
+                    continue
+
+                update_payload[
                     'updated_at'
                 ] = now_iso
 
                 db.client.table(
                     'saved_signals'
                 ).update(
-                    excursion
+                    update_payload
                 ).eq(
                     'id',
                     sig['id']
                 ).execute()
-
-                stats[
-                    'mfe_mae_updated'
-                ] += 1
             except Exception as e:
                 stats['errors'] += 1
                 logger.error(f"evaluate_saved_signals: error en {sig.get('id')}: {e}")
