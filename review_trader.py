@@ -1405,6 +1405,770 @@ class ReviewTrader:
             )
 
             return None    
+
+    # ========================================================================
+    # FASE 7E.1 — CALIBRACIÓN ESTADÍSTICA DE EXECUTION SAFETY
+    # ========================================================================
+
+    def _build_execution_safety_calibration(
+        self,
+        signals_data: List[Dict]
+    ) -> Dict:
+        """
+        FASE 7E.1
+
+        Evalúa si Execution Safety realmente está relacionado con
+        mejores resultados reales.
+
+        IMPORTANTE:
+
+        Execution Safety NO se interpreta como probabilidad.
+
+        Ejemplo:
+
+            Safety 85
+
+        NO significa:
+
+            85% de probabilidad de ganar.
+
+        Lo que estudiamos es:
+
+            Safety mayor
+                ↓
+            ¿mejor expectancy R?
+            ¿mejor win rate?
+            ¿mejor comportamiento histórico?
+
+        Esta función es completamente PASIVA.
+
+        NO modifica:
+        - señales
+        - leverage
+        - filtros
+        - minimum_execution_safety
+        - TP
+        - SL
+        - decisiones
+        """
+
+        # ==============================================================
+        # RESULTADO VACÍO SEGURO
+        # ==============================================================
+
+        empty_result = {
+            'sample': 0,
+            'wins': 0,
+            'losses': 0,
+
+            'win_rate': 0.0,
+            'expectancy_r': 0.0,
+
+            'bands': [],
+            'by_timeframe': {},
+
+            'monotonicity_score': 0.0,
+            'monotonicity_pairs': 0,
+
+            'suggested_min_safety_observational':
+                None,
+
+            'actionable':
+                False
+        }
+
+        try:
+
+            if not isinstance(
+                signals_data,
+                list
+            ):
+
+                return empty_result
+
+            # ==========================================================
+            # BUCKET VACÍO
+            # ==========================================================
+
+            def _new_bucket():
+
+                return {
+                    'sample': 0,
+                    'wins': 0,
+                    'losses': 0,
+
+                    'sum_r': 0.0,
+                    'sum_safety': 0.0
+                }
+
+            # ==========================================================
+            # BANDAS ACTUALES DEL SISTEMA
+            # ==========================================================
+            #
+            # Coinciden con la clasificación conceptual de
+            # futures_system.py:
+            #
+            # <55      RECHAZAR
+            # 55-64    BAJA
+            # 65-74    VALIDA
+            # 75-84    ALTA
+            # >=85     PREMIUM
+            #
+            # NO estamos cambiando esos límites.
+            # Sólo los usamos para medir resultados.
+            # ==========================================================
+
+            band_order = [
+                'RECHAZAR',
+                'BAJA',
+                'VALIDA',
+                'ALTA',
+                'PREMIUM'
+            ]
+
+            band_lower_bound = {
+                'RECHAZAR': 0,
+                'BAJA': 55,
+                'VALIDA': 65,
+                'ALTA': 75,
+                'PREMIUM': 85
+            }
+
+            band_stats = defaultdict(
+                _new_bucket
+            )
+
+            timeframe_stats = defaultdict(
+                _new_bucket
+            )
+
+            total_sample = 0
+            total_wins = 0
+            total_losses = 0
+            total_r = 0.0
+
+            # ==========================================================
+            # CLASIFICAR SAFETY
+            # ==========================================================
+
+            def _safety_band(
+                safety: float
+            ) -> str:
+
+                if safety >= 85:
+                    return 'PREMIUM'
+
+                if safety >= 75:
+                    return 'ALTA'
+
+                if safety >= 65:
+                    return 'VALIDA'
+
+                if safety >= 55:
+                    return 'BAJA'
+
+                return 'RECHAZAR'
+
+            # ==========================================================
+            # PROCESAR SEÑALES REALES
+            # ==========================================================
+
+            for signal in signals_data:
+
+                try:
+
+                    if not isinstance(
+                        signal,
+                        dict
+                    ):
+                        continue
+
+                    # ==================================================
+                    # SÓLO FUTUROS
+                    # ==================================================
+
+                    if str(
+                        signal.get(
+                            'system_type',
+                            ''
+                        )
+                    ).lower() != 'futures':
+
+                        continue
+
+                    status = str(
+                        signal.get(
+                            'status',
+                            ''
+                        )
+                    ).lower()
+
+                    # Sólo operaciones realmente resueltas.
+                    if status not in (
+                        'tp_hit',
+                        'sl_hit'
+                    ):
+                        continue
+
+                    metrics = (
+                        self
+                        ._calculate_real_trade_metrics(
+                            signal
+                        )
+                    )
+
+                    if not metrics:
+                        continue
+
+                    safety = float(
+                        metrics.get(
+                            'execution_safety',
+                            0
+                        )
+                        or 0
+                    )
+
+                    # ==================================================
+                    # SAFETY 0 = SIN INFORMACIÓN
+                    # ==================================================
+                    #
+                    # No mezclamos "0 porque realmente fue cero"
+                    # con "0 porque antiguamente no se guardaba".
+                    # ==================================================
+
+                    if safety <= 0:
+                        continue
+
+                    safety = max(
+                        0.0,
+                        min(
+                            100.0,
+                            safety
+                        )
+                    )
+
+                    realized_r = float(
+                        metrics.get(
+                            'realized_r',
+                            0
+                        )
+                        or 0
+                    )
+
+                    is_win = (
+                        status == 'tp_hit'
+                    )
+
+                    band = _safety_band(
+                        safety
+                    )
+
+                    timeframe = str(
+                        signal.get(
+                            'timeframe',
+                            'UNKNOWN'
+                        )
+                        or 'UNKNOWN'
+                    )
+
+                    # ==================================================
+                    # GLOBAL
+                    # ==================================================
+
+                    total_sample += 1
+                    total_r += realized_r
+
+                    if is_win:
+                        total_wins += 1
+                    else:
+                        total_losses += 1
+
+                    # ==================================================
+                    # POR BANDA
+                    # ==================================================
+
+                    bucket = (
+                        band_stats[
+                            band
+                        ]
+                    )
+
+                    bucket[
+                        'sample'
+                    ] += 1
+
+                    bucket[
+                        'sum_r'
+                    ] += realized_r
+
+                    bucket[
+                        'sum_safety'
+                    ] += safety
+
+                    if is_win:
+
+                        bucket[
+                            'wins'
+                        ] += 1
+
+                    else:
+
+                        bucket[
+                            'losses'
+                        ] += 1
+
+                    # ==================================================
+                    # POR TIMEFRAME + BANDA
+                    # ==================================================
+
+                    tf_key = (
+                        timeframe,
+                        band
+                    )
+
+                    tf_bucket = (
+                        timeframe_stats[
+                            tf_key
+                        ]
+                    )
+
+                    tf_bucket[
+                        'sample'
+                    ] += 1
+
+                    tf_bucket[
+                        'sum_r'
+                    ] += realized_r
+
+                    tf_bucket[
+                        'sum_safety'
+                    ] += safety
+
+                    if is_win:
+
+                        tf_bucket[
+                            'wins'
+                        ] += 1
+
+                    else:
+
+                        tf_bucket[
+                            'losses'
+                        ] += 1
+
+                except Exception as e:
+
+                    logger.debug(
+                        f"7E calibration skip: {e}"
+                    )
+
+                    continue
+
+            # ==========================================================
+            # SIN DATOS
+            # ==========================================================
+
+            if total_sample <= 0:
+
+                return empty_result
+
+            # ==========================================================
+            # FINALIZAR UN BUCKET
+            # ==========================================================
+
+            def _finalize_bucket(
+                label: str,
+                data: Dict
+            ) -> Dict:
+
+                sample = int(
+                    data.get(
+                        'sample',
+                        0
+                    )
+                    or 0
+                )
+
+                wins = int(
+                    data.get(
+                        'wins',
+                        0
+                    )
+                    or 0
+                )
+
+                losses = int(
+                    data.get(
+                        'losses',
+                        0
+                    )
+                    or 0
+                )
+
+                if sample <= 0:
+
+                    return {
+                        'band': label,
+                        'sample': 0,
+                        'wins': 0,
+                        'losses': 0,
+                        'win_rate': 0.0,
+                        'expectancy_r': 0.0,
+                        'avg_safety': 0.0,
+                        'sample_quality':
+                            'SIN_MUESTRA'
+                    }
+
+                win_rate = (
+                    wins
+                    / sample
+                    * 100.0
+                )
+
+                expectancy_r = (
+                    float(
+                        data.get(
+                            'sum_r',
+                            0
+                        )
+                        or 0
+                    )
+                    / sample
+                )
+
+                avg_safety = (
+                    float(
+                        data.get(
+                            'sum_safety',
+                            0
+                        )
+                        or 0
+                    )
+                    / sample
+                )
+
+                # ==============================================
+                # CALIDAD DE MUESTRA
+                # ==============================================
+
+                if sample >= 25:
+
+                    sample_quality = (
+                        'ROBUSTA'
+                    )
+
+                elif sample >= 10:
+
+                    sample_quality = (
+                        'UTIL'
+                    )
+
+                elif sample >= 5:
+
+                    sample_quality = (
+                        'PRELIMINAR'
+                    )
+
+                else:
+
+                    sample_quality = (
+                        'INSUFICIENTE'
+                    )
+
+                return {
+                    'band':
+                        label,
+
+                    'sample':
+                        sample,
+
+                    'wins':
+                        wins,
+
+                    'losses':
+                        losses,
+
+                    'win_rate':
+                        round(
+                            win_rate,
+                            2
+                        ),
+
+                    'expectancy_r':
+                        round(
+                            expectancy_r,
+                            4
+                        ),
+
+                    'avg_safety':
+                        round(
+                            avg_safety,
+                            2
+                        ),
+
+                    'sample_quality':
+                        sample_quality
+                }
+
+            # ==========================================================
+            # BANDAS GLOBALES
+            # ==========================================================
+
+            bands = []
+
+            for band in band_order:
+
+                bands.append(
+                    _finalize_bucket(
+                        band,
+                        band_stats[
+                            band
+                        ]
+                    )
+                )
+
+            # ==========================================================
+            # POR TIMEFRAME
+            # ==========================================================
+
+            by_timeframe = {}
+
+            futures_timeframes = (
+                '5m',
+                '15m',
+                '30m',
+                '1h',
+                '2h',
+                '4h'
+            )
+
+            for timeframe in (
+                futures_timeframes
+            ):
+
+                tf_rows = []
+
+                for band in band_order:
+
+                    data = (
+                        timeframe_stats[
+                            (
+                                timeframe,
+                                band
+                            )
+                        ]
+                    )
+
+                    finalized = (
+                        _finalize_bucket(
+                            band,
+                            data
+                        )
+                    )
+
+                    # Evitar inflar el resultado con
+                    # combinaciones completamente vacías.
+                    if (
+                        finalized[
+                            'sample'
+                        ] > 0
+                    ):
+
+                        tf_rows.append(
+                            finalized
+                        )
+
+                if tf_rows:
+
+                    by_timeframe[
+                        timeframe
+                    ] = tf_rows
+
+            # ==========================================================
+            # MONOTONICIDAD
+            # ==========================================================
+            #
+            # Si Execution Safety está bien ordenado,
+            # idealmente una banda superior debería tener
+            # expectancy igual o mejor que la anterior.
+            #
+            # Sólo comparamos bandas con >= 5 muestras.
+            #
+            # Permitimos una tolerancia de -0.05R para evitar
+            # interpretar pequeñas diferencias como fallas.
+            # ==========================================================
+
+            comparable = [
+                row
+                for row in bands
+                if row[
+                    'sample'
+                ] >= 5
+            ]
+
+            ordered_pairs = 0
+            good_pairs = 0
+
+            for i in range(
+                1,
+                len(
+                    comparable
+                )
+            ):
+
+                previous = (
+                    comparable[
+                        i - 1
+                    ]
+                )
+
+                current = (
+                    comparable[
+                        i
+                    ]
+                )
+
+                ordered_pairs += 1
+
+                if (
+                    current[
+                        'expectancy_r'
+                    ]
+                    >=
+                    previous[
+                        'expectancy_r'
+                    ]
+                    - 0.05
+                ):
+
+                    good_pairs += 1
+
+            monotonicity_score = (
+                good_pairs
+                / ordered_pairs
+                * 100.0
+                if ordered_pairs > 0
+                else 0.0
+            )
+
+            # ==========================================================
+            # UMBRAL OBSERVACIONAL
+            # ==========================================================
+            #
+            # NO se aplica al sistema.
+            #
+            # Sólo informa cuál es la primera banda con:
+            #
+            # - al menos 10 muestras
+            # - expectancy > mínimo accionable
+            #
+            # ==========================================================
+
+            suggested_min_safety = None
+
+            for row in bands:
+
+                if (
+                    row[
+                        'sample'
+                    ] >= MIN_SAMPLE_ACTIONABLE
+                    and
+                    row[
+                        'expectancy_r'
+                    ]
+                    >= MIN_EXPECTANCY_ACTIONABLE
+                ):
+
+                    suggested_min_safety = (
+                        band_lower_bound[
+                            row[
+                                'band'
+                            ]
+                        ]
+                    )
+
+                    break
+
+            # ==========================================================
+            # GLOBAL
+            # ==========================================================
+
+            global_win_rate = (
+                total_wins
+                / total_sample
+                * 100.0
+            )
+
+            global_expectancy = (
+                total_r
+                / total_sample
+            )
+
+            actionable = (
+                total_sample
+                >= MIN_SAMPLE_STRONG
+                and
+                len(
+                    comparable
+                ) >= 2
+            )
+
+            return {
+                'sample':
+                    total_sample,
+
+                'wins':
+                    total_wins,
+
+                'losses':
+                    total_losses,
+
+                'win_rate':
+                    round(
+                        global_win_rate,
+                        2
+                    ),
+
+                'expectancy_r':
+                    round(
+                        global_expectancy,
+                        4
+                    ),
+
+                'bands':
+                    bands,
+
+                'by_timeframe':
+                    by_timeframe,
+
+                'monotonicity_score':
+                    round(
+                        monotonicity_score,
+                        2
+                    ),
+
+                'monotonicity_pairs':
+                    ordered_pairs,
+
+                'suggested_min_safety_observational':
+                    suggested_min_safety,
+
+                # Sólo significa que existe suficiente
+                # información para estudiar la calibración.
+                #
+                # NO autoriza cambios automáticos.
+                'actionable':
+                    actionable
+            }
+
+        except Exception as e:
+
+            logger.error(
+                f"Error calibrando Execution Safety: {e}"
+            )
+
+            return empty_result    
+    
     # ========================================================================
     # 4. RECALCULAR ESTADÍSTICAS
     # ========================================================================
@@ -1473,6 +2237,68 @@ class ReviewTrader:
             f"   📈 Procesando "
             f"{len(signals_data)} señales..."
         )
+
+        # ==============================================================
+        # FASE 7E.1 — CALIBRACIÓN PASIVA DE EXECUTION SAFETY
+        # ==============================================================
+        #
+        # IMPORTANTE:
+        # reutilizamos signals_data.
+        #
+        # NO hacemos:
+        # - nueva consulta Supabase
+        # - llamada KuCoin
+        # - DataFrame
+        # - thread
+        #
+        # ==============================================================
+
+        execution_safety_calibration = (
+            self
+            ._build_execution_safety_calibration(
+                signals_data
+            )
+        )
+
+        calibration_sample = int(
+            execution_safety_calibration.get(
+                'sample',
+                0
+            )
+            or 0
+        )
+
+        if calibration_sample > 0:
+
+            print(
+                "   🛡️ Execution Safety calibration: "
+                f"{calibration_sample} operaciones "
+                f"| Exp "
+                f"{execution_safety_calibration.get('expectancy_r', 0):+.3f}R "
+                f"| monotonicidad "
+                f"{execution_safety_calibration.get('monotonicity_score', 0):.1f}%"
+            )
+
+            suggested = (
+                execution_safety_calibration
+                .get(
+                    'suggested_min_safety_observational'
+                )
+            )
+
+            if suggested is not None:
+
+                print(
+                    "   👁️ Umbral Safety observado "
+                    f"(NO aplicado): {suggested}"
+                )
+
+        else:
+
+            print(
+                "   ℹ️ Execution Safety calibration: "
+                "sin muestra Futures suficiente todavía."
+            )
 
         # ==============================================================
         # ESTADÍSTICAS ESPECÍFICAS
@@ -2810,9 +3636,25 @@ class ReviewTrader:
 
         return {
             'specific':
-                len(specific_rows),
+                len(
+                    specific_rows
+                ),
+
             'general':
-                len(general_rows)
+                len(
+                    general_rows
+                ),
+
+            # ==========================================================
+            # FASE 7E.1
+            # ==========================================================
+            #
+            # Se devuelve únicamente como evidencia estadística.
+            # Ningún componente operativo lo consume todavía.
+            # ==========================================================
+
+            'execution_safety_calibration':
+                execution_safety_calibration
         }
     
     def _generate_recommendations(
