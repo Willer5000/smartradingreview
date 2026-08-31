@@ -125,6 +125,29 @@ class ReviewTrader:
         self.especialidad = "aprendizaje_historico"
         self.peso_base = 1.0
         self.db = supabase_db
+
+        # ==============================================================
+        # FASE 7E.3 — EXECUTION SAFETY
+        # ==============================================================
+        #
+        # Al arrancar el servidor NO existe todavía una calibración
+        # estadística cargada.
+        #
+        # Por seguridad:
+        #
+        #     None
+        #
+        # significa:
+        #
+        #     usar configuración estática original de futuros.
+        #
+        # Nunca se bloquea Futures porque ReviewTrader todavía no
+        # haya recalculado sus estadísticas.
+        # ==============================================================
+
+        self._execution_safety_shadow_policy = None
+
+        self._execution_safety_policy_updated_at = None
     
     # ========================================================================
     # 1. REGISTRO DE SEÑALES (llamado desde app.py o futures_system.py)
@@ -2918,7 +2941,587 @@ class ReviewTrader:
 
             return empty_result
 
+    # ========================================================================
+    # FASE 7E.3 — POLÍTICA OPERATIVA PROTEGIDA
+    # ========================================================================
 
+    def get_execution_safety_operational_policy(
+        self,
+        timeframe: str,
+        safety_score: float,
+        default_min_safety: float = 65.0
+    ) -> Dict:
+        """
+        FASE 7E.3
+
+        Convierte la Shadow Policy de 7E.2 en una protección
+        operacional extremadamente conservadora.
+
+        REGLA CENTRAL:
+
+            EL APRENDIZAJE SÓLO PUEDE REDUCIR RIESGO.
+
+        Puede:
+
+            - subir minimum_execution_safety;
+            - reducir el score utilizado para calcular leverage.
+
+        Nunca puede:
+
+            - bajar minimum_execution_safety;
+            - aumentar Execution Safety;
+            - aumentar leverage;
+            - forzar una señal;
+            - saltarse SL / TP / RR / costes.
+
+        Si cualquier dato es insuficiente o inválido:
+
+            FALLBACK = configuración estática original.
+        """
+
+        try:
+
+            raw_safety = float(
+                safety_score
+                or 0
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+
+            raw_safety = 0.0
+
+        raw_safety = max(
+            0.0,
+            min(
+                100.0,
+                raw_safety
+            )
+        )
+
+        try:
+
+            default_min = float(
+                default_min_safety
+                or 65.0
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+
+            default_min = 65.0
+
+        default_min = max(
+            0.0,
+            min(
+                100.0,
+                default_min
+            )
+        )
+
+        # ==============================================================
+        # FALLBACK ABSOLUTAMENTE SEGURO
+        # ==============================================================
+
+        fallback = {
+            'active':
+                False,
+
+            'mode':
+                'STATIC_FALLBACK',
+
+            'minimum_safety':
+                round(
+                    default_min,
+                    2
+                ),
+
+            'raw_safety':
+                round(
+                    raw_safety,
+                    2
+                ),
+
+            'leverage_safety_score':
+                round(
+                    raw_safety,
+                    2
+                ),
+
+            'leverage_factor':
+                1.0,
+
+            'band':
+                None,
+
+            'sample':
+                0,
+
+            'monotonicity_score':
+                0.0,
+
+            'reason':
+                'CALIBRACION_NO_DISPONIBLE',
+
+            'updated_at':
+                self._execution_safety_policy_updated_at
+        }
+
+        try:
+
+            shadow = getattr(
+                self,
+                '_execution_safety_shadow_policy',
+                None
+            )
+
+            if not isinstance(
+                shadow,
+                dict
+            ):
+
+                return fallback
+
+            # ==========================================================
+            # GUARDRAILS MÁS ESTRICTOS QUE 7E.2
+            # ==========================================================
+            #
+            # 7E.2:
+            #   permite revisión con muestra mínima robusta.
+            #
+            # 7E.3:
+            #   exige el DOBLE antes de tocar comportamiento real.
+            # ==============================================================
+
+            sample = int(
+                shadow.get(
+                    'sample',
+                    0
+                )
+                or 0
+            )
+
+            monotonicity = float(
+                shadow.get(
+                    'monotonicity_score',
+                    0
+                )
+                or 0
+            )
+
+            eligible = bool(
+                shadow.get(
+                    'eligible_for_operational_review',
+                    False
+                )
+            )
+
+            shadow_min = (
+                shadow.get(
+                    'recommended_min_safety_shadow'
+                )
+            )
+
+            required_global_sample = max(
+                50,
+                MIN_SAMPLE_STRONG * 2
+            )
+
+            # ==========================================================
+            # TODAVÍA NO HAY SUFICIENTE EVIDENCIA
+            # ==============================================================
+
+            if not eligible:
+
+                fallback[
+                    'reason'
+                ] = (
+                    'SHADOW_POLICY_NO_ELEGIBLE'
+                )
+
+                fallback[
+                    'sample'
+                ] = sample
+
+                fallback[
+                    'monotonicity_score'
+                ] = round(
+                    monotonicity,
+                    2
+                )
+
+                return fallback
+
+            if sample < required_global_sample:
+
+                fallback[
+                    'reason'
+                ] = (
+                    'MUESTRA_OPERATIVA_INSUFICIENTE'
+                )
+
+                fallback[
+                    'sample'
+                ] = sample
+
+                fallback[
+                    'monotonicity_score'
+                ] = round(
+                    monotonicity,
+                    2
+                )
+
+                return fallback
+
+            # Para actuar realmente exigimos más
+            # monotonicidad que en Shadow Mode.
+            if monotonicity < 75.0:
+
+                fallback[
+                    'reason'
+                ] = (
+                    'MONOTONICIDAD_OPERATIVA_INSUFICIENTE'
+                )
+
+                fallback[
+                    'sample'
+                ] = sample
+
+                fallback[
+                    'monotonicity_score'
+                ] = round(
+                    monotonicity,
+                    2
+                )
+
+                return fallback
+
+            if shadow_min is None:
+
+                fallback[
+                    'reason'
+                ] = (
+                    'SIN_UMBRAL_SHADOW_VALIDO'
+                )
+
+                return fallback
+
+            try:
+
+                shadow_min = float(
+                    shadow_min
+                )
+
+            except (
+                TypeError,
+                ValueError
+            ):
+
+                return fallback
+
+            # ==========================================================
+            # PROTECTION ONLY
+            # ==========================================================
+            #
+            # Nunca bajar de:
+            #
+            #     FUTURES_RISK_CONFIG.minimum_execution_safety
+            #
+            # Si Shadow recomienda 55:
+            #
+            #     REAL sigue siendo 65.
+            #
+            # Si Shadow recomienda 75:
+            #
+            #     REAL puede subir a 75.
+            # ==============================================================
+
+            operational_min = max(
+                default_min,
+                shadow_min
+            )
+
+            operational_min = min(
+                85.0,
+                operational_min
+            )
+
+            # ==========================================================
+            # TIMEFRAME
+            # ==========================================================
+            #
+            # Un TF puede endurecer el filtro.
+            #
+            # Nunca puede relajarlo.
+            # ==============================================================
+
+            timeframe_policy = (
+                shadow.get(
+                    'by_timeframe',
+                    {}
+                )
+                or {}
+            )
+
+            tf_policy = (
+                timeframe_policy.get(
+                    timeframe,
+                    {}
+                )
+                or {}
+            )
+
+            if isinstance(
+                tf_policy,
+                dict
+            ):
+
+                tf_ready = bool(
+                    tf_policy.get(
+                        'eligible_for_operational_review',
+                        False
+                    )
+                )
+
+                tf_sample = int(
+                    tf_policy.get(
+                        'sample',
+                        0
+                    )
+                    or 0
+                )
+
+                tf_monotonicity = float(
+                    tf_policy.get(
+                        'monotonicity_score',
+                        0
+                    )
+                    or 0
+                )
+
+                tf_min = (
+                    tf_policy.get(
+                        'recommended_min_safety_shadow'
+                    )
+                )
+
+                if (
+                    tf_ready
+                    and
+                    tf_sample >= MIN_SAMPLE_STRONG
+                    and
+                    tf_monotonicity >= 75.0
+                    and
+                    tf_min is not None
+                ):
+
+                    try:
+
+                        tf_min = float(
+                            tf_min
+                        )
+
+                        # Sólo endurecer.
+                        operational_min = max(
+                            operational_min,
+                            tf_min
+                        )
+
+                    except (
+                        TypeError,
+                        ValueError
+                    ):
+
+                        pass
+
+            operational_min = min(
+                85.0,
+                operational_min
+            )
+
+            # ==========================================================
+            # DETERMINAR BANDA DEL SAFETY ACTUAL
+            # ==============================================================
+
+            if raw_safety >= 85:
+
+                band = 'PREMIUM'
+
+            elif raw_safety >= 75:
+
+                band = 'ALTA'
+
+            elif raw_safety >= 65:
+
+                band = 'VALIDA'
+
+            elif raw_safety >= 55:
+
+                band = 'BAJA'
+
+            else:
+
+                band = 'RECHAZAR'
+
+            band_factors = (
+                shadow.get(
+                    'band_factors',
+                    {}
+                )
+                or {}
+            )
+
+            band_data = (
+                band_factors.get(
+                    band,
+                    {}
+                )
+                or {}
+            )
+
+            # ==========================================================
+            # FACTOR DE LEVERAGE
+            # ==========================================================
+            #
+            # También PROTECTION ONLY.
+            #
+            # Aunque Shadow diga:
+            #
+            #     factor 1.08
+            #
+            # Operational utiliza:
+            #
+            #     1.00
+            #
+            # Nunca aumenta leverage.
+            #
+            # Sólo una banda ROBUSTA puede reducir Safety para leverage.
+            # ==============================================================
+
+            leverage_factor = 1.0
+
+            evidence = str(
+                band_data.get(
+                    'evidence',
+                    ''
+                )
+                or ''
+            ).upper()
+
+            try:
+
+                shadow_factor = float(
+                    band_data.get(
+                        'shadow_factor',
+                        1.0
+                    )
+                    or 1.0
+                )
+
+            except (
+                TypeError,
+                ValueError
+            ):
+
+                shadow_factor = 1.0
+
+            if (
+                evidence == 'ROBUSTA'
+                and
+                shadow_factor < 1.0
+            ):
+
+                # Penalización máxima operativa:
+                # -5%.
+                leverage_factor = max(
+                    0.95,
+                    shadow_factor
+                )
+
+            # Nunca bonificar.
+            leverage_factor = min(
+                1.0,
+                leverage_factor
+            )
+
+            leverage_safety_score = (
+                raw_safety
+                * leverage_factor
+            )
+
+            # Protección extra:
+            # jamás devolver un Safety de leverage
+            # superior al score original.
+            leverage_safety_score = min(
+                raw_safety,
+                leverage_safety_score
+            )
+
+            return {
+                'active':
+                    True,
+
+                'mode':
+                    'PROTECTION_ONLY',
+
+                'minimum_safety':
+                    round(
+                        operational_min,
+                        2
+                    ),
+
+                'raw_safety':
+                    round(
+                        raw_safety,
+                        2
+                    ),
+
+                'leverage_safety_score':
+                    round(
+                        leverage_safety_score,
+                        2
+                    ),
+
+                'leverage_factor':
+                    round(
+                        leverage_factor,
+                        4
+                    ),
+
+                'band':
+                    band,
+
+                'band_evidence':
+                    evidence,
+
+                'sample':
+                    sample,
+
+                'monotonicity_score':
+                    round(
+                        monotonicity,
+                        2
+                    ),
+
+                'reason':
+                    'PROTECCION_ESTADISTICA_ACTIVA',
+
+                'updated_at':
+                    self._execution_safety_policy_updated_at
+            }
+
+        except Exception as e:
+
+            logger.warning(
+                "Execution Safety operational policy "
+                f"fallback: {e}"
+            )
+
+            return fallback
    
     # ========================================================================
     # 4. RECALCULAR ESTADÍSTICAS
@@ -3062,6 +3665,32 @@ class ReviewTrader:
             ._build_execution_safety_shadow_policy(
                 execution_safety_calibration
             )
+        )
+
+        # ==============================================================
+        # FASE 7E.3
+        # ==============================================================
+        #
+        # Guardar solamente en memoria.
+        #
+        # NO Supabase.
+        # NO archivo.
+        # NO nueva consulta.
+        #
+        # Si Render reinicia:
+        #
+        #     vuelve temporalmente al Safety estático de 65
+        #
+        # hasta que ReviewTrader recalcule nuevamente estadísticas.
+        # ==============================================================
+
+        self._execution_safety_shadow_policy = (
+            execution_safety_shadow_policy
+        )
+
+        self._execution_safety_policy_updated_at = (
+            datetime.utcnow()
+            .isoformat()
         )
 
         shadow_candidate = (
