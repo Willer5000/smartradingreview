@@ -2168,7 +2168,758 @@ class ReviewTrader:
             )
 
             return empty_result    
-    
+
+    # ========================================================================
+    # FASE 7E.2 — EXECUTION SAFETY SHADOW POLICY
+    # ========================================================================
+
+    def _build_execution_safety_shadow_policy(
+        self,
+        calibration: Dict
+    ) -> Dict:
+        """
+        FASE 7E.2
+
+        Convierte la evidencia estadística de 7E.1 en una
+        política RECOMENDADA de Execution Safety.
+
+        IMPORTANTE:
+        esta política está en SHADOW MODE.
+
+        NO modifica:
+        - FUTURES_RISK_CONFIG
+        - minimum_execution_safety
+        - high_safety_threshold
+        - leverage
+        - señales
+        - Entry
+        - SL
+        - TP
+
+        Sólo responde:
+
+            1. ¿Qué umbral mínimo parece razonable?
+            2. ¿Qué bandas históricamente aportan o destruyen expectancy?
+            3. ¿Hay suficiente muestra?
+            4. ¿La relación Safety → Expectancy es coherente?
+            5. ¿Existe evidencia específica por timeframe?
+        """
+
+        empty_result = {
+            'mode':
+                'SHADOW_ONLY',
+
+            'sample':
+                0,
+
+            'eligible_for_operational_review':
+                False,
+
+            'candidate_min_safety':
+                None,
+
+            'recommended_min_safety_shadow':
+                None,
+
+            'reason':
+                'SIN_MUESTRA',
+
+            'band_factors':
+                {},
+
+            'by_timeframe':
+                {},
+
+            'guardrails': {
+                'minimum_shadow_threshold':
+                    55,
+
+                'maximum_shadow_threshold':
+                    85,
+
+                'min_sample_band':
+                    5,
+
+                'min_sample_actionable':
+                    MIN_SAMPLE_ACTIONABLE,
+
+                'min_sample_operational_review':
+                    MIN_SAMPLE_STRONG,
+
+                'minimum_monotonicity_pct':
+                    60.0,
+
+                'factor_floor':
+                    0.90,
+
+                'factor_ceiling':
+                    1.10
+            }
+        }
+
+        try:
+
+            if not isinstance(
+                calibration,
+                dict
+            ):
+                return empty_result
+
+            sample = int(
+                calibration.get(
+                    'sample',
+                    0
+                )
+                or 0
+            )
+
+            if sample <= 0:
+                return empty_result
+
+            bands = (
+                calibration.get(
+                    'bands',
+                    []
+                )
+                or []
+            )
+
+            by_timeframe_source = (
+                calibration.get(
+                    'by_timeframe',
+                    {}
+                )
+                or {}
+            )
+
+            monotonicity = float(
+                calibration.get(
+                    'monotonicity_score',
+                    0
+                )
+                or 0
+            )
+
+            monotonicity_pairs = int(
+                calibration.get(
+                    'monotonicity_pairs',
+                    0
+                )
+                or 0
+            )
+
+            calibration_actionable = bool(
+                calibration.get(
+                    'actionable',
+                    False
+                )
+            )
+
+            raw_suggested_threshold = (
+                calibration.get(
+                    'suggested_min_safety_observational'
+                )
+            )
+
+            # ==========================================================
+            # MAPA DE BANDAS
+            # ==========================================================
+
+            band_order = [
+                'RECHAZAR',
+                'BAJA',
+                'VALIDA',
+                'ALTA',
+                'PREMIUM'
+            ]
+
+            band_lower_bound = {
+                'RECHAZAR': 0,
+                'BAJA': 55,
+                'VALIDA': 65,
+                'ALTA': 75,
+                'PREMIUM': 85
+            }
+
+            # ==========================================================
+            # FACTOR EMPÍRICO
+            # ==========================================================
+            #
+            # NO es probabilidad.
+            #
+            # Es un factor conservador que podrá utilizar 7E.3
+            # si la evidencia futura demuestra que es robusta.
+            #
+            # Expectancy claramente negativa:
+            #       penalización.
+            #
+            # Expectancy claramente positiva:
+            #       bonificación pequeña.
+            #
+            # Máximo permitido:
+            #       ±10%.
+            #
+            # Además aplicamos SHRINKAGE según muestra:
+            #
+            # pocas muestras → factor vuelve hacia 1.0
+            # muchas muestras → puede acercarse al factor empírico.
+            # ==========================================================
+
+            def _raw_factor_from_expectancy(
+                expectancy_r: float
+            ) -> float:
+
+                if expectancy_r <= -0.25:
+                    return 0.90
+
+                if expectancy_r < 0:
+                    return 0.95
+
+                if expectancy_r < 0.20:
+                    return 1.00
+
+                if expectancy_r < 0.50:
+                    return 1.05
+
+                return 1.10
+
+            def _shrunk_factor(
+                expectancy_r: float,
+                bucket_sample: int
+            ) -> float:
+
+                if bucket_sample < 5:
+                    return 1.0
+
+                raw_factor = (
+                    _raw_factor_from_expectancy(
+                        expectancy_r
+                    )
+                )
+
+                reliability = min(
+                    1.0,
+                    bucket_sample
+                    / float(
+                        MIN_SAMPLE_STRONG
+                    )
+                )
+
+                factor = (
+                    1.0
+                    +
+                    (
+                        raw_factor
+                        - 1.0
+                    )
+                    * reliability
+                )
+
+                factor = max(
+                    0.90,
+                    min(
+                        1.10,
+                        factor
+                    )
+                )
+
+                return round(
+                    factor,
+                    4
+                )
+
+            # ==========================================================
+            # FACTORES POR BANDA
+            # ==========================================================
+
+            band_factors = {}
+
+            rows_by_band = {}
+
+            for row in bands:
+
+                if not isinstance(
+                    row,
+                    dict
+                ):
+                    continue
+
+                band = str(
+                    row.get(
+                        'band',
+                        ''
+                    )
+                    or ''
+                ).upper()
+
+                if band not in band_order:
+                    continue
+
+                rows_by_band[
+                    band
+                ] = row
+
+                bucket_sample = int(
+                    row.get(
+                        'sample',
+                        0
+                    )
+                    or 0
+                )
+
+                expectancy_r = float(
+                    row.get(
+                        'expectancy_r',
+                        0
+                    )
+                    or 0
+                )
+
+                factor = (
+                    _shrunk_factor(
+                        expectancy_r,
+                        bucket_sample
+                    )
+                )
+
+                if bucket_sample >= MIN_SAMPLE_STRONG:
+
+                    evidence = (
+                        'ROBUSTA'
+                    )
+
+                elif bucket_sample >= MIN_SAMPLE_ACTIONABLE:
+
+                    evidence = (
+                        'UTIL'
+                    )
+
+                elif bucket_sample >= 5:
+
+                    evidence = (
+                        'PRELIMINAR'
+                    )
+
+                else:
+
+                    evidence = (
+                        'INSUFICIENTE'
+                    )
+
+                band_factors[
+                    band
+                ] = {
+                    'sample':
+                        bucket_sample,
+
+                    'expectancy_r':
+                        round(
+                            expectancy_r,
+                            4
+                        ),
+
+                    'win_rate':
+                        round(
+                            float(
+                                row.get(
+                                    'win_rate',
+                                    0
+                                )
+                                or 0
+                            ),
+                            2
+                        ),
+
+                    'shadow_factor':
+                        factor,
+
+                    'evidence':
+                        evidence
+                }
+
+            # ==========================================================
+            # UMBRAL GLOBAL CANDIDATO
+            # ==========================================================
+
+            candidate_threshold = None
+
+            if raw_suggested_threshold is not None:
+
+                try:
+                    candidate_threshold = int(
+                        raw_suggested_threshold
+                    )
+
+                except (
+                    TypeError,
+                    ValueError
+                ):
+                    candidate_threshold = None
+
+            # ==========================================================
+            # GUARDRAIL
+            # ==========================================================
+            #
+            # Aunque la banda RECHAZAR tuviera resultados positivos
+            # en una muestra histórica sesgada, Shadow Policy nunca
+            # recomendará bajar de 55.
+            #
+            # Tampoco recomendará un mínimo superior a 85 en esta fase.
+            # ==========================================================
+
+            if candidate_threshold is not None:
+
+                candidate_threshold = max(
+                    55,
+                    min(
+                        85,
+                        candidate_threshold
+                    )
+                )
+
+            # ==========================================================
+            # ¿LA EVIDENCIA GLOBAL ES SUFICIENTE?
+            # ==========================================================
+
+            global_ready = (
+                calibration_actionable
+                and
+                sample >= MIN_SAMPLE_STRONG
+                and
+                monotonicity_pairs >= 1
+                and
+                monotonicity >= 60.0
+                and
+                candidate_threshold is not None
+            )
+
+            if candidate_threshold is None:
+
+                global_reason = (
+                    'NINGUNA_BANDA_CON_EXPECTANCY_Y_MUESTRA_SUFICIENTE'
+                )
+
+            elif sample < MIN_SAMPLE_STRONG:
+
+                global_reason = (
+                    'MUESTRA_GLOBAL_INSUFICIENTE'
+                )
+
+            elif monotonicity_pairs < 1:
+
+                global_reason = (
+                    'NO_HAY_BANDAS_COMPARABLES'
+                )
+
+            elif monotonicity < 60.0:
+
+                global_reason = (
+                    'SAFETY_NO_ORDENA_EXPECTANCY_DE_FORMA_CONSISTENTE'
+                )
+
+            elif not calibration_actionable:
+
+                global_reason = (
+                    'CALIBRACION_AUN_NO_ACCIONABLE'
+                )
+
+            else:
+
+                global_reason = (
+                    'EVIDENCIA_SUFICIENTE_PARA_REVISION'
+                )
+
+            recommended_shadow = (
+                candidate_threshold
+                if global_ready
+                else None
+            )
+
+            # ==========================================================
+            # CALIBRACIÓN POR TIMEFRAME
+            # ==========================================================
+
+            timeframe_policy = {}
+
+            for (
+                timeframe,
+                tf_rows
+            ) in by_timeframe_source.items():
+
+                if not isinstance(
+                    tf_rows,
+                    list
+                ):
+                    continue
+
+                tf_total_sample = sum(
+                    int(
+                        row.get(
+                            'sample',
+                            0
+                        )
+                        or 0
+                    )
+                    for row in tf_rows
+                    if isinstance(
+                        row,
+                        dict
+                    )
+                )
+
+                tf_rows_map = {
+                    str(
+                        row.get(
+                            'band',
+                            ''
+                        )
+                        or ''
+                    ).upper():
+                        row
+                    for row in tf_rows
+                    if isinstance(
+                        row,
+                        dict
+                    )
+                }
+
+                # ------------------------------------------------------
+                # Candidato por timeframe
+                # ------------------------------------------------------
+
+                tf_candidate = None
+
+                for band in band_order:
+
+                    row = tf_rows_map.get(
+                        band
+                    )
+
+                    if not row:
+                        continue
+
+                    row_sample = int(
+                        row.get(
+                            'sample',
+                            0
+                        )
+                        or 0
+                    )
+
+                    row_expectancy = float(
+                        row.get(
+                            'expectancy_r',
+                            0
+                        )
+                        or 0
+                    )
+
+                    if (
+                        row_sample
+                        >= MIN_SAMPLE_ACTIONABLE
+                        and
+                        row_expectancy
+                        >= MIN_EXPECTANCY_ACTIONABLE
+                    ):
+
+                        tf_candidate = (
+                            band_lower_bound[
+                                band
+                            ]
+                        )
+
+                        break
+
+                if tf_candidate is not None:
+
+                    tf_candidate = max(
+                        55,
+                        min(
+                            85,
+                            int(
+                                tf_candidate
+                            )
+                        )
+                    )
+
+                # ------------------------------------------------------
+                # MONOTONICIDAD POR TIMEFRAME
+                # ------------------------------------------------------
+
+                tf_comparable = []
+
+                for band in band_order:
+
+                    row = tf_rows_map.get(
+                        band
+                    )
+
+                    if not row:
+                        continue
+
+                    if int(
+                        row.get(
+                            'sample',
+                            0
+                        )
+                        or 0
+                    ) < 5:
+
+                        continue
+
+                    tf_comparable.append(
+                        row
+                    )
+
+                tf_pairs = 0
+                tf_good_pairs = 0
+
+                for idx in range(
+                    1,
+                    len(
+                        tf_comparable
+                    )
+                ):
+
+                    previous = (
+                        tf_comparable[
+                            idx - 1
+                        ]
+                    )
+
+                    current = (
+                        tf_comparable[
+                            idx
+                        ]
+                    )
+
+                    tf_pairs += 1
+
+                    previous_exp = float(
+                        previous.get(
+                            'expectancy_r',
+                            0
+                        )
+                        or 0
+                    )
+
+                    current_exp = float(
+                        current.get(
+                            'expectancy_r',
+                            0
+                        )
+                        or 0
+                    )
+
+                    if (
+                        current_exp
+                        >= previous_exp - 0.05
+                    ):
+                        tf_good_pairs += 1
+
+                tf_monotonicity = (
+                    tf_good_pairs
+                    / tf_pairs
+                    * 100.0
+                    if tf_pairs > 0
+                    else 0.0
+                )
+
+                tf_ready = (
+                    tf_total_sample
+                    >= MIN_SAMPLE_STRONG
+                    and
+                    tf_candidate is not None
+                    and
+                    tf_pairs >= 1
+                    and
+                    tf_monotonicity >= 60.0
+                )
+
+                timeframe_policy[
+                    timeframe
+                ] = {
+                    'sample':
+                        tf_total_sample,
+
+                    'candidate_min_safety':
+                        tf_candidate,
+
+                    'recommended_min_safety_shadow':
+                        (
+                            tf_candidate
+                            if tf_ready
+                            else None
+                        ),
+
+                    'monotonicity_score':
+                        round(
+                            tf_monotonicity,
+                            2
+                        ),
+
+                    'monotonicity_pairs':
+                        tf_pairs,
+
+                    'eligible_for_operational_review':
+                        bool(
+                            tf_ready
+                        )
+                }
+
+            return {
+                'mode':
+                    'SHADOW_ONLY',
+
+                'sample':
+                    sample,
+
+                'eligible_for_operational_review':
+                    bool(
+                        global_ready
+                    ),
+
+                'candidate_min_safety':
+                    candidate_threshold,
+
+                'recommended_min_safety_shadow':
+                    recommended_shadow,
+
+                'reason':
+                    global_reason,
+
+                'monotonicity_score':
+                    round(
+                        monotonicity,
+                        2
+                    ),
+
+                'monotonicity_pairs':
+                    monotonicity_pairs,
+
+                'band_factors':
+                    band_factors,
+
+                'by_timeframe':
+                    timeframe_policy,
+
+                'guardrails':
+                    empty_result[
+                        'guardrails'
+                    ]
+            }
+
+        except Exception as e:
+
+            logger.error(
+                f"Error creando Shadow Policy "
+                f"de Execution Safety: {e}"
+            )
+
+            return empty_result
+
+
+   
     # ========================================================================
     # 4. RECALCULAR ESTADÍSTICAS
     # ========================================================================
@@ -2294,10 +3045,70 @@ class ReviewTrader:
                 )
 
         else:
-
             print(
                 "   ℹ️ Execution Safety calibration: "
                 "sin muestra Futures suficiente todavía."
+            )
+
+        # ==============================================================
+        # FASE 7E.2 — SHADOW POLICY
+        # ==============================================================
+        #
+        # Convierte la evidencia 7E.1 en recomendaciones,
+        # pero NO modifica futures_system.py.
+        # ==============================================================
+        execution_safety_shadow_policy = (
+            self
+            ._build_execution_safety_shadow_policy(
+                execution_safety_calibration
+            )
+        )
+
+        shadow_candidate = (
+            execution_safety_shadow_policy
+            .get(
+                'candidate_min_safety'
+            )
+        )
+
+        shadow_recommended = (
+            execution_safety_shadow_policy
+            .get(
+                'recommended_min_safety_shadow'
+            )
+        )
+
+        shadow_ready = bool(
+            execution_safety_shadow_policy
+            .get(
+                'eligible_for_operational_review',
+                False
+            )
+        )
+
+        if shadow_candidate is not None:
+
+            print(
+                "   👁️ 7E.2 Shadow Safety: "
+                f"candidato={shadow_candidate} "
+                f"| listo={shadow_ready} "
+                f"| razón="
+                f"{execution_safety_shadow_policy.get('reason')}"
+            )
+
+        else:
+
+            print(
+                "   👁️ 7E.2 Shadow Safety: "
+                "sin umbral candidato todavía."
+            )
+
+        if shadow_recommended is not None:
+
+            print(
+                "   🧪 Umbral recomendado SHADOW: "
+                f"{shadow_recommended} "
+                "(NO APLICADO)"
             )
 
         # ==============================================================
@@ -3648,13 +4459,22 @@ class ReviewTrader:
             # ==========================================================
             # FASE 7E.1
             # ==========================================================
-            #
-            # Se devuelve únicamente como evidencia estadística.
-            # Ningún componente operativo lo consume todavía.
-            # ==========================================================
 
             'execution_safety_calibration':
-                execution_safety_calibration
+                execution_safety_calibration,
+
+            # ==========================================================
+            # FASE 7E.2
+            # ==========================================================
+            #
+            # Shadow mode.
+            #
+            # No existe todavía ningún consumidor operativo
+            # de este objeto.
+            # ==========================================================
+
+            'execution_safety_shadow_policy':
+                execution_safety_shadow_policy
         }
     
     def _generate_recommendations(
