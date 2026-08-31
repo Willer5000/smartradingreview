@@ -12886,17 +12886,25 @@ class TradingExpertSystem:
                 * 100
             )
     
-            if (
+            # ==========================================================
+            # DISTANCIA MÍNIMA / RR
+            # ==========================================================
+            # Una distancia inferior al mínimo no significa que
+            # el objetivo técnico deje de existir.
+            #
+            # Se conserva y se penaliza.
+            # Posteriormente calculate_entry_levels decidirá si es
+            # EXECUTABLE_SIGNAL o ANALYSIS_ONLY.
+            # ==========================================================
+
+            below_min_distance = (
                 min_distance_pct > 0
                 and distance_pct < min_distance_pct
-            ):
-                return -1
-    
-            # ==========================================================
-            # ATR / RR
-            # ==========================================================
+            )
+
             rr = 0.0
-    
+            rr_penalty = 0
+
             if (
                 sl_distance_pct
                 and sl_distance_pct > 0
@@ -12905,21 +12913,15 @@ class TradingExpertSystem:
                     distance_pct
                     / sl_distance_pct
                 )
-    
-                # ==========================================================
-                # RR BAJO: NO DESCARTAR EL OBJETIVO TÉCNICO
-                # ==========================================================
-                #
-                # Un RR < 1.8 no significa que el TP sea inexistente.
-                # Significa que la configuración puede ser técnicamente
-                # válida pero no suficientemente atractiva para ejecución.
-                #
-                # El nivel debe conservarse para ANALYSIS_ONLY.
-                # La decisión de ejecución se toma posteriormente.
-                # ==========================================================
 
                 if rr < 1.8:
-                    score -= 35
+                    rr_penalty = 35
+
+            if below_min_distance:
+                rr_penalty = max(
+                    rr_penalty,
+                    35
+                )
     
             # ==========================================================
             # DISTANCE SCORE
@@ -13154,6 +13156,7 @@ class TradingExpertSystem:
             score -= (
                 proximity_penalty
                 + far_penalty
+                + rr_penalty
             )
     
             return max(
@@ -13321,10 +13324,82 @@ class TradingExpertSystem:
                 scored.append((c, score))
         
         if not scored:
-            return None, f"Ningún TP cumple RR mínimo 1:1.8 (mín distancia {min_distance:.2f}%)", 0
-        
+            # ==========================================================
+            # FALLBACK SOBRE CANDIDATOS REALES YA CALCULADOS
+            # ==========================================================
+            # NO inventamos un TP.
+            #
+            # Si existen objetivos técnicos en la dirección correcta,
+            # conservamos el más cercano para ANALYSIS_ONLY.
+            # ==========================================================
 
-        scored.sort(key=lambda x: -x[1])
+            directional_candidates = []
+
+            for candidate in candidates:
+                try:
+                    candidate_price = float(
+                        candidate.get(
+                            'price',
+                            0
+                        )
+                        or 0
+                    )
+                except (
+                    TypeError,
+                    ValueError
+                ):
+                    continue
+
+                if candidate_price <= 0:
+                    continue
+
+                if (
+                    direction == 'long'
+                    and candidate_price > entry
+                ):
+                    directional_candidates.append(
+                        candidate
+                    )
+
+                elif (
+                    direction == 'short'
+                    and candidate_price < entry
+                ):
+                    directional_candidates.append(
+                        candidate
+                    )
+
+            if not directional_candidates:
+                return (
+                    None,
+                    'Sin TP técnico válido en dirección de la operación',
+                    0
+                )
+
+            fallback_candidate = min(
+                directional_candidates,
+                key=lambda candidate: abs(
+                    float(
+                        candidate.get(
+                            'price',
+                            0
+                        )
+                        or 0
+                    )
+                    - entry
+                )
+            )
+
+            scored.append(
+                (
+                    fallback_candidate,
+                    10.0
+                )
+            )
+
+        scored.sort(
+            key=lambda x: -x[1]
+        )
         best = scored[0]
         
         # v24 (Propuesta 2): Techo duro RR máximo 4.5
@@ -13341,18 +13416,41 @@ class TradingExpertSystem:
             )
         best_score = best[1]
         
-        if sl_price and sl_price > 0 and current_price > 0:
-            sl_dist = abs(current_price - sl_price) / current_price * 100
-            tp_dist = abs(best_price - current_price) / current_price * 100
-            rr = tp_dist / sl_dist if sl_dist > 0 else 0
+        if (
+            sl_price
+            and sl_price > 0
+            and entry > 0
+        ):
+            sl_dist = (
+                abs(entry - sl_price)
+                / entry
+                * 100
+            )
+
+            tp_dist = (
+                abs(best_price - entry)
+                / entry
+                * 100
+            )
+
+            rr = (
+                tp_dist / sl_dist
+                if sl_dist > 0
+                else 0
+            )
             # ==============================================================
             # CALIDAD DEL RR
             # ==============================================================
             if rr < 1.8:
-                return (
-                    None,
-                    f"RR insuficiente {rr:.2f}",
-                    0
+                best_source = (
+                    f"{best_source} "
+                    f"[ANALYSIS_ONLY: "
+                    f"RR {rr:.2f} < 1.8]"
+                )
+
+                best_score = min(
+                    best_score,
+                    45
                 )
             
             if rr > 4.5:
@@ -13363,7 +13461,14 @@ class TradingExpertSystem:
                 # Buscar candidato intermedio con RR entre 2.5 y 4.5
                 intermediate = None
                 for c, s in scored:
-                    c_tp_dist = abs(c['price'] - current_price) / current_price * 100
+                    c_tp_dist = (
+                        abs(
+                            float(c['price'])
+                            - entry
+                        )
+                        / entry
+                        * 100
+                    )
                     c_rr = c_tp_dist / sl_dist if sl_dist > 0 else 0
                     if 2.5 <= c_rr <= 4.5:
                         intermediate = (c, s)
@@ -13393,15 +13498,20 @@ class TradingExpertSystem:
                     # ==================================================
 
                     print(
-                        "   ⚠️ TP rechazado: "
-                        "ningún objetivo estructural razonable "
-                        "dentro de RR 2.5–4.5"
+                        "   ⚠️ TP estructural conservado "
+                        "para ANALYSIS_ONLY: "
+                        f"RR {rr:.2f} > 4.5"
                     )
 
-                    return (
-                        None,
-                        "Sin TP estructural realista",
-                        0
+                    best_source = (
+                        f"{best_source} "
+                        f"[ANALYSIS_ONLY: "
+                        f"RR {rr:.2f} > 4.5]"
+                    )
+
+                    best_score = min(
+                        best_score,
+                        45
                     )
         
         return best_price, best_source, best_score
@@ -14539,13 +14649,27 @@ class TradingExpertSystem:
 
             if rr < 1.8:
                 non_executable_reason = (
-                    f"R/R desfavorable {rr:.2f} < 1.8"
+                    f"R/R desfavorable "
+                    f"{rr:.2f} < 1.8"
                 )
 
                 print(
                     f"   ⚠️ ANALYSIS_ONLY: "
                     f"R/R {rr:.2f} < 1.8"
                 )
+
+            elif rr > 4.5:
+                non_executable_reason = (
+                    f"R/R demasiado alto para ejecución "
+                    f"{rr:.2f} > 4.5"
+                )
+
+                print(
+                    f"   ⚠️ ANALYSIS_ONLY: "
+                    f"R/R {rr:.2f} > 4.5"
+                )
+
+
             
             # ============ AJUSTAR APALANCAMIENTO POR VOLATILIDAD ============
             if atr_pct > 0.05:  # > 5%
@@ -15541,24 +15665,107 @@ class TradingExpertSystem:
             else:
                 sentiment_description = "Sentimiento neutral"
         
-        # Niveles de entrada
-        entry_price = levels.get('entry', precio_actual)
-        stop_loss = levels.get('stop_loss', precio_actual * 0.97 if precio_actual > 0 else 0)
-        take_profit = levels.get('take_profit', precio_actual * 1.06 if precio_actual > 0 else 0)
-        risk_reward = levels.get('risk_reward', 2.0)
-        leverage = levels.get('leverage', 1)
-        
+        # ==============================================================
+        # NIVELES DE ENTRADA SEGUROS
+        # ==============================================================
+        # Un nivel ausente nunca debe romper el mensaje profesional.
+        # Tampoco debe convertirse artificialmente en precio 0.
+        # ==============================================================
+
+        def _safe_level_number(
+            value,
+            fallback=0.0
+        ):
+            try:
+                return float(
+                    value
+                    if value is not None
+                    else fallback
+                )
+            except (
+                TypeError,
+                ValueError
+            ):
+                return float(
+                    fallback or 0.0
+                )
+
+        entry_price = _safe_level_number(
+            levels.get('entry'),
+            precio_actual
+        )
+
+        stop_loss = _safe_level_number(
+            levels.get('stop_loss'),
+            0.0
+        )
+
+        take_profit = _safe_level_number(
+            levels.get('take_profit'),
+            0.0
+        )
+
+        risk_reward = _safe_level_number(
+            levels.get('risk_reward'),
+            0.0
+        )
+
+        leverage = max(
+            1,
+            int(
+                _safe_level_number(
+                    levels.get('leverage'),
+                    1
+                )
+            )
+        )
+
         # Formatear precios según símbolo
         if symbol == 'PAXG-BTC':
-            precio_actual_str = f"{precio_actual:.6f}"
-            entry_price_str = f"{entry_price:.6f}"
-            stop_loss_str = f"{stop_loss:.6f}"
-            take_profit_str = f"{take_profit:.6f}"
+            precio_actual_str = (
+                f"{precio_actual:.6f}"
+            )
+
+            entry_price_str = (
+                f"{entry_price:.6f}"
+                if entry_price > 0
+                else "NO DISPONIBLE"
+            )
+
+            stop_loss_str = (
+                f"{stop_loss:.6f}"
+                if stop_loss > 0
+                else "NO DISPONIBLE"
+            )
+
+            take_profit_str = (
+                f"{take_profit:.6f}"
+                if take_profit > 0
+                else "NO DISPONIBLE"
+            )
+
         else:
-            precio_actual_str = f"${precio_actual:.2f}"
-            entry_price_str = f"${entry_price:.2f}"
-            stop_loss_str = f"${stop_loss:.2f}"
-            take_profit_str = f"${take_profit:.2f}"
+            precio_actual_str = (
+                f"${precio_actual:.2f}"
+            )
+
+            entry_price_str = (
+                f"${entry_price:.2f}"
+                if entry_price > 0
+                else "NO DISPONIBLE"
+            )
+
+            stop_loss_str = (
+                f"${stop_loss:.2f}"
+                if stop_loss > 0
+                else "NO DISPONIBLE"
+            )
+
+            take_profit_str = (
+                f"${take_profit:.2f}"
+                if take_profit > 0
+                else "NO DISPONIBLE"
+            )
         
         # Calcular valor_fuerza
         valor_fuerza = max(adx_valor, ftm_strength)
@@ -16710,10 +16917,57 @@ class TradingExpertSystem:
                 )
                 print(f"✅ Mensaje generado correctamente")
             except Exception as e:
-                print(f"❌ ERROR generando mensaje: {e}")
+                print(
+                    f"❌ ERROR generando mensaje: {e}"
+                )
+
                 import traceback
                 traceback.print_exc()
-                message = f"Análisis de {symbol} {timeframe}. Recomendación: {accion_consenso}"
+
+                # ======================================================
+                # FALLBACK CON LAS RAZONES REALES DEL COMITÉ
+                # ======================================================
+                # Nunca dejar una señal únicamente con
+                # "Análisis de ... Recomendación ...".
+                #
+                # No inventamos razones nuevas.
+                # Reutilizamos razones_consenso ya calculadas.
+                # ======================================================
+
+                fallback_reasons = [
+                    str(reason).strip()
+                    for reason in (
+                        razones_consenso
+                        or []
+                    )
+                    if str(reason).strip()
+                ]
+
+                fallback_text = (
+                    ' '.join(
+                        fallback_reasons[:8]
+                    )
+                    if fallback_reasons
+                    else (
+                        'El comité alcanzó consenso, '
+                        'pero la plantilla detallada '
+                        'no pudo completarse.'
+                    )
+                )
+
+                action_text = (
+                    str(accion_consenso)
+                    .replace('_', ' ')
+                )
+
+                message = (
+                    f"{action_text} DE "
+                    f"{symbol.replace('-', '/')} "
+                    f"en {timeframe}. "
+                    f"{fallback_text} "
+                    f"Recomendación del comité: "
+                    f"{action_text}."
+                )
             
             # ============ DATAFRAME PARA GRÁFICOS ============
             print(f"📊 Preparando DataFrame para gráficos...")
