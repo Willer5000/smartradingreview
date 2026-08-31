@@ -3127,6 +3127,17 @@ class PortfolioGuardian:
             'amount_usd': round(amount_usd, 2),
             'source_asset': source_asset,
             'target_asset': target_asset,
+
+            # ============================================================
+            # VALORACIÓN REAL UTILIZADA POR EL TGP
+            # ============================================================
+            # El frontend debe usar exactamente los mismos precios,
+            # valores y porcentajes que utilizó el Guardián.
+            # ============================================================
+            'valuation': dict(
+                valuation or {}
+            ),
+
             'portfolio_before': {
                 'BTC': portfolio.get('BTC', 0),
                 'PAXG': portfolio.get('PAXG', 0),
