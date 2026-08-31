@@ -14918,14 +14918,42 @@ class TradingExpertSystem:
     
         return result
     
-    def _round_price(self, price, symbol):
-        """Redondear precio según el símbolo"""
-        if price <= 0:
-            return 0
-        if symbol == 'PAXG-BTC':
-            return round(price, 8)
-        else:
-            return round(price, 2)
+def _round_price(self, price, symbol):
+    """
+    Redondear precio según el símbolo.
+
+    IMPORTANTE:
+    Esto afecta Entry / SL / TP calculados por el sistema.
+    No modifica la lógica de trading, solamente evita perder
+    precisión en activos de precio bajo y ratios.
+    """
+
+    if price is None:
+        return 0
+
+    try:
+        price = float(price)
+    except (TypeError, ValueError):
+        return 0
+
+    if price <= 0:
+        return 0
+
+    decimals_by_symbol = {
+        'PAXG-BTC': 8,
+        'ADA-USDT': 4,
+        'XRP-USDT': 4,
+    }
+
+    decimals = decimals_by_symbol.get(
+        symbol,
+        2
+    )
+
+    return round(
+        price,
+        decimals
+    )
     
     def _get_default_levels(
         self,
@@ -15720,47 +15748,82 @@ class TradingExpertSystem:
             )
         )
 
-        # Formatear precios según símbolo
+        # ==============================================================
+        # FORMATO DE PRECIOS SEGÚN SÍMBOLO
+        # ==============================================================
+        
         if symbol == 'PAXG-BTC':
+        
+            # Ratio expresado en BTC.
             precio_actual_str = (
-                f"{precio_actual:.6f}"
+                f"{precio_actual:.8f}"
             )
-
+        
             entry_price_str = (
-                f"{entry_price:.6f}"
+                f"{entry_price:.8f}"
                 if entry_price > 0
                 else "NO DISPONIBLE"
             )
-
+        
             stop_loss_str = (
-                f"{stop_loss:.6f}"
+                f"{stop_loss:.8f}"
                 if stop_loss > 0
                 else "NO DISPONIBLE"
             )
-
+        
             take_profit_str = (
-                f"{take_profit:.6f}"
+                f"{take_profit:.8f}"
                 if take_profit > 0
                 else "NO DISPONIBLE"
             )
-
+        
+        elif symbol in (
+            'ADA-USDT',
+            'XRP-USDT'
+        ):
+        
+            # Criptomonedas de precio bajo:
+            # 2 decimales destruyen demasiada información.
+            precio_actual_str = (
+                f"${precio_actual:.4f}"
+            )
+        
+            entry_price_str = (
+                f"${entry_price:.4f}"
+                if entry_price > 0
+                else "NO DISPONIBLE"
+            )
+        
+            stop_loss_str = (
+                f"${stop_loss:.4f}"
+                if stop_loss > 0
+                else "NO DISPONIBLE"
+            )
+        
+            take_profit_str = (
+                f"${take_profit:.4f}"
+                if take_profit > 0
+                else "NO DISPONIBLE"
+            )
+        
         else:
+        
             precio_actual_str = (
                 f"${precio_actual:.2f}"
             )
-
+        
             entry_price_str = (
                 f"${entry_price:.2f}"
                 if entry_price > 0
                 else "NO DISPONIBLE"
             )
-
+        
             stop_loss_str = (
                 f"${stop_loss:.2f}"
                 if stop_loss > 0
                 else "NO DISPONIBLE"
             )
-
+        
             take_profit_str = (
                 f"${take_profit:.2f}"
                 if take_profit > 0
