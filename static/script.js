@@ -185,11 +185,13 @@ async function loadUserPortfolio() {
                     ?? data.portfolio.btc_amount
                     ?? 0
                 ),
+
                 PAXG: Number(
                     data.portfolio.PAXG
                     ?? data.portfolio.paxg_amount
                     ?? 0
                 ),
+
                 USDT: Number(
                     data.portfolio.USDT
                     ?? data.portfolio.usdt_amount
@@ -197,9 +199,54 @@ async function loadUserPortfolio() {
                 )
             };
 
+            // ============================================================
+            // PRECIOS GUARDADOS JUNTO AL PORTFOLIO
+            // ============================================================
+            // Supabase ya devuelve btc_price_at_update y
+            // paxg_price_at_update.
+            //
+            // Se usan como fallback hasta que lleguen precios actuales.
+            // Esto evita:
+            // BTC 100% / PAXG 0%
+            // cuando PAXG sí existe en el portfolio.
+            // ============================================================
+
+            const savedBtcPrice =
+                Number(
+                    data.portfolio.btc_price_at_update
+                    || 0
+                );
+
+            const savedPaxgPrice =
+                Number(
+                    data.portfolio.paxg_price_at_update
+                    || 0
+                );
+
+            if (savedBtcPrice > 0) {
+                lastPrices['BTC-USDT'] =
+                    savedBtcPrice;
+            }
+
+            if (savedPaxgPrice > 0) {
+                lastPrices['PAXG-USDT'] =
+                    savedPaxgPrice;
+            }
+
+            // Evitar reutilizar una valoración TGP anterior
+            // después de recargar el portfolio.
+            lastTGPResult = null;
+
             console.log(
                 '✅ Portfolio cargado para:',
-                currentUser
+                currentUser,
+                {
+                    BTC: userPortfolio.BTC,
+                    PAXG: userPortfolio.PAXG,
+                    USDT: userPortfolio.USDT,
+                    btcPrice: savedBtcPrice,
+                    paxgPrice: savedPaxgPrice
+                }
             );
 
             return true;
@@ -325,7 +372,47 @@ async function savePortfolioToLocal() {
                     ?? data.portfolio.usdt_amount
                     ?? usdt
                 )
+userPortfolio = {
+``` citeturn820797view1
+
+
+### REEMPLÁZALO POR:
+
+```javascript
             };
+
+            // ============================================================
+            // EL PORTFOLIO CAMBIÓ
+            // ============================================================
+            // No utilizar una valoración TGP calculada con cantidades
+            // anteriores.
+            // ============================================================
+
+            lastTGPResult = null;
+
+            const savedBtcPrice =
+                Number(
+                    data.portfolio.btc_price_at_update
+                    || lastPrices['BTC-USDT']
+                    || 0
+                );
+
+            const savedPaxgPrice =
+                Number(
+                    data.portfolio.paxg_price_at_update
+                    || lastPrices['PAXG-USDT']
+                    || 0
+                );
+
+            if (savedBtcPrice > 0) {
+                lastPrices['BTC-USDT'] =
+                    savedBtcPrice;
+            }
+
+            if (savedPaxgPrice > 0) {
+                lastPrices['PAXG-USDT'] =
+                    savedPaxgPrice;
+            }
 
             updatePortfolioUI();
 
