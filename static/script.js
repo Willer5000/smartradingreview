@@ -7720,15 +7720,37 @@ function formatTradingLevel(
         return 'NO DISPONIBLE';
     }
 
-    const decimals =
+    // ============================================================
+    // PAXG/BTC
+    // ============================================================
+    // Es un ratio expresado en BTC.
+    // Necesita mucha más precisión y no corresponde mostrar "$".
+    // ============================================================
+
+    if (
         symbol === 'PAXG-BTC'
-            ? 6
-            : 2;
+    ) {
+        return numeric.toFixed(8);
+    }
+
+    // ============================================================
+    // CRIPTOMONEDAS DE PRECIO BAJO
+    // ============================================================
+
+    if (
+        symbol === 'ADA-USDT'
+        || symbol === 'XRP-USDT'
+    ) {
+        return '$'
+            + numeric.toFixed(4);
+    }
+
+    // ============================================================
+    // BTC / ETH / SOL / PAXG-USDT
+    // ============================================================
 
     return '$'
-        + numeric.toFixed(
-            decimals
-        );
+        + numeric.toFixed(2);
 }
 
 
@@ -8144,7 +8166,7 @@ window.updateActiveSignals = function updateActiveSignals() {
                     </div>
                     <div class="d-flex justify-content-between mt-1">
                         <small class="text-muted">${symbolName} ${timeframeName}</small>
-                        <small class="text-success">E: $${signal.entry?.toFixed(2)}</small>
+                        <small class="text-success">E: ${formatTradingLevel(signal.entry, signal.symbol)}</small>
                     </div>
                 </div>
             `;
@@ -8376,9 +8398,8 @@ window.updatePreviousSignals = function updatePreviousSignals() {
                         </div>
                         <div class="mt-1">
                             <small class="text-${senal.activa === 1 ? bgColor : 'secondary'}">
-                                E: $${senal.entry?.toFixed(2) || '---'} | 
-                                SL: $${     Number(senal.stop_loss) > 0         ? Number(senal.stop_loss).toFixed(2)         : 'NO DISPONIBLE' }
-                            </small>
+                                E: ${formatTradingLevel(senal.entry, senal.symbol)} |
+                                SL: ${formatTradingLevel(senal.stop_loss, senal.symbol)}
                         </div>
                     </div>
                 `;
@@ -8480,19 +8501,19 @@ window.showPreviousSignalJustification = function(senal) {
                     <div class="col-md-4">
                         <div class="border-start border-3 border-primary ps-3">
                             <small class="text-muted d-block">ENTRADA (cierre vela)</small>
-                            <strong class="h5">$${senal.entry?.toFixed(2) || '---'}</strong>
+                            <strong class="h5">${formatTradingLevel(senal.entry, senal.symbol)}</strong>
                         </div>
                     </div>
                     <div class="col-md-4">
                         <div class="border-start border-3 border-danger ps-3">
                             <small class="text-muted d-block">STOP LOSS</small>
-                            <strong class="h5">$${     Number(senal.stop_loss) > 0         ? Number(senal.stop_loss).toFixed(2)         : 'NO DISPONIBLE' }</strong>
+                            <strong class="h5">${formatTradingLevel(senal.stop_loss, senal.symbol)}</strong>
                         </div>
                     </div>
                     <div class="col-md-4">
                         <div class="border-start border-3 border-success ps-3">
                             <small class="text-muted d-block">TAKE PROFIT</small>
-                            <strong class="h5">$${     Number(senal.take_profit) > 0         ? Number(senal.take_profit).toFixed(2)         : 'NO DISPONIBLE' }</strong>
+                            <strong class="h5">${formatTradingLevel(senal.take_profit, senal.symbol)}</strong>
                         </div>
                     </div>
                 </div>
@@ -8502,7 +8523,7 @@ window.showPreviousSignalJustification = function(senal) {
                         <div class="col-6">
                             <small class="text-muted">Precio actual:</small>
                             <strong class="ms-1 text-${senal.activa === 1 ? bgColor : 'secondary'}">
-                                $${senal.precio_actual?.toFixed(2) || '---'}
+                                ${formatTradingLevel(senal.precio_actual, senal.symbol)}
                             </strong>
                         </div>
                         <div class="col-6">
