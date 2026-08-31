@@ -1299,7 +1299,250 @@ class SupabaseClient:
                 f"({portfolio_data.get('user_name')}): {e}"
             )
             return False
+    # ========================================================================
+    # FASE 7F.3 — MEMORIA PERSISTENTE DE ROTACIÓN TGP
+    # ========================================================================
 
+    def get_user_rotation_state(
+        self,
+        user_name: str
+    ) -> Dict:
+        """
+        Recupera únicamente la memoria estratégica BTC/PAXG
+        utilizada por el TGP.
+
+        IMPORTANTE:
+        - NO recupera precios.
+        - NO recupera señales.
+        - NO modifica portfolio.
+        - Se utiliza únicamente una vez por usuario después
+          de iniciar/reiniciar el proceso de Render.
+        """
+
+        if not self.enabled:
+            return {}
+
+        try:
+
+            user_name = str(
+                user_name
+                or ''
+            ).strip()
+
+            if not user_name:
+                return {}
+
+            response = self._with_retry(
+                lambda: (
+                    self.client
+                    .table(
+                        'user_portfolios'
+                    )
+                    .select(
+                        (
+                            'tgp_rotation_direction,'
+                            'tgp_rotation_started_at,'
+                            'tgp_rotation_updated_at'
+                        )
+                    )
+                    .eq(
+                        'user_name',
+                        user_name
+                    )
+                    .limit(
+                        1
+                    )
+                    .execute()
+                )
+            )
+
+            rows = (
+                response.data
+                or []
+            )
+
+            if not rows:
+                return {}
+
+            row = rows[0]
+
+            direction = str(
+                row.get(
+                    'tgp_rotation_direction',
+                    ''
+                )
+                or ''
+            ).upper()
+
+            if direction not in (
+                'BTC',
+                'PAXG'
+            ):
+
+                direction = ''
+
+            return {
+                'direction':
+                    direction,
+
+                'started_at':
+                    row.get(
+                        'tgp_rotation_started_at'
+                    ),
+
+                'updated_at':
+                    row.get(
+                        'tgp_rotation_updated_at'
+                    )
+            }
+
+        except Exception as e:
+
+            # ==========================================================
+            # FAIL-SAFE
+            # ==========================================================
+            #
+            # La persistencia 7F.3 NO puede tumbar el TGP.
+            # Si Supabase falla, simplemente se empieza sin memoria.
+            # ==========================================================
+
+            logger.debug(
+                "7F.3 get_user_rotation_state "
+                f"({user_name}): {e}"
+            )
+
+            return {}
+
+
+    def update_user_rotation_state(
+        self,
+        user_name: str,
+        direction=None,
+        started_at=None
+    ) -> bool:
+        """
+        Guarda o limpia la memoria estratégica del TGP.
+
+        direction:
+            'BTC'
+            'PAXG'
+
+        direction=None:
+            limpia la memoria persistida.
+
+        IMPORTANTE:
+        utiliza UPDATE, no UPSERT.
+
+        Por tanto nunca crea un portfolio vacío accidentalmente.
+        """
+
+        if not self.enabled:
+            return False
+
+        try:
+
+            user_name = str(
+                user_name
+                or ''
+            ).strip()
+
+            if not user_name:
+                return False
+
+            now_iso = (
+                datetime.utcnow()
+                .isoformat()
+            )
+
+            # ==========================================================
+            # LIMPIAR MEMORIA
+            # ==========================================================
+
+            if direction is None:
+
+                payload = {
+                    'tgp_rotation_direction':
+                        None,
+
+                    'tgp_rotation_started_at':
+                        None,
+
+                    'tgp_rotation_updated_at':
+                        now_iso
+                }
+
+            else:
+
+                direction = str(
+                    direction
+                ).upper()
+
+                if direction not in (
+                    'BTC',
+                    'PAXG'
+                ):
+
+                    return False
+
+                if not started_at:
+
+                    started_at = (
+                        now_iso
+                    )
+
+                payload = {
+                    'tgp_rotation_direction':
+                        direction,
+
+                    'tgp_rotation_started_at':
+                        started_at,
+
+                    'tgp_rotation_updated_at':
+                        now_iso
+                }
+
+            response = self._with_retry(
+                lambda: (
+                    self.client
+                    .table(
+                        'user_portfolios'
+                    )
+                    .update(
+                        payload
+                    )
+                    .eq(
+                        'user_name',
+                        user_name
+                    )
+                    .execute()
+                )
+            )
+
+            return bool(
+                response.data
+                is not None
+            )
+
+        except Exception as e:
+
+            # ==========================================================
+            # FAIL-SAFE
+            # ==========================================================
+            #
+            # Una falla guardando memoria NO puede afectar:
+            #
+            # BTC / PAXG / USDT
+            # análisis
+            # TGP
+            # frontend
+            # ==========================================================
+
+            logger.debug(
+                "7F.3 update_user_rotation_state "
+                f"({user_name}): {e}"
+            )
+
+            return False
 
     # ========================================================================
     # USER TRADES
