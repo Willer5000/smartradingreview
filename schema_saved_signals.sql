@@ -75,7 +75,35 @@ CREATE TABLE IF NOT EXISTS saved_signals (
     candles_to_mae INTEGER DEFAULT 0,
     
     last_excursion_at TIMESTAMPTZ,
-    
+
+    -- ============================================================================
+    -- FASE 7D.3 — EARLY EXIT SHADOW MODE
+    -- ============================================================================
+    -- Guarda la primera ocasión en que el Futures Position Guardian
+    -- habría recomendado EXIT.
+    --
+    -- IMPORTANTE:
+    -- esto NO cierra la posición.
+    -- Sólo permite comparar posteriormente esa salida hipotética
+    -- contra el resultado real de TP / SL / cierre manual.
+    -- ============================================================================
+
+    early_exit_candidate_at TIMESTAMPTZ,
+    early_exit_candidate_price NUMERIC(20, 8),
+    early_exit_candidate_r NUMERIC(10, 4),
+
+    early_exit_score NUMERIC(6, 2),
+    early_exit_reason TEXT,
+
+    early_exit_mfe_r NUMERIC(10, 4),
+    early_exit_mae_r NUMERIC(10, 4),
+
+    early_exit_evaluated BOOLEAN DEFAULT FALSE,
+
+    actual_close_r NUMERIC(10, 4),
+    early_exit_delta_r NUMERIC(10, 4),
+    early_exit_would_help BOOLEAN,
+
     -- Timestamps
     
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -111,7 +139,28 @@ ALTER TABLE saved_signals
     ADD COLUMN IF NOT EXISTS candles_to_mfe INTEGER DEFAULT 0,
     ADD COLUMN IF NOT EXISTS candles_to_mae INTEGER DEFAULT 0,
 
-    ADD COLUMN IF NOT EXISTS last_excursion_at TIMESTAMPTZ;
+        ADD COLUMN IF NOT EXISTS last_excursion_at TIMESTAMPTZ;
+
+-- ============================================================================
+-- FASE 7D.3 — EARLY EXIT SHADOW MODE
+-- ============================================================================
+
+ALTER TABLE saved_signals
+    ADD COLUMN IF NOT EXISTS early_exit_candidate_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS early_exit_candidate_price NUMERIC(20, 8),
+    ADD COLUMN IF NOT EXISTS early_exit_candidate_r NUMERIC(10, 4),
+
+    ADD COLUMN IF NOT EXISTS early_exit_score NUMERIC(6, 2),
+    ADD COLUMN IF NOT EXISTS early_exit_reason TEXT,
+
+    ADD COLUMN IF NOT EXISTS early_exit_mfe_r NUMERIC(10, 4),
+    ADD COLUMN IF NOT EXISTS early_exit_mae_r NUMERIC(10, 4),
+
+    ADD COLUMN IF NOT EXISTS early_exit_evaluated BOOLEAN DEFAULT FALSE,
+
+    ADD COLUMN IF NOT EXISTS actual_close_r NUMERIC(10, 4),
+    ADD COLUMN IF NOT EXISTS early_exit_delta_r NUMERIC(10, 4),
+    ADD COLUMN IF NOT EXISTS early_exit_would_help BOOLEAN;
 
 CREATE INDEX IF NOT EXISTS idx_saved_signals_status ON saved_signals(status);
 CREATE INDEX IF NOT EXISTS idx_saved_signals_symbol_tf ON saved_signals(symbol, timeframe);
