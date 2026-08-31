@@ -8,6 +8,9 @@
 # OBJETIVO: Acumular satoshis, USDT y PAXG como bola de nieve.
 
 import logging
+import threading
+import time
+
 from datetime import datetime
 
 logger = logging.getLogger('TGP')
@@ -61,12 +64,73 @@ class PortfolioGuardian:
     # Número mínimo de temporalidades que deben favorecer
     # una rotación antes de ejecutarla.
     MIN_ROTATION_TIMEFRAMES = 2
+    # ========================================================================
+    # FASE 7F.1 — COOLDOWN + ANTI-WHIPSAW
+    # ========================================================================
+    #
+    # Una rotación BTC ↔ PAXG es estratégica.
+    # No debe invertirse por pequeñas variaciones de corto plazo.
+    #
+    # IMPORTANTE:
+    # estas reglas NO sustituyen el análisis multitemporal.
+    # Sólo protegen una decisión ya generada por ese análisis.
+    # ========================================================================
+
+    ROTATION_COOLDOWN_MINUTES = 240
+
+    # Para INVERTIR una rotación reciente exigimos más consenso
+    # que para iniciar la primera.
+    REVERSAL_MIN_TIMEFRAMES = 3
+
+    # El edge normal sigue siendo 18.
+    # Para una reversión exigimos una ventaja claramente mayor.
+    REVERSAL_EDGE_THRESHOLD = 28.0
+
+    # Después de 24 horas la memoria se considera vieja y se
+    # permite que el análisis multitemporal vuelva a decidir desde cero.
+    ROTATION_MEMORY_MAX_MINUTES = 1440
     # Tamaños de operación
     MIN_TRADE_PCT = 0.08   # Mínimo 8% del activo fuente
     MAX_TRADE_PCT = 0.35   # Máximo 35% del activo fuente (nunca quedarse sin nada)
 
     def __init__(self):
-        self.bolivia_tz = __import__('pytz').timezone('America/La_Paz') if 'pytz' in __import__('sys').modules else None
+        self.bolivia_tz = (
+            __import__('pytz')
+            .timezone(
+                'America/La_Paz'
+            )
+            if 'pytz'
+            in __import__('sys').modules
+            else None
+        )
+
+        # ==============================================================
+        # FASE 7F.1 — MEMORIA ANTI-WHIPSAW
+        # ==============================================================
+        #
+        # Memoria ligera en RAM.
+        #
+        # Clave:
+        #     usuario
+        #
+        # Valor:
+        #     última dirección estratégica recomendada.
+        #
+        # No utiliza:
+        #     Supabase
+        #     archivos
+        #     nuevas llamadas de mercado
+        #
+        # Si Render reinicia, simplemente vuelve a comenzar sin memoria.
+        # ==============================================================
+
+        self._rotation_guard_state = {}
+
+        # El servidor puede recibir más de una petición.
+        # Protegemos la pequeña estructura en memoria.
+        self._rotation_guard_lock = (
+            threading.RLock()
+        )
 
     # ========================================================================
     # ANÁLISIS PRINCIPAL
@@ -905,6 +969,422 @@ class PortfolioGuardian:
     # ========================================================================
     # UTILIDADES
     # ========================================================================
+    def _rotation_direction(
+        self,
+        action
+    ):
+        """
+        Convierte una acción BTC ↔ PAXG en una dirección simple.
+
+        Sólo se controlan swaps estratégicos.
+
+        Las compras desde USDT NO quedan bloqueadas por este
+        guardrail porque no representan una reversión directa
+        BTC ↔ PAXG.
+        """
+
+        action = str(
+            action
+            or ''
+        ).upper()
+
+        if action == 'SWAP_PAXG_TO_BTC':
+            return 'BTC'
+
+        if action == 'SWAP_BTC_TO_PAXG':
+            return 'PAXG'
+
+        return None
+
+
+    def _apply_rotation_anti_whipsaw(
+        self,
+        user,
+        action,
+        reason,
+        confidence,
+        btc_count,
+        paxg_count,
+        best_tf_data
+    ):
+        """
+        FASE 7F.1
+
+        Protege las rotaciones BTC ↔ PAXG contra cambios
+        repetitivos de dirección.
+
+        Reglas:
+
+        1. Primera dirección:
+               permitida.
+
+        2. Misma dirección:
+               permitida.
+
+        3. Dirección opuesta durante cooldown:
+               bloqueada.
+
+        4. Dirección opuesta después del cooldown:
+               exige:
+                   >= 3 temporalidades
+                   y edge >= 28.
+
+        5. Memoria > 24h:
+               se considera antigua y el sistema decide desde cero.
+
+        IMPORTANTE:
+        no modifica los análisis técnicos.
+        Sólo puede convertir una rotación en HOLD.
+        """
+
+        direction = (
+            self._rotation_direction(
+                action
+            )
+        )
+
+        base_result = {
+            'allowed':
+                True,
+
+            'action':
+                action,
+
+            'reason':
+                reason,
+
+            'confidence':
+                confidence,
+
+            'active':
+                False,
+
+            'direction':
+                direction,
+
+            'previous_direction':
+                None,
+
+            'cooldown_remaining_minutes':
+                0,
+
+            'reversal_required':
+                False,
+
+            'reversal_confirmed':
+                False
+        }
+
+        # ==============================================================
+        # NO ES ROTACIÓN BTC ↔ PAXG
+        # ==============================================================
+
+        if direction is None:
+            return base_result
+
+        now = time.monotonic()
+
+        user_key = str(
+            user
+            or 'anonymous'
+        )
+
+        try:
+
+            best_edge = abs(
+                float(
+                    (
+                        best_tf_data
+                        or {}
+                    ).get(
+                        'relative_edge',
+                        0
+                    )
+                    or 0
+                )
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+
+            best_edge = 0.0
+
+        current_tf_count = (
+            int(
+                btc_count
+            )
+            if direction == 'BTC'
+            else int(
+                paxg_count
+            )
+        )
+
+        with self._rotation_guard_lock:
+
+            previous = (
+                self._rotation_guard_state
+                .get(
+                    user_key
+                )
+            )
+
+            # ==========================================================
+            # PRIMERA ROTACIÓN OBSERVADA
+            # ==============================================================
+
+            if not isinstance(
+                previous,
+                dict
+            ):
+
+                self._rotation_guard_state[
+                    user_key
+                ] = {
+                    'direction':
+                        direction,
+
+                    'started_at':
+                        now
+                }
+
+                base_result[
+                    'active'
+                ] = True
+
+                return base_result
+
+            previous_direction = str(
+                previous.get(
+                    'direction',
+                    ''
+                )
+                or ''
+            )
+
+            started_at = float(
+                previous.get(
+                    'started_at',
+                    now
+                )
+                or now
+            )
+
+            elapsed_minutes = max(
+                0.0,
+                (
+                    now
+                    - started_at
+                )
+                / 60.0
+            )
+
+            base_result[
+                'active'
+            ] = True
+
+            base_result[
+                'previous_direction'
+            ] = previous_direction
+
+            # ==========================================================
+            # MEMORIA ANTIGUA
+            # ==============================================================
+
+            if (
+                elapsed_minutes
+                >= self.ROTATION_MEMORY_MAX_MINUTES
+            ):
+
+                self._rotation_guard_state[
+                    user_key
+                ] = {
+                    'direction':
+                        direction,
+
+                    'started_at':
+                        now
+                }
+
+                return base_result
+
+            # ==========================================================
+            # MISMA DIRECCIÓN
+            # ==========================================================
+            #
+            # Ejemplo:
+            #
+            # BTC sigue siendo favorecido.
+            #
+            # No bloqueamos la recomendación.
+            #
+            # IMPORTANTE:
+            # NO reiniciamos started_at.
+            #
+            # Si lo reiniciáramos en cada refresh,
+            # el cooldown nunca terminaría.
+            # ==============================================================
+
+            if (
+                direction
+                == previous_direction
+            ):
+
+                return base_result
+
+            # ==========================================================
+            # DIRECCIÓN OPUESTA
+            # ==============================================================
+
+            base_result[
+                'reversal_required'
+            ] = True
+
+            # ==========================================================
+            # COOLDOWN DURO
+            # ==============================================================
+
+            if (
+                elapsed_minutes
+                < self.ROTATION_COOLDOWN_MINUTES
+            ):
+
+                remaining = max(
+                    0,
+                    self.ROTATION_COOLDOWN_MINUTES
+                    - elapsed_minutes
+                )
+
+                return {
+                    **base_result,
+
+                    'allowed':
+                        False,
+
+                    'action':
+                        'HOLD',
+
+                    'confidence':
+                        max(
+                            70,
+                            min(
+                                90,
+                                float(
+                                    confidence
+                                    or 0
+                                )
+                            )
+                        ),
+
+                    'cooldown_remaining_minutes':
+                        round(
+                            remaining,
+                            1
+                        ),
+
+                    'reason': (
+                        f'Anti-whipsaw TGP: apareció una señal '
+                        f'de rotación hacia {direction}, pero la '
+                        f'última dirección estratégica fue '
+                        f'{previous_direction} hace sólo '
+                        f'{elapsed_minutes:.0f} minutos. '
+                        f'Se mantiene el portafolio durante el '
+                        f'cooldown para evitar rotaciones '
+                        f'BTC↔PAXG provocadas por ruido.'
+                    )
+                }
+
+            # ==========================================================
+            # REVERSIÓN DESPUÉS DEL COOLDOWN
+            # ==========================================================
+            #
+            # Ya pasó el tiempo mínimo.
+            #
+            # Pero para cambiar de tesis exigimos:
+            #
+            #     >= 3 TF
+            #
+            # y:
+            #
+            #     edge >= 28
+            #
+            # ==============================================================
+
+            reversal_confirmed = (
+                current_tf_count
+                >= self.REVERSAL_MIN_TIMEFRAMES
+                and
+                best_edge
+                >= self.REVERSAL_EDGE_THRESHOLD
+            )
+
+            base_result[
+                'reversal_confirmed'
+            ] = bool(
+                reversal_confirmed
+            )
+
+            if not reversal_confirmed:
+
+                return {
+                    **base_result,
+
+                    'allowed':
+                        False,
+
+                    'action':
+                        'HOLD',
+
+                    'confidence':
+                        max(
+                            65,
+                            min(
+                                85,
+                                float(
+                                    confidence
+                                    or 0
+                                )
+                            )
+                        ),
+
+                    'reason': (
+                        f'Anti-whipsaw TGP: el mercado intenta '
+                        f'invertir la tesis de '
+                        f'{previous_direction} hacia {direction}, '
+                        f'pero la reversión todavía no alcanza '
+                        f'confirmación reforzada. '
+                        f'Consenso actual: '
+                        f'{current_tf_count}/4 TF; '
+                        f'edge máximo: {best_edge:.1f}. '
+                        f'Para invertir una rotación reciente '
+                        f'se exigen al menos '
+                        f'{self.REVERSAL_MIN_TIMEFRAMES}/4 TF '
+                        f'y edge ≥ '
+                        f'{self.REVERSAL_EDGE_THRESHOLD:.1f}.'
+                    )
+                }
+
+            # ==========================================================
+            # REVERSIÓN CONFIRMADA
+            # ==============================================================
+
+            self._rotation_guard_state[
+                user_key
+            ] = {
+                'direction':
+                    direction,
+
+                'started_at':
+                    now
+            }
+
+            base_result[
+                'reversal_confirmed'
+            ] = True
+
+            return base_result
+    
     def _score_market_snapshot(
         self,
         analysis,
@@ -1993,7 +2473,70 @@ class PortfolioGuardian:
             # ==============================================================
             # RESPUESTA
             # ==============================================================
-    
+
+            # ==============================================================
+            # FASE 7F.1 — ANTI-WHIPSAW DE ROTACIONES BTC ↔ PAXG
+            # ==============================================================
+            #
+            # Se aplica DESPUÉS de que 7B haya terminado todo el
+            # análisis multitemporal.
+            #
+            # Por tanto:
+            #
+            # 7F NO genera una señal nueva.
+            #
+            # Únicamente puede:
+            #
+            #     SWAP → HOLD
+            #
+            # cuando detecta riesgo de giro repetitivo.
+            # ==============================================================
+
+            rotation_guard = (
+                self._apply_rotation_anti_whipsaw(
+                    user=user,
+                    action=action,
+                    reason=reason,
+                    confidence=confidence,
+                    btc_count=btc_count,
+                    paxg_count=paxg_count,
+                    best_tf_data=best_tf_data
+                )
+            )
+
+            if not rotation_guard.get(
+                'allowed',
+                True
+            ):
+
+                action = 'HOLD'
+
+                reason = str(
+                    rotation_guard.get(
+                        'reason',
+                        reason
+                    )
+                )
+
+                confidence = float(
+                    rotation_guard.get(
+                        'confidence',
+                        confidence
+                    )
+                    or confidence
+                )
+
+                # ======================================================
+                # HOLD NO DEBE SIMULAR UNA OPERACIÓN
+                # ======================================================
+
+                trade_size = 0
+                amount_crypto = 0
+                amount_usd = 0
+
+                source_asset = None
+                target_asset = None
+            
             rec = self._build_response(
                 action=action,
                 reason=reason,
@@ -2006,7 +2549,66 @@ class PortfolioGuardian:
                 portfolio=portfolio,
                 valuation=valuation
             )
-    
+
+             # ==============================================================
+            # FASE 7F.1
+            # ==============================================================
+
+            rec[
+                'rotation_guard'
+            ] = {
+                'active':
+                    bool(
+                        rotation_guard.get(
+                            'active',
+                            False
+                        )
+                    ),
+
+                'allowed':
+                    bool(
+                        rotation_guard.get(
+                            'allowed',
+                            True
+                        )
+                    ),
+
+                'direction':
+                    rotation_guard.get(
+                        'direction'
+                    ),
+
+                'previous_direction':
+                    rotation_guard.get(
+                        'previous_direction'
+                    ),
+
+                'reversal_required':
+                    bool(
+                        rotation_guard.get(
+                            'reversal_required',
+                            False
+                        )
+                    ),
+
+                'reversal_confirmed':
+                    bool(
+                        rotation_guard.get(
+                            'reversal_confirmed',
+                            False
+                        )
+                    ),
+
+                'cooldown_remaining_minutes':
+                    float(
+                        rotation_guard.get(
+                            'cooldown_remaining_minutes',
+                            0
+                        )
+                        or 0
+                    )
+            }           
+            
             rec['timeframe_analysis'] = (
                 timeframe_results
             )
@@ -2054,10 +2656,7 @@ class PortfolioGuardian:
                     prices
                 )
             )
-    # [pega aquí exactamente el código completo que te di
-    #  para analyze_multi_timeframe()]
-    # [pega aquí exactamente el código que te di para _score_ratio_for_assets]        
-    # [pega aquí exactamente el código que te di para _score_market_snapshot]
+
     def _calc_trade_size(self, source_asset, confidence, current_pct, target_pct, favorability):
         """
         Calcula el % del activo fuente a usar en la operación.
