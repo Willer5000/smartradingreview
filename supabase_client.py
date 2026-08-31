@@ -388,14 +388,130 @@ class SupabaseClient:
             
             # Insert en signal_results
             payload = {
-                'signal_id': signal_id,
-                'status': result.get('status'),
-                'exit_price': float(result.get('exit_price', 0)),
-                'exit_timestamp': result.get('exit_timestamp'),
-                'pnl_pct': float(result.get('pnl_pct', 0)),
-                'candles_to_result': int(result.get('candles_to_result', 0)),
-                'notes': result.get('notes', ''),
-                'created_at': datetime.utcnow().isoformat()
+                'signal_id':
+                    signal_id,
+
+                'status':
+                    result.get(
+                        'status'
+                    ),
+
+                'exit_price':
+                    float(
+                        result.get(
+                            'exit_price',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'exit_timestamp':
+                    result.get(
+                        'exit_timestamp'
+                    ),
+
+                'pnl_pct':
+                    float(
+                        result.get(
+                            'pnl_pct',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'candles_to_result':
+                    int(
+                        result.get(
+                            'candles_to_result',
+                            0
+                        )
+                        or 0
+                    ),
+
+                # ======================================================
+                # FASE 7D.1 — MFE / MAE
+                # ======================================================
+
+                'mfe_price':
+                    float(
+                        result.get(
+                            'mfe_price',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'mae_price':
+                    float(
+                        result.get(
+                            'mae_price',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'mfe_pct':
+                    float(
+                        result.get(
+                            'mfe_pct',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'mae_pct':
+                    float(
+                        result.get(
+                            'mae_pct',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'mfe_r':
+                    float(
+                        result.get(
+                            'mfe_r',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'mae_r':
+                    float(
+                        result.get(
+                            'mae_r',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'candles_to_mfe':
+                    int(
+                        result.get(
+                            'candles_to_mfe',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'candles_to_mae':
+                    int(
+                        result.get(
+                            'candles_to_mae',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'notes':
+                    result.get(
+                        'notes',
+                        ''
+                    ),
+
+                'created_at':
+                    datetime.utcnow().isoformat()
             }
             
             self.client.table('signal_results').insert(payload).execute()
