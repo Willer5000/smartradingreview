@@ -1368,14 +1368,209 @@ class FuturesAnalysis(TradingExpertSystem):
         )
         
         # ==============================================================
-        # FILTRO DURO DE SEGURIDAD
+        # FASE 7E.3 — EXECUTION SAFETY OPERATIVO PROTEGIDO
         # ==============================================================
-        minimum_safety = float(
+        #
+        # La configuración estática sigue siendo la FUENTE BASE.
+        #
+        # ReviewTrader puede:
+        #
+        #     ✅ endurecer el filtro
+        #     ✅ reducir Safety usado para leverage
+        #
+        # Nunca:
+        #
+        #     ❌ bajar el mínimo base
+        #     ❌ aumentar Safety
+        #     ❌ aumentar leverage
+        #
+        # Si ReviewTrader falla:
+        #
+        #     comportamiento original.
+        # ==============================================================
+
+        base_minimum_safety = float(
             FUTURES_RISK_CONFIG[
                 'minimum_execution_safety'
             ]
         )
-        
+
+        minimum_safety = (
+            base_minimum_safety
+        )
+
+        leverage_safety_score = (
+            safety_score
+        )
+
+        execution_calibration = {
+            'active':
+                False,
+
+            'mode':
+                'STATIC_FALLBACK',
+
+            'minimum_safety':
+                base_minimum_safety,
+
+            'raw_safety':
+                safety_score,
+
+            'leverage_safety_score':
+                safety_score,
+
+            'leverage_factor':
+                1.0,
+
+            'reason':
+                'REVIEWTRADER_NO_DISPONIBLE'
+        }
+
+        try:
+
+            # Import diferido para evitar dependencia circular.
+            from review_trader import (
+                review_trader
+            )
+
+            execution_calibration = (
+                review_trader
+                .get_execution_safety_operational_policy(
+                    timeframe=timeframe,
+                    safety_score=safety_score,
+                    default_min_safety=(
+                        base_minimum_safety
+                    )
+                )
+            )
+
+            if isinstance(
+                execution_calibration,
+                dict
+            ):
+
+                learned_minimum = float(
+                    execution_calibration.get(
+                        'minimum_safety',
+                        base_minimum_safety
+                    )
+                    or base_minimum_safety
+                )
+
+                # ======================================================
+                # GUARDRAIL FINAL EN FUTURES
+                # ======================================================
+                #
+                # Aunque ReviewTrader tuviese un bug:
+                #
+                #     JAMÁS permitir bajar de la configuración base.
+                # ======================================================
+
+                minimum_safety = max(
+                    base_minimum_safety,
+                    learned_minimum
+                )
+
+                learned_leverage_safety = float(
+                    execution_calibration.get(
+                        'leverage_safety_score',
+                        safety_score
+                    )
+                    or safety_score
+                )
+
+                # Nunca permitir una bonificación.
+                leverage_safety_score = min(
+                    safety_score,
+                    learned_leverage_safety
+                )
+
+        except Exception as e:
+
+            logger.debug(
+                "7E.3 Execution Safety fallback: "
+                f"{e}"
+            )
+
+            minimum_safety = (
+                base_minimum_safety
+            )
+
+            leverage_safety_score = (
+                safety_score
+            )
+
+        # ==============================================================
+        # GUARDAR CONTEXTO DE CALIBRACIÓN
+        # ==============================================================
+        #
+        # execution_safety sigue siendo el RAW original.
+        #
+        # Esto es MUY importante porque ReviewTrader debe seguir
+        # aprendiendo sobre el score original y no sobre un score
+        # ya modificado por sí mismo.
+        # ==============================================================
+
+        levels[
+            'execution_safety'
+        ] = round(
+            safety_score,
+            1
+        )
+
+        levels[
+            'execution_safety_label'
+        ] = (
+            safety_label
+        )
+
+        levels[
+            'execution_safety_operational_min'
+        ] = round(
+            minimum_safety,
+            2
+        )
+
+        levels[
+            'execution_safety_leverage_score'
+        ] = round(
+            leverage_safety_score,
+            2
+        )
+
+        levels[
+            'execution_safety_calibration_active'
+        ] = bool(
+            execution_calibration.get(
+                'active',
+                False
+            )
+        )
+
+        levels[
+            'execution_safety_calibration_mode'
+        ] = str(
+            execution_calibration.get(
+                'mode',
+                'STATIC_FALLBACK'
+            )
+        )
+
+        if execution_calibration.get(
+            'active',
+            False
+        ):
+
+            print(
+                "   🧠 7E.3 Safety protegido: "
+                f"mínimo={minimum_safety:.1f} "
+                f"| raw={safety_score:.1f} "
+                f"| leverage_score="
+                f"{leverage_safety_score:.1f} "
+                f"| factor="
+                f"{execution_calibration.get('leverage_factor', 1.0):.3f}"
+            )
+
         if safety_score < minimum_safety:
 
             print(
@@ -1424,7 +1619,7 @@ class FuturesAnalysis(TradingExpertSystem):
                         'max_loss_pct_margin'
                     ]
                 ),
-                execution_safety=safety_score,
+                execution_safety=leverage_safety_score,
                 tp_distance_pct=tp_distance_pct,
                 margin_usdt=float(
                     FUTURES_RISK_CONFIG[
