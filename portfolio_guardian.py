@@ -89,6 +89,47 @@ class PortfolioGuardian:
     # Después de 24 horas la memoria se considera vieja y se
     # permite que el análisis multitemporal vuelva a decidir desde cero.
     ROTATION_MEMORY_MAX_MINUTES = 1440
+    
+    # ========================================================================
+    # FASE 7F.2 — RETORNO GRADUAL A BTC
+    # ========================================================================
+    #
+    # Cuando el portfolio viene de una postura defensiva:
+    #
+    #     PAXG / USDT
+    #
+    # y BTC vuelve a ser favorecido, no se recupera toda la
+    # exposición BTC de una sola vez.
+    #
+    # El tamaño máximo aumenta únicamente cuando la confirmación
+    # multitemporal mejora.
+    #
+    # IMPORTANTE:
+    #
+    # estos valores son TECHOS.
+    #
+    # Nunca aumentan el tamaño calculado originalmente por el TGP.
+    # ========================================================================
+
+    BTC_REENTRY_STAGE_1_MAX_PCT = 0.08
+
+    BTC_REENTRY_STAGE_2_MAX_PCT = 0.15
+
+    BTC_REENTRY_STAGE_3_MAX_PCT = 0.25
+
+    # Stage 2:
+    # mínimo 3 TF favoreciendo BTC + confirmación superior.
+    BTC_REENTRY_STAGE_2_EDGE = 28.0
+
+    # Stage 3:
+    # 4/4 TF + 1D y 1W directamente BTC + edge fuerte.
+    BTC_REENTRY_STAGE_3_EDGE = 40.0
+
+    # Evita considerar "defensivo" un pequeño desvío normal
+    # respecto al portfolio objetivo.
+    BTC_REENTRY_DEFENSIVE_BUFFER = 0.03    
+    
+    
     # Tamaños de operación
     MIN_TRADE_PCT = 0.08   # Mínimo 8% del activo fuente
     MAX_TRADE_PCT = 0.35   # Máximo 35% del activo fuente (nunca quedarse sin nada)
@@ -1384,7 +1425,491 @@ class PortfolioGuardian:
             ] = True
 
             return base_result
+
+    def _build_gradual_btc_reentry_plan(
+        self,
+        user,
+        action,
+        proposed_trade_size,
+        pct_btc,
+        pct_paxg,
+        pct_usdt,
+        btc_count,
+        best_tf_data,
+        timeframe_results
+    ):
+        """
+        FASE 7F.2
+
+        Construye un plan gradual para volver a BTC cuando el
+        portfolio está o estuvo recientemente en modo defensivo.
+
+        Afecta únicamente:
+
+            SWAP_PAXG_TO_BTC
+            BUY_BTC
+
+        No afecta:
+
+            SWAP_BTC_TO_PAXG
+            BUY_PAXG
+            HOLD
+            SELL_BTC
+            SELL_PAXG
+
+        REGLA CENTRAL:
+
+            adjusted_trade_size
+                <=
+            proposed_trade_size
+
+        Por tanto 7F.2 puede reducir riesgo,
+        pero nunca incrementarlo.
+        """
+
+        result = {
+            'active':
+                False,
+
+            'stage':
+                0,
+
+            'proposed_trade_size':
+                float(
+                    proposed_trade_size
+                    or 0
+                ),
+
+            'max_trade_size':
+                float(
+                    proposed_trade_size
+                    or 0
+                ),
+
+            'adjusted_trade_size':
+                float(
+                    proposed_trade_size
+                    or 0
+                ),
+
+            'btc_timeframe_count':
+                int(
+                    btc_count
+                    or 0
+                ),
+
+            'higher_btc_count':
+                0,
+
+            'higher_paxg_count':
+                0,
+
+            'best_btc_edge':
+                0.0,
+
+            'portfolio_defensive':
+                False,
+
+            'recent_defensive_memory':
+                False,
+
+            'previous_direction':
+                None,
+
+            'reason':
+                'NO_APLICA'
+        }
+
+        action = str(
+            action
+            or ''
+        ).upper()
+
+        # ==============================================================
+        # SÓLO REENTRADA HACIA BTC
+        # ==============================================================
+
+        if action not in (
+            'SWAP_PAXG_TO_BTC',
+            'BUY_BTC'
+        ):
+
+            return result
+
+        try:
+
+            proposed_trade_size = float(
+                proposed_trade_size
+                or 0
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+
+            proposed_trade_size = 0.0
+
+        if proposed_trade_size <= 0:
+            return result
+
+        # ==============================================================
+        # MEMORIA DE 7F.1
+        # ==============================================================
+
+        previous_direction = None
+
+        user_key = str(
+            user
+            or 'anonymous'
+        )
+
+        try:
+
+            with self._rotation_guard_lock:
+
+                state = (
+                    self._rotation_guard_state
+                    .get(
+                        user_key
+                    )
+                )
+
+                if isinstance(
+                    state,
+                    dict
+                ):
+
+                    previous_direction = str(
+                        state.get(
+                            'direction',
+                            ''
+                        )
+                        or ''
+                    )
+
+        except Exception:
+
+            previous_direction = None
+
+        recent_defensive_memory = (
+            previous_direction
+            == 'PAXG'
+        )
+
+        # ==============================================================
+        # ¿EL PORTFOLIO ESTÁ DEFENSIVO?
+        # ==============================================================
+        #
+        # Ejemplo:
+        #
+        # BTC 30%
+        # PAXG 45%
+        # USDT 25%
+        #
+        # Está claramente por debajo del objetivo BTC
+        # y sobreponderado defensivamente.
+        #
+        # El buffer de 3 puntos evita dispararlo por pequeñas
+        # diferencias normales.
+        # ==============================================================
+
+        btc_below_target = (
+            pct_btc
+            < self.TARGET_PCTS[
+                'BTC'
+            ]
+        )
+
+        paxg_defensive = (
+            pct_paxg
+            >
+            self.TARGET_PCTS[
+                'PAXG'
+            ]
+            +
+            self.BTC_REENTRY_DEFENSIVE_BUFFER
+        )
+
+        usdt_defensive = (
+            pct_usdt
+            >
+            self.TARGET_PCTS[
+                'USDT'
+            ]
+            +
+            self.BTC_REENTRY_DEFENSIVE_BUFFER
+        )
+
+        portfolio_defensive = (
+            btc_below_target
+            and
+            (
+                paxg_defensive
+                or usdt_defensive
+            )
+        )
+
+        # ==============================================================
+        # SI NO VIENE DE DEFENSA, NO INTERFERIR
+        # ==============================================================
+
+        if not (
+            portfolio_defensive
+            or recent_defensive_memory
+        ):
+
+            return result
+
+        # ==============================================================
+        # EDGE BTC
+        # ==============================================================
+
+        try:
+
+            best_edge = float(
+                (
+                    best_tf_data
+                    or {}
+                ).get(
+                    'relative_edge',
+                    0
+                )
+                or 0
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+
+            best_edge = 0.0
+
+        # Sólo interesa la ventaja positiva hacia BTC.
+        best_btc_edge = max(
+            0.0,
+            best_edge
+        )
+
+        # ==============================================================
+        # CONFIRMACIÓN DIRECTA DE 1D / 1W
+        # ==============================================================
+
+        higher_btc_count = 0
+        higher_paxg_count = 0
+
+        for tf in (
+            '1D',
+            '1W'
+        ):
+
+            data = (
+                timeframe_results.get(
+                    tf,
+                    {}
+                )
+                if isinstance(
+                    timeframe_results,
+                    dict
+                )
+                else {}
+            )
+
+            preference = str(
+                (
+                    data
+                    or {}
+                ).get(
+                    'preference',
+                    'NEUTRAL'
+                )
+                or 'NEUTRAL'
+            ).upper()
+
+            if preference == 'BTC':
+
+                higher_btc_count += 1
+
+            elif preference == 'PAXG':
+
+                higher_paxg_count += 1
+
+        # ==============================================================
+        # STAGE 1 — SONDA
+        # ==============================================================
+        #
+        # Es deliberadamente igual al tamaño mínimo permitido
+        # actualmente por el Guardian: 8%.
+        #
+        # Incluso si el sistema originalmente quería utilizar
+        # 20%-35%, el regreso comienza pequeño.
+        # ==============================================================
+
+        stage = 1
+
+        max_trade_size = (
+            self.BTC_REENTRY_STAGE_1_MAX_PCT
+        )
+
+        stage_reason = (
+            'REENTRADA_INICIAL'
+        )
+
+        # ==============================================================
+        # STAGE 2 — CONFIRMACIÓN INTERMEDIA
+        # ==============================================================
+        #
+        # Requiere:
+        #
+        #     >= 3/4 TF BTC
+        #     >= 1 TF mayor directamente BTC
+        #     edge >= 28
+        # ==============================================================
+
+        if (
+            int(
+                btc_count
+                or 0
+            ) >= 3
+            and
+            higher_btc_count >= 1
+            and
+            best_btc_edge
+            >= self.BTC_REENTRY_STAGE_2_EDGE
+        ):
+
+            stage = 2
+
+            max_trade_size = (
+                self.BTC_REENTRY_STAGE_2_MAX_PCT
+            )
+
+            stage_reason = (
+                'REENTRADA_CONFIRMADA'
+            )
+
+        # ==============================================================
+        # STAGE 3 — CONFIRMACIÓN FUERTE
+        # ==============================================================
+        #
+        # Requiere simultáneamente:
+        #
+        #     4/4 TF BTC
+        #     1D = BTC
+        #     1W = BTC
+        #     edge >= 40
+        #
+        # Aun así el máximo es 25%.
+        #
+        # Nunca volvemos al 35% de una sola vez durante la
+        # transición defensiva → BTC.
+        # ==============================================================
+
+        if (
+            int(
+                btc_count
+                or 0
+            ) >= 4
+            and
+            higher_btc_count >= 2
+            and
+            best_btc_edge
+            >= self.BTC_REENTRY_STAGE_3_EDGE
+        ):
+
+            stage = 3
+
+            max_trade_size = (
+                self.BTC_REENTRY_STAGE_3_MAX_PCT
+            )
+
+            stage_reason = (
+                'REENTRADA_FUERTE'
+            )
+
+        # ==============================================================
+        # PROTECTION ONLY
+        # ==============================================================
+
+        adjusted_trade_size = min(
+            proposed_trade_size,
+            max_trade_size
+        )
+
+        # Protección absoluta adicional.
+        adjusted_trade_size = max(
+            0.0,
+            min(
+                proposed_trade_size,
+                adjusted_trade_size
+            )
+        )
+
+        return {
+            'active':
+                True,
+
+            'stage':
+                stage,
+
+            'proposed_trade_size':
+                round(
+                    proposed_trade_size,
+                    4
+                ),
+
+            'max_trade_size':
+                round(
+                    max_trade_size,
+                    4
+                ),
+
+            'adjusted_trade_size':
+                round(
+                    adjusted_trade_size,
+                    4
+                ),
+
+            'btc_timeframe_count':
+                int(
+                    btc_count
+                    or 0
+                ),
+
+            'higher_btc_count':
+                int(
+                    higher_btc_count
+                ),
+
+            'higher_paxg_count':
+                int(
+                    higher_paxg_count
+                ),
+
+            'best_btc_edge':
+                round(
+                    best_btc_edge,
+                    2
+                ),
+
+            'portfolio_defensive':
+                bool(
+                    portfolio_defensive
+                ),
+
+            'recent_defensive_memory':
+                bool(
+                    recent_defensive_memory
+                ),
+
+            'previous_direction':
+                previous_direction,
+
+            'reason':
+                stage_reason
+        }
     
+
     def _score_market_snapshot(
         self,
         analysis,
@@ -2536,6 +3061,159 @@ class PortfolioGuardian:
 
                 source_asset = None
                 target_asset = None
+
+            # ==============================================================
+            # FASE 7F.2 — RETORNO GRADUAL A BTC
+            # ==============================================================
+            #
+            # Se ejecuta DESPUÉS del anti-whipsaw.
+            #
+            # Si 7F.1 convirtió la señal en HOLD,
+            # este bloque simplemente no hará nada.
+            # ==============================================================
+
+            gradual_btc_reentry = (
+                self._build_gradual_btc_reentry_plan(
+                    user=user,
+                    action=action,
+                    proposed_trade_size=trade_size,
+                    pct_btc=pct_btc,
+                    pct_paxg=pct_paxg,
+                    pct_usdt=pct_usdt,
+                    btc_count=btc_count,
+                    best_tf_data=best_tf_data,
+                    timeframe_results=timeframe_results
+                )
+            )
+
+            if gradual_btc_reentry.get(
+                'active',
+                False
+            ):
+
+                original_trade_size = float(
+                    trade_size
+                    or 0
+                )
+
+                adjusted_trade_size = float(
+                    gradual_btc_reentry.get(
+                        'adjusted_trade_size',
+                        original_trade_size
+                    )
+                    or 0
+                )
+
+                # ======================================================
+                # GUARDRAIL FINAL
+                # ======================================================
+                #
+                # Incluso aunque el helper tuviera un bug:
+                #
+                # 7F.2 JAMÁS puede aumentar el tamaño.
+                # ======================================================
+
+                adjusted_trade_size = min(
+                    original_trade_size,
+                    adjusted_trade_size
+                )
+
+                adjusted_trade_size = max(
+                    0.0,
+                    adjusted_trade_size
+                )
+
+                trade_size = (
+                    adjusted_trade_size
+                )
+
+                # ======================================================
+                # RECALCULAR CANTIDADES
+                # ======================================================
+
+                if (
+                    action
+                    == 'SWAP_PAXG_TO_BTC'
+                ):
+
+                    amount_crypto = (
+                        paxg_available
+                        * trade_size
+                    )
+
+                    amount_usd = (
+                        amount_crypto
+                        * float(
+                            valuation.get(
+                                'paxg_price',
+                                0
+                            )
+                            or 0
+                        )
+                    )
+
+                elif action == 'BUY_BTC':
+
+                    # Mantener intacta la reserva mínima USDT.
+                    usable_usdt_reentry = max(
+                        0.0,
+                        usdt_available
+                        -
+                        (
+                            total
+                            * self.MIN_RESERVE_PCTS[
+                                'USDT'
+                            ]
+                        )
+                    )
+
+                    amount_usd = (
+                        usable_usdt_reentry
+                        * trade_size
+                    )
+
+                    btc_price_reentry = float(
+                        valuation.get(
+                            'btc_price',
+                            0
+                        )
+                        or 0
+                    )
+
+                    amount_crypto = (
+                        amount_usd
+                        / btc_price_reentry
+                        if btc_price_reentry > 0
+                        else 0
+                    )
+
+                # ======================================================
+                # EXPLICAR LA REENTRADA
+                # ======================================================
+
+                stage = int(
+                    gradual_btc_reentry.get(
+                        'stage',
+                        0
+                    )
+                    or 0
+                )
+
+                reason = (
+                    f'{reason} '
+                    f'Fase de retorno gradual BTC={stage}/3: '
+                    f'el tamaño original era '
+                    f'{original_trade_size * 100:.1f}% '
+                    f'del activo fuente y el límite actual '
+                    f'es {trade_size * 100:.1f}%. '
+                    f'Confirmación BTC='
+                    f'{gradual_btc_reentry.get("btc_timeframe_count", 0)}/4 TF, '
+                    f'1D/1W directos='
+                    f'{gradual_btc_reentry.get("higher_btc_count", 0)}/2, '
+                    f'edge={gradual_btc_reentry.get("best_btc_edge", 0):.1f}. '
+                    f'El retorno se hace por tramos para evitar '
+                    f'abandonar la defensa de una sola vez.'
+                )
             
             rec = self._build_response(
                 action=action,
@@ -2608,7 +3286,100 @@ class PortfolioGuardian:
                         or 0
                     )
             }           
-            
+            # ==============================================================
+            # FASE 7F.2 — RETORNO GRADUAL BTC
+            # ==============================================================
+
+            rec[
+                'gradual_btc_reentry'
+            ] = {
+                'active':
+                    bool(
+                        gradual_btc_reentry.get(
+                            'active',
+                            False
+                        )
+                    ),
+
+                'stage':
+                    int(
+                        gradual_btc_reentry.get(
+                            'stage',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'proposed_trade_size':
+                    float(
+                        gradual_btc_reentry.get(
+                            'proposed_trade_size',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'max_trade_size':
+                    float(
+                        gradual_btc_reentry.get(
+                            'max_trade_size',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'adjusted_trade_size':
+                    float(
+                        gradual_btc_reentry.get(
+                            'adjusted_trade_size',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'btc_timeframe_count':
+                    int(
+                        gradual_btc_reentry.get(
+                            'btc_timeframe_count',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'higher_btc_count':
+                    int(
+                        gradual_btc_reentry.get(
+                            'higher_btc_count',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'best_btc_edge':
+                    float(
+                        gradual_btc_reentry.get(
+                            'best_btc_edge',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'portfolio_defensive':
+                    bool(
+                        gradual_btc_reentry.get(
+                            'portfolio_defensive',
+                            False
+                        )
+                    ),
+
+                'recent_defensive_memory':
+                    bool(
+                        gradual_btc_reentry.get(
+                            'recent_defensive_memory',
+                            False
+                        )
+                    )
+            }            
             rec['timeframe_analysis'] = (
                 timeframe_results
             )
