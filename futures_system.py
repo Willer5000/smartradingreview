@@ -1377,17 +1377,32 @@ class FuturesAnalysis(TradingExpertSystem):
         )
         
         if safety_score < minimum_safety:
-        
+
             print(
-                f"   ❌ FUTUROS RECHAZADO: "
+                f"   ⚠️ FUTUROS ANALYSIS_ONLY: "
                 f"Execution Safety "
                 f"{safety_score:.1f} < "
                 f"{minimum_safety:.1f}"
             )
-        
-            return self._build_rejected_levels(
-                entry_price,
-                symbol,
+
+            # ==========================================================
+            # CONSERVAR NIVELES TÉCNICOS
+            # ==========================================================
+            # Entry / SL / TP / RR siguen siendo información válida
+            # del análisis aunque la operación NO sea ejecutable.
+            # ==========================================================
+
+            levels['execution_safety'] = round(
+                safety_score,
+                1
+            )
+
+            levels['execution_safety_label'] = (
+                safety_label
+            )
+
+            return self._mark_levels_non_executable(
+                levels,
                 (
                     f"Execution Safety insuficiente "
                     f"({safety_score:.1f}/100)"
@@ -1420,16 +1435,24 @@ class FuturesAnalysis(TradingExpertSystem):
         )
         
         if optimal_leverage <= 0:
-        
+
             print(
-                "   ❌ FUTUROS RECHAZADO: "
+                "   ⚠️ FUTUROS ANALYSIS_ONLY: "
                 "No existe leverage simultáneamente "
                 "seguro y económicamente viable."
             )
-        
-            return self._build_rejected_levels(
-                entry_price,
-                symbol,
+
+            levels['execution_safety'] = round(
+                safety_score,
+                1
+            )
+
+            levels['execution_safety_label'] = (
+                safety_label
+            )
+
+            return self._mark_levels_non_executable(
+                levels,
                 (
                     "No existe leverage que cumpla "
                     "seguridad + riesgo + rentabilidad"
@@ -1473,22 +1496,35 @@ class FuturesAnalysis(TradingExpertSystem):
         min_roi_tp = 8.0
         
         if roi['roi_tp'] < min_roi_tp:
-        
+
             print(
-                f"   ⚠️ RECHAZADO (futuros): "
+                f"   ⚠️ FUTUROS ANALYSIS_ONLY: "
                 f"ROI potencial "
                 f"{roi['roi_tp']:.1f}% "
                 f"< mínimo {min_roi_tp:.1f}%"
             )
-        
-            return self._build_rejected_levels(
-                levels['entry'],
-                symbol,
+
+            levels['leverage'] = int(
+                optimal_leverage
+            )
+
+            levels['execution_safety'] = round(
+                safety_score,
+                1
+            )
+
+            levels['execution_safety_label'] = (
+                safety_label
+            )
+
+            return self._mark_levels_non_executable(
+                levels,
                 (
                     f"ROI potencial "
                     f"{roi['roi_tp']:.1f}% "
                     f"< {min_roi_tp:.1f}% mínimo"
-                )
+                ),
+                recommended_leverage=optimal_leverage
             )
         
         
@@ -1580,24 +1616,36 @@ class FuturesAnalysis(TradingExpertSystem):
             net_profit_tp_usdt
             < target_net_profit
         ):
-        
             print(
-                f"   ❌ FUTUROS RECHAZADO: "
+                f"   ⚠️ FUTUROS ANALYSIS_ONLY: "
                 f"beneficio neto estimado "
                 f"${net_profit_tp_usdt:.4f} "
                 f"< objetivo "
                 f"${target_net_profit:.4f}"
             )
-        
-            return self._build_rejected_levels(
-                levels['entry'],
-                symbol,
+
+            levels['leverage'] = int(
+                optimal_leverage
+            )
+
+            levels['execution_safety'] = round(
+                safety_score,
+                1
+            )
+
+            levels['execution_safety_label'] = (
+                safety_label
+            )
+
+            return self._mark_levels_non_executable(
+                levels,
                 (
                     f"Beneficio neto estimado "
                     f"${net_profit_tp_usdt:.4f} "
                     f"< objetivo "
                     f"${target_net_profit:.4f}"
-                )
+                ),
+                recommended_leverage=optimal_leverage
             )
         # ==============================================================
         # OPERACIÓN APROBADA
@@ -1815,9 +1863,14 @@ class FuturesAnalysis(TradingExpertSystem):
                     for wrong in (
                         'Se recomienda COMPRA del ratio PAXG/BTC.',
                         'Se recomienda COMPRA SPOT de BTC/USDT.',
+                        'Se recomienda COMPRA SPOT de Bitcoin.',
+                        'Se recomienda COMPRA SPOT de Bitcoin',
                         'Se aconseja COMPRA SPOT de PAXG.',
                     ):
-                        msg = msg.replace(wrong, f'Se recomienda LONG en futuros de {pretty_name}.')
+                        msg = msg.replace(
+                            wrong,
+                            f'Se recomienda LONG en futuros de {pretty_name}.'
+                        )
                 elif original_action == 'VENTA_SPOT':
                     msg = msg.replace(
                         f'🔴 VENTA SPOT DE {pretty_name}',
@@ -1841,9 +1894,14 @@ class FuturesAnalysis(TradingExpertSystem):
                     for wrong in (
                         'Se aconseja VENTA del ratio PAXG/BTC.',
                         'Se recomienda VENTA SPOT de BTC/USDT.',
+                        'Se recomienda VENTA SPOT de Bitcoin.',
+                        'Se recomienda VENTA SPOT de Bitcoin',
                         'Se sugiere VENTA SPOT de PAXG.',
                     ):
-                        msg = msg.replace(wrong, f'Se recomienda SHORT en futuros de {pretty_name}.')
+                        msg = msg.replace(
+                            wrong,
+                            f'Se recomienda SHORT en futuros de {pretty_name}.'
+                        )
                 
                 result['message'] = msg
         except Exception as _msg_err:
