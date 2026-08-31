@@ -56,9 +56,28 @@ CREATE TABLE IF NOT EXISTS saved_signals (
     closed_price NUMERIC(20, 8),
     pnl_pct NUMERIC(10, 4),           -- ROI apalancado real (incluye leverage)
     pnl_usdt NUMERIC(20, 4),          -- Ganancia/pérdida en USDT
-    close_reason TEXT,                -- 'tp_hit' | 'sl_hit' | 'manual' | 'expired'
+    close_reason TEXT, -- 'tp_hit' | 'sl_hit' | 'manual' | 'expired'
+    
+    -- ============================================================================
+    -- FASE 7D.2 — MFE / MAE DE POSICIONES GUARDADAS
+    -- ============================================================================
+    
+    mfe_price NUMERIC(20, 8) DEFAULT 0,
+    mae_price NUMERIC(20, 8) DEFAULT 0,
+    
+    mfe_pct NUMERIC(10, 4) DEFAULT 0,
+    mae_pct NUMERIC(10, 4) DEFAULT 0,
+    
+    mfe_r NUMERIC(10, 4) DEFAULT 0,
+    mae_r NUMERIC(10, 4) DEFAULT 0,
+    
+    candles_to_mfe INTEGER DEFAULT 0,
+    candles_to_mae INTEGER DEFAULT 0,
+    
+    last_excursion_at TIMESTAMPTZ,
     
     -- Timestamps
+    
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     
@@ -73,7 +92,26 @@ CREATE TABLE IF NOT EXISTS saved_signals (
 
 -- Migración: añadir columna entry_at si la tabla ya existe (idempotente)
 ALTER TABLE saved_signals
-    ADD COLUMN IF NOT EXISTS entry_at TIMESTAMPTZ;
+ADD COLUMN IF NOT EXISTS entry_at TIMESTAMPTZ;
+
+-- ============================================================================
+-- FASE 7D.2 — MIGRACIÓN MFE / MAE
+-- ============================================================================
+
+ALTER TABLE saved_signals
+    ADD COLUMN IF NOT EXISTS mfe_price NUMERIC(20, 8) DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS mae_price NUMERIC(20, 8) DEFAULT 0,
+
+    ADD COLUMN IF NOT EXISTS mfe_pct NUMERIC(10, 4) DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS mae_pct NUMERIC(10, 4) DEFAULT 0,
+
+    ADD COLUMN IF NOT EXISTS mfe_r NUMERIC(10, 4) DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS mae_r NUMERIC(10, 4) DEFAULT 0,
+
+    ADD COLUMN IF NOT EXISTS candles_to_mfe INTEGER DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS candles_to_mae INTEGER DEFAULT 0,
+
+    ADD COLUMN IF NOT EXISTS last_excursion_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_saved_signals_status ON saved_signals(status);
 CREATE INDEX IF NOT EXISTS idx_saved_signals_symbol_tf ON saved_signals(symbol, timeframe);
