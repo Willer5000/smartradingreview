@@ -97,7 +97,6 @@ CREATE TABLE IF NOT EXISTS signal_results (
     candles_to_mae INTEGER DEFAULT 0,
 
     notes TEXT,
-    notes TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
