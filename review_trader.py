@@ -476,89 +476,548 @@ class ReviewTrader:
         
         return stats
     
-    def _check_tp_sl_hit(self, signal: Dict, df) -> Optional[Dict]:
+    def _check_tp_sl_hit(
+        self,
+        signal: Dict,
+        df
+    ) -> Optional[Dict]:
         """
-        Verifica si la señal alcanzó su TP o SL usando el DataFrame de velas.
-        Retorna dict con el resultado o None si aún no se resolvió.
+        Verifica TP / SL y calcula MFE / MAE histórico.
+
+        FASE 7D.1
+
+        IMPORTANTE:
+        - NO modifica la decisión original.
+        - NO modifica Entry / SL / TP.
+        - NO modifica leverage.
+        - NO agrega llamadas de mercado.
+        - Utiliza exactamente las mismas velas que ya se
+          recorrían para detectar TP / SL.
+
+        MFE = Maximum Favorable Excursion.
+        MAE = Maximum Adverse Excursion.
+
+        Las métricas se calculan tanto en porcentaje como
+        en unidades R respecto al riesgo original:
+
+            risk = abs(entry - SL)
+
+        LONG:
+            favorable = precio por encima del entry
+            adverse   = precio por debajo del entry
+
+        SHORT:
+            favorable = precio por debajo del entry
+            adverse   = precio por encima del entry
         """
+
         try:
-            action = signal.get('action_normalized')
-            entry = float(signal.get('entry_price', 0))
-            sl = float(signal.get('stop_loss', 0))
-            tp = float(signal.get('take_profit', 0))
-            
-            if entry == 0 or sl == 0 or tp == 0:
+            action = str(
+                signal.get(
+                    'action_normalized',
+                    ''
+                )
+                or ''
+            ).upper()
+
+            entry = float(
+                signal.get(
+                    'entry_price',
+                    0
+                )
+                or 0
+            )
+
+            sl = float(
+                signal.get(
+                    'stop_loss',
+                    0
+                )
+                or 0
+            )
+
+            tp = float(
+                signal.get(
+                    'take_profit',
+                    0
+                )
+                or 0
+            )
+
+            if (
+                action not in (
+                    'LONG',
+                    'SHORT'
+                )
+                or entry <= 0
+                or sl <= 0
+                or tp <= 0
+            ):
                 return None
-            
-            # Timestamp de la señal
-            signal_ts = self._parse_ts(signal.get('candle_timestamp') or signal.get('created_at'))
+
+            # ==========================================================
+            # RIESGO ORIGINAL
+            # ==========================================================
+
+            risk_abs = abs(
+                entry - sl
+            )
+
+            if risk_abs <= 0:
+                return None
+
+            # ==========================================================
+            # TIMESTAMP ORIGINAL
+            # ==========================================================
+
+            signal_ts = self._parse_ts(
+                signal.get(
+                    'candle_timestamp'
+                )
+                or signal.get(
+                    'created_at'
+                )
+            )
+
             if not signal_ts:
                 return None
-            
-            # Filtrar solo velas POSTERIORES a la señal
+
+            # ==========================================================
+            # UTILIZAR SÓLO VELAS POSTERIORES
+            # ==========================================================
+
             import pandas as pd
+
             if 'time' in df.columns:
-                df_after = df[pd.to_datetime(df['time'], utc=True) > pd.Timestamp(signal_ts, tz='UTC')]
+
+                df_time = pd.to_datetime(
+                    df['time'],
+                    utc=True
+                )
+
+                signal_timestamp = pd.Timestamp(
+                    signal_ts,
+                    tz='UTC'
+                )
+
+                df_after = df[
+                    df_time
+                    > signal_timestamp
+                ]
+
             else:
+
                 df_after = df
-            
+
             if len(df_after) == 0:
                 return None
-            
-            # Recorrer velas post-señal en orden
-            for idx, row in df_after.iterrows():
-                high = float(row['high'])
-                low = float(row['low'])
-                close = float(row['close'])
-                candle_ts = row.get('time', datetime.utcnow())
-                
+
+            # ==========================================================
+            # ESTADO INICIAL DE MFE / MAE
+            # ==========================================================
+
+            mfe_price = entry
+            mae_price = entry
+
+            mfe_pct = 0.0
+            mae_pct = 0.0
+
+            mfe_r = 0.0
+            mae_r = 0.0
+
+            candles_to_mfe = 0
+            candles_to_mae = 0
+
+            # ==========================================================
+            # ACTUALIZAR MÉTRICAS
+            # ==========================================================
+
+            def _recalculate_excursions():
+
+                nonlocal mfe_pct
+                nonlocal mae_pct
+                nonlocal mfe_r
+                nonlocal mae_r
+
                 if action == 'LONG':
-                    # SL primero (peor caso): si low <= SL
+
+                    favorable_abs = max(
+                        0.0,
+                        mfe_price - entry
+                    )
+
+                    adverse_abs = max(
+                        0.0,
+                        entry - mae_price
+                    )
+
+                else:
+
+                    favorable_abs = max(
+                        0.0,
+                        entry - mfe_price
+                    )
+
+                    adverse_abs = max(
+                        0.0,
+                        mae_price - entry
+                    )
+
+                mfe_pct = (
+                    favorable_abs
+                    / entry
+                    * 100
+                )
+
+                mae_pct = (
+                    adverse_abs
+                    / entry
+                    * 100
+                )
+
+                mfe_r = (
+                    favorable_abs
+                    / risk_abs
+                )
+
+                mae_r = (
+                    adverse_abs
+                    / risk_abs
+                )
+
+            def _excursion_payload():
+
+                _recalculate_excursions()
+
+                return {
+                    'mfe_price': round(
+                        float(mfe_price),
+                        8
+                    ),
+
+                    'mae_price': round(
+                        float(mae_price),
+                        8
+                    ),
+
+                    'mfe_pct': round(
+                        float(mfe_pct),
+                        4
+                    ),
+
+                    'mae_pct': round(
+                        float(mae_pct),
+                        4
+                    ),
+
+                    'mfe_r': round(
+                        float(mfe_r),
+                        4
+                    ),
+
+                    'mae_r': round(
+                        float(mae_r),
+                        4
+                    ),
+
+                    'candles_to_mfe': int(
+                        candles_to_mfe
+                    ),
+
+                    'candles_to_mae': int(
+                        candles_to_mae
+                    )
+                }
+
+            # ==========================================================
+            # RECORRER LAS MISMAS VELAS QUE YA USABA REVIEWTRADER
+            # ==========================================================
+
+            for candle_number, (
+                idx,
+                row
+            ) in enumerate(
+                df_after.iterrows(),
+                start=1
+            ):
+
+                high = float(
+                    row['high']
+                )
+
+                low = float(
+                    row['low']
+                )
+
+                candle_ts = row.get(
+                    'time',
+                    datetime.utcnow()
+                )
+
+                # ======================================================
+                # LONG
+                # ======================================================
+
+                if action == 'LONG':
+
+                    # --------------------------------------------------
+                    # SL
+                    # --------------------------------------------------
+                    # Se mantiene la regla conservadora existente:
+                    # si SL y TP ocurren en la misma vela, se asume SL.
+                    #
+                    # La MAE termina exactamente en SL porque la
+                    # operación deja de existir allí.
+                    # --------------------------------------------------
+
                     if low <= sl:
-                        pnl_pct = ((sl - entry) / entry) * 100
+
+                        if sl < mae_price:
+                            mae_price = sl
+                            candles_to_mae = (
+                                candle_number
+                            )
+
+                        metrics = (
+                            _excursion_payload()
+                        )
+
+                        pnl_pct = (
+                            (sl - entry)
+                            / entry
+                            * 100
+                        )
+
                         return {
-                            'status': 'sl_hit',
-                            'exit_price': sl,
-                            'exit_timestamp': str(candle_ts),
-                            'pnl_pct': pnl_pct,
-                            'candles_to_result': idx
+                            'status':
+                                'sl_hit',
+
+                            'exit_price':
+                                sl,
+
+                            'exit_timestamp':
+                                str(candle_ts),
+
+                            'pnl_pct':
+                                pnl_pct,
+
+                            'candles_to_result':
+                                idx,
+
+                            **metrics
                         }
-                    # TP: si high >= TP
+
+                    # --------------------------------------------------
+                    # TP
+                    # --------------------------------------------------
+
                     if high >= tp:
-                        pnl_pct = ((tp - entry) / entry) * 100
+
+                        # Antes de alcanzar TP pudo existir una
+                        # excursión adversa dentro de esta vela,
+                        # siempre que no haya tocado SL.
+                        if low < mae_price:
+                            mae_price = low
+                            candles_to_mae = (
+                                candle_number
+                            )
+
+                        # Al cerrar en TP no contamos precios
+                        # posteriores al TP dentro de la misma vela.
+                        if tp > mfe_price:
+                            mfe_price = tp
+                            candles_to_mfe = (
+                                candle_number
+                            )
+
+                        metrics = (
+                            _excursion_payload()
+                        )
+
+                        pnl_pct = (
+                            (tp - entry)
+                            / entry
+                            * 100
+                        )
+
                         return {
-                            'status': 'tp_hit',
-                            'exit_price': tp,
-                            'exit_timestamp': str(candle_ts),
-                            'pnl_pct': pnl_pct,
-                            'candles_to_result': idx
+                            'status':
+                                'tp_hit',
+
+                            'exit_price':
+                                tp,
+
+                            'exit_timestamp':
+                                str(candle_ts),
+
+                            'pnl_pct':
+                                pnl_pct,
+
+                            'candles_to_result':
+                                idx,
+
+                            **metrics
                         }
+
+                    # --------------------------------------------------
+                    # OPERACIÓN SIGUE ABIERTA
+                    # --------------------------------------------------
+
+                    if high > mfe_price:
+
+                        mfe_price = high
+
+                        candles_to_mfe = (
+                            candle_number
+                        )
+
+                    if low < mae_price:
+
+                        mae_price = low
+
+                        candles_to_mae = (
+                            candle_number
+                        )
+
+                # ======================================================
+                # SHORT
+                # ======================================================
+
                 elif action == 'SHORT':
-                    # SL primero: si high >= SL
+
+                    # --------------------------------------------------
+                    # SL
+                    # --------------------------------------------------
+
                     if high >= sl:
-                        pnl_pct = ((entry - sl) / entry) * 100
+
+                        if sl > mae_price:
+
+                            mae_price = sl
+
+                            candles_to_mae = (
+                                candle_number
+                            )
+
+                        metrics = (
+                            _excursion_payload()
+                        )
+
+                        pnl_pct = (
+                            (entry - sl)
+                            / entry
+                            * 100
+                        )
+
                         return {
-                            'status': 'sl_hit',
-                            'exit_price': sl,
-                            'exit_timestamp': str(candle_ts),
-                            'pnl_pct': pnl_pct,
-                            'candles_to_result': idx
+                            'status':
+                                'sl_hit',
+
+                            'exit_price':
+                                sl,
+
+                            'exit_timestamp':
+                                str(candle_ts),
+
+                            'pnl_pct':
+                                pnl_pct,
+
+                            'candles_to_result':
+                                idx,
+
+                            **metrics
                         }
-                    # TP: si low <= TP
+
+                    # --------------------------------------------------
+                    # TP
+                    # --------------------------------------------------
+
                     if low <= tp:
-                        pnl_pct = ((entry - tp) / entry) * 100
+
+                        if high > mae_price:
+
+                            mae_price = high
+
+                            candles_to_mae = (
+                                candle_number
+                            )
+
+                        # La operación cierra en TP.
+                        if tp < mfe_price:
+
+                            mfe_price = tp
+
+                            candles_to_mfe = (
+                                candle_number
+                            )
+
+                        metrics = (
+                            _excursion_payload()
+                        )
+
+                        pnl_pct = (
+                            (entry - tp)
+                            / entry
+                            * 100
+                        )
+
                         return {
-                            'status': 'tp_hit',
-                            'exit_price': tp,
-                            'exit_timestamp': str(candle_ts),
-                            'pnl_pct': pnl_pct,
-                            'candles_to_result': idx
+                            'status':
+                                'tp_hit',
+
+                            'exit_price':
+                                tp,
+
+                            'exit_timestamp':
+                                str(candle_ts),
+
+                            'pnl_pct':
+                                pnl_pct,
+
+                            'candles_to_result':
+                                idx,
+
+                            **metrics
                         }
-            
-            return None  # Aún pendiente
-            
+
+                    # --------------------------------------------------
+                    # OPERACIÓN SIGUE ABIERTA
+                    # --------------------------------------------------
+
+                    if low < mfe_price:
+
+                        mfe_price = low
+
+                        candles_to_mfe = (
+                            candle_number
+                        )
+
+                    if high > mae_price:
+
+                        mae_price = high
+
+                        candles_to_mae = (
+                            candle_number
+                        )
+
+            # ==========================================================
+            # AÚN PENDIENTE
+            # ==========================================================
+            #
+            # En 7D.1 no escribimos MFE/MAE de operaciones abiertas.
+            # Esto evita agregar escrituras Supabase cada 15 minutos.
+            #
+            # 7D.2 se encargará de las posiciones realmente abiertas.
+            # ==========================================================
+
+            return None
+
         except Exception as e:
-            logger.error(f"Error en _check_tp_sl_hit: {e}")
+
+            logger.error(
+                f"Error en _check_tp_sl_hit: {e}"
+            )
+
             return None
     
     def _mark_signal_expired(self, signal: Dict):
