@@ -1995,21 +1995,107 @@ window.runCompleteAnalysis = function() {
                         '⚠️ El backend no devolvió TGP para Spot'
                     );
                 }
-                // ============ ACTUALIZAR PRECIOS PARA PORTAFOLIO ============ (posiblemente se requiere un TAB
-                // ============ ACTUALIZAR PRECIOS PARA PORTAFOLIO ============
-                const currentPrice = data.data.current_price || 0;
+                // ============================================================
+                // ACTUALIZAR PRECIOS DEL PORTFOLIO
+                // ============================================================
+                // Para Spot autenticado, la valoración del TGP server-side
+                // es la referencia principal.
+                //
+                // Esto evita que el frontend muestre, por ejemplo,
+                // BTC 100% / PAXG 0% simplemente porque PAXG todavía
+                // no fue cargado en lastPrices.
+                // ============================================================
+
+                const currentPrice =
+                    Number(
+                        data.data.current_price || 0
+                    );
+
                 if (currentPrice > 0) {
-                    lastPrices[symbol] = currentPrice;
-                    if (symbol === 'BTC-USDT') lastPrices['BTC-USDT'] = currentPrice;
-                    if (symbol === 'PAXG-USDT') lastPrices['PAXG-USDT'] = currentPrice;
-                    if (symbol === 'PAXG-BTC' && data.data.correlation?.paxg_price) {
-                        lastPrices['PAXG-USDT'] = data.data.correlation.paxg_price;
+                    lastPrices[symbol] =
+                        currentPrice;
+
+                    if (
+                        symbol === 'BTC-USDT'
+                    ) {
+                        lastPrices['BTC-USDT'] =
+                            currentPrice;
+                    }
+
+                    if (
+                        symbol === 'PAXG-USDT'
+                    ) {
+                        lastPrices['PAXG-USDT'] =
+                            currentPrice;
+                    }
+
+                    if (
+                        symbol === 'PAXG-BTC'
+                        && data.data.correlation?.paxg_price
+                    ) {
+                        lastPrices['PAXG-USDT'] =
+                            Number(
+                                data.data.correlation.paxg_price
+                            );
                     }
                 }
-                if (data.data.correlation && data.data.correlation.paxg_price) {
-                    lastPrices['PAXG-USDT'] = data.data.correlation.paxg_price;
+
+                if (
+                    data.data.correlation?.paxg_price
+                ) {
+                    lastPrices['PAXG-USDT'] =
+                        Number(
+                            data.data.correlation.paxg_price
+                        );
                 }
+
+                // ============================================================
+                // EL TGP YA CALCULÓ LA VALORACIÓN CORRECTA EN EL SERVIDOR
+                // ============================================================
+
+                if (
+                    data.tgp?.valuation
+                ) {
+                    const tgpValuation =
+                        data.tgp.valuation;
+
+                    const btcPrice =
+                        Number(
+                            tgpValuation.btc_price || 0
+                        );
+
+                    const paxgPrice =
+                        Number(
+                            tgpValuation.paxg_price || 0
+                        );
+
+                    if (btcPrice > 0) {
+                        lastPrices['BTC-USDT'] =
+                            btcPrice;
+                    }
+
+                    if (paxgPrice > 0) {
+                        lastPrices['PAXG-USDT'] =
+                            paxgPrice;
+                    }
+
+                    console.log(
+                        '🛡️ Valoración TGP server-side:',
+                        {
+                            total:
+                                tgpValuation.total,
+                            pct_btc:
+                                tgpValuation.pct_btc,
+                            pct_paxg:
+                                tgpValuation.pct_paxg,
+                            pct_usdt:
+                                tgpValuation.pct_usdt
+                        }
+                    );
+                }
+
                 updatePortfolioUI();
+
                 // ============ FIN ACTUALIZAR PRECIOS ============
 
                 
@@ -8214,12 +8300,6 @@ setInterval(() => {
     }
 
 }, 300000); // 5 minutos
-if (typeof window.updatePreviousSignals === 'function') window.updatePreviousSignals();
-
-
-
-
-
 
 // ============ FEAR & GREED INDEX - VERSIÓN MEJORADA ============
 window.updateFearGreedChart = function(data) {
@@ -9191,11 +9271,37 @@ if (!window.__SMARTTRADING_AUTH_FLOW_INITIALIZED__) {
                 === 'function'
             ) {
                 window.loadInitialData();
+
+                console.log(
+                    '✅ Datos iniciales solicitados.'
+                );
             } else {
                 console.error(
                     '❌ ERROR CRÍTICO: window.loadInitialData no fue definida.'
                 );
             }
+
+            // ============================================================
+            // SEÑALES DE LA VELA ANTERIOR
+            // ============================================================
+            // IMPORTANTÍSIMO:
+            // aquí ya terminó initTGPSession()
+            // y currentUser / isLoggedIn ya están establecidos.
+            // Por eso NO debe ejecutarse antes.
+            // ============================================================
+
+            setTimeout(() => {
+                if (
+                    typeof window.updatePreviousSignals
+                    === 'function'
+                ) {
+                    console.log(
+                        '📊 Cargando señales de la vela anterior...'
+                    );
+
+                    window.updatePreviousSignals();
+                }
+            }, 500);
         })
         .catch(error => {
             console.error(
