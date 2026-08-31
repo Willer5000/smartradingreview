@@ -14918,42 +14918,42 @@ class TradingExpertSystem:
     
         return result
     
-def _round_price(self, price, symbol):
-    """
-    Redondear precio según el símbolo.
+    def _round_price(self, price, symbol):
+        """
+        Redondear precio según el símbolo.
 
-    IMPORTANTE:
-    Esto afecta Entry / SL / TP calculados por el sistema.
-    No modifica la lógica de trading, solamente evita perder
-    precisión en activos de precio bajo y ratios.
-    """
+        IMPORTANTE:
+        Esto afecta Entry / SL / TP calculados por el sistema.
+        No modifica la lógica de trading, solamente evita perder
+        precisión en activos de precio bajo y ratios.
+        """
 
-    if price is None:
-        return 0
+        if price is None:
+            return 0
 
-    try:
-        price = float(price)
-    except (TypeError, ValueError):
-        return 0
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
+            return 0
 
-    if price <= 0:
-        return 0
+        if price <= 0:
+            return 0
 
-    decimals_by_symbol = {
-        'PAXG-BTC': 8,
-        'ADA-USDT': 4,
-        'XRP-USDT': 4,
-    }
+        decimals_by_symbol = {
+            'PAXG-BTC': 8,
+            'ADA-USDT': 4,
+            'XRP-USDT': 4,
+        }
 
-    decimals = decimals_by_symbol.get(
-        symbol,
-        2
-    )
+        decimals = decimals_by_symbol.get(
+            symbol,
+            2
+        )
 
-    return round(
-        price,
-        decimals
-    )
+        return round(
+            price,
+            decimals
+        )
     
     def _get_default_levels(
         self,
