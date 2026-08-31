@@ -1794,7 +1794,22 @@ class FuturesAnalysis(TradingExpertSystem):
                         f'📈 LONG FUTURES DE {pretty_name}'
                     )
                     # Fallback si el símbolo no tenía nombre mapeado
-                    msg = msg.replace('🟢 COMPRA SPOT DE', '📈 LONG FUTURES DE')
+                    msg = msg.replace(
+                        '🟢 COMPRA SPOT DE',
+                        '📈 LONG FUTURES DE'
+                    )
+
+                    # También normalizar mensajes fallback.
+                    msg = msg.replace(
+                        'Recomendación: COMPRA_SPOT',
+                        'Recomendación: LONG'
+                    )
+
+                    msg = msg.replace(
+                        'Recomendación: COMPRA SPOT',
+                        'Recomendación: LONG'
+                    )
+
                     # Recomendaciones incorrectas: eliminar todas las variantes spot
                     # y reemplazar por una recomendación futures apropiada
                     for wrong in (
@@ -1808,7 +1823,21 @@ class FuturesAnalysis(TradingExpertSystem):
                         f'🔴 VENTA SPOT DE {pretty_name}',
                         f'📉 SHORT FUTURES DE {pretty_name}'
                     )
-                    msg = msg.replace('🔴 VENTA SPOT DE', '📉 SHORT FUTURES DE')
+                    msg = msg.replace(
+                        '🔴 VENTA SPOT DE',
+                        '📉 SHORT FUTURES DE'
+                    )
+
+                    msg = msg.replace(
+                        'Recomendación: VENTA_SPOT',
+                        'Recomendación: SHORT'
+                    )
+
+                    msg = msg.replace(
+                        'Recomendación: VENTA SPOT',
+                        'Recomendación: SHORT'
+                    )
+
                     for wrong in (
                         'Se aconseja VENTA del ratio PAXG/BTC.',
                         'Se recomienda VENTA SPOT de BTC/USDT.',
