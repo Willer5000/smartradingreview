@@ -7675,6 +7675,50 @@ function getIntervalName(interval) {
     return names[interval] || interval;
 }
 // ============ FUNCIONES DE UI ============
+// ============================================================================
+// FORMATO SEGURO DE NIVELES DE TRADING
+// ============================================================================
+
+function formatTradingLevel(
+    value,
+    symbol
+) {
+    const numeric =
+        Number(value);
+
+    if (
+        !Number.isFinite(numeric)
+        || numeric <= 0
+    ) {
+        return 'NO DISPONIBLE';
+    }
+
+    const decimals =
+        symbol === 'PAXG-BTC'
+            ? 6
+            : 2;
+
+    return '$'
+        + numeric.toFixed(
+            decimals
+        );
+}
+
+
+function formatTradingRR(value) {
+    const numeric =
+        Number(value);
+
+    if (
+        !Number.isFinite(numeric)
+        || numeric <= 0
+    ) {
+        return 'NO DISPONIBLE';
+    }
+
+    return '1:'
+        + numeric.toFixed(1);
+}
 // ============ ACTUALIZAR RECOMENDACIÓN ============
 window.updateRecommendation = function(data) {
     const container = document.getElementById('system-recommendation');
@@ -7725,13 +7769,13 @@ window.updateRecommendation = function(data) {
     if (action === 'COMPRA_SPOT' || action === 'VENTA_SPOT' || action === 'LONG' || action === 'SHORT') {
         html += `
             <div class="row mt-3">
-                <div class="col-md-4"><div class="border-start border-3 border-primary ps-3"><small class="text-muted d-block">ENTRADA</small><strong class="h5">$${data.levels?.entry?.toFixed(2) || '0.00'}</strong></div></div>
-                <div class="col-md-4"><div class="border-start border-3 border-danger ps-3"><small class="text-muted d-block">STOP LOSS</small><strong class="h5">$${data.levels?.stop_loss?.toFixed(2) || '0.00'}</strong></div></div>
-                <div class="col-md-4"><div class="border-start border-3 border-success ps-3"><small class="text-muted d-block">TAKE PROFIT</small><strong class="h5">$${data.levels?.take_profit?.toFixed(2) || '0.00'}</strong></div></div>
+                <div class="col-md-4"><div class="border-start border-3 border-primary ps-3"><small class="text-muted d-block">ENTRADA</small><strong class="h5">${formatTradingLevel(data.levels?.entry, data.symbol)}</strong></div></div>
+                <div class="col-md-4"><div class="border-start border-3 border-danger ps-3"><small class="text-muted d-block">STOP LOSS</small><strong class="h5">${formatTradingLevel(data.levels?.stop_loss, data.symbol)}</strong></div></div>
+                <div class="col-md-4"><div class="border-start border-3 border-success ps-3"><small class="text-muted d-block">TAKE PROFIT</small><strong class="h5">${formatTradingLevel(data.levels?.take_profit, data.symbol)}</strong></div></div>
             </div>
             <div class="mt-3 pt-3 border-top border-secondary">
                 <div class="row">
-                    <div class="col-6"><small class="text-muted">Riesgo/Recompensa:</small><strong> 1:${data.levels?.risk_reward?.toFixed(1) || '0.0'}</strong></div>
+                    <div class="col-6"><small class="text-muted">Riesgo/Recompensa:</small><strong> ${formatTradingRR(data.levels?.risk_reward)}</strong></div>
                     <div class="col-6"><small class="text-muted">Apalancamiento:</small><strong> ${data.levels?.leverage || 1}x</strong></div>
                 </div>
             </div>
@@ -7827,9 +7871,29 @@ function updateInstantRecommendation(data) {
     if (actionEl) actionEl.textContent = action.replace('_', ' ');
     if (symbolEl) symbolEl.textContent = data.symbol?.replace('-', '/') || 'BTC/USDT';
     if (confidenceEl) confidenceEl.textContent = `Confianza: ${fmtConfidence(confidence)}%`;
-    if (entryEl) entryEl.textContent = `$${data.levels?.entry?.toFixed(2) || '0.00'}`;
-    if (slEl) slEl.textContent = `$${data.levels?.stop_loss?.toFixed(2) || '0.00'}`;
-    if (tpEl) tpEl.textContent = `$${data.levels?.take_profit?.toFixed(2) || '0.00'}`;
+    if (entryEl) {
+        entryEl.textContent =
+            formatTradingLevel(
+                data.levels?.entry,
+                data.symbol
+            );
+    }
+
+    if (slEl) {
+        slEl.textContent =
+            formatTradingLevel(
+                data.levels?.stop_loss,
+                data.symbol
+            );
+    }
+
+    if (tpEl) {
+        tpEl.textContent =
+            formatTradingLevel(
+                data.levels?.take_profit,
+                data.symbol
+            );
+    }
     if (leverageEl) leverageEl.textContent = `${data.levels?.leverage || 1}x`;
     if (timeframeEl) timeframeEl.textContent = getIntervalName(data.timeframe || '1D');
     if (
