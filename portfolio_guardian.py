@@ -11,7 +11,7 @@ import logging
 import threading
 import time
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger('TGP')
 
@@ -89,7 +89,21 @@ class PortfolioGuardian:
     # Después de 24 horas la memoria se considera vieja y se
     # permite que el análisis multitemporal vuelva a decidir desde cero.
     ROTATION_MEMORY_MAX_MINUTES = 1440
-    
+    # ========================================================================
+    # FASE 7F.3 — PERSISTENCIA DE MEMORIA
+    # ========================================================================
+
+    # Si Supabase falla al guardar, no volver a intentar en
+    # cada request. Máximo un intento cada 15 minutos.
+    ROTATION_PERSIST_RETRY_MINUTES = 15
+
+    # Una memoria persistida sólo se invalida automáticamente
+    # si el portfolio REAL se mueve de forma muy clara en
+    # dirección contraria.
+    #
+    # No usamos una tolerancia pequeña porque 7F.2 trabaja
+    # precisamente mediante movimientos progresivos.
+    ROTATION_MEMORY_CONTRADICTION_MARGIN = 0.15    
     # ========================================================================
     # FASE 7F.2 — RETORNO GRADUAL A BTC
     # ========================================================================
@@ -172,7 +186,20 @@ class PortfolioGuardian:
         self._rotation_guard_lock = (
             threading.RLock()
         )
+        # ==============================================================
+        # FASE 7F.3
+        # ==============================================================
+        #
+        # Sirve para garantizar:
+        #
+        #     una sola lectura Supabase
+        #
+        # por usuario y por proceso de Render.
+        #
+        # Después todo vuelve a funcionar desde RAM.
+        # ==============================================================
 
+        self._rotation_state_loaded_users = set()
     # ========================================================================
     # ANÁLISIS PRINCIPAL
     # ========================================================================
@@ -1037,6 +1064,679 @@ class PortfolioGuardian:
 
         return None
 
+     def _parse_rotation_datetime(
+        self,
+        value
+    ):
+        """
+        Convierte timestamp Supabase/ISO a UTC aware datetime.
+        """
+
+        if not value:
+            return None
+
+        try:
+
+            text = str(
+                value
+            ).strip()
+
+            if text.endswith(
+                'Z'
+            ):
+
+                text = (
+                    text[:-1]
+                    + '+00:00'
+                )
+
+            parsed = (
+                datetime.fromisoformat(
+                    text
+                )
+            )
+
+            if parsed.tzinfo is None:
+
+                parsed = (
+                    parsed.replace(
+                        tzinfo=timezone.utc
+                    )
+                )
+
+            else:
+
+                parsed = (
+                    parsed.astimezone(
+                        timezone.utc
+                    )
+                )
+
+            return parsed
+
+        except Exception:
+
+            return None
+
+
+    def _rotation_memory_contradicts_portfolio(
+        self,
+        direction,
+        pct_btc,
+        pct_paxg,
+        pct_usdt
+    ):
+        """
+        Decide si una memoria persistida contradice de forma
+        MUY CLARA el portfolio real actual.
+
+        No se invalida por pequeñas diferencias.
+
+        Ejemplo válido:
+            memoria PAXG
+            BTC 52%
+            PAXG 30%
+
+        puede representar una rotación gradual.
+
+        Ejemplo contradictorio:
+            memoria PAXG
+            BTC 70%
+            PAXG 10%
+
+        tras una actualización posterior del portfolio.
+        """
+
+        direction = str(
+            direction
+            or ''
+        ).upper()
+
+        try:
+
+            pct_btc = float(
+                pct_btc
+                or 0
+            )
+
+            pct_paxg = float(
+                pct_paxg
+                or 0
+            )
+
+            pct_usdt = float(
+                pct_usdt
+                or 0
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+
+            return False
+
+        # Portfolio prácticamente en efectivo:
+        # la vieja tesis BTC/PAXG ya no debe gobernarlo.
+        if pct_usdt >= 0.80:
+            return True
+
+        margin = (
+            self
+            .ROTATION_MEMORY_CONTRADICTION_MARGIN
+        )
+
+        # ==============================================================
+        # MEMORIA = PAXG
+        # ==============================================================
+
+        if direction == 'PAXG':
+
+            btc_clearly_dominant = (
+                pct_btc
+                >=
+                self.TARGET_PCTS[
+                    'BTC'
+                ]
+                + margin
+            )
+
+            paxg_clearly_low = (
+                pct_paxg
+                <=
+                max(
+                    0.0,
+                    self.TARGET_PCTS[
+                        'PAXG'
+                    ]
+                    - margin
+                )
+            )
+
+            return bool(
+                btc_clearly_dominant
+                and
+                paxg_clearly_low
+            )
+
+        # ==============================================================
+        # MEMORIA = BTC
+        # ==============================================================
+
+        if direction == 'BTC':
+
+            paxg_clearly_dominant = (
+                pct_paxg
+                >=
+                self.TARGET_PCTS[
+                    'PAXG'
+                ]
+                + margin
+            )
+
+            btc_clearly_low = (
+                pct_btc
+                <=
+                max(
+                    0.0,
+                    self.TARGET_PCTS[
+                        'BTC'
+                    ]
+                    - margin
+                )
+            )
+
+            return bool(
+                paxg_clearly_dominant
+                and
+                btc_clearly_low
+            )
+
+        return True
+
+
+    def _ensure_rotation_state_loaded(
+        self,
+        user,
+        portfolio,
+        pct_btc,
+        pct_paxg,
+        pct_usdt
+    ):
+        """
+        FASE 7F.3
+
+        Recupera la memoria persistida UNA SOLA VEZ por usuario
+        después de iniciar el proceso.
+
+        La memoria persistida nunca tiene autoridad absoluta.
+
+        Se descarta cuando:
+
+            - dirección inválida;
+            - timestamp inválido;
+            - tiene más de 24 horas;
+            - el usuario actualizó posteriormente su portfolio
+              y la composición real contradice claramente la memoria.
+
+        Si Supabase falla:
+            continúa sin memoria.
+        """
+
+        user_key = str(
+            user
+            or 'anonymous'
+        )
+
+        # ==============================================================
+        # ¿YA SE INTENTÓ CARGAR?
+        # ==============================================================
+
+        with self._rotation_guard_lock:
+
+            if (
+                user_key
+                in self._rotation_state_loaded_users
+            ):
+
+                return
+
+            # Marcamos antes de la llamada de red para no provocar
+            # múltiples lecturas paralelas para el mismo usuario.
+            self._rotation_state_loaded_users.add(
+                user_key
+            )
+
+            # Si por algún motivo ya existe una memoria RAM,
+            # siempre tiene prioridad.
+            existing = (
+                self._rotation_guard_state
+                .get(
+                    user_key
+                )
+            )
+
+            if isinstance(
+                existing,
+                dict
+            ):
+
+                return
+
+        try:
+
+            # Import diferido:
+            # evita acoplar la inicialización del Guardian
+            # con la inicialización de Supabase.
+            from supabase_client import (
+                supabase_db
+            )
+
+            persisted = (
+                supabase_db
+                .get_user_rotation_state(
+                    user_key
+                )
+            )
+
+        except Exception as e:
+
+            logger.debug(
+                "7F.3 memoria persistente no disponible: "
+                f"{e}"
+            )
+
+            return
+
+        if not isinstance(
+            persisted,
+            dict
+        ):
+
+            return
+
+        direction = str(
+            persisted.get(
+                'direction',
+                ''
+            )
+            or ''
+        ).upper()
+
+        if direction not in (
+            'BTC',
+            'PAXG'
+        ):
+
+            return
+
+        started_dt = (
+            self._parse_rotation_datetime(
+                persisted.get(
+                    'started_at'
+                )
+            )
+        )
+
+        if started_dt is None:
+
+            # Estado incompleto:
+            # limpiar best-effort.
+            try:
+
+                supabase_db.update_user_rotation_state(
+                    user_key,
+                    direction=None
+                )
+
+            except Exception:
+
+                pass
+
+            return
+
+        now_utc = (
+            datetime.now(
+                timezone.utc
+            )
+        )
+
+        age_seconds = max(
+            0.0,
+            (
+                now_utc
+                - started_dt
+            ).total_seconds()
+        )
+
+        age_minutes = (
+            age_seconds
+            / 60.0
+        )
+
+        # ==============================================================
+        # MEMORIA DEMASIADO ANTIGUA
+        # ==============================================================
+
+        if (
+            age_minutes
+            >= self.ROTATION_MEMORY_MAX_MINUTES
+        ):
+
+            try:
+
+                supabase_db.update_user_rotation_state(
+                    user_key,
+                    direction=None
+                )
+
+            except Exception:
+
+                pass
+
+            return
+
+        # ==============================================================
+        # VALIDAR CONTRA PORTFOLIO REAL
+        # ==============================================================
+        #
+        # IMPORTANTE:
+        # sólo invalidamos por contradicción si el portfolio fue
+        # actualizado DESPUÉS de que nació esta memoria.
+        #
+        # Esto evita invalidar una recomendación recién generada
+        # simplemente porque el usuario todavía no la ejecutó.
+        # ==============================================================
+
+        portfolio_updated_dt = (
+            self._parse_rotation_datetime(
+                (
+                    portfolio
+                    or {}
+                ).get(
+                    'updated_at'
+                )
+            )
+        )
+
+        portfolio_changed_after = bool(
+            portfolio_updated_dt
+            is not None
+            and
+            portfolio_updated_dt
+            > started_dt
+        )
+
+        contradiction = (
+            self
+            ._rotation_memory_contradicts_portfolio(
+                direction,
+                pct_btc,
+                pct_paxg,
+                pct_usdt
+            )
+        )
+
+        if (
+            portfolio_changed_after
+            and
+            contradiction
+        ):
+
+            logger.info(
+                "🧹 7F.3: memoria TGP descartada "
+                f"para {user_key}. "
+                f"Dirección persistida={direction}, "
+                "pero el portfolio real actualizado "
+                "la contradice claramente."
+            )
+
+            try:
+
+                supabase_db.update_user_rotation_state(
+                    user_key,
+                    direction=None
+                )
+
+            except Exception:
+
+                pass
+
+            return
+
+        # ==============================================================
+        # RECONSTRUIR time.monotonic()
+        # ==============================================================
+        #
+        # Nunca persistimos el valor monotonic porque sólo tiene
+        # significado dentro de un proceso.
+        #
+        # Reconstruimos:
+        #
+        #     monotonic actual - edad real
+        #
+        # ==============================================================
+
+        monotonic_started = (
+            time.monotonic()
+            - age_seconds
+        )
+
+        with self._rotation_guard_lock:
+
+            # No pisar un estado que otro request haya creado
+            # mientras consultábamos Supabase.
+            if not isinstance(
+                self._rotation_guard_state.get(
+                    user_key
+                ),
+                dict
+            ):
+
+                self._rotation_guard_state[
+                    user_key
+                ] = {
+                    'direction':
+                        direction,
+
+                    'started_at':
+                        monotonic_started,
+
+                    'started_at_utc':
+                        started_dt.isoformat(),
+
+                    'dirty':
+                        False,
+
+                    'last_persist_attempt_at':
+                        0.0,
+
+                    'source':
+                        'SUPABASE'
+                }
+
+        logger.info(
+            "♻️ 7F.3 memoria TGP restaurada: "
+            f"{user_key} → {direction} "
+            f"({age_minutes:.0f} min)"
+        )
+
+
+    def _persist_rotation_state_if_dirty(
+        self,
+        user
+    ):
+        """
+        Guarda únicamente estados nuevos/cambiados.
+
+        No escribe en cada refresh.
+
+        Si falla Supabase:
+            conserva memoria RAM
+            y limita reintentos a uno cada 15 minutos.
+        """
+
+        user_key = str(
+            user
+            or 'anonymous'
+        )
+
+        now_mono = (
+            time.monotonic()
+        )
+
+        with self._rotation_guard_lock:
+
+            state = (
+                self._rotation_guard_state
+                .get(
+                    user_key
+                )
+            )
+
+            if not isinstance(
+                state,
+                dict
+            ):
+
+                return False
+
+            if not bool(
+                state.get(
+                    'dirty',
+                    False
+                )
+            ):
+
+                return False
+
+            last_attempt = float(
+                state.get(
+                    'last_persist_attempt_at',
+                    0
+                )
+                or 0
+            )
+
+            retry_seconds = (
+                self
+                .ROTATION_PERSIST_RETRY_MINUTES
+                * 60
+            )
+
+            if (
+                last_attempt > 0
+                and
+                now_mono
+                - last_attempt
+                < retry_seconds
+            ):
+
+                return False
+
+            direction = str(
+                state.get(
+                    'direction',
+                    ''
+                )
+                or ''
+            ).upper()
+
+            started_at_utc = (
+                state.get(
+                    'started_at_utc'
+                )
+            )
+
+            state[
+                'last_persist_attempt_at'
+            ] = now_mono
+
+        if direction not in (
+            'BTC',
+            'PAXG'
+        ):
+
+            return False
+
+        if not started_at_utc:
+            return False
+
+        try:
+
+            from supabase_client import (
+                supabase_db
+            )
+
+            saved = (
+                supabase_db
+                .update_user_rotation_state(
+                    user_name=user_key,
+                    direction=direction,
+                    started_at=started_at_utc
+                )
+            )
+
+        except Exception as e:
+
+            logger.debug(
+                "7F.3 persistencia TGP: "
+                f"{e}"
+            )
+
+            return False
+
+        if not saved:
+            return False
+
+        # ==============================================================
+        # MARCAR LIMPIO
+        # ==============================================================
+        #
+        # Sólo si sigue siendo exactamente el mismo estado.
+        #
+        # Si otra petición cambió dirección mientras escribíamos,
+        # el nuevo estado permanece dirty.
+        # ==============================================================
+
+        with self._rotation_guard_lock:
+
+            current = (
+                self._rotation_guard_state
+                .get(
+                    user_key
+                )
+            )
+
+            if (
+                isinstance(
+                    current,
+                    dict
+                )
+                and
+                str(
+                    current.get(
+                        'direction',
+                        ''
+                    )
+                ).upper()
+                == direction
+                and
+                current.get(
+                    'started_at_utc'
+                )
+                == started_at_utc
+            ):
+
+                current[
+                    'dirty'
+                ] = False
+
+                current[
+                    'source'
+                ] = 'RAM+SUPABASE'
+
+        return True   
 
     def _apply_rotation_anti_whipsaw(
         self,
@@ -1125,6 +1825,13 @@ class PortfolioGuardian:
 
         now = time.monotonic()
 
+        now_utc_iso = (
+            datetime.now(
+                timezone.utc
+            )
+            .isoformat()
+        )
+
         user_key = str(
             user
             or 'anonymous'
@@ -1187,7 +1894,21 @@ class PortfolioGuardian:
                         direction,
 
                     'started_at':
-                        now
+                        now,
+
+                    'started_at_utc':
+                        now_utc_iso,
+
+                    # 7F.3:
+                    # sólo los cambios nuevos deben escribirse.
+                    'dirty':
+                        True,
+
+                    'last_persist_attempt_at':
+                        0.0,
+
+                    'source':
+                        'RAM'
                 }
 
                 base_result[
@@ -1245,7 +1966,19 @@ class PortfolioGuardian:
                         direction,
 
                     'started_at':
-                        now
+                        now,
+
+                    'started_at_utc':
+                        now_utc_iso,
+
+                    'dirty':
+                        True,
+
+                    'last_persist_attempt_at':
+                        0.0,
+
+                    'source':
+                        'RAM'
                 }
 
                 return base_result
@@ -1417,7 +2150,19 @@ class PortfolioGuardian:
                     direction,
 
                 'started_at':
-                    now
+                    now,
+
+                'started_at_utc':
+                    now_utc_iso,
+
+                'dirty':
+                    True,
+
+                'last_persist_attempt_at':
+                    0.0,
+
+                'source':
+                    'RAM'
             }
 
             base_result[
@@ -2357,7 +3102,25 @@ class PortfolioGuardian:
                     0
                 )
             )
-    
+
+            # ==============================================================
+            # FASE 7F.3 — RESTAURAR MEMORIA DESPUÉS DE REINICIO
+            # ==============================================================
+            #
+            # UNA sola lectura por usuario/proceso.
+            #
+            # Si no existe memoria o Supabase falla:
+            # el TGP continúa exactamente como antes.
+            # ==============================================================
+
+            self._ensure_rotation_state_loaded(
+                user=user,
+                portfolio=portfolio,
+                pct_btc=pct_btc,
+                pct_paxg=pct_paxg,
+                pct_usdt=pct_usdt
+            )
+            
             btc_available = float(
                 portfolio.get(
                     'BTC',
@@ -3028,7 +3791,23 @@ class PortfolioGuardian:
                     best_tf_data=best_tf_data
                 )
             )
+            # ==============================================================
+            # FASE 7F.3 — PERSISTENCIA BEST-EFFORT
+            # ==============================================================
+            #
+            # Si el estado no cambió:
+            #     0 escrituras.
+            #
+            # Si cambió:
+            #     1 UPDATE pequeño.
+            #
+            # Si Supabase falla:
+            #     memoria RAM continúa funcionando.
+            # ==============================================================
 
+            self._persist_rotation_state_if_dirty(
+                user
+            )
             if not rotation_guard.get(
                 'allowed',
                 True
