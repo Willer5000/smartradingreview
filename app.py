@@ -12906,9 +12906,20 @@ class TradingExpertSystem:
                     / sl_distance_pct
                 )
     
-                # Nunca aceptar TP con RR por debajo de 1.8.
+                # ==========================================================
+                # RR BAJO: NO DESCARTAR EL OBJETIVO TÉCNICO
+                # ==========================================================
+                #
+                # Un RR < 1.8 no significa que el TP sea inexistente.
+                # Significa que la configuración puede ser técnicamente
+                # válida pero no suficientemente atractiva para ejecución.
+                #
+                # El nivel debe conservarse para ANALYSIS_ONLY.
+                # La decisión de ejecución se toma posteriormente.
+                # ==========================================================
+
                 if rr < 1.8:
-                    return -1
+                    score -= 35
     
             # ==========================================================
             # DISTANCE SCORE
@@ -14435,8 +14446,76 @@ class TradingExpertSystem:
                 liquidation=liquidation
             )
             if tp_price is None:
-                print(f"   ⚠️ RECHAZADO: {tp_source}")
-                return self._build_rejected_levels(current_price, symbol, tp_source)
+                print(
+                    f"   ⚠️ SIN TP ESTRUCTURAL VÁLIDO: "
+                    f"{tp_source}"
+                )
+
+                return {
+                    'entry':
+                        self._round_price(
+                            entry,
+                            symbol
+                        ),
+
+                    'stop_loss':
+                        self._round_price(
+                            sl_price,
+                            symbol
+                        ),
+
+                    'take_profit':
+                        None,
+
+                    'leverage':
+                        int(leverage),
+
+                    'risk_reward':
+                        0,
+
+                    'suggested_size':
+                        0,
+
+                    'tp_source':
+                        tp_source,
+
+                    'sl_source':
+                        sl_source,
+
+                    'tp_probability':
+                        0,
+
+                    'tp_quality_score':
+                        0,
+
+                    'tp_quality_label':
+                        'NO DISPONIBLE',
+
+                    'sl_reliability':
+                        round(
+                            sl_score / 100,
+                            2
+                        ),
+
+                    'min_tp_distance_pct':
+                        self._calculate_min_tp_distance_pct(
+                            timeframe,
+                            leverage,
+                            is_futures
+                        ),
+
+                    'rejected_reason':
+                        tp_source,
+
+                    'is_rejected':
+                        True,
+
+                    'is_executable':
+                        False,
+
+                    'publication_status':
+                        'ANALYSIS_ONLY'
+                }
             
             # ============ CALCULAR R/R ============
             reward = abs(tp_price - entry)
@@ -14444,10 +14523,28 @@ class TradingExpertSystem:
             rr = reward / risk if risk > 0 else 0
             
             # v23: umbral R/R subido de 1.5 a 1.8 (coherente con A2)
+            # ==========================================================
+            # RR / ESTADO DE EJECUCIÓN
+            # ==========================================================
+            #
+            # El RR mínimo operativo sigue siendo 1.8.
+            #
+            # PERO:
+            # RR < 1.8 NO destruye Entry / SL / TP.
+            #
+            # La configuración queda disponible como ANALYSIS_ONLY.
+            # ==========================================================
+
+            non_executable_reason = None
+
             if rr < 1.8:
-                print(f"   ⚠️ RECHAZADO: R/R muy bajo ({rr:.2f} < 1.8)")
-                return self._build_rejected_levels(
-                    current_price, symbol, f"R/R desfavorable {rr:.2f} < 1.8"
+                non_executable_reason = (
+                    f"R/R desfavorable {rr:.2f} < 1.8"
+                )
+
+                print(
+                    f"   ⚠️ ANALYSIS_ONLY: "
+                    f"R/R {rr:.2f} < 1.8"
                 )
             
             # ============ AJUSTAR APALANCAMIENTO POR VOLATILIDAD ============
@@ -14466,31 +14563,95 @@ class TradingExpertSystem:
             
             # ============ CONSTRUIR RESPUESTA ============
             levels = {
-                'entry': self._round_price(entry, symbol),
-                'stop_loss': self._round_price(sl_price, symbol),
-                'take_profit': self._round_price(tp_price, symbol),
-                'leverage': int(leverage),
-                'risk_reward': round(rr, 2),
-                'suggested_size': round(suggested_size, 2),
-                'tp_source': tp_source,
-                'sl_source': sl_source,
-                'tp_probability': round(tp_score / 100, 2),
-                'tp_quality_score': round(
-                    tp_score,
-                    1
-                ),
-                'tp_quality_label': (
-                    'PREMIUM'
-                    if tp_score >= 80
-                    else 'ALTA'
-                    if tp_score >= 70
-                    else 'MEDIA'
-                    if tp_score >= 55
-                    else 'BAJA'
-                ),
-                'sl_reliability': round(sl_score / 100, 2),
-                'min_tp_distance_pct': self._calculate_min_tp_distance_pct(timeframe, leverage, is_futures),
-                'rejected_reason': None
+                'entry':
+                    self._round_price(
+                        entry,
+                        symbol
+                    ),
+
+                'stop_loss':
+                    self._round_price(
+                        sl_price,
+                        symbol
+                    ),
+
+                'take_profit':
+                    self._round_price(
+                        tp_price,
+                        symbol
+                    ),
+
+                'leverage':
+                    int(leverage),
+
+                'risk_reward':
+                    round(rr, 2),
+
+                'suggested_size':
+                    round(
+                        suggested_size,
+                        2
+                    ),
+
+                'tp_source':
+                    tp_source,
+
+                'sl_source':
+                    sl_source,
+
+                'tp_probability':
+                    round(
+                        tp_score / 100,
+                        2
+                    ),
+
+                'tp_quality_score':
+                    round(
+                        tp_score,
+                        1
+                    ),
+
+                'tp_quality_label':
+                    (
+                        'PREMIUM'
+                        if tp_score >= 80
+                        else 'ALTA'
+                        if tp_score >= 70
+                        else 'MEDIA'
+                        if tp_score >= 55
+                        else 'BAJA'
+                    ),
+
+                'sl_reliability':
+                    round(
+                        sl_score / 100,
+                        2
+                    ),
+
+                'min_tp_distance_pct':
+                    self._calculate_min_tp_distance_pct(
+                        timeframe,
+                        leverage,
+                        is_futures
+                    ),
+
+                'rejected_reason':
+                    non_executable_reason,
+
+                'is_rejected':
+                    bool(
+                        non_executable_reason
+                    ),
+
+                'is_executable':
+                    non_executable_reason is None,
+
+                'publication_status':
+                    (
+                        'EXECUTABLE_SIGNAL'
+                        if non_executable_reason is None
+                        else 'ANALYSIS_ONLY'
+                    )
             }
             
             print(
