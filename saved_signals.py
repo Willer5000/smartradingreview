@@ -73,7 +73,394 @@ def _check_entry_touched(entry: float, high: float, low: float,
     tol = entry * (tolerance_pct / 100.0)
     return (low - tol) <= entry <= (high + tol)
 
+def _calculate_open_excursions(
+    signal: Dict,
+    df_after,
+    start_ts
+) -> Optional[Dict]:
+    """
+    FASE 7D.2
 
+    Calcula MFE / MAE de una señal guardada que ya tocó Entry.
+
+    IMPORTANTE:
+    - No modifica Entry.
+    - No modifica SL.
+    - No modifica TP.
+    - No modifica leverage.
+    - No decide cerrar.
+    - No hace llamadas de mercado.
+    - Reutiliza las velas que evaluate_saved_signals() ya descargó.
+
+    Sólo conserva nuevos extremos.
+    """
+
+    try:
+        import pandas as pd
+
+        action = str(
+            signal.get(
+                'action',
+                ''
+            )
+            or ''
+        ).upper()
+
+        entry = float(
+            signal.get(
+                'entry',
+                0
+            )
+            or 0
+        )
+
+        sl = float(
+            signal.get(
+                'stop_loss',
+                0
+            )
+            or 0
+        )
+
+        if (
+            action not in (
+                'LONG',
+                'SHORT'
+            )
+            or entry <= 0
+            or sl <= 0
+        ):
+            return None
+
+        risk_abs = abs(
+            entry - sl
+        )
+
+        if risk_abs <= 0:
+            return None
+
+        # ==============================================================
+        # EXTREMOS YA GUARDADOS
+        # ==============================================================
+
+        old_mfe = float(
+            signal.get(
+                'mfe_price',
+                0
+            )
+            or 0
+        )
+
+        old_mae = float(
+            signal.get(
+                'mae_price',
+                0
+            )
+            or 0
+        )
+
+        old_candles_mfe = int(
+            signal.get(
+                'candles_to_mfe',
+                0
+            )
+            or 0
+        )
+
+        old_candles_mae = int(
+            signal.get(
+                'candles_to_mae',
+                0
+            )
+            or 0
+        )
+
+        # ==============================================================
+        # VALORES INICIALES
+        # ==============================================================
+
+        if action == 'LONG':
+
+            mfe_price = (
+                max(
+                    entry,
+                    old_mfe
+                )
+                if old_mfe > 0
+                else entry
+            )
+
+            mae_price = (
+                min(
+                    entry,
+                    old_mae
+                )
+                if old_mae > 0
+                else entry
+            )
+
+        else:
+
+            mfe_price = (
+                min(
+                    entry,
+                    old_mfe
+                )
+                if old_mfe > 0
+                else entry
+            )
+
+            mae_price = (
+                max(
+                    entry,
+                    old_mae
+                )
+                if old_mae > 0
+                else entry
+            )
+
+        candles_to_mfe = (
+            old_candles_mfe
+        )
+
+        candles_to_mae = (
+            old_candles_mae
+        )
+
+        observed_candles = 0
+
+        # ==============================================================
+        # RECORRER VELAS
+        # ==============================================================
+
+        for _, row in df_after.iterrows():
+
+            try:
+                row_ts = pd.Timestamp(
+                    row['time']
+                )
+
+                if row_ts.tz is None:
+                    row_ts = (
+                        row_ts.tz_localize(
+                            'UTC'
+                        )
+                    )
+                else:
+                    row_ts = (
+                        row_ts.tz_convert(
+                            'UTC'
+                        )
+                    )
+
+            except Exception:
+                row_ts = None
+
+            # No contar velas anteriores a Entry.
+            if (
+                start_ts is not None
+                and row_ts is not None
+                and row_ts < start_ts
+            ):
+                continue
+
+            try:
+                high = float(
+                    row['high']
+                )
+
+                low = float(
+                    row['low']
+                )
+
+            except (
+                TypeError,
+                ValueError,
+                KeyError
+            ):
+                continue
+
+            if (
+                high <= 0
+                or low <= 0
+            ):
+                continue
+
+            observed_candles += 1
+
+            # ==========================================================
+            # LONG
+            # ==========================================================
+
+            if action == 'LONG':
+
+                if high > mfe_price:
+
+                    mfe_price = high
+
+                    candles_to_mfe = (
+                        observed_candles
+                    )
+
+                if low < mae_price:
+
+                    mae_price = low
+
+                    candles_to_mae = (
+                        observed_candles
+                    )
+
+            # ==========================================================
+            # SHORT
+            # ==========================================================
+
+            else:
+
+                if low < mfe_price:
+
+                    mfe_price = low
+
+                    candles_to_mfe = (
+                        observed_candles
+                    )
+
+                if high > mae_price:
+
+                    mae_price = high
+
+                    candles_to_mae = (
+                        observed_candles
+                    )
+
+        # ==============================================================
+        # CONVERTIR A % Y R
+        # ==============================================================
+
+        if action == 'LONG':
+
+            favorable_abs = max(
+                0.0,
+                mfe_price - entry
+            )
+
+            adverse_abs = max(
+                0.0,
+                entry - mae_price
+            )
+
+        else:
+
+            favorable_abs = max(
+                0.0,
+                entry - mfe_price
+            )
+
+            adverse_abs = max(
+                0.0,
+                mae_price - entry
+            )
+
+        mfe_pct = (
+            favorable_abs
+            / entry
+            * 100
+        )
+
+        mae_pct = (
+            adverse_abs
+            / entry
+            * 100
+        )
+
+        mfe_r = (
+            favorable_abs
+            / risk_abs
+        )
+
+        mae_r = (
+            adverse_abs
+            / risk_abs
+        )
+
+        # ==============================================================
+        # ¿REALMENTE CAMBIÓ ALGÚN EXTREMO?
+        # ==============================================================
+
+        epsilon = 1e-12
+
+        if action == 'LONG':
+
+            changed = (
+                old_mfe <= 0
+                or old_mae <= 0
+                or mfe_price
+                > old_mfe + epsilon
+                or mae_price
+                < old_mae - epsilon
+            )
+
+        else:
+
+            changed = (
+                old_mfe <= 0
+                or old_mae <= 0
+                or mfe_price
+                < old_mfe - epsilon
+                or mae_price
+                > old_mae + epsilon
+            )
+
+        return {
+            'mfe_price': round(
+                float(mfe_price),
+                8
+            ),
+
+            'mae_price': round(
+                float(mae_price),
+                8
+            ),
+
+            'mfe_pct': round(
+                float(mfe_pct),
+                4
+            ),
+
+            'mae_pct': round(
+                float(mae_pct),
+                4
+            ),
+
+            'mfe_r': round(
+                float(mfe_r),
+                4
+            ),
+
+            'mae_r': round(
+                float(mae_r),
+                4
+            ),
+
+            'candles_to_mfe': int(
+                candles_to_mfe
+            ),
+
+            'candles_to_mae': int(
+                candles_to_mae
+            ),
+
+            '_changed': bool(
+                changed
+            )
+        }
+
+    except Exception as e:
+
+        logger.warning(
+            f"_calculate_open_excursions: {e}"
+        )
+
+        return None
 # ============================================================================
 # CRUD
 # ============================================================================
@@ -474,91 +861,501 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                     # No hay velas nuevas aún
                     continue
                 
-                # 1. Verificar si tocó entry (si aún no está tocado)
+                # ============================================================
+                # 1. DETERMINAR DESDE CUÁNDO EXISTE REALMENTE LA POSICIÓN
+                # ============================================================
+
+                excursion_start_ts = None
+
+                if already_touched:
+
+                    raw_touch_ts = (
+                        sig.get(
+                            'entry_touched_at'
+                        )
+                        or ts_source
+                    )
+
+                    try:
+                        excursion_start_ts = (
+                            pd.Timestamp(
+                                raw_touch_ts
+                            )
+                        )
+
+                        if (
+                            excursion_start_ts.tz
+                            is None
+                        ):
+                            excursion_start_ts = (
+                                excursion_start_ts
+                                .tz_localize(
+                                    'UTC'
+                                )
+                            )
+                        else:
+                            excursion_start_ts = (
+                                excursion_start_ts
+                                .tz_convert(
+                                    'UTC'
+                                )
+                            )
+
+                    except Exception:
+                        excursion_start_ts = (
+                            start_ts
+                        )
+
+                # ============================================================
+                # 2. VERIFICAR ENTRY
+                # ============================================================
+
                 if not already_touched:
+
                     for _, row in df_after.iterrows():
-                        if _check_entry_touched(entry, float(row['high']), float(row['low']), action):
-                            db.client.table('saved_signals').update({
-                                'entry_touched': True,
-                                'entry_touched_at': datetime.utcnow().isoformat(),
-                                'entry_touched_price': entry,
-                                'status': 'entry_touched',
-                                'updated_at': datetime.utcnow().isoformat(),
-                            }).eq('id', sig['id']).execute()
-                            already_touched = True
-                            stats['entry_touched'] += 1
-                            logger.info(f"Entry tocado: {symbol} {tf} {action} @ {entry}")
-                            break
-                
-                # 2. Verificar TP/SL (solo si entry ya se tocó)
+
+                        if not _check_entry_touched(
+                            entry,
+                            float(
+                                row['high']
+                            ),
+                            float(
+                                row['low']
+                            ),
+                            action
+                        ):
+                            continue
+
+                        # ====================================================
+                        # GUARDAR EL TIMESTAMP REAL DE LA VELA
+                        # ====================================================
+
+                        try:
+                            touch_ts = (
+                                pd.Timestamp(
+                                    row['time']
+                                )
+                            )
+
+                            if touch_ts.tz is None:
+                                touch_ts = (
+                                    touch_ts
+                                    .tz_localize(
+                                        'UTC'
+                                    )
+                                )
+                            else:
+                                touch_ts = (
+                                    touch_ts
+                                    .tz_convert(
+                                        'UTC'
+                                    )
+                                )
+
+                        except Exception:
+                            touch_ts = (
+                                pd.Timestamp.now(
+                                    tz='UTC'
+                                )
+                            )
+
+                        touch_iso = (
+                            touch_ts.isoformat()
+                        )
+
+                        db.client.table(
+                            'saved_signals'
+                        ).update({
+                            'entry_touched':
+                                True,
+
+                            'entry_touched_at':
+                                touch_iso,
+
+                            'entry_touched_price':
+                                entry,
+
+                            'status':
+                                'entry_touched',
+
+                            'updated_at':
+                                datetime.utcnow()
+                                .isoformat(),
+                        }).eq(
+                            'id',
+                            sig['id']
+                        ).execute()
+
+                        already_touched = True
+
+                        excursion_start_ts = (
+                            touch_ts
+                        )
+
+                        # Mantener también el snapshot local
+                        # coherente durante esta misma evaluación.
+                        sig[
+                            'entry_touched'
+                        ] = True
+
+                        sig[
+                            'entry_touched_at'
+                        ] = touch_iso
+
+                        stats[
+                            'entry_touched'
+                        ] += 1
+
+                        logger.info(
+                            f"Entry tocado: "
+                            f"{symbol} "
+                            f"{tf} "
+                            f"{action} "
+                            f"@ {entry}"
+                        )
+
+                        break
+
+                # ============================================================
+                # SI TODAVÍA NO HAY ENTRY, NO EXISTE POSICIÓN
+                # ============================================================
+
                 if not already_touched:
                     continue
-                
+
+                if excursion_start_ts is None:
+                    excursion_start_ts = (
+                        start_ts
+                    )
+
+                # ============================================================
+                # 3. TP / SL
+                # ============================================================
+                #
+                # IMPORTANTE:
+                # este bloque conserva exactamente el orden conservador
+                # actual de resolución:
+                #
+                # LONG  → primero SL, después TP
+                # SHORT → primero SL, después TP
+                #
+                # No cambiamos ninguna decisión.
+                # ============================================================
+
+                closed_this_cycle = False
+
                 for _, row in df_after.iterrows():
-                    high = float(row['high'])
-                    low = float(row['low'])
-                    
+
+                    high = float(
+                        row['high']
+                    )
+
+                    low = float(
+                        row['low']
+                    )
+
                     if action == 'LONG':
+
                         # LONG: SL abajo, TP arriba
                         if low <= sl:
-                            # SL golpeado
-                            pnl = _calc_pnl(entry, sl, leverage, investment, action)
-                            db.client.table('saved_signals').update({
-                                'status': 'sl_hit',
-                                'closed_at': datetime.utcnow().isoformat(),
-                                'closed_price': sl,
-                                'pnl_pct': pnl['pct'],
-                                'pnl_usdt': pnl['usdt'],
-                                'close_reason': 'sl_hit',
-                                'updated_at': datetime.utcnow().isoformat(),
-                            }).eq('id', sig['id']).execute()
-                            stats['sl_hit'] += 1
-                            logger.info(f"SL golpeado: {symbol} {tf} LONG @ {sl} ({pnl['pct']:.2f}%)")
+
+                            pnl = _calc_pnl(
+                                entry,
+                                sl,
+                                leverage,
+                                investment,
+                                action
+                            )
+
+                            db.client.table(
+                                'saved_signals'
+                            ).update({
+                                'status':
+                                    'sl_hit',
+
+                                'closed_at':
+                                    datetime.utcnow()
+                                    .isoformat(),
+
+                                'closed_price':
+                                    sl,
+
+                                'pnl_pct':
+                                    pnl['pct'],
+
+                                'pnl_usdt':
+                                    pnl['usdt'],
+
+                                'close_reason':
+                                    'sl_hit',
+
+                                'updated_at':
+                                    datetime.utcnow()
+                                    .isoformat(),
+                            }).eq(
+                                'id',
+                                sig['id']
+                            ).execute()
+
+                            stats[
+                                'sl_hit'
+                            ] += 1
+
+                            closed_this_cycle = (
+                                True
+                            )
+
+                            logger.info(
+                                f"SL golpeado: "
+                                f"{symbol} {tf} "
+                                f"LONG @ {sl} "
+                                f"({pnl['pct']:.2f}%)"
+                            )
+
                             break
+
                         elif high >= tp:
-                            pnl = _calc_pnl(entry, tp, leverage, investment, action)
-                            db.client.table('saved_signals').update({
-                                'status': 'tp_hit',
-                                'closed_at': datetime.utcnow().isoformat(),
-                                'closed_price': tp,
-                                'pnl_pct': pnl['pct'],
-                                'pnl_usdt': pnl['usdt'],
-                                'close_reason': 'tp_hit',
-                                'updated_at': datetime.utcnow().isoformat(),
-                            }).eq('id', sig['id']).execute()
-                            stats['tp_hit'] += 1
-                            logger.info(f"TP golpeado: {symbol} {tf} LONG @ {tp} ({pnl['pct']:+.2f}%)")
+
+                            pnl = _calc_pnl(
+                                entry,
+                                tp,
+                                leverage,
+                                investment,
+                                action
+                            )
+
+                            db.client.table(
+                                'saved_signals'
+                            ).update({
+                                'status':
+                                    'tp_hit',
+
+                                'closed_at':
+                                    datetime.utcnow()
+                                    .isoformat(),
+
+                                'closed_price':
+                                    tp,
+
+                                'pnl_pct':
+                                    pnl['pct'],
+
+                                'pnl_usdt':
+                                    pnl['usdt'],
+
+                                'close_reason':
+                                    'tp_hit',
+
+                                'updated_at':
+                                    datetime.utcnow()
+                                    .isoformat(),
+                            }).eq(
+                                'id',
+                                sig['id']
+                            ).execute()
+
+                            stats[
+                                'tp_hit'
+                            ] += 1
+
+                            closed_this_cycle = (
+                                True
+                            )
+
+                            logger.info(
+                                f"TP golpeado: "
+                                f"{symbol} {tf} "
+                                f"LONG @ {tp} "
+                                f"({pnl['pct']:+.2f}%)"
+                            )
+
                             break
-                    else:  # SHORT
+
+                    else:
+
                         # SHORT: SL arriba, TP abajo
                         if high >= sl:
-                            pnl = _calc_pnl(entry, sl, leverage, investment, action)
-                            db.client.table('saved_signals').update({
-                                'status': 'sl_hit',
-                                'closed_at': datetime.utcnow().isoformat(),
-                                'closed_price': sl,
-                                'pnl_pct': pnl['pct'],
-                                'pnl_usdt': pnl['usdt'],
-                                'close_reason': 'sl_hit',
-                                'updated_at': datetime.utcnow().isoformat(),
-                            }).eq('id', sig['id']).execute()
-                            stats['sl_hit'] += 1
-                            logger.info(f"SL golpeado: {symbol} {tf} SHORT @ {sl} ({pnl['pct']:.2f}%)")
+
+                            pnl = _calc_pnl(
+                                entry,
+                                sl,
+                                leverage,
+                                investment,
+                                action
+                            )
+
+                            db.client.table(
+                                'saved_signals'
+                            ).update({
+                                'status':
+                                    'sl_hit',
+
+                                'closed_at':
+                                    datetime.utcnow()
+                                    .isoformat(),
+
+                                'closed_price':
+                                    sl,
+
+                                'pnl_pct':
+                                    pnl['pct'],
+
+                                'pnl_usdt':
+                                    pnl['usdt'],
+
+                                'close_reason':
+                                    'sl_hit',
+
+                                'updated_at':
+                                    datetime.utcnow()
+                                    .isoformat(),
+                            }).eq(
+                                'id',
+                                sig['id']
+                            ).execute()
+
+                            stats[
+                                'sl_hit'
+                            ] += 1
+
+                            closed_this_cycle = (
+                                True
+                            )
+
+                            logger.info(
+                                f"SL golpeado: "
+                                f"{symbol} {tf} "
+                                f"SHORT @ {sl} "
+                                f"({pnl['pct']:.2f}%)"
+                            )
+
                             break
+
                         elif low <= tp:
-                            pnl = _calc_pnl(entry, tp, leverage, investment, action)
-                            db.client.table('saved_signals').update({
-                                'status': 'tp_hit',
-                                'closed_at': datetime.utcnow().isoformat(),
-                                'closed_price': tp,
-                                'pnl_pct': pnl['pct'],
-                                'pnl_usdt': pnl['usdt'],
-                                'close_reason': 'tp_hit',
-                                'updated_at': datetime.utcnow().isoformat(),
-                            }).eq('id', sig['id']).execute()
-                            stats['tp_hit'] += 1
-                            logger.info(f"TP golpeado: {symbol} {tf} SHORT @ {tp} ({pnl['pct']:+.2f}%)")
+
+                            pnl = _calc_pnl(
+                                entry,
+                                tp,
+                                leverage,
+                                investment,
+                                action
+                            )
+
+                            db.client.table(
+                                'saved_signals'
+                            ).update({
+                                'status':
+                                    'tp_hit',
+
+                                'closed_at':
+                                    datetime.utcnow()
+                                    .isoformat(),
+
+                                'closed_price':
+                                    tp,
+
+                                'pnl_pct':
+                                    pnl['pct'],
+
+                                'pnl_usdt':
+                                    pnl['usdt'],
+
+                                'close_reason':
+                                    'tp_hit',
+
+                                'updated_at':
+                                    datetime.utcnow()
+                                    .isoformat(),
+                            }).eq(
+                                'id',
+                                sig['id']
+                            ).execute()
+
+                            stats[
+                                'tp_hit'
+                            ] += 1
+
+                            closed_this_cycle = (
+                                True
+                            )
+
+                            logger.info(
+                                f"TP golpeado: "
+                                f"{symbol} {tf} "
+                                f"SHORT @ {tp} "
+                                f"({pnl['pct']:+.2f}%)"
+                            )
+
                             break
+
+                # ============================================================
+                # 4. MFE / MAE SÓLO SI LA POSICIÓN SIGUE ABIERTA
+                # ============================================================
+                #
+                # 7D.2 es deliberadamente pasiva.
+                #
+                # Si TP/SL acaba de cerrar la señal, no hacemos aquí
+                # ninguna segunda escritura.
+                # ============================================================
+
+                if closed_this_cycle:
+                    continue
+
+                excursion = (
+                    _calculate_open_excursions(
+                        sig,
+                        df_after,
+                        excursion_start_ts
+                    )
+                )
+
+                if not excursion:
+                    continue
+
+                changed = bool(
+                    excursion.pop(
+                        '_changed',
+                        False
+                    )
+                )
+
+                # ============================================================
+                # EVITAR ESCRITURAS SUPABASE INNECESARIAS
+                # ============================================================
+                #
+                # Sólo escribimos cuando aparece un nuevo MFE o MAE.
+                # Si el precio permanece dentro de los extremos anteriores:
+                # CERO escrituras nuevas.
+                # ============================================================
+
+                if not changed:
+                    continue
+
+                now_iso = (
+                    datetime.utcnow()
+                    .isoformat()
+                )
+
+                excursion[
+                    'last_excursion_at'
+                ] = now_iso
+
+                excursion[
+                    'updated_at'
+                ] = now_iso
+
+                db.client.table(
+                    'saved_signals'
+                ).update(
+                    excursion
+                ).eq(
+                    'id',
+                    sig['id']
+                ).execute()
+
+                stats[
+                    'mfe_mae_updated'
+                ] += 1
             except Exception as e:
                 stats['errors'] += 1
                 logger.error(f"evaluate_saved_signals: error en {sig.get('id')}: {e}")
