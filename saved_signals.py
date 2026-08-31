@@ -1215,7 +1215,6 @@ def close_saved_signal_manual(signal_id: str, current_price: float) -> Optional[
             'pnl_pct': pnl['pct'],
             'pnl_usdt': pnl['usdt'],
             'close_reason': 'manual',
-            'close_reason': 'manual',
 
             **early_exit_comparison,
 
@@ -1697,13 +1696,13 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                                     pnl['usdt'],
 
                                 'close_reason':
-                                    'tp_hit',
+                                    'sl_hit',
 
                                 **_build_early_exit_comparison(
                                     sig,
-                                    tp
+                                    sl
                                 ),
-
+                              
                                 'updated_at':
                                     datetime.utcnow()
                                     .isoformat(),
@@ -1908,12 +1907,358 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
         logger.error(f"evaluate_saved_signals: {e}")
         return stats
 
+def _build_early_exit_learning_summary(
+    rows: List[Dict]
+) -> Dict:
+    """
+    FASE 7D.4
+
+    Resume estadísticamente los resultados del Early Exit
+    observado durante 7D.3.
+
+    IMPORTANTE:
+    - NO modifica señales.
+    - NO modifica el Futures Guardian.
+    - NO cambia HOLD / REDUCE / EXIT.
+    - NO ejecuta operaciones.
+    - NO hace consultas adicionales a Supabase.
+
+    Sólo aprende de operaciones que ya tienen:
+        early_exit_evaluated = True
+
+    La métrica principal es:
+
+        early_exit_delta_r =
+            R del Early Exit hipotético
+            -
+            R del cierre real
+
+    Interpretación:
+
+        > 0  → Early Exit habría ayudado.
+        < 0  → Early Exit habría perjudicado.
+        = 0  → resultado equivalente.
+    """
+
+    try:
+
+        evaluated = []
+
+        for row in (
+            rows
+            if isinstance(rows, list)
+            else []
+        ):
+
+            if not bool(
+                row.get(
+                    'early_exit_evaluated',
+                    False
+                )
+            ):
+                continue
+
+            raw_delta = row.get(
+                'early_exit_delta_r'
+            )
+
+            if raw_delta is None:
+                continue
+
+            try:
+                delta_r = float(
+                    raw_delta
+                )
+
+            except (
+                TypeError,
+                ValueError
+            ):
+                continue
+
+            evaluated.append({
+                'symbol':
+                    str(
+                        row.get(
+                            'symbol',
+                            ''
+                        )
+                        or ''
+                    ),
+
+                'timeframe':
+                    str(
+                        row.get(
+                            'timeframe',
+                            ''
+                        )
+                        or ''
+                    ),
+
+                'action':
+                    str(
+                        row.get(
+                            'action',
+                            ''
+                        )
+                        or ''
+                    ).upper(),
+
+                'delta_r':
+                    delta_r,
+
+                'candidate_r':
+                    float(
+                        row.get(
+                            'early_exit_candidate_r',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'actual_r':
+                    float(
+                        row.get(
+                            'actual_close_r',
+                            0
+                        )
+                        or 0
+                    )
+            })
+
+        sample = len(
+            evaluated
+        )
+
+        # ==============================================================
+        # SIN MUESTRA
+        # ==============================================================
+
+        if sample == 0:
+
+            return {
+                'sample': 0,
+
+                'helpful': 0,
+                'harmful': 0,
+                'neutral': 0,
+
+                'helpful_rate': 0.0,
+
+                'avg_delta_r': 0.0,
+                'total_delta_r': 0.0,
+
+                'best_delta_r': 0.0,
+                'worst_delta_r': 0.0,
+
+                'by_context': {}
+            }
+
+        # ==============================================================
+        # RESULTADO GLOBAL
+        # ==============================================================
+
+        deltas = [
+            item['delta_r']
+            for item in evaluated
+        ]
+
+        helpful = sum(
+            1
+            for value in deltas
+            if value > 0
+        )
+
+        harmful = sum(
+            1
+            for value in deltas
+            if value < 0
+        )
+
+        neutral = (
+            sample
+            - helpful
+            - harmful
+        )
+
+        total_delta_r = sum(
+            deltas
+        )
+
+        avg_delta_r = (
+            total_delta_r
+            / sample
+        )
+
+        helpful_rate = (
+            helpful
+            / sample
+            * 100
+        )
+
+        # ==============================================================
+        # APRENDIZAJE POR CONTEXTO
+        # ==============================================================
+        #
+        # No mezclamos, por ejemplo:
+        #
+        # BTC 4h LONG
+        # con
+        # ADA 5m SHORT
+        #
+        # porque el comportamiento temporal puede ser muy diferente.
+        # ==============================================================
+
+        context_values = {}
+
+        for item in evaluated:
+
+            key = (
+                f"{item['symbol']}|"
+                f"{item['timeframe']}|"
+                f"{item['action']}"
+            )
+
+            context_values.setdefault(
+                key,
+                []
+            ).append(
+                item['delta_r']
+            )
+
+        by_context = {}
+
+        for (
+            key,
+            values
+        ) in context_values.items():
+
+            context_sample = len(
+                values
+            )
+
+            context_helpful = sum(
+                1
+                for value in values
+                if value > 0
+            )
+
+            context_total = sum(
+                values
+            )
+
+            by_context[
+                key
+            ] = {
+                'sample':
+                    context_sample,
+
+                'helpful_rate':
+                    round(
+                        (
+                            context_helpful
+                            / context_sample
+                            * 100
+                        )
+                        if context_sample > 0
+                        else 0.0,
+                        2
+                    ),
+
+                'avg_delta_r':
+                    round(
+                        (
+                            context_total
+                            / context_sample
+                        )
+                        if context_sample > 0
+                        else 0.0,
+                        4
+                    ),
+
+                'total_delta_r':
+                    round(
+                        context_total,
+                        4
+                    )
+            }
+
+        return {
+            'sample':
+                sample,
+
+            'helpful':
+                helpful,
+
+            'harmful':
+                harmful,
+
+            'neutral':
+                neutral,
+
+            'helpful_rate':
+                round(
+                    helpful_rate,
+                    2
+                ),
+
+            'avg_delta_r':
+                round(
+                    avg_delta_r,
+                    4
+                ),
+
+            'total_delta_r':
+                round(
+                    total_delta_r,
+                    4
+                ),
+
+            'best_delta_r':
+                round(
+                    max(
+                        deltas
+                    ),
+                    4
+                ),
+
+            'worst_delta_r':
+                round(
+                    min(
+                        deltas
+                    ),
+                    4
+                ),
+
+            'by_context':
+                by_context
+        }
+
+    except Exception as e:
+
+        logger.warning(
+            f"_build_early_exit_learning_summary: {e}"
+        )
+
+        return {
+            'sample': 0,
+            'helpful': 0,
+            'harmful': 0,
+            'neutral': 0,
+            'helpful_rate': 0.0,
+            'avg_delta_r': 0.0,
+            'total_delta_r': 0.0,
+            'best_delta_r': 0.0,
+            'worst_delta_r': 0.0,
+            'by_context': {}
+        }
+
 
 # ============================================================================
 # ESTADÍSTICAS (KPIs propios de la pestaña de señales guardadas)
 # ============================================================================
-
 def get_saved_signals_kpis() -> Dict:
+
     """
     Retorna KPIs de las señales guardadas cerradas (winrate + PnL).
     
@@ -1930,11 +2275,41 @@ def get_saved_signals_kpis() -> Dict:
     try:
         # Cerradas (para winrate)
         def _op_closed():
-            return (db.client.table('saved_signals')
-                    .select('pnl_pct, pnl_usdt, entry_touched, status')
-                    .in_('status', ['tp_hit', 'sl_hit', 'closed_manual'])
-                    .eq('entry_touched', True)
-                    .execute())
+            return (
+                db.client
+                .table(
+                    'saved_signals'
+                )
+                .select(
+                    (
+                        'symbol,'
+                        'timeframe,'
+                        'action,'
+                        'pnl_pct,'
+                        'pnl_usdt,'
+                        'entry_touched,'
+                        'status,'
+                        'early_exit_evaluated,'
+                        'early_exit_candidate_r,'
+                        'actual_close_r,'
+                        'early_exit_delta_r,'
+                        'early_exit_would_help'
+                    )
+                )
+                .in_(
+                    'status',
+                    [
+                        'tp_hit',
+                        'sl_hit',
+                        'closed_manual'
+                    ]
+                )
+                .eq(
+                    'entry_touched',
+                    True
+                )
+                .execute()
+            )
         r_closed = db._with_retry(_op_closed)
         closed = r_closed.data if r_closed and r_closed.data else []
         
@@ -1952,17 +2327,64 @@ def get_saved_signals_kpis() -> Dict:
         losses = sum(1 for s in closed if float(s.get('pnl_pct') or 0) < 0)
         total = len(closed)
         win_rate = (wins / total * 100.0) if total > 0 else 0.0
-        pnl_total_pct = sum(float(s.get('pnl_pct') or 0) for s in closed)
-        pnl_total_usdt = sum(float(s.get('pnl_usdt') or 0) for s in closed)
-        
+        pnl_total_pct = sum(
+            float(
+                s.get(
+                    'pnl_pct'
+                )
+                or 0
+            )
+            for s in closed
+        )
+
+        pnl_total_usdt = sum(
+            float(
+                s.get(
+                    'pnl_usdt'
+                )
+                or 0
+            )
+            for s in closed
+        )
+
+        # ==============================================================
+        # FASE 7D.4 — APRENDIZAJE EARLY EXIT
+        # ==============================================================
+        # Reutiliza exactamente las mismas filas que ya cargamos
+        # para los KPIs.
+        # ==============================================================
+
+        early_exit_learning = (
+            _build_early_exit_learning_summary(
+                closed
+            )
+        )
+
         return {
             'total': total,
             'wins': wins,
             'losses': losses,
             'win_rate': round(win_rate, 2),
-            'pnl_total_pct': round(pnl_total_pct, 3),
-            'pnl_total_usdt': round(pnl_total_usdt, 3),
-            'active': int(active_count),
+            'pnl_total_pct':
+                round(
+                    pnl_total_pct,
+                    3
+                ),
+
+            'pnl_total_usdt':
+                round(
+                    pnl_total_usdt,
+                    3
+                ),
+
+            'active':
+                int(
+                    active_count
+                ),
+
+            # FASE 7D.4
+            'early_exit_learning':
+                early_exit_learning,
         }
     except Exception as e:
         logger.error(f"get_saved_signals_kpis: {e}")
