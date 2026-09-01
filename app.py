@@ -23363,6 +23363,7 @@ def _collect_frontend_signals():
     # Ojo: los mismos filtros que api_futures_signals_previous aplica.
     try:
         cache = _get_or_refresh_futures_analysis()
+        futures_lifecycle = cache.get('lifecycle') or {}
         for (symbol, tf), result in (cache.get('analysis') or {}).items():
             if not result or not result.get('success'):
                 continue
@@ -23375,6 +23376,17 @@ def _collect_frontend_signals():
                 continue
             
             levels = result.get('levels', {}) or {}
+            publication_status = str(
+                levels.get('publication_status')
+                or (
+                    'ANALYSIS_ONLY'
+                    if levels.get('is_rejected')
+                    else 'EXECUTABLE_SIGNAL'
+                )
+            )
+            if publication_status != 'EXECUTABLE_SIGNAL':
+                continue
+
             leverage = int(levels.get('leverage', 1) or 1)
             try:
                 from futures_system import _leverage_in_valid_range
@@ -23383,22 +23395,22 @@ def _collect_frontend_signals():
             except Exception:
                 pass
             
-            current_price = float(result.get('current_price', 0) or 0)
+            current_price = float(
+                result.get('live_price')
+                or result.get('current_price')
+                or 0
+            )
             sl_price = float(levels.get('stop_loss', 0) or 0)
             tp_price = float(levels.get('take_profit', 0) or 0)
-            
-            # ¿Sigue activa?
-            activa = 1
-            if action == 'LONG' and sl_price > 0:
-                if current_price <= sl_price:
-                    activa = 0
-                elif tp_price > 0 and current_price >= tp_price:
-                    activa = 0
-            elif action == 'SHORT' and sl_price > 0:
-                if current_price >= sl_price:
-                    activa = 0
-                elif tp_price > 0 and current_price <= tp_price:
-                    activa = 0
+
+            signal_id = str(result.get('signal_id') or '')
+            lifecycle_record = futures_lifecycle.get(signal_id) or {}
+            lifecycle_status = str(
+                lifecycle_record.get('lifecycle_status') or ''
+            )
+            activa = int(
+                lifecycle_status in ('waiting_entry', 'entry_touched')
+            )
             
             # ==============================================================
             # Timestamp REAL de la vela anterior.
@@ -23409,15 +23421,13 @@ def _collect_frontend_signals():
             # ==============================================================
 
             candle_ts = (
-                str(
-                    result.get(
-                        'previous_candle_timestamp'
-                    )
+                str(result.get('source_candle_timestamp'))
+                if result.get('source_candle_timestamp')
+                else (
+                    str(result.get('previous_candle_timestamp'))
+                    if result.get('previous_candle_timestamp')
+                    else None
                 )
-                if result.get(
-                    'previous_candle_timestamp'
-                )
-                else None
             )
             
             unified.append({
@@ -24571,6 +24581,16 @@ _futures_analysis_cache = {
 _futures_correlation_cache = {'data': None, 'ts': 0, 'key': None}
 
 _FUTURES_CACHE_FILE = os.environ.get('FUTURES_CACHE_FILE', '/tmp/futures_analysis_cache.json')
+_FUTURES_CACHE_SCHEMA_VERSION = 2
+_FUTURES_SIGNAL_MAX_WAIT_BARS = 6
+_FUTURES_TF_SECONDS = {
+    '5m': 5 * 60,
+    '15m': 15 * 60,
+    '30m': 30 * 60,
+    '1h': 60 * 60,
+    '2h': 2 * 60 * 60,
+    '4h': 4 * 60 * 60,
+}
 
 
 def _serialize_futures_cache(data):
@@ -24604,6 +24624,7 @@ def _serialize_futures_cache(data):
     return {
         'analysis_serial': analysis_serial,
         'errors': data.get('errors') or [],
+        'lifecycle': data.get('lifecycle') or {},
     }
 
 
@@ -24621,6 +24642,7 @@ def _deserialize_futures_cache(payload):
     return {
         'analysis': analysis,
         'errors': payload.get('errors') or [],
+        'lifecycle': payload.get('lifecycle') or {},
     }
 
 
@@ -24649,6 +24671,14 @@ def _load_futures_cache_from_disk():
             payload = json.load(f)
         t_load = time.time() - t_start
         print(f"📂 [FUT] JSON parseado en {t_load:.2f}s")
+
+        schema_version = int(payload.get('schema_version', 0) or 0)
+        if schema_version != _FUTURES_CACHE_SCHEMA_VERSION:
+            print(
+                "📂 [FUT] Snapshot con contrato antiguo "
+                f"(v{schema_version}); se ignora para evitar vela abierta"
+            )
+            return
         
         ts = float(payload.get('ts', 0))
         age = time.time() - ts
@@ -24687,6 +24717,7 @@ def _save_futures_cache_to_disk():
         if not serial_data:
             return
         payload = {
+            'schema_version': _FUTURES_CACHE_SCHEMA_VERSION,
             'ts': cache.get('ts', time.time()),
             'data': serial_data,
         }
@@ -24727,6 +24758,229 @@ def _save_futures_cache_to_disk():
 _load_futures_cache_from_disk()
 
 
+def _refresh_futures_signal_lifecycle(
+    lifecycle,
+    symbol,
+    timeframe,
+    result
+):
+    """
+    Actualiza el estado operativo sin recalcular la señal original.
+
+    La decisión y los niveles permanecen inmutables. El precio vivo sólo puede:
+    - tocar Entry;
+    - tocar TP/SL después de Entry;
+    - expirar la espera tras 6 velas cerradas.
+    """
+    lifecycle = {
+        key: dict(value)
+        for key, value in (lifecycle or {}).items()
+        if isinstance(value, dict)
+    }
+
+    if not result or not result.get('success'):
+        return lifecycle
+
+    try:
+        import pandas as pd
+
+        now_utc = pd.Timestamp.now(tz='UTC')
+        now_iso = now_utc.isoformat()
+        live_price = float(
+            result.get('live_price')
+            or result.get('current_price')
+            or 0
+        )
+
+        tf_seconds = _FUTURES_TF_SECONDS.get(timeframe)
+
+        if not tf_seconds or live_price <= 0:
+            return lifecycle
+
+        def _advance(record):
+            if record.get('symbol') != symbol:
+                return
+            if record.get('timeframe') != timeframe:
+                return
+
+            status = str(record.get('lifecycle_status') or '')
+
+            if status not in ('waiting_entry', 'entry_touched'):
+                return
+
+            action = str(record.get('action') or '').upper()
+            entry = float(record.get('entry') or 0)
+            sl_price = float(record.get('stop_loss') or 0)
+            tp_price = float(record.get('take_profit') or 0)
+
+            record['current_price'] = live_price
+            record['last_checked_at'] = now_iso
+
+            valid_until_raw = record.get('valid_until')
+            valid_until = (
+                pd.Timestamp(valid_until_raw)
+                if valid_until_raw
+                else None
+            )
+
+            if valid_until is not None:
+                if valid_until.tz is None:
+                    valid_until = valid_until.tz_localize('UTC')
+                else:
+                    valid_until = valid_until.tz_convert('UTC')
+
+            # La expiración esperando Entry tiene prioridad una vez que
+            # finalizaron las seis velas cerradas permitidas.
+            if (
+                status == 'waiting_entry'
+                and valid_until is not None
+                and now_utc >= valid_until
+            ):
+                record['lifecycle_status'] = 'expired'
+                record['close_reason'] = 'expired_no_entry'
+                record['closed_at'] = now_iso
+                return
+
+            if status == 'waiting_entry':
+                entry_touched = (
+                    action == 'LONG' and live_price <= entry
+                ) or (
+                    action == 'SHORT' and live_price >= entry
+                )
+
+                if not entry_touched:
+                    return
+
+                record['lifecycle_status'] = 'entry_touched'
+                record['entry_touched_at'] = now_iso
+                record['entry_touched_price'] = live_price
+                status = 'entry_touched'
+
+            if status == 'entry_touched':
+                if action == 'LONG':
+                    if sl_price > 0 and live_price <= sl_price:
+                        record['lifecycle_status'] = 'sl_hit'
+                        record['close_reason'] = 'sl_hit'
+                        record['closed_at'] = now_iso
+                    elif tp_price > 0 and live_price >= tp_price:
+                        record['lifecycle_status'] = 'tp_hit'
+                        record['close_reason'] = 'tp_hit'
+                        record['closed_at'] = now_iso
+                elif action == 'SHORT':
+                    if sl_price > 0 and live_price >= sl_price:
+                        record['lifecycle_status'] = 'sl_hit'
+                        record['close_reason'] = 'sl_hit'
+                        record['closed_at'] = now_iso
+                    elif tp_price > 0 and live_price <= tp_price:
+                        record['lifecycle_status'] = 'tp_hit'
+                        record['close_reason'] = 'tp_hit'
+                        record['closed_at'] = now_iso
+
+        # Primero avanzar señales antiguas del mismo par/TF.
+        for record in lifecycle.values():
+            if isinstance(record, dict):
+                _advance(record)
+
+        decision = result.get('decision', {}) or {}
+        levels = result.get('levels', {}) or {}
+        action = str(decision.get('action') or '').upper()
+        signal_id = str(result.get('signal_id') or '')
+        source_ts = result.get('source_candle_timestamp')
+        source_close_ts = result.get('source_candle_close_timestamp')
+
+        publication_status = str(
+            levels.get('publication_status')
+            or (
+                'ANALYSIS_ONLY'
+                if levels.get('is_rejected')
+                else 'EXECUTABLE_SIGNAL'
+            )
+        )
+
+        executable = (
+            action in ('LONG', 'SHORT')
+            and signal_id
+            and source_ts
+            and source_close_ts
+            and publication_status == 'EXECUTABLE_SIGNAL'
+            and float(levels.get('entry') or 0) > 0
+            and float(levels.get('stop_loss') or 0) > 0
+            and float(levels.get('take_profit') or 0) > 0
+        )
+
+        if executable and signal_id not in lifecycle:
+            source_close = pd.Timestamp(source_close_ts)
+
+            if source_close.tz is None:
+                source_close = source_close.tz_localize('UTC')
+            else:
+                source_close = source_close.tz_convert('UTC')
+
+            valid_until = source_close + pd.Timedelta(
+                seconds=(
+                    tf_seconds
+                    * _FUTURES_SIGNAL_MAX_WAIT_BARS
+                )
+            )
+
+            message = str(result.get('message') or '')
+            if len(message) > 800:
+                message = message[:800] + '...'
+
+            lifecycle[signal_id] = {
+                'signal_id': signal_id,
+                'symbol': symbol,
+                'timeframe': timeframe,
+                'action': action,
+                'confidence': float(decision.get('confidence') or 0),
+                'entry': float(levels.get('entry') or 0),
+                'stop_loss': float(levels.get('stop_loss') or 0),
+                'take_profit': float(levels.get('take_profit') or 0),
+                'leverage': int(levels.get('leverage') or 1),
+                'risk_reward': float(levels.get('risk_reward') or 0),
+                'roi_tp': levels.get('roi_tp'),
+                'roi_sl': levels.get('roi_sl'),
+                'tp_source': levels.get('tp_source'),
+                'sl_source': levels.get('sl_source'),
+                'execution_safety': levels.get('execution_safety'),
+                'publication_status': publication_status,
+                'source_candle_timestamp': str(source_ts),
+                'source_candle_close_timestamp': str(source_close_ts),
+                'valid_until': valid_until.isoformat(),
+                'analysis_price': float(
+                    result.get('analysis_price')
+                    or result.get('current_price')
+                    or 0
+                ),
+                'current_price': live_price,
+                'lifecycle_status': 'waiting_entry',
+                'created_at': now_iso,
+                'last_checked_at': now_iso,
+                'message': message,
+            }
+
+            _advance(lifecycle[signal_id])
+
+        # Límite defensivo: conservar como máximo 500 snapshots compactos.
+        if len(lifecycle) > 500:
+            ordered = sorted(
+                lifecycle.items(),
+                key=lambda item: str(
+                    (item[1] or {}).get('source_candle_timestamp') or ''
+                ),
+                reverse=True
+            )
+            lifecycle = dict(ordered[:500])
+
+        return lifecycle
+
+    except Exception as e:
+        print(
+            f"⚠️ [FUT] Lifecycle {symbol} {timeframe}: {e}"
+        )
+        return lifecycle
+
+
 def _analyze_futures_all_parallel():
     """
     Ejecuta los 30 análisis de Futuros de forma secuencial para limitar memoria,
@@ -24745,7 +24999,8 @@ def _analyze_futures_all_parallel():
     if futures is None:
         return {
             'analysis': {},
-            'errors': ['FuturesSystem no disponible']
+            'errors': ['FuturesSystem no disponible'],
+            'lifecycle': {}
         }
 
     from futures_system import FUTURES_SYMBOLS, FUTURES_TIMEFRAMES
@@ -24756,14 +25011,29 @@ def _analyze_futures_all_parallel():
         for timeframe in FUTURES_TIMEFRAMES.keys()
     ]
 
-    results = {}
+    cache = _futures_analysis_cache
+
+    # Conservar los resultados ya publicados mientras avanza el nuevo barrido.
+    # Así el frontend no queda parcialmente vacío durante el warm-up.
+    with cache['lock']:
+        previous_data = dict(cache.get('data') or {})
+
+    previous_analysis = dict(
+        previous_data.get('analysis') or {}
+    )
+    lifecycle = {
+        key: dict(value)
+        for key, value in (
+            previous_data.get('lifecycle') or {}
+        ).items()
+        if isinstance(value, dict)
+    }
+    results = dict(previous_analysis)
     errors = []
 
     total = len(combos)
 
     # Estado global de progreso
-    cache = _futures_analysis_cache
-
     with cache['lock']:
         cache['progress'] = {
             'total': total,
@@ -24790,10 +25060,39 @@ def _analyze_futures_all_parallel():
 
         try:
 
-            r = futures.analyze_futures_market(
+            # Consultar primero cuál es la última vela REALMENTE cerrada.
+            # Si ya analizamos esa misma vela, conservamos exactamente la
+            # misma decisión/niveles y sólo refrescamos el precio vivo.
+            prepared = futures._prepare_closed_candle_analysis_data(
                 symbol,
                 timeframe
             )
+
+            existing = previous_analysis.get((symbol, timeframe))
+            same_closed_candle = (
+                isinstance(existing, dict)
+                and existing.get('success')
+                and existing.get('analysis_mode') == 'CLOSED_CANDLE'
+                and str(existing.get('source_candle_timestamp') or '')
+                == str(prepared.get('source_candle_timestamp') or '')
+            )
+
+            if same_closed_candle:
+                r = dict(existing)
+                r['live_price'] = prepared.get('live_price')
+                r['live_candle_timestamp'] = prepared.get(
+                    'live_candle_timestamp'
+                )
+                r['open_candle_present'] = prepared.get(
+                    'open_candle_present'
+                )
+                r['_reused_closed_candle'] = True
+            else:
+                r = futures.analyze_futures_market(
+                    symbol,
+                    timeframe,
+                    closed_candle_only=True
+                )
 
             if not isinstance(r, dict):
                 raise ValueError(
@@ -24805,6 +25104,13 @@ def _analyze_futures_all_parallel():
             # El DataFrame completo no debe quedarse en el caché
             # porque consume demasiada memoria en Render.
             # ---------------------------------------------------------
+            # El timestamp canónico viene del contrato CLOSED_CANDLE.
+            # El fallback con DataFrame existe sólo por compatibilidad.
+            if r.get('source_candle_timestamp'):
+                r['previous_candle_timestamp'] = str(
+                    r.get('source_candle_timestamp')
+                )
+
             if 'df' in r:
             
                 _df = r.get('df')
@@ -24817,7 +25123,11 @@ def _analyze_futures_all_parallel():
             
                         times = _df.get('time', [])
             
-                        if isinstance(times, list) and len(times) >= 2:
+                        if (
+                            not r.get('previous_candle_timestamp')
+                            and isinstance(times, list)
+                            and len(times) >= 2
+                        ):
             
                             r['previous_candle_timestamp'] = str(
                                 times[-2]
@@ -24836,13 +25146,20 @@ def _analyze_futures_all_parallel():
                 del _df
 
             results[(symbol, timeframe)] = r
+            lifecycle = _refresh_futures_signal_lifecycle(
+                lifecycle,
+                symbol,
+                timeframe,
+                r
+            )
 
             # ---------------------------------------------------------
             # PUBLICAR EL RESULTADO INMEDIATAMENTE
             # ---------------------------------------------------------
             partial_data = {
                 'analysis': dict(results),
-                'errors': list(errors)
+                'errors': list(errors),
+                'lifecycle': dict(lifecycle)
             }
 
             with cache['lock']:
@@ -24895,7 +25212,8 @@ def _analyze_futures_all_parallel():
 
     return {
         'analysis': results,
-        'errors': errors
+        'errors': errors,
+        'lifecycle': lifecycle
     }
 
 
@@ -24952,6 +25270,7 @@ def _get_or_refresh_futures_analysis(force_wait=False):
     return {
         'analysis': {},
         'errors': [],
+        'lifecycle': {},
         'warming_up': True,
         'cache_age': 0
     }
@@ -25119,131 +25438,117 @@ def _start_futures_warmup():
 
 
 # ============================================================================
-# ENDPOINT: Señales LONG/SHORT ACTIVAS (vela ACTUAL - dinámica)
+# ENDPOINT: Señales LONG/SHORT ACTIVAS (ciclo de vida persistente)
 # ============================================================================
 @app.route('/api/futures/signals/active')
 def api_futures_signals_active():
-    """Señales LONG/SHORT activas de las 5 cripto × 6 TF de futuros."""
+    """Señales cerradas que aún esperan Entry o ya tocaron Entry."""
     try:
         min_conf = int(request.args.get('min_confidence', 60))
-        
+
         cache = _get_or_refresh_futures_analysis()
         warming_up = cache.get('warming_up', False)
-        
+
         active_signals = []
         filter_stats = {
             'total_processed': 0,
-            'non_directional': 0,
+            'not_active': 0,
             'low_confidence': 0,
             'invalid_levels': 0,
             'leverage_out_of_range': 0,
             'accepted': 0
         }
-        for (symbol, tf), result in cache['analysis'].items(): 
-            filter_stats[
-                'total_processed'
-            ] += 1
-            if not result or not result.get('success'):
+
+        for signal_id, record in (cache.get('lifecycle') or {}).items():
+            filter_stats['total_processed'] += 1
+
+            if not isinstance(record, dict):
                 continue
-            
-            decision = result.get('decision', {})
-            action = decision.get('action', 'NO_OPERAR')
-            confidence = decision.get('confidence', 0)
-            
-            if action not in (
-                'LONG',
-                'SHORT'
-            ):
-            
-                filter_stats[
-                    'non_directional'
-                ] += 1
-            
+
+            lifecycle_status = str(
+                record.get('lifecycle_status') or ''
+            )
+            if lifecycle_status not in ('waiting_entry', 'entry_touched'):
+                filter_stats['not_active'] += 1
                 continue
+
+            symbol = record.get('symbol')
+            tf = record.get('timeframe')
+            action = str(record.get('action') or '').upper()
+            confidence = float(record.get('confidence') or 0)
+
             if confidence < min_conf:
-            
-                filter_stats[
-                    'low_confidence'
-                ] += 1
-            
+                filter_stats['low_confidence'] += 1
                 continue
-            
-            levels = result.get('levels', {})
-            entry = float(
-                levels.get(
-                    'entry',
-                    0
-                )
-                or 0
-            )
-            
-            sl_price = float(
-                levels.get(
-                    'stop_loss',
-                    0
-                )
-                or 0
-            )
-            
-            tp_price = float(
-                levels.get(
-                    'take_profit',
-                    0
-                )
-                or 0
-            )
-            
-            if (
-                entry <= 0
-                or sl_price <= 0
-                or tp_price <= 0
-            ):
-            
-                filter_stats[
-                    'invalid_levels'
-                ] += 1
-            
+
+            entry = float(record.get('entry') or 0)
+            sl_price = float(record.get('stop_loss') or 0)
+            tp_price = float(record.get('take_profit') or 0)
+
+            if entry <= 0 or sl_price <= 0 or tp_price <= 0:
+                filter_stats['invalid_levels'] += 1
                 continue
-            leverage = int(levels.get('leverage', 1))
-            
+
+            leverage = int(record.get('leverage') or 1)
+
             # FILTRO POR RANGO DE LEVERAGE (regla del usuario):
             # No mostrar señales con apalancamiento insuficiente para el TF.
-            # Con 10 USDT de capital, señales bajo el mínimo del rango no son
-            # rentables después de comisiones + slippage.
             try:
                 from futures_system import _leverage_in_valid_range
-                if not _leverage_in_valid_range(
-                    leverage,
-                    tf
-                ):
-                
-                    filter_stats[
-                        'leverage_out_of_range'
-                    ] += 1
-                
+                if not _leverage_in_valid_range(leverage, tf):
+                    filter_stats['leverage_out_of_range'] += 1
                     continue
             except Exception:
                 pass
-            filter_stats[
-                'accepted'
-            ] += 1            
+
+            tiempo_restante = 0
+            try:
+                valid_until = pd.Timestamp(record.get('valid_until'))
+                if valid_until.tz is None:
+                    valid_until = valid_until.tz_localize('UTC')
+                else:
+                    valid_until = valid_until.tz_convert('UTC')
+                tiempo_restante = int(max(
+                    0,
+                    (valid_until - pd.Timestamp.now(tz='UTC')).total_seconds()
+                ))
+            except Exception:
+                pass
+
+            filter_stats['accepted'] += 1
             active_signals.append({
+                'signal_id': signal_id,
                 'symbol': symbol,
                 'timeframe': tf,
                 'action': action,
-                'confidence': float(confidence),
-                'entry': levels.get('entry'),
-                'stop_loss': levels.get('stop_loss'),
-                'take_profit': levels.get('take_profit'),
+                'confidence': confidence,
+                'entry': entry,
+                'stop_loss': sl_price,
+                'take_profit': tp_price,
                 'leverage': leverage,
-                'risk_reward': float(levels.get('risk_reward', 0)),
-                'roi_tp': float(levels.get('roi_tp', 0)),
-                'roi_sl': float(levels.get('roi_sl', 0)),
-                'tp_source': levels.get('tp_source'),
-                'sl_source': levels.get('sl_source'),
-                'current_price': result.get('current_price')
+                'risk_reward': float(record.get('risk_reward') or 0),
+                'roi_tp': record.get('roi_tp'),
+                'roi_sl': record.get('roi_sl'),
+                'tp_source': record.get('tp_source'),
+                'sl_source': record.get('sl_source'),
+                'analysis_price': record.get('analysis_price'),
+                'current_price': record.get('current_price'),
+                'candle_timestamp': record.get('source_candle_timestamp'),
+                'source_candle_timestamp': record.get(
+                    'source_candle_timestamp'
+                ),
+                'source_candle_close_timestamp': record.get(
+                    'source_candle_close_timestamp'
+                ),
+                'valid_until': record.get('valid_until'),
+                'tiempo_restante': tiempo_restante,
+                'lifecycle_status': lifecycle_status,
+                'entry_touched': lifecycle_status == 'entry_touched',
+                'publication_status': record.get('publication_status'),
+                'execution_safety': record.get('execution_safety'),
+                'message': record.get('message', '')
             })
-        
+
         active_signals.sort(key=lambda x: -x['confidence'])
         
         # ==============================================================
@@ -25373,7 +25678,16 @@ def api_futures_debug():
                 entry['action'] = d.get('action')
                 entry['confidence'] = d.get('confidence')
                 entry['leverage'] = lv.get('leverage')
-                entry['current_price'] = result.get('current_price')
+                entry['analysis_mode'] = result.get('analysis_mode')
+                entry['signal_id'] = result.get('signal_id')
+                entry['source_candle_timestamp'] = result.get(
+                    'source_candle_timestamp'
+                )
+                entry['analysis_price'] = result.get('analysis_price')
+                entry['current_price'] = (
+                    result.get('live_price')
+                    or result.get('current_price')
+                )
                 try:
                     from futures_system import _leverage_in_valid_range
                     entry['leverage_ok'] = _leverage_in_valid_range(
@@ -25423,6 +25737,7 @@ def api_futures_debug():
             'cache_age_seconds': cache_age,
             'stale': bool(cache.get('stale', False)),
             'total_entries': len(entries),
+            'lifecycle_entries': len(cache.get('lifecycle') or {}),
             'errors_at_analysis': errors,
             'snapshot_on_disk': snapshot_info,
             'entries': entries,
@@ -25436,21 +25751,23 @@ def api_futures_debug():
 @app.route('/api/futures/signals/previous')
 def api_futures_signals_previous():
     """
-    Señales LONG/SHORT de la vela ANTERIOR (cerrada). Estas se registran en BD.
-    Reutiliza el mismo caché que /api/futures/signals/active (ambos endpoints
-    hacen el análisis de la vela anterior porque analyze_futures_market
-    ya usa el timestamp de la vela anterior en su registro).
+    Setup nacido de la última vela cerrada de cada símbolo/timeframe.
+
+    /previous lee el análisis canónico de la vela. /active, en cambio, lee
+    registros persistentes cuyo ciclo de vida sigue abierto.
     """
     try:
         min_conf = int(request.args.get('min_confidence', 55))
         
         cache = _get_or_refresh_futures_analysis()
         warming_up = cache.get('warming_up', False)
+        lifecycle = cache.get('lifecycle') or {}
         
         previous_signals = []
         filter_stats = {
             'total_processed': 0,
             'non_directional': 0,
+            'non_executable': 0,
             'low_confidence': 0,
             'invalid_levels': 0,
             'leverage_out_of_range': 0,
@@ -25466,6 +25783,16 @@ def api_futures_signals_previous():
             decision = result.get('decision', {})
             action = decision.get('action', 'NO_OPERAR')
             confidence = decision.get('confidence', 0)
+            levels = result.get('levels', {}) or {}
+
+            publication_status = str(
+                levels.get('publication_status')
+                or (
+                    'ANALYSIS_ONLY'
+                    if levels.get('is_rejected')
+                    else 'EXECUTABLE_SIGNAL'
+                )
+            )
             
             if action not in (
                 'LONG',
@@ -25477,6 +25804,9 @@ def api_futures_signals_previous():
                 ] += 1
             
                 continue
+            if publication_status != 'EXECUTABLE_SIGNAL':
+                filter_stats['non_executable'] += 1
+                continue
             if confidence < min_conf:
             
                 filter_stats[
@@ -25485,7 +25815,6 @@ def api_futures_signals_previous():
             
                 continue
             
-            levels = result.get('levels', {})
             entry = float(
                 levels.get(
                     'entry',
@@ -25540,161 +25869,55 @@ def api_futures_signals_previous():
             except Exception:
                 pass
             
-            current_price = float(result.get('current_price', 0))
-            sl_price = float(levels.get('stop_loss', 0) or 0)
-            tp_price = float(levels.get('take_profit', 0) or 0)
-            
-            # Verificar si sigue activa
-            activa = 1
-            resultado = 'pending'
-            
-            if action == 'LONG' and sl_price > 0:
-                if current_price <= sl_price:
-                    activa = 0
-                    resultado = 'sl_hit'
-                elif tp_price > 0 and current_price >= tp_price:
-                    activa = 0
-                    resultado = 'tp_hit'
-            elif action == 'SHORT' and sl_price > 0:
-                if current_price >= sl_price:
-                    activa = 0
-                    resultado = 'sl_hit'
-                elif tp_price > 0 and current_price <= tp_price:
-                    activa = 0
-                    resultado = 'tp_hit'
-            
-            # Timestamp de la vela anterior.
-            # El DataFrame fue eliminado para ahorrar memoria;
-            # el timestamp se conserva en el resultado compacto.
-            # ==============================================================
-            # FASE 7G.2 — VIGENCIA DE VELA ANTERIOR FUTURES
-            # ==============================================================
-            #
-            # previous_candle_timestamp es la APERTURA de la vela
-            # anterior.
-            #
-            # Su señal nace al cerrarla y vence cuando cierra
-            # la vela actual:
-            #
-            # previous_open + 2 * timeframe
-            # ==============================================================
-            # ==============================================================
-            # FIX — TIMESTAMP REAL DE LA VELA ANTERIOR
-            # ==============================================================
-            #
-            # _analyze_futures_all_parallel() ya guardó este dato
-            # ANTES de eliminar el DataFrame pesado.
-            #
-            # No usamos result['timestamp'] porque ese es el momento
-            # del análisis y NO necesariamente la apertura de la
-            # vela anterior.
-            # ==============================================================
-
-            candle_ts = (
-                str(
-                    result.get(
-                        'previous_candle_timestamp'
-                    )
-                )
-                if result.get(
-                    'previous_candle_timestamp'
-                )
-                else None
+            current_price = float(
+                result.get('live_price')
+                or result.get('current_price')
+                or 0
             )
 
+            signal_id = str(result.get('signal_id') or '')
+            record = lifecycle.get(signal_id) or {}
+            if not signal_id or not record:
+                filter_stats['non_executable'] += 1
+                continue
+            lifecycle_status = str(
+                record.get('lifecycle_status') or ''
+            )
+
+            activa = int(
+                lifecycle_status in ('waiting_entry', 'entry_touched')
+            )
+            resultado = (
+                'pending'
+                if lifecycle_status == 'waiting_entry'
+                else lifecycle_status
+            )
+
+            # Timestamp de origen: apertura de la vela cerrada analizada.
+            candle_ts = (
+                str(result.get('source_candle_timestamp'))
+                if result.get('source_candle_timestamp')
+                else (
+                    str(result.get('previous_candle_timestamp'))
+                    if result.get('previous_candle_timestamp')
+                    else None
+                )
+            )
+
+            valid_until_iso = record.get('valid_until')
             tiempo_restante = 0
-            valid_until_iso = None
-
-
             try:
-
-                tf_seconds = {
-                    '5m': 5 * 60,
-                    '15m': 15 * 60,
-                    '30m': 30 * 60,
-                    '1h': 60 * 60,
-                    '2h': 2 * 60 * 60,
-                    '4h': 4 * 60 * 60,
-                }.get(
-                    tf
-                )
-
-                if (
-                    candle_ts
-                    and tf_seconds
-                ):
-
-                    previous_open = (
-                        pd.Timestamp(
-                            candle_ts
-                        )
-                    )
-
-                    if previous_open.tz is None:
-
-                        previous_open = (
-                            previous_open
-                            .tz_localize(
-                                'UTC'
-                            )
-                        )
-
-                    else:
-
-                        previous_open = (
-                            previous_open
-                            .tz_convert(
-                                'UTC'
-                            )
-                        )
-
-                    valid_until = (
-                        previous_open
-                        +
-                        pd.Timedelta(
-                            seconds=(
-                                tf_seconds
-                                * 2
-                            )
-                        )
-                    )
-
-                    valid_until_iso = (
-                        valid_until.isoformat()
-                    )
-
-                    now_utc = (
-                        pd.Timestamp.now(
-                            tz='UTC'
-                        )
-                    )
-
-                    tiempo_restante = int(
-                        max(
-                            0,
-                            (
-                                valid_until
-                                - now_utc
-                            ).total_seconds()
-                        )
-                    )
-
-                    if (
-                        tiempo_restante <= 0
-                        and
-                        resultado == 'pending'
-                    ):
-
-                        activa = 0
-                        resultado = 'expired'
-
-            except Exception as validity_error:
-
-                print(
-                    "⚠️ [FUT] Vigencia vela anterior "
-                    f"{symbol} {tf}: "
-                    f"{validity_error}"
-                )
+                valid_until = pd.Timestamp(valid_until_iso)
+                if valid_until.tz is None:
+                    valid_until = valid_until.tz_localize('UTC')
+                else:
+                    valid_until = valid_until.tz_convert('UTC')
+                tiempo_restante = int(max(
+                    0,
+                    (valid_until - pd.Timestamp.now(tz='UTC')).total_seconds()
+                ))
+            except Exception:
+                pass
             
             # Justificación (truncada) para que el monitor de entries y el
             # frontend puedan mostrarla sin re-analizar.
@@ -25704,6 +25927,7 @@ def api_futures_signals_previous():
                 'accepted'
             ] += 1            
             previous_signals.append({
+                'signal_id': signal_id,
                 'symbol': symbol,
                 'timeframe': tf,
                 'action': action,
@@ -25713,16 +25937,25 @@ def api_futures_signals_previous():
                 'take_profit': levels.get('take_profit'),
                 'leverage': leverage,
                 'risk_reward': float(levels.get('risk_reward', 0)),
-                'roi_tp': float(levels.get('roi_tp', 0)),
-                'roi_sl': float(levels.get('roi_sl', 0)),
+                # No convertir un dato ausente en 0.0: el frontend mostrará --.
+                'roi_tp': levels.get('roi_tp'),
+                'roi_sl': levels.get('roi_sl'),
                 'tp_source': levels.get('tp_source'),
                 'sl_source': levels.get('sl_source'),
                 'current_price': current_price,
                 'candle_timestamp': candle_ts,
+                'source_candle_timestamp': candle_ts,
+                'source_candle_close_timestamp': result.get(
+                    'source_candle_close_timestamp'
+                ),
+                'analysis_price': result.get('analysis_price'),
                 'valid_until': valid_until_iso,
                 'tiempo_restante': tiempo_restante,
                 'activa': activa,
                 'resultado': resultado,
+                'lifecycle_status': lifecycle_status,
+                'publication_status': publication_status,
+                'execution_safety': levels.get('execution_safety'),
                 'message': _msg_short,   # justificación futures (mismo campo que spot)
             })
         
