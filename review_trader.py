@@ -176,7 +176,9 @@ class ReviewTrader:
             return None  # Se descarta silenciosamente
         
         try:
-            # Extraer timestamp de la vela ANTERIOR (penúltima en el df)
+            # Extraer el timestamp de la vela que realmente originó
+            # la señal. Las versiones nuevas lo enviarán explícitamente;
+            # las versiones antiguas siguen usando el fallback histórico.
             candle_ts = self._get_previous_candle_timestamp(analysis_result)
             
             # Extraer estrategias detectadas por los traders
@@ -223,16 +225,31 @@ class ReviewTrader:
             return None
     
     def _get_previous_candle_timestamp(self, analysis: Dict) -> Optional[str]:
-        """Extrae el timestamp de la vela ANTERIOR (penúltima en el df, no la actual)"""
+        """
+        Obtiene el timestamp de la vela que realmente originó la señal.
+
+        Compatibilidad:
+        - Contrato nuevo: usa source_candle_timestamp.
+        - Contrato antiguo: conserva times[-2] para no romper Spot ni los
+          callers que todavía no envían el campo explícito.
+        """
         try:
+            explicit_source = analysis.get('source_candle_timestamp')
+
+            if explicit_source:
+                return str(explicit_source)
+
             df = analysis.get('df', {})
             times = df.get('time', [])
+
             if len(times) >= 2:
-                # Vela anterior = penúltima
+                # Fallback legado: el DataFrame incluía una vela abierta.
                 return times[-2]
             elif len(times) == 1:
                 return times[-1]
+
             return datetime.utcnow().isoformat()
+
         except Exception:
             return datetime.utcnow().isoformat()
     
@@ -652,6 +669,26 @@ class ReviewTrader:
             candles_to_mae = 0
 
             # ==========================================================
+            # ENTRY REAL
+            # ==========================================================
+            #
+            # Una señal direccional no es una operación hasta que el
+            # mercado alcanza su Entry. Antes de ese momento:
+            #
+            # - TP no cuenta;
+            # - SL no cuenta;
+            # - MFE / MAE no empiezan;
+            # - ReviewTrader no debe aprender un resultado.
+            #
+            # El sistema construye LONG como entrada de retroceso
+            # (entry <= cierre fuente) y SHORT como entrada de rebote
+            # (entry >= cierre fuente). Por eso un salto que abra más allá
+            # del Entry también se considera ejecutado.
+            # ==========================================================
+
+            entry_touched = False
+
+            # ==========================================================
             # ACTUALIZAR MÉTRICAS
             # ==========================================================
 
@@ -776,6 +813,22 @@ class ReviewTrader:
                     'time',
                     datetime.utcnow()
                 )
+
+                # ======================================================
+                # NO EVALUAR TP / SL ANTES DE ENTRY
+                # ======================================================
+
+                if not entry_touched:
+
+                    if action == 'LONG':
+                        touched_now = low <= entry
+                    else:
+                        touched_now = high >= entry
+
+                    if not touched_now:
+                        continue
+
+                    entry_touched = True
 
                 # ======================================================
                 # LONG
