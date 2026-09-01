@@ -23583,17 +23583,64 @@ def api_futures_position_guardian():
             'positions': []
         }), 200
 
-@app.route('/api/saved_signals/kpis', methods=['GET'])
+@app.route(
+    '/api/saved_signals/kpis',
+    methods=['GET']
+)
 def api_saved_signals_kpis():
-    """Retorna KPIs de las señales guardadas: total, wins, losses, win_rate,
-    pnl_total_pct, pnl_total_usdt, active."""
+    """
+    KPIs privados de las señales guardadas
+    del usuario autenticado.
+    """
+
     try:
-        from saved_signals import get_saved_signals_kpis
-        kpis = get_saved_signals_kpis()
-        return jsonify({'success': True, 'data': kpis})
+
+        from saved_signals import (
+            get_saved_signals_kpis
+        )
+
+        user = _authenticated_user()
+
+        if not user:
+
+            return jsonify({
+                'success':
+                    False,
+
+                'authenticated':
+                    False,
+
+                'error':
+                    'Debes iniciar sesión.'
+            }), 401
+
+        kpis = (
+            get_saved_signals_kpis(
+                user_name=user
+            )
+        )
+
+        return jsonify({
+            'success':
+                True,
+
+            'data':
+                kpis
+        })
+
     except Exception as e:
-        print(f"❌ api_saved_signals_kpis: {e}")
-        return jsonify({'success': False, 'error': str(e)[:200]}), 200
+
+        print(
+            f"❌ api_saved_signals_kpis: {e}"
+        )
+
+        return jsonify({
+            'success':
+                False,
+
+            'error':
+                str(e)[:200]
+        }), 200
 
 
 @app.route('/api/saved_signals/<signal_id>/chart_data', methods=['GET'])
@@ -23608,11 +23655,45 @@ def api_saved_signals_chart_data(signal_id):
     - Zona ROJA semitransparente: del entry hacia SL (dirección desfavorable)
     """
     try:
-        from saved_signals import get_saved_signal
-        sig = get_saved_signal(signal_id)
-        if not sig:
-            return jsonify({'success': False, 'error': 'No encontrada'}), 200
-        
+
+        from saved_signals import (
+            get_saved_signal
+        )
+
+        user = _authenticated_user()
+
+        if not user:
+
+            return jsonify({
+                'success':
+                    False,
+
+                'authenticated':
+                    False,
+
+                'error':
+                    'Debes iniciar sesión.'
+            }), 401
+
+        sig = get_saved_signal(
+            signal_id
+        )
+
+        if (
+            not sig
+            or sig.get(
+                'user_name'
+            ) != user
+        ):
+
+            return jsonify({
+                'success':
+                    False,
+
+                'error':
+                    'No encontrada'
+            }), 404
+
         symbol = sig.get('symbol')
         tf = sig.get('timeframe')
         
