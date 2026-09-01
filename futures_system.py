@@ -2064,7 +2064,7 @@ class FuturesAnalysis(TradingExpertSystem):
             
     def analyze_futures_market(self, symbol: str, timeframe: str, 
                                 btc_analysis: Optional[Dict] = None,
-                                closed_candle_only: bool = False) -> Dict:
+                                closed_candle_only: bool = True) -> Dict:
         """
         Análisis completo para futuros.
         
