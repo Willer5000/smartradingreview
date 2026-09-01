@@ -1074,7 +1074,13 @@ window.updatePreviousSignals = async function() {
                 statusBadge =
                     '<span class="badge bg-danger">❌ SL</span>';
             }
+            else if (
+                sig.resultado === 'expired'
+            ) {
 
+                statusBadge =
+                    '<span class="badge bg-secondary">⌛ Vencida</span>';
+            }
             const inactive =
                 sig.activa !== 1;
 
@@ -1257,7 +1263,26 @@ window.showFuturesPrevJustif = function(sig) {
         if (sig.resultado === 'tp_hit') {
             estadoHTML = `<div class="alert alert-success mt-3"><strong>✅ TP ALCANZADO</strong> - operación exitosa</div>`;
         } else if (sig.resultado === 'sl_hit') {
-            estadoHTML = `<div class="alert alert-danger mt-3"><strong>❌ SL ALCANZADO</strong> - operación fallida</div>`;
+
+            estadoHTML = `
+                <div class="alert alert-danger mt-3">
+                    <strong>❌ SL ALCANZADO</strong>
+                    - operación invalidada
+                </div>
+            `;
+
+        } else if (sig.resultado === 'expired') {
+
+            estadoHTML = `
+                <div class="alert alert-secondary mt-3">
+                    <strong>⌛ VIGENCIA FINALIZADA</strong>
+                    <br>
+                    Esta señal pertenecía a la vela anterior y
+                    su ventana operativa ya terminó.
+                    No persigas el precio; espera una nueva señal.
+                </div>
+            `;
+
         } else {
             estadoHTML = `<div class="alert alert-warning mt-3"><strong>⏱️ SEÑAL ACTIVA</strong> - aún no toca TP ni SL</div>`;
         }
@@ -1863,7 +1888,7 @@ function _closedSavedSignalsHistoryShell() {
             >
                 📁 Historial cerrado
                 <small>
-                    (TP / SL / cierre manual)
+                    (TP / SL / cierre manual / expiradas)
                 </small>
             </summary>
 
@@ -1930,7 +1955,7 @@ async function(detailsEl) {
                 (
                     '/api/saved_signals'
                     + '?status='
-                    + 'tp_hit,sl_hit,closed_manual'
+                    + 'tp_hit,sl_hit,closed_manual,expired'
                     + '&limit=50'
                 ),
                 {
@@ -2519,6 +2544,9 @@ function _statusBadge(status, entryTouched) {
     if (status === 'entry_touched') return '<span class="badge bg-primary">🎯 En operación</span>';
     if (status === 'tp_hit') return '<span class="badge bg-success">✅ TP</span>';
     if (status === 'sl_hit') return '<span class="badge bg-danger">❌ SL</span>';
+    if (status === 'expired') {
+        return '<span class="badge bg-secondary">⌛ Expirada sin Entry</span>';
+    }
     if (status === 'closed_manual') {
         return entryTouched ? '<span class="badge bg-warning text-dark">🔒 Cerrada</span>'
                              : '<span class="badge bg-secondary">🔒 Cerrada (sin entry)</span>';
