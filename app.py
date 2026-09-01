@@ -22819,22 +22819,133 @@ def _compute_previous_signals():
                 take_profit = float(levels.get('take_profit', 0)) if levels.get('take_profit') else None
                 
                 activa = 0
-                if decision in ['COMPRA_SPOT', 'LONG'] and stop_loss and stop_loss > 0:
-                    activa = 1 if precio_actual > stop_loss else 0
-                elif decision in ['VENTA_SPOT', 'SHORT'] and stop_loss and stop_loss > 0:
-                    activa = 1 if precio_actual < stop_loss else 0
-                
+                resultado = 'pending'
+
+                if (
+                    decision in [
+                        'COMPRA_SPOT',
+                        'LONG'
+                    ]
+                    and stop_loss
+                    and stop_loss > 0
+                ):
+
+                    if precio_actual > stop_loss:
+                        activa = 1
+                    else:
+                        resultado = 'sl_hit'
+
+                elif (
+                    decision in [
+                        'VENTA_SPOT',
+                        'SHORT'
+                    ]
+                    and stop_loss
+                    and stop_loss > 0
+                ):
+
+                    if precio_actual < stop_loss:
+                        activa = 1
+                    else:
+                        resultado = 'sl_hit'
+
+                # ============================================================
+                # FASE 7G.2 — VIGENCIA REAL DE LA VELA ANTERIOR
+                # ============================================================
+                #
+                # KuCoin entrega time = APERTURA de la vela.
+                #
+                # La señal de la vela anterior nace al cerrar esa vela
+                # y permanece vigente hasta cerrar la vela ACTUAL.
+                # ============================================================
+
                 tiempo_restante = 0
+
                 try:
-                    tiempo_vida = {'4h': 14400, '12h': 43200, '1D': 86400, '1W': 604800}.get(timeframe, 14400)
-                    tiempo_cierre = pd.Timestamp(df['time'].iloc[-2]).to_pydatetime()
-                    if tiempo_cierre.tzinfo is not None:
-                        tiempo_cierre = tiempo_cierre.replace(tzinfo=None)
-                    tiempo_actual_naive = tiempo_actual.replace(tzinfo=None) if tiempo_actual.tzinfo else tiempo_actual
-                    tiempo_transcurrido = (tiempo_actual_naive - tiempo_cierre).total_seconds()
-                    tiempo_restante = int(max(0, tiempo_vida - tiempo_transcurrido))
+
+                    tiempo_vida = {
+                        '4h':
+                            4 * 60 * 60,
+
+                        '12h':
+                            12 * 60 * 60,
+
+                        '1D':
+                            24 * 60 * 60,
+
+                        '1W':
+                            7 * 24 * 60 * 60
+                    }.get(
+                        timeframe,
+                        4 * 60 * 60
+                    )
+
+                    current_candle_open = (
+                        pd.Timestamp(
+                            df['time'].iloc[-1]
+                        )
+                    )
+
+                    if (
+                        current_candle_open.tz
+                        is None
+                    ):
+
+                        current_candle_open = (
+                            current_candle_open
+                            .tz_localize(
+                                'UTC'
+                            )
+                        )
+
+                    else:
+
+                        current_candle_open = (
+                            current_candle_open
+                            .tz_convert(
+                                'UTC'
+                            )
+                        )
+
+                    valid_until = (
+                        current_candle_open
+                        +
+                        pd.Timedelta(
+                            seconds=tiempo_vida
+                        )
+                    )
+
+                    now_utc = (
+                        pd.Timestamp.now(
+                            tz='UTC'
+                        )
+                    )
+
+                    tiempo_restante = int(
+                        max(
+                            0,
+                            (
+                                valid_until
+                                - now_utc
+                            ).total_seconds()
+                        )
+                    )
+
+                    if (
+                        tiempo_restante <= 0
+                        and
+                        resultado == 'pending'
+                    ):
+
+                        activa = 0
+                        resultado = 'expired'
+
                 except Exception as e:
-                    print(f"      ⚠️ Error calculando tiempo: {e}")
+
+                    print(
+                        "      ⚠️ Error calculando "
+                        f"vigencia: {e}"
+                    )
                 
                 mensaje_corto = analisis.get('message', '')
                 if len(mensaje_corto) > 500:
@@ -22856,6 +22967,7 @@ def _compute_previous_signals():
                     'take_profit': take_profit,
                     'precio_actual': float(precio_actual),
                     'activa': int(activa),
+                    'resultado': str(resultado),
                     'tiempo_restante': int(tiempo_restante),
                     'message': str(mensaje_corto),
                     'candle_timestamp': candle_ts,
@@ -25120,9 +25232,111 @@ def api_futures_signals_previous():
             # Timestamp de la vela anterior.
             # El DataFrame fue eliminado para ahorrar memoria;
             # el timestamp se conserva en el resultado compacto.
-            candle_ts = result.get(
-                'previous_candle_timestamp'
-            )
+            # ==============================================================
+            # FASE 7G.2 — VIGENCIA DE VELA ANTERIOR FUTURES
+            # ==============================================================
+            #
+            # previous_candle_timestamp es la APERTURA de la vela
+            # anterior.
+            #
+            # Su señal nace al cerrarla y vence cuando cierra
+            # la vela actual:
+            #
+            # previous_open + 2 * timeframe
+            # ==============================================================
+
+            tiempo_restante = 0
+            valid_until_iso = None
+
+            try:
+
+                tf_seconds = {
+                    '5m': 5 * 60,
+                    '15m': 15 * 60,
+                    '30m': 30 * 60,
+                    '1h': 60 * 60,
+                    '2h': 2 * 60 * 60,
+                    '4h': 4 * 60 * 60,
+                }.get(
+                    tf
+                )
+
+                if (
+                    candle_ts
+                    and tf_seconds
+                ):
+
+                    previous_open = (
+                        pd.Timestamp(
+                            candle_ts
+                        )
+                    )
+
+                    if previous_open.tz is None:
+
+                        previous_open = (
+                            previous_open
+                            .tz_localize(
+                                'UTC'
+                            )
+                        )
+
+                    else:
+
+                        previous_open = (
+                            previous_open
+                            .tz_convert(
+                                'UTC'
+                            )
+                        )
+
+                    valid_until = (
+                        previous_open
+                        +
+                        pd.Timedelta(
+                            seconds=(
+                                tf_seconds
+                                * 2
+                            )
+                        )
+                    )
+
+                    valid_until_iso = (
+                        valid_until.isoformat()
+                    )
+
+                    now_utc = (
+                        pd.Timestamp.now(
+                            tz='UTC'
+                        )
+                    )
+
+                    tiempo_restante = int(
+                        max(
+                            0,
+                            (
+                                valid_until
+                                - now_utc
+                            ).total_seconds()
+                        )
+                    )
+
+                    if (
+                        tiempo_restante <= 0
+                        and
+                        resultado == 'pending'
+                    ):
+
+                        activa = 0
+                        resultado = 'expired'
+
+            except Exception as validity_error:
+
+                print(
+                    "⚠️ [FUT] Vigencia vela anterior "
+                    f"{symbol} {tf}: "
+                    f"{validity_error}"
+                )
             
             # Justificación (truncada) para que el monitor de entries y el
             # frontend puedan mostrarla sin re-analizar.
@@ -25147,6 +25361,8 @@ def api_futures_signals_previous():
                 'sl_source': levels.get('sl_source'),
                 'current_price': current_price,
                 'candle_timestamp': candle_ts,
+                'valid_until': valid_until_iso,
+                'tiempo_restante': tiempo_restante,
                 'activa': activa,
                 'resultado': resultado,
                 'message': _msg_short,   # justificación futures (mismo campo que spot)
