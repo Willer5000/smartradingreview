@@ -23182,7 +23182,10 @@ def api_saved_signals_update(signal_id):
     """Modifica campos editables: entry, stop_loss, take_profit, leverage,
     investment_usdt, notes."""
     try:
-        from saved_signals import update_saved_signal
+        from saved_signals import (
+            update_saved_signal,
+            get_saved_signal
+        )
         user = _authenticated_user()
 
         if not user:
