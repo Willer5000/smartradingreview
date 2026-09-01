@@ -1656,77 +1656,47 @@ window.confirmSaveSignal = async function() {
 // ====== CARGAR SEÑALES GUARDADAS (SOLO DEL USUARIO AUTENTICADO) ======
 
 window.loadSavedSignals = async function() {
-    // En futuros, dejar que futures.js maneje el renderizado
-    if (window.IS_FUTURES_PAGE) {
-        console.log('Futuros: delegando a updateSavedSignalsList');
-        if (typeof window.updateSavedSignalsList === 'function') {
-            window.updateSavedSignalsList();
-        }
-        return;
-    }
 
-    // Resto de la función para spot sigue igual...
-    if (!isAuthenticated()) {
-        console.log(
-            '🔒 No autenticado: no se cargan señales privadas.'
+    const card =
+        document.getElementById(
+            'saved-signals-card'
         );
 
-        const card =
-            document.getElementById(
-                'saved-signals-card'
-            );
+    // ================================================================
+    // FASE 7G.1
+    // ================================================================
+    //
+    // Las señales guardadas pertenecen exclusivamente
+    // al flujo FUTURES.
+    //
+    // SPOT:
+    //     no mostrar
+    //     no consultar API
+    //
+    // ================================================================
+
+    if (!window.IS_FUTURES_PAGE) {
 
         if (card) {
-            card.style.display = 'none';
+            card.style.display =
+                'none';
         }
 
         return;
     }
 
-    try {
-        // La identidad viene exclusivamente de la sesión Flask.
-        // NO enviar ?user=...
-        const response = await fetch(
-            '/api/saved_signals',
-            {
-                method: 'GET',
-                credentials: 'same-origin',
-                cache: 'no-store'
-            }
-        );
-        const data = await response.json();
+    // ================================================================
+    // FUTURES
+    // ================================================================
 
-        if (data.success && data.signals) {
-            const listEl = document.getElementById('saved-signals-list');
-            const card = document.getElementById('saved-signals-card');
+    if (
+        typeof window.updateSavedSignalsList
+        === 'function'
+    ) {
 
-            if (listEl) {
-                listEl.innerHTML = '';
-                if (data.signals.length === 0) {
-                    listEl.innerHTML = '<div class="text-center text-muted py-3">No tenés señales guardadas</div>';
-                } else {
-                    data.signals.forEach(sig => {
-                        const item = document.createElement('div');
-                        item.className = 'list-group-item bg-dark text-light border-secondary';
-                        item.innerHTML = `
-                            <div class="d-flex justify-content-between">
-                                <span>${sig.symbol} - ${sig.action}</span>
-                                <span class="badge bg-${sig.status === 'active' ? 'success' : 'secondary'}">${sig.status}</span>
-                            </div>
-                            <small class="text-muted">Entry: ${sig.entry} | SL: ${sig.stop_loss} | TP: ${sig.take_profit}</small>
-                        `;
-                        listEl.appendChild(item);
-                    });
-                }
-            }
-
-            if (card) card.style.display = 'block';
-        }
-    } catch (e) {
-        console.error('Error cargando señales guardadas:', e);
+        await window.updateSavedSignalsList();
     }
 };
-
 // ====== FIN CARGAR SEÑALES ======
 
 
