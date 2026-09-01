@@ -45,6 +45,16 @@ FUTURES_TIMEFRAMES = {
     '4h':  {'name': '4 Horas',    'type': 'intraday',   'kucoin': '4hour'}
 }
 
+# Duración real de cada temporalidad. Se usa únicamente para comprobar
+# si la última fila OHLCV ya cerró; no modifica indicadores ni niveles.
+FUTURES_TIMEFRAME_SECONDS = {
+    '5m': 5 * 60,
+    '15m': 15 * 60,
+    '30m': 30 * 60,
+    '1h': 60 * 60,
+    '2h': 2 * 60 * 60,
+    '4h': 4 * 60 * 60,
+}
 # Extender el mapeo de intervalos KuCoin
 FUTURES_KUCOIN_INTERVALS = {
     '5m': '5min',
@@ -1943,9 +1953,118 @@ class FuturesAnalysis(TradingExpertSystem):
     # ========================================================================
     # ANÁLISIS COMPLETO DE FUTUROS
     # ========================================================================
-    
+     def _prepare_closed_candle_analysis_data(
+        self,
+        symbol: str,
+        timeframe: str
+    ) -> Dict:
+        """
+        Separa la información en dos mundos:
+
+        - closed_df: velas completamente cerradas para generar el setup.
+        - live_price: último precio OHLCV disponible para seguimiento.
+
+        No asume ciegamente que KuCoin siempre incluye una vela abierta.
+        Comprueba el tiempo de apertura de la última fila y la duración del TF.
+        """
+        try:
+            import pandas as pd
+
+            full_df = self.get_kucoin_data(
+                symbol,
+                timeframe
+            )
+
+            if full_df is None or len(full_df) < 3:
+                return {
+                    'success': False,
+                    'error': 'Datos insuficientes para separar vela cerrada'
+                }
+
+            tf_seconds = FUTURES_TIMEFRAME_SECONDS.get(
+                timeframe
+            )
+
+            if not tf_seconds:
+                return {
+                    'success': False,
+                    'error': f'Temporalidad sin duración definida: {timeframe}'
+                }
+
+            parsed_times = pd.to_datetime(
+                full_df['time'],
+                utc=True,
+                errors='coerce'
+            )
+
+            last_open = parsed_times.iloc[-1]
+
+            if pd.isna(last_open):
+                return {
+                    'success': False,
+                    'error': 'Timestamp inválido en la última vela'
+                }
+
+            now_utc = pd.Timestamp.now(tz='UTC')
+            candle_duration = pd.Timedelta(seconds=tf_seconds)
+
+            last_row_is_closed = (
+                last_open + candle_duration
+                <= now_utc
+            )
+
+            if last_row_is_closed:
+                closed_df = full_df.copy()
+                open_candle_present = False
+            else:
+                closed_df = full_df.iloc[:-1].copy()
+                open_candle_present = True
+
+            closed_df = closed_df.reset_index(drop=True)
+
+            if len(closed_df) < 2:
+                return {
+                    'success': False,
+                    'error': 'No existen suficientes velas cerradas'
+                }
+
+            source_open = pd.to_datetime(
+                closed_df['time'].iloc[-1],
+                utc=True,
+                errors='coerce'
+            )
+
+            if pd.isna(source_open):
+                return {
+                    'success': False,
+                    'error': 'Timestamp inválido en la vela fuente'
+                }
+
+            source_close = source_open + candle_duration
+
+            return {
+                'success': True,
+                'closed_df': closed_df,
+                'source_candle_timestamp': source_open.isoformat(),
+                'source_candle_close_timestamp': source_close.isoformat(),
+                'live_price': float(full_df['close'].iloc[-1]),
+                'live_candle_timestamp': last_open.isoformat(),
+                'open_candle_present': bool(open_candle_present),
+            }
+
+        except Exception as e:
+            logger.error(
+                f'Error preparando vela cerrada {symbol} {timeframe}: {e}'
+            )
+
+            return {
+                'success': False,
+                'error': str(e)
+            }   
+            
     def analyze_futures_market(self, symbol: str, timeframe: str, 
-                                btc_analysis: Optional[Dict] = None) -> Dict:
+                                btc_analysis: Optional[Dict] = None,
+                                closed_candle_only: bool = False) -> Dict:
         """
         Análisis completo para futuros.
         
@@ -1954,6 +2073,10 @@ class FuturesAnalysis(TradingExpertSystem):
         - Fuerza system_type='futures' al registrar en Supabase
         - Adapta la correlación (no usa PAXG)
         - Traduce COMPRA/VENTA a LONG/SHORT en la decisión final
+
+        closed_candle_only=False conserva el comportamiento anterior.
+        closed_candle_only=True excluye la vela abierta de todos los
+        indicadores, traders, votación y niveles.
         """
         # Validar
         if symbol not in FUTURES_SYMBOLS:
@@ -1975,6 +2098,30 @@ class FuturesAnalysis(TradingExpertSystem):
         print(f"\n{'='*60}")
         print(f"🚀 FUTUROS: Analizando {symbol} {timeframe}")
         print(f"{'='*60}")
+
+        # Preparación opcional y retrocompatible. app.py activará este modo
+        # en un commit posterior; mientras tanto el comportamiento no cambia.
+        df_override = None
+        closed_context = None
+
+        if closed_candle_only:
+            closed_context = self._prepare_closed_candle_analysis_data(
+                symbol,
+                timeframe
+            )
+
+            if not closed_context.get('success'):
+                return {
+                    'success': False,
+                    'error': closed_context.get(
+                        'error',
+                        'No se pudo preparar la vela cerrada'
+                    ),
+                    'symbol': symbol,
+                    'timeframe': timeframe
+                }
+
+            df_override = closed_context['closed_df']
         
         # Llamar al análisis del padre
         # NOTA: paxg_analysis y paxg_btc_analysis se pasan como None
@@ -1988,7 +2135,8 @@ class FuturesAnalysis(TradingExpertSystem):
                 timeframe=timeframe,
                 btc_analysis=btc_analysis,
                 paxg_analysis=None,
-                paxg_btc_analysis=None
+                paxg_btc_analysis=None,
+                df_override=df_override
             )
         finally:
             self._skip_supabase_register = False
@@ -2013,6 +2161,40 @@ class FuturesAnalysis(TradingExpertSystem):
         # ============ MARCAR COMO FUTUROS ============
         result['system_type'] = 'futures'
         result['is_futures'] = True
+
+        # ============ IDENTIDAD DE LA VELA FUENTE ============
+        # Solo se publica cuando el caller pidió explícitamente analizar
+        # velas cerradas. ReviewTrader ya entiende este campo y mantiene
+        # fallback para resultados antiguos.
+        if closed_context:
+            import hashlib
+
+            source_ts = closed_context['source_candle_timestamp']
+            signal_seed = (
+                f"{symbol}|{timeframe}|{translated_action}|"
+                f"{source_ts}|closed_v1"
+            )
+
+            result['signal_id'] = hashlib.sha256(
+                signal_seed.encode('utf-8')
+            ).hexdigest()[:24]
+            result['analysis_mode'] = 'CLOSED_CANDLE'
+            result['analysis_version'] = 'closed_v1'
+            result['source_candle_timestamp'] = source_ts
+            result['source_candle_close_timestamp'] = closed_context[
+                'source_candle_close_timestamp'
+            ]
+            result['source_candle_closed'] = True
+            result['analysis_price'] = float(
+                result.get('current_price', 0) or 0
+            )
+            result['live_price'] = closed_context['live_price']
+            result['live_candle_timestamp'] = closed_context[
+                'live_candle_timestamp'
+            ]
+            result['open_candle_present'] = closed_context[
+                'open_candle_present'
+            ]
         
         # ============ ADAPTAR JUSTIFICACIÓN AL CONTEXTO DE FUTUROS ============
         # El mensaje se generó con la acción original (COMPRA_SPOT / VENTA_SPOT)
