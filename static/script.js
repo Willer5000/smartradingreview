@@ -8361,9 +8361,11 @@ window.updatePreviousSignals = function updatePreviousSignals() {
                         </div>
                         <div class="d-flex justify-content-between mt-1">
                             <small class="text-muted">${symbolName}</small>
-                            ${senal.activa === 1 ? 
-                                `<small class="text-warning">⏱️ ${tiempoTexto}</small>` : 
-                                `<small class="text-secondary">⚪ inactiva</small>`
+                            ${senal.activa === 1
+                                ? `<small class="text-warning">⏱️ ${tiempoTexto}</small>`
+                                : senal.resultado === 'expired'
+                                    ? `<small class="text-secondary">⌛ vigencia finalizada</small>`
+                                    : `<small class="text-secondary">⚪ inactiva</small>`
                             }
                         </div>
                         <div class="mt-1">
@@ -8439,11 +8441,27 @@ window.showPreviousSignalJustification = function(senal) {
                     ${senal.tiempo_restante ? `<br><small>Válida por ${Math.floor(senal.tiempo_restante/3600)}h ${Math.floor((senal.tiempo_restante%3600)/60)}m más</small>` : ''}
                 </div>
             `;
+        } else if (
+            senal.resultado === 'expired'
+        ) {
+
+            estadoHTML = `
+                <div class="alert alert-secondary mt-3">
+                    <i class="fas fa-clock me-2"></i>
+                    <strong>VIGENCIA FINALIZADA</strong>
+                    <br>
+                    Esta señal ya cumplió su ventana temporal.
+                    No persigas el precio; espera una nueva señal.
+                </div>
+            `;
+
         } else {
+
             estadoHTML = `
                 <div class="alert alert-secondary mt-3">
                     <i class="fas fa-pause-circle me-2"></i>
-                    <strong>ESTADO ACTUAL:</strong> SEÑAL INACTIVA - Stop Loss fue alcanzado
+                    <strong>ESTADO ACTUAL:</strong>
+                    SEÑAL INACTIVA - Stop Loss fue alcanzado
                 </div>
             `;
         }
