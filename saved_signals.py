@@ -1913,6 +1913,23 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                                 'close_reason':
                                     'tp_hit',
 
+                                # ======================================
+                                # FASE 8.1
+                                # ======================================
+                                # Mantener simetría con:
+                                # LONG SL
+                                # LONG TP
+                                # SHORT SL
+                                #
+                                # La salida real SHORT+TP también debe
+                                # compararse contra el Early Exit shadow.
+                                # ======================================
+
+                                **_build_early_exit_comparison(
+                                    sig,
+                                    tp
+                                ),
+
                                 'updated_at':
                                     datetime.utcnow()
                                     .isoformat(),
