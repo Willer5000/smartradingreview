@@ -27,7 +27,17 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 logger = logging.getLogger('SAVED_SIGNALS')
+# ============================================================================
+# FASE 7G.2 — VIGENCIA DE SETUPS GUARDADOS
+# ============================================================================
+#
+# Una señal que todavía NO tocó Entry puede esperar como máximo
+# 6 velas CERRADAS desde el inicio de seguimiento.
+#
+# Al tocar Entry deja de aplicarse esta expiración.
+# ============================================================================
 
+SAVED_SIGNAL_MAX_WAIT_BARS = 6
 
 def _get_db():
     """Obtiene el cliente Supabase o None si no está disponible."""
@@ -1282,6 +1292,7 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
             'sl_hit': 0,
             'mfe_mae_updated': 0,
             'early_exit_observed': 0,
+            'expired':0,
             'errors': 0
         }
 
@@ -1292,6 +1303,7 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
         'sl_hit': 0,
         'mfe_mae_updated': 0,
         'early_exit_observed': 0,
+        'expired':0,
         'errors': 0
     }
     
@@ -1329,12 +1341,153 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                     start_ts = start_ts.tz_localize('UTC')
                 else:
                     start_ts = start_ts.tz_convert('UTC')
-                df_time = pd.to_datetime(df['time'], utc=True) if df['time'].dtype != 'datetime64[ns, UTC]' else df['time']
-                df_after = df[df_time > start_ts]
-                
+                df_time = (
+                    pd.to_datetime(
+                        df['time'],
+                        utc=True
+                    )
+                    if df['time'].dtype
+                    != 'datetime64[ns, UTC]'
+                    else df['time']
+                )
+
+                df_after = (
+                    df[
+                        df_time > start_ts
+                    ]
+                )
+
                 if len(df_after) == 0:
-                    # No hay velas nuevas aún
+                    # No hay velas nuevas aún.
                     continue
+
+                # ============================================================
+                # FASE 7G.2 — EXPIRACIÓN ESPERANDO ENTRY
+                # ============================================================
+                #
+                # KuCoin normalmente incluye como última fila
+                # la vela que todavía está abierta.
+                #
+                # Para EXPIRAR sólo contamos velas cerradas.
+                #
+                # Sin embargo, la vela actual sí podrá tocar Entry
+                # más abajo mientras la señal siga vigente.
+                # ============================================================
+
+                if not already_touched:
+
+                    completed_after = (
+                        df_after.iloc[:-1]
+                        if len(df_after) > 1
+                        else df_after.iloc[0:0]
+                    )
+
+                    if (
+                        len(completed_after)
+                        >= SAVED_SIGNAL_MAX_WAIT_BARS
+                    ):
+
+                        # ----------------------------------------------------
+                        # Antes de expirar comprobar que Entry NO haya sido
+                        # tocado dentro de las seis velas válidas.
+                        # ----------------------------------------------------
+
+                        valid_window = (
+                            completed_after.iloc[
+                                :SAVED_SIGNAL_MAX_WAIT_BARS
+                            ]
+                        )
+
+                        entry_touched_in_window = False
+
+                        for _, validity_row in (
+                            valid_window.iterrows()
+                        ):
+
+                            if _check_entry_touched(
+                                entry,
+                                float(
+                                    validity_row['high']
+                                ),
+                                float(
+                                    validity_row['low']
+                                ),
+                                action
+                            ):
+
+                                entry_touched_in_window = (
+                                    True
+                                )
+
+                                break
+
+                        # ----------------------------------------------------
+                        # 6 velas cerradas y nunca hubo Entry.
+                        # ----------------------------------------------------
+
+                        if not entry_touched_in_window:
+
+                            now_iso = (
+                                datetime.utcnow()
+                                .isoformat()
+                            )
+
+                            try:
+
+                                expiry_price = float(
+                                    df['close'].iloc[-1]
+                                    or 0
+                                )
+
+                            except Exception:
+
+                                expiry_price = 0.0
+
+                            db.client.table(
+                                'saved_signals'
+                            ).update({
+                                'status':
+                                    'expired',
+
+                                'closed_at':
+                                    now_iso,
+
+                                'closed_price':
+                                    (
+                                        expiry_price
+                                        if expiry_price > 0
+                                        else None
+                                    ),
+
+                                'pnl_pct':
+                                    0.0,
+
+                                'pnl_usdt':
+                                    0.0,
+
+                                'close_reason':
+                                    'expired_no_entry',
+
+                                'updated_at':
+                                    now_iso,
+                            }).eq(
+                                'id',
+                                sig['id']
+                            ).execute()
+
+                            stats[
+                                'expired'
+                            ] += 1
+
+                            logger.info(
+                                "⌛ Señal expirada sin Entry: "
+                                f"{symbol} {tf} {action} "
+                                f"después de "
+                                f"{SAVED_SIGNAL_MAX_WAIT_BARS} "
+                                "velas cerradas."
+                            )
+
+                            continue
                 
                 # ============================================================
                 # 1. DETERMINAR DESDE CUÁNDO EXISTE REALMENTE LA POSICIÓN
