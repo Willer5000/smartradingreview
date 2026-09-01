@@ -23293,13 +23293,25 @@ def _collect_frontend_signals():
                 elif tp_price > 0 and current_price <= tp_price:
                     activa = 0
             
-            # candle_timestamp — puede ser None porque df fue eliminado del caché.
-            # Fallback: usar timestamp del análisis (menos preciso pero funcional).
-            candle_ts = None
-            df_dict = result.get('df', {}) or {}
-            times = df_dict.get('time', []) if isinstance(df_dict, dict) else []
-            if len(times) >= 2:
-                candle_ts = str(times[-2])
+            # ==============================================================
+            # Timestamp REAL de la vela anterior.
+            # ==============================================================
+            #
+            # El DataFrame completo ya fue eliminado intencionalmente
+            # para ahorrar RAM. El warm-up conserva únicamente este dato.
+            # ==============================================================
+
+            candle_ts = (
+                str(
+                    result.get(
+                        'previous_candle_timestamp'
+                    )
+                )
+                if result.get(
+                    'previous_candle_timestamp'
+                )
+                else None
+            )
             
             unified.append({
                 'symbol': symbol,
@@ -25389,9 +25401,33 @@ def api_futures_signals_previous():
             #
             # previous_open + 2 * timeframe
             # ==============================================================
+            # ==============================================================
+            # FIX — TIMESTAMP REAL DE LA VELA ANTERIOR
+            # ==============================================================
+            #
+            # _analyze_futures_all_parallel() ya guardó este dato
+            # ANTES de eliminar el DataFrame pesado.
+            #
+            # No usamos result['timestamp'] porque ese es el momento
+            # del análisis y NO necesariamente la apertura de la
+            # vela anterior.
+            # ==============================================================
+
+            candle_ts = (
+                str(
+                    result.get(
+                        'previous_candle_timestamp'
+                    )
+                )
+                if result.get(
+                    'previous_candle_timestamp'
+                )
+                else None
+            )
 
             tiempo_restante = 0
             valid_until_iso = None
+
 
             try:
 
