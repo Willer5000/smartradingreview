@@ -1953,7 +1953,7 @@ class FuturesAnalysis(TradingExpertSystem):
     # ========================================================================
     # ANÁLISIS COMPLETO DE FUTUROS
     # ========================================================================
-     def _prepare_closed_candle_analysis_data(
+    def _prepare_closed_candle_analysis_data(
         self,
         symbol: str,
         timeframe: str
