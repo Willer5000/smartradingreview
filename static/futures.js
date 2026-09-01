@@ -2100,8 +2100,6 @@ async function(detailsEl) {
 
 // ============ Refrescar lista y KPIs ============
 window.updateSavedSignalsList = async function() {
-// ============ Refrescar lista y KPIs ============
-window.updateSavedSignalsList = async function() {
     if (!window.IS_FUTURES_PAGE) return;
 
     if (
