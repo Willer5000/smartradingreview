@@ -236,31 +236,176 @@ _ANALYSIS_CACHE_LOCK = _threading_analysis_cache.Lock()
 _ANALYSIS_CACHE_STATS = {'hits': 0, 'misses': 0}
 
 
-def _analysis_ttl_for(timeframe: str) -> int:
-    return _ANALYSIS_CACHE_TTL.get(timeframe, 30)  # default 30s
+def _analysis_cache_purge_expired_locked(
+    now_ts=None
+):
+    """
+    FASE 7G.1
 
+    Elimina resultados expirados de _ANALYSIS_CACHE.
 
+    IMPORTANTE:
+    esta función debe ejecutarse con
+    _ANALYSIS_CACHE_LOCK adquirido.
+
+    No cambia TTLs.
+    No cambia análisis.
+    No recalcula mercado.
+
+    Sólo elimina objetos que ya no serían utilizados
+    porque su TTL terminó.
+    """
+
+    import time as _time
+
+    if now_ts is None:
+        now_ts = _time.time()
+
+    expired_keys = []
+
+    for key, entry in list(
+        _ANALYSIS_CACHE.items()
+    ):
+
+        try:
+
+            if not isinstance(
+                key,
+                tuple
+            ) or len(key) < 2:
+
+                expired_keys.append(
+                    key
+                )
+
+                continue
+
+            timeframe = key[1]
+
+            entry_ts = float(
+                (
+                    entry
+                    or {}
+                ).get(
+                    'ts',
+                    0
+                )
+                or 0
+            )
+
+            ttl = float(
+                _analysis_ttl_for(
+                    timeframe
+                )
+            )
+
+            age = (
+                now_ts
+                - entry_ts
+            )
+
+            if (
+                entry_ts <= 0
+                or age >= ttl
+            ):
+
+                expired_keys.append(
+                    key
+                )
+
+        except Exception:
+
+            # Una entrada corrupta tampoco debe permanecer
+            # reteniendo memoria.
+            expired_keys.append(
+                key
+            )
+
+    for key in expired_keys:
+
+        _ANALYSIS_CACHE.pop(
+            key,
+            None
+        )
+
+    return len(
+        expired_keys
+    )
 def _analysis_cache_get(key):
-    """Retorna el análisis cacheado si está fresco, None si expiró."""
+    """
+    Retorna el análisis cacheado únicamente si sigue fresco.
+
+    FASE 7G.1:
+    antes de consultar, elimina todas las entradas cuyo TTL
+    ya terminó para evitar retener resultados pesados en RAM.
+    """
+
+    import time as _time
+
+    now_ts = (
+        _time.time()
+    )
+
     with _ANALYSIS_CACHE_LOCK:
-        entry = _ANALYSIS_CACHE.get(key)
+
+        _analysis_cache_purge_expired_locked(
+            now_ts
+        )
+
+        entry = (
+            _ANALYSIS_CACHE.get(
+                key
+            )
+        )
+
         if entry is None:
-            _ANALYSIS_CACHE_STATS['misses'] += 1
+
+            _ANALYSIS_CACHE_STATS[
+                'misses'
+            ] += 1
+
             return None
-        import time as _time
-        _, tf = key
-        if _time.time() - entry['ts'] >= _analysis_ttl_for(tf):
-            _ANALYSIS_CACHE_STATS['misses'] += 1
-            return None
-        _ANALYSIS_CACHE_STATS['hits'] += 1
-        return entry['data']
+
+        _ANALYSIS_CACHE_STATS[
+            'hits'
+        ] += 1
+
+        return entry[
+            'data'
+        ]
 
 
 def _analysis_cache_put(key, data):
     """Guarda el resultado del análisis con timestamp."""
     import time as _time
+
+    now_ts = (
+        _time.time()
+    )
+
     with _ANALYSIS_CACHE_LOCK:
-        _ANALYSIS_CACHE[key] = {'data': data, 'ts': _time.time()}
+
+        # ==============================================================
+        # FASE 7G.1
+        # ==============================================================
+        #
+        # Antes de guardar otro objeto pesado, eliminar todo
+        # lo que ya expiró.
+        # ==============================================================
+
+        _analysis_cache_purge_expired_locked(
+            now_ts
+        )
+
+        _ANALYSIS_CACHE[
+            key
+        ] = {
+            'data':
+                data,
+
+            'ts':
+                now_ts
+        }
         # Límite MUY REDUCIDO para OOM en Render Free (512MB).
         # 50→20 entradas. Cada entrada ~1-2 MB → máx 40MB de caché.
         # Ya no hay margen para más porque el warm-up de futuros ocupa mucho.
