@@ -1064,7 +1064,7 @@ class PortfolioGuardian:
 
         return None
 
-def _parse_rotation_datetime(
+    def _parse_rotation_datetime(
         self,
         value
     ):
