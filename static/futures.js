@@ -580,7 +580,59 @@ window.updateActiveSignals = async function() {
 
             const roiSl =
                 Number(sig.roi_sl || 0);
-
+         
+            const remainingSeconds =
+                Math.max(
+                    0,
+                    Number(
+                        sig.tiempo_restante
+                        || 0
+                    )
+                );
+            
+            const validityText =
+                _formatPreviousSignalValidity(
+                    remainingSeconds
+                );
+            
+            let validityHtml = '';
+            
+            if (
+                sig.activa === 1
+                && sig.resultado === 'pending'
+            ) {
+            
+                validityHtml = `
+                    <div
+                        class="
+                            small
+                            text-warning
+                            mt-1
+                        "
+                    >
+                        ⏳ Vigente por:
+                        <strong>
+                            ${validityText}
+                        </strong>
+                    </div>
+                `;
+            
+            } else if (
+                sig.resultado === 'expired'
+            ) {
+            
+                validityHtml = `
+                    <div
+                        class="
+                            small
+                            text-secondary
+                            mt-1
+                        "
+                    >
+                        ⌛ Esta señal ya no es vigente.
+                    </div>
+                `;
+            }
             html += `
                 <div
                     class="list-group-item bg-dark text-white border-secondary"
@@ -656,6 +708,8 @@ window.updateActiveSignals = async function() {
 
                     </div>
 
+                    ${validityHtml}
+
                 </div>
             `;
         });
@@ -703,6 +757,65 @@ window.updateActiveSignals = async function() {
         );
     }
 };
+
+
+// ============================================================================
+// FASE 8.2 — VIGENCIA VISUAL DE SEÑALES DE VELA ANTERIOR
+// ============================================================================
+
+function _formatPreviousSignalValidity(seconds) {
+
+    const totalSeconds = Math.max(
+        0,
+        Number(
+            seconds
+            || 0
+        )
+    );
+
+    if (totalSeconds <= 0) {
+        return 'vigencia finalizada';
+    }
+
+    const days = Math.floor(
+        totalSeconds
+        / 86400
+    );
+
+    const hours = Math.floor(
+        (
+            totalSeconds
+            % 86400
+        )
+        / 3600
+    );
+
+    const minutes = Math.floor(
+        (
+            totalSeconds
+            % 3600
+        )
+        / 60
+    );
+
+    if (days > 0) {
+
+        return (
+            `${days}d `
+            + `${hours}h`
+        );
+    }
+
+    if (hours > 0) {
+
+        return (
+            `${hours}h `
+            + `${minutes}m`
+        );
+    }
+
+    return `${minutes}m`;
+}
 
 
 // ============================================================================
@@ -975,16 +1088,37 @@ window.updatePreviousSignals = async function() {
             true;
 
         if (signalsCount) {
-
+        
+            const activeCount =
+                Number.isFinite(
+                    Number(
+                        json.active_count
+                    )
+                )
+                    ? Number(
+                        json.active_count
+                    )
+                    : signals.filter(
+                        signal =>
+                            signal.activa === 1
+                    ).length;
+        
             signalsCount.textContent =
-                String(signals.length);
-
+                String(
+                    activeCount
+                );
+        
             signalsCount.className =
                 `badge bg-${
-                    signals.length > 0
+                    activeCount > 0
                         ? 'warning'
                         : 'secondary'
                 }`;
+        
+            signalsCount.title =
+                `${activeCount} señal(es) `
+                + 'de vela anterior '
+                + 'todavía vigente(s)';
         }
 
         // ------------------------------------------------------------
@@ -1284,7 +1418,48 @@ window.showFuturesPrevJustif = function(sig) {
             `;
 
         } else {
-            estadoHTML = `<div class="alert alert-warning mt-3"><strong>⏱️ SEÑAL ACTIVA</strong> - aún no toca TP ni SL</div>`;
+        
+            const remainingText =
+                _formatPreviousSignalValidity(
+                    sig.tiempo_restante
+                );
+        
+            estadoHTML = `
+                <div
+                    class="
+                        alert
+                        alert-warning
+                        mt-3
+                    "
+                >
+                    <strong>
+                        ⏱️ SEÑAL TODAVÍA VIGENTE
+                    </strong>
+        
+                    <br>
+        
+                    La señal pertenece a la vela anterior
+                    y todavía se encuentra dentro de su
+                    ventana operativa.
+        
+                    <br>
+        
+                    <small>
+                        Tiempo restante aproximado:
+                        <strong>
+                            ${remainingText}
+                        </strong>
+                    </small>
+        
+                    <br>
+        
+                    <small class="text-muted">
+                        Si no se activa dentro de esta
+                        ventana, no debe perseguirse el
+                        precio; debe esperarse una nueva señal.
+                    </small>
+                </div>
+            `;
         }
         
         body.innerHTML = `
@@ -2021,6 +2196,31 @@ async function(detailsEl) {
                         ? 'success'
                         : 'danger';
 
+                const expiryMessage =
+                    s.status === 'expired'
+                        ? `
+                            <div
+                                class="
+                                    small
+                                    text-secondary
+                                    mt-2
+                                "
+                            >
+                                ⌛ Esta señal ya no es vigente:
+                                no alcanzó su Entry dentro de
+                                la ventana permitida.
+                
+                                <br>
+                
+                                <strong>
+                                    Recomendación:
+                                </strong>
+                                no persigas el precio;
+                                espera una nueva señal válida.
+                            </div>
+                        `
+                        : '';                
+                
                 html += `
                     <a
                         href="#"
@@ -2098,6 +2298,9 @@ async function(detailsEl) {
                                 }
                             </div>
                         </div>
+
+                        ${expiryMessage}
+
                     </a>
                 `;
             }
