@@ -1846,6 +1846,260 @@ window.confirmSaveSignal = async function() {
         showToast('Error de red: ' + e.message, 'danger');
     }
 };
+// ============================================================================
+// FASE 7G.1 — HISTORIAL CERRADO MINIMIZADO
+// ============================================================================
+
+function _closedSavedSignalsHistoryShell() {
+
+    return `
+        <details
+            class="mt-2 border border-secondary rounded"
+            ontoggle="window.loadClosedSavedSignalsHistory(this)"
+        >
+            <summary
+                class="p-2 text-muted"
+                style="cursor: pointer;"
+            >
+                📁 Historial cerrado
+                <small>
+                    (TP / SL / cierre manual)
+                </small>
+            </summary>
+
+            <div
+                class="list-group list-group-flush"
+                data-closed-history-list
+            >
+                <div
+                    class="list-group-item bg-dark text-muted text-center"
+                >
+                    Abre esta sección para cargar
+                    las operaciones cerradas.
+                </div>
+            </div>
+        </details>
+    `;
+}
+
+
+window.loadClosedSavedSignalsHistory =
+async function(detailsEl) {
+
+    if (
+        !detailsEl
+        || !detailsEl.open
+    ) {
+        return;
+    }
+
+    if (
+        detailsEl.dataset.loaded
+        === '1'
+    ) {
+        return;
+    }
+
+    const container =
+        detailsEl.querySelector(
+            '[data-closed-history-list]'
+        );
+
+    if (!container) {
+        return;
+    }
+
+    detailsEl.dataset.loaded =
+        '1';
+
+    container.innerHTML = `
+        <div
+            class="list-group-item bg-dark text-info text-center"
+        >
+            <div
+                class="spinner-border spinner-border-sm me-2"
+            ></div>
+            Cargando historial...
+        </div>
+    `;
+
+    try {
+
+        const response =
+            await fetch(
+                (
+                    '/api/saved_signals'
+                    + '?status='
+                    + 'tp_hit,sl_hit,closed_manual'
+                    + '&limit=50'
+                ),
+                {
+                    method:
+                        'GET',
+
+                    credentials:
+                        'same-origin',
+
+                    cache:
+                        'no-store'
+                }
+            );
+
+        const json =
+            await response.json();
+
+        if (
+            !response.ok
+            || !json.success
+        ) {
+
+            throw new Error(
+                json.error
+                || `HTTP ${response.status}`
+            );
+        }
+
+        const closed =
+            Array.isArray(
+                json.signals
+            )
+                ? json.signals
+                : [];
+
+        if (
+            closed.length === 0
+        ) {
+
+            container.innerHTML = `
+                <div
+                    class="list-group-item bg-dark text-muted text-center"
+                >
+                    No hay operaciones cerradas.
+                </div>
+            `;
+
+            return;
+        }
+
+        let html = '';
+
+        closed.forEach(
+            s => {
+
+                const emoji =
+                    s.action === 'LONG'
+                        ? '📈'
+                        : '📉';
+
+                const badgeClass =
+                    s.action === 'LONG'
+                        ? 'success'
+                        : 'danger';
+
+                html += `
+                    <a
+                        href="#"
+                        class="
+                            list-group-item
+                            list-group-item-action
+                            bg-dark
+                            text-white
+                        "
+                        onclick="
+                            event.preventDefault();
+                            window.openSavedSignalDetail(
+                                '${s.id}'
+                            );
+                        "
+                    >
+                        <div
+                            class="
+                                d-flex
+                                justify-content-between
+                                align-items-center
+                                flex-wrap
+                            "
+                        >
+                            <div>
+                                <span
+                                    class="
+                                        badge
+                                        bg-${badgeClass}
+                                        me-2
+                                    "
+                                >
+                                    ${emoji}
+                                    ${s.action}
+                                </span>
+
+                                <strong>
+                                    ${
+                                        (
+                                            s.symbol
+                                            || ''
+                                        )
+                                        .replace(
+                                            '-',
+                                            '/'
+                                        )
+                                    }
+                                </strong>
+
+                                <span
+                                    class="
+                                        badge
+                                        bg-dark
+                                        ms-1
+                                    "
+                                >
+                                    ${s.timeframe}
+                                </span>
+                            </div>
+
+                            <div
+                                class="text-end"
+                            >
+                                ${
+                                    _statusBadge(
+                                        s.status,
+                                        s.entry_touched
+                                    )
+                                }
+
+                                ${
+                                    _formatPnl(
+                                        s
+                                    )
+                                }
+                            </div>
+                        </div>
+                    </a>
+                `;
+            }
+        );
+
+        container.innerHTML =
+            html;
+
+    } catch (error) {
+
+        detailsEl.dataset.loaded =
+            '0';
+
+        container.innerHTML = `
+            <div
+                class="list-group-item bg-dark text-danger"
+            >
+                Error cargando historial:
+                ${error.message}
+            </div>
+        `;
+    }
+};
+
+
+// ============ Refrescar lista y KPIs ============
+window.updateSavedSignalsList = async function() {
 // ============ Refrescar lista y KPIs ============
 window.updateSavedSignalsList = async function() {
     if (!window.IS_FUTURES_PAGE) return;
@@ -1926,8 +2180,21 @@ window.updateSavedSignalsList = async function() {
         }
         
         // Lista de todas (activas + cerradas recientes)
+        // =============================================================
+        // FASE 7G.1
+        // =============================================================
+        // La pantalla principal sólo necesita señales abiertas.
+        //
+        // Historial cerrado se carga únicamente cuando el
+        // usuario despliega la sección correspondiente.
+        // =============================================================
+
         const lRes = await fetch(
-            '/api/saved_signals?limit=100',
+            (
+                '/api/saved_signals'
+                + '?status=active,entry_touched'
+                + '&limit=100'
+            ),
             {
                 method: 'GET',
                 credentials: 'same-origin',
@@ -1942,11 +2209,32 @@ window.updateSavedSignalsList = async function() {
         
         const signals = lJson.signals || [];
         if (signals.length === 0) {
+
             list.innerHTML = `
-                <div class="list-group-item bg-dark text-muted text-center py-3">
-                    <i class="fas fa-info-circle me-1"></i>
-                    Aún no has guardado ninguna señal.
-                </div>`;
+                <div
+                    class="
+                        list-group-item
+                        bg-dark
+                        text-muted
+                        text-center
+                        py-3
+                    "
+                >
+                    <i
+                        class="
+                            fas
+                            fa-check-circle
+                            me-1
+                        "
+                    ></i>
+
+                    No tienes señales abiertas
+                    ni esperando Entry.
+                </div>
+
+                ${_closedSavedSignalsHistoryShell()}
+            `;
+
             return;
         }
         // =============================================================
@@ -2220,7 +2508,9 @@ window.updateSavedSignalsList = async function() {
                 </a>
             `;
         });
-        list.innerHTML = html;
+        list.innerHTML =
+            html
+            + _closedSavedSignalsHistoryShell();
     } catch (e) {
         list.innerHTML = `<div class="list-group-item bg-dark text-danger">Error: ${e.message}</div>`;
     }
