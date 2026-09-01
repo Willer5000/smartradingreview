@@ -2257,8 +2257,9 @@ def _build_early_exit_learning_summary(
 # ============================================================================
 # ESTADÍSTICAS (KPIs propios de la pestaña de señales guardadas)
 # ============================================================================
-def get_saved_signals_kpis() -> Dict:
-
+def get_saved_signals_kpis(
+    user_name: Optional[str] = None
+) -> Dict:
     """
     Retorna KPIs de las señales guardadas cerradas (winrate + PnL).
     
@@ -2275,7 +2276,8 @@ def get_saved_signals_kpis() -> Dict:
     try:
         # Cerradas (para winrate)
         def _op_closed():
-            return (
+
+            q = (
                 db.client
                 .table(
                     'saved_signals'
@@ -2308,18 +2310,55 @@ def get_saved_signals_kpis() -> Dict:
                     'entry_touched',
                     True
                 )
-                .execute()
             )
+
+            if user_name:
+
+                q = q.eq(
+                    'user_name',
+                    str(
+                        user_name
+                    ).strip()
+                )
+
+            return q.execute()
         r_closed = db._with_retry(_op_closed)
         closed = r_closed.data if r_closed and r_closed.data else []
         
         # Activas (no cuentan para winrate pero sí para 'activas')
         def _op_active():
-            return (db.client.table('saved_signals')
-                    .select('id', count='exact')
-                    .in_('status', ['active', 'entry_touched'])
-                    .limit(1)
-                    .execute())
+
+            q = (
+                db.client
+                .table(
+                    'saved_signals'
+                )
+                .select(
+                    'id',
+                    count='exact'
+                )
+                .in_(
+                    'status',
+                    [
+                        'active',
+                        'entry_touched'
+                    ]
+                )
+                .limit(
+                    1
+                )
+            )
+
+            if user_name:
+
+                q = q.eq(
+                    'user_name',
+                    str(
+                        user_name
+                    ).strip()
+                )
+
+            return q.execute()
         r_active = db._with_retry(_op_active)
         active_count = r_active.count if hasattr(r_active, 'count') and r_active.count is not None else 0
         
