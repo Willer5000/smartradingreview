@@ -22844,8 +22844,44 @@ def api_analyze():
         
 
 _PREV_SIGNALS_LOCK = threading.Lock()
-_PREV_SIGNALS_COMPUTING = {'running': False}
+_PREV_SIGNALS_COMPUTING = {
+    'running': False
+}
 
+# ============================================================================
+# FASE 7G.3 — COORDINADOR GLOBAL DE ANÁLISIS PESADOS
+# ============================================================================
+#
+# Render Free tiene recursos muy limitados.
+#
+# Los dos lotes más pesados son:
+#
+#   1. Futures completo
+#      5 símbolos × 6 TF
+#
+#   2. Previous Signals Spot
+#      3 símbolos × 4 TF + correlaciones
+#
+# Ambos siguen funcionando en background,
+# pero NO deben ejecutar simultáneamente.
+#
+# IMPORTANTE:
+#
+# Este lock:
+#
+#   - NO bloquea endpoints web livianos.
+#   - NO bloquea lectura de caché.
+#   - NO cambia análisis.
+#   - NO cambia resultados.
+#
+# Sólo serializa los dos trabajos pesados.
+# ============================================================================
+
+_HEAVY_ANALYSIS_LOCK = threading.Lock()
+
+# Si otro trabajo pesado realmente quedase atascado durante
+# 20 minutos, abandonamos este ciclo en vez de esperar eternamente.
+_HEAVY_ANALYSIS_WAIT_SECONDS = 20 * 60
 
 def _compute_previous_signals():
     """
@@ -23141,20 +23177,91 @@ def _compute_previous_signals():
 
 
 def _run_previous_signals_background():
-    """Ejecuta _compute_previous_signals con lock para evitar cálculos concurrentes."""
-    if _PREV_SIGNALS_COMPUTING['running']:
-        print("⏳ previous_signals ya se está calculando en background — skip")
+    """
+    Ejecuta _compute_previous_signals en background.
+
+    FASE 7G.3:
+    además del lock propio de previous_signals,
+    espera el turno global de análisis pesado para no competir
+    simultáneamente con el warm-up completo de Futures.
+    """
+
+    if _PREV_SIGNALS_COMPUTING[
+        'running'
+    ]:
+
+        print(
+            "⏳ previous_signals ya se está calculando "
+            "en background — skip"
+        )
+
         return
+
     with _PREV_SIGNALS_LOCK:
-        _PREV_SIGNALS_COMPUTING['running'] = True
+
+        _PREV_SIGNALS_COMPUTING[
+            'running'
+        ] = True
+
+        heavy_acquired = False
+
         try:
+
+            print(
+                "⏳ [7G.3] SPOT previous_signals "
+                "esperando turno de análisis pesado..."
+            )
+
+            heavy_acquired = (
+                _HEAVY_ANALYSIS_LOCK.acquire(
+                    timeout=(
+                        _HEAVY_ANALYSIS_WAIT_SECONDS
+                    )
+                )
+            )
+
+            if not heavy_acquired:
+
+                print(
+                    "⚠️ [7G.3] SPOT previous_signals "
+                    "no obtuvo turno pesado dentro del límite. "
+                    "Se conserva el caché anterior."
+                )
+
+                return
+
+            print(
+                "▶️ [7G.3] SPOT previous_signals "
+                "obtuvo turno pesado."
+            )
+
             _compute_previous_signals()
+
         except Exception as e:
-            print(f"❌ Error en _compute_previous_signals background: {e}")
+
+            print(
+                "❌ Error en "
+                "_compute_previous_signals background: "
+                f"{e}"
+            )
+
             import traceback
             traceback.print_exc()
+
         finally:
-            _PREV_SIGNALS_COMPUTING['running'] = False
+
+            if heavy_acquired:
+
+                _HEAVY_ANALYSIS_LOCK.release()
+
+                print(
+                    "✅ [7G.3] SPOT previous_signals "
+                    "liberó turno pesado."
+                )
+
+            _PREV_SIGNALS_COMPUTING[
+                'running'
+            ] = False
 
 
 @app.route('/api/previous_signals')
@@ -24874,37 +24981,107 @@ def _trigger_futures_refresh_async():
             'INICIANDO'
         )
     def _do_refresh():
+
+        heavy_acquired = False
+
         try:
-            print(f"\n🔄 [BG] Refrescando análisis futuros...")
-            start = time.time()
-
-            data = _analyze_futures_all_parallel()
-
-            elapsed = time.time() - start
 
             print(
-                f"✅ [BG] Análisis futuros completado en {elapsed:.1f}s "
+                "\n⏳ [7G.3] FUTURES esperando "
+                "turno de análisis pesado..."
+            )
+
+            heavy_acquired = (
+                _HEAVY_ANALYSIS_LOCK.acquire(
+                    timeout=(
+                        _HEAVY_ANALYSIS_WAIT_SECONDS
+                    )
+                )
+            )
+
+            if not heavy_acquired:
+
+                print(
+                    "⚠️ [7G.3] FUTURES no obtuvo "
+                    "turno pesado dentro del límite. "
+                    "Se conserva el caché anterior."
+                )
+
+                return
+
+            print(
+                "▶️ [7G.3] FUTURES obtuvo turno pesado."
+            )
+
+            print(
+                "\n🔄 [BG] Refrescando análisis futuros..."
+            )
+
+            start = time.time()
+
+            data = (
+                _analyze_futures_all_parallel()
+            )
+
+            elapsed = (
+                time.time()
+                - start
+            )
+
+            print(
+                f"✅ [BG] Análisis futuros completado "
+                f"en {elapsed:.1f}s "
                 f"({len(data.get('analysis', {}))} pares, "
                 f"{len(data.get('errors', []))} errores)"
             )
 
-            cache['data'] = data
-            cache['ts'] = time.time()
+            cache[
+                'data'
+            ] = data
+
+            cache[
+                'ts'
+            ] = time.time()
 
             try:
+
                 _save_futures_cache_to_disk()
+
             except Exception as save_err:
-                print(f"⚠️ [FUT] Snapshot save falló: {save_err}")
+
+                print(
+                    "⚠️ [FUT] Snapshot save falló: "
+                    f"{save_err}"
+                )
 
         except Exception as e:
-            print(f"❌ [BG] Error refrescando futuros: {e}")
+
+            print(
+                "❌ [BG] Error refrescando futuros: "
+                f"{e}"
+            )
 
             import traceback
             traceback.print_exc()
 
         finally:
-            with cache['lock']:
-                cache['running'] = False
+
+            if heavy_acquired:
+
+                _HEAVY_ANALYSIS_LOCK.release()
+
+                print(
+                    "✅ [7G.3] FUTURES liberó "
+                    "turno pesado."
+                )
+
+            with cache[
+                'lock'
+            ]:
+
+                cache[
+                    'running'
+                ] = False
 
     t = threading.Thread(
         target=_do_refresh,
