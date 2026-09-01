@@ -132,8 +132,47 @@ def _get_session() -> requests.Session:
 _cache: dict = {}
 _cache_lock = threading.Lock()
 
+# ============================================================================
+# FASE 7G.1 — SINGLE-FLIGHT POR SYMBOL / TIMEFRAME
+# ============================================================================
+#
+# Problema:
+#
+# Si varios threads llegan simultáneamente justo después de expirar
+# el caché:
+#
+#     thread A → cache miss
+#     thread B → cache miss
+#     thread C → cache miss
+#
+# sin protección los tres podrían hacer:
+#
+#     GET KuCoin BTC-USDT 1h
+#
+# al mismo tiempo.
+#
+# Solución:
+#
+# para cada (symbol, interval) permitimos UN SOLO fetch remoto.
+# Los demás esperan brevemente el resultado del primero.
+#
+# No cambia los datos ni los TTL.
+# ============================================================================
+
+_fetch_inflight = {}
+_fetch_inflight_lock = threading.Lock()
+
 # Estadísticas (útil para debug)
-_stats = {'hits': 0, 'misses': 0, 'errors': 0, 'fetches': 0}
+_stats = {
+    'hits': 0,
+    'misses': 0,
+    'errors': 0,
+    'fetches': 0,
+
+    # Número de requests que NO hicieron una descarga duplicada
+    # porque esperaron al fetch que ya estaba en curso.
+    'coalesced_waits': 0
+}
 
 
 def _ttl_for(interval: str) -> int:
@@ -175,103 +214,554 @@ def _cache_put(symbol: str, interval: str, df: pd.DataFrame) -> None:
 # ============================================================================
 # FETCH principal
 # ============================================================================
-def fetch_kucoin_candles(symbol: str, interval: str, timeout: int = 15) -> Optional[pd.DataFrame]:
+def fetch_kucoin_candles(
+    symbol: str,
+    interval: str,
+    timeout: int = 15
+) -> Optional[pd.DataFrame]:
     """
-    Obtiene velas de KuCoin con caché por (symbol, interval).
-    
-    Retorna DataFrame con columnas [time, open, close, high, low, volume, turnover]
-    en orden ascendente por tiempo, o None si falla.
-    
-    El caller decide qué hacer si retorna None (típicamente: fallback data).
+    Obtiene velas KuCoin utilizando:
+
+    - TTL cache existente;
+    - requests.Session existente;
+    - FASE 7G.1 single-flight por (symbol, interval).
+
+    Si varios threads solicitan exactamente las mismas velas al mismo
+    tiempo, sólo uno realiza el fetch remoto.
+
+    Los demás esperan el resultado y reutilizan el DataFrame cacheado.
+
+    No altera:
+    - contenido de velas;
+    - TTL;
+    - orden del DataFrame;
+    - columnas;
+    - comportamiento del caller ante errores.
     """
-    # 1. Intentar caché
-    cached = _cache_get(symbol, interval)
+
+    key = (
+        symbol,
+        interval
+    )
+
+    # ========================================================================
+    # 1. CACHÉ NORMAL
+    # ========================================================================
+
+    cached = _cache_get(
+        symbol,
+        interval
+    )
+
     if cached is not None:
+
         with _cache_lock:
-            _stats['hits'] += 1
+
+            _stats[
+                'hits'
+            ] += 1
+
         return cached
-    
+
     with _cache_lock:
-        _stats['misses'] += 1
-    
-    # 2. Fetch remoto
-    kucoin_interval = KUCOIN_INTERVALS.get(interval)
-    if not kucoin_interval:
-        logger.warning(f"Intervalo no soportado: {interval}")
-        return None
-    
-    url = f"https://api.kucoin.com/api/v1/market/candles?symbol={symbol}&type={kucoin_interval}"
-    session = _get_session()
-    
-    try:
+
+        _stats[
+            'misses'
+        ] += 1
+
+    # ========================================================================
+    # 2. SINGLE-FLIGHT
+    # ========================================================================
+    #
+    # Exactamente un thread se convierte en OWNER del fetch.
+    #
+    # Los demás obtienen el mismo Event y esperan.
+    # ========================================================================
+
+    with _fetch_inflight_lock:
+
+        inflight_event = (
+            _fetch_inflight.get(
+                key
+            )
+        )
+
+        if inflight_event is None:
+
+            inflight_event = (
+                threading.Event()
+            )
+
+            _fetch_inflight[
+                key
+            ] = inflight_event
+
+            fetch_owner = True
+
+        else:
+
+            fetch_owner = False
+
+    # ========================================================================
+    # 3. OTRO THREAD YA ESTÁ DESCARGANDO
+    # ========================================================================
+
+    if not fetch_owner:
+
         with _cache_lock:
-            _stats['fetches'] += 1
-        response = session.get(url, timeout=timeout)
-        
-        if response.status_code != 200:
-            logger.warning(f"HTTP {response.status_code} KuCoin {symbol} {interval}: {response.text[:120]}")
-            with _cache_lock:
-                _stats['errors'] += 1
+
+            _stats[
+                'coalesced_waits'
+            ] += 1
+
+        # La petición owner tiene timeout propio.
+        #
+        # Dejamos unos segundos adicionales para:
+        # - JSON decode
+        # - construcción DataFrame
+        # - adquisición de locks
+        wait_timeout = max(
+            3,
+            int(
+                timeout
+            )
+            + 5
+        )
+
+        completed = (
+            inflight_event.wait(
+                timeout=wait_timeout
+            )
+        )
+
+        # ==============================================================
+        # OWNER TERMINÓ
+        # ==============================================================
+
+        if completed:
+
+            cached_after_wait = (
+                _cache_get(
+                    symbol,
+                    interval
+                )
+            )
+
+            if cached_after_wait is not None:
+
+                with _cache_lock:
+
+                    _stats[
+                        'hits'
+                    ] += 1
+
+                return cached_after_wait
+
+            # El owner terminó pero no dejó datos:
+            #
+            # HTTP error / timeout / datos inválidos.
+            #
+            # No hacemos inmediatamente otra descarga desde todos
+            # los threads que estaban esperando.
+            #
+            # El caller conserva exactamente su comportamiento previo:
+            # recibe None y puede usar su fallback.
             return None
-        
-        data = response.json()
-        if data.get('code') != '200000' or 'data' not in data:
-            logger.warning(f"Respuesta KuCoin inválida {symbol} {interval}: code={data.get('code')}")
-            with _cache_lock:
-                _stats['errors'] += 1
-            return None
-        
-        candles = data['data']
-        if not candles or len(candles) < 30:
-            logger.warning(f"Datos insuficientes KuCoin {symbol} {interval}: {len(candles) if candles else 0} velas")
-            with _cache_lock:
-                _stats['errors'] += 1
-            return None
-        
-        df = pd.DataFrame(candles, columns=['time', 'open', 'close', 'high', 'low', 'volume', 'turnover'])
-        df['time'] = pd.to_datetime(df['time'].astype(int), unit='s')
-        df['open'] = df['open'].astype(float)
-        df['high'] = df['high'].astype(float)
-        df['low'] = df['low'].astype(float)
-        df['close'] = df['close'].astype(float)
-        df['volume'] = df['volume'].astype(float)
-        df = df.sort_values('time').reset_index(drop=True)
-        
-        # Guardar en caché
-        _cache_put(symbol, interval, df)
-        # Devolver copia (defensa contra mutación del caller)
-        return df.copy()
-    
-    except requests.exceptions.Timeout:
-        logger.warning(f"Timeout KuCoin {symbol} {interval}")
-        with _cache_lock:
-            _stats['errors'] += 1
-        return None
-    except requests.exceptions.ConnectionError as e:
-        logger.warning(f"ConnectionError KuCoin {symbol} {interval}: {str(e)[:100]}")
-        with _cache_lock:
-            _stats['errors'] += 1
-        return None
-    except Exception as e:
-        logger.error(f"Excepción KuCoin {symbol} {interval}: {e}")
-        with _cache_lock:
-            _stats['errors'] += 1
+
+        # ==============================================================
+        # TIMEOUT ESPERANDO OWNER
+        # ==============================================================
+        #
+        # No generamos otro fetch paralelo.
+        #
+        # Eso volvería a crear precisamente el problema que 7G.1 intenta
+        # eliminar.
+        # ==============================================================
+
+        logger.warning(
+            "Single-flight timeout esperando "
+            f"{symbol} {interval}"
+        )
+
         return None
 
+    # ========================================================================
+    # 4. ESTE THREAD ES EL OWNER
+    # ========================================================================
+
+    try:
+
+        kucoin_interval = (
+            KUCOIN_INTERVALS.get(
+                interval
+            )
+        )
+
+        if not kucoin_interval:
+
+            logger.warning(
+                f"Intervalo no soportado: "
+                f"{interval}"
+            )
+
+            return None
+
+        url = (
+            "https://api.kucoin.com/"
+            "api/v1/market/candles"
+            f"?symbol={symbol}"
+            f"&type={kucoin_interval}"
+        )
+
+        session = _get_session()
+
+        try:
+
+            with _cache_lock:
+
+                # IMPORTANTE:
+                #
+                # fetches cuenta peticiones HTTP REALES,
+                # no cache misses.
+                _stats[
+                    'fetches'
+                ] += 1
+
+            response = session.get(
+                url,
+                timeout=timeout
+            )
+
+            if response.status_code != 200:
+
+                logger.warning(
+                    f"HTTP {response.status_code} "
+                    f"KuCoin {symbol} {interval}: "
+                    f"{response.text[:120]}"
+                )
+
+                with _cache_lock:
+
+                    _stats[
+                        'errors'
+                    ] += 1
+
+                return None
+
+            data = response.json()
+
+            if (
+                data.get(
+                    'code'
+                )
+                != '200000'
+                or
+                'data'
+                not in data
+            ):
+
+                logger.warning(
+                    "Respuesta KuCoin inválida "
+                    f"{symbol} {interval}: "
+                    f"code={data.get('code')}"
+                )
+
+                with _cache_lock:
+
+                    _stats[
+                        'errors'
+                    ] += 1
+
+                return None
+
+            candles = data[
+                'data'
+            ]
+
+            if (
+                not candles
+                or len(
+                    candles
+                ) < 30
+            ):
+
+                logger.warning(
+                    "Datos insuficientes KuCoin "
+                    f"{symbol} {interval}: "
+                    f"{len(candles) if candles else 0} "
+                    "velas"
+                )
+
+                with _cache_lock:
+
+                    _stats[
+                        'errors'
+                    ] += 1
+
+                return None
+
+            # ==========================================================
+            # 5. MISMO DATAFRAME QUE ANTES DE 7G.1
+            # ==========================================================
+
+            df = pd.DataFrame(
+                candles,
+                columns=[
+                    'time',
+                    'open',
+                    'close',
+                    'high',
+                    'low',
+                    'volume',
+                    'turnover'
+                ]
+            )
+
+            df[
+                'time'
+            ] = pd.to_datetime(
+                df[
+                    'time'
+                ].astype(
+                    int
+                ),
+                unit='s'
+            )
+
+            df[
+                'open'
+            ] = df[
+                'open'
+            ].astype(
+                float
+            )
+
+            df[
+                'high'
+            ] = df[
+                'high'
+            ].astype(
+                float
+            )
+
+            df[
+                'low'
+            ] = df[
+                'low'
+            ].astype(
+                float
+            )
+
+            df[
+                'close'
+            ] = df[
+                'close'
+            ].astype(
+                float
+            )
+
+            df[
+                'volume'
+            ] = df[
+                'volume'
+            ].astype(
+                float
+            )
+
+            df = (
+                df
+                .sort_values(
+                    'time'
+                )
+                .reset_index(
+                    drop=True
+                )
+            )
+
+            # ==========================================================
+            # 6. CACHEAR
+            # ==========================================================
+
+            _cache_put(
+                symbol,
+                interval,
+                df
+            )
+
+            # La función histórica devolvía una copia.
+            #
+            # Se conserva exactamente ese comportamiento.
+            return df.copy()
+
+        except requests.exceptions.Timeout:
+
+            logger.warning(
+                f"Timeout KuCoin "
+                f"{symbol} {interval}"
+            )
+
+            with _cache_lock:
+
+                _stats[
+                    'errors'
+                ] += 1
+
+            return None
+
+        except requests.exceptions.ConnectionError as e:
+
+            logger.warning(
+                f"ConnectionError KuCoin "
+                f"{symbol} {interval}: "
+                f"{str(e)[:100]}"
+            )
+
+            with _cache_lock:
+
+                _stats[
+                    'errors'
+                ] += 1
+
+            return None
+
+        except Exception as e:
+
+            logger.error(
+                f"Excepción KuCoin "
+                f"{symbol} {interval}: "
+                f"{e}"
+            )
+
+            with _cache_lock:
+
+                _stats[
+                    'errors'
+                ] += 1
+
+            return None
+
+    finally:
+
+        # ====================================================================
+        # 7. DESPERTAR A TODOS LOS THREADS QUE ESPERABAN
+        # ====================================================================
+        #
+        # Este finally corre tanto con:
+        #
+        # éxito
+        # HTTP error
+        # timeout
+        # excepción
+        #
+        # Por tanto ningún waiter queda bloqueado indefinidamente.
+        # ====================================================================
+
+        with _fetch_inflight_lock:
+
+            current_event = (
+                _fetch_inflight.get(
+                    key
+                )
+            )
+
+            if (
+                current_event
+                is inflight_event
+            ):
+
+                # Primero avisamos.
+                inflight_event.set()
+
+                # Después liberamos la clave para futuras solicitudes.
+                _fetch_inflight.pop(
+                    key,
+                    None
+                )
 
 def get_cache_stats() -> dict:
-    """Devuelve estadísticas del caché (útil para /api/review/health)."""
+    """
+    Devuelve estadísticas del caché KuCoin.
+
+    FASE 7G.1 añade:
+
+        coalesced_waits
+        inflight
+
+    Esto permite comprobar cuántas descargas duplicadas
+    estamos evitando.
+    """
+
+    with _fetch_inflight_lock:
+
+        inflight_count = len(
+            _fetch_inflight
+        )
+
     with _cache_lock:
-        entries = len(_cache)
-        total = _stats['hits'] + _stats['misses']
-        hit_rate = (_stats['hits'] / total * 100) if total > 0 else 0.0
+
+        entries = len(
+            _cache
+        )
+
+        total = (
+            _stats[
+                'hits'
+            ]
+            +
+            _stats[
+                'misses'
+            ]
+        )
+
+        hit_rate = (
+            (
+                _stats[
+                    'hits'
+                ]
+                / total
+                * 100
+            )
+            if total > 0
+            else 0.0
+        )
+
         return {
-            'entries': entries,
-            'hits': _stats['hits'],
-            'misses': _stats['misses'],
-            'fetches': _stats['fetches'],
-            'errors': _stats['errors'],
-            'hit_rate_pct': round(hit_rate, 1),
+            'entries':
+                entries,
+
+            'hits':
+                _stats[
+                    'hits'
+                ],
+
+            'misses':
+                _stats[
+                    'misses'
+                ],
+
+            'fetches':
+                _stats[
+                    'fetches'
+                ],
+
+            'errors':
+                _stats[
+                    'errors'
+                ],
+
+            'coalesced_waits':
+                _stats[
+                    'coalesced_waits'
+                ],
+
+            'inflight':
+                inflight_count,
+
+            'hit_rate_pct':
+                round(
+                    hit_rate,
+                    1
+                ),
         }
 
 
