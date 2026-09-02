@@ -1440,7 +1440,7 @@ async function confirmSaveTrade() {
 
 // En futuros, la función está en futures.js. En spot, usamos esta versión.
 if (!window.IS_FUTURES_PAGE) {
-    window.openSaveSignalModal = function(alreadyInPosition = false) {
+    window.openSaveSignalModal = function() {
         if (!isAuthenticated()) {
             showToast('Debes iniciar sesión para guardar señales', 'warning');
             const modalEl = document.getElementById('modalTGPLogin');
@@ -1491,8 +1491,6 @@ if (!window.IS_FUTURES_PAGE) {
         return;
     }
 
-    window._saveSignalAlreadyInPosition = Boolean(alreadyInPosition);
-
     // Determinar acción (LONG/SHORT) - más permisivo
     let action = 'LONG';
     const rawAction = String(source.decision || '').toUpperCase();
@@ -1510,11 +1508,7 @@ if (!window.IS_FUTURES_PAGE) {
     console.log('✅ Acción determinada:', action);
 
     // Llenar el modal
-    const defaultEntry = window._saveSignalAlreadyInPosition
-        ? (source.precio_actual || source.current_price || source.entry || source.entry_price || 0)
-        : (source.entry || source.entry_price || 0);
-
-    document.getElementById('ss-entry').value = defaultEntry;
+    document.getElementById('ss-entry').value = source.entry || source.entry_price || 0;
     document.getElementById('ss-sl').value = source.stop_loss || 0;
     document.getElementById('ss-tp').value = source.take_profit || 0;
     document.getElementById('ss-leverage').value = source.leverage || 1;
@@ -1532,12 +1526,9 @@ if (!window.IS_FUTURES_PAGE) {
     const infoEl = document.getElementById('save-signal-info');
     if (infoEl) {
         infoEl.innerHTML = `
-            <div class="alert alert-${window._saveSignalAlreadyInPosition ? 'success' : 'info'}">
+            <div class="alert alert-info">
                 <strong>${source.symbol || window.currentSymbol}</strong> - ${action}<br>
-                <small>Confianza: ${source.confidence || 0}% | Timeframe: ${source.timeframe || window.currentInterval} | Fuente: ${sourceType === 'previous' ? 'Vela Anterior' : 'Análisis Actual'}</small><br>
-                <small>${window._saveSignalAlreadyInPosition
-                    ? 'Modo: ya entré. El Entry usa el precio actual por defecto y puedes editarlo.'
-                    : 'Modo: esperar Entry. Puedes editar el precio que debe tocar.'}</small>
+                <small>Confianza: ${source.confidence || 0}% | Timeframe: ${source.timeframe || window.currentInterval} | Fuente: ${sourceType === 'previous' ? 'Vela Anterior' : 'Análisis Actual'}</small>
             </div>
         `;
     }
@@ -1618,8 +1609,7 @@ window.confirmSaveSignal = async function() {
         investment_usdt: investment,
         notes: notes,
         entry_at: entryAtISO,
-        candle_timestamp: source.candle_timestamp || source.timestamp || new Date().toISOString(),
-        already_in_position: Boolean(window._saveSignalAlreadyInPosition)
+        candle_timestamp: source.candle_timestamp || new Date().toISOString()
     };
 
     console.log('📤 Payload:', payload);
@@ -1645,7 +1635,6 @@ window.confirmSaveSignal = async function() {
             // Limpiar señales seleccionadas
             window.selectedPreviousSignal = null;
             window._currentPrevSignal = null;
-            window._saveSignalAlreadyInPosition = false;
             // Refrescar lista (usar la de futures.js si existe, sino la de script.js)
             if (typeof window.updateSavedSignalsList === 'function') {
                 window.updateSavedSignalsList();
@@ -8440,21 +8429,6 @@ window.updatePreviousSignals = function updatePreviousSignals() {
         });
 };
 
-window.savePreviousSpotSignal = function savePreviousSpotSignal(alreadyInPosition) {
-    const previousModalElement = document.getElementById('prevSignalModal');
-    const previousModal = previousModalElement
-        ? bootstrap.Modal.getInstance(previousModalElement)
-        : null;
-
-    if (previousModal) {
-        previousModal.hide();
-    }
-
-    setTimeout(() => {
-        window.openSaveSignalModal(Boolean(alreadyInPosition));
-    }, previousModal ? 200 : 0);
-};
-
 // ============ MOSTRAR JUSTIFICACIÓN DE SEÑAL ANTERIOR ============
 window.showPreviousSignalJustification = function(senal) {
     // Guardar la señal seleccionada para poder guardarla después
@@ -8585,24 +8559,6 @@ window.showPreviousSignalJustification = function(senal) {
                 <div class="analysis-text p-3 bg-dark rounded-3 mt-3">
                     ${mensajeFormateado}
                 </div>
-
-                ${senal.activa === 1 ? `
-                    <div class="d-flex flex-column flex-md-row gap-2 mt-3">
-                        <button type="button"
-                                class="btn btn-outline-warning flex-fill"
-                                onclick="window.savePreviousSpotSignal(false)">
-                            🔖 Guardar y esperar Entry
-                        </button>
-                        <button type="button"
-                                class="btn btn-success flex-fill"
-                                onclick="window.savePreviousSpotSignal(true)">
-                            ✅ Guardar en operación
-                        </button>
-                    </div>
-                    <small class="text-muted d-block mt-2">
-                        Ambos modos permiten editar el Entry antes de guardar.
-                    </small>
-                ` : ''}
                 
                 <div class="mt-3 text-end">
                     <small class="text-muted">
