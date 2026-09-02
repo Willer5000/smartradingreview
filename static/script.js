@@ -1440,7 +1440,7 @@ async function confirmSaveTrade() {
 
 // En futuros, la función está en futures.js. En spot, usamos esta versión.
 if (!window.IS_FUTURES_PAGE) {
-    window.openSaveSignalModal = function() {
+    window.openSaveSignalModal = function(alreadyInPosition = false) {
         if (!isAuthenticated()) {
             showToast('Debes iniciar sesión para guardar señales', 'warning');
             const modalEl = document.getElementById('modalTGPLogin');
@@ -1491,6 +1491,8 @@ if (!window.IS_FUTURES_PAGE) {
         return;
     }
 
+    window._saveSignalAlreadyInPosition = Boolean(alreadyInPosition);
+
     // Determinar acción (LONG/SHORT) - más permisivo
     let action = 'LONG';
     const rawAction = String(source.decision || '').toUpperCase();
@@ -1508,7 +1510,11 @@ if (!window.IS_FUTURES_PAGE) {
     console.log('✅ Acción determinada:', action);
 
     // Llenar el modal
-    document.getElementById('ss-entry').value = source.entry || source.entry_price || 0;
+    const defaultEntry = window._saveSignalAlreadyInPosition
+        ? (source.precio_actual || source.current_price || source.entry || source.entry_price || 0)
+        : (source.entry || source.entry_price || 0);
+
+    document.getElementById('ss-entry').value = defaultEntry;
     document.getElementById('ss-sl').value = source.stop_loss || 0;
     document.getElementById('ss-tp').value = source.take_profit || 0;
     document.getElementById('ss-leverage').value = source.leverage || 1;
@@ -1526,9 +1532,12 @@ if (!window.IS_FUTURES_PAGE) {
     const infoEl = document.getElementById('save-signal-info');
     if (infoEl) {
         infoEl.innerHTML = `
-            <div class="alert alert-info">
+            <div class="alert alert-${window._saveSignalAlreadyInPosition ? 'success' : 'info'}">
                 <strong>${source.symbol || window.currentSymbol}</strong> - ${action}<br>
-                <small>Confianza: ${source.confidence || 0}% | Timeframe: ${source.timeframe || window.currentInterval} | Fuente: ${sourceType === 'previous' ? 'Vela Anterior' : 'Análisis Actual'}</small>
+                <small>Confianza: ${source.confidence || 0}% | Timeframe: ${source.timeframe || window.currentInterval} | Fuente: ${sourceType === 'previous' ? 'Vela Anterior' : 'Análisis Actual'}</small><br>
+                <small>${window._saveSignalAlreadyInPosition
+                    ? 'Modo: ya entré. El Entry usa el precio actual por defecto y puedes editarlo.'
+                    : 'Modo: esperar Entry. Puedes editar el precio que debe tocar.'}</small>
             </div>
         `;
     }
@@ -1609,7 +1618,8 @@ window.confirmSaveSignal = async function() {
         investment_usdt: investment,
         notes: notes,
         entry_at: entryAtISO,
-        candle_timestamp: source.candle_timestamp || new Date().toISOString()
+        candle_timestamp: source.candle_timestamp || source.timestamp || new Date().toISOString(),
+        already_in_position: Boolean(window._saveSignalAlreadyInPosition)
     };
 
     console.log('📤 Payload:', payload);
@@ -1635,6 +1645,7 @@ window.confirmSaveSignal = async function() {
             // Limpiar señales seleccionadas
             window.selectedPreviousSignal = null;
             window._currentPrevSignal = null;
+            window._saveSignalAlreadyInPosition = false;
             // Refrescar lista (usar la de futures.js si existe, sino la de script.js)
             if (typeof window.updateSavedSignalsList === 'function') {
                 window.updateSavedSignalsList();
@@ -7998,156 +8009,164 @@ function updateConfirmedSignals(data) {
     if (html === '') html = '<tr><td colspan="3" class="text-center py-3 small">No hay señales confirmadas</td></tr>';
     tbody.innerHTML = html;
 }
-// ============ ACTUALIZAR SEÑALES ACTIVAS - VERSIÓN COMPLETA ============
-// NOTA: se asigna a window para que futures.js pueda sobreescribirla
+// ============================================================================
+// SPOT — PANELES ACTIVOS DESDE EL CACHÉ ÚNICO DEL SERVIDOR
+// ============================================================================
+//
+// La implementación anterior hacía 12 análisis desde el navegador. El servidor
+// ya calcula esas mismas combinaciones para Spot/TGP, por lo que esta versión
+// sólo consulta el resumen liviano creado por /api/spot/signals/active.
+//
+// Si Render todavía está calentando el sistema, se conserva el estado
+// "calculando" y se vuelve a consultar. Un caché vacío ya terminado sí significa
+// realmente que no existen señales activas en ese ciclo.
+// ============================================================================
 window.updateActiveSignals = function updateActiveSignals() {
-    // Si estamos en la página de Futuros, futures.js maneja esto con su propia lógica
-    // (consulta /api/futures/signals/active en vez de spot)
-    if (window.IS_FUTURES_PAGE) {
+    if (window.IS_FUTURES_PAGE || !isAuthenticated()) {
         return;
     }
-    
+
     const signalsList = document.getElementById('active-signals-list');
     const signalsCount = document.getElementById('active-signals-count');
-    
-    if (!signalsList) return;
-    
-    signalsList.innerHTML = '<div class="list-group-item bg-dark text-muted text-center py-3"><div class="spinner-border spinner-border-sm text-success me-2"></div>Buscando señales...</div>';
-    
-    // ============ CONSULTAR TODAS LAS COMBINACIONES ============
-    // 3 pares × 4 temporalidades = 12 consultas
-    Promise.all([
-        // BTC-USDT
-        fetch(`/api/analyze?symbol=BTC-USDT&interval=1D`).then(r => r.json()),
-        fetch(`/api/analyze?symbol=BTC-USDT&interval=12h`).then(r => r.json()),
-        fetch(`/api/analyze?symbol=BTC-USDT&interval=4h`).then(r => r.json()),
-        fetch(`/api/analyze?symbol=BTC-USDT&interval=1W`).then(r => r.json()),  // ← NUEVO
-        
-        // PAXG-USDT
-        fetch(`/api/analyze?symbol=PAXG-USDT&interval=1D`).then(r => r.json()),
-        fetch(`/api/analyze?symbol=PAXG-USDT&interval=12h`).then(r => r.json()),
-        fetch(`/api/analyze?symbol=PAXG-USDT&interval=4h`).then(r => r.json()),
-        fetch(`/api/analyze?symbol=PAXG-USDT&interval=1W`).then(r => r.json()),  // ← NUEVO
-        
-        // PAXG-BTC
-        fetch(`/api/analyze?symbol=PAXG-BTC&interval=1D`).then(r => r.json()),
-        fetch(`/api/analyze?symbol=PAXG-BTC&interval=12h`).then(r => r.json()),
-        fetch(`/api/analyze?symbol=PAXG-BTC&interval=4h`).then(r => r.json()),
-        fetch(`/api/analyze?symbol=PAXG-BTC&interval=1W`).then(r => r.json())   // ← NUEVO
-    ])
-    .then(responses => {
-        const activeSignals = [];
-        const signalColors = {
-            'COMPRA_SPOT': 'success',
-            'LONG': 'info',
-            'VENTA_SPOT': 'danger',
-            'SHORT': 'warning'
-        };
-        
-        const signalIcons = {
-            'COMPRA_SPOT': '🟢',
-            'LONG': '📈',
-            'VENTA_SPOT': '🔴',
-            'SHORT': '📉'
-        };
-        
-        // Mapeo de índices a pares y temporalidades
-        const mappings = [
-            // BTC-USDT (índices 0-3)
-            { symbol: 'BTC-USDT', tf: '1D' },
-            { symbol: 'BTC-USDT', tf: '12h' },
-            { symbol: 'BTC-USDT', tf: '4h' },
-            { symbol: 'BTC-USDT', tf: '1W' },
-            
-            // PAXG-USDT (índices 4-7)
-            { symbol: 'PAXG-USDT', tf: '1D' },
-            { symbol: 'PAXG-USDT', tf: '12h' },
-            { symbol: 'PAXG-USDT', tf: '4h' },
-            { symbol: 'PAXG-USDT', tf: '1W' },
-            
-            // PAXG-BTC (índices 8-11)
-            { symbol: 'PAXG-BTC', tf: '1D' },
-            { symbol: 'PAXG-BTC', tf: '12h' },
-            { symbol: 'PAXG-BTC', tf: '4h' },
-            { symbol: 'PAXG-BTC', tf: '1W' }
-        ];
-        
-        responses.forEach((response, index) => {
-            if (response.success && response.data) {
-                const data = response.data;
-                const action = data.decision?.action;
-                const confidence = data.decision?.confidence || 0;
-                
-                // Solo mostrar acciones de trading con confianza >= 60
-                if (['COMPRA_SPOT', 'LONG', 'VENTA_SPOT', 'SHORT'].includes(action) && confidence >= 60) {
-                    
-                    const symbol = mappings[index].symbol;
-                    const timeframe = mappings[index].tf;
-                    
-                    activeSignals.push({
-                        symbol: symbol,
-                        timeframe: timeframe,
-                        action: action,
-                        confidence: confidence,
-                        entry: data.levels?.entry,
-                        sl: data.levels?.stop_loss,
-                        tp: data.levels?.take_profit,
-                        icon: signalIcons[action] || '🔔',
-                        color: signalColors[action] || 'secondary'
-                    });
-                }
+
+    if (!signalsList || window.__spotActiveSignalsLoading) {
+        return;
+    }
+
+    window.__spotActiveSignalsLoading = true;
+
+    if (!window.spotActiveSignalsLoaded) {
+        signalsList.innerHTML = `
+            <div class="list-group-item bg-dark text-muted text-center py-3">
+                <div class="spinner-border spinner-border-sm text-success me-2"></div>
+                Cargando señales activas...
+            </div>
+        `;
+    }
+
+    fetch('/api/spot/signals/active', { cache: 'no-store' })
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
             }
-        });
-        
-        // Ordenar por confianza (mayor primero)
-        activeSignals.sort((a, b) => b.confidence - a.confidence);
-        
-        // Actualizar contador
-        if (signalsCount) {
-            signalsCount.textContent = activeSignals.length;
-            signalsCount.className = `badge bg-${activeSignals.length > 0 ? 'success' : 'secondary'}`;
-        }
-        
-        // Generar HTML
-        if (activeSignals.length === 0) {
-            signalsList.innerHTML = '<div class="list-group-item bg-dark text-muted text-center py-3">No hay señales activas</div>';
-            return;
-        }
-        
-        let html = '';
-        activeSignals.forEach(signal => {
-            const symbolName = signal.symbol.replace('-', '/');
-            const timeframeName = {
-                '4h': '4H', '12h': '12H', '1D': '1D', '1W': '1W'
-            }[signal.timeframe] || signal.timeframe;
-            
-            html += `
-                <div class="list-group-item bg-dark text-white border-secondary signal-item" 
-                     style="cursor: pointer; transition: all 0.2s;"
-                     onclick="window.changeToSignal('${signal.symbol}', '${signal.timeframe}')"
-                     onmouseover="this.style.backgroundColor='#1a1e24'"
-                     onmouseout="this.style.backgroundColor=''">
-                    <div class="d-flex justify-content-between align-items-center">
-                        <div>
-                            <span class="badge bg-${signal.color} me-2">${signal.icon}</span>
-                            <strong>${signal.action.replace('_', ' ')}</strong>
+            return response.json();
+        })
+        .then(data => {
+            if (!data.success) {
+                throw new Error(data.error || 'No se pudieron cargar las señales');
+            }
+
+            if (data.processing) {
+                if (signalsCount) {
+                    signalsCount.textContent = '0';
+                    signalsCount.className = 'badge bg-secondary';
+                }
+
+                signalsList.innerHTML = `
+                    <div class="list-group-item bg-dark text-muted text-center py-3">
+                        <div class="spinner-border spinner-border-sm text-success me-2"></div>
+                        El servidor está preparando Spot. Volveré a comprobar automáticamente.
+                    </div>
+                `;
+
+                clearTimeout(window.__spotActiveSignalsRetry);
+                window.__spotActiveSignalsRetry = setTimeout(() => {
+                    window.updateActiveSignals();
+                }, 20000);
+                return;
+            }
+
+            clearTimeout(window.__spotActiveSignalsRetry);
+
+            const signalColors = {
+                'COMPRA_SPOT': 'success',
+                'LONG': 'info',
+                'VENTA_SPOT': 'danger',
+                'SHORT': 'warning'
+            };
+
+            const signalIcons = {
+                'COMPRA_SPOT': '🟢',
+                'LONG': '📈',
+                'VENTA_SPOT': '🔴',
+                'SHORT': '📉'
+            };
+
+            const activeSignals = (Array.isArray(data.signals) ? data.signals : [])
+                .filter(signal =>
+                    ['COMPRA_SPOT', 'LONG', 'VENTA_SPOT', 'SHORT']
+                        .includes(String(signal.action || '').toUpperCase())
+                    && Number(signal.confidence || 0) >= 60
+                )
+                .sort((a, b) => Number(b.confidence || 0) - Number(a.confidence || 0));
+
+            if (signalsCount) {
+                signalsCount.textContent = String(activeSignals.length);
+                signalsCount.className = `badge bg-${activeSignals.length > 0 ? 'success' : 'secondary'}`;
+            }
+
+            if (activeSignals.length === 0) {
+                signalsList.innerHTML = `
+                    <div class="list-group-item bg-dark text-muted text-center py-3">
+                        No hay señales activas en el último cálculo completo
+                    </div>
+                `;
+                window.spotActiveSignalsLoaded = true;
+                return;
+            }
+
+            signalsList.innerHTML = activeSignals.map(signal => {
+                const action = String(signal.action || '').toUpperCase();
+                const symbol = String(signal.symbol || 'BTC-USDT');
+                const timeframe = String(signal.timeframe || '4h');
+                const symbolName = symbol.replace('-', '/');
+                const timeframeName = {
+                    '4h': '4H', '12h': '12H', '1D': '1D', '1W': '1W'
+                }[timeframe] || timeframe;
+
+                return `
+                    <div class="list-group-item bg-dark text-white border-secondary signal-item"
+                         style="cursor: pointer; transition: all 0.2s;"
+                         onclick="window.changeToSignal('${symbol}', '${timeframe}')"
+                         onmouseover="this.style.backgroundColor='#1a1e24'"
+                         onmouseout="this.style.backgroundColor=''">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <span class="badge bg-${signalColors[action] || 'secondary'} me-2">
+                                    ${signalIcons[action] || '🔔'}
+                                </span>
+                                <strong>${action.replace('_', ' ')}</strong>
+                            </div>
+                            <span class="badge bg-dark">${fmtConfidence(signal.confidence)}%</span>
                         </div>
-                        <span class="badge bg-dark">${fmtConfidence(signal.confidence)}%</span>
+                        <div class="d-flex justify-content-between mt-1">
+                            <small class="text-muted">${symbolName} ${timeframeName}</small>
+                            <small class="text-success">
+                                E: ${formatTradingLevel(signal.entry, symbol)}
+                            </small>
+                        </div>
                     </div>
-                    <div class="d-flex justify-content-between mt-1">
-                        <small class="text-muted">${symbolName} ${timeframeName}</small>
-                        <small class="text-success">E: ${formatTradingLevel(signal.entry, signal.symbol)}</small>
-                    </div>
+                `;
+            }).join('');
+
+            window.spotActiveSignalsLoaded = true;
+        })
+        .catch(error => {
+            console.error('Error cargando señales activas:', error);
+            signalsList.innerHTML = `
+                <div class="list-group-item bg-dark text-warning text-center py-3">
+                    ⚠️ Señales activas temporalmente no disponibles. Se reintentará.
                 </div>
             `;
+
+            clearTimeout(window.__spotActiveSignalsRetry);
+            window.__spotActiveSignalsRetry = setTimeout(() => {
+                window.updateActiveSignals();
+            }, 30000);
+        })
+        .finally(() => {
+            window.__spotActiveSignalsLoading = false;
         });
-        
-        signalsList.innerHTML = html;
-    })
-    .catch(error => {
-        console.error('Error cargando señales activas:', error);
-        signalsList.innerHTML = '<div class="list-group-item bg-dark text-danger text-center py-3">Error al cargar señales</div>';
-    });
 };
 // ============ FUNCIÓN PARA CAMBIAR A UNA SEÑAL ============
 window.changeToSignal = function(symbol, timeframe) {
@@ -8190,6 +8209,13 @@ setInterval(() => {
         === 'function'
     ) {
         window.updateActiveSignals();
+    }
+
+    if (
+        typeof window.updatePreviousSignals
+        === 'function'
+    ) {
+        window.updatePreviousSignals();
     }
 }, 120000); // Cada 2 minutos
 
@@ -8285,6 +8311,26 @@ window.updatePreviousSignals = function updatePreviousSignals() {
                 window.prevSignalsLoaded = true;
                 return;
             }
+
+            // El backend todavía está calculando. Esto NO significa que el
+            // resultado final esté vacío: mantener el spinner y reintentar.
+            if (data.processing) {
+                signalsList.innerHTML = `
+                    <div class="list-group-item bg-dark text-muted text-center py-3">
+                        <div class="spinner-border spinner-border-sm text-warning me-2"></div>
+                        El servidor está preparando las velas anteriores. Volveré a comprobar automáticamente.
+                    </div>
+                `;
+                window.prevSignalsLoaded = false;
+
+                clearTimeout(window.__spotPreviousSignalsRetry);
+                window.__spotPreviousSignalsRetry = setTimeout(() => {
+                    window.updatePreviousSignals();
+                }, 20000);
+                return;
+            }
+
+            clearTimeout(window.__spotPreviousSignalsRetry);
             
             // Si no hay datos
             if (!data.data || Object.keys(data.data).length === 0) {
@@ -8392,6 +8438,21 @@ window.updatePreviousSignals = function updatePreviousSignals() {
                 signalsCount.className = 'badge bg-secondary';
             }
         });
+};
+
+window.savePreviousSpotSignal = function savePreviousSpotSignal(alreadyInPosition) {
+    const previousModalElement = document.getElementById('prevSignalModal');
+    const previousModal = previousModalElement
+        ? bootstrap.Modal.getInstance(previousModalElement)
+        : null;
+
+    if (previousModal) {
+        previousModal.hide();
+    }
+
+    setTimeout(() => {
+        window.openSaveSignalModal(Boolean(alreadyInPosition));
+    }, previousModal ? 200 : 0);
 };
 
 // ============ MOSTRAR JUSTIFICACIÓN DE SEÑAL ANTERIOR ============
@@ -8524,6 +8585,24 @@ window.showPreviousSignalJustification = function(senal) {
                 <div class="analysis-text p-3 bg-dark rounded-3 mt-3">
                     ${mensajeFormateado}
                 </div>
+
+                ${senal.activa === 1 ? `
+                    <div class="d-flex flex-column flex-md-row gap-2 mt-3">
+                        <button type="button"
+                                class="btn btn-outline-warning flex-fill"
+                                onclick="window.savePreviousSpotSignal(false)">
+                            🔖 Guardar y esperar Entry
+                        </button>
+                        <button type="button"
+                                class="btn btn-success flex-fill"
+                                onclick="window.savePreviousSpotSignal(true)">
+                            ✅ Guardar en operación
+                        </button>
+                    </div>
+                    <small class="text-muted d-block mt-2">
+                        Ambos modos permiten editar el Entry antes de guardar.
+                    </small>
+                ` : ''}
                 
                 <div class="mt-3 text-end">
                     <small class="text-muted">
@@ -8537,33 +8616,6 @@ window.showPreviousSignalJustification = function(senal) {
         modalBody.innerHTML = html;
     }, 100);
 };
-
-// Actualizar cada 10 minutos
-// ============ ACTUALIZAR SEÑALES PERIÓDICAMENTE ============
-//
-// IMPORTANTE:
-// No ejecutar análisis privados si no existe sesión.
-// El intervalo es deliberadamente más conservador para Render Free.
-//
-// La carga inicial YA NO ejecuta updateActiveSignals().
-// Aquí sólo se refrescan periódicamente.
-//
-// ============================================================================
-
-setInterval(() => {
-
-    if (!isAuthenticated()) {
-        return;
-    }
-
-    if (
-        typeof window.updateActiveSignals
-        === 'function'
-    ) {
-        window.updateActiveSignals();
-    }
-
-}, 300000); // 5 minutos
 
 // ============ FEAR & GREED INDEX - VERSIÓN MEJORADA ============
 window.updateFearGreedChart = function(data) {
@@ -9555,6 +9607,17 @@ if (!window.__SMARTTRADING_AUTH_FLOW_INITIALIZED__) {
             // ============================================================
 
             setTimeout(() => {
+                if (
+                    typeof window.updateActiveSignals
+                    === 'function'
+                ) {
+                    console.log(
+                        '📊 Cargando señales activas Spot...'
+                    );
+
+                    window.updateActiveSignals();
+                }
+
                 if (
                     typeof window.updatePreviousSignals
                     === 'function'
