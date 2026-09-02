@@ -762,24 +762,17 @@ class FuturesAnalysis(TradingExpertSystem):
             # 7. FACTOR TEMPORAL
             # ==============================================================
             #
-            # Basado provisionalmente en el histórico del sistema:
+            # La cohorte histórica anterior mezcló señales Spot con Futuros y
+            # no puede decidir qué temporalidad es "mejor". Hasta que el
+            # ReviewTrader reúna una muestra limpia de perpetuos reales, todos
+            # los TF reciben el mismo valor NEUTRAL.
             #
-            # 4h = mejor desempeño
-            # 30m = segunda zona relativamente mejor
-            # 5m = peor
-            #
-            # NO es una probabilidad.
-            #
-            timeframe_factor = {
-                '5m': 0.55,
-                '15m': 0.70,
-                '30m': 0.78,
-                '1h': 0.60,
-                '2h': 0.65,
-                '4h': 0.95,
-            }.get(
-                timeframe,
-                0.70
+            # 0.50 significa "sin evidencia estadística", NO 50% de acierto.
+            # Además es deliberadamente prudente: no aumenta el score de
+            # ninguna temporalidad ni autoriza más leverage.
+            timeframe_factor = 0.50
+            timeframe_factor_source = (
+                'NEUTRAL_PENDING_CLEAN_FUTURES_COHORT'
             )
     
             timeframe_component = (
@@ -878,7 +871,13 @@ class FuturesAnalysis(TradingExpertSystem):
                 'timeframe_factor': round(
                     timeframe_factor,
                     3
-                )
+                ),
+
+                'timeframe_factor_source': (
+                    timeframe_factor_source
+                ),
+
+                'timeframe_factor_statistically_calibrated': False
             }
     
         except Exception as e:
@@ -891,7 +890,9 @@ class FuturesAnalysis(TradingExpertSystem):
                 'score': 0,
                 'label': 'RECHAZAR',
                 'components': {},
-                'timeframe_factor': 0
+                'timeframe_factor': 0,
+                'timeframe_factor_source': 'ERROR',
+                'timeframe_factor_statistically_calibrated': False
             }    
     # ========================================================================
     # CÁLCULO DE APALANCAMIENTO ÓPTIMO
