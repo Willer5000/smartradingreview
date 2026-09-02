@@ -13,8 +13,14 @@
 # - Registra señales en Supabase con system_type='futures'
 
 import logging
+import threading
+import time
 from datetime import datetime
 from typing import Dict, List, Optional
+
+import pandas as pd
+import requests
+from requests.adapters import HTTPAdapter
 
 # Importamos la clase base del sistema principal
 from app import TradingExpertSystem, KUCOIN_INTERVALS, SYMBOLS as SPOT_SYMBOLS
@@ -45,6 +51,16 @@ FUTURES_TIMEFRAMES = {
     '4h':  {'name': '4 Horas',    'type': 'intraday',   'kucoin': '4hour'}
 }
 
+# Contratos perpetuos USDT-M reales de KuCoin Futures.
+# BTC se llama XBT dentro de la API de derivados de KuCoin.
+FUTURES_CONTRACT_SYMBOLS = {
+    'BTC-USDT': 'XBTUSDTM',
+    'ETH-USDT': 'ETHUSDTM',
+    'SOL-USDT': 'SOLUSDTM',
+    'XRP-USDT': 'XRPUSDTM',
+    'ADA-USDT': 'ADAUSDTM',
+}
+
 # Duración real de cada temporalidad. Se usa únicamente para comprobar
 # si la última fila OHLCV ya cerró; no modifica indicadores ni niveles.
 FUTURES_TIMEFRAME_SECONDS = {
@@ -55,6 +71,93 @@ FUTURES_TIMEFRAME_SECONDS = {
     '2h': 2 * 60 * 60,
     '4h': 4 * 60 * 60,
 }
+
+# La API de Futures recibe la granularidad como minutos, no con los textos
+# ("5min", "1hour", etc.) utilizados por la API Spot.
+FUTURES_GRANULARITY_MINUTES = {
+    '5m': 5,
+    '15m': 15,
+    '30m': 30,
+    '1h': 60,
+    '2h': 120,
+    '4h': 240,
+}
+
+KUCOIN_FUTURES_KLINES_URL = (
+    'https://api-futures.kucoin.com/api/v1/kline/query'
+)
+KUCOIN_FUTURES_DATA_SOURCE = 'KUCOIN_FUTURES_PERPETUAL_REST'
+FUTURES_MIN_REAL_CANDLES = 100
+
+# Caché corto e independiente del caché Spot. Evita repetir descargas durante
+# un mismo refresco sin permitir que una respuesta vieja se convierta en una
+# señal nueva.
+FUTURES_DATA_TTL_SECONDS = {
+    '5m': 15,
+    '15m': 30,
+    '30m': 60,
+    '1h': 120,
+    '2h': 240,
+    '4h': 300,
+}
+_futures_data_cache = {}
+_futures_data_cache_lock = threading.Lock()
+_futures_fetch_inflight = {}
+_futures_fetch_inflight_lock = threading.Lock()
+_futures_http_session = None
+_futures_http_session_lock = threading.Lock()
+
+
+def _get_futures_http_session() -> requests.Session:
+    """Crea una sesión HTTP reutilizable exclusivamente para Futures."""
+    global _futures_http_session
+
+    if _futures_http_session is not None:
+        return _futures_http_session
+
+    with _futures_http_session_lock:
+        if _futures_http_session is None:
+            session = requests.Session()
+            adapter = HTTPAdapter(
+                pool_connections=12,
+                pool_maxsize=12,
+                max_retries=0,
+                pool_block=False,
+            )
+            session.mount('https://', adapter)
+            session.headers.update({
+                'Accept': 'application/json',
+                'User-Agent': 'SmartTradingReview/1.0',
+            })
+            _futures_http_session = session
+
+    return _futures_http_session
+
+
+def _get_cached_futures_data(symbol: str, interval: str):
+    """Devuelve una copia sólo cuando el caché Futures sigue fresco."""
+    cache_key = (symbol, interval)
+    ttl = FUTURES_DATA_TTL_SECONDS.get(interval, 30)
+
+    with _futures_data_cache_lock:
+        cached = _futures_data_cache.get(cache_key)
+        if not cached:
+            return None
+        if time.monotonic() - cached['stored_at'] >= ttl:
+            _futures_data_cache.pop(cache_key, None)
+            return None
+        return cached['df'].copy(deep=True)
+
+
+def _store_futures_data(symbol: str, interval: str, df) -> None:
+    """Guarda únicamente velas reales ya validadas."""
+    cache_key = (symbol, interval)
+    with _futures_data_cache_lock:
+        _futures_data_cache[cache_key] = {
+            'df': df.copy(deep=True),
+            'stored_at': time.monotonic(),
+        }
+
 # Extender el mapeo de intervalos KuCoin
 FUTURES_KUCOIN_INTERVALS = {
     '5m': '5min',
@@ -197,6 +300,7 @@ class FuturesAnalysis(TradingExpertSystem):
     
     def __init__(self):
         super().__init__()
+        self._futures_data_errors = {}
         print("=" * 60)
         print("🚀 FUTURES ANALYSIS - INICIALIZANDO")
         print("=" * 60)
@@ -213,78 +317,186 @@ class FuturesAnalysis(TradingExpertSystem):
     
     def get_kucoin_data(self, symbol: str, interval: str):
         """
-        Obtener datos de velas de KuCoin.
-        Sobrescribe el método padre para incluir las temporalidades cortas.
-        Usa kucoin_cache (Session HTTP + caché con TTL por TF).
+        Obtiene velas REALES del contrato perpetuo KuCoin Futures.
+
+        Reglas de seguridad:
+        - nunca consulta el endpoint Spot;
+        - nunca inventa velas cuando KuCoin falla;
+        - valida esquema, timestamps y coherencia OHLC;
+        - devuelve None ante cualquier duda para que NO se publique una señal.
         """
-        try:
-            from kucoin_cache import fetch_kucoin_candles, KUCOIN_INTERVALS as CACHE_INTERVALS
-            
-            # Validar que el intervalo esté soportado (incluye los TF cortos de futuros)
-            all_intervals = {**KUCOIN_INTERVALS, **FUTURES_KUCOIN_INTERVALS}
-            if interval not in all_intervals and interval not in CACHE_INTERVALS:
-                print(f"❌ Intervalo no soportado: {interval}")
-                return self._generate_fallback_data(symbol, interval)
-            
-            df = fetch_kucoin_candles(symbol, interval, timeout=15)
-            if df is None or df.empty:
-                return self._generate_fallback_data(symbol, interval)
-            return df
-        except Exception as e:
-            print(f"Excepción en get_kucoin_data (futures): {e}")
-            return self._generate_fallback_data(symbol, interval)
-    
-    def _generate_fallback_data(self, symbol: str, interval: str):
-        """Genera datos sintéticos si KuCoin falla"""
-        import numpy as np
-        import pandas as pd
-        from datetime import datetime, timedelta
-        
-        try:
-            # Precios base por símbolo
-            base_prices = {
-                'BTC-USDT': 68000,
-                'ETH-USDT': 3500,
-                'SOL-USDT': 150,
-                'XRP-USDT': 0.55,
-                'ADA-USDT': 0.40
-            }
-            base_price = base_prices.get(symbol, 100)
-            volatility = 0.015  # 1.5%
-            
-            # Cantidad de velas y frecuencia
-            freq_map = {
-                '5m': ('5min', 300),
-                '15m': ('15min', 200),
-                '30m': ('30min', 200),
-                '1h': ('1H', 200),
-                '2h': ('2H', 200),
-                '4h': ('4H', 200)
-            }
-            freq, periods = freq_map.get(interval, ('1H', 100))
-            
-            end_date = datetime.now()
-            dates = pd.date_range(end=end_date, periods=periods, freq=freq)
-            
-            np.random.seed(hash(symbol) % 1000)
-            returns = np.random.randn(periods) * volatility
-            price_series = base_price * np.exp(np.cumsum(returns))
-            
-            df = pd.DataFrame({
-                'time': dates,
-                'open': price_series * (1 + np.random.randn(periods) * 0.002),
-                'high': price_series * (1 + abs(np.random.randn(periods) * 0.005)),
-                'low': price_series * (1 - abs(np.random.randn(periods) * 0.005)),
-                'close': price_series * (1 + np.random.randn(periods) * 0.001),
-                'volume': np.abs(np.random.randn(periods) * 1000 + 5000)
-            })
-            df['high'] = df[['open', 'close', 'high']].max(axis=1)
-            df['low'] = df[['open', 'close', 'low']].min(axis=1)
-            
-            return df
-        except Exception as e:
-            print(f"Error generando fallback: {e}")
+        error_key = (symbol, interval)
+        contract_symbol = FUTURES_CONTRACT_SYMBOLS.get(symbol)
+        granularity = FUTURES_GRANULARITY_MINUTES.get(interval)
+
+        if not contract_symbol:
+            error = f'Símbolo Futures no soportado: {symbol}'
+            self._futures_data_errors[error_key] = error
+            logger.warning(error)
             return None
+
+        if not granularity:
+            error = f'Temporalidad Futures no soportada: {interval}'
+            self._futures_data_errors[error_key] = error
+            logger.warning(error)
+            return None
+
+        cached = _get_cached_futures_data(symbol, interval)
+        if cached is not None:
+            self._futures_data_errors.pop(error_key, None)
+            return cached
+
+        # Single-flight: si otro hilo ya descarga exactamente el mismo
+        # contrato+TF, esperamos su resultado en vez de duplicar la petición.
+        with _futures_fetch_inflight_lock:
+            inflight_event = _futures_fetch_inflight.get(error_key)
+            if inflight_event is None:
+                inflight_event = threading.Event()
+                _futures_fetch_inflight[error_key] = inflight_event
+                fetch_owner = True
+            else:
+                fetch_owner = False
+
+        if not fetch_owner:
+            if inflight_event.wait(timeout=20):
+                cached_after_wait = _get_cached_futures_data(
+                    symbol,
+                    interval,
+                )
+                if cached_after_wait is not None:
+                    self._futures_data_errors.pop(error_key, None)
+                    return cached_after_wait
+
+            self._futures_data_errors[error_key] = (
+                'No se recibieron velas reales del contrato perpetuo'
+            )
+            return None
+
+        try:
+            session = _get_futures_http_session()
+            response = session.get(
+                KUCOIN_FUTURES_KLINES_URL,
+                params={
+                    'symbol': contract_symbol,
+                    'granularity': granularity,
+                },
+                timeout=15,
+            )
+
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f'KuCoin Futures respondió HTTP {response.status_code}'
+                )
+
+            payload = response.json()
+            if payload.get('code') != '200000':
+                raise RuntimeError(
+                    'KuCoin Futures rechazó la consulta '
+                    f"(code={payload.get('code', 'desconocido')})"
+                )
+
+            candles = payload.get('data')
+            if not isinstance(candles, list):
+                raise ValueError('Respuesta Futures sin lista de velas')
+
+            # Esquema oficial Futures:
+            # time, open, high, low, close, volume, turnover
+            valid_rows = [
+                row for row in candles
+                if isinstance(row, (list, tuple)) and len(row) >= 7
+            ]
+            if len(valid_rows) < FUTURES_MIN_REAL_CANDLES:
+                raise ValueError(
+                    f'Sólo llegaron {len(valid_rows)} velas Futures válidas; '
+                    f'se requieren al menos {FUTURES_MIN_REAL_CANDLES}'
+                )
+
+            df = pd.DataFrame(
+                [row[:7] for row in valid_rows],
+                columns=[
+                    'time',
+                    'open',
+                    'high',
+                    'low',
+                    'close',
+                    'volume',
+                    'turnover',
+                ],
+            )
+
+            df['time'] = pd.to_datetime(
+                pd.to_numeric(df['time'], errors='coerce'),
+                unit='ms',
+                utc=True,
+                errors='coerce',
+            ).dt.tz_convert(None)
+
+            numeric_columns = [
+                'open', 'high', 'low', 'close', 'volume', 'turnover'
+            ]
+            for column in numeric_columns:
+                df[column] = pd.to_numeric(df[column], errors='coerce')
+
+            df = (
+                df.dropna(subset=['time'] + numeric_columns)
+                .drop_duplicates(subset=['time'], keep='last')
+                .sort_values('time')
+                .reset_index(drop=True)
+            )
+
+            coherent_ohlc = (
+                (df['open'] > 0)
+                & (df['high'] > 0)
+                & (df['low'] > 0)
+                & (df['close'] > 0)
+                & (df['volume'] >= 0)
+                & (df['high'] >= df[['open', 'close']].max(axis=1))
+                & (df['low'] <= df[['open', 'close']].min(axis=1))
+                & (df['high'] >= df['low'])
+            )
+            df = df.loc[coherent_ohlc].reset_index(drop=True)
+
+            if len(df) < FUTURES_MIN_REAL_CANDLES:
+                raise ValueError(
+                    'Las velas Futures no superaron la validación OHLC '
+                    f'({len(df)} válidas)'
+                )
+
+            fetched_at = datetime.utcnow().isoformat() + 'Z'
+            df.attrs.update({
+                'market_data_source': KUCOIN_FUTURES_DATA_SOURCE,
+                'market_data_is_synthetic': False,
+                'contract_symbol': contract_symbol,
+                'fetched_at': fetched_at,
+                'candles_count': int(len(df)),
+            })
+
+            _store_futures_data(symbol, interval, df)
+            self._futures_data_errors.pop(error_key, None)
+            logger.info(
+                'Velas reales Futures cargadas: '
+                f'{symbol}->{contract_symbol} {interval} ({len(df)})'
+            )
+            return df.copy(deep=True)
+
+        except requests.exceptions.Timeout:
+            error = 'Timeout consultando velas reales de KuCoin Futures'
+        except requests.exceptions.ConnectionError:
+            error = 'Sin conexión con KuCoin Futures'
+        except Exception as exc:
+            error = str(exc)
+        finally:
+            with _futures_fetch_inflight_lock:
+                finished_event = _futures_fetch_inflight.pop(
+                    error_key,
+                    inflight_event,
+                )
+                finished_event.set()
+
+        # Fail closed: sin velas reales no hay análisis ni señal.
+        self._futures_data_errors[error_key] = error
+        logger.warning(f'{symbol} {interval}: {error}')
+        return None
             
     def _calculate_execution_safety(
         self,
@@ -1953,6 +2165,7 @@ class FuturesAnalysis(TradingExpertSystem):
     # ========================================================================
     # ANÁLISIS COMPLETO DE FUTUROS
     # ========================================================================
+
     def _prepare_closed_candle_analysis_data(
         self,
         symbol: str,
@@ -1968,17 +2181,24 @@ class FuturesAnalysis(TradingExpertSystem):
         Comprueba el tiempo de apertura de la última fila y la duración del TF.
         """
         try:
-            import pandas as pd
-
             full_df = self.get_kucoin_data(
                 symbol,
                 timeframe
             )
 
             if full_df is None or len(full_df) < 3:
+                data_error = self._futures_data_errors.get(
+                    (symbol, timeframe),
+                    'No se recibieron velas reales del contrato perpetuo'
+                )
                 return {
                     'success': False,
-                    'error': 'Datos insuficientes para separar vela cerrada'
+                    'error': (
+                        'Futuros detenido por seguridad: '
+                        f'{data_error}'
+                    ),
+                    'market_data_source': KUCOIN_FUTURES_DATA_SOURCE,
+                    'market_data_is_synthetic': False,
                 }
 
             tf_seconds = FUTURES_TIMEFRAME_SECONDS.get(
@@ -2050,6 +2270,17 @@ class FuturesAnalysis(TradingExpertSystem):
                 'live_price': float(full_df['close'].iloc[-1]),
                 'live_candle_timestamp': last_open.isoformat(),
                 'open_candle_present': bool(open_candle_present),
+                'market_data_source': full_df.attrs.get(
+                    'market_data_source',
+                    KUCOIN_FUTURES_DATA_SOURCE,
+                ),
+                'market_data_is_synthetic': False,
+                'contract_symbol': full_df.attrs.get(
+                    'contract_symbol',
+                    FUTURES_CONTRACT_SYMBOLS.get(symbol),
+                ),
+                'market_data_fetched_at': full_df.attrs.get('fetched_at'),
+                'market_data_candles': int(len(full_df)),
             }
 
         except Exception as e:
@@ -2060,8 +2291,8 @@ class FuturesAnalysis(TradingExpertSystem):
             return {
                 'success': False,
                 'error': str(e)
-            }   
-            
+            }
+    
     def analyze_futures_market(self, symbol: str, timeframe: str, 
                                 btc_analysis: Optional[Dict] = None,
                                 closed_candle_only: bool = True) -> Dict:
@@ -2118,7 +2349,12 @@ class FuturesAnalysis(TradingExpertSystem):
                         'No se pudo preparar la vela cerrada'
                     ),
                     'symbol': symbol,
-                    'timeframe': timeframe
+                    'timeframe': timeframe,
+                    'market_data_source': closed_context.get(
+                        'market_data_source',
+                        KUCOIN_FUTURES_DATA_SOURCE,
+                    ),
+                    'market_data_is_synthetic': False,
                 }
 
             df_override = closed_context['closed_df']
@@ -2161,6 +2397,9 @@ class FuturesAnalysis(TradingExpertSystem):
         # ============ MARCAR COMO FUTUROS ============
         result['system_type'] = 'futures'
         result['is_futures'] = True
+        result['market_data_source'] = KUCOIN_FUTURES_DATA_SOURCE
+        result['market_data_is_synthetic'] = False
+        result['contract_symbol'] = FUTURES_CONTRACT_SYMBOLS.get(symbol)
 
         # ============ IDENTIDAD DE LA VELA FUENTE ============
         # Solo se publica cuando el caller pidió explícitamente analizar
@@ -2194,6 +2433,15 @@ class FuturesAnalysis(TradingExpertSystem):
             ]
             result['open_candle_present'] = closed_context[
                 'open_candle_present'
+            ]
+            result['market_data_source'] = closed_context[
+                'market_data_source'
+            ]
+            result['market_data_fetched_at'] = closed_context[
+                'market_data_fetched_at'
+            ]
+            result['market_data_candles'] = closed_context[
+                'market_data_candles'
             ]
         
         # ============ ADAPTAR JUSTIFICACIÓN AL CONTEXTO DE FUTUROS ============
