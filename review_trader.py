@@ -101,6 +101,21 @@ SIGNAL_EXPIRATION = {
     '1W': 1680    # 10 semanas
 }
 
+# Duración real de cada vela. Se usa para comenzar la evaluación DESPUÉS del
+# cierre que originó la señal y evitar que ReviewTrader vea precios anteriores
+# a una decisión que todavía no existía.
+TIMEFRAME_MINUTES = {
+    '5m': 5,
+    '15m': 15,
+    '30m': 30,
+    '1h': 60,
+    '2h': 120,
+    '4h': 240,
+    '12h': 720,
+    '1D': 1440,
+    '1W': 10080
+}
+
 # Contrato de aprendizaje de Futuros.
 #
 # Antes de esta versión existieron señales rotuladas como ``futures`` que podían
@@ -710,6 +725,82 @@ class ReviewTrader:
     # ========================================================================
     # 2. EVALUAR RESULTADOS DE SEÑALES PENDIENTES
     # ========================================================================
+
+    def _get_signal_evaluation_window(
+        self,
+        signal: Dict
+    ) -> Tuple[Optional[datetime], Optional[datetime]]:
+        """
+        Devuelve (inicio_operable, vencimiento) sin mirar precios futuros.
+
+        El timestamp principal de una señal representa la APERTURA de la vela
+        fuente. Esa vela tuvo que cerrar antes de que la decisión fuese válida.
+        Las señales nuevas de Futuros guardan ese cierre explícitamente; para
+        Spot y registros compatibles se calcula con su temporalidad.
+        """
+        timeframe = str(signal.get('timeframe') or '')
+        learning = self._get_signal_learning(signal)
+
+        source_open = self._parse_ts(
+            learning.get('source_candle_timestamp')
+            or signal.get('candle_timestamp')
+        )
+        source_close = self._parse_ts(
+            learning.get('source_candle_close_timestamp')
+        )
+
+        if source_close is None and source_open is not None:
+            minutes = TIMEFRAME_MINUTES.get(timeframe)
+            if minutes:
+                source_close = source_open + timedelta(minutes=minutes)
+
+        # Si un registro legado no permite reconstruir la vela, created_at es
+        # el primer instante seguro: jamás evaluamos antes de que se guardara.
+        evaluation_start = source_close or self._parse_ts(
+            signal.get('created_at')
+        )
+        if evaluation_start is None:
+            return None, None
+
+        max_hours = SIGNAL_EXPIRATION.get(timeframe, 24)
+        evaluation_end = evaluation_start + timedelta(hours=max_hours)
+        return evaluation_start, evaluation_end
+
+    def _has_complete_expiration_coverage(
+        self,
+        signal: Dict,
+        observation: Dict,
+        evaluation_start: datetime,
+        evaluation_end: datetime
+    ) -> bool:
+        """Impide expirar usando un historial recortado o con huecos."""
+        timeframe = str(signal.get('timeframe') or '')
+        minutes = TIMEFRAME_MINUTES.get(timeframe)
+        if not minutes:
+            return False
+
+        expected_candles = int(
+            (evaluation_end - evaluation_start).total_seconds()
+            / (minutes * 60)
+        )
+        observed_candles = int(
+            observation.get('candles_observed', 0) or 0
+        )
+        first_timestamp = self._parse_ts(
+            observation.get('first_timestamp')
+        )
+        last_timestamp = self._parse_ts(
+            observation.get('last_timestamp')
+        )
+        if not first_timestamp or not last_timestamp:
+            return False
+
+        last_required_open = evaluation_end - timedelta(minutes=minutes)
+        return bool(
+            observed_candles >= expected_candles
+            and first_timestamp <= evaluation_start
+            and last_timestamp >= last_required_open
+        )
     
     def evaluate_pending_signals(self, price_fetcher) -> Dict:
         """
@@ -724,13 +815,23 @@ class ReviewTrader:
         if not self.db.enabled:
             return {'processed': 0, 'tp_hit': 0, 'sl_hit': 0, 'expired': 0}
         
-        pending = self.db.get_pending_signals(hours_old_max=1680)  # Hasta 70 días atrás
+        # Margen adicional para que una indisponibilidad temporal del proveedor
+        # no haga desaparecer una señal justo al vencer la ventana más larga.
+        oldest_pending_hours = max(SIGNAL_EXPIRATION.values()) + (14 * 24)
+        pending = self.db.get_pending_signals(
+            hours_old_max=oldest_pending_hours
+        )
         
         stats = {
             'processed': 0,
             'tp_hit': 0,
             'sl_hit': 0,
             'expired': 0,
+            'expired_no_entry': 0,
+            'expired_after_entry': 0,
+            'ambiguous': 0,
+            'invalid_setup': 0,
+            'incomplete_history': 0,
             'still_pending': 0,
             'spot_evaluated': 0,
             'futures_real_evaluated': 0,
@@ -767,19 +868,6 @@ class ReviewTrader:
                     stats['legacy_futures_quarantined'] += 1
                     continue
                 
-                # Verificar expiración
-                created = self._parse_ts(signal.get('created_at'))
-                if created:
-                    hours_old = (datetime.utcnow() - created).total_seconds() / 3600
-                    max_hours = SIGNAL_EXPIRATION.get(timeframe, 24)
-                    
-                    if hours_old > max_hours:
-                        # Expiró sin tocar TP ni SL
-                        self._mark_signal_expired(signal)
-                        stats['expired'] += 1
-                        stats['processed'] += 1
-                        continue
-                
                 # Obtener velas del mercado correcto desde el timestamp.
                 df, data_source = self._fetch_market_data_for_signal(
                     signal,
@@ -799,18 +887,72 @@ class ReviewTrader:
                 else:
                     stats['spot_evaluated'] += 1
                 
-                # Evaluar si tocó TP o SL
-                result = self._check_tp_sl_hit(signal, df)
-                if result:
+                evaluation_start, evaluation_end = (
+                    self._get_signal_evaluation_window(signal)
+                )
+                if evaluation_start is None or evaluation_end is None:
+                    stats['invalid_setup'] += 1
+                    stats['still_pending'] += 1
+                    continue
+
+                is_expired = datetime.utcnow() >= evaluation_end
+
+                # Primero se reconstruye TODA la vida válida de la señal. Sólo
+                # después, si no hubo salida, se la marca como expirada.
+                result = self._check_tp_sl_hit(
+                    signal,
+                    df,
+                    evaluation_start=evaluation_start,
+                    evaluation_end=evaluation_end,
+                    include_pending_snapshot=True
+                )
+
+                if result and result.get('status') in (
+                    'tp_hit',
+                    'sl_hit',
+                    'ambiguous',
+                    'invalid_setup'
+                ):
                     self.db.update_signal_result(signal['id'], result)
                     stats['processed'] += 1
                     if result['status'] == 'tp_hit':
                         stats['tp_hit'] += 1
                     elif result['status'] == 'sl_hit':
                         stats['sl_hit'] += 1
-                    print(f"   {'✅' if result['status']=='tp_hit' else '❌'} "
+                    elif result['status'] == 'ambiguous':
+                        stats['ambiguous'] += 1
+                    elif result['status'] == 'invalid_setup':
+                        stats['invalid_setup'] += 1
+                    marker = {
+                        'tp_hit': '✅',
+                        'sl_hit': '❌',
+                        'ambiguous': '⚖️',
+                        'invalid_setup': '⚠️'
+                    }.get(result['status'], 'ℹ️')
+                    print(f"   {marker} "
                           f"{symbol} {timeframe} {action_norm}: {result['status']} "
                           f"({result['pnl_pct']:+.2f}%)")
+                elif result and is_expired:
+                    if not self._has_complete_expiration_coverage(
+                        signal,
+                        result,
+                        evaluation_start,
+                        evaluation_end
+                    ):
+                        stats['incomplete_history'] += 1
+                        stats['still_pending'] += 1
+                        continue
+                    expiry_result = self._mark_signal_expired(
+                        signal,
+                        result,
+                        evaluation_end
+                    )
+                    stats['expired'] += 1
+                    stats['processed'] += 1
+                    if expiry_result.get('entry_touched'):
+                        stats['expired_after_entry'] += 1
+                    else:
+                        stats['expired_no_entry'] += 1
                 else:
                     stats['still_pending'] += 1
                     
@@ -820,7 +962,20 @@ class ReviewTrader:
         print(f"\n📊 [REVIEW] Batch completado:")
         print(f"   TP alcanzado: {stats['tp_hit']}")
         print(f"   SL alcanzado: {stats['sl_hit']}")
-        print(f"   Expiradas: {stats['expired']}")
+        print(
+            f"   Expiradas: {stats['expired']} "
+            f"(sin Entry={stats['expired_no_entry']} | "
+            f"tras Entry={stats['expired_after_entry']})"
+        )
+        print(
+            "   Resultado OHLC no demostrable (TP+SL misma vela): "
+            f"{stats['ambiguous']}"
+        )
+        print(f"   Setups inválidos: {stats['invalid_setup']}")
+        print(
+            "   Historial incompleto (sin fabricar resultado): "
+            f"{stats['incomplete_history']}"
+        )
         print(f"   Aún pendientes: {stats['still_pending']}")
         print(
             "   Mercados evaluados: "
@@ -838,7 +993,10 @@ class ReviewTrader:
     def _check_tp_sl_hit(
         self,
         signal: Dict,
-        df
+        df,
+        evaluation_start: Optional[datetime] = None,
+        evaluation_end: Optional[datetime] = None,
+        include_pending_snapshot: bool = False
     ) -> Optional[Dict]:
         """
         Verifica TP / SL y calcula MFE / MAE histórico.
@@ -903,16 +1061,30 @@ class ReviewTrader:
                 or 0
             )
 
-            if (
-                action not in (
-                    'LONG',
-                    'SHORT'
-                )
-                or entry <= 0
-                or sl <= 0
-                or tp <= 0
-            ):
+            if action not in ('LONG', 'SHORT'):
                 return None
+
+            invalid_reason = None
+            if entry <= 0 or sl <= 0 or tp <= 0:
+                invalid_reason = 'LEVEL_NON_POSITIVE'
+            elif action == 'LONG' and not (sl < entry < tp):
+                invalid_reason = 'INVALID_LONG_GEOMETRY'
+            elif action == 'SHORT' and not (tp < entry < sl):
+                invalid_reason = 'INVALID_SHORT_GEOMETRY'
+
+            if invalid_reason:
+                return {
+                    'status': 'invalid_setup',
+                    'exit_price': 0,
+                    'exit_timestamp': datetime.utcnow().isoformat(),
+                    'pnl_pct': 0,
+                    'candles_to_result': 0,
+                    'notes': (
+                        'outcome_reason=invalid_setup; '
+                        f'validation={invalid_reason}; '
+                        'statistically_resolved=false'
+                    )
+                }
 
             # ==========================================================
             # RIESGO ORIGINAL
@@ -929,16 +1101,14 @@ class ReviewTrader:
             # TIMESTAMP ORIGINAL
             # ==========================================================
 
-            signal_ts = self._parse_ts(
-                signal.get(
-                    'candle_timestamp'
+            if evaluation_start is None or evaluation_end is None:
+                calculated_start, calculated_end = (
+                    self._get_signal_evaluation_window(signal)
                 )
-                or signal.get(
-                    'created_at'
-                )
-            )
+                evaluation_start = evaluation_start or calculated_start
+                evaluation_end = evaluation_end or calculated_end
 
-            if not signal_ts:
+            if not evaluation_start:
                 return None
 
             # ==========================================================
@@ -954,15 +1124,21 @@ class ReviewTrader:
                     utc=True
                 )
 
-                signal_timestamp = pd.Timestamp(
-                    signal_ts,
+                start_timestamp = pd.Timestamp(
+                    evaluation_start,
                     tz='UTC'
                 )
 
-                df_after = df[
-                    df_time
-                    > signal_timestamp
-                ]
+                valid_mask = df_time >= start_timestamp
+
+                if evaluation_end is not None:
+                    end_timestamp = pd.Timestamp(
+                        evaluation_end,
+                        tz='UTC'
+                    )
+                    valid_mask = valid_mask & (df_time < end_timestamp)
+
+                df_after = df[valid_mask]
 
             else:
 
@@ -1006,6 +1182,10 @@ class ReviewTrader:
             # ==========================================================
 
             entry_touched = False
+            last_close = entry
+            first_candle_ts = None
+            last_candle_ts = evaluation_start
+            observed_candles = 0
 
             # ==========================================================
             # ACTUALIZAR MÉTRICAS
@@ -1133,6 +1313,16 @@ class ReviewTrader:
                     datetime.utcnow()
                 )
 
+                candle_close = float(
+                    row.get('close', entry)
+                    or entry
+                )
+                last_close = candle_close
+                if first_candle_ts is None:
+                    first_candle_ts = candle_ts
+                last_candle_ts = candle_ts
+                observed_candles = candle_number
+
                 # ======================================================
                 # NO EVALUAR TP / SL ANTES DE ENTRY
                 # ======================================================
@@ -1155,12 +1345,34 @@ class ReviewTrader:
 
                 if action == 'LONG':
 
+                    # Una vela OHLC informa que ambos niveles ocurrieron, pero
+                    # no en qué orden. Etiquetarla siempre como SL fabricaba
+                    # pérdidas; etiquetarla TP fabricaría ganancias. Se aparta
+                    # de win rate hasta poder resolverla con menor timeframe.
+                    if low <= sl and high >= tp:
+                        mfe_price = max(mfe_price, tp)
+                        mae_price = min(mae_price, sl)
+                        candles_to_mfe = candle_number
+                        candles_to_mae = candle_number
+                        metrics = _excursion_payload()
+                        return {
+                            'status': 'ambiguous',
+                            'exit_price': 0,
+                            'exit_timestamp': str(candle_ts),
+                            'pnl_pct': 0,
+                            'candles_to_result': candle_number,
+                            'notes': (
+                                'outcome_reason=tp_and_sl_same_candle; '
+                                'entry_touched=true; '
+                                'statistically_resolved=false; '
+                                'requires_lower_timeframe=true'
+                            ),
+                            **metrics
+                        }
+
                     # --------------------------------------------------
                     # SL
                     # --------------------------------------------------
-                    # Se mantiene la regla conservadora existente:
-                    # si SL y TP ocurren en la misma vela, se asume SL.
-                    #
                     # La MAE termina exactamente en SL porque la
                     # operación deja de existir allí.
                     # --------------------------------------------------
@@ -1198,6 +1410,13 @@ class ReviewTrader:
 
                             'candles_to_result':
                                 candle_number,
+
+                            'notes': (
+                                'outcome_reason=sl_hit; '
+                                'entry_touched=true; '
+                                'resolution_quality=unambiguous_ohlc; '
+                                'statistically_resolved=true'
+                            ),
 
                             **metrics
                         }
@@ -1251,6 +1470,13 @@ class ReviewTrader:
                             'candles_to_result':
                                 candle_number,
 
+                            'notes': (
+                                'outcome_reason=tp_hit; '
+                                'entry_touched=true; '
+                                'resolution_quality=unambiguous_ohlc; '
+                                'statistically_resolved=true'
+                            ),
+
                             **metrics
                         }
 
@@ -1279,6 +1505,27 @@ class ReviewTrader:
                 # ======================================================
 
                 elif action == 'SHORT':
+
+                    if high >= sl and low <= tp:
+                        mfe_price = min(mfe_price, tp)
+                        mae_price = max(mae_price, sl)
+                        candles_to_mfe = candle_number
+                        candles_to_mae = candle_number
+                        metrics = _excursion_payload()
+                        return {
+                            'status': 'ambiguous',
+                            'exit_price': 0,
+                            'exit_timestamp': str(candle_ts),
+                            'pnl_pct': 0,
+                            'candles_to_result': candle_number,
+                            'notes': (
+                                'outcome_reason=tp_and_sl_same_candle; '
+                                'entry_touched=true; '
+                                'statistically_resolved=false; '
+                                'requires_lower_timeframe=true'
+                            ),
+                            **metrics
+                        }
 
                     # --------------------------------------------------
                     # SL
@@ -1319,6 +1566,13 @@ class ReviewTrader:
 
                             'candles_to_result':
                                 candle_number,
+
+                            'notes': (
+                                'outcome_reason=sl_hit; '
+                                'entry_touched=true; '
+                                'resolution_quality=unambiguous_ohlc; '
+                                'statistically_resolved=true'
+                            ),
 
                             **metrics
                         }
@@ -1372,6 +1626,13 @@ class ReviewTrader:
                             'candles_to_result':
                                 candle_number,
 
+                            'notes': (
+                                'outcome_reason=tp_hit; '
+                                'entry_touched=true; '
+                                'resolution_quality=unambiguous_ohlc; '
+                                'statistically_resolved=true'
+                            ),
+
                             **metrics
                         }
 
@@ -1405,7 +1666,23 @@ class ReviewTrader:
             # 7D.2 se encargará de las posiciones realmente abiertas.
             # ==========================================================
 
-            return None
+            if not include_pending_snapshot:
+                return None
+
+            metrics = _excursion_payload()
+            return {
+                'status': (
+                    'pending_after_entry'
+                    if entry_touched
+                    else 'pending_no_entry'
+                ),
+                'entry_touched': entry_touched,
+                'last_price': float(last_close),
+                'first_timestamp': str(first_candle_ts),
+                'last_timestamp': str(last_candle_ts),
+                'candles_observed': int(observed_candles),
+                **metrics
+            }
 
         except Exception as e:
 
@@ -1415,17 +1692,65 @@ class ReviewTrader:
 
             return None
     
-    def _mark_signal_expired(self, signal: Dict):
-        """Marca una señal como expirada"""
+    def _mark_signal_expired(
+        self,
+        signal: Dict,
+        observation: Optional[Dict] = None,
+        evaluation_end: Optional[datetime] = None
+    ) -> Dict:
+        """
+        Cierra por tiempo distinguiendo una orden nunca ejecutada de una
+        operación que sí alcanzó Entry pero no tocó TP/SL.
+        """
+        observation = observation or {}
+        entry_touched = bool(observation.get('entry_touched', False))
+        entry = float(signal.get('entry_price', 0) or 0)
+        last_price = float(observation.get('last_price', 0) or 0)
+        action = str(signal.get('action_normalized', '') or '').upper()
+
+        pnl_pct = 0.0
+        if entry_touched and entry > 0 and last_price > 0:
+            if action == 'LONG':
+                pnl_pct = (last_price - entry) / entry * 100
+            elif action == 'SHORT':
+                pnl_pct = (entry - last_price) / entry * 100
+
+        outcome_reason = (
+            'expired_after_entry'
+            if entry_touched
+            else 'expired_no_entry'
+        )
+        expiry_ts = (
+            evaluation_end.isoformat()
+            if evaluation_end is not None
+            else datetime.utcnow().isoformat()
+        )
         result = {
             'status': 'expired',
-            'exit_price': 0,
-            'exit_timestamp': datetime.utcnow().isoformat(),
-            'pnl_pct': 0,
-            'candles_to_result': 0,
-            'notes': 'Señal expiró sin tocar TP ni SL'
+            'exit_price': last_price if entry_touched else 0,
+            'exit_timestamp': expiry_ts,
+            'pnl_pct': pnl_pct,
+            'candles_to_result': int(
+                observation.get('candles_observed', 0) or 0
+            ),
+            'entry_touched': entry_touched,
+            'notes': (
+                f'outcome_reason={outcome_reason}; '
+                f'entry_touched={str(entry_touched).lower()}; '
+                'exit_rule=time_expiration; '
+                'statistically_resolved=false'
+            ),
+            'mfe_price': observation.get('mfe_price', 0),
+            'mae_price': observation.get('mae_price', 0),
+            'mfe_pct': observation.get('mfe_pct', 0),
+            'mae_pct': observation.get('mae_pct', 0),
+            'mfe_r': observation.get('mfe_r', 0),
+            'mae_r': observation.get('mae_r', 0),
+            'candles_to_mfe': observation.get('candles_to_mfe', 0),
+            'candles_to_mae': observation.get('candles_to_mae', 0)
         }
         self.db.update_signal_result(signal['id'], result)
+        return result
     
     def _parse_ts(self, ts_str) -> Optional[datetime]:
         """Parsea un timestamp ISO a datetime"""
