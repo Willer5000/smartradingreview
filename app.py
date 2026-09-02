@@ -22899,6 +22899,7 @@ def _compute_previous_signals():
     """
     import gc
     resultados = {}
+    active_results = {}
     tiempo_actual = datetime.now(bolivia_tz)
     temporalidades = ['4h', '12h', '1D', '1W']
     pares = ['BTC-USDT', 'PAXG-USDT', 'PAXG-BTC']
@@ -22950,6 +22951,55 @@ def _compute_previous_signals():
                     print(f"      ✅ RATIO-{timeframe} obtenido")
             except Exception as e:
                 print(f"      ⚠️ Error en RATIO-{timeframe}: {e}")
+
+    # ============ COMPACTAR SEÑALES ACTIVAS SPOT ============
+    #
+    # Los 12 análisis actuales ya fueron calculados arriba para alimentar las
+    # correlaciones. Reutilizarlos evita que el navegador vuelva a lanzar otras
+    # 12 peticiones pesadas sólo para llenar el panel "Señales Activas".
+    # Guardamos únicamente los campos pequeños que necesita la interfaz.
+    for timeframe, analyses_by_symbol in analisis_correlacion.items():
+        for symbol, current_analysis in analyses_by_symbol.items():
+            try:
+                decision_data = current_analysis.get('decision', {}) or {}
+                action = str(decision_data.get('action') or '').upper()
+                confidence = float(decision_data.get('confidence') or 0)
+
+                if action not in (
+                    'COMPRA_SPOT',
+                    'VENTA_SPOT',
+                    'LONG',
+                    'SHORT'
+                ) or confidence < 60:
+                    continue
+
+                levels_data = current_analysis.get('levels', {}) or {}
+                analysis_df = current_analysis.get('df', {}) or {}
+                candle_timestamp = None
+
+                if isinstance(analysis_df, dict):
+                    times = analysis_df.get('time', []) or []
+                    if times:
+                        candle_timestamp = str(times[-1])
+
+                key = f"{symbol}_{timeframe}"
+                active_results[key] = {
+                    'symbol': str(symbol),
+                    'timeframe': str(timeframe),
+                    'action': action,
+                    'confidence': confidence,
+                    'entry': levels_data.get('entry'),
+                    'stop_loss': levels_data.get('stop_loss'),
+                    'take_profit': levels_data.get('take_profit'),
+                    'current_price': current_analysis.get('current_price'),
+                    'candle_timestamp': candle_timestamp,
+                    'message': str(current_analysis.get('message') or '')[:800]
+                }
+            except Exception as e:
+                print(
+                    "      ⚠️ No se pudo compactar señal activa "
+                    f"{symbol}-{timeframe}: {e}"
+                )
         
     # ============ PROCESAR SEÑALES DE VELA ANTERIOR ============
     for timeframe in temporalidades:
@@ -23171,6 +23221,8 @@ def _compute_previous_signals():
     # ============ GUARDAR EN CACHÉ ============
     setattr(expert_system, 'prev_signals_cache', resultados)
     setattr(expert_system, 'prev_signals_cache_time', time.time())
+    setattr(expert_system, 'spot_active_signals_cache', active_results)
+    setattr(expert_system, 'spot_active_signals_cache_time', time.time())
     activas = sum(1 for r in resultados.values() if r.get('activa', 0) == 1)
     print(f"\n✅ CÁLCULO COMPLETADO - {len(resultados)} señales totales, {activas} activas")
     return resultados
@@ -23264,6 +23316,73 @@ def _run_previous_signals_background():
             ] = False
 
 
+@app.route('/api/spot/signals/active')
+def api_spot_signals_active():
+    """Sirve el panel Spot desde el mismo caché liviano del background."""
+    try:
+        now = time.time()
+        cache_data = getattr(
+            expert_system,
+            'spot_active_signals_cache',
+            None
+        )
+        cache_time = getattr(
+            expert_system,
+            'spot_active_signals_cache_time',
+            0
+        )
+        age = now - cache_time if cache_time else 999999
+
+        if cache_data is not None:
+            if (
+                age > 600
+                and not _PREV_SIGNALS_COMPUTING['running']
+            ):
+                threading.Thread(
+                    target=_run_previous_signals_background,
+                    daemon=True
+                ).start()
+
+            signals = list(cache_data.values())
+            signals.sort(
+                key=lambda signal: -float(signal.get('confidence') or 0)
+            )
+
+            return jsonify({
+                'success': True,
+                'processing': False,
+                'cached': True,
+                'cache_age_seconds': int(age),
+                'total': len(signals),
+                'signals': signals,
+                'timestamp': datetime.now(bolivia_tz).isoformat()
+            })
+
+        if not _PREV_SIGNALS_COMPUTING['running']:
+            threading.Thread(
+                target=_run_previous_signals_background,
+                daemon=True
+            ).start()
+
+        return jsonify({
+            'success': True,
+            'processing': True,
+            'total': 0,
+            'signals': [],
+            'message': (
+                'El primer cálculo está esperando su turno o sigue en curso.'
+            ),
+            'timestamp': datetime.now(bolivia_tz).isoformat()
+        })
+    except Exception as e:
+        print(f"❌ Error en api_spot_signals_active: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'signals': []
+        })
+
+
 @app.route('/api/previous_signals')
 def api_previous_signals():
     """
@@ -23284,7 +23403,7 @@ def api_previous_signals():
         age = now - cache_time if cache_time else 999999
         
         # Si hay caché aunque sea viejo, lo devolvemos + refresh en bg si toca
-        if cache_data:
+        if cache_data is not None:
             if age > cache_duration and not _PREV_SIGNALS_COMPUTING['running']:
                 # Refresh silencioso en background — no bloqueamos al usuario
                 threading.Thread(target=_run_previous_signals_background, daemon=True).start()
