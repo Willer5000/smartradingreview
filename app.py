@@ -24623,11 +24623,20 @@ def api_futures_analyze():
         
         if not result:
             return jsonify({'success': False, 'error': 'Análisis vacío'}), 500
+
+        analysis_status = _classify_futures_analysis_result(
+            symbol=symbol,
+            timeframe=timeframe,
+            result=result,
+            lifecycle={},
+            min_confidence=0
+        )
         
         # Envolver en formato consistente con /api/analyze
         return jsonify({
             'success': result.get('success', True),
             'data': result if result.get('success') else None,
+            'analysis_status': analysis_status,
             'error': result.get('error')
         })
         
@@ -25557,6 +25566,337 @@ def _start_futures_warmup():
 
 
 # ============================================================================
+# VISIBILIDAD OPERATIVA DE FUTUROS
+# ============================================================================
+#
+# Este bloque NO recalcula ni modifica una señal. Solamente traduce el resultado
+# ya producido por FuturesAnalysis a uno de cuatro estados comprensibles:
+#
+#   EXECUTABLE_SIGNAL  -> superó todos los filtros de publicación;
+#   ANALYSIS_ONLY      -> hay hipótesis LONG/SHORT, pero no se puede ejecutar;
+#   NO_TRADE           -> el comité decidió NO_OPERAR;
+#   ANALYSIS_ERROR     -> faltaron datos o el análisis falló.
+#
+# Las listas legacy `signals` continúan idénticas para no romper futures.js.
+# El frontend nuevo podrá leer `analysis_summary` y `analysis_candidates`.
+# ============================================================================
+def _futures_reason_text(value, fallback, max_length=360):
+    """Convierte razones heterogéneas a texto corto y seguro para la API."""
+    if isinstance(value, (list, tuple, set)):
+        text = '; '.join(
+            str(item).strip()
+            for item in value
+            if str(item).strip()
+        )
+    elif isinstance(value, dict):
+        preferred = (
+            value.get('reason')
+            or value.get('message')
+            or value.get('detail')
+        )
+        text = str(preferred if preferred is not None else value).strip()
+    else:
+        text = str(value or '').strip()
+
+    if not text:
+        text = fallback
+
+    if len(text) > max_length:
+        text = text[:max_length].rstrip() + '...'
+
+    return text
+
+
+def _classify_futures_analysis_result(
+    symbol,
+    timeframe,
+    result,
+    lifecycle=None,
+    min_confidence=0
+):
+    """
+    Clasifica un resultado ya calculado sin alterar decisión, niveles ni safety.
+
+    `classification` explica si el setup es publicable. `is_active` explica si
+    además conserva un ciclo operativo abierto. Son conceptos diferentes.
+    """
+    lifecycle = lifecycle or {}
+
+    def _safe_float(value, default=0.0):
+        try:
+            return float(value if value is not None else default)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _safe_int(value, default=0):
+        try:
+            return int(float(value if value is not None else default))
+        except (TypeError, ValueError):
+            return int(default)
+
+    if not isinstance(result, dict) or not result.get('success'):
+        error = (
+            result.get('error')
+            if isinstance(result, dict)
+            else None
+        )
+        return {
+            'symbol': symbol,
+            'timeframe': timeframe,
+            'classification': 'ANALYSIS_ERROR',
+            'status_label': 'ANÁLISIS NO DISPONIBLE',
+            'reason': _futures_reason_text(
+                error,
+                'El análisis no devolvió un resultado válido.'
+            ),
+            'action': 'NO_OPERAR',
+            'confidence': 0.0,
+            'directional': False,
+            'is_executable': False,
+            'is_active': False,
+            'lifecycle_status': None,
+            'signal_id': None,
+            'source_candle_timestamp': None,
+            'source_candle_close_timestamp': None,
+        }
+
+    decision = result.get('decision') or {}
+    levels = result.get('levels') or {}
+
+    action = str(decision.get('action') or 'NO_OPERAR').upper()
+    confidence = _safe_float(decision.get('confidence'))
+    directional = action in ('LONG', 'SHORT')
+
+    entry = _safe_float(levels.get('entry'))
+    stop_loss = _safe_float(levels.get('stop_loss'))
+    take_profit = _safe_float(levels.get('take_profit'))
+    leverage = _safe_int(levels.get('leverage'))
+
+    engine_status = str(
+        levels.get('publication_status')
+        or result.get('publication_status')
+        or (
+            'ANALYSIS_ONLY'
+            if levels.get('is_rejected')
+            else 'EXECUTABLE_SIGNAL'
+        )
+    ).upper()
+
+    rejection_reason = (
+        levels.get('rejected_reason')
+        or result.get('rejected_reason')
+    )
+
+    classification = 'EXECUTABLE_SIGNAL'
+    reason = 'Cumple los filtros actuales de publicación.'
+
+    if not directional:
+        classification = 'NO_TRADE'
+        reason = _futures_reason_text(
+            decision.get('reason') or decision.get('razones'),
+            'El comité no alcanzó consenso suficiente para LONG o SHORT.'
+        )
+    elif engine_status != 'EXECUTABLE_SIGNAL':
+        classification = 'ANALYSIS_ONLY'
+        reason = _futures_reason_text(
+            rejection_reason,
+            'Existe dirección, pero el motor la marcó como no ejecutable.'
+        )
+    elif confidence < float(min_confidence or 0):
+        classification = 'ANALYSIS_ONLY'
+        reason = (
+            f'Confianza {confidence:.1f}% por debajo del mínimo visible '
+            f'{float(min_confidence):.1f}%.'
+        )
+    elif entry <= 0 or stop_loss <= 0 or take_profit <= 0:
+        classification = 'ANALYSIS_ONLY'
+        reason = 'Entry, Stop Loss o Take Profit no son válidos.'
+    else:
+        try:
+            from futures_system import _leverage_in_valid_range
+
+            if not _leverage_in_valid_range(leverage, timeframe):
+                classification = 'ANALYSIS_ONLY'
+                reason = (
+                    f'Leverage recomendado {leverage}x fuera del rango '
+                    f'operativo actual para {timeframe}.'
+                )
+        except Exception:
+            # Mantiene el mismo fallback tolerante usado por los endpoints.
+            pass
+
+    signal_id = str(result.get('signal_id') or '') or None
+    record = (
+        lifecycle.get(signal_id, {})
+        if signal_id
+        else {}
+    )
+    lifecycle_status = str(
+        record.get('lifecycle_status') or ''
+    ) or None
+
+    is_active = (
+        classification == 'EXECUTABLE_SIGNAL'
+        and lifecycle_status in ('waiting_entry', 'entry_touched')
+    )
+
+    if classification == 'EXECUTABLE_SIGNAL':
+        if lifecycle_status == 'waiting_entry':
+            status_label = 'SEÑAL EJECUTABLE · ESPERANDO ENTRY'
+            active_reason = 'La señal sigue vigente y espera tocar el Entry.'
+        elif lifecycle_status == 'entry_touched':
+            status_label = 'SEÑAL EJECUTABLE · EN OPERACIÓN'
+            active_reason = 'El Entry ya fue tocado y la operación está en seguimiento.'
+        elif lifecycle_status:
+            status_label = 'SEÑAL EJECUTABLE · CICLO FINALIZADO'
+            active_reason = (
+                f'El setup original fue ejecutable, pero su ciclo terminó: '
+                f'{lifecycle_status}.'
+            )
+        else:
+            status_label = 'SEÑAL EJECUTABLE · SIN CICLO ACTIVO'
+            active_reason = (
+                'Cumple los filtros de publicación, pero no existe un registro '
+                'activo de seguimiento.'
+            )
+    elif classification == 'ANALYSIS_ONLY':
+        status_label = 'ANÁLISIS DIRECCIONAL · NO EJECUTABLE'
+        active_reason = 'No se publica como señal activa.'
+    elif classification == 'NO_TRADE':
+        status_label = 'NO OPERAR'
+        active_reason = 'No existe una operación direccional que seguir.'
+    else:
+        status_label = 'ANÁLISIS NO DISPONIBLE'
+        active_reason = 'No existe una operación que seguir.'
+
+    return {
+        'symbol': symbol,
+        'timeframe': timeframe,
+        'classification': classification,
+        'engine_publication_status': engine_status,
+        'status_label': status_label,
+        'reason': reason,
+        'active_reason': active_reason,
+        'action': action,
+        'confidence': round(confidence, 2),
+        'directional': directional,
+        'is_executable': classification == 'EXECUTABLE_SIGNAL',
+        'is_active': is_active,
+        'lifecycle_status': lifecycle_status,
+        'signal_id': signal_id,
+        'entry': entry if entry > 0 else None,
+        'stop_loss': stop_loss if stop_loss > 0 else None,
+        'take_profit': take_profit if take_profit > 0 else None,
+        'leverage': leverage if leverage > 0 else None,
+        'risk_reward': _safe_float(levels.get('risk_reward')),
+        'execution_safety': (
+            _safe_float(levels.get('execution_safety'))
+            if levels.get('execution_safety') is not None
+            else None
+        ),
+        'execution_safety_minimum': (
+            _safe_float(levels.get('execution_safety_operational_min'))
+            if levels.get('execution_safety_operational_min') is not None
+            else None
+        ),
+        'source_candle_timestamp': result.get(
+            'source_candle_timestamp'
+        ),
+        'source_candle_close_timestamp': result.get(
+            'source_candle_close_timestamp'
+        ),
+        'analysis_price': result.get('analysis_price'),
+        'current_price': (
+            result.get('live_price')
+            or result.get('current_price')
+        ),
+    }
+
+
+def _build_futures_analysis_visibility(cache, min_confidence):
+    """Construye el resumen compacto de todas las combinaciones analizadas."""
+    cache = cache or {}
+    lifecycle = cache.get('lifecycle') or {}
+    candidates = []
+
+    for raw_key, result in (cache.get('analysis') or {}).items():
+        if isinstance(raw_key, tuple) and len(raw_key) == 2:
+            symbol, timeframe = raw_key
+        else:
+            key_text = str(raw_key)
+            if '|' in key_text:
+                symbol, timeframe = key_text.split('|', 1)
+            else:
+                symbol = (
+                    result.get('symbol')
+                    if isinstance(result, dict)
+                    else key_text
+                )
+                timeframe = (
+                    result.get('timeframe')
+                    if isinstance(result, dict)
+                    else ''
+                )
+
+        candidates.append(
+            _classify_futures_analysis_result(
+                symbol=symbol,
+                timeframe=timeframe,
+                result=result,
+                lifecycle=lifecycle,
+                min_confidence=min_confidence
+            )
+        )
+
+    status_order = {
+        'EXECUTABLE_SIGNAL': 0,
+        'ANALYSIS_ONLY': 1,
+        'NO_TRADE': 2,
+        'ANALYSIS_ERROR': 3,
+    }
+    candidates.sort(
+        key=lambda item: (
+            status_order.get(item.get('classification'), 9),
+            -float(item.get('confidence') or 0),
+            str(item.get('symbol') or ''),
+            str(item.get('timeframe') or '')
+        )
+    )
+
+    summary = {
+        'total_analyzed': len(candidates),
+        'executable': sum(
+            1 for item in candidates
+            if item['classification'] == 'EXECUTABLE_SIGNAL'
+        ),
+        'active_now': sum(
+            1 for item in candidates
+            if item.get('is_active')
+        ),
+        'analysis_only': sum(
+            1 for item in candidates
+            if item['classification'] == 'ANALYSIS_ONLY'
+        ),
+        'no_trade': sum(
+            1 for item in candidates
+            if item['classification'] == 'NO_TRADE'
+        ),
+        'errors': sum(
+            1 for item in candidates
+            if item['classification'] == 'ANALYSIS_ERROR'
+        ),
+        'minimum_confidence': float(min_confidence or 0),
+        'warming_up': bool(cache.get('warming_up', False)),
+        'stale': bool(cache.get('stale', False)),
+    }
+
+    return {
+        'summary': summary,
+        'candidates': candidates,
+    }
+
+
+# ============================================================================
 # ENDPOINT: Señales LONG/SHORT ACTIVAS (ciclo de vida persistente)
 # ============================================================================
 @app.route('/api/futures/signals/active')
@@ -25567,6 +25907,10 @@ def api_futures_signals_active():
 
         cache = _get_or_refresh_futures_analysis()
         warming_up = cache.get('warming_up', False)
+        visibility = _build_futures_analysis_visibility(
+            cache,
+            min_confidence=min_conf
+        )
 
         active_signals = []
         filter_stats = {
@@ -25697,6 +26041,10 @@ def api_futures_signals_active():
                 ),
             'filter_stats':
                 filter_stats,        
+            'analysis_summary':
+                visibility['summary'],
+            'analysis_candidates':
+                visibility['candidates'],
             'cache_age':
                 cache.get(
                     'cache_age',
@@ -25847,6 +26195,11 @@ def api_futures_debug():
                     False
                 )
             )
+
+        visibility = _build_futures_analysis_visibility(
+            cache,
+            min_confidence=60
+        )
         
         return jsonify({
             'success': True,
@@ -25859,6 +26212,8 @@ def api_futures_debug():
             'lifecycle_entries': len(cache.get('lifecycle') or {}),
             'errors_at_analysis': errors,
             'snapshot_on_disk': snapshot_info,
+            'analysis_summary': visibility['summary'],
+            'analysis_candidates': visibility['candidates'],
             'entries': entries,
         })
     except Exception as e:
@@ -25881,6 +26236,10 @@ def api_futures_signals_previous():
         cache = _get_or_refresh_futures_analysis()
         warming_up = cache.get('warming_up', False)
         lifecycle = cache.get('lifecycle') or {}
+        visibility = _build_futures_analysis_visibility(
+            cache,
+            min_confidence=min_conf
+        )
         
         previous_signals = []
         filter_stats = {
@@ -26108,6 +26467,10 @@ def api_futures_signals_previous():
                 ),
             'filter_stats':
                 filter_stats,        
+            'analysis_summary':
+                visibility['summary'],
+            'analysis_candidates':
+                visibility['candidates'],
             'cache_age':
                 cache.get(
                     'cache_age',
