@@ -64,6 +64,129 @@ function futEscapeHtml(value) {
         .replace(/'/g, '&#039;');
 }
 
+function futRenderDecisionAudit(audit) {
+    if (!audit || audit.schema_version !== 'DECISION_AUDIT_V1') {
+        return '';
+    }
+
+    const trace = audit.moderator_trace || {};
+    const input = audit.input_snapshot || {};
+    const contract = audit.data_contract || {};
+    const votes = Array.isArray(audit.votes) ? audit.votes : [];
+
+    const numberText = (value, decimals = 2) => {
+        const number = Number(value);
+        return Number.isFinite(number) ? number.toFixed(decimals) : '--';
+    };
+    const dispositionMeta = {
+        APOYO_FINAL: ['success', 'APOYÓ EL RESULTADO'],
+        APOYO_AL_VETO: ['danger', 'ACTIVÓ/RESPALDÓ VETO'],
+        OPOSICION_DIRECCIONAL: ['warning text-dark', 'QUEDÓ EN MINORÍA'],
+        CAUTELA_ESPERAR: ['info text-dark', 'PIDIÓ ESPERAR'],
+        CAUTELA_NO_OPERAR: ['secondary', 'PIDIÓ NO OPERAR'],
+        ABSTENCION: ['secondary', 'SE ABSTUVO'],
+        ERROR_CONTROLADO: ['danger', 'FALLÓ; VOTO NEUTRALIZADO']
+    };
+
+    let votesHtml = '';
+    votes.forEach(vote => {
+        const disposition = String(vote.disposition || 'ABSTENCION');
+        const meta = dispositionMeta[disposition]
+            || dispositionMeta.ABSTENCION;
+        const originalAction = String(vote.original_action || 'NO_OPERAR');
+        const normalizedAction = String(
+            vote.normalized_action || originalAction
+        );
+        const actionText = originalAction === normalizedAction
+            ? futEscapeHtml(normalizedAction)
+            : `${futEscapeHtml(originalAction)} → ${futEscapeHtml(normalizedAction)}`;
+        const counted = vote.counted_confidence;
+        const countedText = counted === null || counted === undefined
+            ? 'no entró al conteo principal'
+            : `conteo final ${numberText(counted, 1)}%`;
+        const reasons = Array.isArray(vote.reasons) ? vote.reasons : [];
+        const strategies = Array.isArray(vote.strategies) ? vote.strategies : [];
+        const explanation = reasons[0]
+            || (strategies.length > 0 ? strategies.join(', ') : 'Sin razón declarada');
+
+        votesHtml += `
+            <div class="border-top border-secondary py-2">
+                <div class="d-flex flex-wrap justify-content-between gap-1">
+                    <strong>${futEscapeHtml(vote.trader || 'Trader')}</strong>
+                    <span class="badge bg-${meta[0]}">${meta[1]}</span>
+                </div>
+                <div class="small text-light mt-1">
+                    Voto: <strong>${actionText}</strong> ·
+                    confianza ${numberText(vote.original_confidence, 1)}%
+                </div>
+                <div class="small text-muted">
+                    ${numberText(vote.original_confidence, 1)}%
+                    × peso ${numberText(vote.base_weight, 2)}
+                    × régimen ${numberText(vote.regime_multiplier, 2)}
+                    × aprendizaje ${numberText(vote.review_multiplier, 2)}
+                    = ${numberText(vote.weighted_confidence, 1)}%
+                    · ${countedText}
+                </div>
+                <div class="small text-secondary mt-1">
+                    ${futEscapeHtml(explanation)}
+                </div>
+            </div>
+        `;
+    });
+
+    const provider = futEscapeHtml(contract.provider || 'pendiente del wrapper');
+    const candleTimestamp = futEscapeHtml(
+        contract.source_candle_timestamp
+        || input.analysis_candle_timestamp
+        || '--'
+    );
+    const synthetic = contract.is_synthetic;
+    const syntheticText = synthetic === false
+        ? 'datos reales (no sintéticos)'
+        : (synthetic === true ? 'datos sintéticos' : 'origen aún no declarado');
+    const finalReasons = Array.isArray(trace.final_reasons)
+        ? trace.final_reasons
+        : [];
+
+    return `
+        <details class="mt-2 border border-secondary rounded p-2"
+                 onclick="event.stopPropagation();">
+            <summary class="text-info" style="cursor:pointer;">
+                🔎 Auditor de la decisión · ${votes.length} traders
+            </summary>
+            <div class="small mt-2">
+                <div>
+                    <strong>Datos recibidos:</strong> ${provider} ·
+                    ${futEscapeHtml(syntheticText)} · vela ${candleTimestamp}
+                </div>
+                <div class="text-muted">
+                    Régimen ${futEscapeHtml(input.market_regime || 'DESCONOCIDO')}
+                    (${numberText(input.market_regime_confidence, 1)}%) ·
+                    ADX ${numberText(input.adx, 1)} ·
+                    ATR ${numberText(input.atr_pct, 2)}% ·
+                    volumen ${numberText(input.volume_ratio, 2)}x
+                </div>
+                <div class="mt-2">
+                    <strong>Moderador:</strong>
+                    ${futEscapeHtml(trace.decision_basis || 'SIN_TRAZA')} ·
+                    resultado ${futEscapeHtml(trace.final_action || 'NO_OPERAR')}
+                    (${numberText(trace.final_confidence, 1)}%) ·
+                    veto ${futEscapeHtml(trace.veto_state || 'SIN_VETO')}
+                </div>
+                ${finalReasons.length > 0 ? `
+                    <div class="text-light mt-1">
+                        ${futEscapeHtml(finalReasons.join(' · '))}
+                    </div>
+                ` : ''}
+                <div class="text-secondary mt-1">
+                    Auditoría de sólo lectura: explica la decisión, no la modifica.
+                </div>
+                <div class="mt-2">${votesHtml}</div>
+            </div>
+        </details>
+    `;
+}
+
 function futRenderAnalysisDiagnostics(json, context) {
     const summary = json && json.analysis_summary;
     const candidates = Array.isArray(json && json.analysis_candidates)
@@ -182,6 +305,7 @@ function futRenderAnalysisDiagnostics(json, context) {
                 <div class="small text-muted mt-1">
                     Información diagnóstica: no se puede guardar como operación.
                 </div>
+                ${futRenderDecisionAudit(candidate.decision_audit)}
             </div>
         `;
     });
@@ -893,6 +1017,8 @@ window.updateActiveSignals = async function() {
 
                     ${validityHtml}
 
+                    ${futRenderDecisionAudit(sig.decision_audit)}
+
                 </div>
             `;
         });
@@ -1546,6 +1672,8 @@ window.updatePreviousSignals = async function() {
                     </div>
 
                     ${saveButtons}
+
+                    ${futRenderDecisionAudit(sig.decision_audit)}
 
                 </div>
             `;
