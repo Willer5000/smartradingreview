@@ -979,29 +979,66 @@ class TradingExpertSystem:
             'lower': lower_band
         }
     
+    def calculate_wilder_rma(self, values, period=14):
+        """Suavizado de Wilder (RMA), usado por ATR y ADX."""
+        values = np.asarray(values, dtype=float)
+        n = len(values)
+        result = np.zeros(n, dtype=float)
+
+        if n == 0:
+            return result
+
+        period = max(1, int(period))
+        seed_end = min(period, n)
+
+        # Mientras no existe una ventana completa usamos una media creciente.
+        for i in range(seed_end):
+            result[i] = float(np.mean(values[:i + 1]))
+
+        if n <= period:
+            return result
+
+        result[period - 1] = float(np.mean(values[:period]))
+        alpha = 1.0 / period
+
+        for i in range(period, n):
+            result[i] = result[i - 1] + alpha * (
+                values[i] - result[i - 1]
+            )
+
+        return result
+
     def calculate_atr(self, high, low, close, period=14):
-        """Calcular ATR manualmente"""
+        """Average True Range estándar con suavizado Wilder."""
+        high = np.asarray(high, dtype=float)
+        low = np.asarray(low, dtype=float)
+        close = np.asarray(close, dtype=float)
         n = len(high)
-        tr = np.zeros(n)
-        
+        tr = np.zeros(n, dtype=float)
+
         for i in range(n):
             if i == 0:
                 tr[i] = high[i] - low[i]
             else:
-                hl = high[i] - low[i]
-                hc = abs(high[i] - close[i-1])
-                lc = abs(low[i] - close[i-1])
-                tr[i] = max(hl, hc, lc)
-        
-        atr = self.calculate_ema(tr, period)
-        return atr
+                tr[i] = max(
+                    high[i] - low[i],
+                    abs(high[i] - close[i - 1]),
+                    abs(low[i] - close[i - 1])
+                )
+
+        return self.calculate_wilder_rma(tr, period)
     
     def calculate_adx(self, high, low, close, period=14):
         """Calcular ADX con DMI manualmente - SIN LÍMITE ARTIFICIAL"""
+        high = np.asarray(high, dtype=float)
+        low = np.asarray(low, dtype=float)
+        close = np.asarray(close, dtype=float)
         n = len(high)
         plus_dm = np.zeros(n)
         minus_dm = np.zeros(n)
         tr = np.zeros(n)
+        if n:
+            tr[0] = high[0] - low[0]
         
         for i in range(1, n):
             up_move = high[i] - high[i-1]
@@ -1022,9 +1059,9 @@ class TradingExpertSystem:
             lc = abs(low[i] - close[i-1])
             tr[i] = max(hl, hc, lc)
         
-        atr = self.calculate_ema(tr, period)
-        plus_di_ema = self.calculate_ema(plus_dm, period)
-        minus_di_ema = self.calculate_ema(minus_dm, period)
+        atr = self.calculate_wilder_rma(tr, period)
+        plus_di_ema = self.calculate_wilder_rma(plus_dm, period)
+        minus_di_ema = self.calculate_wilder_rma(minus_dm, period)
         
         plus_di = np.zeros(n)
         minus_di = np.zeros(n)
@@ -1038,7 +1075,7 @@ class TradingExpertSystem:
                 if di_sum != 0:
                     dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
         
-        adx = self.calculate_ema(dx, period)
+        adx = self.calculate_wilder_rma(dx, period)
         
         # EL ADX AHORA PUEDE SUPERAR 60, REFLEJANDO TENDENCIAS EXTREMADAMENTE FUERTES
         
@@ -1072,15 +1109,23 @@ class TradingExpertSystem:
                 final_ub[i] = basic_ub[i] if (basic_ub[i] < final_ub[i-1] or close[i-1] > final_ub[i-1]) else final_ub[i-1]
                 final_lb[i] = basic_lb[i] if (basic_lb[i] > final_lb[i-1] or close[i-1] < final_lb[i-1]) else final_lb[i-1]
                 
-                if close[i] <= final_ub[i] and trend[i-1] == 1:
-                    trend[i] = -1
-                    supertrend[i] = final_ub[i]
-                elif close[i] >= final_lb[i] and trend[i-1] == -1:
-                    trend[i] = 1
-                    supertrend[i] = final_lb[i]
+                # En tendencia alcista la banda relevante es la INFERIOR;
+                # en tendencia bajista es la SUPERIOR. Comparar con la banda
+                # opuesta hacía que el indicador alternara casi cada vela.
+                if trend[i - 1] == 1:
+                    if close[i] < final_lb[i]:
+                        trend[i] = -1
+                        supertrend[i] = final_ub[i]
+                    else:
+                        trend[i] = 1
+                        supertrend[i] = final_lb[i]
                 else:
-                    trend[i] = trend[i-1]
-                    supertrend[i] = supertrend[i-1]
+                    if close[i] > final_ub[i]:
+                        trend[i] = 1
+                        supertrend[i] = final_lb[i]
+                    else:
+                        trend[i] = -1
+                        supertrend[i] = final_ub[i]
         
         return {
             'supertrend': supertrend,
@@ -1501,134 +1546,166 @@ class TradingExpertSystem:
     
     def calculate_whale_signals_improved(self, df, sensitivity=1.7, min_volume_multiplier=1.5, 
                                        support_resistance_lookback=50, signal_threshold=25):
-        """Detector de Ballenas Mejorado - RETORNA VALORES BOOLEANOS, NO LISTAS"""
+        """Proxy OHLCV de actividad grande: evento 12h/1D + reacción posterior.
+
+        No afirma observar identidades, icebergs ni spoofing. Esas afirmaciones
+        necesitarían libro de órdenes/trades identificados, datos que este sistema
+        no posee. El voto se habilita sólo después de una reacción confirmada.
+        """
         try:
-            close = df['close'].values
-            low = df['low'].values
-            high = df['high'].values
-            volume = df['volume'].values
-            open_price = df['open'].values
-            
+            close = np.asarray(df['close'].values, dtype=float)
+            low = np.asarray(df['low'].values, dtype=float)
+            high = np.asarray(df['high'].values, dtype=float)
+            volume = np.asarray(df['volume'].values, dtype=float)
+            open_price = np.asarray(df['open'].values, dtype=float)
             n = len(close)
-            
-            # Inicializar acumuladores
-            whale_pump = 0
-            whale_dump = 0
-            confirmed_buy = False
-            confirmed_sell = False
-            extended_buy = False
-            extended_sell = False
-            iceberg_buy = False
-            iceberg_sell = False
-            spoofing_buy = False
-            spoofing_sell = False
-            aggressive_whale = False
-            passive_whale = False
-            
-            # Usar SOLO la última vela para análisis en tiempo real
-            i = n - 1
-            
-            if i < 10:
-                return {
-                    'whale_pump': 0, 'whale_dump': 0,
-                    'confirmed_buy': False, 'confirmed_sell': False,
-                    'extended_buy': False, 'extended_sell': False,
-                    'iceberg_buy': False, 'iceberg_sell': False,
-                    'spoofing_buy': False, 'spoofing_sell': False,
-                    'aggressive_whale': False, 'passive_whale': False,
-                    'support': float(low[i]), 'resistance': float(high[i]),
-                    'volume_anomaly': False
-                }
-            
-            # Volumen promedio
-            avg_volume = np.mean(volume[max(0, i-20):i+1])
-            volume_ratio = volume[i] / avg_volume if avg_volume > 0 else 1
-            
-            # Cambio de precio
-            price_change = (close[i] - close[i-1]) / close[i-1] * 100 if close[i-1] != 0 else 0
-            
-            # ============ DETECCIÓN DE ICEBERG ============
-            consecutive_buy = 0
-            consecutive_sell = 0
-            for j in range(max(5, i-5), i+1):
-                if j > 0:
-                    if close[j] > open_price[j] and volume[j] > avg_volume * 0.8:
-                        consecutive_buy += 1
-                    if close[j] < open_price[j] and volume[j] > avg_volume * 0.8:
-                        consecutive_sell += 1
-            
-            if consecutive_buy >= 3 and volume[i] > avg_volume * 1.2 and abs(price_change) < 0.5:
-                iceberg_buy = True
-                whale_pump = 60
-            
-            if consecutive_sell >= 3 and volume[i] > avg_volume * 1.2 and abs(price_change) < 0.5:
-                iceberg_sell = True
-                whale_dump = 60
-            
-            # ============ DETECCIÓN DE SPOOFING ============
-            if volume[i] > avg_volume * 1.8:
-                if high[i] > high[i-1] * 1.01 and close[i] < (high[i] + low[i]) / 2:
-                    spoofing_sell = True
-                    whale_dump = max(whale_dump, 50)
-                
-                if low[i] < low[i-1] * 0.99 and close[i] > (high[i] + low[i]) / 2:
-                    spoofing_buy = True
-                    whale_pump = max(whale_pump, 50)
-            
-            # ============ TIPO DE BALLENA ============
-            volume_strength = min(3.0, volume_ratio / min_volume_multiplier)
-            
-            if volume_ratio > 2.0 and abs(price_change) > 1.0:
-                aggressive_whale = True
-            elif volume_ratio > 1.5 and abs(price_change) < 0.5:
-                passive_whale = True
-            
-            # ============ SEÑAL DE COMPRA ============
-            if (volume_ratio > min_volume_multiplier and 
-                (close[i] < close[i-1] or price_change < -0.5) and
-                low[i] <= np.min(low[max(0, i-5):i+1]) * 1.01):
-                
-                whale_pump = max(whale_pump, min(100, volume_ratio * 20 * sensitivity * volume_strength))
-                extended_buy = True
-            
-            # ============ SEÑAL DE VENTA ============
-            if (volume_ratio > min_volume_multiplier and 
-                (close[i] > close[i-1] or price_change > 0.5) and
-                high[i] >= np.max(high[max(0, i-5):i+1]) * 0.99):
-                
-                whale_dump = max(whale_dump, min(100, volume_ratio * 20 * sensitivity * volume_strength))
-                extended_sell = True
-            
-            # ============ CONFIRMACIÓN ============
-            current_support = np.min(low[max(0, i-support_resistance_lookback+1):i+1])
-            current_resistance = np.max(high[max(0, i-support_resistance_lookback+1):i+1])
-            
-            if (whale_pump > signal_threshold and 
-                close[i] <= current_support * 1.02 and
-                volume[i] > np.mean(volume[max(0, i-10):i+1])):
-                confirmed_buy = True
-            
-            if (whale_dump > signal_threshold and 
-                close[i] >= current_resistance * 0.98 and
-                volume[i] > np.mean(volume[max(0, i-10):i+1])):
-                confirmed_sell = True
-            
+            empty = {
+                'whale_pump': 0.0, 'whale_dump': 0.0,
+                'confirmed_buy': False, 'confirmed_sell': False,
+                'extended_buy': False, 'extended_sell': False,
+                'iceberg_buy': False, 'iceberg_sell': False,
+                'spoofing_buy': False, 'spoofing_sell': False,
+                'aggressive_whale': False, 'passive_whale': False,
+                'support': float(low[-1]) if n else 0.0,
+                'resistance': float(high[-1]) if n else 0.0,
+                'volume_anomaly': False, 'volume_ratio': 1.0,
+                'whale_event_index': None, 'whale_event_age_bars': None,
+                'whale_confirmation_index': None, 'whale_event_pending': False,
+                'whale_signal_source': 'OHLCV_VOLUME_REACTION_PROXY',
+                'whale_observed': False,
+                'whale_timeframe_policy': '12h_1D_REACTION_ONLY'
+            }
+            if n < 25:
+                return empty
+
+            current_support = float(np.min(low[max(0, n-support_resistance_lookback):n]))
+            current_resistance = float(np.max(high[max(0, n-support_resistance_lookback):n]))
+            candidates = []
+
+            # El evento puede haber ocurrido hasta siete velas cerradas atrás.
+            for event_i in range(max(20, n - 8), n):
+                prior_start = max(0, event_i - 20)
+                prior_volume = volume[prior_start:event_i]
+                positive_volume = prior_volume[prior_volume > 0]
+                baseline = float(np.median(positive_volume)) if len(positive_volume) else 0.0
+                if baseline <= 0:
+                    continue
+
+                volume_ratio = float(volume[event_i] / baseline)
+                if volume_ratio < min_volume_multiplier:
+                    continue
+
+                candle_range = max(float(high[event_i] - low[event_i]), 1e-12)
+                body = abs(float(close[event_i] - open_price[event_i]))
+                close_location = float((close[event_i] - low[event_i]) / candle_range)
+                lower_wick = float(min(open_price[event_i], close[event_i]) - low[event_i])
+                upper_wick = float(high[event_i] - max(open_price[event_i], close[event_i]))
+                prior_low = float(np.min(low[max(0, event_i-10):event_i]))
+                prior_high = float(np.max(high[max(0, event_i-10):event_i]))
+
+                buy_event = (
+                    low[event_i] <= prior_low * 1.002 and close_location >= 0.55
+                ) or (
+                    lower_wick >= max(body * 1.2, candle_range * 0.25)
+                    and close_location >= 0.55
+                )
+                sell_event = (
+                    high[event_i] >= prior_high * 0.998 and close_location <= 0.45
+                ) or (
+                    upper_wick >= max(body * 1.2, candle_range * 0.25)
+                    and close_location <= 0.45
+                )
+                if not buy_event and not sell_event:
+                    continue
+
+                direction = 'buy' if buy_event and not sell_event else 'sell'
+                if buy_event and sell_event:
+                    direction = 'buy' if lower_wick > upper_wick else 'sell'
+
+                future_close = close[event_i + 1:n]
+                midpoint = float((high[event_i] + low[event_i]) / 2)
+                tolerance = candle_range * 0.15
+                confirmed = False
+                confirmation_index = None
+                if len(future_close):
+                    for offset, reaction_close in enumerate(future_close, start=1):
+                        seen = close[event_i + 1:event_i + offset + 1]
+                        if direction == 'buy':
+                            invalidated = bool(np.min(seen) < low[event_i] - tolerance)
+                            reacted = reaction_close > midpoint and (
+                                reaction_close > close[event_i]
+                                or reaction_close >= high[event_i]
+                            )
+                        else:
+                            invalidated = bool(np.max(seen) > high[event_i] + tolerance)
+                            reacted = reaction_close < midpoint and (
+                                reaction_close < close[event_i]
+                                or reaction_close <= low[event_i]
+                            )
+                        if invalidated:
+                            break
+                        if reacted:
+                            confirmed = True
+                            confirmation_index = event_i + offset
+                            break
+
+                rejection_ratio = (lower_wick if direction == 'buy' else upper_wick) / candle_range
+                strength = min(85.0, 30.0 + volume_ratio * 13.0 + rejection_ratio * 20.0)
+                candidates.append({
+                    'direction': direction,
+                    'event_i': event_i,
+                    'age': n - 1 - event_i,
+                    'volume_ratio': volume_ratio,
+                    'strength': strength,
+                    'confirmed': confirmed,
+                    'confirmation_index': confirmation_index,
+                    'absorption_proxy': rejection_ratio >= 0.35,
+                    'aggressive_proxy': body / candle_range >= 0.65
+                })
+
+            if not candidates:
+                empty.update({'support': current_support, 'resistance': current_resistance})
+                return empty
+
+            # Una reacción confirmada siempre tiene prioridad sobre un evento nuevo pendiente.
+            selected = max(
+                candidates,
+                key=lambda item: (1 if item['confirmed'] else 0, item['strength'], -item['age'])
+            )
+            is_buy = selected['direction'] == 'buy'
+            is_sell = not is_buy
+            confirmed_buy = bool(is_buy and selected['confirmed'])
+            confirmed_sell = bool(is_sell and selected['confirmed'])
+
             return {
-                'whale_pump': float(whale_pump),
-                'whale_dump': float(whale_dump),
+                'whale_pump': float(selected['strength'] if is_buy else 0.0),
+                'whale_dump': float(selected['strength'] if is_sell else 0.0),
                 'confirmed_buy': confirmed_buy,
                 'confirmed_sell': confirmed_sell,
-                'extended_buy': extended_buy,
-                'extended_sell': extended_sell,
-                'iceberg_buy': iceberg_buy,
-                'iceberg_sell': iceberg_sell,
-                'spoofing_buy': spoofing_buy,
-                'spoofing_sell': spoofing_sell,
-                'aggressive_whale': aggressive_whale,
-                'passive_whale': passive_whale,
-                'support': float(current_support),
-                'resistance': float(current_resistance),
-                'volume_anomaly': volume[i] > avg_volume * min_volume_multiplier
+                'extended_buy': bool(is_buy),
+                'extended_sell': bool(is_sell),
+                # Se conservan las claves por compatibilidad, pero significan proxy
+                # de absorción por vela/volumen; no una orden iceberg observada.
+                'iceberg_buy': bool(is_buy and selected['absorption_proxy']),
+                'iceberg_sell': bool(is_sell and selected['absorption_proxy']),
+                'spoofing_buy': False,
+                'spoofing_sell': False,
+                'aggressive_whale': bool(selected['aggressive_proxy']),
+                'passive_whale': bool(selected['absorption_proxy']),
+                'support': current_support,
+                'resistance': current_resistance,
+                'volume_anomaly': True,
+                'volume_ratio': float(selected['volume_ratio']),
+                'whale_event_index': int(selected['event_i']),
+                'whale_event_age_bars': int(selected['age']),
+                'whale_confirmation_index': (
+                    int(selected['confirmation_index'])
+                    if selected['confirmation_index'] is not None else None
+                ),
+                'whale_event_pending': not bool(selected['confirmed']),
+                'whale_signal_source': 'OHLCV_VOLUME_REACTION_PROXY',
+                'whale_observed': False,
+                'whale_timeframe_policy': '12h_1D_REACTION_ONLY'
             }
             
         except Exception as e:
@@ -1643,7 +1720,12 @@ class TradingExpertSystem:
                 'spoofing_buy': False, 'spoofing_sell': False,
                 'aggressive_whale': False, 'passive_whale': False,
                 'support': 0, 'resistance': 0,
-                'volume_anomaly': False
+                'volume_anomaly': False, 'volume_ratio': 1.0,
+                'whale_event_index': None, 'whale_event_age_bars': None,
+                'whale_confirmation_index': None, 'whale_event_pending': False,
+                'whale_signal_source': 'OHLCV_VOLUME_REACTION_PROXY',
+                'whale_observed': False,
+                'whale_timeframe_policy': '12h_1D_REACTION_ONLY'
             }
     # === FIN calculate_whale_signals_improved ===
     
@@ -3886,7 +3968,8 @@ class TradingExpertSystem:
                 return False
             
             window = 50
-            highs = h[i-window:i]
+            window_start = i - window
+            highs = h[window_start:i]
             
             # Buscar máximos locales
             peaks = []
@@ -3915,8 +3998,12 @@ class TradingExpertSystem:
                 return False
             
             # Encontrar neckline (mínimos entre picos)
-            left_neck = min(l[peaks[0][0]:peaks[1][0]])
-            right_neck = min(l[peaks[1][0]:peaks[2][0]])
+            left_neck = min(l[
+                window_start + peaks[0][0]:window_start + peaks[1][0]
+            ])
+            right_neck = min(l[
+                window_start + peaks[1][0]:window_start + peaks[2][0]
+            ])
             neckline = (left_neck + right_neck) / 2
             
             # Verificar ruptura
@@ -3932,7 +4019,8 @@ class TradingExpertSystem:
                 return False
             
             window = 50
-            lows = l[i-window:i]
+            window_start = i - window
+            lows = l[window_start:i]
             
             # Buscar mínimos locales
             troughs = []
@@ -3961,8 +4049,12 @@ class TradingExpertSystem:
                 return False
             
             # Encontrar neckline (máximos entre mínimos)
-            left_neck = max(h[troughs[0][0]:troughs[1][0]])
-            right_neck = max(h[troughs[1][0]:troughs[2][0]])
+            left_neck = max(h[
+                window_start + troughs[0][0]:window_start + troughs[1][0]
+            ])
+            right_neck = max(h[
+                window_start + troughs[1][0]:window_start + troughs[2][0]
+            ])
             neckline = (left_neck + right_neck) / 2
             
             # Verificar ruptura
@@ -3978,8 +4070,9 @@ class TradingExpertSystem:
                 return False
             
             window = 45
-            highs = h[i-window:i-5]
-            lows = l[i-window:i-5]
+            window_start = i - window
+            highs = h[window_start:i-5]
+            lows = l[window_start:i-5]
             
             left_shoulder_idx = np.argmax(highs[:15]) if len(highs[:15]) > 0 else -1
             head_idx = 15 + np.argmax(highs[15:25]) if len(highs[15:25]) > 0 else -1
@@ -3988,8 +4081,12 @@ class TradingExpertSystem:
             if left_shoulder_idx == -1 or head_idx == -1 or right_shoulder_idx == -1:
                 return False
             
-            neckline_left = min(l[left_shoulder_idx:head_idx])
-            neckline_right = min(l[head_idx:right_shoulder_idx])
+            neckline_left = min(l[
+                window_start + left_shoulder_idx:window_start + head_idx
+            ])
+            neckline_right = min(l[
+                window_start + head_idx:window_start + right_shoulder_idx
+            ])
             neckline = (neckline_left + neckline_right) / 2
             
             return (c[i] < neckline * 0.97 and
@@ -4004,8 +4101,9 @@ class TradingExpertSystem:
                 return False
             
             window = 45
-            highs = h[i-window:i-5]
-            lows = l[i-window:i-5]
+            window_start = i - window
+            highs = h[window_start:i-5]
+            lows = l[window_start:i-5]
             
             left_shoulder_idx = np.argmin(lows[:15]) if len(lows[:15]) > 0 else -1
             head_idx = 15 + np.argmin(lows[15:25]) if len(lows[15:25]) > 0 else -1
@@ -4014,8 +4112,12 @@ class TradingExpertSystem:
             if left_shoulder_idx == -1 or head_idx == -1 or right_shoulder_idx == -1:
                 return False
             
-            neckline_left = max(h[left_shoulder_idx:head_idx])
-            neckline_right = max(h[head_idx:right_shoulder_idx])
+            neckline_left = max(h[
+                window_start + left_shoulder_idx:window_start + head_idx
+            ])
+            neckline_right = max(h[
+                window_start + head_idx:window_start + right_shoulder_idx
+            ])
             neckline = (neckline_left + neckline_right) / 2
             
             return (c[i] > neckline * 1.03 and
@@ -4454,37 +4556,49 @@ class TradingExpertSystem:
                     'high_quality_patterns': []
                 }
             
-            # Calcular métricas de contexto
-            avg_volume = np.mean(v) if len(v) > 0 else 0
-            current_price = c[-1] if n > 0 else 0
-            
-            # Calcular soportes y resistencias cercanos
-            supports = []
-            resistances = []
-            for i in range(max(10, n-50), n):
-                if i > 5 and i < n-5:
-                    if l[i] == min(l[i-5:i+6]):
-                        supports.append(l[i])
-                    if h[i] == max(h[i-5:i+6]):
-                        resistances.append(h[i])
-            
-            # CORREGIDO: Verificar listas vacías antes de min/max
-            support_candidates = [s for s in supports if s < current_price]
-            nearest_support = max(support_candidates) if support_candidates else None
-            
-            resistance_candidates = [r for r in resistances if r > current_price]
-            nearest_resistance = min(resistance_candidates) if resistance_candidates else None
-            
-            # Calcular fuerza de tendencia previa
-            prev_trend = None
-            if n > 10:
-                cambios = [(c[i] - c[i-1]) / c[i-1] * 100 for i in range(max(0, n-10), n)]
-                if sum(cambios) > 2:
-                    prev_trend = 'bullish'
-                elif sum(cambios) < -2:
-                    prev_trend = 'bearish'
-                else:
-                    prev_trend = 'neutral'
+            detection_start = max(0, n - max_lookback)
+
+            def _context_at(index):
+                """Contexto disponible al cierre de la vela evaluada."""
+                price = float(c[index]) if c[index] else 0.0
+                volume_window = v[max(0, index - 20):index]
+                avg_vol = (
+                    float(np.mean(volume_window))
+                    if len(volume_window) > 0
+                    else float(v[index] or 0)
+                )
+
+                supports = []
+                resistances = []
+                pivot_start = max(5, index - 50)
+                # Un pivote necesita cinco velas posteriores, pero nunca se
+                # permite mirar más allá de la vela que estamos evaluando.
+                for pivot_i in range(pivot_start, max(pivot_start, index - 4)):
+                    if l[pivot_i] == min(l[pivot_i - 5:pivot_i + 6]):
+                        supports.append(float(l[pivot_i]))
+                    if h[pivot_i] == max(h[pivot_i - 5:pivot_i + 6]):
+                        resistances.append(float(h[pivot_i]))
+
+                support_candidates = [s for s in supports if s < price]
+                resistance_candidates = [r for r in resistances if r > price]
+                nearest_sup = max(support_candidates) if support_candidates else None
+                nearest_res = min(resistance_candidates) if resistance_candidates else None
+
+                changes = []
+                for change_i in range(max(1, index - 10), index):
+                    if c[change_i - 1] != 0:
+                        changes.append(
+                            (c[change_i] - c[change_i - 1])
+                            / c[change_i - 1]
+                            * 100
+                        )
+                change_sum = sum(changes)
+                previous_trend = (
+                    'bullish' if change_sum > 2
+                    else 'bearish' if change_sum < -2
+                    else 'neutral'
+                )
+                return avg_vol, price, nearest_sup, nearest_res, previous_trend
             
             # Agrupar patrones por tipo
             patterns_by_type = {
@@ -4498,15 +4612,16 @@ class TradingExpertSystem:
                 patterns_by_type[pattern['type']].append((pattern_id, pattern))
             
             # ============ DETECTAR PATRONES DE 1 VELA ============
-            for i in range(0, n):
+            for i in range(detection_start, n):
+                (
+                    avg_volume,
+                    current_price,
+                    nearest_support,
+                    nearest_resistance,
+                    prev_trend
+                ) = _context_at(i)
                 for pattern_id, pattern in patterns_by_type['1']:
                     try:
-                        # Verificar que la vela sea del color correcto según el patrón
-                        if pattern['direction'] == 'bullish' and c[i] <= o[i]:
-                            continue
-                        if pattern['direction'] == 'bearish' and c[i] >= o[i]:
-                            continue
-                        
                         if pattern['detect'](o[i], h[i], l[i], c[i], c, i):
                             contexto_score = 0
                             razones_contexto = []
@@ -4584,14 +4699,16 @@ class TradingExpertSystem:
                         continue
             
             # ============ PATRONES DE 2 VELAS ============
-            for i in range(1, n):
+            for i in range(max(1, detection_start), n):
+                (
+                    avg_volume,
+                    current_price,
+                    nearest_support,
+                    nearest_resistance,
+                    prev_trend
+                ) = _context_at(i)
                 for pattern_id, pattern in patterns_by_type['2']:
                     try:
-                        if pattern['direction'] == 'bullish' and c[i] <= o[i]:
-                            continue
-                        if pattern['direction'] == 'bearish' and c[i] >= o[i]:
-                            continue
-                        
                         if pattern['detect'](o, h, l, c, None, i):
                             contexto_score = 0
                             razones_contexto = []
@@ -4637,7 +4754,7 @@ class TradingExpertSystem:
                         continue
             
             # ============ PATRONES DE 3 VELAS - VERSIÓN CORREGIDA ============
-            for i in range(2, n):
+            for i in range(max(2, detection_start), n):
                 for pattern_id, pattern in patterns_by_type['3']:
                     try:
                         # ============ VALIDACIÓN ESTRICTA PARA TRES CUERVOS NEGROS ============
@@ -4719,8 +4836,10 @@ class TradingExpertSystem:
                             if cuerpo3 / rango3 < 0.6:
                                 continue
                             
-                            # Gap
-                            if not (c[i-1] < l[i-2] and c[i] > o[i-1]):
+                            # En cripto 24/7 no exigimos un gap clásico. La
+                            # tercera vela debe recuperar al menos la mitad del
+                            # cuerpo de la primera.
+                            if c[i] <= (o[i-2] + c[i-2]) / 2:
                                 continue
                             
                             contexto_score = 30
@@ -4747,8 +4866,8 @@ class TradingExpertSystem:
                             if cuerpo3 / rango3 < 0.6:
                                 continue
                             
-                            # Gap
-                            if not (c[i-1] > h[i-2] and c[i] < o[i-1]):
+                            # Confirmación equivalente sin exigir gap de sesión.
+                            if c[i] >= (o[i-2] + c[i-2]) / 2:
                                 continue
                             
                             contexto_score = 30
@@ -4784,7 +4903,14 @@ class TradingExpertSystem:
                         continue
             
             # ============ PATRONES DE 4+ VELAS ============
-            for i in range(15, n):
+            for i in range(max(15, detection_start), n):
+                (
+                    avg_volume,
+                    current_price,
+                    nearest_support,
+                    nearest_resistance,
+                    prev_trend
+                ) = _context_at(i)
                 for pattern_id, pattern in patterns_by_type['4+']:
                     try:
                         if pattern['detect'](o, h, l, c, None, i):
@@ -8911,8 +9037,8 @@ class TradingExpertSystem:
     # Ubicación: Reemplazar entre línea ~1200 y línea ~1250 aproximadamente
     # Agregar squeeze_length para detectar compresión prolongada
     
-    def analyze_volatility_layer(self, df):
-        """Capa 3: Análisis de Volatilidad - Espacio, riesgo y apalancamiento"""
+    def analyze_volatility_layer(self, df, symbol=None, timeframe=None):
+        """Volatilidad normalizada por el historial del propio par y TF."""
         try:
             close = df['close'].values
             high = df['high'].values
@@ -8925,16 +9051,52 @@ class TradingExpertSystem:
             
             current_price = close[-1] if len(close) > 0 else 0
             atr_pct = (atr[-1] / current_price * 100) if current_price != 0 else 0
+
+            atr_pct_series = np.divide(
+                atr,
+                close,
+                out=np.zeros_like(atr, dtype=float),
+                where=np.asarray(close) != 0
+            ) * 100
+            baseline_history = atr_pct_series[
+                max(0, len(atr_pct_series) - 101):-1
+            ]
+            baseline_history = baseline_history[
+                np.isfinite(baseline_history) & (baseline_history > 0)
+            ]
+            atr_baseline_pct = (
+                float(np.median(baseline_history))
+                if len(baseline_history) >= 10
+                else float(atr_pct or 0)
+            )
+            volatility_ratio = (
+                float(atr_pct / atr_baseline_pct)
+                if atr_baseline_pct > 0
+                else 1.0
+            )
+            volatility_percentile = (
+                float(np.mean(baseline_history <= atr_pct) * 100)
+                if len(baseline_history) >= 20
+                else 50.0
+            )
             
             bb_width = ((bb['upper'][-1] - bb['lower'][-1]) / bb['middle'][-1] * 100) if bb['middle'][-1] != 0 else 0
+            bb_width_prev = (
+                (bb['upper'][-2] - bb['lower'][-2])
+                / bb['middle'][-2]
+                * 100
+                if len(bb['middle']) > 1 and bb['middle'][-2] != 0
+                else bb_width
+            )
             bb_position = (current_price - bb['lower'][-1]) / (bb['upper'][-1] - bb['lower'][-1]) if (bb['upper'][-1] - bb['lower'][-1]) != 0 else 0.5
             
-            # Determinar nivel de volatilidad
-            if atr_pct < 1:
+            # El percentil aprende la escala normal de cada cripto+TF. Así un
+            # ATR de 1% no significa lo mismo en BTC 4h que en XRP 5m.
+            if volatility_percentile <= 25:
                 volatility_level = 'low'
-            elif atr_pct < 3:
+            elif volatility_percentile <= 75:
                 volatility_level = 'medium'
-            elif atr_pct < 5:
+            elif volatility_percentile <= 92:
                 volatility_level = 'high'
             else:
                 volatility_level = 'extreme'
@@ -8945,8 +9107,8 @@ class TradingExpertSystem:
             
             # Calcular duración de la compresión
             if len(squeeze['squeeze_on']) > 0:
-                for i in range(min(30, len(squeeze['squeeze_on']) - 1), 0, -1):
-                    if squeeze['squeeze_on'][-i]:
+                for is_squeezed in reversed(squeeze['squeeze_on'][-30:]):
+                    if is_squeezed:
                         squeeze_length += 1
                     else:
                         break
@@ -8979,7 +9141,7 @@ class TradingExpertSystem:
             
             # Contracción prolongada (rojo sostenido)
             contraction_count = 0
-            for val in ftm['trend_strength'][-10:]:
+            for val in reversed(ftm['trend_strength'][-20:]):
                 if val < 0:  # Rojo = decreciente
                     contraction_count += 1
                 else:
@@ -8990,8 +9152,12 @@ class TradingExpertSystem:
                 if contraction_count >= 12:
                     operability = False
             
-            # Otras condiciones de no operabilidad
-            if atr_pct > 5:
+            # Freno adaptativo: se bloquea una expansión extrema respecto al
+            # comportamiento normal del propio activo, con respaldo absoluto.
+            if (
+                volatility_level == 'extreme'
+                and volatility_ratio >= 1.5
+            ) or atr_pct > 8:
                 operability = False
                 no_trade_reason.append('volatility_extreme')
             
@@ -9025,8 +9191,13 @@ class TradingExpertSystem:
             return {
                 'atr': float(atr[-1]) if len(atr) > 0 else 0,
                 'atr_pct': float(atr_pct),
+                'atr_baseline_pct': float(atr_baseline_pct),
+                'volatility_ratio': float(volatility_ratio),
+                'volatility_percentile': float(volatility_percentile),
+                'volatility_profile': f'{symbol or "UNKNOWN"}:{timeframe or "UNKNOWN"}',
                 'volatility_level': volatility_level,
                 'bb_width': float(bb_width),
+                'bb_width_prev': float(bb_width_prev),
                 'bb_position': float(bb_position),
                 'bb_upper': float(bb['upper'][-1]) if len(bb['upper']) > 0 else 0,
                 'bb_lower': float(bb['lower'][-1]) if len(bb['lower']) > 0 else 0,
@@ -9051,8 +9222,13 @@ class TradingExpertSystem:
             return {
                 'atr': 0,
                 'atr_pct': 0,
+                'atr_baseline_pct': 0,
+                'volatility_ratio': 1,
+                'volatility_percentile': 50,
+                'volatility_profile': f'{symbol or "UNKNOWN"}:{timeframe or "UNKNOWN"}',
                 'volatility_level': 'unknown',
                 'bb_width': 0,
+                'bb_width_prev': 0,
                 'bb_position': 0.5,
                 'bb_upper': 0,
                 'bb_lower': 0,
@@ -9109,7 +9285,12 @@ class TradingExpertSystem:
                     'aggressive_whale': False, 'passive_whale': False,
                     'support': float(df['low'].iloc[-1]) if len(df) > 0 else 0,
                     'resistance': float(df['high'].iloc[-1]) if len(df) > 0 else 0,
-                    'volume_anomaly': False
+                    'volume_anomaly': False, 'volume_ratio': 1.0,
+                    'whale_event_index': None, 'whale_event_age_bars': None,
+                    'whale_confirmation_index': None, 'whale_event_pending': False,
+                    'whale_signal_source': 'OHLCV_VOLUME_REACTION_PROXY',
+                    'whale_observed': False,
+                    'whale_timeframe_policy': '12h_1D_REACTION_ONLY'
                 }
             
             # ============ PUNTUACIÓN DE ACUMULACIÓN/DISTRIBUCIÓN ============
@@ -9159,23 +9340,18 @@ class TradingExpertSystem:
                     whale_signal_strength = whale_data.get('whale_dump', 0)
                     accumulation_reasons.append('whale_confirmed_sell')
                 
-                # Señales extendidas
-                if whale_data.get('extended_buy', False):
-                    accumulation_score += 2
-                    accumulation_reasons.append('whale_extended_buy')
-                
-                if whale_data.get('extended_sell', False):
-                    accumulation_score -= 2
-                    accumulation_reasons.append('whale_extended_sell')
-                
-                # Iceberg
-                if whale_data.get('iceberg_buy', False):
-                    accumulation_score += 1.5
-                    accumulation_reasons.append('iceberg_accumulation')
-                
-                if whale_data.get('iceberg_sell', False):
-                    accumulation_score -= 1.5
-                    accumulation_reasons.append('iceberg_distribution')
+                # Un evento pendiente se muestra, pero no empuja la decisión. El
+                # proxy de absorción sólo refuerza una reacción ya confirmada.
+                if whale_data.get('whale_event_pending', False):
+                    accumulation_reasons.append('whale_reaction_pending')
+
+                if whale_buy_confirmed and whale_data.get('iceberg_buy', False):
+                    accumulation_score += 1
+                    accumulation_reasons.append('absorption_proxy_confirmed_buy')
+
+                if whale_sell_confirmed and whale_data.get('iceberg_sell', False):
+                    accumulation_score -= 1
+                    accumulation_reasons.append('absorption_proxy_confirmed_sell')
             
             # Volumen anómalo
             volume_anomaly = volume[-1] > volume_sma[-1] * 1.5
@@ -9204,8 +9380,8 @@ class TradingExpertSystem:
                 'accumulation_reasons': accumulation_reasons[-3:],
                 
                 # Ballenas - VALORES BOOLEANOS SIMPLES
-                'whale_buy': whale_data.get('extended_buy', False) if whale_data else False,
-                'whale_sell': whale_data.get('extended_sell', False) if whale_data else False,
+                'whale_buy': whale_buy_confirmed,
+                'whale_sell': whale_sell_confirmed,
                 'whale_buy_confirmed': whale_buy_confirmed,
                 'whale_sell_confirmed': whale_sell_confirmed,
                 'whale_signal_strength': float(whale_signal_strength),
@@ -9216,7 +9392,14 @@ class TradingExpertSystem:
                 'spoofing_buy': whale_data.get('spoofing_buy', False) if whale_data else False,
                 'spoofing_sell': whale_data.get('spoofing_sell', False) if whale_data else False,
                 'aggressive_whale': whale_data.get('aggressive_whale', False) if whale_data else False,
-                'passive_whale': whale_data.get('passive_whale', False) if whale_data else False
+                'passive_whale': whale_data.get('passive_whale', False) if whale_data else False,
+                'whale_event_pending': whale_data.get('whale_event_pending', False) if whale_data else False,
+                'whale_event_age_bars': whale_data.get('whale_event_age_bars') if whale_data else None,
+                'whale_event_index': whale_data.get('whale_event_index') if whale_data else None,
+                'whale_confirmation_index': whale_data.get('whale_confirmation_index') if whale_data else None,
+                'whale_signal_source': whale_data.get('whale_signal_source', 'OHLCV_VOLUME_REACTION_PROXY') if whale_data else 'OHLCV_VOLUME_REACTION_PROXY',
+                'whale_observed': False,
+                'whale_timeframe_policy': '12h_1D_REACTION_ONLY'
             }
             
         except Exception as e:
@@ -9245,7 +9428,14 @@ class TradingExpertSystem:
                 'spoofing_buy': False,
                 'spoofing_sell': False,
                 'aggressive_whale': False,
-                'passive_whale': False
+                'passive_whale': False,
+                'whale_event_pending': False,
+                'whale_event_age_bars': None,
+                'whale_event_index': None,
+                'whale_confirmation_index': None,
+                'whale_signal_source': 'OHLCV_VOLUME_REACTION_PROXY',
+                'whale_observed': False,
+                'whale_timeframe_policy': '12h_1D_REACTION_ONLY'
             }
     # === FIN FUNCIÓN COMPLETA ===
     
@@ -9277,19 +9467,33 @@ class TradingExpertSystem:
             
             atr_pct = float((volatility or {}).get('atr_pct', 0) or 0)
             
-            # BB width para detectar rango (BB estrecho = consolidación)
-            momentum_indicators = (momentum or {}).get('indicators', {}) or {}
-            bb_width = float(momentum_indicators.get('bb_width', 0) or 0)
+            # BB width pertenece a la capa de volatilidad, no a momentum.
+            bb_width = float((volatility or {}).get('bb_width', 0) or 0)
+            volatility_percentile = float(
+                (volatility or {}).get('volatility_percentile', 50) or 50
+            )
+            volatility_ratio = float(
+                (volatility or {}).get('volatility_ratio', 1) or 1
+            )
             
             reasoning = []
             regime = 'RANGING'  # default conservador
             confidence = 50.0
             
             # ============ HIGH VOLATILITY (prioridad — mercado errático) ============
-            if atr_pct > 4.0:
+            if (
+                volatility_percentile >= 93
+                and volatility_ratio >= 1.5
+            ) or atr_pct > 8.0:
                 regime = 'HIGH_VOLATILITY'
-                confidence = min(90.0, 50 + atr_pct * 5)
-                reasoning.append(f'ATR% muy alto: {atr_pct:.2f}% (> 4% umbral)')
+                confidence = min(
+                    90.0,
+                    55 + max(0, volatility_percentile - 90) * 2
+                )
+                reasoning.append(
+                    f'Volatilidad en percentil {volatility_percentile:.1f} '
+                    f'y {volatility_ratio:.2f}x su ATR normal'
+                )
                 return {'regime': regime, 'confidence': round(confidence, 1),
                         'reasoning': reasoning, 'adx': adx, 'atr_pct': atr_pct}
             
@@ -9492,131 +9696,55 @@ class TradingExpertSystem:
                     max_lookback = 300
             
             start_idx = max(2, max(0, n - max_lookback))
-            
-            for i in range(start_idx, n-2):
+
+            # FVG estándar de tres velas. Una visita parcial no equivale a un
+            # gap completamente mitigado: ese error hacía imposible reaccionar
+            # sobre el FVG porque "filled" y "precio dentro" eran lo mismo.
+            for i in range(start_idx, n):
                 try:
-                    # ============ TEORÍA CORRECTA DE IMBALANCE (3 VELAS) ============
-                    # Vela1: i-2, Vela2: i-1, Vela3: i
-                    # El imbalance existe si el rango de la vela2 NO está completamente cubierto
-                    # por el rango combinado de vela1 y vela3
-                    
-                    rango_vela2 = high[i-1] - low[i-1]
-                    if rango_vela2 <= 0:
+                    middle_range = float(high[i-1] - low[i-1])
+                    if middle_range <= 0 or middle_range < avg_range * 0.8:
                         continue
-                        
-                    # Rango cubierto por vela1 y vela3
-                    cobertura_superior = max(high[i-2], high[i])
-                    cobertura_inferior = min(low[i-2], low[i])
-                    
-                    # Solapamiento entre el rango de vela2 y la cobertura
-                    overlap = max(0, min(high[i-1], cobertura_superior) - max(low[i-1], cobertura_inferior))
-                    overlap_ratio = overlap / rango_vela2 if rango_vela2 > 0 else 1.0
-                    
-                    # Si el solapamiento es MENOR al 70%, hay imbalance (30% o más sin cubrir)
-                    if overlap_ratio < 0.7:
-                        # Determinar la zona del imbalance
-                        gap_bottom = max(low[i-1], cobertura_inferior)
-                        gap_top = min(high[i-1], cobertura_superior)
-                        
-                        # Asegurar que el gap tenga dirección
-                        if gap_top > gap_bottom:
-                            gap_size = (gap_top - gap_bottom) / close[i-1] * 100
-                            
-                            # Determinar dirección del imbalance
-                            if close[i-1] > open_price[i-1]:  # Vela2 alcista
-                                # Para vela alcista, el imbalance está en la parte superior
-                                gap_bottom = max(high[i-2], high[i])  # CORREGIDO
-                                gap_top = high[i-1]
-                                direccion = 'bullish'
-                            else:  # Vela2 bajista
-                                # Para vela bajista, el imbalance está en la parte inferior
-                                gap_bottom = low[i-1]
-                                gap_top = min(low[i-2], low[i])  # CORREGIDO
-                                direccion = 'bearish'
-                            
-                            if gap_top > gap_bottom:
-                                gap_size = (gap_top - gap_bottom) / close[i-1] * 100
-                                
-                                # Umbrales dinámicos por símbolo
-                                if symbol == 'BTC-USDT':
-                                    min_gap_size = 0.02  # 0.02% para BTC
-                                elif symbol == 'PAXG-USDT':
-                                    min_gap_size = 0.03
-                                else:
-                                    min_gap_size = 0.04
-                                
-                                if gap_size > min_gap_size:
-                                    filled = (current_price <= gap_top and current_price >= gap_bottom)
-                                    
-                                    # Determinar fuerza
-                                    if gap_size > 0.5:
-                                        strength = 'strong'
-                                    elif gap_size > 0.2:
-                                        strength = 'moderate'
-                                    else:
-                                        strength = 'weak'
-                                    
-                                    fair_value_gaps.append({
-                                        'type': direccion,
-                                        'gap_bottom': float(gap_bottom),
-                                        'gap_top': float(gap_top),
-                                        'gap_size': float(gap_size),
-                                        'index': i-1,
-                                        'filled': filled,
-                                        'reaccion': False,  # Se calculará después
-                                        'antiguedad': n - 1 - (i-1),
-                                        'strength': strength,
-                                        'volume_ratio': float(volume[i-1] / avg_volume) if avg_volume > 0 else 1.0
-                                    })
-                                    print(f"   ✅ IMBALANCE {direccion.upper()} en índice {i-1}: {gap_bottom:.2f}-{gap_top:.2f} (gap {gap_size:.2f}%)")
-                    
-                    # ============ IMBALANCE DE 2 VELAS (CASOS ESPECIALES) ============
-                    # Para movimientos muy fuertes donde la vela2 cubre casi toda la vela1
-                    if i > 1:
-                        rango_vela1 = high[i-2] - low[i-2]
-                        if rango_vela1 > 0:
-                            overlap_2v = max(0, min(high[i-1], high[i-2]) - max(low[i-1], low[i-2]))
-                            overlap_ratio_2v = overlap_2v / rango_vela1
-                            
-                            # Si el solapamiento es muy bajo (<30%) y la vela2 es grande
-                            if overlap_ratio_2v < 0.3 and rango_vela1 > avg_range * 1.5:
-                                if close[i-1] > open_price[i-1]:  # Vela2 alcista
-                                    gap_bottom = high[i-2]
-                                    gap_top = high[i-1]
-                                    direccion = 'bullish'
-                                else:  # Vela2 bajista
-                                    gap_bottom = low[i-1]
-                                    gap_top = low[i-2]
-                                    direccion = 'bearish'
-                                
-                                if gap_top > gap_bottom:
-                                    gap_size = (gap_top - gap_bottom) / close[i-2] * 100
-                                    if gap_size > 0.1:  # Umbral más alto para 2 velas
-                                        fair_value_gaps.append({
-                                            'type': direccion,
-                                            'gap_bottom': float(gap_bottom),
-                                            'gap_top': float(gap_top),
-                                            'gap_size': float(gap_size),
-                                            'index': i-1,
-                                            'filled': current_price <= gap_top and current_price >= gap_bottom,
-                                            'reaccion': False,
-                                            'antiguedad': n - 1 - (i-1),
-                                            'strength': 'moderate' if gap_size > 0.3 else 'weak',
-                                            'volume_ratio': float(volume[i-1] / avg_volume) if avg_volume > 0 else 1.0
-                                        })
-                    
-                    # ============ ACTUALIZAR REACCIÓN PARA FVGs EXISTENTES ============
-                    # Verificar si el precio actual reaccionó en algún FVG
-                    for fvg in fair_value_gaps:
-                        if not fvg['filled']:
-                            if current_price <= fvg['gap_top'] and current_price >= fvg['gap_bottom']:
-                                # El precio está dentro del gap
-                                if abs(current_price - fvg['gap_bottom']) / current_price < 0.005:
-                                    fvg['reaccion'] = True  # Rebote en soporte
-                                elif abs(fvg['gap_top'] - current_price) / current_price < 0.005:
-                                    fvg['reaccion'] = True  # Rechazo en resistencia
-                                    
-                except Exception as e:
+
+                    if high[i-2] < low[i]:
+                        direccion = 'bullish'
+                        gap_bottom = float(high[i-2])
+                        gap_top = float(low[i])
+                    elif low[i-2] > high[i]:
+                        direccion = 'bearish'
+                        gap_bottom = float(high[i])
+                        gap_top = float(low[i-2])
+                    else:
+                        continue
+
+                    gap_size = (gap_top - gap_bottom) / max(float(close[i-1]), 1e-12) * 100
+                    min_gap_size = 0.02 if symbol == 'BTC-USDT' else 0.03 if symbol == 'PAXG-USDT' else 0.04
+                    if gap_size <= min_gap_size:
+                        continue
+
+                    future_lows = low[i+1:n]
+                    future_highs = high[i+1:n]
+                    if direccion == 'bullish':
+                        filled = bool(len(future_lows) and np.min(future_lows) <= gap_bottom)
+                    else:
+                        filled = bool(len(future_highs) and np.max(future_highs) >= gap_top)
+                    touching_current = bool(gap_bottom <= current_price <= gap_top)
+
+                    strength = 'strong' if gap_size > 0.5 else 'moderate' if gap_size > 0.2 else 'weak'
+                    fair_value_gaps.append({
+                        'type': direccion,
+                        'gap_bottom': gap_bottom,
+                        'gap_top': gap_top,
+                        'gap_size': float(gap_size),
+                        'index': int(i),
+                        'filled': filled,
+                        'touching_current': touching_current,
+                        'reaccion': bool(not filled and touching_current),
+                        'antiguedad': int(n - 1 - i),
+                        'strength': strength,
+                        'volume_ratio': float(volume[i-1] / avg_volume) if avg_volume > 0 else 1.0
+                    })
+                except Exception:
                     continue
             
             # Eliminar duplicados (mismo índice y tipo)
@@ -9752,7 +9880,7 @@ class TradingExpertSystem:
                 'fib_extensions': {str(k): float(v) for k, v in fib_extensions.items()},
                 'psychological_levels': [float(l) for l in psychological_levels],
                 'order_blocks': order_blocks[-10:] if order_blocks else [],
-                'fair_value_gaps': fair_value_gaps[-10:] if fair_value_gaps else [],
+                'fair_value_gaps': fair_value_gaps[:10] if fair_value_gaps else [],
                 'liquidity_sweeps': liquidity_sweeps[-5:] if liquidity_sweeps else [],
                 'stop_hunts': stop_hunts[-5:] if stop_hunts else [],
                 'volume_profile': volume_profile,
@@ -9778,47 +9906,44 @@ class TradingExpertSystem:
             print(f"❌ Error en analyze_price_structure_layer: {e}")
             import traceback
             traceback.print_exc()
-            return {
-                'success': True,
-                'symbol': symbol,
-                'timeframe': timeframe,
-                'decision': {
-                    'action': accion_consenso,
-                    'confidence': max(0.0, min(100.0, float(confianza_consenso))),
-                    'estrategias': [str(e) for e in estrategias_consenso],
-                    'razones': [str(r) for r in razones_consenso],
-                    'registro_votacion': registro_serializable,
-                    'conviction': conviction
-                },
-                'levels': {k: float(v) if isinstance(v, (int, float)) else v for k, v in levels.items()},
-                'message': str(message),
-                'trend': self._make_serializable(trend),
-                'momentum': self._make_serializable(momentum),
-                'volatility': self._make_serializable(volatility),
-                'volume': self._make_serializable(volume),
-                'structure': self._make_serializable(structure),
-                'correlation': self._make_serializable(correlation),
-                'market_hours': self._make_serializable(market_hours),
-                'confirmation': self._make_serializable(confirmation),
-                'time_factor': self._make_serializable(time_factor),
-                'sentiment': self._make_serializable(sentiment),
-                'liquidation': self._make_serializable(liquidation_data),  # <--- AÑADIR ESTA LÍNEA
-                'current_price': float(structure.get('current_price', 0)),
-                'df': df_dict,
-                'timestamp': datetime.now(self.bolivia_tz).isoformat()
+            try:
+                if hasattr(df['time'], 'dt'):
+                    safe_times = [str(t) for t in df['time'].dt.strftime('%Y-%m-%d %H:%M:%S').tolist()]
+                else:
+                    safe_times = [str(t) for t in df['time'].tolist()]
+            except Exception:
+                safe_times = []
+            empty_patterns = {
+                'all_patterns': [], 'recent_patterns': [],
+                'bullish_patterns': [], 'bearish_patterns': [],
+                'neutral_patterns': [], 'count': 0,
+                'bullish_count': 0, 'bearish_count': 0, 'neutral_count': 0,
+                'pattern_score': 0, 'highest_reliability': 0,
+                'avg_reliability': 0, 'high_quality_patterns': []
             }
-            
-        except Exception as e:
-            print(f"\n{'='*60}")
-            print(f"❌ ERROR CRÍTICO en analyze_full_market: {e}")
-            import traceback
-            traceback.print_exc()
-            print(f"{'='*60}\n")
             return {
-                'success': False,
-                'error': str(e),
-                'symbol': symbol,
-                'timeframe': timeframe
+                'supports': [], 'resistances': [],
+                'nearest_support': None, 'nearest_resistance': None,
+                'patterns': empty_patterns,
+                'bullish_patterns_count': 0, 'bearish_patterns_count': 0,
+                'pivot_highs': [], 'pivot_lows': [],
+                'fib_levels': {}, 'fib_extensions': {},
+                'psychological_levels': [], 'order_blocks': [],
+                'fair_value_gaps': [], 'liquidity_sweeps': [],
+                'stop_hunts': [], 'volume_profile': {},
+                'hvn_nodes': [], 'lvn_nodes': [],
+                'closest_hvn': None, 'closest_lvn': None,
+                'current_price': float(df['close'].iloc[-1]) if len(df) else 0.0,
+                'previous_close': float(df['close'].iloc[-2]) if len(df) > 1 else 0.0,
+                'df': {
+                    'time': safe_times,
+                    'open': [float(x) for x in df['open'].tolist()],
+                    'high': [float(x) for x in df['high'].tolist()],
+                    'low': [float(x) for x in df['low'].tolist()],
+                    'close': [float(x) for x in df['close'].tolist()],
+                    'volume': [float(x) for x in df['volume'].tolist()]
+                },
+                'analysis_error': str(e)
             }
             
         # === FIN analyze_price_structure_layer ===
@@ -16613,7 +16738,11 @@ class TradingExpertSystem:
             momentum = self.analyze_momentum_layer(df)
             
             print(f"📊 Calculando capa de volatilidad...")
-            volatility = self.analyze_volatility_layer(df)
+            volatility = self.analyze_volatility_layer(
+                df,
+                symbol=symbol,
+                timeframe=timeframe
+            )
             
             print(f"📊 Calculando capa de volumen...")
             volume = self.analyze_volume_layer(df, timeframe)
@@ -19539,7 +19668,8 @@ class DynamicZones:
 
 class LiquidationHeatmap:
     """
-    Mapa de calor de liquidaciones - VERSIÓN CORREGIDA CON 3 CRITERIOS DE TOQUE
+    Mapa estimado de exposición apalancada a partir de OHLCV público.
+    Sus bins no representan posiciones ni liquidaciones observadas.
     """
     
     def __init__(self, timeframe='4h', max_bins_per_side=500):
@@ -19590,6 +19720,7 @@ class LiquidationHeatmap:
         self.total_events = 0
         self.last_event_timestamp = None
         self.current_timestamp = None
+        self._last_generated_timestamp = None
         self.history_loaded = False
         self.current_idx = 0
         
@@ -19664,7 +19795,7 @@ class LiquidationHeatmap:
             return 'rgba(0, 100, 0, 0.3)'
     
     def update_heatmap(self, df, current_idx, high, low, close, volume):
-        """Genera bins en CADA vela usando TIMESTAMPS"""
+        """Estima exposición relativa por OHLCV; no son liquidaciones observadas."""
         if not self.history_loaded:
             self.load_price_history(df)
         
@@ -19672,6 +19803,15 @@ class LiquidationHeatmap:
         self.current_timestamp = df['time'].iloc[current_idx]
         if isinstance(self.current_timestamp, str):
             self.current_timestamp = datetime.fromisoformat(self.current_timestamp.replace('Z', '+00:00'))
+
+        # No duplicar exposición cuando el usuario consulta varias veces la
+        # misma vela cerrada.
+        if self._last_generated_timestamp == self.current_timestamp:
+            return self._get_stats()
+
+        # Primero comprobar los bins creados en velas anteriores. Crear y tocar
+        # un bin con la misma vela introduciría un orden intravela inexistente.
+        bins_congelados_actual = self._check_touched_bins(high, low)
         # ==============================================================
         # HISTORIAL INCREMENTAL
         # ==============================================================
@@ -19692,22 +19832,26 @@ class LiquidationHeatmap:
                 f"   ➕ Historial incremental: "
                 f"{len(self.price_history)} velas"
             )        
-        # Volumen en millones
-        volume_m = volume / 1000
-        print(f"   📊 Volumen: {volume:.2f}K = {volume_m:.2f}M USD")
-        
-        if volume_m < self.min_volume:
-            volume_m = self.min_volume
-            print(f"   ⚠️ Usando volumen mínimo {self.min_volume}M para {self.timeframe}")
-        
-        is_up = close >= df['open'].iloc[current_idx]
-        
-        if is_up:
-            long_flow = volume_m * 0.7
-            short_flow = volume_m * 0.3
-        else:
-            long_flow = volume_m * 0.3
-            short_flow = volume_m * 0.7
+        # La unidad pública puede ser contratos, moneda base o turnover según
+        # la fuente. Por eso sólo se usa una razón contra su propia mediana.
+        activity_column = 'turnover' if 'turnover' in df.columns else 'volume'
+        activity_series = pd.to_numeric(df[activity_column], errors='coerce').fillna(0).values
+        history_start = max(0, current_idx - 20)
+        prior_activity = activity_series[history_start:current_idx]
+        prior_positive = prior_activity[prior_activity > 0]
+        baseline_activity = float(np.median(prior_positive)) if len(prior_positive) else 0.0
+        current_activity = float(activity_series[current_idx]) if current_idx < len(activity_series) else float(volume)
+        participation_units = (
+            current_activity / baseline_activity if baseline_activity > 0 else 1.0
+        )
+        participation_units = max(self.min_volume, min(5.0, participation_units))
+
+        candle_range = max(float(high - low), 1e-12)
+        close_location = max(0.0, min(1.0, float((close - low) / candle_range)))
+        long_share = 0.25 + close_location * 0.50
+        short_share = 1.0 - long_share
+        long_flow = participation_units * long_share
+        short_flow = participation_units * short_share
         
         lev_count = len(self.leverages)
         per_lev_long = long_flow / lev_count
@@ -19719,8 +19863,8 @@ class LiquidationHeatmap:
         if per_lev_short < 0.01:
             per_lev_short = 0.01
         
-        print(f"   💰 Flujo LONG: {long_flow:.2f}M, SHORT: {short_flow:.2f}M")
-        print(f"   ⚖️ Por leverage: LONG={per_lev_long:.3f}M, SHORT={per_lev_short:.3f}M")
+        print(f"   📊 Participación relativa: {participation_units:.2f}x mediana")
+        print(f"   ⚖️ Proxy LONG={long_flow:.3f}, SHORT={short_flow:.3f} unidades relativas")
         
         ref_price = close
         bins_creados = 0
@@ -19748,12 +19892,10 @@ class LiquidationHeatmap:
         if bins_creados > 0:
             self.total_events += 1
             self.last_event_timestamp = self.current_timestamp
-        
-        # ============ NUEVO: Verificar bins tocados en la vela ACTUAL ============
-        bins_congelados_actual = self._check_touched_bins(high, low)
+            self._last_generated_timestamp = self.current_timestamp
+
         if bins_congelados_actual > 0:
             print(f"   ❄️ Total congelados en vela actual: {bins_congelados_actual}")
-        # =========================================================================
         
         print(f"   📦 Total bins creados en esta vela: {bins_creados}")
         return self._get_stats()
@@ -19763,7 +19905,7 @@ class LiquidationHeatmap:
         # ============ CORRECCIÓN: Asegurar peso > 0 ============
         if weight <= 0:
             weight = 0.01
-            print(f"   ⚠️ Peso ajustado a 0.01M para {side} ${price_top:.2f}")
+            print(f"   ⚠️ Peso relativo ajustado a 0.01 para {side} ${price_top:.2f}")
         
         new_bin = LiquidationBin(
             price_top, price_bottom, weight, side, timestamp, leverage
@@ -19774,7 +19916,7 @@ class LiquidationHeatmap:
         if len(self.all_bins) % 50 == 0:
             print(f"   ✅ [{self.timeframe}] +50 bins - total: {len(self.all_bins)} (último: ${price_top:.2f})")
         elif len(self.all_bins) <= 10:
-            print(f"   ✅ [{self.timeframe}] Nuevo bin {side} ${price_top:.2f} (peso: {weight:.2f}M, lev:{leverage}x)")
+            print(f"   ✅ [{self.timeframe}] Nuevo bin {side} ${price_top:.2f} (peso relativo: {weight:.2f}, lev:{leverage}x)")
     
     def _check_touched_bins(self, high, low):
         """Congela bins tocados por el precio en la vela ACTUAL - VERSIÓN QUE FUNCIONABA"""
@@ -19797,7 +19939,7 @@ class LiquidationHeatmap:
                 self.all_bins.remove(bin_obj)
                 self.frozen_bins.append(bin_obj)
                 touched += 1
-                print(f"   ❄️ [{self.timeframe}] Bin {bin_obj.side} CONGELADO (actual) ${bin_obj.price_top:.2f} (peso: {bin_obj.weight:.1f}M)")
+                print(f"   ❄️ [{self.timeframe}] Bin {bin_obj.side} CONGELADO (actual) ${bin_obj.price_top:.2f} (peso relativo: {bin_obj.weight:.2f})")
         
         # CAP anti-OOM: mantener solo los últimos 300 frozen_bins.
         # En uptime largo (>1 semana), esta lista crecía indefinidamente
@@ -19863,7 +20005,7 @@ class LiquidationHeatmap:
         
         # Log cada 10 llamadas para no saturar
         if self.current_idx % 10 == 0:
-            print(f"   📊 Stats - Long: {total_long_bins} bins, {total_long_weight:.1f}M | Short: {total_short_bins} bins, {total_short_weight:.1f}M")
+            print(f"   📊 Stats - Long: {total_long_bins} bins, {total_long_weight:.2f}u | Short: {total_short_bins} bins, {total_short_weight:.2f}u")
         
         return {
             'total_active': len(self.all_bins),
@@ -20040,7 +20182,7 @@ class LiquidationHeatmap:
         print(f"\n📊 [{self.timeframe}] HEATMAP DATA:")
         print(f"   Bins activos: {len(active_bins)} (L:{total_long_bins} S:{total_short_bins})")
         print(f"   Bins congelados: {len(frozen_bins)}")
-        print(f"   Long weight: {total_long_weight:.1f}M, Short weight: {total_short_weight:.1f}M")
+        print(f"   Peso relativo Long: {total_long_weight:.2f}u, Short: {total_short_weight:.2f}u")
         print(f"   % congelados: {len(frozen_bins)/max(1,total_bins)*100:.1f}% ({len(frozen_bins)}/{total_bins})")
         
         return {
@@ -20052,7 +20194,13 @@ class LiquidationHeatmap:
             'total_short_weight': total_short_weight,
             'last_spike_bar': self.last_event_timestamp.isoformat() if self.last_event_timestamp else None,
             'total_spikes': self.total_events,
-            'total_bins_historical': total_bins
+            'total_bins_historical': total_bins,
+            'data_type': 'MODEL_ESTIMATE_NOT_OBSERVED',
+            'model_version': 'OHLCV_RELATIVE_EXPOSURE_V2',
+            'weight_unit': 'relative_participation',
+            'model_confidence': min(70.0, 20.0 + self.total_events * 5.0),
+            'coverage_bars': len(self.price_history),
+            'observed_liquidations': False
         }
     
     def _empty_data(self):
@@ -20065,7 +20213,13 @@ class LiquidationHeatmap:
             'total_short_weight': 0,
             'last_spike_bar': None,
             'total_spikes': 0,
-            'total_bins_historical': 0
+            'total_bins_historical': 0,
+            'data_type': 'MODEL_ESTIMATE_NOT_OBSERVED',
+            'model_version': 'OHLCV_RELATIVE_EXPOSURE_V2',
+            'weight_unit': 'relative_participation',
+            'model_confidence': 0,
+            'coverage_bars': len(self.price_history),
+            'observed_liquidations': False
         }
 
 
@@ -20218,6 +20372,7 @@ class TraderTecnico(TraderBase):
             if bb_position > 0.9 and not squeeze_on:
                 if adx > 25 and direccion_trend == 'bullish':
                     if confianza_actual < 80:
+                        accion_actual = 'COMPRA_SPOT'
                         confianza_actual = 80
                         if 'BAND_WALK_ALCISTA' not in estrategias:
                             estrategias.append('BAND_WALK_ALCISTA')
@@ -20228,6 +20383,7 @@ class TraderTecnico(TraderBase):
             if bb_position < 0.1 and not squeeze_on:
                 if adx > 25 and direccion_trend == 'bearish':
                     if confianza_actual < 80:
+                        accion_actual = 'VENTA_SPOT'
                         confianza_actual = 80
                         if 'BAND_WALK_BAJISTA' not in estrategias:
                             estrategias.append('BAND_WALK_BAJISTA')
@@ -20238,11 +20394,18 @@ class TraderTecnico(TraderBase):
             if bb_width > 5.0 and bb_width > volatility.get('bb_width_prev', 0) * 1.5:
                 if direccion_trend == 'bullish':
                     if confianza_actual < 70:
+                        accion_actual = 'COMPRA_SPOT'
                         confianza_actual = 70
                         if 'EXPANSION_VOLATILIDAD' not in estrategias:
                             estrategias.append('EXPANSION_VOLATILIDAD')
                             razones.append(f"Expansión brusca de volatilidad (ancho de banda {bb_width:.1f}%), confirmando movimiento")
                             print(f"   ✅ ESTRATEGIA: EXPANSION_VOLATILIDAD - {accion_actual} (70%)")
+                elif direccion_trend == 'bearish' and confianza_actual < 70:
+                    accion_actual = 'VENTA_SPOT'
+                    confianza_actual = 70
+                    if 'EXPANSION_VOLATILIDAD' not in estrategias:
+                        estrategias.append('EXPANSION_VOLATILIDAD')
+                        razones.append(f"Expansión brusca de volatilidad ({bb_width:.1f}%) confirmando presión bajista")
             
             # Actualizar acción y confianza
             if accion_actual != accion or confianza_actual > confianza:
@@ -20269,213 +20432,157 @@ class TraderChartista(TraderBase):
         super().__init__("Chartista", "patrones", peso_base=1.3)
         
     def votar(self, capas, symbol, timeframe):
-        # Valores por defecto
         accion = 'NO_OPERAR'
         confianza = 0
         estrategias = []
         razones = []
-        
+
         try:
             structure = capas.get('structure', {})
             patterns = structure.get('patterns', {})
-            recent = patterns.get('recent_patterns', [])
-            bullish_count = patterns.get('bullish_count', 0)
-            bearish_count = patterns.get('bearish_count', 0)
-            high_quality = patterns.get('high_quality_patterns', [])
-            
-            # ============ LOG INICIAL ============
+            recent = [p for p in patterns.get('recent_patterns', []) if isinstance(p, dict)]
+            high_quality = [p for p in patterns.get('high_quality_patterns', []) if isinstance(p, dict)]
+            df_payload = structure.get('df', {}) if isinstance(structure, dict) else {}
+            current_index = (
+                len(df_payload.get('time', [])) - 1
+                if isinstance(df_payload, dict) and df_payload.get('time')
+                else max([int(p.get('index', 0) or 0) for p in recent], default=0)
+            )
+
             print(f"\n📊 TRADER CHARTISTA - {symbol} {timeframe}")
             print(f"   Patrones totales: {len(recent)}")
             print(f"   Alta calidad: {len(high_quality)}")
-            print(f"   Alcistas: {bullish_count}, Bajistas: {bearish_count}")
-            
-            # Mostrar patrones de alta calidad detectados
-            if high_quality:
-                print(f"   Patrones de alta calidad:")
-                for pattern in high_quality[:5]:  # Mostrar primeros 5
-                    nombre = pattern.get('name', '')
-                    direccion = pattern.get('direction', 'neutral')
-                    reliability = pattern.get('reliability', 0)
-                    print(f"      - {nombre} ({direccion}) con {reliability}%")
-            
-            # Buscar patrones de alta calidad (reliability >= 80)
-            for pattern in high_quality:
-                if not isinstance(pattern, dict):
+
+            direction_scores = {'bullish': 0.0, 'bearish': 0.0}
+            direction_patterns = {'bullish': [], 'bearish': []}
+            strategy_map = {
+                ('HCH Invertido', 'bullish'): 'HCH_INVERTIDO',
+                ('Doble Suelo', 'bullish'): 'DOBLE_SUELO',
+                ('Doble Techo', 'bearish'): 'DOBLE_TECHO',
+                ('Bandera', 'bullish'): 'BANDERA_ALCISTA',
+                ('Banderín', 'bullish'): 'BANDERA_ALCISTA'
+            }
+
+            # La fiabilidad es un puntaje técnico del detector, no una probabilidad
+            # garantizada. Se degrada con la antigüedad y se suman ambos bandos.
+            for pattern in recent:
+                direction = pattern.get('direction', 'neutral')
+                if direction not in direction_scores:
                     continue
-                    
-                nombre = pattern.get('name', '')
-                direccion = pattern.get('direction', 'neutral')
-                reliability = pattern.get('reliability', 0)
-                
-                # ============ ESTRATEGIA 5: HCH INVERTIDO ============
-                if 'HCH Invertido' in nombre and direccion == 'bullish':
-                    accion = 'COMPRA_SPOT'
-                    confianza = max(confianza, reliability)
-                    estrategias.append('HCH_INVERTIDO')
-                    razones.append(f"Patrón HCH Invertido completado con {reliability}% confianza")
-                    print(f"   ✅ ESTRATEGIA: HCH_INVERTIDO detectado con {reliability}%")
-                    
-                # ============ ESTRATEGIA 6: DOBLE SUELO ============
-                elif 'Doble Suelo' in nombre and direccion == 'bullish':
-                    accion = 'COMPRA_SPOT'
-                    confianza = max(confianza, reliability)
-                    estrategias.append('DOBLE_SUELO')
-                    razones.append(f"Patrón de Doble Suelo confirmado con {reliability}% confianza")
-                    print(f"   ✅ ESTRATEGIA: DOBLE_SUELO detectado con {reliability}%")
-                    
-                # ============ ESTRATEGIA 7: DOBLE TECHO ============
-                elif 'Doble Techo' in nombre and direccion == 'bearish':
-                    accion = 'VENTA_SPOT'
-                    confianza = max(confianza, reliability)
-                    estrategias.append('DOBLE_TECHO')
-                    razones.append(f"Patrón de Doble Techo confirmado con {reliability}% confianza")
-                    print(f"   ✅ ESTRATEGIA: DOBLE_TECHO detectado con {reliability}%")
-                    
-                # ============ ESTRATEGIA 8: BANDERA/BANDERÍN ============
-                elif ('Bandera' in nombre or 'Banderín' in nombre) and direccion == 'bullish':
-                    accion = 'LONG' if timeframe == '4h' else 'COMPRA_SPOT'
-                    confianza = max(confianza, reliability)
-                    estrategias.append('BANDERA_ALCISTA')
-                    razones.append(f"Patrón de {nombre} detectado, típico de continuación alcista")
-                    print(f"   ✅ ESTRATEGIA: BANDERA_ALCISTA detectado con {reliability}%")
-            
-            # Si no hay patrones de alta calidad pero hay acumulación de patrones
-            if accion == 'NO_OPERAR' and bullish_count > bearish_count + 2:
-                accion = 'COMPRA_SPOT'
-                confianza = 60 + min(20, bullish_count * 5)
-                estrategias.append('ACUMULACION_PATRONES')
-                razones.append(f"{bullish_count} patrones alcistas vs {bearish_count} bajistas")
-                print(f"   📊 ACUMULACIÓN: {bullish_count} patrones alcistas, {bearish_count} bajistas → COMPRA")
-                
-            elif accion == 'NO_OPERAR' and bearish_count > bullish_count + 2:
-                accion = 'VENTA_SPOT'
-                confianza = 60 + min(20, bearish_count * 5)
-                estrategias.append('ACUMULACION_PATRONES_BAJISTAS')
-                razones.append(f"{bearish_count} patrones bajistas vs {bullish_count} alcistas")
-                print(f"   📊 ACUMULACIÓN: {bearish_count} patrones bajistas, {bullish_count} alcistas → VENTA")
-            
-            # ============ LOG FINAL ============
+                reliability = max(0.0, min(100.0, float(pattern.get('reliability', 0) or 0)))
+                try:
+                    pattern_index = int(pattern.get('index', current_index))
+                except (TypeError, ValueError):
+                    pattern_index = current_index
+                age = max(0, current_index - pattern_index)
+                age_decay = max(0.20, 1.0 - age / 30.0)
+                weighted_score = reliability * age_decay
+                direction_scores[direction] += weighted_score
+                direction_patterns[direction].append((pattern, weighted_score))
+
+            bullish_score = direction_scores['bullish']
+            bearish_score = direction_scores['bearish']
+            max_score = max(bullish_score, bearish_score)
+            if max_score > 0 and abs(bullish_score - bearish_score) <= max_score * 0.25:
+                accion = 'ESPERAR'
+                confianza = min(82.0, 60.0 + max_score / 20.0)
+                estrategias.append('CONFLICTO_PATRONES')
+                razones.append(
+                    f"Patrones contradictorios: alcista {bullish_score:.1f} vs bajista {bearish_score:.1f}"
+                )
+            elif max_score > 0:
+                dominant = 'bullish' if bullish_score > bearish_score else 'bearish'
+                opposition = bearish_score if dominant == 'bullish' else bullish_score
+                advantage = max_score - opposition
+                recognized = []
+                for pattern, _ in sorted(
+                    direction_patterns[dominant], key=lambda item: item[1], reverse=True
+                ):
+                    name = str(pattern.get('name', ''))
+                    for (needle, direction), strategy in strategy_map.items():
+                        if direction == dominant and needle in name and strategy not in recognized:
+                            recognized.append(strategy)
+
+                dominant_count = len(direction_patterns[dominant])
+                opposite_count = len(direction_patterns['bearish' if dominant == 'bullish' else 'bullish'])
+                if recognized or dominant_count >= opposite_count + 3:
+                    accion = 'COMPRA_SPOT' if dominant == 'bullish' else 'VENTA_SPOT'
+                    confianza = min(88.0, 58.0 + advantage / 12.0 + min(12.0, dominant_count * 2.0))
+                    estrategias.extend(recognized)
+                    if not recognized:
+                        estrategias.append(
+                            'ACUMULACION_PATRONES' if dominant == 'bullish'
+                            else 'ACUMULACION_PATRONES_BAJISTAS'
+                        )
+                    razones.append(
+                        f"Ventaja chartista {dominant}: {dominant_count} patrones recientes "
+                        f"contra {opposite_count}; score {max_score:.1f} vs {opposition:.1f}"
+                    )
+
             print(f"   ✅ Decisión final: {accion} (confianza {confianza}%)")
-            if estrategias:
-                print(f"   📋 Estrategias: {estrategias}")
-            
         except Exception as e:
             print(f"❌ Error en TraderChartista.votar: {e}")
             import traceback
             traceback.print_exc()
-            
+
         return accion, confianza, estrategias, razones
 
 class TraderBallenas(TraderBase):
-    """Trader 3: Cazador de Ballenas - Basado en flujo institucional"""
+    """Trader 3: proxy OHLCV de actividad grande con reacción 12h/1D."""
     
     def __init__(self):
         super().__init__("Cazador de Ballenas", "volumen", peso_base=1.5)
         
     def votar(self, capas, symbol, timeframe):
-        # Valores por defecto
         accion = 'NO_OPERAR'
         confianza = 0
         estrategias = []
         razones = []
-        
+
         try:
+            if timeframe not in ('12h', '1D'):
+                razones.append('Ballenas sólo se evalúa en 12h/1D según su política temporal')
+                return accion, confianza, estrategias, razones
+
             volume = capas.get('volume', {})
             if not isinstance(volume, dict):
                 return accion, confianza, estrategias, razones
-            
+
             print(f"\n📊 TRADER BALLENAS - {symbol} {timeframe}")
-            
-            whale_buy = volume.get('whale_buy', False)
-            whale_sell = volume.get('whale_sell', False)
             whale_buy_confirmed = volume.get('whale_buy_confirmed', False)
             whale_sell_confirmed = volume.get('whale_sell_confirmed', False)
-            iceberg_buy = volume.get('iceberg_buy', False)
-            iceberg_sell = volume.get('iceberg_sell', False)
-            accumulation_score = volume.get('accumulation_score', 0)
-            volume_ratio = volume.get('volume_ratio', 1)
-            
-            print(f"   🐋 Ballena compra: {whale_buy} (confirmada: {whale_buy_confirmed})")
-            print(f"   🐋 Ballena venta: {whale_sell} (confirmada: {whale_sell_confirmed})")
-            print(f"   🧊 Iceberg compra: {iceberg_buy}, venta: {iceberg_sell}")
-            print(f"   📊 Score acumulación: {accumulation_score:.1f}")
-            print(f"   📈 Ratio volumen: {volume_ratio:.1f}x")
-            
-            # Calcular velas desde última señal (simulado)
-            velas_desde_senal = 2
-            
-            # ============ ESTRATEGIA MAVERICK ============
-            if whale_buy_confirmed and velas_desde_senal <= 7:
+            event_age = volume.get('whale_event_age_bars')
+            pending = bool(volume.get('whale_event_pending', False))
+            strength = max(0.0, min(85.0, float(volume.get('whale_signal_strength', 0) or 0)))
+            absorption_buy = bool(volume.get('iceberg_buy', False))
+            absorption_sell = bool(volume.get('iceberg_sell', False))
+
+            age_is_valid = isinstance(event_age, (int, float)) and 1 <= event_age <= 7
+            if whale_buy_confirmed and age_is_valid:
                 accion = 'COMPRA_SPOT'
-                confianza = 95
+                confianza = min(88.0, 62.0 + strength * 0.25 + (5.0 if absorption_buy else 0.0))
                 estrategias.append('MAVERICK')
-                razones.append(f"Ballena compradora CONFIRMADA hace {velas_desde_senal} velas")
-                print(f"   ✅ MAVERICK: Compra confirmada (confianza 95%)")
-                
-            elif whale_buy:
-                accion = 'COMPRA_SPOT'
-                confianza = 80
-                estrategias.append('MAVERICK')
-                razones.append("Ballena compradora detectada (pendiente confirmación)")
-                print(f"   ✅ MAVERICK: Compra detectada (confianza 80%)")
-                
-            elif whale_sell_confirmed:
+                razones.append(
+                    f"Proxy de actividad grande comprador reaccionó y confirmó hace {int(event_age)} velas"
+                )
+                if absorption_buy:
+                    estrategias.append('ABSORCION_PROXY_CONFIRMADA')
+            elif whale_sell_confirmed and age_is_valid:
                 accion = 'VENTA_SPOT'
-                confianza = 95
+                confianza = min(88.0, 62.0 + strength * 0.25 + (5.0 if absorption_sell else 0.0))
                 estrategias.append('MAVERICK_BAJISTA')
-                razones.append("Ballena vendedora CONFIRMADA")
-                print(f"   🔴 MAVERICK: Venta confirmada (confianza 95%)")
-                
-            elif whale_sell:
-                accion = 'VENTA_SPOT'
-                confianza = 80
-                estrategias.append('MAVERICK_BAJISTA')
-                razones.append("Ballena vendedora detectada")
-                print(f"   🔴 MAVERICK: Venta detectada (confianza 80%)")
-            
-            # ============ ESTRATEGIA ICEBERG ============
-            if iceberg_buy:
-                if accion == 'NO_OPERAR':
-                    accion = 'COMPRA_SPOT'
-                    confianza = 70
-                else:
-                    confianza = min(100, confianza + 15)
-                estrategias.append('ACUMULACION_ICEBERG')
-                razones.append("Acumulación tipo ICEBERG detectada")
-                print(f"   🧊 ICEBERG: Acumulación detectada (+15% confianza)")
-                
-            elif iceberg_sell:
-                if accion == 'NO_OPERAR':
-                    accion = 'VENTA_SPOT'
-                    confianza = 70
-                else:
-                    confianza = min(100, confianza + 15)
-                estrategias.append('DISTRIBUCION_ICEBERG')
-                razones.append("Distribución tipo ICEBERG detectada")
-                print(f"   🧊 ICEBERG: Distribución detectada (+15% confianza)")
-            
-            # ============ ESTRATEGIA VOLUMEN ANÓMALO ============
-            if volume_ratio > 2.0 and accumulation_score > 3:
-                if accion == 'NO_OPERAR':
-                    accion = 'COMPRA_SPOT'
-                    confianza = 75
-                estrategias.append('VOLUMEN_ANOMALO_ALCISTA')
-                razones.append(f"Volumen anómalo ({volume_ratio:.1f}x) con acumulación")
-                print(f"   📊 VOLUMEN ANÓMALO: Alcista (confianza 75%)")
-                
-            elif volume_ratio > 2.0 and accumulation_score < -3:
-                if accion == 'NO_OPERAR':
-                    accion = 'VENTA_SPOT'
-                    confianza = 75
-                estrategias.append('VOLUMEN_ANOMALO_BAJISTA')
-                razones.append(f"Volumen anómalo ({volume_ratio:.1f}x) con distribución")
-                print(f"   📊 VOLUMEN ANÓMALO: Bajista (confianza 75%)")
-            
+                razones.append(
+                    f"Proxy de actividad grande vendedor reaccionó y confirmó hace {int(event_age)} velas"
+                )
+                if absorption_sell:
+                    estrategias.append('ABSORCION_PROXY_CONFIRMADA')
+            elif pending:
+                razones.append('Hay anomalía de volumen, pero aún falta la reacción posterior; no genera voto')
+
             print(f"   ✅ Decisión final: {accion} (confianza {confianza}%)")
-            
         except Exception as e:
             print(f"❌ Error en TraderBallenas.votar: {e}")
-            
+
         return accion, confianza, estrategias, razones
 
 
@@ -20495,6 +20602,10 @@ class TraderMacro(TraderBase):
         razones = []
         
         try:
+            if str(capas.get('system_type', 'spot')).lower() == 'futures':
+                razones.append('Macro/rotación PAXG-BTC queda reservado para acumulación Spot')
+                return accion, confianza, estrategias, razones
+
             # ============ OBTENER ANÁLISIS DE BTC Y RATIO ============
             btc_analysis = capas.get('btc_analysis', {})
             ratio_analysis = capas.get('ratio_analysis', {})
@@ -20781,92 +20892,95 @@ class TraderPullback(TraderBase):
         super().__init__("Pullback", "timing", peso_base=1.2)
         
     def votar(self, capas, symbol, timeframe):
-        # Valores por defecto
         accion = 'NO_OPERAR'
         confianza = 0
         estrategias = []
         razones = []
-        
+
         try:
             print(f"\n📊 TRADER PULLBACK - {symbol} {timeframe}")
-            
             trend = capas.get('trend', {})
+            momentum = capas.get('momentum', {})
             volatility = capas.get('volatility', {})
             structure = capas.get('structure', {})
             time_factor = capas.get('time_factor', {})
-            
+
             if not isinstance(trend, dict):
-                print(f"   ⚠️ Trend no disponible")
                 return accion, confianza, estrategias, razones
-            
-            adx = trend.get('adx', 0)
+
+            adx = float(trend.get('adx', 0) or 0)
             direccion_trend = trend.get('direction', 'neutral')
-            bb_position = volatility.get('bb_position', 0.5)
+            momentum_direction = momentum.get('direction', 'neutral') if isinstance(momentum, dict) else 'neutral'
+            bb_position = float(volatility.get('bb_position', 0.5) or 0.5)
+            atr_pct = max(0.0, float(volatility.get('atr_pct', 0) or 0))
             nearest_support = structure.get('nearest_support')
             nearest_resistance = structure.get('nearest_resistance')
-            current_price = structure.get('current_price', 0)
+            current_price = float(structure.get('current_price', 0) or 0)
             time_score = time_factor.get('time_score', 0) if time_factor else 0
-            
-            print(f"   ADX: {adx:.1f}, Dirección: {direccion_trend}")
-            print(f"   BB Position: {bb_position:.2f}")
-            
-            # ============ CORRECCIÓN: Validar None antes de formatear ============
-            support_str = f"${nearest_support:.2f}" if nearest_support is not None else "N/A"
-            resistance_str = f"${nearest_resistance:.2f}" if nearest_resistance is not None else "N/A"
-            print(f"   Soporte: {support_str}, Resistencia: {resistance_str}")
-            # ======================================================================
-            
-            print(f"   Time Score: {time_score}")
-            
-            # ============ ESTRATEGIA PULLBACK ALCISTA ============
-            if (direccion_trend == 'bullish' and adx > 20 and
-                bb_position > 0.7 and nearest_support is not None and
-                current_price > 0 and
-                (current_price - nearest_support) / current_price > 0.02):
-                
-                accion = 'ESPERAR'
-                confianza = 75
-                estrategias.append('PULLBACK_ALCISTA')
-                razones.append("Tendencia alcista confirmada pero precio extendido")
-                razones.append(f"Esperar retroceso a soporte en ${nearest_support:.2f}")
-                print(f"   ✅ Estrategia: PULLBACK_ALCISTA - Esperar retroceso a ${nearest_support:.2f}")
-                
-            # ============ ESTRATEGIA PULLBACK BAJISTA ============
-            elif (direccion_trend == 'bearish' and adx > 20 and
-                  bb_position < 0.3 and nearest_resistance is not None and
-                  current_price > 0 and
-                  (nearest_resistance - current_price) / current_price > 0.02):
-                
-                accion = 'ESPERAR'
-                confianza = 75
-                estrategias.append('PULLBACK_BAJISTA')
-                razones.append("Tendencia bajista confirmada pero precio extendido")
-                razones.append(f"Esperar rebote a resistencia en ${nearest_resistance:.2f}")
-                print(f"   ✅ Estrategia: PULLBACK_BAJISTA - Esperar rebote a ${nearest_resistance:.2f}")
-                
-            # ============ ESTRATEGIA ESPERAR CONFIRMACIÓN ============
-            elif time_score < -20:
+
+            if current_price <= 0 or adx < 18:
+                return accion, confianza, estrategias, razones
+
+            # Las distancias se adaptan al ATR propio del par+temporalidad.
+            extended_threshold_pct = max(0.35, atr_pct * 1.10)
+            entry_zone_pct = max(0.15, min(1.50, atr_pct * 0.65))
+            support_distance_pct = None
+            resistance_distance_pct = None
+            if nearest_support is not None and float(nearest_support) <= current_price:
+                support_distance_pct = (current_price - float(nearest_support)) / current_price * 100
+            if nearest_resistance is not None and float(nearest_resistance) >= current_price:
+                resistance_distance_pct = (float(nearest_resistance) - current_price) / current_price * 100
+
+            if direccion_trend == 'bullish' and support_distance_pct is not None:
+                if bb_position > 0.70 and support_distance_pct > extended_threshold_pct:
+                    accion = 'ESPERAR'
+                    confianza = 78
+                    estrategias.append('ESPERAR_CONFIRMACION')
+                    razones.append(
+                        f"Precio alcista extendido {support_distance_pct:.2f}% del soporte; "
+                        f"esperar retroceso (umbral ATR {extended_threshold_pct:.2f}%)"
+                    )
+                elif support_distance_pct <= entry_zone_pct and bb_position <= 0.62 and momentum_direction != 'bearish':
+                    accion = 'COMPRA_SPOT'
+                    confianza = min(86.0, 66.0 + min(12.0, adx * 0.35) + (6.0 if momentum_direction == 'bullish' else 0.0))
+                    estrategias.append('PULLBACK_ALCISTA')
+                    razones.append(
+                        f"Retroceso alcista llegó a zona ATR del soporte ({support_distance_pct:.2f}% ≤ {entry_zone_pct:.2f}%)"
+                    )
+            elif direccion_trend == 'bearish' and resistance_distance_pct is not None:
+                if bb_position < 0.30 and resistance_distance_pct > extended_threshold_pct:
+                    accion = 'ESPERAR'
+                    confianza = 78
+                    estrategias.append('ESPERAR_CONFIRMACION')
+                    razones.append(
+                        f"Precio bajista extendido {resistance_distance_pct:.2f}% de la resistencia; "
+                        f"esperar subida (umbral ATR {extended_threshold_pct:.2f}%)"
+                    )
+                elif resistance_distance_pct <= entry_zone_pct and bb_position >= 0.38 and momentum_direction != 'bullish':
+                    accion = 'VENTA_SPOT'
+                    confianza = min(86.0, 66.0 + min(12.0, adx * 0.35) + (6.0 if momentum_direction == 'bearish' else 0.0))
+                    estrategias.append('PULLBACK_BAJISTA')
+                    razones.append(
+                        f"Subida bajista llegó a zona ATR de resistencia ({resistance_distance_pct:.2f}% ≤ {entry_zone_pct:.2f}%)"
+                    )
+
+            if accion == 'NO_OPERAR' and time_score < -20:
                 accion = 'ESPERAR'
                 confianza = 70
                 estrategias.append('ESPERAR_CONFIRMACION')
                 razones.append("Momento desfavorable, esperar mejor timing")
-                print(f"   ✅ Estrategia: ESPERAR_CONFIRMACION - Time score bajo")
-            
-            else:
-                print(f"   ⚠️ Ninguna condición de pullback cumplida")
-            
+
             print(f"   Decisión: {accion} (confianza {confianza}%)")
-            
         except Exception as e:
             print(f"❌ Error en TraderPullback.votar: {e}")
             import traceback
             traceback.print_exc()
-            
+
         return accion, confianza, estrategias, razones
 
 
 class TraderSmartMoney(TraderBase):
-    """Trader 6: Smart Money - Basado en Order Blocks, FVGs, Liquidity Sweeps y Perfil de Volumen
+    """Trader 6: Smart Money - Proxies de Order Blocks, FVGs, sweeps y perfil de volumen
        VERSIÓN MEJORADA CON ESTRATEGIAS DE HVN, LVN Y STOP HUNTS
     """
     
@@ -20885,6 +20999,7 @@ class TraderSmartMoney(TraderBase):
             volume = capas.get('volume', {})
             momentum = capas.get('momentum', {})
             trend = capas.get('trend', {})
+            volatility = capas.get('volatility', {})
             
             if not isinstance(structure, dict):
                 return accion, confianza, estrategias, razones
@@ -20892,6 +21007,8 @@ class TraderSmartMoney(TraderBase):
             current_price = structure.get('current_price', 0)
             if current_price == 0:
                 return accion, confianza, estrategias, razones
+            atr_pct = max(0.0, float(volatility.get('atr_pct', 0) or 0)) if isinstance(volatility, dict) else 0.0
+            structure_tolerance = max(0.0015, min(0.012, (atr_pct / 100.0) * 0.35))
             
             # ============ EXTRACCIÓN DE DATOS ESTRUCTURALES ============
             order_blocks = structure.get('order_blocks', [])
@@ -20933,7 +21050,9 @@ class TraderSmartMoney(TraderBase):
                     
                 if ob.get('type') == 'bullish':
                     price_range = ob.get('price_range', [0, 0])
-                    if len(price_range) >= 2 and price_range[0] <= current_price <= price_range[1] * 1.01:
+                    if (len(price_range) >= 2
+                            and price_range[0] * (1 - structure_tolerance) <= current_price
+                            <= price_range[1] * (1 + structure_tolerance)):
                         # Order block alcista activo
                         confianza_base = 85 if ob.get('strength') == 'strong' else 75
                         
@@ -20963,7 +21082,9 @@ class TraderSmartMoney(TraderBase):
                         
                     if ob.get('type') == 'bearish':
                         price_range = ob.get('price_range', [0, 0])
-                        if len(price_range) >= 2 and price_range[1] >= current_price >= price_range[0] * 0.99:
+                        if (len(price_range) >= 2
+                                and price_range[0] * (1 - structure_tolerance) <= current_price
+                                <= price_range[1] * (1 + structure_tolerance)):
                             confianza_base = 85 if ob.get('strength') == 'strong' else 75
                             
                             if volume_ratio > 1.5:
@@ -21036,7 +21157,7 @@ class TraderSmartMoney(TraderBase):
                     if sweep.get('type') == 'bullish' and sweep.get('strength') == 'strong':
                         # Sweep alcista (barrido de stops por debajo)
                         sweep_level = sweep.get('sweep_level', 0)
-                        days_ago = len(liquidity_sweeps) - liquidity_sweeps.index(sweep)
+                        days_ago = max(0, n - 1 - int(sweep.get('index', n - 1))) if n else 999
                         
                         if days_ago <= 3:  # Sweep reciente (últimas 3 velas)
                             confianza = 85
@@ -21059,7 +21180,7 @@ class TraderSmartMoney(TraderBase):
                         
                     if sweep.get('type') == 'bearish' and sweep.get('strength') == 'strong':
                         sweep_level = sweep.get('sweep_level', 0)
-                        days_ago = len(liquidity_sweeps) - liquidity_sweeps.index(sweep)
+                        days_ago = max(0, n - 1 - int(sweep.get('index', n - 1))) if n else 999
                         
                         if days_ago <= 3:
                             confianza = 85
@@ -21380,7 +21501,7 @@ class TraderEspectico(TraderBase):
 # ============================================================================
 # TRADER 8: MULTIFRAME ANALYST - VERSIÓN CORREGIDA CON ANÁLISIS REAL
 # ============================================================================
-def _get_higher_tf_analysis_from_cache(symbol, current_timeframe):
+def _get_higher_tf_analysis_from_cache(symbol, current_timeframe, system_type='spot'):
     """
     Devuelve el análisis del TIMEFRAME SUPERIOR desde el caché de análisis,
     SI está disponible. Nunca dispara requests nuevos (para no saturar).
@@ -21398,7 +21519,22 @@ def _get_higher_tf_analysis_from_cache(symbol, current_timeframe):
     if not higher_tf:
         return None
     try:
+        if str(system_type).lower() == 'futures':
+            cache_data = (_futures_analysis_cache.get('data') or {}) if '_futures_analysis_cache' in globals() else {}
+            cached = (cache_data.get('analysis') or {}).get((symbol, higher_tf))
+            if not isinstance(cached, dict) or not cached.get('success'):
+                return None
+            if cached.get('system_type') != 'futures':
+                return None
+            if cached.get('market_data_is_synthetic') is not False:
+                return None
+            if cached.get('analysis_mode') != 'CLOSED_CANDLE':
+                return None
+            return cached
+
         cached = _analysis_cache_get((symbol, higher_tf))
+        if isinstance(cached, dict) and cached.get('system_type') == 'futures':
+            return None
         return cached
     except Exception:
         return None
@@ -21416,7 +21552,7 @@ class TraderMultiframe(TraderBase):
     def __init__(self):
         super().__init__("Multiframe", "contexto_temporal", peso_base=1.4)
         
-    def votar(self, capas, symbol, timeframe):
+    def _votar_legacy(self, capas, symbol, timeframe):
         # Valores por defecto
         accion = 'NO_OPERAR'
         confianza = 0
@@ -21706,6 +21842,74 @@ class TraderMultiframe(TraderBase):
             
         return accion, confianza, estrategias, razones
 
+    def votar(self, capas, symbol, timeframe):
+        """Vota sólo con otra temporalidad real del mismo mercado y símbolo."""
+        accion = 'NO_OPERAR'
+        confianza = 0
+        estrategias = []
+        razones = []
+        try:
+            system_type = str(capas.get('system_type', 'spot')).lower()
+            trend = capas.get('trend', {}) or {}
+            momentum = capas.get('momentum', {}) or {}
+            current_direction = trend.get('direction', 'neutral')
+            momentum_direction = momentum.get('direction', 'neutral')
+            adx = max(0.0, float(trend.get('adx', 0) or 0))
+
+            higher_analysis = _get_higher_tf_analysis_from_cache(
+                symbol, timeframe, system_type=system_type
+            )
+            if not higher_analysis:
+                razones.append('TF superior real aún no está en caché; Multiframe se abstiene')
+                return accion, confianza, estrategias, razones
+
+            higher_tf = higher_analysis.get('timeframe', '?')
+            higher_direction = (higher_analysis.get('trend') or {}).get('direction', 'neutral')
+            if higher_tf == timeframe:
+                razones.append('El supuesto TF superior coincide con el actual; voto descartado')
+                return accion, confianza, estrategias, razones
+
+            print(f"\n📊 TRADER MULTIFRAME REAL - {symbol} {timeframe}→{higher_tf}")
+            print(f"   Actual: {current_direction} | Superior: {higher_direction}")
+
+            if (current_direction == higher_direction
+                    and current_direction in ('bullish', 'bearish') and adx >= 18):
+                accion = 'COMPRA_SPOT' if current_direction == 'bullish' else 'VENTA_SPOT'
+                confianza = min(86.0, 62.0 + adx * 0.55)
+                estrategias.append(
+                    'ALINEACION_BULLISH_COMPLETA'
+                    if current_direction == 'bullish'
+                    else 'ALINEACION_BEARISH_COMPLETA'
+                )
+                razones.append(
+                    f"Alineación real {timeframe}→{higher_tf} en {system_type}; ADX {adx:.1f}"
+                )
+            elif (current_direction in ('bullish', 'bearish')
+                  and higher_direction in ('bullish', 'bearish')
+                  and current_direction != higher_direction):
+                accion = 'ESPERAR'
+                confianza = 80
+                estrategias.append('CONFLICTO_MULTIFRAME_REAL')
+                razones.append(
+                    f"Conflicto real: {timeframe} {current_direction}, {higher_tf} {higher_direction}"
+                )
+            elif (current_direction == 'neutral'
+                  and higher_direction in ('bullish', 'bearish')
+                  and momentum_direction == higher_direction):
+                accion = 'COMPRA_SPOT' if higher_direction == 'bullish' else 'VENTA_SPOT'
+                confianza = 66
+                estrategias.append('PULLBACK_OPORTUNIDAD')
+                razones.append(
+                    f"TF superior {higher_tf} domina y momentum actual confirma el retroceso"
+                )
+
+            if symbol == 'PAXG-BTC':
+                confianza *= 0.8
+            confianza = max(0.0, min(86.0, confianza))
+        except Exception as e:
+            print(f"❌ Error en TraderMultiframe.votar: {e}")
+        return accion, confianza, estrategias, razones
+
 
 # ============================================================================
 # TRADER 9: LIQUIDATION ANALYST (EL LIQUIDADOR)
@@ -21714,14 +21918,14 @@ class TraderMultiframe(TraderBase):
 
 class TraderLiquidation(TraderBase):
     """
-    Trader 9: Especialista en Mapa de Calor de Liquidaciones
-    Analiza pools de liquidez apalancada para anticipar movimientos de stop hunting
+    Trader 9: especialista en un mapa estimado de exposición apalancada.
+    Nunca presenta los bins modelados como liquidaciones realmente observadas.
     """
     
     def __init__(self):
         super().__init__("El Liquidador", "liquidaciones", peso_base=1.3)
         
-    def votar(self, capas, symbol, timeframe):
+    def _votar_legacy(self, capas, symbol, timeframe):
         # Valores por defecto
         accion = 'NO_OPERAR'
         confianza = 0
@@ -21919,6 +22123,84 @@ class TraderLiquidation(TraderBase):
         
         return accion, confianza, estrategias, razones
 
+    def votar(self, capas, symbol, timeframe):
+        """Usa el heatmap sólo como proxy de riesgo y únicamente en Futuros."""
+        accion = 'NO_OPERAR'
+        confianza = 0
+        estrategias = []
+        razones = []
+        try:
+            if str(capas.get('system_type', 'spot')).lower() != 'futures':
+                razones.append('El modelo de exposición apalancada no dirige acumulación Spot')
+                return accion, confianza, estrategias, razones
+
+            liquidation = capas.get('liquidation', {}) or {}
+            if liquidation.get('data_type') != 'MODEL_ESTIMATE_NOT_OBSERVED':
+                razones.append('Heatmap sin contrato de datos verificable; Liquidador se abstiene')
+                return accion, confianza, estrategias, razones
+
+            active_bins = liquidation.get('active_bins', []) or []
+            frozen_bins = liquidation.get('frozen_bins', []) or []
+            total_events = int(liquidation.get('total_spikes', 0) or 0)
+            model_confidence = max(0.0, min(70.0, float(liquidation.get('model_confidence', 0) or 0)))
+            long_weight = max(0.0, float(liquidation.get('total_long_weight', 0) or 0))
+            short_weight = max(0.0, float(liquidation.get('total_short_weight', 0) or 0))
+
+            if total_events < 5 or len(active_bins) < 6 or model_confidence < 45:
+                razones.append('Modelo de exposición todavía sin cobertura mínima; no genera dirección')
+                return accion, confianza, estrategias, razones
+
+            trend_direction = (capas.get('trend', {}) or {}).get('direction', 'neutral')
+            momentum_direction = (capas.get('momentum', {}) or {}).get('direction', 'neutral')
+            long_dominance = long_weight / max(short_weight, 1e-9)
+            short_dominance = short_weight / max(long_weight, 1e-9)
+
+            recent_frozen = frozen_bins[-5:]
+            frozen_long = sum(1 for item in recent_frozen if item.get('side') == 'long')
+            frozen_short = sum(1 for item in recent_frozen if item.get('side') == 'short')
+            market_bearish = trend_direction == 'bearish' and momentum_direction != 'bullish'
+            market_bullish = trend_direction == 'bullish' and momentum_direction != 'bearish'
+
+            # Mucha exposición LONG por debajo no es soporte: es combustible de
+            # liquidación bajista. La dirección sólo se acepta si precio/tendencia
+            # ya confirman; el modelo nunca manda por sí solo.
+            if long_dominance >= 1.35 and market_bearish:
+                accion = 'SHORT'
+                confianza = min(68.0, model_confidence + min(8.0, (long_dominance - 1.0) * 10.0))
+                estrategias.append('MODEL_LONG_LIQUIDATION_RISK')
+                razones.append(
+                    f"Exposición LONG relativa {long_dominance:.2f}x con tendencia bajista confirmada"
+                )
+                if frozen_long >= 3:
+                    confianza = min(68.0, confianza + 3.0)
+                    estrategias.append('RECENT_LONG_LIQUIDATIONS_PROXY')
+            elif short_dominance >= 1.35 and market_bullish:
+                accion = 'LONG'
+                confianza = min(68.0, model_confidence + min(8.0, (short_dominance - 1.0) * 10.0))
+                estrategias.append('MODEL_SHORT_LIQUIDATION_RISK')
+                razones.append(
+                    f"Exposición SHORT relativa {short_dominance:.2f}x con tendencia alcista confirmada"
+                )
+                if frozen_short >= 3:
+                    confianza = min(68.0, confianza + 3.0)
+                    estrategias.append('RECENT_SHORT_LIQUIDATIONS_PROXY')
+            elif max(long_dominance, short_dominance) >= 1.35:
+                accion = 'ESPERAR'
+                confianza = min(60.0, model_confidence)
+                estrategias.append('LIQUIDITY_MODEL_WAIT_CONFIRMATION')
+                razones.append('Desequilibrio estimado sin confirmación direccional del mercado')
+            else:
+                accion = 'ESPERAR'
+                confianza = min(56.0, model_confidence)
+                estrategias.append('LIQUIDITY_MODEL_BALANCED')
+                razones.append('Exposición estimada equilibrada; no ofrece ventaja direccional')
+
+            razones.append('Fuente: modelo OHLCV relativo; no liquidaciones observadas')
+            print(f"   Liquidador proxy: {accion} ({confianza:.1f}%)")
+        except Exception as e:
+            print(f"❌ Error en TraderLiquidation.votar: {e}")
+        return accion, confianza, estrategias, razones
+
 
 
 
@@ -22002,6 +22284,22 @@ class Moderador:
         if not regime:
             return 1.0
         return self.REGIME_WEIGHT_MULTIPLIERS.get(regime, {}).get(trader_name, 1.0)
+
+    @staticmethod
+    def _normalize_action_for_market(action, system_type):
+        """Unifica el vocabulario antes de contar votos del comité."""
+        normalized = str(action or 'NO_OPERAR').upper()
+        if normalized == 'CAUTION':
+            normalized = 'ESPERAR'
+        if str(system_type or 'spot').lower() == 'futures':
+            return {
+                'COMPRA_SPOT': 'LONG',
+                'VENTA_SPOT': 'SHORT'
+            }.get(normalized, normalized)
+        return {
+            'LONG': 'COMPRA_SPOT',
+            'SHORT': 'VENTA_SPOT'
+        }.get(normalized, normalized)
     
     def procesar_votacion(self, capas, symbol, timeframe):
         """
@@ -22010,6 +22308,7 @@ class Moderador:
         """
         votos = []
         todas_estrategias = []
+        system_type = str(capas.get('system_type', 'spot')).lower()
         
         # Régimen de mercado detectado en analyze_full_market
         market_regime_data = capas.get('market_regime', {}) or {}
@@ -22039,6 +22338,7 @@ class Moderador:
                     estrategias = []
                 if razones is None:
                     razones = []
+                accion = self._normalize_action_for_market(accion, system_type)
                 
                 # ============ APLICAR PESO DEL TRADER + AJUSTES DE CONTEXTO ============
                 # Fórmula: peso_efectivo = peso_base × mult_régimen × mult_review
@@ -22062,7 +22362,7 @@ class Moderador:
                             symbol,
                             timeframe,
                             accion,
-                            system_type=capas.get('system_type')
+                            system_type=system_type
                         )
                     except Exception:
                         review_mult = 1.0
@@ -22089,7 +22389,8 @@ class Moderador:
                     'confianza_original': confianza,
                     'estrategias': estrategias,
                     'razones': razones,
-                    'peso': trader.peso_base
+                    'peso': trader.peso_base,
+                    'system_type': system_type
                 })
                 
                 todas_estrategias.extend(estrategias)
@@ -22105,7 +22406,8 @@ class Moderador:
                     'confianza_original': 0,
                     'estrategias': ['ERROR'],
                     'razones': [f'Error: {str(e)[:50]}'],
-                    'peso': trader.peso_base
+                    'peso': trader.peso_base,
+                    'system_type': system_type
                 })
                 print()
         
