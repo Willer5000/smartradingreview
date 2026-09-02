@@ -6,13 +6,14 @@
 # - 5 criptomonedas: BTC, ETH, SOL, XRP, ADA (contra USDT)
 # - 6 temporalidades: 5m, 15m, 30m, 1h, 2h, 4h
 # - Solo acciones LONG y SHORT (nunca COMPRA_SPOT/VENTA_SPOT)
-# - Apalancamiento dinámico: x10-x50 en TF cortas, x5-x20 en TF largas
+# - Apalancamiento dinámico sin mínimo forzado y limitado por riesgo/ATR
 # - Hereda TODA la lógica del sistema principal (traders, indicadores, patrones)
 # - Correlación adaptada: BTC dominancia + BTC vs alts (no PAXG)
 # - Usa el mismo Moderador con los 9 traders + ReviewTrader (cuando esté integrado)
 # - Registra señales en Supabase con system_type='futures'
 
 import logging
+import math
 import threading
 import time
 from datetime import datetime
@@ -188,12 +189,24 @@ FUTURES_KUCOIN_INTERVALS = {
 # El mínimo operativo siempre puede ser 1x.
 #
 LEVERAGE_RANGES = {
-    '5m':  (25, 100),
-    '15m': (20, 70),
-    '30m': (15, 50),
-    '1h':  (10, 35),
-    '2h':  (8, 25),
-    '4h':  (5, 20),
+    '5m':  (1, 50),
+    '15m': (1, 40),
+    '30m': (1, 30),
+    '1h':  (1, 20),
+    '2h':  (1, 15),
+    '4h':  (1, 10),
+}
+
+# Banda preferida para operaciones con margen pequeño. No es un mínimo ciego:
+# una señal por debajo de la banda puede publicarse si un TP amplio produce
+# suficiente ROI y beneficio neto sin romper los límites de riesgo.
+PREFERRED_LEVERAGE_RANGES = {
+    '5m':  (25, 50),
+    '15m': (20, 40),
+    '30m': (15, 30),
+    '1h':  (10, 20),
+    '2h':  (8, 15),
+    '4h':  (5, 10),
 }
 # ============================================================================
 # ECONOMÍA DE FUTUROS — CONFIGURACIÓN
@@ -213,7 +226,7 @@ FUTURES_RISK_CONFIG = {
     # Beneficio neto mínimo deseado por operación.
     # No significa que todas las operaciones deban alcanzar esto:
     # sólo define el mínimo económico para considerar una entrada.
-    'target_net_profit_usdt': 0.50,
+    'target_net_profit_usdt': 0.75,
 
     # Coste ida + vuelta estimado.
     #
@@ -223,15 +236,26 @@ FUTURES_RISK_CONFIG = {
     # Ejemplo ilustrativo: 0.12% = 0.0012
     'round_trip_cost_pct': 0.0012,
 
-    # Máxima pérdida prevista sobre el margen.
+    # Máxima pérdida prevista sobre el margen si el SL se ejecuta
+    # aproximadamente en el nivel calculado.
     #
     # No es una garantía de pérdida máxima real.
     # Slippage, gaps y liquidación pueden producir diferencias.
     'max_loss_pct_margin': 10.0,
 
+    # Un movimiento adverso equivalente a 1.5 ATR no debería consumir más
+    # de este porcentaje del margen. Es una prueba de estrés adicional para
+    # evitar que un SL muy estrecho justifique leverage excesivo.
+    'atr_stress_multiplier': 1.5,
+    'max_atr_stress_loss_pct_margin': 30.0,
+
+    # ROI bruto mínimo que debe poder producir el TP. Se incorpora desde el
+    # cálculo del leverage para elegir el MENOR entero que cumpla el objetivo.
+    'minimum_roi_tp_pct': 12.0,
+
     # Leverage máximo absoluto que el sistema permitirá.
     # Después también se aplicará el máximo específico del TF.
-    'absolute_max_leverage': 100,
+    'absolute_max_leverage': 50,
 
     # Porcentaje mínimo del score de seguridad necesario para
     # poder abrir futuros.
@@ -239,6 +263,16 @@ FUTURES_RISK_CONFIG = {
 
     # Con seguridad muy elevada se permite acercarse más al máximo.
     'high_safety_threshold': 90.0,
+
+    # Filtro PREMIUM para Activas / Vela anterior. Una decisión direccional
+    # que no lo supere sigue visible como análisis, pero no como oportunidad.
+    'minimum_publication_execution_safety': 75.0,
+    'minimum_publication_tp_quality': 55.0,
+    'minimum_publication_sl_avoidance_quality': 60.0,
+    'minimum_publication_rr': 1.8,
+    'maximum_publication_rr': 3.5,
+    'maximum_publication_loss_pct_margin': 8.0,
+    'maximum_publication_atr_stress_loss_pct_margin': 25.0,
 }
 
 def _leverage_in_valid_range(
@@ -246,20 +280,18 @@ def _leverage_in_valid_range(
     timeframe: str
 ) -> bool:
     """
-    Valida el rango de leverage REAL exigido por el timeframe.
+    Valida que el leverage no supere el techo del timeframe.
 
     Importante:
-    - El mínimo NO se fuerza.
-    - El mínimo es un REQUISITO para publicar la señal.
-    - Si el sistema sólo puede soportar menos del mínimo:
-      la señal debe ser rechazada.
+    - 1x siempre es válido si la operación supera las demás condiciones.
+    - El máximo sí es una restricción dura.
+    - Rentabilidad, SL, ATR y Execution Safety se validan por separado.
 
     Ejemplo:
 
-        4h → mínimo 5x
-        leverage calculado = 4x
-        → inválido
-        → NO OPERAR
+        4h → techo 10x
+        leverage calculado = 4x → válido
+        leverage calculado = 11x → inválido
     """
 
     try:
@@ -869,134 +901,116 @@ class FuturesAnalysis(TradingExpertSystem):
         margin_usdt,
         tp_distance_pct,
         sl_distance_pct,
+        atr_pct,
         execution_safety,
         timeframe
     ):
         """
-        Determina el rango de leverage económicamente viable.
-    
-        El leverage debe cumplir simultáneamente:
-    
-        1. Ser suficiente para que el TP produzca utilidad neta mínima.
-        2. No superar la pérdida máxima permitida por el SL.
-        3. Respetar la seguridad real de ejecución.
-        4. Respetar el máximo del timeframe.
-        5. Respetar el techo absoluto del sistema.
-    
-        Si no existe un leverage que cumpla las condiciones,
-        devuelve None y la operación debe rechazarse.
+        Elige el MENOR leverage entero que hace viable la operación.
+
+        Debe caber simultáneamente bajo cuatro techos independientes:
+        riesgo del SL, estrés de volatilidad ATR, Execution Safety y TF.
+        Si el mínimo rentable no cabe bajo todos los techos, devuelve None.
         """
-    
         try:
-    
             margin = float(
                 margin_usdt
                 or FUTURES_RISK_CONFIG['default_margin_usdt']
             )
-    
+
             tp_pct = abs(float(tp_distance_pct or 0))
             sl_pct = abs(float(sl_distance_pct or 0))
+            normalized_atr_pct = abs(float(atr_pct or 0))
             safety = max(
                 0.0,
                 min(100.0, float(execution_safety or 0))
             )
-    
+
             if (
                 margin <= 0
                 or tp_pct <= 0
                 or sl_pct <= 0
+                or normalized_atr_pct <= 0
             ):
                 return None
-    
-            # --------------------------------------------------------------
-            # COSTE TOTAL ESTIMADO
-            # --------------------------------------------------------------
+
+            # El TP debe dejar ventaja después del coste de entrada y salida.
             round_trip_cost = float(
                 FUTURES_RISK_CONFIG['round_trip_cost_pct']
             )
-    
-            # --------------------------------------------------------------
-            # LEVERAGE MÍNIMO ECONÓMICO
-            # --------------------------------------------------------------
-            #
-            # profit_net ≈ margin × leverage ×
-            #              (TP% - costes%)
-            #
-            # Por tanto:
-            #
-            # leverage >= target_profit /
-            #              (margin × (TP% - costes%))
-            #
             edge_after_cost = (
                 tp_pct / 100.0
                 - round_trip_cost
             )
-    
+
             if edge_after_cost <= 0:
                 return None
-    
+
             target_profit = float(
                 FUTURES_RISK_CONFIG[
                     'target_net_profit_usdt'
                 ]
             )
-    
             min_leverage_economic = (
                 target_profit
                 / (margin * edge_after_cost)
             )
-    
-            # --------------------------------------------------------------
-            # LEVERAGE MÁXIMO POR RIESGO DEL SL
-            # --------------------------------------------------------------
+
+            minimum_roi_tp = float(
+                FUTURES_RISK_CONFIG['minimum_roi_tp_pct']
+            )
+            min_leverage_by_roi = minimum_roi_tp / tp_pct
+
+            # Techo 1: pérdida prevista si se ejecuta el SL.
             max_loss_pct = float(
                 FUTURES_RISK_CONFIG[
                     'max_loss_pct_margin'
                 ]
             )
-    
             max_leverage_by_risk = (
                 max_loss_pct
                 / sl_pct
             )
-    
-            # --------------------------------------------------------------
-            # LEVERAGE MÁXIMO POR TEMPORALIDAD
-            # --------------------------------------------------------------
-            _, tf_max = LEVERAGE_RANGES.get(
+
+            # Techo 2: prueba de estrés. Aunque el SL sea estrecho, un salto
+            # adverso de 1.5 ATR no debe acercar el margen a liquidación.
+            atr_stress_multiplier = float(
+                FUTURES_RISK_CONFIG['atr_stress_multiplier']
+            )
+            atr_stress_move_pct = max(
+                sl_pct,
+                normalized_atr_pct * atr_stress_multiplier,
+            )
+            max_atr_stress_loss = float(
+                FUTURES_RISK_CONFIG[
+                    'max_atr_stress_loss_pct_margin'
+                ]
+            )
+            max_leverage_by_atr_stress = (
+                max_atr_stress_loss / atr_stress_move_pct
+            )
+
+            # Techo 3: temporalidad y techo absoluto del sistema.
+            min_leverage_tf, tf_max = LEVERAGE_RANGES.get(
                 timeframe,
                 (1, 10)
             )
-    
             absolute_max = float(
                 FUTURES_RISK_CONFIG[
                     'absolute_max_leverage'
                 ]
             )
-    
-            max_leverage = min(
+            max_leverage_by_policy = min(
                 float(tf_max),
                 absolute_max
             )
-    
-            # --------------------------------------------------------------
-            # MODULACIÓN POR SEGURIDAD REAL
-            # --------------------------------------------------------------
-            #
-            # No hacemos:
-            # safety 90 -> 90x
-            #
-            # Hacemos:
-            # safety bajo -> menor proporción del techo
-            # safety alto -> puede aproximarse al techo
-            #
-            # El riesgo del SL sigue siendo una restricción dura.
-            #
+
+            # Techo 4: una mejor puntuación permite utilizar una parte mayor
+            # del techo, pero nunca convierte directamente 90 puntos en 90x.
             security_factor = (
                 0.25
                 + 0.75 * (safety / 100.0)
             )
-    
             if safety >= FUTURES_RISK_CONFIG[
                 'high_safety_threshold'
             ]:
@@ -1004,143 +1018,65 @@ class FuturesAnalysis(TradingExpertSystem):
                     1.0,
                     security_factor + 0.05
                 )
-    
             max_leverage_by_security = (
-                max_leverage
+                max_leverage_by_policy
                 * security_factor
             )
-    
-            # --------------------------------------------------------------
-            # LEVERAGE MÁXIMO FINAL
-            # --------------------------------------------------------------
+
             final_max_leverage = min(
                 max_leverage_by_risk,
+                max_leverage_by_atr_stress,
                 max_leverage_by_security,
-                max_leverage
+                max_leverage_by_policy,
             )
-            
-            # --------------------------------------------------------------
-            # MÍNIMO EXIGIDO POR EL TIMEFRAME
-            # --------------------------------------------------------------
-            min_leverage_tf, _ = LEVERAGE_RANGES.get(
-                timeframe,
-                (1, 10)
-            )
-            
-            # --------------------------------------------------------------
-            # SI EL MERCADO NO PERMITE ALCANZAR EL MÍNIMO,
-            # NO EXISTE UNA OPERACIÓN VÁLIDA PARA ESTE SISTEMA.
-            # --------------------------------------------------------------
-            if (
-                final_max_leverage
-                < min_leverage_tf
-            ):
-            
-                logger.info(
-                    f"❌ FUTURES {timeframe}: "
-                    f"máximo seguro {final_max_leverage:.2f}x "
-                    f"< mínimo requerido {min_leverage_tf}x"
-                )
-            
-                return None
-            
-            # --------------------------------------------------------------
-            # REQUISITO MÍNIMO DEL TIMEFRAME
-            # --------------------------------------------------------------
-            min_leverage_tf, max_leverage_tf = LEVERAGE_RANGES.get(
-                timeframe,
-                (1, 10)
-            )
-            
-            # --------------------------------------------------------------
-            # MÁXIMO ABSOLUTO
-            # --------------------------------------------------------------
-            absolute_max = float(
-                FUTURES_RISK_CONFIG[
-                    'absolute_max_leverage'
-                ]
-            )
-            
-            max_leverage = min(
-                float(max_leverage_tf),
-                absolute_max
-            )
-            
-            # --------------------------------------------------------------
-            # ¿EL MÁXIMO SEGURO ALCANZA EL MÍNIMO DEL TF?
-            # --------------------------------------------------------------
-            if (
-                final_max_leverage
-                < min_leverage_tf
-            ):
-            
-                logger.info(
-                    f"FUTURES rechazado: "
-                    f"el riesgo real sólo permite "
-                    f"{final_max_leverage:.2f}x, "
-                    f"pero {timeframe} exige mínimo "
-                    f"{min_leverage_tf}x"
-                )
-            
-                return None
-            
-            # --------------------------------------------------------------
-            # ¿ES ECONÓMICAMENTE VIABLE?
-            # --------------------------------------------------------------
-            if (
-                min_leverage_economic
-                > final_max_leverage
-            ):
-                return None
-    
-            # Leverage objetivo:
-            # suficiente para que la operación sea útil,
-            # pero no mayor de lo necesario.
-            # ==============================================================
-            # LEVERAGE OBJETIVO
-            # ==============================================================
-            
-            leverage_target = (
-                final_max_leverage * 0.75
-                +
-                max(
-                    min_leverage_economic,
-                    float(min_leverage_tf)
-                ) * 0.25
-            )
-            
-            leverage = max(
+
+            minimum_required = max(
                 float(min_leverage_tf),
-                min(
-                    final_max_leverage,
-                    leverage_target
+                min_leverage_economic,
+                min_leverage_by_roi,
+            )
+            minimum_required_integer = int(math.ceil(minimum_required))
+            maximum_safe_integer = int(math.floor(final_max_leverage))
+
+            if (
+                maximum_safe_integer < 1
+                or minimum_required_integer > maximum_safe_integer
+            ):
+                logger.info(
+                    f'FUTURES {timeframe} sin leverage viable: '
+                    f'mínimo rentable {minimum_required:.2f}x > '
+                    f'máximo seguro {final_max_leverage:.2f}x'
                 )
-            )
-    
-            leverage = int(
-                round(leverage)
-            )
-    
-            leverage = max(
-                1,
-                min(
-                    int(final_max_leverage),
-                    leverage
-                )
-            )
-    
+                return None
+
+            # No premiamos una señal con más riesgo. Se recomienda el menor
+            # entero que supera rentabilidad y ROI sin romper ningún techo.
+            leverage = minimum_required_integer
+
             return {
                 'leverage': leverage,
                 'min_economic': round(
                     min_leverage_economic,
                     2
                 ),
+                'min_by_roi': round(
+                    min_leverage_by_roi,
+                    2
+                ),
                 'max_by_risk': round(
                     max_leverage_by_risk,
                     2
                 ),
+                'max_by_atr_stress': round(
+                    max_leverage_by_atr_stress,
+                    2
+                ),
                 'max_by_security': round(
                     max_leverage_by_security,
+                    2
+                ),
+                'max_safe': round(
+                    final_max_leverage,
                     2
                 ),
                 'min_by_timeframe': int(
@@ -1149,19 +1085,30 @@ class FuturesAnalysis(TradingExpertSystem):
                 'max_by_timeframe': int(
                     tf_max
                 ),
+                'atr_pct': round(
+                    normalized_atr_pct,
+                    4
+                ),
+                'atr_stress_move_pct': round(
+                    atr_stress_move_pct,
+                    4
+                ),
+                'estimated_atr_stress_loss_pct_margin': round(
+                    atr_stress_move_pct * leverage,
+                    2
+                ),
                 'security_factor': round(
                     security_factor,
                     3
                 ),
+                'selection_policy': 'MINIMUM_SAFE_VIABLE',
                 'economically_viable': True
             }
-    
+
         except Exception as e:
-    
             logger.warning(
                 f"Error en cálculo económico de leverage: {e}"
             )
-    
             return None    
    
     def calculate_optimal_leverage(
@@ -1219,6 +1166,10 @@ class FuturesAnalysis(TradingExpertSystem):
                 sl_distance_pct
                 or 0
             ),
+            atr_pct=(
+                atr_pct
+                or 0
+            ),
             execution_safety=execution_safety,
             timeframe=timeframe
         )
@@ -1233,6 +1184,180 @@ class FuturesAnalysis(TradingExpertSystem):
                 0
             )
         )
+
+    def _apply_futures_publication_gate(
+        self,
+        levels: Dict,
+        timeframe: str
+    ) -> Dict:
+        """
+        Decide si un análisis merece aparecer como oportunidad de Futuros.
+
+        Los niveles técnicos siempre se conservan. Si falla este filtro, el
+        resultado continúa visible como ANALYSIS_ONLY, pero no entra en las
+        listas Activas ni Vela anterior.
+
+        `tp_quality_score` y `sl_reliability` son proxies de calidad; todavía
+        NO son probabilidades estadísticas calibradas de toque/no toque.
+        """
+        result = dict(levels or {})
+        risk_control = dict(result.get('risk_control') or {})
+
+        def safe_float(value, default=0.0):
+            try:
+                return float(value if value is not None else default)
+            except (TypeError, ValueError):
+                return float(default)
+
+        leverage = int(safe_float(result.get('leverage'), 0))
+        safety = safe_float(result.get('execution_safety'))
+        tp_quality = safe_float(result.get('tp_quality_score'))
+        sl_quality_raw = safe_float(result.get('sl_reliability'))
+        sl_avoidance_quality = (
+            sl_quality_raw * 100.0
+            if sl_quality_raw <= 1.0
+            else sl_quality_raw
+        )
+        rr = safe_float(result.get('risk_reward'))
+        roi_tp = safe_float(result.get('roi_tp'))
+        roi_sl_abs = abs(safe_float(result.get('roi_sl')))
+        net_profit = safe_float(result.get('net_profit_tp_usdt'))
+        atr_stress_loss = safe_float(
+            risk_control.get('estimated_atr_stress_loss_pct_margin')
+        )
+
+        preferred_min, preferred_max = PREFERRED_LEVERAGE_RANGES.get(
+            timeframe,
+            (1, LEVERAGE_RANGES.get(timeframe, (1, 10))[1])
+        )
+        in_preferred_band = preferred_min <= leverage <= preferred_max
+
+        thresholds = {
+            'execution_safety_min': float(
+                FUTURES_RISK_CONFIG[
+                    'minimum_publication_execution_safety'
+                ]
+            ),
+            'tp_quality_min': float(
+                FUTURES_RISK_CONFIG['minimum_publication_tp_quality']
+            ),
+            'sl_avoidance_quality_min': float(
+                FUTURES_RISK_CONFIG[
+                    'minimum_publication_sl_avoidance_quality'
+                ]
+            ),
+            'risk_reward_min': float(
+                FUTURES_RISK_CONFIG['minimum_publication_rr']
+            ),
+            'risk_reward_max': float(
+                FUTURES_RISK_CONFIG['maximum_publication_rr']
+            ),
+            'roi_tp_min': float(
+                FUTURES_RISK_CONFIG['minimum_roi_tp_pct']
+            ),
+            'net_profit_min_usdt': float(
+                FUTURES_RISK_CONFIG['target_net_profit_usdt']
+            ),
+            'loss_at_sl_max_pct_margin': float(
+                FUTURES_RISK_CONFIG[
+                    'maximum_publication_loss_pct_margin'
+                ]
+            ),
+            'atr_stress_loss_max_pct_margin': float(
+                FUTURES_RISK_CONFIG[
+                    'maximum_publication_atr_stress_loss_pct_margin'
+                ]
+            ),
+        }
+
+        rejection_reasons = []
+
+        def require(condition, reason):
+            if not condition:
+                rejection_reasons.append(reason)
+
+        require(
+            safety >= thresholds['execution_safety_min'],
+            f"Safety {safety:.1f} < {thresholds['execution_safety_min']:.1f}"
+        )
+        require(
+            tp_quality >= thresholds['tp_quality_min'],
+            f"calidad TP {tp_quality:.1f} < {thresholds['tp_quality_min']:.1f}"
+        )
+        require(
+            sl_avoidance_quality >= thresholds['sl_avoidance_quality_min'],
+            'protección SL '
+            f"{sl_avoidance_quality:.1f} < "
+            f"{thresholds['sl_avoidance_quality_min']:.1f}"
+        )
+        require(
+            thresholds['risk_reward_min']
+            <= rr
+            <= thresholds['risk_reward_max'],
+            'R/R fuera de banda premium '
+            f"{thresholds['risk_reward_min']:.1f}-{thresholds['risk_reward_max']:.1f}"
+        )
+        require(
+            roi_tp >= thresholds['roi_tp_min'],
+            f"ROI TP {roi_tp:.1f}% < {thresholds['roi_tp_min']:.1f}%"
+        )
+        require(
+            net_profit >= thresholds['net_profit_min_usdt'],
+            'beneficio neto '
+            f"${net_profit:.2f} < ${thresholds['net_profit_min_usdt']:.2f}"
+        )
+        require(
+            roi_sl_abs <= thresholds['loss_at_sl_max_pct_margin'],
+            'pérdida estimada en SL '
+            f"{roi_sl_abs:.1f}% > "
+            f"{thresholds['loss_at_sl_max_pct_margin']:.1f}% del margen"
+        )
+        require(
+            0 < atr_stress_loss
+            <= thresholds['atr_stress_loss_max_pct_margin'],
+            'estrés ATR '
+            f"{atr_stress_loss:.1f}% > "
+            f"{thresholds['atr_stress_loss_max_pct_margin']:.1f}% del margen"
+        )
+
+        gate = {
+            'eligible': not rejection_reasons,
+            'tier': 'PREMIUM' if not rejection_reasons else 'ANALYSIS_ONLY',
+            'reasons': rejection_reasons,
+            'preferred_leverage_min': int(preferred_min),
+            'preferred_leverage_max': int(preferred_max),
+            'leverage_in_preferred_band': bool(in_preferred_band),
+            'tp_touch_quality_score': round(tp_quality, 2),
+            'sl_avoidance_quality_score': round(sl_avoidance_quality, 2),
+            'probability_status': 'QUALITY_PROXY_NOT_CALIBRATED',
+            'thresholds': thresholds,
+        }
+
+        result['futures_publication_gate'] = gate
+        result['futures_signal_tier'] = gate['tier']
+        result['publication_eligible'] = gate['eligible']
+        result['leverage_preferred_min'] = int(preferred_min)
+        result['leverage_preferred_max'] = int(preferred_max)
+        result['leverage_in_preferred_band'] = bool(in_preferred_band)
+        result['tp_touch_quality_score'] = round(tp_quality, 2)
+        result['sl_avoidance_quality_score'] = round(
+            sl_avoidance_quality,
+            2
+        )
+        result['probability_status'] = 'QUALITY_PROXY_NOT_CALIBRATED'
+
+        if rejection_reasons:
+            return self._mark_levels_non_executable(
+                result,
+                'No cumple publicación premium: '
+                + '; '.join(rejection_reasons),
+                recommended_leverage=leverage
+            )
+
+        result['is_rejected'] = False
+        result['is_executable'] = True
+        result['publication_status'] = 'EXECUTABLE_SIGNAL'
+        return result
     
     def calculate_roi_futures(
         self,
@@ -1829,26 +1954,21 @@ class FuturesAnalysis(TradingExpertSystem):
         # ==============================================================
         # LEVERAGE ECONÓMICO
         # ==============================================================
-        optimal_leverage = (
-            self.calculate_optimal_leverage(
-                timeframe=timeframe,
-                atr_pct=atr_pct,
-                confidence=0,  # deliberadamente NO usado
-                review_multiplier=review_multiplier,
-                sl_distance_pct=sl_distance_pct,
-                max_loss_pct_of_margin=float(
-                    FUTURES_RISK_CONFIG[
-                        'max_loss_pct_margin'
-                    ]
-                ),
-                execution_safety=leverage_safety_score,
-                tp_distance_pct=tp_distance_pct,
-                margin_usdt=float(
-                    FUTURES_RISK_CONFIG[
-                        'default_margin_usdt'
-                    ]
-                )
-            )
+        leverage_evaluation = self._calculate_economic_leverage(
+            margin_usdt=float(
+                FUTURES_RISK_CONFIG['default_margin_usdt']
+            ),
+            tp_distance_pct=tp_distance_pct,
+            sl_distance_pct=sl_distance_pct,
+            atr_pct=atr_pct,
+            execution_safety=leverage_safety_score,
+            timeframe=timeframe,
+        )
+
+        optimal_leverage = int(
+            leverage_evaluation.get('leverage', 0)
+            if leverage_evaluation
+            else 0
         )
         
         if optimal_leverage <= 0:
@@ -1910,7 +2030,12 @@ class FuturesAnalysis(TradingExpertSystem):
         #     4. pérdida estimada en USDT
         # ==============================================================
         
-        min_roi_tp = 8.0
+        min_roi_tp = float(
+            FUTURES_RISK_CONFIG.get(
+                'minimum_roi_tp_pct',
+                8.0
+            )
+        )
         
         if roi['roi_tp'] < min_roi_tp:
 
@@ -2114,10 +2239,43 @@ class FuturesAnalysis(TradingExpertSystem):
                     timeframe
                 ][1]
             ),
+            'leverage_preferred_min': int(
+                PREFERRED_LEVERAGE_RANGES[timeframe][0]
+            ),
+            'leverage_preferred_max': int(
+                PREFERRED_LEVERAGE_RANGES[timeframe][1]
+            ),
             
             'leverage_policy': (
-                f"{LEVERAGE_RANGES[timeframe][0]}x-"
-                f"{LEVERAGE_RANGES[timeframe][1]}x"
+                'MINIMUM_SAFE_VIABLE '
+                f"(1x-{LEVERAGE_RANGES[timeframe][1]}x)"
+            ),
+            'minimum_economic_leverage': leverage_evaluation.get(
+                'min_economic'
+            ),
+            'minimum_roi_leverage': leverage_evaluation.get(
+                'min_by_roi'
+            ),
+            'maximum_leverage_by_sl_risk': leverage_evaluation.get(
+                'max_by_risk'
+            ),
+            'maximum_leverage_by_atr_stress': leverage_evaluation.get(
+                'max_by_atr_stress'
+            ),
+            'maximum_leverage_by_execution_safety': (
+                leverage_evaluation.get('max_by_security')
+            ),
+            'maximum_safe_leverage': leverage_evaluation.get(
+                'max_safe'
+            ),
+            'atr_pct': leverage_evaluation.get('atr_pct'),
+            'atr_stress_move_pct': leverage_evaluation.get(
+                'atr_stress_move_pct'
+            ),
+            'estimated_atr_stress_loss_pct_margin': (
+                leverage_evaluation.get(
+                    'estimated_atr_stress_loss_pct_margin'
+                )
             ),
             'margin_usdt': float(
                 FUTURES_RISK_CONFIG[
@@ -2161,7 +2319,13 @@ class FuturesAnalysis(TradingExpertSystem):
                 ),
                 recommended_leverage=optimal_leverage
             )
-        return levels    
+
+        # Sólo las oportunidades premium alimentan Activas/Vela anterior.
+        # Las demás conservan decisión y niveles como análisis consultable.
+        return self._apply_futures_publication_gate(
+            levels,
+            timeframe
+        )
     # ========================================================================
     # ANÁLISIS COMPLETO DE FUTUROS
     # ========================================================================
