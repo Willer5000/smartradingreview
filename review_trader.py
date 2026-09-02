@@ -101,6 +101,18 @@ SIGNAL_EXPIRATION = {
     '1W': 1680    # 10 semanas
 }
 
+# Contrato de aprendizaje de Futuros.
+#
+# Antes de esta versión existieron señales rotuladas como ``futures`` que podían
+# haber sido creadas o evaluadas con velas Spot. No se borran: permanecen como
+# historial, pero no pueden autorizar ajustes del ReviewTrader.
+LEARNING_CONTRACT_VERSION = 'market_separated_v1'
+FUTURES_REAL_DATA_SOURCE = 'KUCOIN_FUTURES_PERPETUAL_REST'
+FUTURES_REAL_ANALYSIS_VERSION = 'closed_v1'
+FUTURES_REAL_COHORT = 'FUTURES_PERPETUAL_REAL_CLOSED_V1'
+FUTURES_LEGACY_COHORT = 'FUTURES_LEGACY_UNVERIFIED'
+SPOT_LEARNING_COHORT = 'SPOT_ACCUMULATION_V1'
+
 
 # ============================================================================
 # CLASE PRINCIPAL: REVIEW TRADER
@@ -148,6 +160,263 @@ class ReviewTrader:
         self._execution_safety_shadow_policy = None
 
         self._execution_safety_policy_updated_at = None
+
+    # ========================================================================
+    # CONTRATO DE APRENDIZAJE — SEPARACIÓN SPOT / FUTUROS
+    # ========================================================================
+
+    @staticmethod
+    def _as_bool(value) -> bool:
+        """Convierte valores JSON comunes a booleano sin confundir 'false'."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in ('1', 'true', 'yes', 'si', 'sí')
+        return bool(value)
+
+    @staticmethod
+    def _normalize_system_type(system_type: str) -> str:
+        value = str(system_type or '').strip().lower()
+        return 'futures' if value == 'futures' else 'spot'
+
+    def _build_learning_provenance(
+        self,
+        analysis: Dict,
+        system_type: str
+    ) -> Dict:
+        """
+        Guarda la procedencia necesaria para que una observación pueda auditarse.
+
+        Una señal Futures sólo entra a estadísticas de rentabilidad cuando:
+        - nació de velas reales del perpetuo;
+        - la vela fuente estaba cerrada;
+        - pasó el filtro de publicación EXECUTABLE_SIGNAL.
+
+        Los análisis descartados se conservan como shadow para estudiar el filtro,
+        pero no se presentan como si hubieran sido operaciones publicadas.
+        """
+        market = self._normalize_system_type(system_type)
+        levels = analysis.get('levels', {}) or {}
+
+        data_source = str(
+            analysis.get('market_data_source')
+            or levels.get('market_data_source')
+            or ''
+        ).strip().upper()
+        is_synthetic = self._as_bool(
+            analysis.get(
+                'market_data_is_synthetic',
+                levels.get('market_data_is_synthetic', False)
+            )
+        )
+        analysis_version = str(
+            analysis.get('analysis_version')
+            or levels.get('analysis_version')
+            or ''
+        ).strip()
+        source_closed = self._as_bool(
+            analysis.get(
+                'source_candle_closed',
+                levels.get('source_candle_closed', False)
+            )
+        )
+        source_timestamp = (
+            analysis.get('source_candle_timestamp')
+            or levels.get('source_candle_timestamp')
+        )
+        publication_status = str(
+            analysis.get('publication_status')
+            or levels.get('publication_status')
+            or 'ANALYSIS_ONLY'
+        ).strip().upper()
+        publication_eligible = self._as_bool(
+            analysis.get(
+                'publication_eligible',
+                levels.get('publication_eligible', False)
+            )
+        )
+
+        clean_futures = bool(
+            market == 'futures'
+            and data_source == FUTURES_REAL_DATA_SOURCE
+            and not is_synthetic
+            and analysis_version == FUTURES_REAL_ANALYSIS_VERSION
+            and source_closed
+            and source_timestamp
+        )
+
+        if market == 'futures':
+            cohort = (
+                FUTURES_REAL_COHORT
+                if clean_futures
+                else FUTURES_LEGACY_COHORT
+            )
+            evaluation_role = (
+                'EXECUTABLE_SIGNAL'
+                if publication_status == 'EXECUTABLE_SIGNAL'
+                and publication_eligible
+                else 'SHADOW_ANALYSIS'
+            )
+            statistically_eligible = bool(
+                clean_futures
+                and evaluation_role == 'EXECUTABLE_SIGNAL'
+            )
+        else:
+            cohort = SPOT_LEARNING_COHORT
+            evaluation_role = 'SPOT_ACCUMULATION'
+            statistically_eligible = True
+
+        return {
+            'contract_version': LEARNING_CONTRACT_VERSION,
+            'system_type': market,
+            'cohort': cohort,
+            'evaluation_role': evaluation_role,
+            'statistically_eligible': statistically_eligible,
+            'market_data_source': data_source,
+            'market_data_is_synthetic': is_synthetic,
+            'analysis_version': analysis_version,
+            'analysis_mode': str(
+                analysis.get('analysis_mode')
+                or levels.get('analysis_mode')
+                or ''
+            ),
+            'source_candle_closed': source_closed,
+            'source_candle_timestamp': (
+                str(source_timestamp) if source_timestamp else None
+            ),
+            'source_candle_close_timestamp': analysis.get(
+                'source_candle_close_timestamp'
+            ),
+            'signal_id': analysis.get('signal_id'),
+            'publication_status': publication_status,
+            'publication_eligible': publication_eligible,
+            'futures_signal_tier': (
+                analysis.get('futures_signal_tier')
+                or levels.get('futures_signal_tier')
+            ),
+            'probability_status': (
+                analysis.get('probability_status')
+                or levels.get('probability_status')
+            )
+        }
+
+    @staticmethod
+    def _get_signal_learning(signal: Dict) -> Dict:
+        context = signal.get('context', {}) or {}
+        if not isinstance(context, dict):
+            return {}
+        learning = context.get('learning', {}) or {}
+        return learning if isinstance(learning, dict) else {}
+
+    def _is_clean_futures_signal(self, signal: Dict) -> bool:
+        if self._normalize_system_type(
+            signal.get('system_type')
+        ) != 'futures':
+            return False
+
+        learning = self._get_signal_learning(signal)
+        return bool(
+            learning.get('contract_version') == LEARNING_CONTRACT_VERSION
+            and learning.get('cohort') == FUTURES_REAL_COHORT
+            and str(learning.get('market_data_source', '')).upper()
+            == FUTURES_REAL_DATA_SOURCE
+            and not self._as_bool(
+                learning.get('market_data_is_synthetic', True)
+            )
+            and self._as_bool(
+                learning.get('source_candle_closed', False)
+            )
+        )
+
+    def _is_signal_eligible_for_profit_stats(self, signal: Dict) -> bool:
+        market = self._normalize_system_type(signal.get('system_type'))
+        if market == 'spot':
+            # Conserva el aprendizaje Spot histórico. Sus registros siempre
+            # provinieron del motor Spot y sirven al objetivo de acumulación.
+            return True
+
+        if not self._is_clean_futures_signal(signal):
+            return False
+
+        learning = self._get_signal_learning(signal)
+        return bool(
+            self._as_bool(learning.get('statistically_eligible', False))
+            and learning.get('evaluation_role') == 'EXECUTABLE_SIGNAL'
+        )
+
+    @staticmethod
+    def _scoped_action(action: str, system_type: str) -> str:
+        """Usa la columna action existente para evitar mezclar ambos mercados."""
+        normalized = str(action or '').strip().upper()
+        if str(system_type or '').strip().lower() == 'futures':
+            return f'FUTURES_{normalized}'
+        return normalized
+
+    @staticmethod
+    def _scope_from_action(action: str) -> str:
+        return (
+            'futures'
+            if str(action or '').upper().startswith('FUTURES_')
+            else 'spot'
+        )
+
+    @staticmethod
+    def _general_strategy_key(strategy: str, system_type: str) -> str:
+        strategy = str(strategy or '').strip().upper()
+        if str(system_type or '').strip().lower() == 'futures':
+            return f'FUTURES::{strategy}'
+        return strategy
+
+    def _fetch_market_data_for_signal(
+        self,
+        signal: Dict,
+        price_fetcher
+    ):
+        """
+        Spot usa el proveedor recibido por app.py. Futuros ignora ese proveedor
+        porque históricamente apunta al endpoint Spot y consulta su motor real.
+        """
+        symbol = signal.get('symbol')
+        timeframe = signal.get('timeframe')
+        market = self._normalize_system_type(signal.get('system_type'))
+
+        if market == 'spot':
+            return price_fetcher(symbol, timeframe), 'SPOT_PROVIDER'
+
+        if not self._is_clean_futures_signal(signal):
+            return None, 'FUTURES_LEGACY_QUARANTINED'
+
+        try:
+            # Importación diferida para no crear un ciclo durante el arranque.
+            from futures_system import futures_system as futures_engine
+
+            df = futures_engine.get_kucoin_data(symbol, timeframe)
+            if df is None or len(df) == 0:
+                return None, 'FUTURES_PROVIDER_EMPTY'
+
+            attrs = getattr(df, 'attrs', {}) or {}
+            source = str(
+                attrs.get('market_data_source', '')
+            ).strip().upper()
+            synthetic = self._as_bool(
+                attrs.get('market_data_is_synthetic', True)
+            )
+            if source != FUTURES_REAL_DATA_SOURCE or synthetic:
+                logger.error(
+                    'Velas Futures rechazadas por procedencia: '
+                    f'{symbol} {timeframe} source={source or "UNKNOWN"} '
+                    f'synthetic={synthetic}'
+                )
+                return None, 'FUTURES_SOURCE_REJECTED'
+
+            return df, FUTURES_REAL_DATA_SOURCE
+
+        except Exception as exc:
+            logger.error(
+                f'No se pudieron obtener velas perpetuas reales para '
+                f'{symbol} {timeframe}: {exc}'
+            )
+            return None, 'FUTURES_PROVIDER_ERROR'
     
     # ========================================================================
     # 1. REGISTRO DE SEÑALES (llamado desde app.py o futures_system.py)
@@ -189,6 +458,10 @@ class ReviewTrader:
             
             # Extraer contexto (sesión, día, sentimiento, etc.)
             context = self._extract_context(analysis_result)
+            context['learning'] = self._build_learning_provenance(
+                analysis_result,
+                system_type
+            )
             
             # Datos de la señal
             decision = analysis_result.get('decision', {})
@@ -442,9 +715,9 @@ class ReviewTrader:
         """
         Recorre todas las señales pendientes y verifica si alcanzaron TP, SL o expiraron.
         
-        price_fetcher: función que recibe (symbol, timeframe) y retorna un DataFrame
-                       con las velas más recientes. Se usa la función get_kucoin_data
-                       del sistema principal.
+        price_fetcher: proveedor Spot que recibe (symbol, timeframe). Las señales
+                       Futures NO usan este proveedor: se consultan mediante el
+                       motor de contratos perpetuos y se valida su procedencia.
         
         Retorna: estadísticas del batch procesado.
         """
@@ -453,7 +726,17 @@ class ReviewTrader:
         
         pending = self.db.get_pending_signals(hours_old_max=1680)  # Hasta 70 días atrás
         
-        stats = {'processed': 0, 'tp_hit': 0, 'sl_hit': 0, 'expired': 0, 'still_pending': 0}
+        stats = {
+            'processed': 0,
+            'tp_hit': 0,
+            'sl_hit': 0,
+            'expired': 0,
+            'still_pending': 0,
+            'spot_evaluated': 0,
+            'futures_real_evaluated': 0,
+            'legacy_futures_quarantined': 0,
+            'market_data_rejected': 0
+        }
         
         print(f"\n{'='*60}")
         print(f"🔍 [REVIEW] Evaluando {len(pending)} señales pendientes")
@@ -469,6 +752,20 @@ class ReviewTrader:
                 if action_norm == 'NO_OPERAR':
                     stats['still_pending'] += 1
                     continue
+
+                system_type = self._normalize_system_type(
+                    signal.get('system_type')
+                )
+
+                # Las filas antiguas de Futuros no tienen una cadena de
+                # procedencia demostrable. No se borran ni se reinterpretan:
+                # se dejan en cuarentena para no fabricar un win rate.
+                if (
+                    system_type == 'futures'
+                    and not self._is_clean_futures_signal(signal)
+                ):
+                    stats['legacy_futures_quarantined'] += 1
+                    continue
                 
                 # Verificar expiración
                 created = self._parse_ts(signal.get('created_at'))
@@ -483,11 +780,24 @@ class ReviewTrader:
                         stats['processed'] += 1
                         continue
                 
-                # Obtener velas desde el timestamp de la señal
-                df = price_fetcher(symbol, timeframe)
+                # Obtener velas del mercado correcto desde el timestamp.
+                df, data_source = self._fetch_market_data_for_signal(
+                    signal,
+                    price_fetcher
+                )
                 if df is None or len(df) == 0:
+                    if data_source in (
+                        'FUTURES_SOURCE_REJECTED',
+                        'FUTURES_PROVIDER_ERROR'
+                    ):
+                        stats['market_data_rejected'] += 1
                     stats['still_pending'] += 1
                     continue
+
+                if system_type == 'futures':
+                    stats['futures_real_evaluated'] += 1
+                else:
+                    stats['spot_evaluated'] += 1
                 
                 # Evaluar si tocó TP o SL
                 result = self._check_tp_sl_hit(signal, df)
@@ -512,6 +822,15 @@ class ReviewTrader:
         print(f"   SL alcanzado: {stats['sl_hit']}")
         print(f"   Expiradas: {stats['expired']}")
         print(f"   Aún pendientes: {stats['still_pending']}")
+        print(
+            "   Mercados evaluados: "
+            f"Spot={stats['spot_evaluated']} | "
+            f"Futures reales={stats['futures_real_evaluated']}"
+        )
+        print(
+            "   Futures antiguos en cuarentena: "
+            f"{stats['legacy_futures_quarantined']}"
+        )
         print(f"{'='*60}\n")
         
         return stats
@@ -1152,12 +1471,27 @@ class ReviewTrader:
                 try:
                     symbol = signal.get('symbol')
                     timeframe = signal.get('timeframe')
+                    system_type = self._normalize_system_type(
+                        signal.get('system_type')
+                    )
+
+                    # No reinterpretar como oportunidades perdidas las antiguas
+                    # filas Futures cuya procedencia no puede demostrarse.
+                    if (
+                        system_type == 'futures'
+                        and not self._is_clean_futures_signal(signal)
+                    ):
+                        continue
+
                     price_at_signal = float(signal.get('current_price', 0))
                     
                     if price_at_signal == 0:
                         continue
                     
-                    df = price_fetcher(symbol, timeframe)
+                    df, _ = self._fetch_market_data_for_signal(
+                        signal,
+                        price_fetcher
+                    )
                     if df is None or len(df) == 0:
                         continue
                     
@@ -1189,7 +1523,10 @@ class ReviewTrader:
                         opp_data = {
                             'symbol': symbol,
                             'timeframe': timeframe,
-                            'action_should': 'LONG',
+                            'action_should': self._scoped_action(
+                                'LONG',
+                                system_type
+                            ),
                             'confidence': signal.get('confidence', 0),
                             'strategies': strategies,
                             'indicators_snapshot': signal.get('indicators_snapshot', {}),
@@ -1213,7 +1550,10 @@ class ReviewTrader:
                         opp_data = {
                             'symbol': symbol,
                             'timeframe': timeframe,
-                            'action_should': 'SHORT',
+                            'action_should': self._scoped_action(
+                                'SHORT',
+                                system_type
+                            ),
                             'confidence': signal.get('confidence', 0),
                             'strategies': strategies,
                             'indicators_snapshot': signal.get('indicators_snapshot', {}),
@@ -3623,13 +3963,13 @@ class ReviewTrader:
             f"{'=' * 60}"
         )
 
-        signals_data = (
+        all_signals_data = (
             self.db.get_signals_for_stats(
                 days_back=90
             )
         )
 
-        if not signals_data:
+        if not all_signals_data:
 
             print(
                 "   ⚠️ No hay señales suficientes"
@@ -3640,9 +3980,47 @@ class ReviewTrader:
                 'general': 0
             }
 
+        cohort_counts = {
+            'input_records': len(all_signals_data),
+            'eligible_records': 0,
+            'spot_records': 0,
+            'futures_real_executable_records': 0,
+            'legacy_futures_quarantined': 0,
+            'futures_shadow_excluded': 0
+        }
+        signals_data = []
+
+        for candidate in all_signals_data:
+            market = self._normalize_system_type(
+                candidate.get('system_type')
+            )
+            if market == 'spot':
+                cohort_counts['spot_records'] += 1
+            elif not self._is_clean_futures_signal(candidate):
+                cohort_counts['legacy_futures_quarantined'] += 1
+            elif not self._is_signal_eligible_for_profit_stats(candidate):
+                cohort_counts['futures_shadow_excluded'] += 1
+
+            if self._is_signal_eligible_for_profit_stats(candidate):
+                signals_data.append(candidate)
+                if market == 'futures':
+                    cohort_counts[
+                        'futures_real_executable_records'
+                    ] += 1
+
+        cohort_counts['eligible_records'] = len(signals_data)
+
         print(
-            f"   📈 Procesando "
-            f"{len(signals_data)} señales..."
+            f"   📈 Registros recibidos: {len(all_signals_data)} | "
+            f"aptos para rentabilidad: {len(signals_data)}"
+        )
+        print(
+            "   🧪 Cohorte Futures: "
+            f"reales+publicables="
+            f"{cohort_counts['futures_real_executable_records']} | "
+            f"shadow excluidos={cohort_counts['futures_shadow_excluded']} | "
+            f"antiguos en cuarentena="
+            f"{cohort_counts['legacy_futures_quarantined']}"
         )
 
         # ==============================================================
@@ -3926,8 +4304,9 @@ class ReviewTrader:
                             'timeframe'
                         )
 
-                        action = signal.get(
-                            'action_normalized'
+                        action = self._scoped_action(
+                            signal.get('action_normalized'),
+                            signal.get('system_type')
                         )
 
                         key = (
@@ -3969,8 +4348,13 @@ class ReviewTrader:
                     'timeframe'
                 )
 
-                action = signal.get(
-                    'action_normalized'
+                system_type = self._normalize_system_type(
+                    signal.get('system_type')
+                )
+
+                action = self._scoped_action(
+                    signal.get('action_normalized'),
+                    system_type
                 )
 
                 is_win = (
@@ -4261,8 +4645,13 @@ class ReviewTrader:
                     # ==================================================
                     # GENERAL
                     # ==================================================
+                    general_strategy = self._general_strategy_key(
+                        strategy,
+                        system_type
+                    )
+
                     g = general_stats[
-                        strategy
+                        general_strategy
                     ]
 
                     if is_win:
@@ -5138,6 +5527,9 @@ class ReviewTrader:
                     general_rows
                 ),
 
+            'learning_cohort':
+                cohort_counts,
+
             # ==========================================================
             # FASE 7E.1
             # ==========================================================
@@ -5552,6 +5944,17 @@ class ReviewTrader:
                     f" | Exp={avg_exp:+.3f}R"
                 )
 
+                market_scope = self._scope_from_action(action)
+                cohort_label = (
+                    FUTURES_REAL_COHORT
+                    if market_scope == 'futures'
+                    else SPOT_LEARNING_COHORT
+                )
+                notes += (
+                    f" | MARKET={market_scope.upper()}"
+                    f" | COHORT={cohort_label}"
+                )
+
                 rec_data = {
                     'symbol':
                         symbol,
@@ -5728,13 +6131,53 @@ class ReviewTrader:
         if losers:
             notes.append(f"Evitar: {losers[0]['strategy']} ({losers[0]['win_rate']}%)")
         return " | ".join(notes)
+
+    def _get_market_recommendation(
+        self,
+        symbol: str,
+        timeframe: str,
+        direction: str,
+        system_type: str
+    ) -> Optional[Dict]:
+        """Obtiene sólo recomendaciones identificadas con su mercado/cohorte."""
+        market = str(system_type or '').strip().lower()
+        if market not in ('spot', 'futures'):
+            return None
+
+        scoped_action = self._scoped_action(direction, market)
+        recommendation = self.db.get_recommendations(
+            symbol,
+            timeframe,
+            scoped_action
+        )
+        if not recommendation:
+            return None
+
+        notes = str(recommendation.get('notes', '') or '').upper()
+        expected_market = f'MARKET={market.upper()}'
+        expected_cohort = (
+            FUTURES_REAL_COHORT
+            if market == 'futures'
+            else SPOT_LEARNING_COHORT
+        )
+
+        # Las recomendaciones antiguas no indican de qué mercado proceden.
+        # Fallamos de forma neutral en vez de reutilizarlas a ciegas.
+        if (
+            expected_market not in notes
+            or f'COHORT={expected_cohort}' not in notes
+        ):
+            return None
+
+        return recommendation
     
     # ========================================================================
     # 5. CONSULTAS PARA EL FRONTEND
     # ========================================================================
     
     def get_confidence_adjustment(self, symbol: str, timeframe: str, action: str,
-                                     min_sample_size: int = 10) -> float:
+                                  min_sample_size: int = 10,
+                                  system_type: Optional[str] = None) -> float:
         """
         Devuelve el multiplicador de confianza que el ReviewTrader recomienda
         para un trader que vote (action) en (symbol, timeframe).
@@ -5756,8 +6199,22 @@ class ReviewTrader:
                 return 1.0
             if action not in ('LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT'):
                 return 1.0  # solo ajustamos direccionales
-            
-            rec = self.db.get_recommendations(symbol, timeframe, action)
+
+            market = str(system_type or '').strip().lower()
+            if market not in ('spot', 'futures'):
+                return 1.0  # mercado no identificado = autoridad neutral
+
+            direction = (
+                'LONG'
+                if action in ('LONG', 'COMPRA_SPOT')
+                else 'SHORT'
+            )
+            rec = self._get_market_recommendation(
+                symbol,
+                timeframe,
+                direction,
+                market
+            )
             if not rec:
                 return 1.0  # sin recomendación cacheada = neutral
             
@@ -5771,7 +6228,13 @@ class ReviewTrader:
         except Exception:
             return 1.0
     
-    def get_recommendations_for(self, symbol: str, timeframe: str, action: str) -> Dict:
+    def get_recommendations_for(
+        self,
+        symbol: str,
+        timeframe: str,
+        action: str,
+        system_type: str = 'spot'
+    ) -> Dict:
         """
         Retorna recomendaciones cacheadas para un contexto específico.
         Uso desde endpoint /api/review/recommendations/<symbol>/<tf>/<action>
@@ -5779,18 +6242,30 @@ class ReviewTrader:
         if not self.db.enabled:
             return {'available': False, 'message': 'Supabase no configurado'}
         
-        rec = self.db.get_recommendations(symbol, timeframe, action)
+        direction = (
+            'LONG'
+            if action in ('LONG', 'COMPRA_SPOT')
+            else 'SHORT'
+        )
+        rec = self._get_market_recommendation(
+            symbol,
+            timeframe,
+            direction,
+            system_type
+        )
         if not rec:
             return {
                 'available': False,
                 'message': 'Aún no hay suficientes datos históricos para esta combinación',
                 'symbol': symbol,
                 'timeframe': timeframe,
-                'action': self.db.normalize_action(action)
+                'action': self._scoped_action(direction, system_type),
+                'system_type': self._normalize_system_type(system_type)
             }
         
         return {
             'available': True,
+            'system_type': self._normalize_system_type(system_type),
             'symbol': rec['symbol'],
             'timeframe': rec['timeframe'],
             'action': rec['action'],
@@ -5812,21 +6287,30 @@ class ReviewTrader:
             return []
         
         stats = self.db.get_general_stats()
-        
-        return [
-            {
-                'strategy': s['strategy'],
-                'win_rate': s.get('win_rate', 0),
-                'expectancy': s.get('expectancy', 0),
-                'sample': s.get('total_signals', 0),
-                'best_symbols': s.get('best_symbols', []),
-                'worst_symbols': s.get('worst_symbols', []),
-                'best_timeframes': s.get('best_timeframes', []),
-                'worst_timeframes': s.get('worst_timeframes', []),
-                'is_degrading': s.get('is_degrading', False)
-            }
-            for s in stats
-        ]
+
+        result = []
+        for stat in stats:
+            stored_strategy = str(stat.get('strategy', '') or '')
+            is_futures = stored_strategy.upper().startswith('FUTURES::')
+            display_strategy = (
+                stored_strategy.split('::', 1)[1]
+                if is_futures
+                else stored_strategy
+            )
+            result.append({
+                'system_type': 'futures' if is_futures else 'spot',
+                'strategy': display_strategy,
+                'win_rate': stat.get('win_rate', 0),
+                'expectancy': stat.get('expectancy', 0),
+                'sample': stat.get('total_signals', 0),
+                'best_symbols': stat.get('best_symbols', []),
+                'worst_symbols': stat.get('worst_symbols', []),
+                'best_timeframes': stat.get('best_timeframes', []),
+                'worst_timeframes': stat.get('worst_timeframes', []),
+                'is_degrading': stat.get('is_degrading', False)
+            })
+
+        return result
     
     # ========================================================================
     # 6. VOTO EN EL MODERADOR (compatible con TraderBase)
@@ -5856,6 +6340,19 @@ class ReviewTrader:
         
         try:
             print(f"\n📊 REVIEW TRADER - {symbol} {timeframe}")
+
+            explicit_market = str(
+                capas.get('system_type')
+                or capas.get('_system_type')
+                or ''
+            ).strip().lower()
+            if explicit_market not in ('spot', 'futures'):
+                return (
+                    'NEUTRAL',
+                    0,
+                    [],
+                    ['Mercado Spot/Futures no identificado; ReviewTrader neutral']
+                )
             
             # Recolectar estrategias detectadas por otros traders desde las capas
             active_strategies = self._collect_strategies_from_layers(capas)
@@ -5866,9 +6363,19 @@ class ReviewTrader:
             
             print(f"   📋 Estrategias activas: {active_strategies}")
             
-            # Consultar historial para LONG y SHORT
-            rec_long = self.db.get_recommendations(symbol, timeframe, 'LONG')
-            rec_short = self.db.get_recommendations(symbol, timeframe, 'SHORT')
+            # Consultar exclusivamente el historial del mercado actual.
+            rec_long = self._get_market_recommendation(
+                symbol,
+                timeframe,
+                'LONG',
+                explicit_market
+            )
+            rec_short = self._get_market_recommendation(
+                symbol,
+                timeframe,
+                'SHORT',
+                explicit_market
+            )
             
             # Evaluar coincidencia con ganadoras
             long_score = self._evaluate_match(active_strategies, rec_long)
@@ -5879,7 +6386,11 @@ class ReviewTrader:
             
             # Decisión
             if long_score > 60 and long_score > short_score + 15:
-                accion = 'COMPRA_SPOT'  # Se normalizará a LONG en el guardado
+                accion = (
+                    'LONG'
+                    if explicit_market == 'futures'
+                    else 'COMPRA_SPOT'
+                )
                 confianza = min(95, long_score)
                 estrategias_detectadas.append('REVIEW_HISTORICO_GANADOR_LONG')
                 razones.append(f"Coincidencia con estrategias ganadoras históricas (score {long_score:.0f})")
@@ -5887,7 +6398,11 @@ class ReviewTrader:
                     razones.append(f"Basado en {rec_long.get('sample_size', 0)} señales")
                     
             elif short_score > 60 and short_score > long_score + 15:
-                accion = 'VENTA_SPOT'  # Se normalizará a SHORT
+                accion = (
+                    'SHORT'
+                    if explicit_market == 'futures'
+                    else 'VENTA_SPOT'
+                )
                 confianza = min(95, short_score)
                 estrategias_detectadas.append('REVIEW_HISTORICO_GANADOR_SHORT')
                 razones.append(f"Coincidencia con estrategias ganadoras históricas (score {short_score:.0f})")
