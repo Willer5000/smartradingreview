@@ -17384,6 +17384,26 @@ class TradingExpertSystem:
                     'estrategias_consenso': [str(e) for e in estrategias_consenso],
                     'todos_los_votos': [],
                 }
+
+            # Auditoría de caja negra: se construye DESPUÉS de que el Moderador
+            # decidió. Por diseño sólo observa y explica; no participa en votos,
+            # niveles, SL/TP, leverage ni filtros de publicación.
+            decision_audit = self._build_decision_audit(
+                symbol=symbol,
+                timeframe=timeframe,
+                system_type=analysis_system_type,
+                final_action=accion_consenso,
+                final_confidence=confianza_consenso,
+                final_strategies=estrategias_consenso,
+                final_reasons=razones_consenso,
+                raw_vote_record=registro_votacion,
+                market_regime=market_regime,
+                trend=trend,
+                volatility=volatility,
+                volume=volume,
+                liquidation=liquidation_data,
+                dataframe=df
+            )
             
             print(f"✅ ANÁLISIS COMPLETADO para {symbol} {timeframe}")
             print(f"{'='*60}\n")
@@ -17400,6 +17420,7 @@ class TradingExpertSystem:
                     'estrategias': [str(e) for e in estrategias_consenso],
                     'razones': [str(r) for r in razones_consenso],
                     'registro_votacion': registro_serializable,
+                    'audit': decision_audit,
                     'conviction': conviction
                 },
                 'levels': {k: float(v) if isinstance(v, (int, float)) else v for k, v in levels.items()},
@@ -17505,6 +17526,309 @@ class TradingExpertSystem:
         
         # Para cualquier otro tipo, convertir a string
         return str(obj)
+
+    def _build_decision_audit(
+        self,
+        symbol,
+        timeframe,
+        system_type,
+        final_action,
+        final_confidence,
+        final_strategies,
+        final_reasons,
+        raw_vote_record,
+        market_regime,
+        trend,
+        volatility,
+        volume,
+        liquidation,
+        dataframe
+    ):
+        """Crea trazabilidad legible sin intervenir en la decisión."""
+
+        def _number(value, default=0.0):
+            try:
+                return float(value if value is not None else default)
+            except (TypeError, ValueError):
+                return float(default)
+
+        if isinstance(raw_vote_record, dict):
+            raw_votes = raw_vote_record.get('todos_los_votos') or []
+            action_counts = raw_vote_record.get('conteo_acciones') or {}
+            action_confidences = (
+                raw_vote_record.get('confianza_por_accion') or {}
+            )
+            supporters = raw_vote_record.get('traders_que_apoyan') or []
+            veto_state = raw_vote_record.get('veto_estado') or 'SIN_VETO'
+            neutral_penalty = _number(
+                raw_vote_record.get('penalizacion_neutral_review'),
+                1.0
+            )
+        elif isinstance(raw_vote_record, list):
+            # El retorno legacy de un veto es una lista. Se conserva así para
+            # no modificar el cálculo histórico de zonas; el auditor sí puede
+            # leerla y explicar por qué se activó el veto.
+            raw_votes = raw_vote_record
+            action_counts = {}
+            action_confidence_totals = {}
+            supporters = []
+            veto_state = (
+                str(raw_votes[0].get('veto_estado') or 'SIN_VETO')
+                if raw_votes and isinstance(raw_votes[0], dict)
+                else 'SIN_VETO'
+            )
+            neutral_penalty = (
+                _number(
+                    raw_votes[0].get('penalizacion_neutral_review'),
+                    1.0
+                )
+                if raw_votes and isinstance(raw_votes[0], dict)
+                else 1.0
+            )
+
+            for vote in raw_votes:
+                if not isinstance(vote, dict):
+                    continue
+                action = str(vote.get('accion') or 'NO_OPERAR')
+                if not vote.get('incluido_en_conteo', action != 'NEUTRAL'):
+                    continue
+                counted = _number(
+                    vote.get(
+                        'confianza_contabilizada',
+                        vote.get('confianza')
+                    )
+                )
+                action_counts[action] = action_counts.get(action, 0) + 1
+                action_confidence_totals[action] = (
+                    action_confidence_totals.get(action, 0.0) + counted
+                )
+
+            action_confidences = {
+                action: (
+                    action_confidence_totals[action]
+                    / max(1, int(action_counts.get(action, 0)))
+                )
+                for action in action_counts
+            }
+        else:
+            raw_votes = []
+            action_counts = {}
+            action_confidences = {}
+            supporters = []
+            veto_state = 'SIN_VETO'
+            neutral_penalty = 1.0
+
+        final_action_text = str(final_action or 'NO_OPERAR').upper()
+        veto_active = str(veto_state).startswith('ACTIVO_') or (
+            'VETO_DETECTADO'
+            in {str(item) for item in (final_strategies or [])}
+        )
+        directional_actions = {
+            'LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT'
+        }
+        audit_votes = []
+
+        for raw_vote in raw_votes:
+            if not isinstance(raw_vote, dict):
+                continue
+
+            action = str(
+                raw_vote.get('accion_normalizada')
+                or raw_vote.get('accion')
+                or 'NO_OPERAR'
+            ).upper()
+            original_action = str(
+                raw_vote.get('accion_original')
+                or raw_vote.get('accion')
+                or 'NO_OPERAR'
+            ).upper()
+            original_confidence = _number(
+                raw_vote.get(
+                    'confianza_original',
+                    raw_vote.get('confianza')
+                )
+            )
+            weighted_confidence = _number(
+                raw_vote.get(
+                    'confianza_ponderada',
+                    raw_vote.get('confianza')
+                )
+            )
+            counted_value = raw_vote.get('confianza_contabilizada')
+            counted_confidence = (
+                _number(counted_value)
+                if counted_value is not None
+                else None
+            )
+            strategies = [
+                str(item)
+                for item in (raw_vote.get('estrategias') or [])
+            ]
+
+            if 'ERROR' in strategies or original_action == 'ERROR':
+                disposition = 'ERROR_CONTROLADO'
+            elif action == 'NEUTRAL' or original_confidence <= 0:
+                disposition = 'ABSTENCION'
+            elif veto_active and action == 'NO_OPERAR':
+                disposition = 'APOYO_AL_VETO'
+            elif action == final_action_text:
+                disposition = 'APOYO_FINAL'
+            elif action in directional_actions:
+                disposition = 'OPOSICION_DIRECCIONAL'
+            elif action == 'ESPERAR':
+                disposition = 'CAUTELA_ESPERAR'
+            else:
+                disposition = 'CAUTELA_NO_OPERAR'
+
+            audit_votes.append({
+                'trader': str(raw_vote.get('trader') or 'Desconocido'),
+                'original_action': original_action,
+                'normalized_action': action,
+                'action_was_normalized': original_action != action,
+                'original_confidence': round(original_confidence, 2),
+                'base_weight': round(
+                    _number(
+                        raw_vote.get(
+                            'peso_base',
+                            raw_vote.get('peso', 1.0)
+                        ),
+                        1.0
+                    ),
+                    4
+                ),
+                'regime_multiplier': round(
+                    _number(raw_vote.get('multiplicador_regimen'), 1.0),
+                    4
+                ),
+                'review_multiplier': round(
+                    _number(raw_vote.get('multiplicador_review'), 1.0),
+                    4
+                ),
+                'effective_weight': round(
+                    _number(raw_vote.get('peso_efectivo'), 1.0),
+                    4
+                ),
+                'weighted_confidence': round(weighted_confidence, 2),
+                'counted_confidence': (
+                    round(counted_confidence, 2)
+                    if counted_confidence is not None
+                    else None
+                ),
+                'counted_in_primary_tally': bool(
+                    raw_vote.get('incluido_en_conteo', action != 'NEUTRAL')
+                ),
+                'eligible_as_directional_winner': action in directional_actions,
+                'disposition': disposition,
+                'strategies': strategies,
+                'reasons': [
+                    str(reason)[:240]
+                    for reason in (raw_vote.get('razones') or [])[:3]
+                ]
+            })
+
+        if veto_active:
+            decision_basis = 'VETO_DE_SEGURIDAD'
+        elif final_action_text == 'ESPERAR':
+            decision_basis = 'CAUTELA_O_CONSENSO_INSUFICIENTE'
+        elif final_action_text == 'NO_OPERAR':
+            decision_basis = 'SIN_CONSENSO_DIRECCIONAL'
+        elif len(supporters) >= 2:
+            decision_basis = 'CONSENSO_DIRECCIONAL'
+        else:
+            decision_basis = 'VOTO_UNICO_DE_ALTA_CONFIANZA'
+
+        last_candle_timestamp = None
+        candle_count = 0
+        try:
+            candle_count = int(len(dataframe.index))
+            if candle_count and 'time' in dataframe.columns:
+                last_candle_timestamp = str(dataframe['time'].iloc[-1])
+        except Exception:
+            pass
+
+        regime_data = market_regime if isinstance(market_regime, dict) else {}
+        trend_data = trend if isinstance(trend, dict) else {}
+        volatility_data = volatility if isinstance(volatility, dict) else {}
+        volume_data = volume if isinstance(volume, dict) else {}
+        liquidation_data = (
+            liquidation if isinstance(liquidation, dict) else {}
+        )
+
+        layer_presence = {
+            'trend': bool(trend_data),
+            'volatility': bool(volatility_data),
+            'volume': bool(volume_data),
+            'liquidation': bool(liquidation_data),
+            'market_regime': bool(regime_data),
+        }
+
+        return self._make_serializable({
+            'schema_version': 'DECISION_AUDIT_V1',
+            'read_only': True,
+            'affects_decision': False,
+            'symbol': str(symbol),
+            'timeframe': str(timeframe),
+            'system_type': str(system_type),
+            'input_snapshot': {
+                'candle_count': candle_count,
+                'analysis_candle_timestamp': last_candle_timestamp,
+                'layer_presence': layer_presence,
+                'missing_layers': [
+                    name for name, present in layer_presence.items()
+                    if not present
+                ],
+                'market_regime': str(
+                    regime_data.get('regime') or 'DESCONOCIDO'
+                ),
+                'market_regime_confidence': _number(
+                    regime_data.get('confidence')
+                ),
+                'adx': _number(trend_data.get('adx')),
+                'atr': _number(volatility_data.get('atr')),
+                'atr_pct': _number(
+                    regime_data.get(
+                        'atr_pct',
+                        volatility_data.get('atr_pct')
+                    )
+                ),
+                'volume_ratio': _number(volume_data.get('volume_ratio'), 1.0),
+                'liquidation_source': str(
+                    liquidation_data.get('source')
+                    or liquidation_data.get('model_type')
+                    or 'NO_DECLARADA'
+                )
+            },
+            'moderator_trace': {
+                'decision_basis': decision_basis,
+                'minimum_directional_votes': 2,
+                'final_action': final_action_text,
+                'final_confidence': round(_number(final_confidence), 2),
+                'supporters': [str(item) for item in supporters],
+                'action_counts': {
+                    str(key): int(value)
+                    for key, value in action_counts.items()
+                },
+                'average_confidence_by_action': {
+                    str(key): round(_number(value), 2)
+                    for key, value in action_confidences.items()
+                },
+                'market_regime': str(
+                    regime_data.get('regime') or 'DESCONOCIDO'
+                ),
+                'neutral_review_penalty': round(neutral_penalty, 4),
+                'veto_state': str(veto_state),
+                'veto_active': veto_active,
+                'final_strategies': [
+                    str(item) for item in (final_strategies or [])
+                ],
+                'final_reasons': [
+                    str(reason)[:300]
+                    for reason in (final_reasons or [])[:4]
+                ]
+            },
+            'votes': audit_votes,
+            'generated_at': datetime.now(self.bolivia_tz).isoformat(),
+        })
     # ========================================================================
     # ANALIZE ALL PAIRS
     # ========================================================================
@@ -17514,9 +17838,9 @@ class TradingExpertSystem:
         print(f"\n{'='*60}")
         print(f"📊 [analyze_all_pairs] INICIANDO para {timeframe}")
         print(f"{'='*60}")
-        
+
         results = {}
-        
+
         # ============ PASO 1: ANALIZAR BTC (BASE) ============
         print(f"\n🔍 PASO 1: Analizando BTC-USDT...")
         try:
@@ -22338,6 +22662,7 @@ class Moderador:
                     estrategias = []
                 if razones is None:
                     razones = []
+                accion_original = str(accion or 'NO_OPERAR').upper()
                 accion = self._normalize_action_for_market(accion, system_type)
                 
                 # ============ APLICAR PESO DEL TRADER + AJUSTES DE CONTEXTO ============
@@ -22385,11 +22710,18 @@ class Moderador:
                 votos.append({
                     'trader': trader.nombre,
                     'accion': accion,
+                    'accion_original': accion_original,
+                    'accion_normalizada': accion,
                     'confianza': confianza_ponderada,
                     'confianza_original': confianza,
+                    'confianza_ponderada': confianza_ponderada,
                     'estrategias': estrategias,
                     'razones': razones,
                     'peso': trader.peso_base,
+                    'peso_base': trader.peso_base,
+                    'multiplicador_regimen': regime_mult,
+                    'multiplicador_review': review_mult,
+                    'peso_efectivo': peso_efectivo,
                     'system_type': system_type
                 })
                 
@@ -22402,11 +22734,18 @@ class Moderador:
                 votos.append({
                     'trader': trader.nombre,
                     'accion': 'NO_OPERAR',
+                    'accion_original': 'ERROR',
+                    'accion_normalizada': 'NO_OPERAR',
                     'confianza': 0,
                     'confianza_original': 0,
+                    'confianza_ponderada': 0,
                     'estrategias': ['ERROR'],
                     'razones': [f'Error: {str(e)[:50]}'],
                     'peso': trader.peso_base,
+                    'peso_base': trader.peso_base,
+                    'multiplicador_regimen': 1.0,
+                    'multiplicador_review': 1.0,
+                    'peso_efectivo': trader.peso_base,
                     'system_type': system_type
                 })
                 print()
@@ -22442,7 +22781,10 @@ class Moderador:
         
         for voto in votos:
             accion = voto['accion']
-            
+            voto['penalizacion_neutral_review'] = review_neutral_penalty
+            voto['incluido_en_conteo'] = False
+            voto['confianza_contabilizada'] = None
+
             # Saltar NEUTRAL para el conteo principal (pero ya fue procesado arriba)
             if accion == 'NEUTRAL':
                 continue
@@ -22452,6 +22794,11 @@ class Moderador:
             # Aplicar penalización si el ReviewTrader emitió NEUTRAL cualificado
             if accion in ('LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT'):
                 confianza = confianza * review_neutral_penalty
+
+            # Estos campos son exclusivamente de auditoría. No intervienen en
+            # ninguna comparación ni modifican la confianza usada arriba.
+            voto['incluido_en_conteo'] = True
+            voto['confianza_contabilizada'] = confianza
             
             trader = voto['trader']
             estrategias = voto['estrategias']
@@ -22527,22 +22874,26 @@ class Moderador:
         
         veto_activo = False
         veto_razon = None
+        veto_estado = 'SIN_VETO'
         
         if len(vetos) >= 2:
             # (a) Consenso vetador → NO_OPERAR firme
             veto_activo = True
+            veto_estado = 'ACTIVO_POR_CONSENSO'
             trader_names = ', '.join(v['trader'] for v in vetos[:3])
             veto_razon = f'Veto por consenso ({len(vetos)} traders): {trader_names}'
             print(f"\n⚠️ VETO CONFIRMADO por {len(vetos)} traders: {trader_names}")
         elif len(vetos_fuertes) == 1 and len(replicas_fuertes) < 3:
             # (b) Veto único sin réplica suficiente → NO_OPERAR
             veto_activo = True
+            veto_estado = 'ACTIVO_UNICO_SIN_REPLICA'
             v = vetos_fuertes[0]
             veto_razon = f'Veto único de {v["trader"]} ({v["confianza_original"]}%) sin réplica del comité'
             print(f"\n⚠️ VETO ÚNICO ACEPTADO: {v['trader']} con {v['confianza_original']}% (solo {len(replicas_fuertes)} traders opositores fuertes)")
         elif len(vetos_fuertes) == 1 and len(replicas_fuertes) >= 3:
             # (b) Veto único ANULADO por réplica del comité → deliberación continúa
             v = vetos_fuertes[0]
+            veto_estado = 'ANULADO_POR_REPLICA_FUERTE'
             print(f"\n⚖️ VETO DISPUTADO: {v['trader']} vetó con {v['confianza_original']}% pero {len(replicas_fuertes)} traders replican con conviction alta")
             print(f"   → El comité anula el veto y continúa deliberando")
             # No hay veto activo; el conteo procede normalmente
@@ -22556,12 +22907,17 @@ class Moderador:
             ]
             if len(replicas_normales) < 2:
                 veto_activo = True
+                veto_estado = 'ACTIVO_SIN_REPLICA'
                 v = vetos[0]
                 veto_razon = f'Veto de {v["trader"]} ({v["confianza_original"]}%) sin réplica'
                 print(f"\n⚠️ VETO ACEPTADO: {v['trader']} con {v['confianza_original']}% (sin réplica suficiente)")
             else:
                 v = vetos[0]
+                veto_estado = 'ANULADO_POR_REPLICA'
                 print(f"\n⚖️ Veto de {v['trader']} anulado por réplica de {len(replicas_normales)} traders")
+
+        for voto in votos:
+            voto['veto_estado'] = veto_estado
         
         if veto_activo:
             print(f"\n🚫 Decisión final: NO_OPERAR por veto (confianza 90%)")
@@ -22634,12 +22990,32 @@ class Moderador:
             'conteo_acciones': conteo_acciones,
             'confianza_por_accion': confianza_por_accion,
             'estrategias_consenso': estrategias_consenso,
+            'regimen_mercado': regime,
+            'confianza_regimen': regime_conf,
+            'penalizacion_neutral_review': review_neutral_penalty,
+            'veto_estado': veto_estado,
             'todos_los_votos': [
                 {
                     'trader': v['trader'],
                     'accion': v['accion'],
                     'confianza': v['confianza_original'],
-                    'estrategias': v['estrategias']
+                    'confianza_original': v['confianza_original'],
+                    'confianza_ponderada': v['confianza_ponderada'],
+                    'confianza_contabilizada': v.get('confianza_contabilizada'),
+                    'accion_original': v['accion_original'],
+                    'accion_normalizada': v['accion_normalizada'],
+                    'estrategias': v['estrategias'],
+                    'razones': v['razones'],
+                    'peso_base': v['peso_base'],
+                    'multiplicador_regimen': v['multiplicador_regimen'],
+                    'multiplicador_review': v['multiplicador_review'],
+                    'peso_efectivo': v['peso_efectivo'],
+                    'penalizacion_neutral_review': v.get(
+                        'penalizacion_neutral_review',
+                        1.0
+                    ),
+                    'incluido_en_conteo': v.get('incluido_en_conteo', False),
+                    'veto_estado': v.get('veto_estado', 'SIN_VETO')
                 } for v in votos
             ]
         }
@@ -23317,7 +23693,7 @@ def _compute_previous_signals():
                     "      ⚠️ No se pudo compactar señal activa "
                     f"{symbol}-{timeframe}: {e}"
                 )
-        
+
     # ============ PROCESAR SEÑALES DE VELA ANTERIOR ============
     for timeframe in temporalidades:
         print(f"\n📊 Procesando {timeframe}...")
@@ -25353,6 +25729,27 @@ def _refresh_futures_signal_lifecycle(
             and float(levels.get('take_profit') or 0) > 0
         )
 
+        # Migración no destructiva de señales creadas antes del auditor. Si el
+        # mismo signal_id ya existe, sólo se completa su explicación; decisión,
+        # niveles y estado operativo permanecen intactos.
+        if executable and signal_id in lifecycle and decision.get('audit'):
+            existing_record = lifecycle[signal_id]
+            if not existing_record.get('decision_audit'):
+                existing_record['decision_audit'] = decision.get('audit')
+                existing_record['market_data_source'] = result.get(
+                    'market_data_source'
+                )
+                existing_record['market_data_is_synthetic'] = result.get(
+                    'market_data_is_synthetic'
+                )
+                existing_record['market_data_candles'] = result.get(
+                    'market_data_candles'
+                )
+                existing_record['contract_symbol'] = result.get(
+                    'contract_symbol'
+                )
+                existing_record['analysis_mode'] = result.get('analysis_mode')
+
         if executable and signal_id not in lifecycle:
             source_close = pd.Timestamp(source_close_ts)
 
@@ -25391,6 +25788,14 @@ def _refresh_futures_signal_lifecycle(
                 'publication_status': publication_status,
                 'source_candle_timestamp': str(source_ts),
                 'source_candle_close_timestamp': str(source_close_ts),
+                'market_data_source': result.get('market_data_source'),
+                'market_data_is_synthetic': result.get(
+                    'market_data_is_synthetic'
+                ),
+                'market_data_candles': result.get('market_data_candles'),
+                'contract_symbol': result.get('contract_symbol'),
+                'analysis_mode': result.get('analysis_mode'),
+                'decision_audit': decision.get('audit'),
                 'valid_until': valid_until.isoformat(),
                 'analysis_price': float(
                     result.get('analysis_price')
@@ -25518,6 +25923,10 @@ def _analyze_futures_all_parallel():
                 isinstance(existing, dict)
                 and existing.get('success')
                 and existing.get('analysis_mode') == 'CLOSED_CANDLE'
+                and isinstance(
+                    (existing.get('decision') or {}).get('audit'),
+                    dict
+                )
                 and str(existing.get('source_candle_timestamp') or '')
                 == str(prepared.get('source_candle_timestamp') or '')
             )
@@ -25924,6 +26333,41 @@ def _futures_reason_text(value, fallback, max_length=360):
     return text
 
 
+def _futures_decision_audit_for_api(result):
+    """Adjunta al auditor el contrato de datos real del wrapper de Futuros."""
+    if not isinstance(result, dict):
+        return None
+
+    decision = result.get('decision') or {}
+    raw_audit = (
+        result.get('decision_audit')
+        or decision.get('audit')
+    )
+    if not isinstance(raw_audit, dict):
+        return None
+
+    audit = dict(raw_audit)
+    synthetic_value = result.get('market_data_is_synthetic')
+    audit['data_contract'] = {
+        'provider': result.get('market_data_source') or 'NO_DECLARADO',
+        'contract_symbol': result.get('contract_symbol'),
+        'analysis_mode': result.get('analysis_mode') or 'NO_DECLARADO',
+        'is_synthetic': (
+            bool(synthetic_value)
+            if synthetic_value is not None
+            else None
+        ),
+        'source_candle_timestamp': result.get(
+            'source_candle_timestamp'
+        ),
+        'source_candle_close_timestamp': result.get(
+            'source_candle_close_timestamp'
+        ),
+        'candle_count': result.get('market_data_candles'),
+    }
+    return audit
+
+
 def _classify_futures_analysis_result(
     symbol,
     timeframe,
@@ -25975,6 +26419,7 @@ def _classify_futures_analysis_result(
             'signal_id': None,
             'source_candle_timestamp': None,
             'source_candle_close_timestamp': None,
+            'decision_audit': None,
         }
 
     decision = result.get('decision') or {}
@@ -26127,6 +26572,7 @@ def _classify_futures_analysis_result(
             result.get('live_price')
             or result.get('current_price')
         ),
+        'decision_audit': _futures_decision_audit_for_api(result),
     }
 
 
@@ -26326,7 +26772,8 @@ def api_futures_signals_active():
                 'entry_touched': lifecycle_status == 'entry_touched',
                 'publication_status': record.get('publication_status'),
                 'execution_safety': record.get('execution_safety'),
-                'message': record.get('message', '')
+                'message': record.get('message', ''),
+                'decision_audit': _futures_decision_audit_for_api(record)
             })
 
         active_signals.sort(key=lambda x: -x['confidence'])
@@ -26752,6 +27199,7 @@ def api_futures_signals_previous():
                 'publication_status': publication_status,
                 'execution_safety': levels.get('execution_safety'),
                 'message': _msg_short,   # justificación futures (mismo campo que spot)
+                'decision_audit': _futures_decision_audit_for_api(result),
             })
         
         # Ordenar: activas primero, luego por confianza
