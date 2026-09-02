@@ -16780,8 +16780,19 @@ class TradingExpertSystem:
             for r in market_regime.get('reasoning', []):
                 print(f"   • {r}")
             
+            # ============ IDENTIFICAR MERCADO DEL ANÁLISIS ============
+            # FuturesAnalysis activa este indicador únicamente mientras reutiliza
+            # el motor común. Así el comité y el ReviewTrader pueden consultar el
+            # aprendizaje correcto sin cambiar la lógica de los otros 9 traders.
+            analysis_system_type = (
+                'futures'
+                if getattr(self, '_skip_supabase_register', False)
+                else 'spot'
+            )
+
             # ============ CONSTRUIR CAPAS PARA TRADERS ============
             capas = {
+                'system_type': analysis_system_type,
                 'trend': trend,
                 'momentum': momentum,
                 'volatility': volatility,
@@ -17253,6 +17264,7 @@ class TradingExpertSystem:
                 'success': True,
                 'symbol': symbol,
                 'timeframe': timeframe,
+                'system_type': analysis_system_type,
                 'decision': {
                     'action': accion_consenso,
                     'confidence': max(0.0, min(100.0, float(confianza_consenso))),
@@ -22047,7 +22059,10 @@ class Moderador:
                 if trader.nombre != 'Trader de Revisión' and self._review_trader is not None:
                     try:
                         review_mult = self._review_trader.get_confidence_adjustment(
-                            symbol, timeframe, accion
+                            symbol,
+                            timeframe,
+                            accion,
+                            system_type=capas.get('system_type')
                         )
                     except Exception:
                         review_mult = 1.0
