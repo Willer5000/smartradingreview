@@ -55,6 +55,179 @@ function futFormatDuration(seconds) {
     return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
+function futEscapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+function futRenderAnalysisDiagnostics(json, context) {
+    const summary = json && json.analysis_summary;
+    const candidates = Array.isArray(json && json.analysis_candidates)
+        ? json.analysis_candidates
+        : [];
+
+    // Compatibilidad durante despliegues: si el backend todavía es anterior
+    // al commit 7, no insertar un panel vacío ni romper las listas existentes.
+    if (!summary || candidates.length === 0) {
+        return '';
+    }
+
+    const executable = Number(summary.executable || 0);
+    const activeNow = Number(summary.active_now || 0);
+    const analysisOnly = Number(summary.analysis_only || 0);
+    const noTrade = Number(summary.no_trade || 0);
+    const errors = Number(summary.errors || 0);
+
+    const excluded = candidates.filter(candidate => {
+        if (context === 'active') {
+            return !candidate.is_active;
+        }
+        return candidate.classification !== 'EXECUTABLE_SIGNAL';
+    });
+
+    const shouldOpen = (
+        context === 'active'
+            ? activeNow === 0
+            : executable === 0
+    );
+
+    const statusMeta = {
+        EXECUTABLE_SIGNAL: {
+            badge: 'success',
+            label: 'EJECUTABLE'
+        },
+        ANALYSIS_ONLY: {
+            badge: 'warning text-dark',
+            label: 'SOLO ANÁLISIS'
+        },
+        NO_TRADE: {
+            badge: 'secondary',
+            label: 'NO OPERAR'
+        },
+        ANALYSIS_ERROR: {
+            badge: 'danger',
+            label: 'ERROR DE DATOS'
+        }
+    };
+
+    let excludedHtml = '';
+
+    excluded.forEach(candidate => {
+        const classification = String(
+            candidate.classification || 'ANALYSIS_ERROR'
+        );
+        const meta = statusMeta[classification]
+            || statusMeta.ANALYSIS_ERROR;
+        const symbol = futEscapeHtml(
+            String(candidate.symbol || '').replace('-', '/')
+        );
+        const timeframe = futEscapeHtml(candidate.timeframe || '--');
+        const action = futEscapeHtml(candidate.action || 'NO_OPERAR');
+        const confidence = fmtConfidence(candidate.confidence);
+        const reason = futEscapeHtml(
+            candidate.reason || candidate.active_reason || 'Sin motivo disponible'
+        );
+        const safety = candidate.execution_safety;
+        const safetyMinimum = candidate.execution_safety_minimum;
+
+        let safetyHtml = '';
+        if (safety !== null && safety !== undefined) {
+            safetyHtml = `
+                <span class="text-info ms-2">
+                    Safety ${Number(safety).toFixed(1)}
+                    ${
+                        safetyMinimum !== null && safetyMinimum !== undefined
+                            ? `/ mínimo ${Number(safetyMinimum).toFixed(1)}`
+                            : ''
+                    }
+                </span>
+            `;
+        }
+
+        let lifecycleHtml = '';
+        if (
+            classification === 'EXECUTABLE_SIGNAL'
+            && !candidate.is_active
+        ) {
+            lifecycleHtml = `
+                <div class="small text-secondary mt-1">
+                    ${futEscapeHtml(candidate.active_reason || '')}
+                </div>
+            `;
+        }
+
+        excludedHtml += `
+            <div class="border-bottom border-secondary py-2">
+                <div class="d-flex flex-wrap justify-content-between gap-1">
+                    <div>
+                        <span class="badge bg-${meta.badge} me-1">
+                            ${meta.label}
+                        </span>
+                        <strong>${symbol}</strong>
+                        <span class="badge bg-dark ms-1">${timeframe}</span>
+                    </div>
+                    <small class="text-muted">
+                        ${action} · ${confidence}%
+                    </small>
+                </div>
+                <div class="small text-light mt-1">
+                    ${reason}
+                    ${safetyHtml}
+                </div>
+                ${lifecycleHtml}
+                <div class="small text-muted mt-1">
+                    Información diagnóstica: no se puede guardar como operación.
+                </div>
+            </div>
+        `;
+    });
+
+    const detailHtml = excluded.length > 0
+        ? `
+            <details class="mt-2" ${shouldOpen ? 'open' : ''}>
+                <summary class="text-warning" style="cursor:pointer;">
+                    Por qué no aparecen otras señales (${excluded.length})
+                </summary>
+                <div class="mt-2 px-2"
+                     style="max-height:360px; overflow-y:auto;">
+                    ${excludedHtml}
+                </div>
+            </details>
+        `
+        : `
+            <div class="small text-success mt-2">
+                No existen análisis ocultos por los filtros actuales.
+            </div>
+        `;
+
+    return `
+        <div class="list-group-item bg-dark text-white border-info">
+            <div class="d-flex flex-wrap justify-content-between gap-2">
+                <strong>🛡️ Diagnóstico del ciclo</strong>
+                <small class="text-muted">
+                    ${Number(summary.total_analyzed || 0)} combinaciones
+                </small>
+            </div>
+            <div class="d-flex flex-wrap gap-1 mt-2">
+                <span class="badge bg-success">Activas: ${activeNow}</span>
+                <span class="badge bg-info text-dark">Ejecutables: ${executable}</span>
+                <span class="badge bg-warning text-dark">Solo análisis: ${analysisOnly}</span>
+                <span class="badge bg-secondary">No operar: ${noTrade}</span>
+                ${errors > 0 ? `<span class="badge bg-danger">Errores: ${errors}</span>` : ''}
+            </div>
+            <div class="small text-muted mt-2">
+                “Solo análisis” indica que hubo dirección LONG/SHORT,
+                pero un filtro de seguridad impidió publicarla.
+            </div>
+            ${detailHtml}
+        </div>
+    `;
+}
+
 
 // ============================================================================
 // PANEL DE REVIEWTRADER (mantenido de la versión anterior)
@@ -327,7 +500,7 @@ window.updateActiveSignals = async function() {
     try {
 
         const response = await fetch(
-            '/api/futures/signals/active?min_confidence=60&_ts=' + Date.now(),
+            '/api/futures/signals/active?min_confidence=55&_ts=' + Date.now(),
             {
                 method: 'GET',
                 cache: 'no-store',
@@ -392,6 +565,12 @@ window.updateActiveSignals = async function() {
         const progress = json.progress || {};
         const filterStats =
             json.filter_stats || null;
+
+        const diagnosticsHtml =
+            futRenderAnalysisDiagnostics(
+                json,
+                'active'
+            );
 
         const completed = Number(
             progress.completed || 0
@@ -494,7 +673,7 @@ window.updateActiveSignals = async function() {
         // ------------------------------------------------------------
         if (signals.length === 0) {
 
-            signalsList.innerHTML = `
+            signalsList.innerHTML = diagnosticsHtml + `
                 <div class="list-group-item bg-dark text-warning text-center py-3">
 
                     <strong>
@@ -576,10 +755,10 @@ window.updateActiveSignals = async function() {
                 Number(sig.risk_reward || 0);
 
             const roiTp =
-                Number(sig.roi_tp || 0);
+                sig.roi_tp == null ? null : Number(sig.roi_tp);
 
             const roiSl =
-                Number(sig.roi_sl || 0);
+                sig.roi_sl == null ? null : Number(sig.roi_sl);
          
             const remainingSeconds =
                 Math.max(
@@ -597,10 +776,7 @@ window.updateActiveSignals = async function() {
             
             let validityHtml = '';
             
-            if (
-                sig.activa === 1
-                && sig.resultado === 'pending'
-            ) {
+            if (sig.lifecycle_status === 'waiting_entry') {
             
                 validityHtml = `
                     <div
@@ -610,16 +786,23 @@ window.updateActiveSignals = async function() {
                             mt-1
                         "
                     >
-                        ⏳ Vigente por:
+                        ⏳ Esperando que el precio toque Entry · vigente por:
                         <strong>
                             ${validityText}
                         </strong>
                     </div>
                 `;
             
-            } else if (
-                sig.resultado === 'expired'
-            ) {
+            } else if (sig.lifecycle_status === 'entry_touched') {
+
+                validityHtml = `
+                    <div class="small text-info mt-1">
+                        📍 Entry tocado: operación en seguimiento ·
+                        <strong>${validityText}</strong> restantes
+                    </div>
+                `;
+
+            } else if (sig.lifecycle_status === 'expired') {
             
                 validityHtml = `
                     <div
@@ -693,7 +876,7 @@ window.updateActiveSignals = async function() {
                         <div>
 
                             <span class="text-success">
-                                TP ${roiTp >= 0 ? '+' : ''}${roiTp.toFixed(1)}%
+                                TP ${roiTp == null ? '--' : `${roiTp >= 0 ? '+' : ''}${roiTp.toFixed(1)}%`}
                             </span>
 
                             <span class="mx-1 text-muted">
@@ -701,7 +884,7 @@ window.updateActiveSignals = async function() {
                             </span>
 
                             <span class="text-danger">
-                                SL ${roiSl.toFixed(1)}%
+                                SL ${roiSl == null ? '--' : `${roiSl.toFixed(1)}%`}
                             </span>
 
                         </div>
@@ -714,7 +897,7 @@ window.updateActiveSignals = async function() {
             `;
         });
 
-        signalsList.innerHTML = html;
+        signalsList.innerHTML = diagnosticsHtml + html;
 
     } catch (err) {
 
@@ -816,6 +999,20 @@ function _formatPreviousSignalValidity(seconds) {
 
     return `${minutes}m`;
 }
+
+function _encodeFuturesSignal(sig) {
+    return encodeURIComponent(JSON.stringify(sig)).replace(/'/g, '%27');
+}
+
+function _decodeFuturesSignal(encodedSignal) {
+    return JSON.parse(decodeURIComponent(encodedSignal));
+}
+
+window.openSaveSignalFromCard = function(event, encodedSignal, alreadyInPosition) {
+    if (event) event.stopPropagation();
+    const sig = _decodeFuturesSignal(encodedSignal);
+    window.openSaveSignalModal(sig, Boolean(alreadyInPosition));
+};
 
 
 // ============================================================================
@@ -993,6 +1190,15 @@ window.updatePreviousSignals = async function() {
         const progress =
             json.progress || {};
 
+        const filterStats =
+            json.filter_stats || null;
+
+        const diagnosticsHtml =
+            futRenderAnalysisDiagnostics(
+                json,
+                'previous'
+            );
+
         const completed =
             Number(
                 progress.completed || 0
@@ -1126,7 +1332,7 @@ window.updatePreviousSignals = async function() {
         // ------------------------------------------------------------
         if (signals.length === 0) {
 
-            signalsList.innerHTML = `
+            signalsList.innerHTML = diagnosticsHtml + `
                 <div class="list-group-item bg-dark text-warning text-center py-3">
 
                     <strong>
@@ -1136,9 +1342,20 @@ window.updatePreviousSignals = async function() {
                     <br>
 
                     <small>
-                        No hay señales LONG/SHORT
+                        No hay señales LONG/SHORT ejecutables
                         para la vela anterior.
                     </small>
+
+                    ${filterStats ? `
+                        <div class="small text-secondary mt-2">
+                            Analizados: ${filterStats.total_processed || 0}
+                            · Sin dirección: ${filterStats.non_directional || 0}
+                            · Solo análisis / rechazadas por seguridad: ${filterStats.non_executable || 0}
+                            · Confianza insuficiente: ${filterStats.low_confidence || 0}
+                            · Niveles inválidos: ${filterStats.invalid_levels || 0}
+                            · Leverage fuera de rango: ${filterStats.leverage_out_of_range || 0}
+                        </div>
+                    ` : ''}
 
                     <br>
 
@@ -1186,10 +1403,10 @@ window.updatePreviousSignals = async function() {
                 Number(sig.risk_reward || 0);
 
             const roiTp =
-                Number(sig.roi_tp || 0);
+                sig.roi_tp == null ? null : Number(sig.roi_tp);
 
             const roiSl =
-                Number(sig.roi_sl || 0);
+                sig.roi_sl == null ? null : Number(sig.roi_sl);
 
             let statusBadge =
                 '<span class="badge bg-warning text-dark">⏱️ Activa</span>';
@@ -1224,22 +1441,37 @@ window.updatePreviousSignals = async function() {
                     : '';
 
             const signalData =
-                JSON.stringify(sig)
-                    .replace(/'/g, "\\'");
+                _encodeFuturesSignal(sig);
+
+            const saveButtons = inactive
+                ? ''
+                : `
+                    <div class="d-flex flex-wrap gap-2 mt-2">
+                        <button
+                            type="button"
+                            class="btn btn-sm btn-outline-success"
+                            onclick="window.openSaveSignalFromCard(event, '${signalData}', false)"
+                            title="Guardar y esperar a que el precio toque Entry"
+                        >
+                            🔖 Guardar
+                        </button>
+                        <button
+                            type="button"
+                            class="btn btn-sm btn-success"
+                            onclick="window.openSaveSignalFromCard(event, '${signalData}', true)"
+                            title="Ya entré: usar el precio actual como Entry editable"
+                        >
+                            ✅ Guardar en operación
+                        </button>
+                    </div>
+                `;
 
             html += `
                 <div
                     class="list-group-item bg-dark text-white border-secondary ${opacity}"
                     style="cursor:pointer;"
-                    data-signal='${signalData}'
-                    onclick="
-                        const s =
-                            JSON.parse(
-                                this.getAttribute('data-signal')
-                            );
-
-                        window.showFuturesPrevJustif(s);
-                    "
+                    data-signal="${signalData}"
+                    onclick="window.showFuturesPrevJustif(_decodeFuturesSignal(this.getAttribute('data-signal')))"
                 >
 
                     <div class="d-flex justify-content-between align-items-center">
@@ -1298,7 +1530,7 @@ window.updatePreviousSignals = async function() {
                         <div>
 
                             <span class="text-success">
-                                TP ${roiTp >= 0 ? '+' : ''}${roiTp.toFixed(1)}%
+                                TP ${roiTp == null ? '--' : `${roiTp >= 0 ? '+' : ''}${roiTp.toFixed(1)}%`}
                             </span>
 
                             <span class="mx-1 text-muted">
@@ -1306,19 +1538,21 @@ window.updatePreviousSignals = async function() {
                             </span>
 
                             <span class="text-danger">
-                                SL ${roiSl.toFixed(1)}%
+                                SL ${roiSl == null ? '--' : `${roiSl.toFixed(1)}%`}
                             </span>
 
                         </div>
 
                     </div>
 
+                    ${saveButtons}
+
                 </div>
             `;
         });
 
         signalsList.innerHTML =
-            html;
+            diagnosticsHtml + html;
 
     } catch (err) {
 
@@ -1818,7 +2052,7 @@ window._currentSavedSignal = null;
                 btn.style.display = 'inline-block';
                 // PASAR sig DIRECTAMENTE - no depender de window._currentPrevSignal
                 btn.onclick = function() {
-                    window.openSaveSignalModal(sig);
+                    window.openSaveSignalModal(sig, false);
                 };
             }
         }, 150);
@@ -1827,7 +2061,7 @@ window._currentSavedSignal = null;
 
 // ============ Abrir modal "Guardar señal" ============
 // ============ Abrir modal "Guardar señal" ============
-window.openSaveSignalModal = function(sig) {
+window.openSaveSignalModal = function(sig, alreadyInPosition = false) {
     // Si no recibe parámetro, fallback a la variable global (compatibilidad)
     if (!sig) {
         sig = window._currentPrevSignal;
@@ -1855,6 +2089,9 @@ window.openSaveSignalModal = function(sig) {
         return;
     }
 
+    window._currentPrevSignal = sig;
+    window._saveSignalAlreadyInPosition = Boolean(alreadyInPosition);
+
     // Cerrar el modal actual de justificación
     const prevModal = bootstrap.Modal.getInstance(document.getElementById('prevSignalModal'));
     if (prevModal) prevModal.hide();
@@ -1879,17 +2116,39 @@ window.openSaveSignalModal = function(sig) {
     document.getElementById('ss-leverage-hint').textContent = `Sugerido por el sistema: ${sig.leverage || 1}x`;
     
     // Fallback: si no hay entry/sl/tp en la señal, usar el precio actual del mercado como base
-    const currentPrice = window.lastPrices?.[sig.symbol] || window.currentAnalysis?.current_price || 0;
+    const currentPrice = Number(
+        sig.current_price
+        || sig.live_price
+        || window.lastPrices?.[sig.symbol]
+        || window.currentAnalysis?.current_price
+        || 0
+    );
     const defaultEntry = currentPrice > 0 ? currentPrice.toFixed(2) : '';
     const defaultSL = currentPrice > 0 ? (currentPrice * 0.95).toFixed(2) : '';  // 5% abajo
     const defaultTP = currentPrice > 0 ? (currentPrice * 1.10).toFixed(2) : '';  // 10% arriba
     
-    document.getElementById('ss-entry').value = sig.entry || sig.entry_price || defaultEntry;
+    document.getElementById('ss-entry').value = alreadyInPosition
+        ? (defaultEntry || sig.entry || sig.entry_price || '')
+        : (sig.entry || sig.entry_price || defaultEntry);
     document.getElementById('ss-sl').value = sig.stop_loss || defaultSL;
     document.getElementById('ss-tp').value = sig.take_profit || defaultTP;
     document.getElementById('ss-notes').value = '';
     // v22.9.4: fecha/hora de ingreso — default = ahora en zona local del navegador
     document.getElementById('ss-entry-at').value = _nowLocalDatetimeInput();
+
+    const modalElement = document.getElementById('saveSignalModal');
+    const modalTitle = modalElement?.querySelector('.modal-title');
+    const confirmButton = modalElement?.querySelector('.modal-footer .btn-success');
+    if (modalTitle) {
+        modalTitle.innerHTML = alreadyInPosition
+            ? '<i class="fas fa-check-circle me-2 text-success"></i>Guardar operación ya iniciada'
+            : '<i class="fas fa-bookmark me-2 text-success"></i>Guardar señal y esperar Entry';
+    }
+    if (confirmButton) {
+        confirmButton.innerHTML = alreadyInPosition
+            ? '<i class="fas fa-check me-2"></i>Guardar en operación'
+            : '<i class="fas fa-check me-2"></i>Guardar señal';
+    }
 
     // Habilitar preview del cálculo
     _updateSaveCalcPreview();
@@ -1997,6 +2256,20 @@ window.confirmSaveSignal = async function() {
         return;
     }
 
+    const levelsAreOrdered = sig.action === 'LONG'
+        ? (sl < entry && entry < tp)
+        : (tp < entry && entry < sl);
+
+    if (!levelsAreOrdered) {
+        showToast(
+            sig.action === 'LONG'
+                ? 'LONG inválido: debe cumplirse SL < Entry < TP'
+                : 'SHORT inválido: debe cumplirse TP < Entry < SL',
+            'warning'
+        );
+        return;
+    }
+
     const payload = {
         user_name: user,  // <-- AGREGADO: enviar usuario autenticado
         symbol: sig.symbol,
@@ -2012,6 +2285,7 @@ window.confirmSaveSignal = async function() {
         original_leverage: sig.leverage,
         candle_timestamp: sig.candle_timestamp,
         entry_at: entryAtISO,
+        already_in_position: Boolean(window._saveSignalAlreadyInPosition),
         notes,
     };
 
@@ -2034,7 +2308,12 @@ window.confirmSaveSignal = async function() {
 
         const json = await res.json();
         if (json.success) {
-            showToast('✅ Señal guardada correctamente', 'success');
+            showToast(
+                window._saveSignalAlreadyInPosition
+                    ? '✅ Operación guardada con Entry ya tocado'
+                    : '✅ Señal guardada; el sistema esperará el Entry',
+                'success'
+            );
             const modal = bootstrap.Modal.getInstance(document.getElementById('saveSignalModal'));
             if (modal) modal.hide();
             window.updateSavedSignalsList();
