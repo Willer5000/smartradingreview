@@ -4,12 +4,10 @@ pdf_learning_report.py
 Genera un PDF que explica QUÉ está aprendiendo el ReviewTrader.
 
 Estructura del informe:
-  1. Métricas globales (registradas, evaluadas, TP/SL/expired, win rate)
+  1. Métricas coherentes por mercado y cohorte
   2. QUÉ HA APRENDIDO EL SISTEMA (resumen humano automático)
-  3. Top 20 mejores estrategias generales (agregado por estrategia)
-  4. Top 20 peores estrategias generales
-  5. Top 15 mejores combinaciones específicas (par + TF + acción + estrategia)
-  6. Top 15 peores combinaciones específicas
+  3. Mejores/peores estrategias separadas para Spot y Futuros
+  4. Combinaciones específicas por mercado
   7. ESTRATEGIAS POR TRADER (cobertura del comité) — v22
   8. Aprendizaje por PAR (win rate por símbolo)
   9. Aprendizaje por TIMEFRAME
@@ -18,13 +16,14 @@ Estructura del informe:
 
 CAMBIO IMPORTANTE: en lugar de leer solo las tablas strategy_stats_* (que
 requieren ejecutar run_full_review y a veces fallan por timeout), este PDF
-CALCULA las estadísticas EN EL MOMENTO desde la tabla `signals` de Supabase.
+CALCULA las estadísticas EN EL MOMENTO desde `signals` + `signal_results`.
 Así el aprendizaje siempre se ve, aunque las tablas cache estén vacías.
 
 Requiere: reportlab, supabase-py.
 """
 
 import io
+import json
 import logging
 from typing import Optional, Dict, List, Tuple
 from datetime import datetime
@@ -39,6 +38,184 @@ SPECIFIC_SAMPLES_RIGOROUS = 10   # con >=10 muestras el resultado es "válido"
 SPECIFIC_SAMPLES_MIN = 3         # con <3 no lo mostramos (ruido puro)
 GENERAL_SAMPLES_RIGOROUS = 25    # con >=25 muestras el resultado es "válido"
 GENERAL_SAMPLES_MIN = 5
+REPORT_DAYS_BACK = 90
+
+LEARNING_CONTRACT_VERSION = 'market_separated_v1'
+FUTURES_REAL_DATA_SOURCE = 'KUCOIN_FUTURES_PERPETUAL_REST'
+FUTURES_REAL_COHORT = 'FUTURES_PERPETUAL_REAL_CLOSED_V1'
+
+
+def _as_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ('1', 'true', 'yes', 'si', 'sí')
+    return bool(value)
+
+
+def _normalize_market(signal: Dict) -> str:
+    value = str(signal.get('system_type') or '').strip().lower()
+    if value == 'spot':
+        return 'spot'
+    if value == 'futures':
+        return 'futures'
+    return 'unscoped'
+
+
+def _get_learning_context(signal: Dict) -> Dict:
+    context = signal.get('context') or {}
+    if isinstance(context, str):
+        try:
+            context = json.loads(context)
+        except Exception:
+            return {}
+    if not isinstance(context, dict):
+        return {}
+    learning = context.get('learning') or {}
+    return learning if isinstance(learning, dict) else {}
+
+
+def _is_clean_futures_observation(signal: Dict) -> bool:
+    if _normalize_market(signal) != 'futures':
+        return False
+    learning = _get_learning_context(signal)
+    return bool(
+        learning.get('contract_version') == LEARNING_CONTRACT_VERSION
+        and learning.get('cohort') == FUTURES_REAL_COHORT
+        and str(learning.get('market_data_source') or '').upper()
+        == FUTURES_REAL_DATA_SOURCE
+        and not _as_bool(learning.get('market_data_is_synthetic', True))
+        and _as_bool(learning.get('source_candle_closed', False))
+    )
+
+
+def _is_verified_futures_trade(signal: Dict) -> bool:
+    if not _is_clean_futures_observation(signal):
+        return False
+    learning = _get_learning_context(signal)
+    return bool(
+        _as_bool(learning.get('statistically_eligible', False))
+        and learning.get('evaluation_role') == 'EXECUTABLE_SIGNAL'
+    )
+
+
+def _latest_signal_result(signal: Dict) -> Dict:
+    results = signal.get('signal_results') or []
+    if isinstance(results, dict):
+        return results
+    if not isinstance(results, list) or not results:
+        return {}
+    return max(
+        (item for item in results if isinstance(item, dict)),
+        key=lambda item: str(item.get('created_at') or ''),
+        default={}
+    )
+
+
+def _outcome_values(signal: Dict) -> Tuple[Optional[float], Optional[float]]:
+    """Retorna (PnL bruto %, resultado R) usando los niveles de ESA señal."""
+    status = str(signal.get('status') or '')
+    if status not in ('tp_hit', 'sl_hit'):
+        return None, None
+
+    try:
+        entry = float(signal.get('entry_price') or 0)
+        sl = float(signal.get('stop_loss') or 0)
+        tp = float(signal.get('take_profit') or 0)
+    except (TypeError, ValueError):
+        return None, None
+    if entry <= 0 or sl <= 0 or tp <= 0:
+        return None, None
+
+    result = _latest_signal_result(signal)
+    raw_pnl = result.get('pnl_pct')
+    try:
+        pnl_pct = float(raw_pnl) if raw_pnl is not None else None
+    except (TypeError, ValueError):
+        pnl_pct = None
+
+    action = str(signal.get('action_normalized') or '').upper()
+    if pnl_pct is None:
+        exit_price = tp if status == 'tp_hit' else sl
+        if action == 'LONG':
+            pnl_pct = (exit_price - entry) / entry * 100
+        elif action == 'SHORT':
+            pnl_pct = (entry - exit_price) / entry * 100
+        else:
+            return None, None
+
+    risk_pct = abs(entry - sl) / entry * 100
+    r_multiple = pnl_pct / risk_pct if risk_pct > 0 else None
+    return pnl_pct, r_multiple
+
+
+def _signal_notes(signal: Dict) -> str:
+    return str(_latest_signal_result(signal).get('notes') or '')
+
+
+def _market_metrics(signals: List[Dict]) -> Dict:
+    counts = defaultdict(int)
+    pnl_values = []
+    r_values = []
+    for signal in signals:
+        status = str(signal.get('status') or 'unknown')
+        counts[status] += 1
+        if status == 'expired':
+            notes = _signal_notes(signal)
+            if 'outcome_reason=expired_no_entry' in notes:
+                counts['expired_no_entry'] += 1
+            elif 'outcome_reason=expired_after_entry' in notes:
+                counts['expired_after_entry'] += 1
+        pnl_pct, r_multiple = _outcome_values(signal)
+        if pnl_pct is not None:
+            pnl_values.append(pnl_pct)
+        if r_multiple is not None:
+            r_values.append(r_multiple)
+
+    resolved = counts['tp_hit'] + counts['sl_hit']
+    return {
+        'total': len(signals),
+        'pending': counts['pending'],
+        'tp_hit': counts['tp_hit'],
+        'sl_hit': counts['sl_hit'],
+        'resolved': resolved,
+        'expired': counts['expired'],
+        'expired_no_entry': counts['expired_no_entry'],
+        'expired_after_entry': counts['expired_after_entry'],
+        'ambiguous': counts['ambiguous'],
+        'invalid_setup': counts['invalid_setup'],
+        'win_rate': round(counts['tp_hit'] / resolved * 100, 1)
+        if resolved else None,
+        'avg_pnl_pct': round(sum(pnl_values) / len(pnl_values), 4)
+        if pnl_values else None,
+        'expectancy_r': round(sum(r_values) / len(r_values), 4)
+        if r_values else None,
+        'outcome_samples': len(pnl_values)
+    }
+
+
+def _split_learning_cohorts(signals: List[Dict]) -> Dict[str, List[Dict]]:
+    cohorts = {
+        'spot': [],
+        'futures_verified': [],
+        'futures_shadow': [],
+        'futures_legacy': [],
+        'unscoped': []
+    }
+    for signal in signals:
+        market = _normalize_market(signal)
+        if market == 'spot':
+            cohorts['spot'].append(signal)
+        elif market == 'futures':
+            if _is_verified_futures_trade(signal):
+                cohorts['futures_verified'].append(signal)
+            elif _is_clean_futures_observation(signal):
+                cohorts['futures_shadow'].append(signal)
+            else:
+                cohorts['futures_legacy'].append(signal)
+        else:
+            cohorts['unscoped'].append(signal)
+    return cohorts
 
 
 # ============================================================================
@@ -176,6 +353,7 @@ def _calc_stats_by_trader(signals: List[Dict]) -> List[Dict]:
         if not strategies:
             continue
         status = sig.get('status')
+        market = _normalize_market(sig)
         
         traders_de_esta_signal = set()
         for strat in strategies:
@@ -185,11 +363,11 @@ def _calc_stats_by_trader(signals: List[Dict]) -> List[Dict]:
             # Estrategia ambigua: contarla para cada trader que la emite
             for t in trader.split('+'):
                 traders_de_esta_signal.add(t)
-                by_trader[t]['strategies_seen'].add(strat)
+                by_trader[(market, t)]['strategies_seen'].add(strat)
         
         # Cada trader que contribuyó recibe crédito/débito
         for t in traders_de_esta_signal:
-            b = by_trader[t]
+            b = by_trader[(market, t)]
             if status == 'tp_hit':
                 b['wins'] += 1
             elif status == 'sl_hit':
@@ -198,30 +376,40 @@ def _calc_stats_by_trader(signals: List[Dict]) -> List[Dict]:
                 b['expired'] += 1
     
     rows = []
-    for t in CANONICAL_TRADERS:
-        b = by_trader.get(t)
-        if not b:
-            # Trader que NO aportó nada en el período — se lista igual como aviso
+    markets_present = [
+        market for market in ('spot', 'futures')
+        if any(key[0] == market for key in by_trader)
+    ]
+    for market in markets_present:
+        for t in CANONICAL_TRADERS:
+            b = by_trader.get((market, t))
+            if not b:
+                rows.append({
+                    'market': market,
+                    'trader': t, 'signals': 0, 'wins': 0, 'losses': 0,
+                    'win_rate': 0.0, 'expired': 0,
+                    'unique_strategies': 0, 'strategies': [],
+                })
+                continue
+            resolved = b['wins'] + b['losses']
+            wr = (b['wins'] / resolved * 100) if resolved > 0 else 0.0
             rows.append({
-                'trader': t, 'signals': 0, 'wins': 0, 'losses': 0,
-                'win_rate': 0.0, 'expired': 0, 'unique_strategies': 0,
-                'strategies': [],
+                'market': market,
+                'trader': t,
+                'signals': resolved + b['expired'],
+                'wins': b['wins'],
+                'losses': b['losses'],
+                'expired': b['expired'],
+                'win_rate': round(wr, 1),
+                'unique_strategies': len(b['strategies_seen']),
+                'strategies': sorted(b['strategies_seen']),
             })
-            continue
-        resolved = b['wins'] + b['losses']
-        wr = (b['wins'] / resolved * 100) if resolved > 0 else 0.0
-        rows.append({
-            'trader': t,
-            'signals': resolved + b['expired'],
-            'wins': b['wins'],
-            'losses': b['losses'],
-            'expired': b['expired'],
-            'win_rate': round(wr, 1),
-            'unique_strategies': len(b['strategies_seen']),
-            'strategies': sorted(b['strategies_seen']),
-        })
     # Ordenar: primero por si aportó, luego por WR
-    rows.sort(key=lambda x: (-x['signals'], -x['win_rate']))
+    rows.sort(key=lambda x: (
+        0 if x['market'] == 'spot' else 1,
+        -x['signals'],
+        -x['win_rate']
+    ))
     return rows
 
 
@@ -230,7 +418,7 @@ def _calc_stats_by_trader(signals: List[Dict]) -> List[Dict]:
 # ============================================================================
 
 def _fetch_all_signals_with_indicators(db, days_back: int = 90) -> List[Dict]:
-    """Trae todas las señales resueltas con sus estrategias (paginación manual)."""
+    """Trae una cohorte temporal coherente, incluyendo pendientes y resultados."""
     from datetime import timedelta
     cutoff = (datetime.utcnow() - timedelta(days=days_back)).isoformat()
     all_data = []
@@ -240,10 +428,11 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90) -> List[Dict]:
         try:
             r = (db.client.table('signals')
                  .select('id, symbol, timeframe, action_normalized, status, '
-                         'confidence, entry_price, stop_loss, take_profit, leverage, '
-                         'created_at, candle_timestamp, system_type, '
-                         'signal_indicators(strategy_name)')
-                 .neq('status', 'pending')
+                          'confidence, entry_price, stop_loss, take_profit, leverage, '
+                          'created_at, candle_timestamp, system_type, context, '
+                          'signal_indicators(strategy_name), '
+                          'signal_results(status, pnl_pct, notes, exit_price, '
+                          'exit_timestamp, created_at)')
                  .gte('created_at', cutoff)
                  .order('created_at', desc=True)
                  .range(offset, offset + page_size - 1)
@@ -269,6 +458,7 @@ def _calc_stats_general(signals: List[Dict]) -> List[Dict]:
     """
     buckets = defaultdict(lambda: {
         'wins': 0, 'losses': 0, 'expired': 0, 'missed_opps': 0,
+        'pnl_total': 0.0, 'r_total': 0.0, 'outcome_samples': 0,
         'by_symbol': defaultdict(lambda: {'wins': 0, 'losses': 0}),
         'by_timeframe': defaultdict(lambda: {'wins': 0, 'losses': 0}),
         'by_action': defaultdict(lambda: {'wins': 0, 'losses': 0}),
@@ -285,9 +475,11 @@ def _calc_stats_general(signals: List[Dict]) -> List[Dict]:
         symbol = sig.get('symbol')
         tf = sig.get('timeframe')
         action = sig.get('action_normalized')
+        market = _normalize_market(sig)
+        pnl_pct, r_multiple = _outcome_values(sig)
         
         for strat in strategies:
-            b = buckets[strat]
+            b = buckets[(market, strat)]
             if status == 'tp_hit':
                 b['wins'] += 1
                 b['by_symbol'][symbol]['wins'] += 1
@@ -304,14 +496,26 @@ def _calc_stats_general(signals: List[Dict]) -> List[Dict]:
                 b['expired'] += 1
             elif status == 'missed_opportunity':
                 b['missed_opps'] += 1
+            if pnl_pct is not None and r_multiple is not None:
+                b['pnl_total'] += pnl_pct
+                b['r_total'] += r_multiple
+                b['outcome_samples'] += 1
     
     rows = []
-    for strat, b in buckets.items():
+    for (market, strat), b in buckets.items():
         resolved = b['wins'] + b['losses']
         if resolved == 0 and b['expired'] == 0:
             continue
         win_rate = (b['wins'] / resolved * 100) if resolved > 0 else 0
-        expectancy = (win_rate/100)*2 - (1 - win_rate/100)*1  # asume RR 2:1
+        outcome_samples = b['outcome_samples']
+        expectancy = (
+            b['r_total'] / outcome_samples
+            if outcome_samples else 0.0
+        )
+        avg_pnl_pct = (
+            b['pnl_total'] / outcome_samples
+            if outcome_samples else 0.0
+        )
         
         # Best/worst pairs & timeframes (min 3 muestras)
         def _rank(subs: Dict, top: bool):
@@ -323,6 +527,7 @@ def _calc_stats_general(signals: List[Dict]) -> List[Dict]:
             return sorted(scored, key=lambda x: -x[1] if top else x[1])[:3]
         
         rows.append({
+            'market': market,
             'strategy': strat,
             'total': resolved + b['expired'],
             'wins': b['wins'],
@@ -331,13 +536,18 @@ def _calc_stats_general(signals: List[Dict]) -> List[Dict]:
             'missed': b['missed_opps'],
             'win_rate': round(win_rate, 1),
             'expectancy': round(expectancy, 3),
+            'avg_pnl_pct': round(avg_pnl_pct, 4),
             'sample_size': resolved,
             'best_symbols': _rank(b['by_symbol'], top=True),
             'worst_symbols': _rank(b['by_symbol'], top=False),
             'best_tfs': _rank(b['by_timeframe'], top=True),
             'worst_tfs': _rank(b['by_timeframe'], top=False),
         })
-    return sorted(rows, key=lambda r: (-r['expectancy'], -r['sample_size']))
+    return sorted(rows, key=lambda r: (
+        0 if r['market'] == 'spot' else 1,
+        -r['expectancy'],
+        -r['sample_size']
+    ))
 
 
 def _calc_stats_specific(signals: List[Dict]) -> List[Dict]:
@@ -345,13 +555,18 @@ def _calc_stats_specific(signals: List[Dict]) -> List[Dict]:
     Calcula stats por (symbol, timeframe, action, strategy).
     Ordenado por expectancy desc.
     """
-    buckets = defaultdict(lambda: {'wins': 0, 'losses': 0, 'expired': 0})
+    buckets = defaultdict(lambda: {
+        'wins': 0, 'losses': 0, 'expired': 0,
+        'pnl_total': 0.0, 'r_total': 0.0, 'outcome_samples': 0
+    })
     
     for sig in signals:
         symbol = sig.get('symbol')
         tf = sig.get('timeframe')
         action = sig.get('action_normalized')
         status = sig.get('status')
+        market = _normalize_market(sig)
+        pnl_pct, r_multiple = _outcome_values(sig)
         if not (symbol and tf and action):
             continue
         strategies = [
@@ -362,41 +577,63 @@ def _calc_stats_specific(signals: List[Dict]) -> List[Dict]:
             continue
         
         for strat in strategies:
-            key = (symbol, tf, action, strat)
+            key = (market, symbol, tf, action, strat)
             if status == 'tp_hit':
                 buckets[key]['wins'] += 1
             elif status == 'sl_hit':
                 buckets[key]['losses'] += 1
             elif status == 'expired':
                 buckets[key]['expired'] += 1
+            if pnl_pct is not None and r_multiple is not None:
+                buckets[key]['pnl_total'] += pnl_pct
+                buckets[key]['r_total'] += r_multiple
+                buckets[key]['outcome_samples'] += 1
     
     rows = []
-    for (sym, tf, action, strat), b in buckets.items():
+    for (market, sym, tf, action, strat), b in buckets.items():
         resolved = b['wins'] + b['losses']
         if resolved == 0:
             continue
         win_rate = (b['wins'] / resolved) * 100
-        expectancy = (win_rate/100)*2 - (1 - win_rate/100)*1
+        outcome_samples = b['outcome_samples']
+        expectancy = (
+            b['r_total'] / outcome_samples
+            if outcome_samples else 0.0
+        )
+        avg_pnl_pct = (
+            b['pnl_total'] / outcome_samples
+            if outcome_samples else 0.0
+        )
         rows.append({
+            'market': market,
             'symbol': sym, 'timeframe': tf, 'action': action, 'strategy': strat,
             'total': resolved + b['expired'], 'wins': b['wins'],
             'losses': b['losses'], 'expired': b['expired'],
             'win_rate': round(win_rate, 1),
             'expectancy': round(expectancy, 3),
+            'avg_pnl_pct': round(avg_pnl_pct, 4),
             'sample_size': resolved,
         })
-    return sorted(rows, key=lambda r: (-r['expectancy'], -r['sample_size']))
+    return sorted(rows, key=lambda r: (
+        0 if r['market'] == 'spot' else 1,
+        -r['expectancy'],
+        -r['sample_size']
+    ))
 
 
 def _calc_stats_by_symbol(signals: List[Dict]) -> List[Dict]:
     """Win rate agregado por par."""
-    buckets = defaultdict(lambda: {'wins': 0, 'losses': 0, 'expired': 0, 'missed': 0})
+    buckets = defaultdict(lambda: {
+        'wins': 0, 'losses': 0, 'expired': 0, 'missed': 0,
+        'pnl_total': 0.0, 'r_total': 0.0, 'outcome_samples': 0
+    })
     for sig in signals:
         sym = sig.get('symbol')
         if not sym:
             continue
         st = sig.get('status')
-        b = buckets[sym]
+        market = _normalize_market(sig)
+        b = buckets[(market, sym)]
         if st == 'tp_hit':
             b['wins'] += 1
         elif st == 'sl_hit':
@@ -405,47 +642,84 @@ def _calc_stats_by_symbol(signals: List[Dict]) -> List[Dict]:
             b['expired'] += 1
         elif st == 'missed_opportunity':
             b['missed'] += 1
+        pnl_pct, r_multiple = _outcome_values(sig)
+        if pnl_pct is not None and r_multiple is not None:
+            b['pnl_total'] += pnl_pct
+            b['r_total'] += r_multiple
+            b['outcome_samples'] += 1
     rows = []
-    for sym, b in buckets.items():
+    for (market, sym), b in buckets.items():
         resolved = b['wins'] + b['losses']
+        if resolved == 0 and b['expired'] == 0:
+            continue
         win_rate = (b['wins']/resolved*100) if resolved > 0 else 0
+        outcome_samples = b['outcome_samples']
         rows.append({
-            'symbol': sym, 'wins': b['wins'], 'losses': b['losses'],
+            'market': market, 'symbol': sym,
+            'wins': b['wins'], 'losses': b['losses'],
             'expired': b['expired'], 'missed': b['missed'],
             'sample_size': resolved,
             'win_rate': round(win_rate, 1),
+            'expectancy': round(b['r_total']/outcome_samples, 3)
+            if outcome_samples else 0.0,
+            'avg_pnl_pct': round(b['pnl_total']/outcome_samples, 4)
+            if outcome_samples else 0.0,
         })
-    return sorted(rows, key=lambda r: -r['win_rate'])
+    return sorted(rows, key=lambda r: (
+        0 if r['market'] == 'spot' else 1,
+        -r['expectancy'],
+        -r['sample_size']
+    ))
 
 
 def _calc_stats_by_timeframe(signals: List[Dict]) -> List[Dict]:
     """Win rate agregado por timeframe."""
-    buckets = defaultdict(lambda: {'wins': 0, 'losses': 0, 'expired': 0})
+    buckets = defaultdict(lambda: {
+        'wins': 0, 'losses': 0, 'expired': 0,
+        'pnl_total': 0.0, 'r_total': 0.0, 'outcome_samples': 0
+    })
     for sig in signals:
         tf = sig.get('timeframe')
         if not tf:
             continue
         st = sig.get('status')
-        b = buckets[tf]
+        market = _normalize_market(sig)
+        b = buckets[(market, tf)]
         if st == 'tp_hit':
             b['wins'] += 1
         elif st == 'sl_hit':
             b['losses'] += 1
         elif st == 'expired':
             b['expired'] += 1
+        pnl_pct, r_multiple = _outcome_values(sig)
+        if pnl_pct is not None and r_multiple is not None:
+            b['pnl_total'] += pnl_pct
+            b['r_total'] += r_multiple
+            b['outcome_samples'] += 1
     rows = []
-    for tf, b in buckets.items():
+    for (market, tf), b in buckets.items():
         resolved = b['wins'] + b['losses']
+        if resolved == 0 and b['expired'] == 0:
+            continue
         win_rate = (b['wins']/resolved*100) if resolved > 0 else 0
+        outcome_samples = b['outcome_samples']
         rows.append({
-            'timeframe': tf, 'wins': b['wins'], 'losses': b['losses'],
+            'market': market, 'timeframe': tf,
+            'wins': b['wins'], 'losses': b['losses'],
             'expired': b['expired'], 'sample_size': resolved,
             'win_rate': round(win_rate, 1),
+            'expectancy': round(b['r_total']/outcome_samples, 3)
+            if outcome_samples else 0.0,
+            'avg_pnl_pct': round(b['pnl_total']/outcome_samples, 4)
+            if outcome_samples else 0.0,
         })
     # Ordenar por TF de menor a mayor (5m, 15m, 30m, 1h, 2h, 4h, 12h, 1D, 1W)
     tf_order = {'5m': 0, '15m': 1, '30m': 2, '1h': 3, '2h': 4, '4h': 5,
                 '12h': 6, '1D': 7, '1W': 8}
-    return sorted(rows, key=lambda r: tf_order.get(r['timeframe'], 99))
+    return sorted(rows, key=lambda r: (
+        0 if r['market'] == 'spot' else 1,
+        tf_order.get(r['timeframe'], 99)
+    ))
 
 
 def _fetch_missed_opp_indicators(db, limit: int = 200) -> List[Dict]:
@@ -539,98 +813,82 @@ def _build_human_summary(metrics: Dict, top_general: List[Dict],
                          worst_general: List[Dict],
                          by_symbol: List[Dict],
                          by_timeframe: List[Dict]) -> str:
-    """Genera un resumen en lenguaje natural de lo que ha aprendido el sistema."""
-    lines = []
-    total_resolved = metrics['tp_hit'] + metrics['sl_hit']
-    win_rate = (metrics['tp_hit'] / total_resolved * 100) if total_resolved > 0 else 0
-    
-    lines.append(
-        f"El sistema ha registrado <b>{metrics['total_signals']}</b> señales en total. "
-        f"De estas, <b>{total_resolved}</b> operaciones han sido resueltas (tocaron TP o SL), "
-        f"con un win rate REAL de <b>{win_rate:.1f}%</b>. "
-        f"Otras {metrics['expired']} señales expiraron sin toque, y "
-        f"{metrics['missed_opp_from_signals']} fueron NO_OPERAR que se equivocaron "
-        f"(el precio se movió >2% en la dirección esperada)."
-    )
-    
-    if win_rate < 40:
-        lines.append(
-            f"<br/><br/>⚠️ El win rate actual ({win_rate:.1f}%) está por debajo del umbral "
-            f"de rentabilidad (~40% con RR 1:1.5). Esto indica que los stops se están "
-            f"tocando más de lo que se alcanzan los TP. Posibles causas: entries tardíos, "
-            f"stops demasiado apretados para la volatilidad actual, o el mercado en modo "
-            f"'choppy' (sin dirección clara)."
-        )
-    elif win_rate < 55:
-        lines.append(
-            f"<br/><br/>📊 El win rate ({win_rate:.1f}%) está en zona de subsistencia. "
-            f"Con RR 1:2 este ratio permite ganancias moderadas, pero requiere disciplina "
-            f"en el sizing."
-        )
-    else:
-        lines.append(
-            f"<br/><br/>✅ El win rate ({win_rate:.1f}%) es sólido. El sistema está "
-            f"identificando setups con edge estadístico."
-        )
-    
-    # Top estrategia con muestras suficientes
-    top_valid = [s for s in top_general if s['sample_size'] >= GENERAL_SAMPLES_RIGOROUS]
-    if top_valid:
-        top = top_valid[0]
-        lines.append(
-            f"<br/><br/><b>Mejor estrategia aprendida hasta ahora</b>: "
-            f"<i>{top['strategy']}</i> con {top['win_rate']}% de win rate "
-            f"en {top['sample_size']} muestras evaluadas. "
-        )
-        if top['best_symbols']:
-            best_sym = top['best_symbols'][0]
-            lines.append(
-                f"Rinde especialmente bien en <b>{best_sym[0]}</b> "
-                f"({best_sym[1]:.0f}% win rate)."
+    """Resumen por mercado, sin presentar win rate aislado como rentabilidad."""
+    del worst_general, by_symbol, by_timeframe  # Las tablas contienen el detalle.
+    lines = [
+        f"Este informe usa una sola ventana coherente de <b>{REPORT_DAYS_BACK} días</b>. "
+        "Spot y Futuros se evalúan por separado. Los Futuros sin procedencia "
+        "verificable no pueden mejorar ni empeorar las estadísticas operables."
+    ]
+    metrics_by_market = metrics.get('metrics_by_market') or {}
+
+    for market, label in (
+        ('spot', 'SPOT — acumulación'),
+        ('futures', 'FUTUROS — perpetuos verificados')
+    ):
+        values = metrics_by_market.get(market) or {}
+        resolved = int(values.get('resolved') or 0)
+        if resolved:
+            wr = values.get('win_rate')
+            expectancy_r = values.get('expectancy_r')
+            avg_pnl = values.get('avg_pnl_pct')
+            expectancy_text = (
+                f'{expectancy_r:+.3f}R'
+                if expectancy_r is not None else '—'
             )
-    else:
+            pnl_text = (
+                f'{avg_pnl:+.3f}%'
+                if avg_pnl is not None else '—'
+            )
+            lines.append(
+                f"<br/><br/><b>{label}</b>: {resolved} salidas demostrables, "
+                f"win rate {wr:.1f}%, expectancy observada "
+                f"{expectancy_text} y movimiento bruto medio {pnl_text}."
+            )
+        else:
+            lines.append(
+                f"<br/><br/><b>{label}</b>: todavía no hay salidas "
+                "demostrables suficientes para afirmar que existe rentabilidad."
+            )
         lines.append(
-            f"<br/><br/>Ninguna estrategia ha acumulado aún las {GENERAL_SAMPLES_RIGOROUS} "
-            f"muestras necesarias para considerarla estadísticamente probada. "
-            f"Se muestran igual las estrategias con >={GENERAL_SAMPLES_MIN} muestras como "
-            f"referencia preliminar."
+            f" Pendientes: {int(values.get('pending') or 0)}; "
+            f"expiradas: {int(values.get('expired') or 0)}; "
+            f"ambiguas: {int(values.get('ambiguous') or 0)}; "
+            f"setups inválidos: {int(values.get('invalid_setup') or 0)}."
         )
-    
-    # Peor estrategia
-    worst_valid = [s for s in worst_general if s['sample_size'] >= GENERAL_SAMPLES_RIGOROUS]
-    if worst_valid:
-        w = worst_valid[-1]  # último es el peor (menor expectancy)
-        lines.append(
-            f"<br/><br/><b>Estrategia con peor desempeño</b>: "
-            f"<i>{w['strategy']}</i> con solo {w['win_rate']}% de win rate. "
-            f"Con {w['sample_size']} muestras evaluadas, esta señal está debilitando "
-            f"al comité y sería candidata a bajarle peso."
-        )
-    
-    # Mejor par
-    valid_symbols = [s for s in by_symbol if s['sample_size'] >= 5]
-    if valid_symbols:
-        best_pair = valid_symbols[0]
-        worst_pair = valid_symbols[-1]
-        lines.append(
-            f"<br/><br/><b>Par con mejor rendimiento</b>: {best_pair['symbol']} "
-            f"({best_pair['win_rate']}% win rate en {best_pair['sample_size']} operaciones). "
-            f"<b>Par con peor rendimiento</b>: {worst_pair['symbol']} "
-            f"({worst_pair['win_rate']}% win rate)."
-        )
-    
-    # Mejor timeframe
-    valid_tfs = [t for t in by_timeframe if t['sample_size'] >= 5]
-    if valid_tfs:
-        best_tf = max(valid_tfs, key=lambda t: t['win_rate'])
-        worst_tf = min(valid_tfs, key=lambda t: t['win_rate'])
-        lines.append(
-            f"<br/><br/><b>Timeframe más efectivo</b>: {best_tf['timeframe']} "
-            f"({best_tf['win_rate']}% win rate). "
-            f"<b>Timeframe con más pérdidas</b>: {worst_tf['timeframe']} "
-            f"({worst_tf['win_rate']}%)."
-        )
-    
+
+    quarantine = metrics.get('quarantine_counts') or {}
+    lines.append(
+        f"<br/><br/>Cuarentena informativa: "
+        f"{int(quarantine.get('futures_legacy') or 0)} Futuros antiguos/no "
+        f"verificables, {int(quarantine.get('futures_shadow') or 0)} análisis "
+        f"shadow y {int(quarantine.get('unscoped') or 0)} registros sin mercado."
+    )
+
+    for market, label in (('spot', 'Spot'), ('futures', 'Futuros')):
+        candidates = [
+            item for item in top_general
+            if item.get('market') == market
+            and item.get('sample_size', 0) >= GENERAL_SAMPLES_RIGOROUS
+        ]
+        if candidates:
+            best = max(candidates, key=lambda item: item['expectancy'])
+            lines.append(
+                f"<br/><br/><b>Mejor evidencia válida en {label}</b>: "
+                f"{best['strategy']} con {best['expectancy']:+.3f}R por señal, "
+                f"PnL bruto medio {best['avg_pnl_pct']:+.3f}% y "
+                f"{best['sample_size']} resultados."
+            )
+        else:
+            lines.append(
+                f"<br/><br/>{label} aún no tiene una estrategia con "
+                f"{GENERAL_SAMPLES_RIGOROUS} resultados demostrables."
+            )
+
+    lines.append(
+        "<br/><br/><i>El PnL mostrado todavía es bruto: no descuenta comisión, "
+        "slippage ni funding. Por eso este informe no lo llama beneficio neto.</i>"
+    )
     return ''.join(lines)
 
 
@@ -642,6 +900,8 @@ def _fetch_learning_data() -> Dict:
     """Recupera todo el conocimiento actual del ReviewTrader desde Supabase."""
     data = {
         'supabase_connected': False,
+        'report_window_days': REPORT_DAYS_BACK,
+        'all_time_signals': 0,
         'total_signals': 0,
         'evaluated_signals': 0,
         'pending_signals': 0,
@@ -651,6 +911,8 @@ def _fetch_learning_data() -> Dict:
         'missed_opp_from_signals': 0,
         'missed_opportunities': 0,
         'signals_with_indicators': [],
+        'metrics_by_market': {},
+        'quarantine_counts': {},
         'missed_details': [],
         'last_review_log': None,
         'error': None,
@@ -669,29 +931,11 @@ def _fetch_learning_data() -> Dict:
     
     data['supabase_connected'] = True
     
-    # Conteo global por status usando .count
+    # El total histórico se muestra sólo como inventario; no se mezcla con la
+    # ventana estadística del informe.
     try:
         r_total = (db.client.table('signals').select('id', count='exact').limit(1).execute())
-        data['total_signals'] = int(getattr(r_total, 'count', 0) or 0)
-        
-        for status_name, key in [
-            ('tp_hit', 'tp_hit'),
-            ('sl_hit', 'sl_hit'),
-            ('expired', 'expired'),
-            ('pending', 'pending_signals'),
-            ('missed_opportunity', 'missed_opp_from_signals'),
-        ]:
-            try:
-                r_s = (db.client.table('signals')
-                       .select('id', count='exact')
-                       .eq('status', status_name)
-                       .limit(1)
-                       .execute())
-                data[key] = int(getattr(r_s, 'count', 0) or 0)
-            except Exception:
-                data[key] = 0
-        
-        data['evaluated_signals'] = data['tp_hit'] + data['sl_hit'] + data['expired']
+        data['all_time_signals'] = int(getattr(r_total, 'count', 0) or 0)
     except Exception as e:
         logger.warning(f'Error contando signals: {e}')
     
@@ -702,9 +946,44 @@ def _fetch_learning_data() -> Dict:
     except Exception:
         pass
     
-    # Traer TODAS las signals resueltas con indicadores (paginación manual)
+    # Traer una sola ventana y separar las cohortes antes de calcular cualquier
+    # win rate. Así el encabezado y las tablas hablan del mismo conjunto.
     try:
-        data['signals_with_indicators'] = _fetch_all_signals_with_indicators(db, days_back=90)
+        report_signals = _fetch_all_signals_with_indicators(
+            db,
+            days_back=REPORT_DAYS_BACK
+        )
+        cohorts = _split_learning_cohorts(report_signals)
+        eligible_signals = (
+            cohorts['spot']
+            + cohorts['futures_verified']
+        )
+        spot_metrics = _market_metrics(cohorts['spot'])
+        futures_metrics = _market_metrics(cohorts['futures_verified'])
+        data['signals_with_indicators'] = eligible_signals
+        data['metrics_by_market'] = {
+            'spot': spot_metrics,
+            'futures': futures_metrics
+        }
+        data['quarantine_counts'] = {
+            'futures_legacy': len(cohorts['futures_legacy']),
+            'futures_shadow': len(cohorts['futures_shadow']),
+            'unscoped': len(cohorts['unscoped'])
+        }
+        data['total_signals'] = len(eligible_signals)
+        data['pending_signals'] = (
+            spot_metrics['pending'] + futures_metrics['pending']
+        )
+        data['tp_hit'] = spot_metrics['tp_hit'] + futures_metrics['tp_hit']
+        data['sl_hit'] = spot_metrics['sl_hit'] + futures_metrics['sl_hit']
+        data['expired'] = spot_metrics['expired'] + futures_metrics['expired']
+        data['evaluated_signals'] = (
+            data['tp_hit'] + data['sl_hit'] + data['expired']
+        )
+        data['missed_opp_from_signals'] = sum(
+            1 for signal in eligible_signals
+            if signal.get('status') == 'missed_opportunity'
+        )
     except Exception as e:
         logger.warning(f'Error trayendo signals con indicadores: {e}')
     
@@ -748,7 +1027,8 @@ def generate_learning_pdf() -> bytes:
     from reportlab.lib.colors import HexColor, black, white
     from reportlab.lib.enums import TA_JUSTIFY, TA_CENTER
     from reportlab.platypus import (
-        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak,
+        KeepTogether
     )
     
     data = _fetch_learning_data()
@@ -819,22 +1099,47 @@ def generate_learning_pdf() -> bytes:
                                           stats_by_symbol, stats_by_tf)
     story.append(Paragraph(human_summary, style_body))
     
-    # ============ 3. MÉTRICAS GLOBALES ============
-    story.append(Paragraph("Métricas globales", style_h2))
-    resolved = data['tp_hit'] + data['sl_hit']
-    win_rate_global = (data['tp_hit'] / resolved * 100) if resolved > 0 else 0
-    
+    # ============ 3. MÉTRICAS COHERENTES POR MERCADO ============
+    story.append(Paragraph("Métricas por mercado", style_h2))
+    spot_metrics = data.get('metrics_by_market', {}).get('spot', {})
+    futures_metrics = data.get('metrics_by_market', {}).get('futures', {})
+    quarantine = data.get('quarantine_counts', {})
+
+    def _metric_text(value, suffix=''):
+        return '—' if value is None else f'{value}{suffix}'
+
     metrics_data = [
         ['Métrica', 'Valor'],
-        ['Señales registradas totales', str(data['total_signals'])],
-        ['Señales pendientes', str(data['pending_signals'])],
-        ['Operaciones resueltas (TP + SL)', str(resolved)],
-        ['   — Take Profit tocado', str(data['tp_hit'])],
-        ['   — Stop Loss tocado', str(data['sl_hit'])],
-        ['Señales expiradas sin toque', str(data['expired'])],
-        ['NO_OPERAR marcadas como oportunidad perdida', str(data['missed_opp_from_signals'])],
-        ['Win rate real (TP / (TP+SL))', f'{win_rate_global:.1f}%'],
-        ['Oportunidades perdidas registradas', str(data['missed_opportunities'])],
+        ['Inventario histórico total (no usado como cohorte)', str(data['all_time_signals'])],
+        [f'Cohorte estadística verificable ({REPORT_DAYS_BACK} días)', str(data['total_signals'])],
+        ['SPOT — señales en cohorte', str(spot_metrics.get('total', 0))],
+        ['   — TP / SL / Expired', (
+            f"{spot_metrics.get('tp_hit', 0)} / "
+            f"{spot_metrics.get('sl_hit', 0)} / "
+            f"{spot_metrics.get('expired', 0)}"
+        )],
+        ['   — Win rate / Expectancy observada', (
+            f"{_metric_text(spot_metrics.get('win_rate'), '%')} / "
+            f"{_metric_text(spot_metrics.get('expectancy_r'), 'R')}"
+        )],
+        ['FUTUROS — ejecutables y verificables', str(futures_metrics.get('total', 0))],
+        ['   — TP / SL / Expired', (
+            f"{futures_metrics.get('tp_hit', 0)} / "
+            f"{futures_metrics.get('sl_hit', 0)} / "
+            f"{futures_metrics.get('expired', 0)}"
+        )],
+        ['   — Win rate / Expectancy observada', (
+            f"{_metric_text(futures_metrics.get('win_rate'), '%')} / "
+            f"{_metric_text(futures_metrics.get('expectancy_r'), 'R')}"
+        )],
+        ['Resultados ambiguos (Spot / Futuros)', (
+            f"{spot_metrics.get('ambiguous', 0)} / "
+            f"{futures_metrics.get('ambiguous', 0)}"
+        )],
+        ['Futuros antiguos/no verificables en cuarentena', str(quarantine.get('futures_legacy', 0))],
+        ['Análisis Futures shadow (no publicados)', str(quarantine.get('futures_shadow', 0))],
+        ['Registros sin mercado en cuarentena', str(quarantine.get('unscoped', 0))],
+        ['Oportunidades perdidas (diagnóstico no separado)', str(data['missed_opportunities'])],
     ]
     tmet = Table(metrics_data, colWidths=[11*cm, 5*cm])
     tmet.setStyle(TableStyle([
@@ -853,26 +1158,38 @@ def generate_learning_pdf() -> bytes:
     story.append(PageBreak())
     
     # ============ 4. TOP 20 MEJORES ESTRATEGIAS GENERALES ============
-    story.append(Paragraph("Top 20 mejores estrategias (todas las combinaciones)", style_h2))
+    story.append(Paragraph("Mejores estrategias por mercado", style_h2))
     story.append(Paragraph(
-        "Agregado por estrategia, sumando todos los pares y timeframes. "
-        "Ordenadas por <b>expectancy</b> (rentabilidad esperada por operación). "
+        "Spot y Futuros permanecen separados. La <b>Expectancy R</b> es el "
+        "promedio de los resultados R propios de cada señal; ya no supone que "
+        "todas las ganadoras valen +2R. El PnL es bruto, antes de costos. "
         "La columna 'Confianza estadística' indica si la muestra es suficiente para "
         f"tomar la métrica como válida (≥{GENERAL_SAMPLES_RIGOROUS} muestras).",
         style_note
     ))
     
-    top_general = [s for s in stats_general if s['sample_size'] >= GENERAL_SAMPLES_MIN][:20]
+    top_general = []
+    for market in ('spot', 'futures'):
+        market_rows = [
+            s for s in stats_general
+            if s['market'] == market
+            and s['sample_size'] >= GENERAL_SAMPLES_MIN
+        ]
+        top_general.extend(
+            sorted(market_rows, key=lambda r: (-r['expectancy'], -r['sample_size']))[:10]
+        )
     if top_general:
-        rows = [['#', 'Estrategia', 'Muestras', 'Wins', 'Losses', 'Win %', 'Expec.', 'Confianza']]
+        rows = [['#', 'Mercado', 'Estrategia', 'N', 'TP', 'SL', 'Win %', 'Exp. R', 'PnL %', 'Confianza']]
         for i, s in enumerate(top_general, 1):
             badge_txt, _ = _confidence_badge(s['sample_size'], GENERAL_SAMPLES_RIGOROUS)
             rows.append([
-                str(i), s['strategy'][:32], str(s['sample_size']),
+                str(i), s['market'].upper(), s['strategy'][:27], str(s['sample_size']),
                 str(s['wins']), str(s['losses']),
-                f"{s['win_rate']}%", f"{s['expectancy']}", badge_txt
+                f"{s['win_rate']}%", f"{s['expectancy']:+.3f}",
+                f"{s['avg_pnl_pct']:+.3f}%", badge_txt
             ])
-        t = Table(rows, colWidths=[0.8*cm, 5.5*cm, 1.6*cm, 1.4*cm, 1.6*cm, 1.5*cm, 1.6*cm, 3.0*cm])
+        t = Table(rows, colWidths=[0.6*cm, 1.6*cm, 4.2*cm, 0.9*cm, 0.8*cm,
+                                  0.8*cm, 1.2*cm, 1.2*cm, 1.4*cm, 2.5*cm])
         t.setStyle(TableStyle([
             ('BACKGROUND', (0,0), (-1,0), HexColor('#0a8f4c')),
             ('TEXTCOLOR', (0,0), (-1,0), white),
@@ -880,7 +1197,7 @@ def generate_learning_pdf() -> bytes:
             ('FONTSIZE', (0,0), (-1,-1), 8.5),
             ('GRID', (0,0), (-1,-1), 0.3, HexColor('#c8ccd6')),
             ('ROWBACKGROUNDS', (0,1), (-1,-1), [HexColor('#f4f6fa'), white]),
-            ('ALIGN', (2,1), (6,-1), 'CENTER'),
+            ('ALIGN', (1,1), (-2,-1), 'CENTER'),
         ]))
         story.append(t)
     else:
@@ -890,25 +1207,35 @@ def generate_learning_pdf() -> bytes:
         ))
     
     # ============ 5. TOP 20 PEORES ESTRATEGIAS GENERALES ============
-    story.append(Paragraph("Top 20 peores estrategias (todas las combinaciones)", style_h2))
+    story.append(Paragraph("Estrategias con peor evidencia por mercado", style_h2))
     story.append(Paragraph(
-        "Estrategias que están perjudicando al sistema. Candidatas a revisión o "
-        "reducción de peso en el comité. Ordenadas por expectancy ascendente.",
+        "Se muestran por separado y se ordenan por Expectancy R observada. Una "
+        "muestra preliminar sirve para investigar, no para cambiar pesos automáticamente.",
         style_note
     ))
     
-    worst_general = [s for s in stats_general if s['sample_size'] >= GENERAL_SAMPLES_MIN]
-    worst_general = sorted(worst_general, key=lambda r: (r['expectancy'], -r['sample_size']))[:20]
+    worst_general = []
+    for market in ('spot', 'futures'):
+        market_rows = [
+            s for s in stats_general
+            if s['market'] == market
+            and s['sample_size'] >= GENERAL_SAMPLES_MIN
+        ]
+        worst_general.extend(
+            sorted(market_rows, key=lambda r: (r['expectancy'], -r['sample_size']))[:10]
+        )
     if worst_general:
-        rows = [['#', 'Estrategia', 'Muestras', 'Wins', 'Losses', 'Win %', 'Expec.', 'Confianza']]
+        rows = [['#', 'Mercado', 'Estrategia', 'N', 'TP', 'SL', 'Win %', 'Exp. R', 'PnL %', 'Confianza']]
         for i, s in enumerate(worst_general, 1):
             badge_txt, _ = _confidence_badge(s['sample_size'], GENERAL_SAMPLES_RIGOROUS)
             rows.append([
-                str(i), s['strategy'][:32], str(s['sample_size']),
+                str(i), s['market'].upper(), s['strategy'][:27], str(s['sample_size']),
                 str(s['wins']), str(s['losses']),
-                f"{s['win_rate']}%", f"{s['expectancy']}", badge_txt
+                f"{s['win_rate']}%", f"{s['expectancy']:+.3f}",
+                f"{s['avg_pnl_pct']:+.3f}%", badge_txt
             ])
-        t = Table(rows, colWidths=[0.8*cm, 5.5*cm, 1.6*cm, 1.4*cm, 1.6*cm, 1.5*cm, 1.6*cm, 3.0*cm])
+        t = Table(rows, colWidths=[0.6*cm, 1.6*cm, 4.2*cm, 0.9*cm, 0.8*cm,
+                                  0.8*cm, 1.2*cm, 1.2*cm, 1.4*cm, 2.5*cm])
         t.setStyle(TableStyle([
             ('BACKGROUND', (0,0), (-1,0), HexColor('#c92a2a')),
             ('TEXTCOLOR', (0,0), (-1,0), white),
@@ -916,7 +1243,7 @@ def generate_learning_pdf() -> bytes:
             ('FONTSIZE', (0,0), (-1,-1), 8.5),
             ('GRID', (0,0), (-1,-1), 0.3, HexColor('#c8ccd6')),
             ('ROWBACKGROUNDS', (0,1), (-1,-1), [HexColor('#f4f6fa'), white]),
-            ('ALIGN', (2,1), (6,-1), 'CENTER'),
+            ('ALIGN', (1,1), (-2,-1), 'CENTER'),
         ]))
         story.append(t)
     else:
@@ -927,23 +1254,34 @@ def generate_learning_pdf() -> bytes:
     story.append(PageBreak())
     
     # ============ 6. APRENDIZAJE ESPECÍFICO ============
-    story.append(Paragraph("Top 15 combinaciones específicas (par + TF + acción + estrategia)", style_h2))
+    story.append(Paragraph("Combinaciones específicas por mercado", style_h2))
     story.append(Paragraph(
         "Aprendizaje más granular: dónde exactamente rinde cada estrategia. "
         f"Requiere ≥{SPECIFIC_SAMPLES_MIN} muestras para aparecer, ≥{SPECIFIC_SAMPLES_RIGOROUS} para ser 'válida'.",
         style_note
     ))
     
-    top_specific = [s for s in stats_specific if s['sample_size'] >= SPECIFIC_SAMPLES_MIN][:15]
+    top_specific = []
+    for market in ('spot', 'futures'):
+        market_rows = [
+            s for s in stats_specific
+            if s['market'] == market
+            and s['sample_size'] >= SPECIFIC_SAMPLES_MIN
+        ]
+        top_specific.extend(
+            sorted(market_rows, key=lambda r: (-r['expectancy'], -r['sample_size']))[:8]
+        )
     if top_specific:
-        rows = [['Par', 'TF', 'Acción', 'Estrategia', 'Muestras', 'Win %', 'Expec.']]
+        rows = [['Mercado', 'Par', 'TF', 'Acción', 'Estrategia', 'N', 'Win %', 'Exp. R', 'PnL %']]
         for s in top_specific:
             rows.append([
-                s['symbol'], s['timeframe'], s['action'],
-                s['strategy'][:22], str(s['sample_size']),
-                f"{s['win_rate']}%", f"{s['expectancy']}"
+                s['market'].upper(), s['symbol'], s['timeframe'], s['action'],
+                s['strategy'][:20], str(s['sample_size']),
+                f"{s['win_rate']}%", f"{s['expectancy']:+.3f}",
+                f"{s['avg_pnl_pct']:+.3f}%"
             ])
-        t = Table(rows, colWidths=[2.2*cm, 1.3*cm, 1.9*cm, 4.5*cm, 1.8*cm, 1.6*cm, 2.0*cm])
+        t = Table(rows, colWidths=[1.6*cm, 2.0*cm, 1.0*cm, 1.5*cm, 3.6*cm,
+                                  0.8*cm, 1.2*cm, 1.3*cm, 1.5*cm])
         t.setStyle(TableStyle([
             ('BACKGROUND', (0,0), (-1,0), HexColor('#0a8f4c')),
             ('TEXTCOLOR', (0,0), (-1,0), white),
@@ -961,20 +1299,28 @@ def generate_learning_pdf() -> bytes:
         ))
     
     # Peores específicas
-    story.append(Paragraph("Top 15 peores combinaciones específicas", style_h2))
-    worst_specific = sorted(
-        [s for s in stats_specific if s['sample_size'] >= SPECIFIC_SAMPLES_MIN],
-        key=lambda r: (r['expectancy'], -r['sample_size'])
-    )[:15]
+    story.append(Paragraph("Peores combinaciones específicas por mercado", style_h2))
+    worst_specific = []
+    for market in ('spot', 'futures'):
+        market_rows = [
+            s for s in stats_specific
+            if s['market'] == market
+            and s['sample_size'] >= SPECIFIC_SAMPLES_MIN
+        ]
+        worst_specific.extend(
+            sorted(market_rows, key=lambda r: (r['expectancy'], -r['sample_size']))[:8]
+        )
     if worst_specific:
-        rows = [['Par', 'TF', 'Acción', 'Estrategia', 'Muestras', 'Win %', 'Expec.']]
+        rows = [['Mercado', 'Par', 'TF', 'Acción', 'Estrategia', 'N', 'Win %', 'Exp. R', 'PnL %']]
         for s in worst_specific:
             rows.append([
-                s['symbol'], s['timeframe'], s['action'],
-                s['strategy'][:22], str(s['sample_size']),
-                f"{s['win_rate']}%", f"{s['expectancy']}"
+                s['market'].upper(), s['symbol'], s['timeframe'], s['action'],
+                s['strategy'][:20], str(s['sample_size']),
+                f"{s['win_rate']}%", f"{s['expectancy']:+.3f}",
+                f"{s['avg_pnl_pct']:+.3f}%"
             ])
-        t = Table(rows, colWidths=[2.2*cm, 1.3*cm, 1.9*cm, 4.5*cm, 1.8*cm, 1.6*cm, 2.0*cm])
+        t = Table(rows, colWidths=[1.6*cm, 2.0*cm, 1.0*cm, 1.5*cm, 3.6*cm,
+                                  0.8*cm, 1.2*cm, 1.3*cm, 1.5*cm])
         t.setStyle(TableStyle([
             ('BACKGROUND', (0,0), (-1,0), HexColor('#c92a2a')),
             ('TEXTCOLOR', (0,0), (-1,0), white),
@@ -987,15 +1333,13 @@ def generate_learning_pdf() -> bytes:
     else:
         story.append(Paragraph(f"<i>Sin datos suficientes.</i>", style_body))
     
-    story.append(PageBreak())
-    
     # ============ v22: 7. ESTRATEGIAS POR TRADER (auditoría del comité) ============
     # Permite al usuario verificar que cada uno de los 10 traders está
     # aportando estrategias distintas y qué performance tiene cada uno.
     story.append(Paragraph("Estrategias por trader (cobertura del comité)", style_h2))
     story.append(Paragraph(
         "Cada uno de los 10 traders del sistema emite un conjunto de estrategias distintas. "
-        "Esta tabla muestra <b>qué está aportando cada trader</b>: cuántas estrategias diferentes "
+        "La contribución se separa por mercado. Esta tabla muestra <b>qué está aportando cada trader</b>: cuántas estrategias diferentes "
         "ha emitido, cuántas señales resueltas tiene y su win rate. Si un trader tiene 0 señales, "
         "significa que no ha aportado en el período — puede indicar que no encuentra setups o que "
         "sus estrategias están silenciadas por el régimen de mercado actual.",
@@ -1004,10 +1348,11 @@ def generate_learning_pdf() -> bytes:
     
     stats_by_trader = _calc_stats_by_trader(signals_with_ind) if signals_with_ind else []
     if stats_by_trader:
-        rows = [['Trader', '# Estrategias', 'Señales', 'TP', 'SL', 'Expired', 'Win %']]
+        rows = [['Mercado', 'Trader', '# Estr.', 'Señales', 'TP', 'SL', 'Expired', 'Win %']]
         for s in stats_by_trader:
             active_mark = '' if s['signals'] > 0 else ' (inactivo)'
             rows.append([
+                s['market'].upper(),
                 s['trader'] + active_mark,
                 str(s['unique_strategies']),
                 str(s['signals']),
@@ -1016,7 +1361,8 @@ def generate_learning_pdf() -> bytes:
                 str(s['expired']),
                 f"{s['win_rate']}%" if s['signals'] > 0 else '—'
             ])
-        t = Table(rows, colWidths=[4.5*cm, 2.2*cm, 1.8*cm, 1.5*cm, 1.5*cm, 2*cm, 2*cm])
+        t = Table(rows, colWidths=[1.7*cm, 3.8*cm, 1.4*cm, 1.5*cm, 1.0*cm,
+                                  1.0*cm, 1.5*cm, 1.4*cm])
         t.setStyle(TableStyle([
             ('BACKGROUND', (0,0), (-1,0), HexColor('#1a5490')),
             ('TEXTCOLOR', (0,0), (-1,0), white),
@@ -1030,32 +1376,35 @@ def generate_learning_pdf() -> bytes:
         story.append(Spacer(1, 8))
         
         # Detalle: estrategias emitidas por cada trader activo
-        story.append(Paragraph("Estrategias emitidas por cada trader (detalle)", style_h3))
+        trader_details = [
+            Paragraph("Estrategias emitidas por cada trader (detalle)", style_h3)
+        ]
         for s in stats_by_trader:
             if s['unique_strategies'] == 0:
                 continue
             strategies_str = ', '.join(s['strategies'])
-            story.append(Paragraph(
-                f"<b>{s['trader']}</b> ({s['unique_strategies']} estrategias): "
+            trader_details.append(Paragraph(
+                f"<b>[{s['market'].upper()}] {s['trader']}</b> "
+                f"({s['unique_strategies']} estrategias): "
                 f"<font color='#555'>{strategies_str}</font>",
                 style_note
             ))
+        story.append(KeepTogether(trader_details))
     else:
         story.append(Paragraph("<i>Sin datos suficientes — el sistema aún no ha resuelto señales.</i>", style_body))
     
-    story.append(PageBreak())
-    
     # ============ 8. APRENDIZAJE POR PAR ============
-    story.append(Paragraph("Aprendizaje por par (todos los TFs y acciones)", style_h2))
+    story.append(Paragraph("Aprendizaje por par y mercado", style_h2))
     if stats_by_symbol:
-        rows = [['Par', 'Wins (TP)', 'Losses (SL)', 'Expired', 'Missed', 'Muestras', 'Win %']]
+        rows = [['Mercado', 'Par', 'TP', 'SL', 'Expired', 'N', 'Win %', 'Exp. R', 'PnL %']]
         for s in stats_by_symbol:
             rows.append([
-                s['symbol'], str(s['wins']), str(s['losses']),
-                str(s['expired']), str(s['missed']),
-                str(s['sample_size']), f"{s['win_rate']}%"
+                s['market'].upper(), s['symbol'], str(s['wins']), str(s['losses']),
+                str(s['expired']), str(s['sample_size']), f"{s['win_rate']}%",
+                f"{s['expectancy']:+.3f}", f"{s['avg_pnl_pct']:+.3f}%"
             ])
-        t = Table(rows, colWidths=[2.5*cm, 2*cm, 2*cm, 1.8*cm, 1.8*cm, 2*cm, 2*cm])
+        t = Table(rows, colWidths=[1.8*cm, 2.3*cm, 1.0*cm, 1.0*cm, 1.4*cm,
+                                  1.0*cm, 1.3*cm, 1.3*cm, 1.5*cm])
         t.setStyle(TableStyle([
             ('BACKGROUND', (0,0), (-1,0), HexColor('#1a5490')),
             ('TEXTCOLOR', (0,0), (-1,0), white),
@@ -1070,16 +1419,18 @@ def generate_learning_pdf() -> bytes:
         story.append(Paragraph("<i>Sin datos.</i>", style_body))
     
     # ============ 8. APRENDIZAJE POR TIMEFRAME ============
-    story.append(Paragraph("Aprendizaje por timeframe (todos los pares y acciones)", style_h2))
+    story.append(Paragraph("Aprendizaje por timeframe y mercado", style_h2))
     if stats_by_tf:
-        rows = [['Timeframe', 'Wins (TP)', 'Losses (SL)', 'Expired', 'Muestras', 'Win %']]
+        rows = [['Mercado', 'Timeframe', 'TP', 'SL', 'Expired', 'N', 'Win %', 'Exp. R', 'PnL %']]
         for s in stats_by_tf:
             rows.append([
-                s['timeframe'], str(s['wins']), str(s['losses']),
-                str(s['expired']), str(s['sample_size']),
-                f"{s['win_rate']}%"
+                s['market'].upper(), s['timeframe'], str(s['wins']),
+                str(s['losses']), str(s['expired']), str(s['sample_size']),
+                f"{s['win_rate']}%", f"{s['expectancy']:+.3f}",
+                f"{s['avg_pnl_pct']:+.3f}%"
             ])
-        t = Table(rows, colWidths=[3*cm, 2.5*cm, 2.5*cm, 2*cm, 2.5*cm, 2.5*cm])
+        t = Table(rows, colWidths=[1.8*cm, 2.0*cm, 1.0*cm, 1.0*cm, 1.4*cm,
+                                  1.0*cm, 1.3*cm, 1.3*cm, 1.5*cm])
         t.setStyle(TableStyle([
             ('BACKGROUND', (0,0), (-1,0), HexColor('#1a5490')),
             ('TEXTCOLOR', (0,0), (-1,0), white),
@@ -1100,8 +1451,9 @@ def generate_learning_pdf() -> bytes:
     story.append(Paragraph(
         f"Se han detectado <b>{missed_analysis['total']}</b> oportunidades perdidas — "
         f"casos donde el sistema decidió NO_OPERAR pero el precio se movió >2% en una "
-        f"dirección clara. El análisis de qué indicadores estaban activos revela dónde "
-        f"el sistema está siendo demasiado conservador.",
+        f"dirección clara. La tabla histórica no identifica de forma fiable Spot/Futuros "
+        f"ni demuestra que la entrada hubiese sido ejecutable. Por eso se usa sólo para "
+        f"formular hipótesis y no para subir pesos automáticamente.",
         style_body
     ))
     
@@ -1109,8 +1461,8 @@ def generate_learning_pdf() -> bytes:
         story.append(Paragraph("Top 15 indicadores/estrategias más frecuentes en oportunidades perdidas", style_h3))
         story.append(Paragraph(
             "Cuando estos indicadores estaban activos, el sistema no operó pero el mercado sí se movió. "
-            "Si aparecen muchas veces, sugieren que el sistema debería <b>ponderar más</b> "
-            "su señal para no dejarlas pasar.",
+            "La frecuencia por sí sola <b>no prueba rentabilidad</b>: falta confirmar Entry, "
+            "SL, TP, costos y mercado de procedencia.",
             style_note
         ))
         rows = [['#', 'Indicador / Estrategia', 'Veces aparece', 'Movimiento medio']]
@@ -1131,8 +1483,8 @@ def generate_learning_pdf() -> bytes:
         story.append(Paragraph("Top 10 COMBINACIONES de indicadores en oportunidades perdidas", style_h3))
         story.append(Paragraph(
             "Estas combinaciones de 2 indicadores/estrategias aparecen juntas frecuentemente "
-            "cuando el sistema no toma la operación pero el precio sí se mueve. Son <b>señales "
-            "confluentes que el sistema aprendió a identificar pero que aún no traduce en trade</b>.",
+            "cuando el sistema no toma la operación pero el precio sí se mueve. Son candidatos "
+            "para pruebas posteriores, <b>no señales autorizadas de trade</b>.",
             style_note
         ))
         rows = [['#', 'Combinación', 'Veces aparece', 'Movimiento medio']]
@@ -1181,12 +1533,18 @@ def generate_learning_pdf() -> bytes:
         f"<b>{GENERAL_SAMPLES_RIGOROUS}</b>"
         f"<br/>• Muestras mínimas para mostrar en el PDF (preliminares): "
         f"<b>{SPECIFIC_SAMPLES_MIN}/{GENERAL_SAMPLES_MIN}</b>"
-        f"<br/>• Win rate objetivo para 'estrategia ganadora': ≥ 60%"
-        f"<br/>• Win rate objetivo para 'estrategia perdedora': ≤ 40%"
+        f"<br/>• El win rate es descriptivo: no demuestra rentabilidad sin tamaño de "
+        f"ganancias, pérdidas y costos."
+        f"<br/>• Expectancy R = promedio de cada resultado dividido por el riesgo "
+        f"Entry–SL de esa misma señal; no se supone RR fijo 2:1."
         f"<br/><br/>"
         f"<b>Cómo se aprende:</b>"
         f"<br/>• El learning worker corre cada 15 minutos: evalúa señales pendientes y "
-        f"marca si tocaron TP, SL o expiraron."
+        f"marca TP, SL, expiración, ambigüedad o setup inválido."
+        f"<br/>• TP y SL en la misma vela no cuentan como win ni loss hasta resolver "
+        f"su orden con datos más finos."
+        f"<br/>• Futuros sólo usa contratos perpetuos reales, vela fuente cerrada y "
+        f"señales que superaron el filtro de publicación. El legado queda en cuarentena."
         f"<br/>• Cada 4 horas se recalculan las estadísticas cachedas y las recomendaciones."
         f"<br/>• A las 20:00 hora Bolivia corre el ciclo diario completo (evaluación + "
         f"detección de oportunidades perdidas + recalculo + optimización)."
@@ -1197,7 +1555,9 @@ def generate_learning_pdf() -> bytes:
         f"proporcional a cuántas coinciden con las estrategias activas actuales."
         f"<br/>• El voto se pondera con peso 1.0 en el consenso final junto a los otros 9 traders."
         f"<br/>• Las 'oportunidades perdidas' se registran para futura calibración pero "
-        f"aún no ajustan automáticamente las decisiones — es información para el operador humano.",
+        f"aún no ajustan automáticamente las decisiones — es información para el operador humano."
+        f"<br/>• El PnL de este informe es bruto. Comisión, slippage y funding se "
+        f"incorporarán en la siguiente fase económica.",
         style_body
     ))
     
