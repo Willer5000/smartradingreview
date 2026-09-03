@@ -275,6 +275,92 @@ FUTURES_RISK_CONFIG = {
     'maximum_publication_atr_stress_loss_pct_margin': 25.0,
 }
 
+# ============================================================================
+# CAPA CUANTITATIVA FUTURES — CONFIGURACIÓN POR TEMPORALIDAD
+# ============================================================================
+#
+# Esta capa usa únicamente las velas OHLCV cerradas del contrato perpetuo que
+# el sistema ya descargó. No consulta servicios de pago ni crea datos que no
+# existen (footprint, bid/ask real, opciones o griegas).
+#
+# En este primer paso trabaja en SHADOW/OBSERVACIÓN: describe el régimen y la
+# calidad del setup, pero NO puede aprobar, rechazar, aumentar leverage ni
+# modificar Entry/SL/TP. Primero necesitamos guardar una cohorte limpia y
+# comparar estas métricas con resultados reales.
+FUTURES_QUANT_MODEL_VERSION = 'closed_returns_regime_v1'
+
+FUTURES_QUANT_CONFIG = {
+    # Los TF cortos exigen mayor eficiencia direccional porque contienen más
+    # ruido. Los lookbacks se expresan en velas y siempre caben dentro de las
+    # 100 velas reales mínimas exigidas al proveedor.
+    '5m': {
+        'trend_window': 36,
+        'volatility_fast_window': 12,
+        'volatility_slow_window': 72,
+        'trend_efficiency_min': 0.30,
+        'balance_efficiency_max': 0.16,
+        'drift_strength_min': 1.10,
+        'return_shock_z': 3.75,
+        'volatility_shock_ratio': 2.25,
+        'max_pullback_atr': 1.50,
+    },
+    '15m': {
+        'trend_window': 32,
+        'volatility_fast_window': 12,
+        'volatility_slow_window': 64,
+        'trend_efficiency_min': 0.28,
+        'balance_efficiency_max': 0.17,
+        'drift_strength_min': 1.05,
+        'return_shock_z': 3.75,
+        'volatility_shock_ratio': 2.20,
+        'max_pullback_atr': 1.55,
+    },
+    '30m': {
+        'trend_window': 28,
+        'volatility_fast_window': 10,
+        'volatility_slow_window': 56,
+        'trend_efficiency_min': 0.26,
+        'balance_efficiency_max': 0.18,
+        'drift_strength_min': 1.00,
+        'return_shock_z': 3.60,
+        'volatility_shock_ratio': 2.15,
+        'max_pullback_atr': 1.60,
+    },
+    '1h': {
+        'trend_window': 24,
+        'volatility_fast_window': 8,
+        'volatility_slow_window': 48,
+        'trend_efficiency_min': 0.24,
+        'balance_efficiency_max': 0.19,
+        'drift_strength_min': 0.95,
+        'return_shock_z': 3.50,
+        'volatility_shock_ratio': 2.10,
+        'max_pullback_atr': 1.70,
+    },
+    '2h': {
+        'trend_window': 20,
+        'volatility_fast_window': 8,
+        'volatility_slow_window': 40,
+        'trend_efficiency_min': 0.22,
+        'balance_efficiency_max': 0.20,
+        'drift_strength_min': 0.90,
+        'return_shock_z': 3.40,
+        'volatility_shock_ratio': 2.05,
+        'max_pullback_atr': 1.80,
+    },
+    '4h': {
+        'trend_window': 18,
+        'volatility_fast_window': 6,
+        'volatility_slow_window': 36,
+        'trend_efficiency_min': 0.20,
+        'balance_efficiency_max': 0.20,
+        'drift_strength_min': 0.85,
+        'return_shock_z': 3.25,
+        'volatility_shock_ratio': 2.00,
+        'max_pullback_atr': 2.00,
+    },
+}
+
 def _leverage_in_valid_range(
     leverage: int,
     timeframe: str
@@ -529,6 +615,453 @@ class FuturesAnalysis(TradingExpertSystem):
         self._futures_data_errors[error_key] = error
         logger.warning(f'{symbol} {interval}: {error}')
         return None
+
+    def _analyze_quantitative_futures_context(
+        self,
+        df: pd.DataFrame,
+        action: str,
+        timeframe: str,
+        entry_price: Optional[float] = None,
+    ) -> Dict:
+        """
+        Mide el contexto cuantitativo con velas perpetuas ya cerradas.
+
+        Es una capa de investigación, no un oráculo ni una probabilidad de
+        ganar. En ``SHADOW_OBSERVATION`` sus métricas se guardan para poder
+        contrastarlas posteriormente con TP/SL reales; no cambia la decisión,
+        los niveles, el leverage ni el filtro de publicación.
+        """
+        base = {
+            'available': False,
+            'model_version': FUTURES_QUANT_MODEL_VERSION,
+            'mode': 'SHADOW_OBSERVATION',
+            'calibrated': False,
+            'affects_publication': False,
+            'data_scope': 'CLOSED_PERPETUAL_OHLCV_ONLY',
+            'quality_score_status': (
+                'UNVALIDATED_PROXY_NOT_WIN_PROBABILITY'
+            ),
+            'limitations': [
+                'NO_REAL_BID_ASK_OR_FOOTPRINT',
+                'NO_OPTIONS_GREEKS_OR_GEX',
+            ],
+        }
+
+        config = FUTURES_QUANT_CONFIG.get(timeframe)
+        if not config:
+            return {
+                **base,
+                'status': 'UNSUPPORTED_TIMEFRAME',
+                'reason': f'Sin configuración cuantitativa para {timeframe}',
+            }
+
+        try:
+            if not isinstance(df, pd.DataFrame):
+                raise ValueError('Los datos cuantitativos no son un DataFrame')
+
+            required_columns = ('high', 'low', 'close')
+            missing = [column for column in required_columns if column not in df]
+            if missing:
+                raise ValueError(
+                    'Faltan columnas OHLC: ' + ', '.join(missing)
+                )
+
+            prices = df.loc[:, required_columns].copy()
+            for column in required_columns:
+                prices[column] = pd.to_numeric(
+                    prices[column],
+                    errors='coerce',
+                )
+
+            valid_rows = pd.Series(True, index=prices.index)
+            for column in required_columns:
+                valid_rows &= prices[column].map(
+                    lambda value: (
+                        pd.notna(value)
+                        and math.isfinite(float(value))
+                        and float(value) > 0
+                    )
+                )
+
+            prices = prices.loc[valid_rows].reset_index(drop=True)
+            minimum_samples = max(
+                int(config['volatility_slow_window']) + 2,
+                int(config['trend_window']) + 2,
+                30,
+            )
+
+            if len(prices) < minimum_samples:
+                return {
+                    **base,
+                    'status': 'INSUFFICIENT_DATA',
+                    'reason': (
+                        f'{len(prices)} velas válidas; '
+                        f'se requieren {minimum_samples}'
+                    ),
+                    'sample_size': int(len(prices)),
+                    'minimum_sample_size': int(minimum_samples),
+                    'shadow_verdict': 'INSUFFICIENT_DATA',
+                }
+
+            close = prices['close'].astype(float)
+            high = prices['high'].astype(float)
+            low = prices['low'].astype(float)
+            returns = close.pct_change().dropna()
+
+            trend_window = int(config['trend_window'])
+            fast_window = int(config['volatility_fast_window'])
+            slow_window = int(config['volatility_slow_window'])
+
+            path = close.tail(trend_window + 1)
+            path_changes = path.diff().dropna()
+            path_distance = float(path_changes.abs().sum())
+            net_move = float(path.iloc[-1] - path.iloc[0])
+            efficiency_ratio = (
+                abs(net_move) / path_distance
+                if path_distance > 0
+                else 0.0
+            )
+            trend_move_pct = (
+                (float(path.iloc[-1]) / float(path.iloc[0]) - 1.0)
+                * 100.0
+            )
+
+            trend_returns = returns.tail(trend_window)
+            mean_return = float(trend_returns.mean())
+            return_std = float(trend_returns.std(ddof=1) or 0.0)
+            drift_strength = (
+                mean_return
+                / return_std
+                * math.sqrt(len(trend_returns))
+                if return_std > 1e-12
+                else 0.0
+            )
+
+            short_volatility = float(
+                returns.tail(fast_window).std(ddof=1) or 0.0
+            )
+            long_volatility = float(
+                returns.tail(slow_window).std(ddof=1) or 0.0
+            )
+            if long_volatility > 1e-12:
+                volatility_ratio = short_volatility / long_volatility
+            elif short_volatility <= 1e-12:
+                volatility_ratio = 1.0
+            else:
+                volatility_ratio = 99.0
+
+            latest_return = float(returns.iloc[-1])
+            return_history = returns.tail(slow_window + 1).iloc[:-1]
+            return_median = float(return_history.median())
+            median_deviation = float(
+                (return_history - return_median).abs().median()
+            )
+            robust_sigma = median_deviation * 1.4826
+            if robust_sigma <= 1e-12:
+                robust_sigma = float(return_history.std(ddof=1) or 0.0)
+            if robust_sigma > 1e-12:
+                return_anomaly_z = (
+                    latest_return - return_median
+                ) / robust_sigma
+            elif abs(latest_return - return_median) <= 1e-12:
+                return_anomaly_z = 0.0
+            else:
+                return_anomaly_z = math.copysign(99.0, latest_return)
+            return_anomaly_z = max(-99.0, min(99.0, return_anomaly_z))
+
+            rolling_volatility = (
+                returns
+                .rolling(fast_window, min_periods=fast_window)
+                .std(ddof=1)
+                .dropna()
+                .tail(slow_window)
+            )
+            if not rolling_volatility.empty:
+                current_rolling_volatility = float(
+                    rolling_volatility.iloc[-1]
+                )
+                volatility_percentile = float(
+                    (rolling_volatility <= current_rolling_volatility).mean()
+                    * 100.0
+                )
+            else:
+                volatility_percentile = 50.0
+
+            previous_close = close.shift(1)
+            true_range = pd.concat(
+                [
+                    (high - low).abs(),
+                    (high - previous_close).abs(),
+                    (low - previous_close).abs(),
+                ],
+                axis=1,
+            ).max(axis=1)
+            atr = float(true_range.tail(14).mean() or 0.0)
+            source_price = float(close.iloc[-1])
+            atr_pct = (
+                atr / source_price * 100.0
+                if source_price > 0
+                else 0.0
+            )
+
+            try:
+                autocorrelation = float(
+                    trend_returns.autocorr(lag=1) or 0.0
+                )
+                if not math.isfinite(autocorrelation):
+                    autocorrelation = 0.0
+            except Exception:
+                autocorrelation = 0.0
+
+            shock_detected = (
+                abs(return_anomaly_z) >= float(config['return_shock_z'])
+                or volatility_ratio
+                >= float(config['volatility_shock_ratio'])
+            )
+            trend_detected = (
+                efficiency_ratio >= float(config['trend_efficiency_min'])
+                and abs(drift_strength)
+                >= float(config['drift_strength_min'])
+            )
+            balance_detected = (
+                efficiency_ratio <= float(config['balance_efficiency_max'])
+                and abs(drift_strength)
+                < float(config['drift_strength_min'])
+            )
+
+            if shock_detected:
+                regime = 'VOLATILITY_SHOCK'
+            elif trend_detected and trend_move_pct > 0:
+                regime = 'TREND_UP'
+            elif trend_detected and trend_move_pct < 0:
+                regime = 'TREND_DOWN'
+            elif balance_detected:
+                regime = 'BALANCE'
+            else:
+                regime = 'TRANSITION'
+
+            if trend_move_pct > 0 and drift_strength > 0:
+                quantitative_direction = 'BULLISH'
+            elif trend_move_pct < 0 and drift_strength < 0:
+                quantitative_direction = 'BEARISH'
+            else:
+                quantitative_direction = 'NEUTRAL'
+
+            normalized_action = str(action or 'NO_OPERAR').upper()
+            if normalized_action == 'COMPRA_SPOT':
+                normalized_action = 'LONG'
+            elif normalized_action == 'VENTA_SPOT':
+                normalized_action = 'SHORT'
+
+            directional_setup = normalized_action in ('LONG', 'SHORT')
+            direction_aligned = (
+                (normalized_action == 'LONG'
+                 and quantitative_direction == 'BULLISH')
+                or
+                (normalized_action == 'SHORT'
+                 and quantitative_direction == 'BEARISH')
+            )
+            direction_conflict = (
+                (normalized_action == 'LONG'
+                 and quantitative_direction == 'BEARISH')
+                or
+                (normalized_action == 'SHORT'
+                 and quantitative_direction == 'BULLISH')
+            )
+
+            if not directional_setup:
+                direction_alignment = 'NOT_APPLICABLE'
+            elif direction_aligned:
+                direction_alignment = 'ALIGNED'
+            elif direction_conflict:
+                direction_alignment = 'CONFLICT'
+            else:
+                direction_alignment = 'NEUTRAL'
+
+            entry_location = 'UNAVAILABLE'
+            entry_distance_atr = None
+            entry_pullback_signed_atr = None
+            try:
+                normalized_entry = float(entry_price or 0.0)
+            except (TypeError, ValueError):
+                normalized_entry = 0.0
+
+            if directional_setup and normalized_entry > 0 and atr > 1e-12:
+                if normalized_action == 'LONG':
+                    entry_pullback_signed_atr = (
+                        source_price - normalized_entry
+                    ) / atr
+                else:
+                    entry_pullback_signed_atr = (
+                        normalized_entry - source_price
+                    ) / atr
+
+                entry_distance_atr = abs(entry_pullback_signed_atr)
+                if entry_pullback_signed_atr < -0.10:
+                    entry_location = 'NOT_PULLBACK'
+                elif entry_pullback_signed_atr <= 0.10:
+                    entry_location = 'AT_SOURCE_PRICE'
+                elif entry_pullback_signed_atr <= float(
+                    config['max_pullback_atr']
+                ):
+                    entry_location = 'PULLBACK'
+                else:
+                    entry_location = 'DEEP_PULLBACK'
+
+            reasons = []
+            quality_score = 50.0
+
+            if directional_setup:
+                if direction_aligned:
+                    quality_score += 20.0
+                    reasons.append('Dirección cuantitativa alineada')
+                elif direction_conflict:
+                    quality_score -= 30.0
+                    reasons.append('Dirección cuantitativa opuesta al setup')
+                else:
+                    quality_score -= 5.0
+                    reasons.append('Dirección cuantitativa todavía neutral')
+
+                if regime in ('TREND_UP', 'TREND_DOWN'):
+                    quality_score += 15.0 if direction_aligned else 0.0
+                    reasons.append(f'Régimen direccional {regime}')
+                elif regime == 'VOLATILITY_SHOCK':
+                    quality_score -= 25.0
+                    reasons.append('Choque de volatilidad detectado')
+                elif regime == 'BALANCE':
+                    quality_score -= 15.0
+                    reasons.append('Mercado en balance: menor ventaja direccional')
+                else:
+                    reasons.append('Mercado en transición')
+
+                if entry_location == 'PULLBACK':
+                    quality_score += 10.0
+                    reasons.append('Entry ubicado en retroceso medido por ATR')
+                elif entry_location == 'AT_SOURCE_PRICE':
+                    quality_score += 3.0
+                    reasons.append('Entry próximo al cierre fuente')
+                elif entry_location == 'NOT_PULLBACK':
+                    quality_score -= 20.0
+                    reasons.append('Entry no está en retroceso')
+                elif entry_location == 'DEEP_PULLBACK':
+                    quality_score -= 10.0
+                    reasons.append('Entry profundo: menor probabilidad de toque')
+                else:
+                    quality_score -= 5.0
+                    reasons.append('No se pudo evaluar la ubicación del Entry')
+
+                if abs(return_anomaly_z) < 2.0:
+                    quality_score += 5.0
+                elif shock_detected:
+                    quality_score -= 15.0
+
+                if 0.60 <= volatility_ratio <= 1.50:
+                    quality_score += 5.0
+                elif volatility_ratio >= float(
+                    config['volatility_shock_ratio']
+                ):
+                    quality_score -= 10.0
+
+            quality_score = round(max(0.0, min(100.0, quality_score)), 2)
+
+            if not directional_setup:
+                shadow_verdict = 'NO_DIRECTIONAL_SETUP'
+            elif (
+                shock_detected
+                or direction_conflict
+                or entry_location == 'NOT_PULLBACK'
+            ):
+                shadow_verdict = 'REJECT_CANDIDATE'
+            elif (
+                quality_score >= 70.0
+                and direction_aligned
+                and regime in ('TREND_UP', 'TREND_DOWN')
+            ):
+                shadow_verdict = 'FAVORABLE_CANDIDATE'
+            elif quality_score >= 55.0:
+                shadow_verdict = 'CAUTION_CANDIDATE'
+            else:
+                shadow_verdict = 'REJECT_CANDIDATE'
+
+            return {
+                **base,
+                'available': True,
+                'status': 'OBSERVED_NOT_ENFORCED',
+                'sample_size': int(len(prices)),
+                'minimum_sample_size': int(minimum_samples),
+                'timeframe': timeframe,
+                'action_evaluated': normalized_action,
+                'regime': regime,
+                'direction': quantitative_direction,
+                'direction_alignment': direction_alignment,
+                'entry_location': entry_location,
+                'shadow_verdict': shadow_verdict,
+                'quality_score': quality_score,
+                'reasons': reasons,
+                'metrics': {
+                    'source_price': round(source_price, 10),
+                    'latest_return_pct': round(latest_return * 100.0, 6),
+                    'return_anomaly_robust_z': round(return_anomaly_z, 4),
+                    'directional_efficiency_ratio': round(
+                        efficiency_ratio,
+                        4,
+                    ),
+                    'trend_move_pct': round(trend_move_pct, 6),
+                    'drift_strength': round(drift_strength, 4),
+                    'return_autocorrelation_lag1': round(
+                        autocorrelation,
+                        4,
+                    ),
+                    'realized_volatility_fast_pct': round(
+                        short_volatility * 100.0,
+                        6,
+                    ),
+                    'realized_volatility_slow_pct': round(
+                        long_volatility * 100.0,
+                        6,
+                    ),
+                    'fast_slow_volatility_ratio': round(
+                        volatility_ratio,
+                        4,
+                    ),
+                    'volatility_percentile': round(
+                        volatility_percentile,
+                        2,
+                    ),
+                    'atr_pct': round(atr_pct, 6),
+                    'entry_distance_atr': (
+                        round(entry_distance_atr, 4)
+                        if entry_distance_atr is not None
+                        else None
+                    ),
+                    'entry_pullback_signed_atr': (
+                        round(entry_pullback_signed_atr, 4)
+                        if entry_pullback_signed_atr is not None
+                        else None
+                    ),
+                },
+                'thresholds': {
+                    key: (
+                        int(value)
+                        if isinstance(value, int)
+                        else float(value)
+                    )
+                    for key, value in config.items()
+                },
+            }
+
+        except Exception as exc:
+            logger.warning(
+                'Capa cuantitativa Futures no disponible para %s: %s',
+                timeframe,
+                exc,
+            )
+            return {
+                **base,
+                'status': 'CALCULATION_ERROR',
+                'reason': str(exc),
+                'shadow_verdict': 'UNAVAILABLE',
+            }
             
     def _calculate_execution_safety(
         self,
@@ -2608,6 +3141,81 @@ class FuturesAnalysis(TradingExpertSystem):
             result['market_data_candles'] = closed_context[
                 'market_data_candles'
             ]
+
+        # ============ CAPA CUANTITATIVA FUTURES (SHADOW) ============
+        #
+        # Se calcula DESPUÉS de la decisión para poder medir alineación y la
+        # ubicación del Entry, pero no retroalimenta al comité ni reabre el
+        # filtro de publicación. Sus resultados quedan listos para formar una
+        # cohorte estadística separada en ReviewTrader.
+        levels_for_quant = dict(result.get('levels') or {})
+        if closed_context:
+            quantitative_context = (
+                self._analyze_quantitative_futures_context(
+                    df=closed_context['closed_df'],
+                    action=translated_action,
+                    timeframe=timeframe,
+                    entry_price=levels_for_quant.get('entry'),
+                )
+            )
+        else:
+            quantitative_context = {
+                'available': False,
+                'model_version': FUTURES_QUANT_MODEL_VERSION,
+                'mode': 'SHADOW_OBSERVATION',
+                'calibrated': False,
+                'affects_publication': False,
+                'data_scope': 'CLOSED_PERPETUAL_OHLCV_ONLY',
+                'quality_score_status': (
+                    'UNVALIDATED_PROXY_NOT_WIN_PROBABILITY'
+                ),
+                'status': 'REQUIRES_CLOSED_CANDLE_MODE',
+                'shadow_verdict': 'UNAVAILABLE',
+            }
+
+        result['futures_quantitative_context'] = quantitative_context
+        levels_for_quant['quantitative_model_version'] = (
+            quantitative_context.get('model_version')
+        )
+        levels_for_quant['quantitative_regime'] = (
+            quantitative_context.get('regime', 'UNAVAILABLE')
+        )
+        levels_for_quant['quantitative_direction_alignment'] = (
+            quantitative_context.get(
+                'direction_alignment',
+                'NOT_APPLICABLE',
+            )
+        )
+        levels_for_quant['quantitative_shadow_verdict'] = (
+            quantitative_context.get('shadow_verdict', 'UNAVAILABLE')
+        )
+        levels_for_quant['quantitative_quality_score'] = float(
+            quantitative_context.get('quality_score', 0.0) or 0.0
+        )
+        levels_for_quant['quantitative_affects_publication'] = False
+        result['levels'] = levels_for_quant
+
+        decision['quantitative_observation'] = {
+            'regime': quantitative_context.get('regime', 'UNAVAILABLE'),
+            'direction': quantitative_context.get('direction', 'NEUTRAL'),
+            'alignment': quantitative_context.get(
+                'direction_alignment',
+                'NOT_APPLICABLE',
+            ),
+            'entry_location': quantitative_context.get(
+                'entry_location',
+                'UNAVAILABLE',
+            ),
+            'shadow_verdict': quantitative_context.get(
+                'shadow_verdict',
+                'UNAVAILABLE',
+            ),
+            'quality_score': float(
+                quantitative_context.get('quality_score', 0.0) or 0.0
+            ),
+            'affects_publication': False,
+        }
+        result['decision'] = decision
         
         # ============ ADAPTAR JUSTIFICACIÓN AL CONTEXTO DE FUTUROS ============
         # El mensaje se generó con la acción original (COMPRA_SPOT / VENTA_SPOT)
