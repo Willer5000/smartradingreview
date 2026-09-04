@@ -499,89 +499,328 @@ def render_indicator_chart(df: pd.DataFrame, indicator: str,
         return None
 
 
+def _safe_chart_number(value):
+    """Convierte un valor de análisis a float finito para uso gráfico."""
+    try:
+        number = float(value)
+        return number if np.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_chart_price(value):
+    """Formato de precio adaptativo para BTC, altcoins y ratios como PAXG-BTC."""
+    value = _safe_chart_number(value)
+    if value is None:
+        return '--'
+    absolute = abs(value)
+    if absolute >= 1000:
+        return f'{value:,.2f}'
+    if absolute >= 1:
+        return f'{value:.4f}'
+    if absolute >= 0.01:
+        return f'{value:.5f}'
+    return f'{value:.8f}'
+
+
+def _calc_visual_atr(highs, lows, closes, period=14):
+    """ATR sólo para visualización; no participa en decisiones del sistema."""
+    highs = np.asarray(highs, dtype=float)
+    lows = np.asarray(lows, dtype=float)
+    closes = np.asarray(closes, dtype=float)
+    prev_close = np.roll(closes, 1)
+    prev_close[0] = closes[0]
+    tr = np.maximum(
+        highs - lows,
+        np.maximum(np.abs(highs - prev_close), np.abs(lows - prev_close))
+    )
+    return _calc_ema(tr, period)
+
+
+def _calc_visual_supertrend(highs, lows, closes, period=10, multiplier=3.0):
+    """SuperTrend reproducible para el panel visual de Telegram."""
+    highs = np.asarray(highs, dtype=float)
+    lows = np.asarray(lows, dtype=float)
+    closes = np.asarray(closes, dtype=float)
+    n = len(closes)
+    atr = _calc_visual_atr(highs, lows, closes, period)
+    hl2 = (highs + lows) / 2.0
+    upper_basic = hl2 + multiplier * atr
+    lower_basic = hl2 - multiplier * atr
+    upper = upper_basic.copy()
+    lower = lower_basic.copy()
+    trend = np.ones(n, dtype=int)
+    supertrend = np.zeros(n, dtype=float)
+
+    for i in range(1, n):
+        if upper_basic[i] < upper[i - 1] or closes[i - 1] > upper[i - 1]:
+            upper[i] = upper_basic[i]
+        else:
+            upper[i] = upper[i - 1]
+
+        if lower_basic[i] > lower[i - 1] or closes[i - 1] < lower[i - 1]:
+            lower[i] = lower_basic[i]
+        else:
+            lower[i] = lower[i - 1]
+
+        if trend[i - 1] > 0:
+            trend[i] = -1 if closes[i] < lower[i] else 1
+        else:
+            trend[i] = 1 if closes[i] > upper[i] else -1
+
+        supertrend[i] = lower[i] if trend[i] > 0 else upper[i]
+
+    supertrend[0] = lower[0]
+    return supertrend, trend
+
+
+def _calc_visual_psar(highs, lows, step=0.02, max_step=0.2):
+    """Parabolic SAR ligero para visualización."""
+    highs = np.asarray(highs, dtype=float)
+    lows = np.asarray(lows, dtype=float)
+    n = len(highs)
+    psar = np.zeros(n, dtype=float)
+    if n == 0:
+        return psar
+
+    bull = True
+    af = step
+    ep = highs[0]
+    psar[0] = lows[0]
+
+    for i in range(1, n):
+        prev = psar[i - 1]
+        current = prev + af * (ep - prev)
+
+        if bull:
+            if i >= 2:
+                current = min(current, lows[i - 1], lows[i - 2])
+            else:
+                current = min(current, lows[i - 1])
+
+            if lows[i] < current:
+                bull = False
+                current = ep
+                ep = lows[i]
+                af = step
+            elif highs[i] > ep:
+                ep = highs[i]
+                af = min(max_step, af + step)
+        else:
+            if i >= 2:
+                current = max(current, highs[i - 1], highs[i - 2])
+            else:
+                current = max(current, highs[i - 1])
+
+            if highs[i] > current:
+                bull = True
+                current = ep
+                ep = highs[i]
+                af = step
+            elif lows[i] < ep:
+                ep = lows[i]
+                af = min(max_step, af + step)
+
+        psar[i] = current
+
+    return psar
+
+
 def render_telegram_signal_chart(symbol: str, timeframe: str,
                                    analysis: dict,
                                    indicators: List[str] = None,
-                                   width: int = 14, height: int = 12) -> Optional[bytes]:
+                                   width: int = 14, height: int = 14) -> Optional[bytes]:
     """
-    Genera UNA sola imagen combinada para alerta Telegram con:
-    - Panel superior: velas + EMAs + soportes/resistencias + niveles entry/SL/TP
-    - Paneles inferiores: hasta 4 indicadores que respaldan la señal
-    
-    Telegram solo acepta 1 imagen por sendPhoto, así que combinamos todo en
-    una sola figura de matplotlib. Es más eficiente que enviar múltiples fotos.
+    Genera UNA imagen operativa para Telegram:
+      - Panel principal grande con velas, niveles y zonas de riesgo/objetivo.
+      - Hasta 4 paneles con las evidencias técnicas seleccionadas para ESA señal.
+
+    Este renderer sólo visualiza. No modifica decisiones, niveles ni aprendizaje.
     """
     df = _prepare_df(analysis, min_candles=30, symbol=symbol, timeframe=timeframe)
     if df is None:
         logger.warning(f'render_telegram_signal_chart: sin df para {symbol} {timeframe}')
         return None
-    
-    indicators = (indicators or [])[:4]  # máximo 4 indicadores extra
+
+    # Evitar duplicados conservando el orden de importancia recibido desde app.py.
+    indicators = list(dict.fromkeys((indicators or [])))[:4]
     n_indicators = len(indicators)
-    
+
     try:
-        # Estructura: 1 fila principal grande + N filas de indicadores
         n_rows = 1 + n_indicators
-        height_ratios = [3] + [1] * n_indicators
+        height_ratios = [3.6] + [1.05] * n_indicators
         fig = plt.figure(figsize=(width, height), facecolor=COLORS['bg'])
-        gs = fig.add_gridspec(n_rows, 1, height_ratios=height_ratios, hspace=0.35)
-        
-        # ============ PANEL PRINCIPAL: velas + niveles ============
+        gs = fig.add_gridspec(
+            n_rows, 1,
+            height_ratios=height_ratios,
+            hspace=0.32
+        )
+
+        # ================================================================
+        # PANEL PRINCIPAL
+        # ================================================================
         ax_main = fig.add_subplot(gs[0])
+        ax_main.set_facecolor(COLORS['bg'])
         _draw_candles(ax_main, df)
-        
-        # EMAs
+
         closes = df['close'].values
-        for period, color in [(9, COLORS['blue']), (21, COLORS['yellow']),
-                              (50, COLORS['orange']), (200, COLORS['pink'])]:
+        for period, color in [
+            (9, COLORS['blue']),
+            (21, COLORS['yellow']),
+            (50, COLORS['orange']),
+            (200, COLORS['pink'])
+        ]:
             if len(closes) >= period:
                 ema = _calc_ema(closes, period)
-                ax_main.plot(df.index, ema, color=color, linewidth=1,
-                             label=f'EMA {period}', alpha=0.85)
-        
-        # Niveles Entry/SL/TP prominentes
+                ax_main.plot(
+                    df.index, ema,
+                    color=color,
+                    linewidth=0.9,
+                    label=f'EMA {period}',
+                    alpha=0.78
+                )
+
+        # Soportes/resistencias discretos para contexto, sin competir con Entry/SL/TP.
+        structure = analysis.get('structure', {}) or {}
+        for support in (structure.get('supports') or [])[:2]:
+            support = _safe_chart_number(support)
+            if support and support > 0:
+                ax_main.axhline(
+                    support,
+                    color=COLORS['green'],
+                    linestyle=':',
+                    linewidth=0.7,
+                    alpha=0.35
+                )
+        for resistance in (structure.get('resistances') or [])[:2]:
+            resistance = _safe_chart_number(resistance)
+            if resistance and resistance > 0:
+                ax_main.axhline(
+                    resistance,
+                    color=COLORS['red'],
+                    linestyle=':',
+                    linewidth=0.7,
+                    alpha=0.35
+                )
+
+        # ================================================================
+        # ENTRY / SL / TP — prominentes y legibles en móvil
+        # ================================================================
         levels = analysis.get('levels', {}) or {}
-        entry = levels.get('entry')
-        sl = levels.get('stop_loss')
-        tp = levels.get('take_profit')
-        if entry and entry > 0:
-            ax_main.axhline(y=entry, color=COLORS['blue'], linestyle='-',
-                            linewidth=1.8, alpha=0.9,
-                            label=f'ENTRY ${entry:.4f}')
-        if sl and sl > 0:
-            ax_main.axhline(y=sl, color=COLORS['red'], linestyle='-',
-                            linewidth=1.8, alpha=0.9, label=f'SL ${sl:.4f}')
-        if tp and tp > 0:
-            ax_main.axhline(y=tp, color=COLORS['green'], linestyle='-',
-                            linewidth=1.8, alpha=0.9, label=f'TP ${tp:.4f}')
-        
-        # Título principal
+        entry = _safe_chart_number(levels.get('entry'))
+        sl = _safe_chart_number(levels.get('stop_loss'))
+        tp = _safe_chart_number(levels.get('take_profit'))
+
+        if entry and tp:
+            ax_main.axhspan(
+                min(entry, tp), max(entry, tp),
+                color=COLORS['green'], alpha=0.045, zorder=0
+            )
+        if entry and sl:
+            ax_main.axhspan(
+                min(entry, sl), max(entry, sl),
+                color=COLORS['red'], alpha=0.045, zorder=0
+            )
+
+        def draw_trade_level(value, label, color, linewidth=2.2):
+            if not value or value <= 0:
+                return
+            ax_main.axhline(
+                y=value,
+                color=color,
+                linestyle='-',
+                linewidth=linewidth,
+                alpha=0.96,
+                zorder=6
+            )
+            ax_main.text(
+                0.995,
+                value,
+                f' {label}  {_format_chart_price(value)} ',
+                transform=ax_main.get_yaxis_transform(),
+                ha='right',
+                va='center',
+                fontsize=9,
+                fontweight='bold',
+                color='white',
+                bbox={
+                    'boxstyle': 'round,pad=0.25',
+                    'facecolor': color,
+                    'edgecolor': color,
+                    'alpha': 0.88,
+                },
+                zorder=8
+            )
+
+        draw_trade_level(tp, 'TP', COLORS['green'])
+        draw_trade_level(entry, 'ENTRY', COLORS['blue'], linewidth=2.6)
+        draw_trade_level(sl, 'SL', COLORS['red'])
+
+        # ================================================================
+        # TÍTULO Y RESUMEN OPERATIVO
+        # ================================================================
         decision = analysis.get('decision', {}) or {}
-        action = decision.get('action', '?')
+        action = str(decision.get('action', '?')).upper()
         try:
             conf = max(0, min(100, float(decision.get('confidence', 0))))
         except Exception:
             conf = 0
-        color_action = COLORS['green'] if action in ('LONG', 'COMPRA_SPOT') else \
-                       COLORS['red'] if action in ('SHORT', 'VENTA_SPOT') else \
-                       COLORS['yellow']
-        ax_main.set_title(f'{symbol} · {timeframe} · {action} ({conf:.0f}%)',
-                          color=color_action, fontsize=14, fontweight='bold', pad=10)
-        ax_main.set_ylabel('Precio', color='white', fontsize=10)
-        ax_main.legend(loc='upper left', fontsize=8, framealpha=0.7, ncol=2)
-        ax_main.grid(True, alpha=0.15, linestyle=':')
+
+        color_action = (
+            COLORS['green'] if action in ('LONG', 'COMPRA_SPOT')
+            else COLORS['red'] if action in ('SHORT', 'VENTA_SPOT')
+            else COLORS['yellow']
+        )
+
+        title = f'{symbol} · {timeframe} · {action} · confianza {conf:.0f}%'
+        ax_main.set_title(
+            title,
+            color=color_action,
+            fontsize=14,
+            fontweight='bold',
+            pad=10
+        )
+        ax_main.set_ylabel('Precio', color='white', fontsize=9)
+        ax_main.grid(True, alpha=0.13, linestyle=':')
         ax_main.tick_params(colors='white', labelsize=8)
-        ax_main.set_facecolor(COLORS['bg'])
-        # Sin xticks en panel principal (limpieza visual)
         ax_main.set_xticks([])
-        
-        # ============ PANELES DE INDICADORES ============
-        for idx, ind in enumerate(indicators):
+
+        # Leyenda sólo para EMAs; Entry/SL/TP ya tienen etiquetas propias.
+        handles, labels = ax_main.get_legend_handles_labels()
+        if handles:
+            ax_main.legend(
+                handles, labels,
+                loc='upper left',
+                fontsize=7,
+                framealpha=0.55,
+                ncol=4
+            )
+
+        # ================================================================
+        # PANELES DE LAS EVIDENCIAS REALES
+        # ================================================================
+        for idx, indicator in enumerate(indicators):
             ax = fig.add_subplot(gs[idx + 1])
             ax.set_facecolor(COLORS['bg'])
-            _render_indicator_into_ax(ax, df, ind, idx == n_indicators - 1)
-        
-        return _fig_to_png_bytes(fig, dpi=90)
+            _render_indicator_into_ax(
+                ax,
+                df,
+                indicator,
+                idx == n_indicators - 1,
+                analysis=analysis,
+                evidence_number=idx + 1,
+                evidence_total=n_indicators
+            )
+
+        fig.suptitle(
+            'Evidencia técnica de la señal',
+            color=COLORS['gray'],
+            fontsize=9,
+            y=0.995
+        )
+        fig.subplots_adjust(top=0.965, bottom=0.055, left=0.07, right=0.985)
+        return _fig_to_png_bytes(fig, dpi=100)
+
     except Exception as e:
         logger.error(f'render_telegram_signal_chart error: {e}')
         try:
@@ -591,98 +830,402 @@ def render_telegram_signal_chart(symbol: str, timeframe: str,
         return None
 
 
-def _render_indicator_into_ax(ax, df: pd.DataFrame, indicator: str, is_last: bool):
+def _render_indicator_into_ax(
+    ax,
+    df: pd.DataFrame,
+    indicator: str,
+    is_last: bool,
+    analysis: dict = None,
+    evidence_number: int = None,
+    evidence_total: int = None
+):
     """
-    Helper: dibuja un indicador en un ax dado (para figuras compuestas).
+    Dibuja una evidencia técnica dentro de la imagen combinada de Telegram.
+
+    Para evidencias estructurales que no son una serie clásica (FVG, OB, sweeps,
+    ballenas, volume profile), se dibuja una representación OHLCV explícitamente
+    etiquetada como visual/proxy cuando corresponde. Nunca se presentan datos
+    estimados como order flow observado.
     """
-    indicator = (indicator or '').lower()
-    closes = df['close'].values
-    highs = df['high'].values
-    lows = df['low'].values
+    analysis = analysis or {}
+    indicator = (indicator or '').lower().strip()
+    closes = df['close'].values.astype(float)
+    highs = df['high'].values.astype(float)
+    lows = df['low'].values.astype(float)
+    opens = df['open'].values.astype(float)
+    volumes = df['volume'].values.astype(float)
     n = len(df)
-    
+    x = np.arange(n)
+    uses_time_axis = True
+
     title_map = {
-        'rsi': 'RSI (14)', 'rsi_maverick': 'RSI Maverick',
-        'macd': 'MACD', 'bollinger': 'Bollinger',
-        'volume': 'Volumen', 'dmi': 'DMI/ADX', 'adx': 'ADX',
-        'stochastic': 'Estocástico', 'williams': 'Williams %R',
-        'atr': 'ATR%', 'obv': 'OBV',
-        'supertrend': 'SuperTrend', 'psar': 'PSAR',
-        'ichimoku': 'Ichimoku', 'squeeze': 'Squeeze',
-        'ftm': 'FTM', 'whale': 'Whale', 'cci': 'CCI',
-        'mfi': 'MFI', 'fvg': 'FVG',
+        'rsi': 'RSI (14)',
+        'rsi_maverick': 'RSI Maverick',
+        'macd': 'MACD',
+        'bollinger': 'Bollinger',
+        'volume': 'Volumen',
+        'dmi': 'DMI / ADX',
+        'adx': 'ADX',
+        'stochastic': 'Estocástico',
+        'williams': 'Williams %R',
+        'atr': 'ATR %',
+        'obv': 'OBV',
+        'cci': 'CCI',
+        'mfi': 'MFI',
+        'force': 'Force Index',
+        'supertrend': 'SuperTrend',
+        'psar': 'Parabolic SAR',
+        'ichimoku': 'Ichimoku',
+        'squeeze': 'Squeeze',
+        'ftm': 'Fuerza de Tendencia',
+        'whale': 'Ballenas · proxy volumen',
+        'fvg': 'Fair Value Gap',
+        'order_blocks': 'Order Blocks · vista estructural',
+        'sweeps': 'Liquidity Sweep',
+        'stop_hunts': 'Stop Hunt / barrido',
+        'volume_profile': 'Volume Profile · aprox. OHLCV',
     }
-    ax.set_title(title_map.get(indicator, indicator.upper()),
-                  color='white', fontsize=9, fontweight='bold', pad=5)
+
+    prefix = ''
+    if evidence_number and evidence_total:
+        prefix = f'{evidence_number}/{evidence_total} · '
+
+    ax.set_title(
+        prefix + title_map.get(indicator, indicator.upper()),
+        color='white',
+        fontsize=9,
+        fontweight='bold',
+        pad=5,
+        loc='left'
+    )
     ax.tick_params(colors='white', labelsize=7)
-    ax.grid(True, alpha=0.15, linestyle=':')
-    
+    ax.grid(True, alpha=0.13, linestyle=':')
+
     try:
         if indicator == 'rsi':
             rsi = _calc_rsi(closes, 14)
-            ax.plot(range(n), rsi, color=COLORS['purple'], linewidth=1)
-            ax.axhline(y=70, color=COLORS['red'], linestyle='--', linewidth=0.6, alpha=0.5)
-            ax.axhline(y=30, color=COLORS['green'], linestyle='--', linewidth=0.6, alpha=0.5)
-            ax.set_ylim([0, 100])
+            ax.plot(x, rsi, color=COLORS['purple'], linewidth=1.1)
+            ax.axhline(70, color=COLORS['red'], linestyle='--', linewidth=0.6, alpha=0.5)
+            ax.axhline(30, color=COLORS['green'], linestyle='--', linewidth=0.6, alpha=0.5)
+            ax.axhline(50, color=COLORS['gray'], linestyle=':', linewidth=0.5, alpha=0.4)
+            ax.set_ylim(0, 100)
+
+        elif indicator == 'rsi_maverick':
+            rsi3 = _calc_rsi(closes, 3)
+            fast = _calc_ema(rsi3, 5)
+            slow = _calc_ema(rsi3, 14)
+            ax.plot(x, rsi3, color=COLORS['white'], linewidth=0.8, alpha=0.75, label='RSI 3')
+            ax.plot(x, fast, color=COLORS['blue'], linewidth=1.1, label='EMA 5')
+            ax.plot(x, slow, color=COLORS['yellow'], linewidth=1.1, label='EMA 14')
+            ax.axhline(80, color=COLORS['red'], linestyle='--', linewidth=0.6, alpha=0.45)
+            ax.axhline(20, color=COLORS['green'], linestyle='--', linewidth=0.6, alpha=0.45)
+            ax.axhline(50, color=COLORS['gray'], linestyle=':', linewidth=0.5, alpha=0.4)
+            ax.set_ylim(0, 100)
+            ax.legend(loc='upper left', fontsize=6, ncol=3, framealpha=0.35)
+
         elif indicator == 'macd':
             macd_line, signal_line, hist = _calc_macd(closes)
             colors_hist = [COLORS['green'] if h >= 0 else COLORS['red'] for h in hist]
-            ax.bar(range(n), hist, color=colors_hist, alpha=0.5, width=0.8)
-            ax.plot(range(n), macd_line, color=COLORS['blue'], linewidth=0.9)
-            ax.plot(range(n), signal_line, color=COLORS['yellow'], linewidth=0.9)
-            ax.axhline(y=0, color=COLORS['white'], linewidth=0.4, alpha=0.5)
+            ax.bar(x, hist, color=colors_hist, alpha=0.5, width=0.8)
+            ax.plot(x, macd_line, color=COLORS['blue'], linewidth=0.9, label='MACD')
+            ax.plot(x, signal_line, color=COLORS['yellow'], linewidth=0.9, label='Señal')
+            ax.axhline(0, color=COLORS['white'], linewidth=0.4, alpha=0.5)
+            ax.legend(loc='upper left', fontsize=6, framealpha=0.35)
+
         elif indicator == 'bollinger':
             upper, sma, lower = _calc_bollinger(closes, 20, 2)
-            ax.plot(range(n), closes, color=COLORS['white'], linewidth=0.8)
-            ax.plot(range(n), upper, color=COLORS['red'], linewidth=0.6, linestyle='--')
-            ax.plot(range(n), sma, color=COLORS['yellow'], linewidth=0.6)
-            ax.plot(range(n), lower, color=COLORS['green'], linewidth=0.6, linestyle='--')
-            ax.fill_between(range(n), lower, upper, color=COLORS['blue'], alpha=0.08)
+            ax.plot(x, closes, color=COLORS['white'], linewidth=0.8)
+            ax.plot(x, upper, color=COLORS['red'], linewidth=0.7, linestyle='--')
+            ax.plot(x, sma, color=COLORS['yellow'], linewidth=0.7)
+            ax.plot(x, lower, color=COLORS['green'], linewidth=0.7, linestyle='--')
+            ax.fill_between(x, lower, upper, color=COLORS['blue'], alpha=0.07)
+
         elif indicator == 'volume':
-            volumes = df['volume'].values
-            colors_vol = [COLORS['green'] if c >= o else COLORS['red']
-                          for c, o in zip(closes, df['open'].values)]
-            ax.bar(range(n), volumes, color=colors_vol, alpha=0.7, width=0.8)
+            colors_vol = [COLORS['green'] if c >= o else COLORS['red'] for c, o in zip(closes, opens)]
+            ax.bar(x, volumes, color=colors_vol, alpha=0.7, width=0.8)
+            if len(volumes) >= 20:
+                avg = pd.Series(volumes).rolling(20, min_periods=1).median().values
+                ax.plot(x, avg, color=COLORS['yellow'], linewidth=0.8, label='Mediana 20')
+                ax.legend(loc='upper left', fontsize=6, framealpha=0.35)
+
         elif indicator in ('dmi', 'adx'):
             high_diff = np.diff(highs, prepend=highs[0])
             low_diff = -np.diff(lows, prepend=lows[0])
             plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
             minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
-            tr = np.maximum(highs - lows,
-                             np.maximum(np.abs(highs - np.roll(closes, 1)),
-                                        np.abs(lows - np.roll(closes, 1))))
-            tr[0] = highs[0] - lows[0]
-            atr = _calc_ema(tr, 14)
-            plus_di = np.divide(_calc_ema(plus_dm, 14) * 100, atr,
-                                 out=np.zeros_like(atr), where=atr != 0)
-            minus_di = np.divide(_calc_ema(minus_dm, 14) * 100, atr,
-                                  out=np.zeros_like(atr), where=atr != 0)
-            dx = np.divide(np.abs(plus_di - minus_di) * 100, plus_di + minus_di,
-                            out=np.zeros_like(plus_di), where=(plus_di + minus_di) != 0)
+            atr = _calc_visual_atr(highs, lows, closes, 14)
+            plus_di = np.divide(_calc_ema(plus_dm, 14) * 100, atr, out=np.zeros_like(atr), where=atr != 0)
+            minus_di = np.divide(_calc_ema(minus_dm, 14) * 100, atr, out=np.zeros_like(atr), where=atr != 0)
+            dx = np.divide(
+                np.abs(plus_di - minus_di) * 100,
+                plus_di + minus_di,
+                out=np.zeros_like(plus_di),
+                where=(plus_di + minus_di) != 0
+            )
             adx = _calc_ema(dx, 14)
-            ax.plot(range(n), plus_di, color=COLORS['green'], linewidth=0.9, label='+DI')
-            ax.plot(range(n), minus_di, color=COLORS['red'], linewidth=0.9, label='-DI')
-            ax.plot(range(n), adx, color=COLORS['yellow'], linewidth=1.1, linestyle='-.')
-            ax.axhline(y=25, color=COLORS['gray'], linestyle=':', alpha=0.4)
+            if indicator == 'dmi':
+                ax.plot(x, plus_di, color=COLORS['green'], linewidth=0.9, label='+DI')
+                ax.plot(x, minus_di, color=COLORS['red'], linewidth=0.9, label='-DI')
+            ax.plot(x, adx, color=COLORS['yellow'], linewidth=1.1, label='ADX')
+            ax.axhline(25, color=COLORS['gray'], linestyle=':', alpha=0.4)
+            ax.legend(loc='upper left', fontsize=6, ncol=3, framealpha=0.35)
+
+        elif indicator == 'atr':
+            atr = _calc_visual_atr(highs, lows, closes, 14)
+            atr_pct = np.divide(atr * 100, closes, out=np.zeros_like(atr), where=closes != 0)
+            ax.plot(x, atr_pct, color=COLORS['yellow'], linewidth=1.0)
+            ax.fill_between(x, 0, atr_pct, color=COLORS['yellow'], alpha=0.12)
+
+        elif indicator in ('stochastic', 'williams'):
+            period = 14
+            values = np.full(n, np.nan)
+            for i in range(period - 1, n):
+                highest = np.max(highs[i - period + 1:i + 1])
+                lowest = np.min(lows[i - period + 1:i + 1])
+                if highest != lowest:
+                    if indicator == 'stochastic':
+                        values[i] = 100 * (closes[i] - lowest) / (highest - lowest)
+                    else:
+                        values[i] = -100 * (highest - closes[i]) / (highest - lowest)
+            if indicator == 'stochastic':
+                filled = pd.Series(values).interpolate(limit_direction='both').fillna(50).values
+                d_line = pd.Series(filled).rolling(3, min_periods=1).mean().values
+                ax.plot(x, values, color=COLORS['blue'], linewidth=1.0, label='%K')
+                ax.plot(x, d_line, color=COLORS['yellow'], linewidth=0.9, label='%D')
+                ax.axhline(80, color=COLORS['red'], linestyle=':', alpha=0.45)
+                ax.axhline(20, color=COLORS['green'], linestyle=':', alpha=0.45)
+                ax.set_ylim(0, 100)
+                ax.legend(loc='upper left', fontsize=6, framealpha=0.35)
+            else:
+                ax.plot(x, values, color=COLORS['purple'], linewidth=1.0)
+                ax.axhline(-20, color=COLORS['red'], linestyle=':', alpha=0.45)
+                ax.axhline(-80, color=COLORS['green'], linestyle=':', alpha=0.45)
+                ax.set_ylim(-100, 0)
+
+        elif indicator == 'obv':
+            obv = np.zeros(n)
+            if n:
+                obv[0] = volumes[0]
+            for i in range(1, n):
+                direction = 1 if closes[i] > closes[i - 1] else -1 if closes[i] < closes[i - 1] else 0
+                obv[i] = obv[i - 1] + direction * volumes[i]
+            ax.plot(x, obv, color=COLORS['blue'], linewidth=1.0)
+            ax.fill_between(x, np.nanmin(obv), obv, color=COLORS['blue'], alpha=0.1)
+
+        elif indicator == 'cci':
+            typical = (highs + lows + closes) / 3.0
+            tp_series = pd.Series(typical)
+            sma = tp_series.rolling(20, min_periods=20).mean()
+            mad = tp_series.rolling(20, min_periods=20).apply(
+                lambda values: np.mean(np.abs(values - np.mean(values))), raw=True
+            )
+            cci = ((tp_series - sma) / (0.015 * mad.replace(0, np.nan))).values
+            ax.plot(x, cci, color=COLORS['purple'], linewidth=1.0)
+            ax.axhline(100, color=COLORS['red'], linestyle=':', alpha=0.45)
+            ax.axhline(-100, color=COLORS['green'], linestyle=':', alpha=0.45)
+            ax.axhline(0, color=COLORS['gray'], linewidth=0.5, alpha=0.4)
+
+        elif indicator == 'mfi':
+            typical = (highs + lows + closes) / 3.0
+            raw_flow = typical * volumes
+            positive = np.where(np.diff(typical, prepend=typical[0]) > 0, raw_flow, 0.0)
+            negative = np.where(np.diff(typical, prepend=typical[0]) < 0, raw_flow, 0.0)
+            pos_sum = pd.Series(positive).rolling(14, min_periods=1).sum().values
+            neg_sum = pd.Series(negative).rolling(14, min_periods=1).sum().values
+            ratio = np.divide(pos_sum, neg_sum, out=np.full(n, 1.0), where=neg_sum != 0)
+            mfi = 100 - (100 / (1 + ratio))
+            ax.plot(x, mfi, color=COLORS['blue'], linewidth=1.0)
+            ax.axhline(80, color=COLORS['red'], linestyle=':', alpha=0.45)
+            ax.axhline(20, color=COLORS['green'], linestyle=':', alpha=0.45)
+            ax.set_ylim(0, 100)
+
+        elif indicator == 'force':
+            force = np.diff(closes, prepend=closes[0]) * volumes
+            smooth = _calc_ema(force, 13)
+            ax.bar(x, force, color=[COLORS['green'] if v >= 0 else COLORS['red'] for v in force], alpha=0.3, width=0.8)
+            ax.plot(x, smooth, color=COLORS['yellow'], linewidth=1.0)
+            ax.axhline(0, color=COLORS['gray'], linewidth=0.5, alpha=0.5)
+
+        elif indicator == 'supertrend':
+            st, trend = _calc_visual_supertrend(highs, lows, closes)
+            ax.plot(x, closes, color=COLORS['white'], linewidth=0.75, alpha=0.8)
+            bull = np.where(trend > 0, st, np.nan)
+            bear = np.where(trend < 0, st, np.nan)
+            ax.plot(x, bull, color=COLORS['green'], linewidth=1.1, label='ST alcista')
+            ax.plot(x, bear, color=COLORS['red'], linewidth=1.1, label='ST bajista')
+            ax.legend(loc='upper left', fontsize=6, framealpha=0.35)
+
+        elif indicator == 'psar':
+            psar = _calc_visual_psar(highs, lows)
+            ax.plot(x, closes, color=COLORS['white'], linewidth=0.7, alpha=0.75)
+            colors = [COLORS['green'] if psar[i] <= closes[i] else COLORS['red'] for i in range(n)]
+            ax.scatter(x, psar, c=colors, s=7, alpha=0.8)
+
+        elif indicator == 'ichimoku':
+            high_s = pd.Series(highs)
+            low_s = pd.Series(lows)
+            tenkan = ((high_s.rolling(9).max() + low_s.rolling(9).min()) / 2).values
+            kijun = ((high_s.rolling(26).max() + low_s.rolling(26).min()) / 2).values
+            span_a = pd.Series((tenkan + kijun) / 2).shift(26).values
+            span_b = pd.Series((high_s.rolling(52).max() + low_s.rolling(52).min()) / 2).shift(26).values
+            ax.plot(x, closes, color=COLORS['white'], linewidth=0.7, alpha=0.75)
+            ax.plot(x, tenkan, color=COLORS['blue'], linewidth=0.8, label='Tenkan')
+            ax.plot(x, kijun, color=COLORS['red'], linewidth=0.8, label='Kijun')
+            valid = np.isfinite(span_a) & np.isfinite(span_b)
+            if valid.any():
+                ax.fill_between(x, span_a, span_b, where=valid, color=COLORS['purple'], alpha=0.12)
+            ax.legend(loc='upper left', fontsize=6, framealpha=0.35)
+
+        elif indicator == 'squeeze':
+            upper, sma, lower = _calc_bollinger(closes, 20, 2)
+            bb_width = np.divide(upper - lower, sma, out=np.zeros_like(sma), where=sma != 0) * 100
+            width_series = pd.Series(bb_width)
+            threshold = width_series.rolling(50, min_periods=20).quantile(0.25).values
+            squeeze_on = bb_width <= threshold
+            ax.plot(x, bb_width, color=COLORS['yellow'], linewidth=1.0, label='BB width %')
+            ax.fill_between(x, 0, bb_width, where=squeeze_on, color=COLORS['purple'], alpha=0.28, label='Squeeze')
+            ax.legend(loc='upper left', fontsize=6, framealpha=0.35)
+
+        elif indicator == 'ftm':
+            # Proxy VISUAL de fuerza: spread EMA9/EMA21 normalizado por ATR.
+            # No se usa para recalcular ni alterar el FTM del sistema.
+            ema9 = _calc_ema(closes, 9)
+            ema21 = _calc_ema(closes, 21)
+            atr = _calc_visual_atr(highs, lows, closes, 14)
+            force = np.divide(ema9 - ema21, atr, out=np.zeros_like(atr), where=atr != 0)
+            ax.plot(x, force, color=COLORS['blue'], linewidth=1.0)
+            ax.axhline(0, color=COLORS['gray'], linewidth=0.5, alpha=0.5)
+            ax.fill_between(x, 0, force, where=(force >= 0), color=COLORS['green'], alpha=0.12)
+            ax.fill_between(x, 0, force, where=(force < 0), color=COLORS['red'], alpha=0.12)
+            ax.text(0.995, 0.86, 'proxy visual', transform=ax.transAxes, ha='right', va='top', fontsize=6, color=COLORS['gray'])
+
+        elif indicator == 'whale':
+            # Proxy explícito: anomalía de volumen + reacción del precio.
+            vol_series = pd.Series(volumes)
+            median = vol_series.rolling(20, min_periods=5).median().replace(0, np.nan)
+            ratio = (vol_series / median).replace([np.inf, -np.inf], np.nan).fillna(0).values
+            spike = ratio >= 2.0
+            colors = [COLORS['orange'] if spike[i] else COLORS['gray'] for i in range(n)]
+            ax.bar(x, ratio, color=colors, alpha=0.72, width=0.8)
+            ax.axhline(2.0, color=COLORS['yellow'], linestyle='--', linewidth=0.7, alpha=0.7)
+            ax.text(0.995, 0.86, 'proxy OHLCV, no órdenes observadas', transform=ax.transAxes, ha='right', va='top', fontsize=6, color=COLORS['gray'])
+
+        elif indicator == 'fvg':
+            ax.plot(x, closes, color=COLORS['white'], linewidth=0.8)
+            found = 0
+            for i in range(2, n):
+                # Gap alcista: high de i-2 por debajo del low actual.
+                if highs[i - 2] < lows[i]:
+                    ax.axhspan(highs[i - 2], lows[i], color=COLORS['green'], alpha=0.11)
+                    found += 1
+                # Gap bajista: low de i-2 por encima del high actual.
+                elif lows[i - 2] > highs[i]:
+                    ax.axhspan(highs[i], lows[i - 2], color=COLORS['red'], alpha=0.11)
+                    found += 1
+                if found >= 4:
+                    break
+
+        elif indicator == 'order_blocks':
+            ax.plot(x, closes, color=COLORS['white'], linewidth=0.8)
+            atr = _calc_visual_atr(highs, lows, closes, 14)
+            candidates = []
+            for i in range(2, n - 1):
+                displacement = closes[i + 1] - closes[i]
+                if atr[i] <= 0:
+                    continue
+                if closes[i] < opens[i] and displacement > 1.2 * atr[i]:
+                    candidates.append((i, lows[i], highs[i], COLORS['green']))
+                elif closes[i] > opens[i] and displacement < -1.2 * atr[i]:
+                    candidates.append((i, lows[i], highs[i], COLORS['red']))
+            for i, low_zone, high_zone, color in candidates[-3:]:
+                ax.axhspan(low_zone, high_zone, color=color, alpha=0.12)
+                ax.axvline(i, color=color, linewidth=0.5, alpha=0.4)
+            ax.text(0.995, 0.86, 'vista OHLCV del contexto OB', transform=ax.transAxes, ha='right', va='top', fontsize=6, color=COLORS['gray'])
+
+        elif indicator in ('sweeps', 'stop_hunts'):
+            ax.plot(x, closes, color=COLORS['white'], linewidth=0.75)
+            lookback = 5
+            for i in range(lookback, n):
+                prior_high = np.max(highs[i - lookback:i])
+                prior_low = np.min(lows[i - lookback:i])
+                if highs[i] > prior_high and closes[i] < prior_high:
+                    ax.scatter(i, highs[i], marker='v', s=28, color=COLORS['red'], zorder=4)
+                    ax.axhline(prior_high, color=COLORS['red'], linestyle=':', linewidth=0.5, alpha=0.35)
+                if lows[i] < prior_low and closes[i] > prior_low:
+                    ax.scatter(i, lows[i], marker='^', s=28, color=COLORS['green'], zorder=4)
+                    ax.axhline(prior_low, color=COLORS['green'], linestyle=':', linewidth=0.5, alpha=0.35)
+
+        elif indicator == 'volume_profile':
+            uses_time_axis = False
+            typical = (highs + lows + closes) / 3.0
+            price_min = np.nanmin(lows)
+            price_max = np.nanmax(highs)
+            if price_max > price_min:
+                bins = np.linspace(price_min, price_max, 25)
+                idxs = np.clip(np.digitize(typical, bins) - 1, 0, len(bins) - 2)
+                profile = np.zeros(len(bins) - 1)
+                for i, bin_idx in enumerate(idxs):
+                    profile[bin_idx] += volumes[i]
+                centers = (bins[:-1] + bins[1:]) / 2
+                height_bar = (bins[1] - bins[0]) * 0.78
+                ax.barh(centers, profile, height=height_bar, color=COLORS['blue'], alpha=0.55)
+                poc_idx = int(np.argmax(profile)) if len(profile) else 0
+                if len(centers):
+                    ax.axhline(centers[poc_idx], color=COLORS['yellow'], linewidth=1.0, label='POC aprox.')
+                    ax.legend(loc='upper right', fontsize=6, framealpha=0.35)
+            ax.set_xlabel('Volumen agregado por precio', fontsize=6, color=COLORS['gray'])
+            ax.text(0.995, 0.86, 'aprox. con volumen de vela', transform=ax.transAxes, ha='right', va='top', fontsize=6, color=COLORS['gray'])
+
         else:
-            # Fallback: precio + EMA 21
-            if n >= 21:
-                ema21 = _calc_ema(closes, 21)
-                ax.plot(range(n), closes, color=COLORS['white'], linewidth=0.7)
-                ax.plot(range(n), ema21, color=COLORS['yellow'], linewidth=0.9)
+            # Fallback HONESTO: no fingir que otro gráfico representa el indicador.
+            ax.plot(x, closes, color=COLORS['white'], linewidth=0.8)
+            ax.text(
+                0.5, 0.5,
+                'Evidencia seleccionada por el sistema\nvisualización específica no disponible',
+                transform=ax.transAxes,
+                ha='center', va='center',
+                fontsize=7,
+                color=COLORS['gray'],
+                bbox={
+                    'boxstyle': 'round,pad=0.35',
+                    'facecolor': COLORS['bg'],
+                    'edgecolor': COLORS['gray'],
+                    'alpha': 0.8,
+                }
+            )
+
     except Exception as e:
         logger.debug(f'_render_indicator_into_ax {indicator}: {e}')
-    
-    # X-ticks solo en el último panel
-    if is_last:
-        times = df['time'].values
-        step = max(1, n // 6)
-        ax.set_xticks(range(0, n, step))
-        ax.set_xticklabels([pd.Timestamp(times[i]).strftime('%m-%d %H:%M')
-                              for i in range(0, n, step)], rotation=25, ha='right', fontsize=6)
-    else:
-        ax.set_xticks([])
+        ax.clear()
+        ax.set_facecolor(COLORS['bg'])
+        ax.plot(x, closes, color=COLORS['white'], linewidth=0.75)
+        ax.set_title(
+            prefix + title_map.get(indicator, indicator.upper()),
+            color='white', fontsize=9, fontweight='bold', pad=5, loc='left'
+        )
+        ax.text(
+            0.5, 0.5,
+            'Panel no disponible; la señal no fue modificada',
+            transform=ax.transAxes,
+            ha='center', va='center',
+            fontsize=7, color=COLORS['gray']
+        )
 
+    # X ticks sólo en el último panel cuando el eje representa tiempo.
+    if uses_time_axis:
+        if is_last:
+            times = df['time'].values
+            step = max(1, n // 6)
+            tick_idx = list(range(0, n, step))
+            ax.set_xticks(tick_idx)
+            ax.set_xticklabels(
+                [pd.Timestamp(times[i]).strftime('%m-%d %H:%M') for i in tick_idx],
+                rotation=25,
+                ha='right',
+                fontsize=6
+            )
+        else:
+            ax.set_xticks([])
 
 def render_supporting_indicators_bundle(symbol: str, timeframe: str,
                                           analysis: dict,
