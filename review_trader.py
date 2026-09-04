@@ -375,6 +375,119 @@ class ReviewTrader:
         return 'OTHER'
 
 
+    @staticmethod
+    def _pre_gate_rejection_code(reason: str) -> str:
+        """Clasifica rechazos exactos ocurridos ANTES del gate Premium."""
+        text = str(reason or '').strip().lower()
+
+        if 'safety' in text:
+            return 'HARD_SAFETY'
+
+        if (
+            'no existe leverage' in text
+            or 'leverage recomendado' in text
+            or 'leverage' in text
+        ):
+            return 'LEVERAGE_VIABILITY'
+
+        if (
+            'roi potencial' in text
+            or 'roi tp' in text
+        ):
+            return 'ROI_TP'
+
+        if (
+            'beneficio neto' in text
+            or 'net profit' in text
+        ):
+            return 'NET_PROFIT'
+
+        if (
+            'pérdida' in text
+            or 'perdida' in text
+        ) and 'sl' in text:
+            return 'LOSS_AT_SL'
+
+        if (
+            'atr' in text
+            and (
+                'estrés' in text
+                or 'estres' in text
+                or 'stress' in text
+            )
+        ):
+            return 'ATR_STRESS'
+
+        return 'PRE_GATE_OTHER'
+
+
+    def _build_futures_pre_gate_rejection_snapshot(
+        self,
+        analysis: Dict
+    ) -> Dict:
+        """
+        Conserva el motivo EXACTO por el que Futures salió ANALYSIS_ONLY
+        antes de llegar a _apply_futures_publication_gate().
+
+        Este snapshot NO es un publication gate y NO cambia decisiones.
+        Sirve para distinguir:
+
+            PRE_GATE_REJECTION
+                vs
+            PUBLICATION_GATE_REJECTION
+
+        sin inventar backfill histórico.
+        """
+        levels = (
+            analysis.get(
+                'levels',
+                {}
+            )
+            or {}
+        )
+
+        reason = (
+            analysis.get('rejected_reason')
+            or analysis.get('non_executable_reason')
+            or levels.get('rejected_reason')
+            or levels.get('non_executable_reason')
+            or ''
+        )
+
+        reason = str(reason or '').strip()
+
+        if not reason:
+            return {}
+
+        # Si existe gate Premium, este rechazo pertenece al gate y no al pre-gate.
+        if (
+            analysis.get('futures_publication_gate')
+            or levels.get('futures_publication_gate')
+        ):
+            return {}
+
+        return {
+            'stage': 'PRE_PUBLICATION',
+            'exact': True,
+            'reason': reason[:220],
+            'reason_code': self._pre_gate_rejection_code(reason),
+            'publication_status': str(
+                analysis.get('publication_status')
+                or levels.get('publication_status')
+                or 'ANALYSIS_ONLY'
+            ).strip().upper(),
+            'is_executable': self._as_bool(
+                analysis.get(
+                    'is_executable',
+                    levels.get('is_executable', False)
+                )
+            ),
+            'affects_publication': False,
+            'affects_weights': False,
+            'diagnostic_only': True
+        }
+
+
     def _build_futures_publication_snapshot(
         self,
         analysis: Dict
@@ -832,6 +945,37 @@ class ReviewTrader:
             publication,
             dict
         ) or not publication:
+
+            pre_gate = (
+                learning.get(
+                    'pre_gate_rejection'
+                )
+                or {}
+            )
+
+            if isinstance(
+                pre_gate,
+                dict
+            ) and pre_gate:
+
+                reason_code = str(
+                    pre_gate.get(
+                        'reason_code'
+                    )
+                    or 'PRE_GATE_OTHER'
+                ).strip().upper()
+
+                return {
+                    **base,
+                    'status':
+                        'PRE_GATE_REJECTION',
+                    'reason_codes': [
+                        reason_code
+                    ],
+                    'failed_guardrails': [
+                        reason_code
+                    ]
+                }
 
             return {
                 **base,
@@ -1435,6 +1579,22 @@ class ReviewTrader:
                     context[
                         'futures_publication'
                     ] = publication
+
+                else:
+
+                    pre_gate_rejection = (
+                        self._build_futures_pre_gate_rejection_snapshot(
+                            analysis_result
+                        )
+                    )
+
+                    if pre_gate_rejection:
+
+                        context[
+                            'learning'
+                        ][
+                            'pre_gate_rejection'
+                        ] = pre_gate_rejection
 
                 context[
                     'learning'
