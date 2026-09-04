@@ -25192,7 +25192,36 @@ def api_futures_position_guardian():
         # ==============================================================
         # UNA SOLA PETICIÓN POR SYMBOL/TF
         # ==============================================================
+        # ==============================================================
+        # COMMIT 27 — FUENTE REAL PARA FUTURES POSITION GUARDIAN
+        # ==============================================================
+        #
+        # El Guardian gestiona posiciones de contratos perpetuos.
+        # Por tanto NO debe utilizar las velas del sistema Spot.
+        #
+        # Reutilizamos la instancia Futures existente:
+        # - datos KuCoin Futures reales;
+        # - caché Futures existente;
+        # - sin llamadas Spot;
+        # - sin inventar velas si KuCoin falla.
+        #
+        # Este cambio NO modifica Entry, SL, TP, leverage ni Safety.
+        # ==============================================================
 
+        futures_market = _get_futures_system()
+
+        if futures_market is None:
+            return jsonify({
+                'success': False,
+                'user': user,
+                'positions': [],
+                'count': 0,
+                'error': (
+                    'FuturesSystem no disponible. '
+                    'El Guardian no utilizará datos Spot como fallback.'
+                )
+            }), 200
+            
         for (
             symbol,
             timeframe
@@ -25200,7 +25229,7 @@ def api_futures_position_guardian():
 
             try:
 
-                df = expert_system.get_kucoin_data(
+                df = futures_market.get_kucoin_data(
                     symbol,
                     timeframe
                 )
