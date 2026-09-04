@@ -1526,37 +1526,286 @@ def _calc_stats_by_trader(signals: List[Dict]) -> List[Dict]:
 # HELPERS DE CÁLCULO DE STATS (funcionan directamente sobre signals de la BD)
 # ============================================================================
 
-def _fetch_all_signals_with_indicators(db, days_back: int = 90) -> List[Dict]:
-    """Trae una cohorte temporal coherente, incluyendo pendientes y resultados."""
+def _fetch_all_signals_with_indicators(db, days_back: int = 90):
+    """
+    Trae una cohorte temporal coherente, incluyendo pendientes y resultados.
+
+    COMMIT 36I
+    -----------
+    La versión anterior paginaba de 1000 en 1000 y cortaba ante el primer
+    error. Si Supabase/PostgREST devolvía una segunda página vacía o fallaba
+    transitoriamente, el PDF podía quedar exactamente con los 1000 registros
+    más recientes aunque el count histórico demostrara que existían más.
+
+    Esta versión:
+    - congela una ventana temporal [cutoff, snapshot_end);
+    - obtiene count exacto de esa MISMA ventana;
+    - pagina en bloques de 500 con reintentos;
+    - NO asume que un batch parcial sea necesariamente el último;
+    - deduplica por id;
+    - si la paginación normal queda incompleta, reintenta por ventanas
+      temporales de 3 días;
+    - devuelve diagnóstico de cobertura para que el PDF nunca presente una
+      muestra truncada como si fuera completa.
+
+    No modifica señales ni aprendizaje. Sólo mejora la lectura del informe.
+    """
     from datetime import timedelta
-    cutoff = (datetime.utcnow() - timedelta(days=days_back)).isoformat()
+    import time
+
+    now = datetime.utcnow()
+    cutoff_dt = now - timedelta(days=days_back)
+    # Congela el límite superior para que el count y las páginas midan el
+    # mismo snapshot lógico aunque entren nuevas señales mientras se genera.
+    snapshot_end_dt = now + timedelta(seconds=2)
+
+    cutoff = cutoff_dt.isoformat()
+    snapshot_end = snapshot_end_dt.isoformat()
+
+    select_fields = (
+        'id, symbol, timeframe, action_normalized, status, '
+        'confidence, entry_price, stop_loss, take_profit, leverage, '
+        'created_at, candle_timestamp, system_type, context, '
+        'signal_indicators(strategy_name), '
+        'signal_results(status, pnl_pct, notes, exit_price, '
+        'exit_timestamp, created_at)'
+    )
+
+    diagnostics = {
+        'window_days': int(days_back),
+        'cutoff': cutoff,
+        'snapshot_end': snapshot_end,
+        'expected_rows': None,
+        'fetched_rows': 0,
+        'coverage_pct': None,
+        'complete': False,
+        'primary_pages': 0,
+        'fallback_used': False,
+        'fallback_slices': 0,
+        'errors': [],
+        'model_version': 'report_fetch_pagination_v1'
+    }
+
+    # ------------------------------------------------------------------
+    # Count exacto de la misma ventana del informe.
+    # ------------------------------------------------------------------
+    try:
+        r_count = (
+            db.client
+            .table('signals')
+            .select('id', count='exact')
+            .gte('created_at', cutoff)
+            .lt('created_at', snapshot_end)
+            .limit(1)
+            .execute()
+        )
+        diagnostics['expected_rows'] = int(
+            getattr(r_count, 'count', 0) or 0
+        )
+    except Exception as e:
+        diagnostics['errors'].append(
+            f'count_window_failed: {str(e)[:180]}'
+        )
+        logger.warning(
+            f'No se pudo contar la ventana de {days_back} días: {e}'
+        )
+
+    def _append_unique(target, seen_ids, batch):
+        added = 0
+        for row in batch or []:
+            if not isinstance(row, dict):
+                continue
+            row_id = str(row.get('id') or '').strip()
+            # Signals debería tener id. Si faltara por un problema de select,
+            # usamos una clave compuesta para no perder silenciosamente la fila.
+            dedupe_key = row_id or '|'.join([
+                str(row.get('created_at') or ''),
+                str(row.get('symbol') or ''),
+                str(row.get('timeframe') or ''),
+                str(row.get('action_normalized') or '')
+            ])
+            if dedupe_key in seen_ids:
+                continue
+            seen_ids.add(dedupe_key)
+            target.append(row)
+            added += 1
+        return added
+
+    def _execute_page(start_iso, end_iso, offset, page_size):
+        last_error = None
+        for attempt in range(3):
+            try:
+                return (
+                    db.client
+                    .table('signals')
+                    .select(select_fields)
+                    .gte('created_at', start_iso)
+                    .lt('created_at', end_iso)
+                    .order('created_at', desc=True)
+                    .range(offset, offset + page_size - 1)
+                    .execute()
+                ), None
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(0.20 * (attempt + 1))
+        return None, last_error
+
+    # ------------------------------------------------------------------
+    # PASO A: paginación normal de toda la ventana.
+    # ------------------------------------------------------------------
     all_data = []
+    seen_ids = set()
+    page_size = 500
     offset = 0
-    page_size = 1000
-    for _ in range(50):  # cap 50k
-        try:
-            r = (db.client.table('signals')
-                 .select('id, symbol, timeframe, action_normalized, status, '
-                          'confidence, entry_price, stop_loss, take_profit, leverage, '
-                          'created_at, candle_timestamp, system_type, context, '
-                          'signal_indicators(strategy_name), '
-                          'signal_results(status, pnl_pct, notes, exit_price, '
-                          'exit_timestamp, created_at)')
-                 .gte('created_at', cutoff)
-                 .order('created_at', desc=True)
-                 .range(offset, offset + page_size - 1)
-                 .execute())
-            batch = r.data or []
-            if not batch:
-                break
-            all_data.extend(batch)
-            if len(batch) < page_size:
-                break
-            offset += page_size
-        except Exception as e:
-            logger.warning(f'paginación falló offset={offset}: {e}')
+
+    for _ in range(100):  # cap 50k filas
+        response, error = _execute_page(
+            cutoff,
+            snapshot_end,
+            offset,
+            page_size
+        )
+
+        if error is not None:
+            diagnostics['errors'].append(
+                f'primary_offset_{offset}: {str(error)[:180]}'
+            )
+            logger.warning(
+                f'Paginación principal falló offset={offset}: {error}'
+            )
             break
-    return all_data
+
+        batch = response.data or []
+        diagnostics['primary_pages'] += 1
+
+        if not batch:
+            break
+
+        added = _append_unique(
+            all_data,
+            seen_ids,
+            batch
+        )
+
+        # Avanzamos por filas REALMENTE devueltas, no por el tamaño pedido.
+        # Esto evita asumir que el servidor respetó exactamente page_size.
+        offset += len(batch)
+
+        if added == 0:
+            diagnostics['errors'].append(
+                f'primary_no_progress_offset_{offset}'
+            )
+            logger.warning(
+                'Paginación principal sin progreso; se activa fallback temporal.'
+            )
+            break
+
+        expected = diagnostics.get('expected_rows')
+        if expected is not None and len(all_data) >= expected:
+            break
+
+    expected = diagnostics.get('expected_rows')
+    primary_incomplete = (
+        expected is not None
+        and len(all_data) < expected
+    )
+
+    # ------------------------------------------------------------------
+    # PASO B: fallback por ventanas de 3 días.
+    # Sólo se ejecuta si el count exacto demuestra que faltan filas.
+    # ------------------------------------------------------------------
+    if primary_incomplete:
+        diagnostics['fallback_used'] = True
+        logger.warning(
+            'Fetch 90d incompleto: '
+            f'{len(all_data)}/{expected}. Reintentando por ventanas temporales.'
+        )
+
+        fallback_data = []
+        fallback_seen = set()
+        slice_start = cutoff_dt
+        slice_size = timedelta(days=3)
+
+        while slice_start < snapshot_end_dt:
+            slice_end = min(
+                slice_start + slice_size,
+                snapshot_end_dt
+            )
+            diagnostics['fallback_slices'] += 1
+
+            slice_offset = 0
+            for _ in range(20):  # hasta 10k por slice, muy por encima de lo esperado
+                response, error = _execute_page(
+                    slice_start.isoformat(),
+                    slice_end.isoformat(),
+                    slice_offset,
+                    page_size
+                )
+
+                if error is not None:
+                    diagnostics['errors'].append(
+                        'fallback_'
+                        f'{slice_start.isoformat()}_offset_{slice_offset}: '
+                        f'{str(error)[:180]}'
+                    )
+                    logger.warning(
+                        'Fallback temporal falló '
+                        f'{slice_start.isoformat()} offset={slice_offset}: {error}'
+                    )
+                    break
+
+                batch = response.data or []
+                if not batch:
+                    break
+
+                added = _append_unique(
+                    fallback_data,
+                    fallback_seen,
+                    batch
+                )
+                slice_offset += len(batch)
+
+                if added == 0:
+                    break
+
+            slice_start = slice_end
+
+        # El fallback reemplaza al primario sólo si recupera más filas.
+        if len(fallback_data) > len(all_data):
+            all_data = fallback_data
+            seen_ids = fallback_seen
+
+    # Orden determinista global para tablas y walk-forward.
+    all_data.sort(
+        key=lambda row: str(row.get('created_at') or ''),
+        reverse=True
+    )
+
+    diagnostics['fetched_rows'] = len(all_data)
+
+    expected = diagnostics.get('expected_rows')
+    if expected is not None:
+        diagnostics['complete'] = (
+            len(all_data) == expected
+        )
+        diagnostics['coverage_pct'] = round(
+            (len(all_data) / expected * 100.0)
+            if expected > 0
+            else 100.0,
+            2
+        )
+    else:
+        diagnostics['complete'] = not diagnostics['errors']
+
+    if not diagnostics['complete']:
+        logger.warning(
+            '⚠️ Cohorte PDF incompleta: '
+            f"{diagnostics['fetched_rows']}/"
+            f"{diagnostics.get('expected_rows')} filas."
+        )
+
+    return all_data, diagnostics
 
 
 def _calc_stats_general(signals: List[Dict]) -> List[Dict]:
@@ -2020,6 +2269,7 @@ def _fetch_learning_data() -> Dict:
         'missed_opp_from_signals': 0,
         'missed_opportunities': 0,
         'signals_with_indicators': [],
+        'fetch_diagnostics': {},
         'metrics_by_market': {},
         'quarantine_counts': {},
         'futures_shadow_analysis': {},
@@ -2061,10 +2311,20 @@ def _fetch_learning_data() -> Dict:
     # Traer una sola ventana y separar las cohortes antes de calcular cualquier
     # win rate. Así el encabezado y las tablas hablan del mismo conjunto.
     try:
-        report_signals = _fetch_all_signals_with_indicators(
+        (
+            report_signals,
+            fetch_diagnostics
+        ) = _fetch_all_signals_with_indicators(
             db,
             days_back=REPORT_DAYS_BACK
         )
+        data['fetch_diagnostics'] = fetch_diagnostics
+
+        if not fetch_diagnostics.get('complete', False):
+            logger.warning(
+                'El PDF continuará, pero marcará la cohorte 90d como INCOMPLETA.'
+            )
+
         cohorts = _split_learning_cohorts(report_signals)
         eligible_signals = (
             cohorts['spot']
@@ -2238,6 +2498,32 @@ def generate_learning_pdf() -> bytes:
         ['Métrica', 'Valor'],
         ['Inventario histórico total (no usado como cohorte)', str(data['all_time_signals'])],
         [f'Cohorte estadística verificable ({REPORT_DAYS_BACK} días)', str(data['total_signals'])],
+        [
+            f'Cobertura lectura Supabase ({REPORT_DAYS_BACK} días)',
+            (
+                f"{int((data.get('fetch_diagnostics') or {}).get('fetched_rows') or 0)} / "
+                f"{int((data.get('fetch_diagnostics') or {}).get('expected_rows') or 0)} "
+                f"({float((data.get('fetch_diagnostics') or {}).get('coverage_pct') or 0):.1f}%)"
+                if (data.get('fetch_diagnostics') or {}).get('expected_rows') is not None
+                else 'COUNT NO DISPONIBLE'
+            )
+        ],
+        [
+            'Modo de lectura cohorte',
+            (
+                'FALLBACK TEMPORAL'
+                if (data.get('fetch_diagnostics') or {}).get('fallback_used')
+                else 'PAGINACIÓN NORMAL'
+            )
+        ],
+        [
+            'Estado lectura cohorte',
+            (
+                'COMPLETA'
+                if (data.get('fetch_diagnostics') or {}).get('complete', False)
+                else 'INCOMPLETA - NO CALIBRAR'
+            )
+        ],
         ['SPOT — señales en cohorte', str(spot_metrics.get('total', 0))],
         ['   — TP / SL / Expired', (
             f"{spot_metrics.get('tp_hit', 0)} / "
@@ -2272,15 +2558,15 @@ def generate_learning_pdf() -> bytes:
         ('BACKGROUND', (0,0), (-1,0), HexColor('#0a3d62')),
         ('TEXTCOLOR', (0,0), (-1,0), white),
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0,0), (-1,-1), 10),
+        ('FONTSIZE', (0,0), (-1,-1), 9.2),
         ('GRID', (0,0), (-1,-1), 0.4, HexColor('#c8ccd6')),
         ('ROWBACKGROUNDS', (0,1), (-1,-1), [HexColor('#f4f6fa'), white]),
         ('LEFTPADDING', (0,0), (-1,-1), 7),
-        ('TOPPADDING', (0,0), (-1,-1), 5),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 5),
+        ('TOPPADDING', (0,0), (-1,-1), 4),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 4),
     ]))
     story.append(tmet)
-    
+
     story.append(PageBreak())
     
     # ============ 4. FUTURES SHADOW — DIAGNÓSTICO DE TIMIDEZ ============
