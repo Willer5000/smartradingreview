@@ -348,6 +348,292 @@
                         </div>
                     </div>
                 </div>
+                {% if is_futures %}
+                <!-- ========================================================= -->
+                <!-- COMMIT 36L — PREFERENCIAS VISUALES DE SCALPING FUTURES -->
+                <!-- ========================================================= -->
+                <div
+                    id="futures-scalping-settings-card"
+                    class="card bg-dark border-warning mb-3"
+                >
+                    <div
+                        class="card-header bg-warning bg-opacity-10 d-flex justify-content-between align-items-center py-2"
+                        role="button"
+                        data-bs-toggle="collapse"
+                        data-bs-target="#futures-scalping-settings-body"
+                        aria-expanded="false"
+                        aria-controls="futures-scalping-settings-body"
+                        style="cursor: pointer;"
+                    >
+                        <div>
+                            <span class="fw-bold text-warning">
+                                ⚡ Alertas Scalping Futures
+                            </span>
+                            <div class="small text-muted">
+                                5m · 15m · 30m · horario personal
+                            </div>
+                        </div>
+
+                        <div class="d-flex align-items-center gap-2">
+                            <span
+                                id="futures-scalping-status-badge"
+                                class="badge bg-secondary"
+                            >
+                                OFF
+                            </span>
+                            <i class="fas fa-chevron-down text-muted"></i>
+                        </div>
+                    </div>
+
+                    <!-- Cerrado por defecto para no generar ruido -->
+                    <div
+                        id="futures-scalping-settings-body"
+                        class="collapse"
+                    >
+                        <div class="card-body p-3">
+
+                            <div
+                                id="futures-scalping-message"
+                                class="alert alert-secondary py-2 px-2 small mb-3"
+                            >
+                                Desactivado por defecto. Configura tus horarios
+                                sólo si deseas recibir alertas de scalping.
+                            </div>
+
+                            <div class="d-flex justify-content-between align-items-center mb-3">
+                                <div>
+                                    <label
+                                        class="form-check-label fw-bold"
+                                        for="futures-scalping-enabled"
+                                    >
+                                        Telegram de scalping
+                                    </label>
+                                    <div class="small text-muted">
+                                        Sólo señales Futures ejecutables.
+                                    </div>
+                                </div>
+
+                                <div class="form-check form-switch m-0">
+                                    <input
+                                        class="form-check-input"
+                                        type="checkbox"
+                                        role="switch"
+                                        id="futures-scalping-enabled"
+                                    >
+                                </div>
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label small text-muted mb-2">
+                                    Temporalidades
+                                </label>
+
+                                <div class="d-flex flex-wrap gap-2">
+                                    <input
+                                        class="btn-check"
+                                        type="checkbox"
+                                        id="futures-scalping-tf-5m"
+                                        value="5m"
+                                        data-scalping-tf
+                                        autocomplete="off"
+                                    >
+                                    <label
+                                        class="btn btn-sm btn-outline-warning"
+                                        for="futures-scalping-tf-5m"
+                                    >
+                                        5m
+                                    </label>
+
+                                    <input
+                                        class="btn-check"
+                                        type="checkbox"
+                                        id="futures-scalping-tf-15m"
+                                        value="15m"
+                                        data-scalping-tf
+                                        autocomplete="off"
+                                    >
+                                    <label
+                                        class="btn btn-sm btn-outline-warning"
+                                        for="futures-scalping-tf-15m"
+                                    >
+                                        15m
+                                    </label>
+
+                                    <input
+                                        class="btn-check"
+                                        type="checkbox"
+                                        id="futures-scalping-tf-30m"
+                                        value="30m"
+                                        data-scalping-tf
+                                        autocomplete="off"
+                                    >
+                                    <label
+                                        class="btn btn-sm btn-outline-warning"
+                                        for="futures-scalping-tf-30m"
+                                    >
+                                        30m
+                                    </label>
+                                </div>
+
+                                <div class="small text-muted mt-2">
+                                    La selección controla Telegram; no cambia
+                                    cómo analiza el sistema.
+                                </div>
+                            </div>
+
+                            <div class="row g-2 mb-3">
+                                <div class="col-6">
+                                    <label
+                                        class="form-label small text-muted"
+                                        for="futures-scalping-start-time"
+                                    >
+                                        Desde
+                                    </label>
+                                    <input
+                                        type="time"
+                                        class="form-control form-control-sm bg-dark text-light border-secondary"
+                                        id="futures-scalping-start-time"
+                                    >
+                                </div>
+
+                                <div class="col-6">
+                                    <label
+                                        class="form-label small text-muted"
+                                        for="futures-scalping-end-time"
+                                    >
+                                        Hasta
+                                    </label>
+                                    <input
+                                        type="time"
+                                        class="form-control form-control-sm bg-dark text-light border-secondary"
+                                        id="futures-scalping-end-time"
+                                    >
+                                </div>
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label small text-muted mb-2">
+                                    Días de scalping
+                                </label>
+
+                                <div class="d-flex flex-wrap gap-1">
+                                    {% for day_num, day_short, day_full in [
+                                        (1, 'L', 'Lunes'),
+                                        (2, 'M', 'Martes'),
+                                        (3, 'X', 'Miércoles'),
+                                        (4, 'J', 'Jueves'),
+                                        (5, 'V', 'Viernes'),
+                                        (6, 'S', 'Sábado'),
+                                        (7, 'D', 'Domingo')
+                                    ] %}
+                                    <input
+                                        class="btn-check"
+                                        type="checkbox"
+                                        id="futures-scalping-day-{{ day_num }}"
+                                        value="{{ day_num }}"
+                                        data-scalping-day
+                                        autocomplete="off"
+                                    >
+                                    <label
+                                        class="btn btn-sm btn-outline-info"
+                                        for="futures-scalping-day-{{ day_num }}"
+                                        title="{{ day_full }}"
+                                    >
+                                        {{ day_short }}
+                                    </label>
+                                    {% endfor %}
+                                </div>
+
+                                <div class="small text-muted mt-2">
+                                    Si el horario cruza medianoche, el día elegido
+                                    es el día en que comienza la sesión.
+                                </div>
+                            </div>
+
+                            <div class="mb-3">
+                                <label
+                                    class="form-label small text-muted"
+                                    for="futures-scalping-timezone"
+                                >
+                                    Zona horaria
+                                </label>
+
+                                <div class="input-group input-group-sm">
+                                    <input
+                                        type="text"
+                                        class="form-control bg-dark text-light border-secondary"
+                                        id="futures-scalping-timezone"
+                                        list="futures-scalping-timezone-list"
+                                        placeholder="America/Argentina/Buenos_Aires"
+                                        autocomplete="off"
+                                    >
+
+                                    <button
+                                        type="button"
+                                        class="btn btn-outline-secondary"
+                                        id="btn-detect-futures-scalping-timezone"
+                                        title="Usar la zona horaria de este dispositivo"
+                                    >
+                                        📍
+                                    </button>
+                                </div>
+
+                                <datalist id="futures-scalping-timezone-list">
+                                    <option value="America/Argentina/Buenos_Aires"></option>
+                                    <option value="America/La_Paz"></option>
+                                    <option value="America/Santiago"></option>
+                                    <option value="America/Lima"></option>
+                                    <option value="America/Bogota"></option>
+                                    <option value="America/Mexico_City"></option>
+                                    <option value="America/New_York"></option>
+                                    <option value="Europe/Madrid"></option>
+                                    <option value="UTC"></option>
+                                </datalist>
+
+                                <div class="small text-muted mt-1">
+                                    Usa una zona IANA. El botón 📍 intenta detectar
+                                    automáticamente la de tu navegador.
+                                </div>
+                            </div>
+
+                            <div class="small text-muted mb-3">
+                                Usuario:
+                                <span
+                                    id="futures-scalping-user-label"
+                                    class="text-light"
+                                >
+                                    —
+                                </span>
+                            </div>
+
+                            <div class="d-flex gap-2">
+                                <button
+                                    type="button"
+                                    class="btn btn-sm btn-warning flex-fill"
+                                    id="btn-save-futures-scalping"
+                                >
+                                    💾 Guardar
+                                </button>
+
+                                <button
+                                    type="button"
+                                    class="btn btn-sm btn-outline-secondary"
+                                    id="btn-refresh-futures-scalping"
+                                    title="Recargar preferencias"
+                                >
+                                    ↻
+                                </button>
+                            </div>
+
+                            <div class="small text-muted mt-3">
+                                36L sólo configura las alertas. No modifica
+                                Safety, Entry, SL, TP, leverage ni Publication Gate.
+                            </div>
+
+                        </div>
+                    </div>
+                </div>
+                {% endif %}              
                 <!-- ====== PANEL DE PORTAFOLIO DEL USUARIO (TGP) ====== -->
                 <!-- ====== PANEL DE PORTAFOLIO (TGP) ====== -->
                 <div id="portfolio-panel" class="card bg-dark border-secondary mb-3">
