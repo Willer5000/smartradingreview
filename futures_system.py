@@ -2672,7 +2672,290 @@ class FuturesAnalysis(TradingExpertSystem):
                 'STATIC_FALLBACK'
             )
         )
+        # ==============================================================
+        # COMMIT 36F — BREAKDOWN DIAGNÓSTICO DE EXECUTION SAFETY
+        # ==============================================================
 
+        safety_component_weights = {
+            'entry_smc': 0.25,
+            'sl': 0.20,
+            'tp': 0.15,
+            'rr': 0.15,
+            'structure': 0.10,
+            'trend': 0.05,
+            'timeframe': 0.10
+        }
+
+        raw_safety_components = (
+            execution_safety.get(
+                'components',
+                {}
+            )
+            or {}
+        )
+
+        if not isinstance(
+            raw_safety_components,
+            dict
+        ):
+            raw_safety_components = {}
+
+        safety_components = {}
+        weighted_contributions = {}
+        penalties_to_perfect = {}
+
+        for (
+            component_name,
+            component_weight
+        ) in safety_component_weights.items():
+
+            try:
+                component_score = float(
+                    raw_safety_components.get(
+                        component_name,
+                        0.0
+                    )
+                    or 0.0
+                )
+            except (
+                TypeError,
+                ValueError
+            ):
+                component_score = 0.0
+
+            if not math.isfinite(
+                component_score
+            ):
+                component_score = 0.0
+
+            component_score = max(
+                0.0,
+                min(
+                    100.0,
+                    component_score
+                )
+            )
+
+            weighted_value = (
+                component_score
+                * component_weight
+            )
+
+            missing_value = (
+                (100.0 - component_score)
+                * component_weight
+            )
+
+            safety_components[
+                component_name
+            ] = round(
+                component_score,
+                3
+            )
+
+            weighted_contributions[
+                component_name
+            ] = round(
+                weighted_value,
+                4
+            )
+
+            penalties_to_perfect[
+                component_name
+            ] = round(
+                missing_value,
+                4
+            )
+
+        reconstructed_score = sum(
+            weighted_contributions.values()
+        )
+
+        dominant_penalties = sorted(
+            (
+                {
+                    'component':
+                        component_name,
+                    'score':
+                        safety_components.get(
+                            component_name,
+                            0.0
+                        ),
+                    'weight':
+                        safety_component_weights.get(
+                            component_name,
+                            0.0
+                        ),
+                    'penalty_points':
+                        penalties_to_perfect.get(
+                            component_name,
+                            0.0
+                        )
+                }
+                for component_name
+                in safety_component_weights
+            ),
+            key=lambda item: (
+                -float(
+                    item.get(
+                        'penalty_points',
+                        0.0
+                    )
+                    or 0.0
+                ),
+                str(
+                    item.get(
+                        'component',
+                        ''
+                    )
+                )
+            )
+        )[:3]
+
+        levels[
+            'execution_safety_breakdown'
+        ] = {
+            'model_version':
+                'execution_safety_breakdown_v1',
+
+            'available':
+                bool(
+                    raw_safety_components
+                ),
+
+            'raw_score':
+                round(
+                    safety_score,
+                    3
+                ),
+
+            'label':
+                str(
+                    safety_label
+                    or ''
+                ),
+
+            'base_minimum':
+                round(
+                    base_minimum_safety,
+                    3
+                ),
+
+            'operational_minimum':
+                round(
+                    minimum_safety,
+                    3
+                ),
+
+            'distance_to_operational_min':
+                round(
+                    safety_score
+                    - minimum_safety,
+                    3
+                ),
+
+            'shortfall_to_operational_min':
+                round(
+                    max(
+                        0.0,
+                        minimum_safety
+                        - safety_score
+                    ),
+                    3
+                ),
+
+            'leverage_safety_score':
+                round(
+                    leverage_safety_score,
+                    3
+                ),
+
+            'components':
+                safety_components,
+
+            'weights':
+                {
+                    key: round(
+                        value,
+                        4
+                    )
+                    for key, value
+                    in safety_component_weights.items()
+                },
+
+            'weighted_contributions':
+                weighted_contributions,
+
+            'penalties_to_perfect':
+                penalties_to_perfect,
+
+            'dominant_penalties':
+                dominant_penalties,
+
+            'reconstructed_score':
+                round(
+                    reconstructed_score,
+                    3
+                ),
+
+            'score_reconstruction_delta':
+                round(
+                    reconstructed_score
+                    - safety_score,
+                    4
+                ),
+
+            'timeframe_factor':
+                execution_safety.get(
+                    'timeframe_factor'
+                ),
+
+            'timeframe_factor_source':
+                str(
+                    execution_safety.get(
+                        'timeframe_factor_source',
+                        ''
+                    )
+                    or ''
+                ),
+
+            'timeframe_factor_statistically_calibrated':
+                bool(
+                    execution_safety.get(
+                        'timeframe_factor_statistically_calibrated',
+                        False
+                    )
+                ),
+
+            'calibration_active':
+                bool(
+                    execution_calibration.get(
+                        'active',
+                        False
+                    )
+                ),
+
+            'calibration_mode':
+                str(
+                    execution_calibration.get(
+                        'mode',
+                        'STATIC_FALLBACK'
+                    )
+                    or 'STATIC_FALLBACK'
+                ),
+
+            'diagnostic_only':
+                True,
+
+            'affects_execution':
+                False,
+
+            'affects_publication':
+                False,
+
+            'affects_leverage':
+                False
+        }
         if execution_calibration.get(
             'active',
             False
