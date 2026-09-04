@@ -764,7 +764,50 @@ def _get_tgp_market_snapshots(
     """
 
     result = {}
+    # ==============================================================
+    # COMMIT 31 — SNAPSHOT TGP PERSISTENTE EN MEMORIA
+    # ==============================================================
+    #
+    # _ANALYSIS_CACHE contiene objetos pesados y tiene TTL corto.
+    #
+    # _TGP_MARKET_SNAPSHOT contiene únicamente resúmenes compactos
+    # pensados específicamente para conservar el contexto 4h/12h/1D/1W.
+    #
+    # Primero recuperamos esos snapshots.
+    # Después el caché normal podrá sobrescribirlos con información
+    # más fresca cuando todavía exista.
+    #
+    # NO recalcula mercado.
+    # NO realiza llamadas KuCoin.
+    # ==============================================================
 
+    with _TGP_MARKET_SNAPSHOT_LOCK:
+
+        compact_items = list(
+            _TGP_MARKET_SNAPSHOT.items()
+        )
+
+    for (
+        symbol,
+        timeframe
+    ), compact in compact_items:
+
+        if (
+            symbol not in _TGP_SPOT_SYMBOLS
+            or timeframe not in _TGP_SPOT_TIMEFRAMES
+            or not isinstance(
+                compact,
+                dict
+            )
+        ):
+            continue
+
+        result.setdefault(
+            timeframe,
+            {}
+        )[symbol] = dict(
+            compact
+        )
     with _ANALYSIS_CACHE_LOCK:
 
         for (
@@ -29197,6 +29240,28 @@ def ejecutar_analisis_completo(timeframe):
                 
                 if resultado and resultado.get('success'):
                     resultados[par] = resultado
+                    # ==================================================
+                    # COMMIT 31 — ALIMENTAR TGP MULTITEMPORAL
+                    # ==================================================
+                    #
+                    # Guardar incluso cuando la decisión sea NO_OPERAR.
+                    #
+                    # El Guardian necesita conocer también mercados
+                    # neutrales o desfavorables; no sólo señales.
+                    # ==================================================
+
+                    try:
+
+                        _tgp_snapshot_put(
+                            resultado
+                        )
+
+                    except Exception as snapshot_error:
+
+                        print(
+                            "   ⚠️ TGP snapshot: "
+                            f"{snapshot_error}"
+                        )    
                     decision = resultado['decision']['action']
                     confianza = resultado['decision']['confidence']
                     print(f"   ✅ {par}: {decision} ({confianza:.0f}%)")
@@ -29292,7 +29357,29 @@ def ejecutar_analisis_completo(timeframe):
                 print(f"   ❌ Error en {par}: {e}")
                 import traceback
                 traceback.print_exc()
-        
+        # ==============================================================
+        # COMMIT 31 — TGP SPOT PROACTIVO
+        # ==============================================================
+        #
+        # Se ejecuta DESPUÉS de analizar los tres pares.
+        #
+        # No genera análisis nuevos.
+        # Sólo utiliza los resultados y snapshots ya existentes.
+        # ==============================================================
+
+        try:
+
+            _run_proactive_spot_guardian(
+                timeframe=timeframe,
+                resultados=resultados
+            )
+
+        except Exception as tgp_proactive_error:
+
+            print(
+                "⚠️ TGP Spot proactivo: "
+                f"{tgp_proactive_error}"
+            )        
         # Limpiar señales_ventana viejas (más de 2 horas)
         ahora_ts = time.time()
         for key in list(expert_system.señales_ventana.keys()):
@@ -30380,6 +30467,849 @@ def monitor_guardian_telegram_loop():
         time.sleep(
             GUARDIAN_TELEGRAM_CHECK_INTERVAL
         )
+
+# ============================================================================
+# COMMIT 31 — SPOT GUARDIAN PROACTIVO
+# ============================================================================
+#
+# Se ejecuta únicamente después de un análisis Spot que YA iba a realizarse.
+#
+# NO:
+# - crea otro scheduler;
+# - repite análisis;
+# - hace polling agresivo;
+# - llama KuCoin adicionalmente;
+# - modifica el portfolio;
+# - ejecuta operaciones.
+#
+# SÍ:
+# - utiliza snapshots compactos existentes;
+# - consulta una vez el portfolio de cada usuario autorizado;
+# - ejecuta TGP multi-timeframe;
+# - manda Telegram sólo si existe acción real.
+# ============================================================================
+
+_PROACTIVE_SPOT_GUARDIAN_LOCK = (
+    threading.Lock()
+)
+
+
+def _build_proactive_spot_guardian_message(
+    user,
+    tgp_result,
+    timeframe
+):
+
+    action = str(
+        tgp_result.get(
+            'action',
+            'HOLD'
+        )
+    ).upper()
+
+    confidence = float(
+        tgp_result.get(
+            'confidence',
+            0
+        )
+        or 0
+    )
+
+    reason = str(
+        tgp_result.get(
+            'reason',
+            ''
+        )
+        or ''
+    )
+
+    source = str(
+        tgp_result.get(
+            'source_asset',
+            ''
+        )
+        or ''
+    )
+
+    target = str(
+        tgp_result.get(
+            'target_asset',
+            ''
+        )
+        or ''
+    )
+
+    amount_crypto = float(
+        tgp_result.get(
+            'amount_crypto',
+            0
+        )
+        or 0
+    )
+
+    amount_usd = float(
+        tgp_result.get(
+            'amount_usd',
+            0
+        )
+        or 0
+    )
+
+    before = (
+        tgp_result.get(
+            'portfolio_before',
+            {}
+        )
+        or {}
+    )
+
+    after = (
+        tgp_result.get(
+            'portfolio_after',
+            {}
+        )
+        or {}
+    )
+
+    best_tf = str(
+        tgp_result.get(
+            'best_timeframe',
+            ''
+        )
+        or ''
+    )
+
+    btc_count = int(
+        tgp_result.get(
+            'btc_timeframe_count',
+            0
+        )
+        or 0
+    )
+
+    paxg_count = int(
+        tgp_result.get(
+            'paxg_timeframe_count',
+            0
+        )
+        or 0
+    )
+
+    action_labels = {
+
+        'BUY_BTC':
+            '🟢 <b>COMPRAR BTC</b>',
+
+        'BUY_PAXG':
+            '🟡 <b>COMPRAR PAXG</b>',
+
+        'SELL_BTC':
+            '🔴 <b>VENDER BTC</b>',
+
+        'SELL_PAXG':
+            '🔴 <b>VENDER PAXG</b>',
+
+        'SWAP_PAXG_TO_BTC':
+            '🔄 <b>ROTAR PAXG → BTC</b>',
+
+        'SWAP_BTC_TO_PAXG':
+            '🔄 <b>ROTAR BTC → PAXG</b>'
+    }
+
+    action_text = (
+        action_labels.get(
+            action,
+            _telegram_escape(
+                action
+            )
+        )
+    )
+
+    lines = [
+
+        f"👤 <b>{_telegram_escape(user)}</b>",
+        "🛡️ <b>GUARDIAN SPOT</b>",
+        '',
+        action_text,
+        '',
+        (
+            "Confianza TGP: "
+            f"<b>{confidence:.0f}%</b>"
+        )
+    ]
+
+    if best_tf:
+
+        lines.append(
+            "📊 Mejor contexto: "
+            f"<b>{_telegram_escape(best_tf)}</b>"
+        )
+
+    lines.append(
+        (
+            "BTC favorecido: "
+            f"{btc_count}/4 TF · "
+            "PAXG favorecido: "
+            f"{paxg_count}/4 TF"
+        )
+    )
+
+    lines.extend([
+        '',
+        '💼 <b>Portfolio actual</b>',
+        (
+            "BTC: "
+            f"{float(before.get('pct_btc', 0) or 0) * 100:.1f}%"
+        ),
+        (
+            "PAXG: "
+            f"{float(before.get('pct_paxg', 0) or 0) * 100:.1f}%"
+        ),
+        (
+            "USDT: "
+            f"{float(before.get('pct_usdt', 0) or 0) * 100:.1f}%"
+        )
+    ])
+
+    if (
+        source
+        and target
+        and amount_usd > 0
+    ):
+
+        lines.extend([
+            '',
+            '💰 <b>Operación sugerida</b>',
+            (
+                f"{_telegram_escape(source)}"
+                " → "
+                f"{_telegram_escape(target)}"
+            ),
+            (
+                "Valor aproximado: "
+                f"<b>${amount_usd:,.2f}</b>"
+            )
+        ])
+
+        if amount_crypto > 0:
+
+            lines.append(
+                "Cantidad del activo fuente: "
+                f"{amount_crypto:.8f} "
+                f"{_telegram_escape(source)}"
+            )
+
+    if after:
+
+        lines.extend([
+            '',
+            '📈 <b>Portfolio estimado después</b>',
+            (
+                "BTC: "
+                f"{float(after.get('pct_btc', 0) or 0) * 100:.1f}%"
+            ),
+            (
+                "PAXG: "
+                f"{float(after.get('pct_paxg', 0) or 0) * 100:.1f}%"
+            ),
+            (
+                "USDT: "
+                f"{float(after.get('pct_usdt', 0) or 0) * 100:.1f}%"
+            )
+        ])
+
+    if reason:
+
+        lines.extend([
+            '',
+            '💡 <b>Razón técnica</b>',
+            _telegram_escape(
+                reason
+            )
+        ])
+
+    lines.extend([
+        '',
+        (
+            "⏰ Evaluación tras análisis "
+            f"{_telegram_escape(timeframe)}"
+        ),
+        '',
+        (
+            "⚠️ <i>Recomendación del Guardian. "
+            "No modifica automáticamente tu portfolio.</i>"
+        )
+    ])
+
+    return '\n'.join(
+        lines
+    )
+
+
+def _run_proactive_spot_guardian(
+    timeframe,
+    resultados
+):
+    """
+    Ejecuta TGP para cada usuario Spot autorizado usando exclusivamente
+    información que el sistema YA calculó.
+    """
+
+    if not _PROACTIVE_SPOT_GUARDIAN_LOCK.acquire(
+        blocking=False
+    ):
+
+        print(
+            "🛡️📱 TGP proactivo: "
+            "otra evaluación ya está en curso."
+        )
+
+        return
+
+    try:
+
+        if not isinstance(
+            resultados,
+            dict
+        ):
+
+            return
+
+        # ==============================================================
+        # 1. EL TF ACTUAL DEBE HABER COMPLETADO LOS TRES MERCADOS
+        # ==============================================================
+
+        current_complete = all(
+
+            isinstance(
+                resultados.get(
+                    symbol
+                ),
+                dict
+            )
+
+            and resultados[
+                symbol
+            ].get(
+                'success'
+            )
+
+            for symbol
+            in _TGP_SPOT_SYMBOLS
+        )
+
+        if not current_complete:
+
+            print(
+                "🛡️📱 TGP proactivo: "
+                "TF actual incompleto. Sin alerta."
+            )
+
+            return
+
+        # ==============================================================
+        # 2. ASEGURAR SNAPSHOTS DEL CICLO ACTUAL
+        # ==============================================================
+
+        for result in resultados.values():
+
+            try:
+
+                _tgp_snapshot_put(
+                    result
+                )
+
+            except Exception:
+                pass
+
+        market_snapshots = (
+            _get_tgp_market_snapshots()
+        )
+
+        # ==============================================================
+        # 3. EXIGIR CONTEXTO MULTITEMPORAL REAL
+        # ==============================================================
+        #
+        # No queremos una recomendación estratégica basada sólo
+        # en un único timeframe.
+        # ==============================================================
+
+        complete_timeframes = []
+
+        for tf in _TGP_SPOT_TIMEFRAMES:
+
+            tf_data = (
+                market_snapshots.get(
+                    tf,
+                    {}
+                )
+                or {}
+            )
+
+            if all(
+                symbol in tf_data
+                for symbol
+                in _TGP_SPOT_SYMBOLS
+            ):
+
+                complete_timeframes.append(
+                    tf
+                )
+
+        if len(
+            complete_timeframes
+        ) < 2:
+
+            print(
+                "🛡️📱 TGP proactivo: "
+                "menos de 2 TF completos. "
+                "Se mantiene silencio."
+            )
+
+            return
+
+        # ==============================================================
+        # 4. PRECIOS
+        # ==============================================================
+        #
+        # Primero usar el análisis recién realizado.
+        # Si no está disponible, usar uno de los snapshots.
+        #
+        # NO hacer llamada adicional a KuCoin.
+        # ==============================================================
+
+        def _pick_price(
+            symbol
+        ):
+
+            current = (
+                resultados.get(
+                    symbol,
+                    {}
+                )
+                or {}
+            )
+
+            try:
+
+                value = float(
+                    current.get(
+                        'current_price',
+                        0
+                    )
+                    or 0
+                )
+
+                if value > 0:
+
+                    return value
+
+            except Exception:
+                pass
+
+            for tf in (
+                '4h',
+                '12h',
+                '1D',
+                '1W'
+            ):
+
+                try:
+
+                    value = float(
+                        (
+                            market_snapshots
+                            .get(
+                                tf,
+                                {}
+                            )
+                            .get(
+                                symbol,
+                                {}
+                            )
+                            .get(
+                                'current_price',
+                                0
+                            )
+                        )
+                        or 0
+                    )
+
+                    if value > 0:
+
+                        return value
+
+                except Exception:
+                    continue
+
+            return 0.0
+
+        prices = {
+
+            'BTC-USDT':
+                _pick_price(
+                    'BTC-USDT'
+                ),
+
+            'PAXG-USDT':
+                _pick_price(
+                    'PAXG-USDT'
+                )
+        }
+
+        if (
+            prices[
+                'BTC-USDT'
+            ] <= 0
+            or prices[
+                'PAXG-USDT'
+            ] <= 0
+        ):
+
+            print(
+                "🛡️📱 TGP proactivo: "
+                "precios incompletos. "
+                "No se utilizará fallback externo."
+            )
+
+            return
+
+        # ==============================================================
+        # 5. PORTFOLIO DE CADA USUARIO AUTORIZADO
+        # ==============================================================
+
+        from supabase_client import (
+            supabase_client
+        )
+
+        users = sorted(
+            _telegram_market_users(
+                'spot'
+            )
+        )
+
+        for user in users:
+
+            try:
+
+                portfolio = (
+                    supabase_client
+                    .get_user_portfolio(
+                        user
+                    )
+                    or {}
+                )
+
+            except Exception as portfolio_error:
+
+                print(
+                    "⚠️ TGP proactivo "
+                    f"{user}: portfolio: "
+                    f"{portfolio_error}"
+                )
+
+                continue
+
+            has_assets = any(
+
+                float(
+                    portfolio.get(
+                        asset,
+                        0
+                    )
+                    or 0
+                ) > 0
+
+                for asset
+                in (
+                    'BTC',
+                    'PAXG',
+                    'USDT'
+                )
+            )
+
+            if not has_assets:
+
+                continue
+
+            # ==========================================================
+            # 6. TGP MULTI-TIMEFRAME
+            # ==========================================================
+
+            try:
+
+                tgp_result = (
+                    portfolio_guardian
+                    .analyze_multi_timeframe(
+                        user=user,
+                        portfolio=portfolio,
+                        prices=prices,
+                        market_snapshots=(
+                            market_snapshots
+                        )
+                    )
+                )
+
+            except Exception as tgp_error:
+
+                print(
+                    "⚠️ TGP proactivo "
+                    f"{user}: {tgp_error}"
+                )
+
+                continue
+
+            if not isinstance(
+                tgp_result,
+                dict
+            ):
+
+                continue
+
+            action = str(
+                tgp_result.get(
+                    'action',
+                    'HOLD'
+                )
+            ).upper()
+
+            confidence = float(
+                tgp_result.get(
+                    'confidence',
+                    0
+                )
+                or 0
+            )
+
+            # ==========================================================
+            # HOLD = SILENCIO
+            # ==========================================================
+
+            if (
+                action == 'HOLD'
+                or confidence < 70
+            ):
+
+                print(
+                    "🛡️📱 TGP proactivo "
+                    f"{user}: {action} "
+                    f"({confidence:.0f}%). "
+                    "Sin Telegram."
+                )
+
+                continue
+
+            # ==========================================================
+            # 7. ESTADO REAL DEL PORTFOLIO
+            # ==========================================================
+
+            before = (
+                tgp_result.get(
+                    'portfolio_before',
+                    {}
+                )
+                or {}
+            )
+
+            try:
+
+                state = (
+                    portfolio_guardian
+                    ._classify_state(
+                        float(
+                            before.get(
+                                'pct_btc',
+                                0
+                            )
+                            or 0
+                        ),
+                        float(
+                            before.get(
+                                'pct_paxg',
+                                0
+                            )
+                            or 0
+                        ),
+                        float(
+                            before.get(
+                                'pct_usdt',
+                                0
+                            )
+                            or 0
+                        )
+                    )
+                )
+
+            except Exception:
+
+                state = (
+                    'MULTI_TIMEFRAME'
+                )
+
+            tgp_result[
+                'state'
+            ] = state
+
+            source = str(
+                tgp_result.get(
+                    'source_asset',
+                    ''
+                )
+                or ''
+            )
+
+            target = str(
+                tgp_result.get(
+                    'target_asset',
+                    ''
+                )
+                or ''
+            )
+
+            # ==========================================================
+            # 8. ANTI-SPAM COMPARTIDO CON COMMIT 30
+            # ==========================================================
+            #
+            # Usa exactamente la misma identidad lógica que las
+            # alertas TGP solicitadas desde la web.
+            #
+            # Si la página ya informó esta recomendación:
+            #     el proactivo permanece en silencio.
+            #
+            # Si el proactivo la informó:
+            #     abrir la página no la duplica.
+            # ==============================================================
+
+            spot_window = int(
+                time.time()
+                // (
+                    6
+                    * 60
+                    * 60
+                )
+            )
+
+            spot_subject = (
+                f"{state}|"
+                f"{source}|"
+                f"{target}|0"
+            )
+
+            reservation = (
+                _guardian_alert_can_send(
+                    user=user,
+                    market='spot',
+                    subject=spot_subject,
+                    action=action,
+                    bucket=str(
+                        spot_window
+                    ),
+                    min_interval=(
+                        6
+                        * 60
+                        * 60
+                    )
+                )
+            )
+
+            if not reservation:
+
+                print(
+                    "🔕 TGP proactivo "
+                    f"{user}: recomendación "
+                    "ya informada."
+                )
+
+                continue
+
+            # ==========================================================
+            # 9. ANTI-RÁFAGA GLOBAL
+            # ==========================================================
+            #
+            # Si 4h/12h/1D terminan casi al mismo tiempo,
+            # máximo una alerta proactiva cada 15 min por usuario.
+            # ==============================================================
+
+            global_window = int(
+                time.time()
+                // (
+                    15
+                    * 60
+                )
+            )
+
+            global_reservation = (
+                _guardian_alert_can_send(
+                    user=user,
+                    market='spot',
+                    subject=(
+                        'PROACTIVE_SPOT_GLOBAL'
+                    ),
+                    action='NOTICE',
+                    bucket=str(
+                        global_window
+                    ),
+                    min_interval=(
+                        15
+                        * 60
+                    )
+                )
+            )
+
+            if not global_reservation:
+
+                continue
+
+            # ==========================================================
+            # 10. TELEGRAM
+            # ==============================================================
+
+            message = (
+                _build_proactive_spot_guardian_message(
+                    user=user,
+                    tgp_result=tgp_result,
+                    timeframe=timeframe
+                )
+            )
+
+            sent = (
+                expert_system
+                .send_telegram_alert(
+                    message,
+                    None
+                )
+            )
+
+            if sent:
+
+                _guardian_alert_mark_sent(
+                    reservation
+                )
+
+                _guardian_alert_mark_sent(
+                    global_reservation
+                )
+
+                print(
+                    "🛡️📱 TGP SPOT: "
+                    f"{action} enviado a "
+                    f"{user}"
+                )
+
+    except Exception as e:
+
+        print(
+            "❌ _run_proactive_spot_guardian: "
+            f"{e}"
+        )
+
+    finally:
+
+        _PROACTIVE_SPOT_GUARDIAN_LOCK.release()
+
+
+
+
 # ============================================================================
 # FASE 7: FUNCIÓN DEL CICLO DIARIO DEL REVIEWTRADER
 # ============================================================================
