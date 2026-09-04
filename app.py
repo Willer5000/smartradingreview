@@ -30989,7 +30989,52 @@ def _run_proactive_spot_guardian(
         )
 
         for user in users:
+            # ==========================================================
+            # COMMIT 34C — PREFERENCIAS PERSONALES DE TELEGRAM
+            # ==========================================================
+            #
+            # La preferencia controla CUÁNDO avisar.
+            # NO controla qué TF utiliza TGP para decidir.
+            # ==========================================================
 
+            preferences = (
+                _get_spot_telegram_preferences(
+                    user
+                )
+            )
+
+            if not preferences.get(
+                'spot_telegram_enabled',
+                True
+            ):
+
+                print(
+                    "🔕 TGP Spot "
+                    f"{user}: Telegram desactivado."
+                )
+
+                continue
+
+            allowed_user_timeframes = (
+                preferences.get(
+                    'spot_telegram_timeframes',
+                    []
+                )
+                or []
+            )
+
+            if timeframe not in (
+                allowed_user_timeframes
+            ):
+
+                print(
+                    "🔕 TGP Spot "
+                    f"{user}: {timeframe} "
+                    "no seleccionado para Telegram."
+                )
+
+                continue
+                
             try:
 
                 portfolio = (
@@ -32848,7 +32893,348 @@ def api_user_portfolio():
 # ============================================================================
 # Paso 5: NUEVO ENDPOINT /api/user-stats
 # ============================================================================
+# ============================================================================
+# COMMIT 34C — PREFERENCIAS TELEGRAM SPOT POR USUARIO
+# ============================================================================
 
+_SPOT_TELEGRAM_ALLOWED_TIMEFRAMES = (
+    '4h',
+    '12h',
+    '1D',
+    '1W'
+)
+
+
+def _normalize_spot_telegram_preferences(
+    preferences
+):
+    """
+    Normaliza únicamente preferencias de COMUNICACIÓN.
+
+    No modifica:
+    - TGP
+    - Guardian
+    - análisis multitemporal
+    - decisiones
+    """
+
+    default = {
+        'spot_telegram_enabled': True,
+        'spot_telegram_timeframes': list(
+            _SPOT_TELEGRAM_ALLOWED_TIMEFRAMES
+        )
+    }
+
+    if not isinstance(
+        preferences,
+        dict
+    ):
+        return default
+
+    enabled = preferences.get(
+        'spot_telegram_enabled',
+        True
+    )
+
+    if isinstance(
+        enabled,
+        str
+    ):
+        enabled = (
+            enabled.strip().lower()
+            in (
+                '1',
+                'true',
+                'yes',
+                'si',
+                'sí',
+                'on'
+            )
+        )
+    else:
+        enabled = bool(
+            enabled
+        )
+
+    raw_timeframes = preferences.get(
+        'spot_telegram_timeframes',
+        list(
+            _SPOT_TELEGRAM_ALLOWED_TIMEFRAMES
+        )
+    )
+
+    if isinstance(
+        raw_timeframes,
+        str
+    ):
+        try:
+            raw_timeframes = json.loads(
+                raw_timeframes
+            )
+        except Exception:
+            raw_timeframes = []
+
+    if not isinstance(
+        raw_timeframes,
+        list
+    ):
+        raw_timeframes = []
+
+    clean_timeframes = [
+        tf
+        for tf
+        in _SPOT_TELEGRAM_ALLOWED_TIMEFRAMES
+        if tf in raw_timeframes
+    ]
+
+    return {
+        'spot_telegram_enabled':
+            enabled,
+
+        'spot_telegram_timeframes':
+            clean_timeframes
+    }
+
+
+def _get_spot_telegram_preferences(
+    user
+):
+    """
+    Preferencias personales del usuario.
+
+    El usuario proviene de sesión/auth del servidor,
+    nunca del navegador.
+    """
+
+    default = {
+        'spot_telegram_enabled': True,
+        'spot_telegram_timeframes': list(
+            _SPOT_TELEGRAM_ALLOWED_TIMEFRAMES
+        )
+    }
+
+    try:
+
+        from supabase_client import (
+            supabase_client
+        )
+
+        preferences = (
+            supabase_client
+            .get_user_preferences(
+                user
+            )
+        )
+
+        return (
+            _normalize_spot_telegram_preferences(
+                preferences
+            )
+        )
+
+    except Exception as e:
+
+        print(
+            "⚠️ Preferencias Telegram Spot "
+            f"{user}: {e}"
+        )
+
+        # Compatibilidad con comportamiento previo.
+        return default
+
+
+@app.route(
+    '/api/user/telegram-preferences',
+    methods=[
+        'GET',
+        'POST'
+    ]
+)
+def api_user_telegram_preferences():
+    """
+    Preferencias Telegram asociadas exclusivamente
+    al usuario autenticado.
+
+    El navegador NO puede seleccionar otro usuario.
+    """
+
+    from supabase_client import (
+        supabase_client
+    )
+
+    user = _authenticated_user()
+
+    if not user:
+
+        return jsonify({
+            'success': False,
+            'authenticated': False,
+            'error':
+                'Debes iniciar sesión.'
+        }), 401
+
+    try:
+
+        # ==============================================================
+        # GET
+        # ==============================================================
+
+        if request.method == 'GET':
+
+            preferences = (
+                _get_spot_telegram_preferences(
+                    user
+                )
+            )
+
+            return jsonify({
+                'success': True,
+                'authenticated': True,
+                'user': user,
+                'preferences':
+                    preferences,
+                'allowed_timeframes':
+                    list(
+                        _SPOT_TELEGRAM_ALLOWED_TIMEFRAMES
+                    )
+            })
+
+        # ==============================================================
+        # POST
+        # ==============================================================
+
+        data = (
+            request.get_json(
+                silent=True
+            )
+            or {}
+        )
+
+        enabled = data.get(
+            'spot_telegram_enabled'
+        )
+
+        requested_timeframes = data.get(
+            'spot_telegram_timeframes'
+        )
+
+        if not isinstance(
+            enabled,
+            bool
+        ):
+
+            return jsonify({
+                'success': False,
+                'authenticated': True,
+                'error':
+                    'spot_telegram_enabled debe ser booleano.'
+            }), 400
+
+        if not isinstance(
+            requested_timeframes,
+            list
+        ):
+
+            return jsonify({
+                'success': False,
+                'authenticated': True,
+                'error':
+                    'spot_telegram_timeframes debe ser una lista.'
+            }), 400
+
+        requested_timeframes = [
+            str(
+                tf
+            ).strip()
+            for tf
+            in requested_timeframes
+        ]
+
+        invalid = [
+            tf
+            for tf
+            in requested_timeframes
+            if tf not in (
+                _SPOT_TELEGRAM_ALLOWED_TIMEFRAMES
+            )
+        ]
+
+        if invalid:
+
+            return jsonify({
+                'success': False,
+                'authenticated': True,
+                'error':
+                    (
+                        'Temporalidades no permitidas: '
+                        + ', '.join(
+                            invalid
+                        )
+                    )
+            }), 400
+
+        clean_timeframes = [
+            tf
+            for tf
+            in _SPOT_TELEGRAM_ALLOWED_TIMEFRAMES
+            if tf in requested_timeframes
+        ]
+
+        saved = (
+            supabase_client
+            .upsert_user_preferences(
+                user,
+                {
+                    'spot_telegram_enabled':
+                        enabled,
+
+                    'spot_telegram_timeframes':
+                        clean_timeframes
+                }
+            )
+        )
+
+        if not saved:
+
+            return jsonify({
+                'success': False,
+                'authenticated': True,
+                'error':
+                    'No se pudieron guardar las preferencias.'
+            }), 500
+
+        preferences = (
+            _get_spot_telegram_preferences(
+                user
+            )
+        )
+
+        return jsonify({
+            'success': True,
+            'authenticated': True,
+            'user': user,
+            'preferences':
+                preferences,
+            'allowed_timeframes':
+                list(
+                    _SPOT_TELEGRAM_ALLOWED_TIMEFRAMES
+                )
+        })
+
+    except Exception as e:
+
+        print(
+            "❌ Error preferencias "
+            f"Telegram Spot: {e}"
+        )
+
+        return jsonify({
+            'success': False,
+            'authenticated': True,
+            'error': str(
+                e
+            )[:200]
+        }), 500
 @app.route('/api/user-stats', methods=['GET'])
 def api_user_stats():
     """Estadísticas personales del usuario autenticado."""
@@ -32934,7 +33320,45 @@ def send_tgp_telegram_alert(tgp_result, user, symbol, timeframe, prices):
         if not bot_token or not chat_id:
             print("   ⚠️ TGP Telegram: faltan credenciales")
             return
-        
+        # ==============================================================
+        # COMMIT 34C — RESPETAR PREFERENCIAS DEL USUARIO
+        # ==============================================================
+
+        preferences = (
+            _get_spot_telegram_preferences(
+                user
+            )
+        )
+
+        if not preferences.get(
+            'spot_telegram_enabled',
+            True
+        ):
+
+            print(
+                "   🔕 TGP Telegram "
+                f"{user}: desactivado."
+            )
+
+            return
+
+        allowed_timeframes = (
+            preferences.get(
+                'spot_telegram_timeframes',
+                []
+            )
+            or []
+        )
+
+        if timeframe not in allowed_timeframes:
+
+            print(
+                "   🔕 TGP Telegram "
+                f"{user}: {timeframe} "
+                "no seleccionado."
+            )
+
+            return        
         action = tgp_result.get('action', 'HOLD')
         reason = tgp_result.get('reason', '')
         confidence = tgp_result.get('confidence', 0)
