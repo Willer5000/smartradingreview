@@ -8,7 +8,8 @@ Estructura del informe:
   2. QUÉ HA APRENDIDO EL SISTEMA (resumen humano automático)
   3. Métricas separadas Spot/Futuros
   4. Futures Shadow: Safety, resultados y contexto cuantitativo
-  5. Mejores/peores estrategias operables y combinaciones por mercado
+  5. Futures: anatomía diagnóstica de Execution Safety (Commit 36G)
+  6. Mejores/peores estrategias operables y combinaciones por mercado
   7. ESTRATEGIAS POR TRADER (cobertura del comité) — v22
   8. Aprendizaje por PAR (win rate por símbolo)
   9. Aprendizaje por TIMEFRAME
@@ -271,6 +272,13 @@ def _get_execution_context(signal: Dict) -> Dict:
     return execution if isinstance(execution, dict) else {}
 
 
+def _get_execution_safety_breakdown(signal: Dict) -> Dict:
+    """Snapshot diagnóstico persistido por Commit 36F."""
+    execution = _get_execution_context(signal)
+    breakdown = execution.get('safety_breakdown') or {}
+    return breakdown if isinstance(breakdown, dict) else {}
+
+
 def _get_futures_publication_context(signal: Dict) -> Dict:
     """Snapshot exacto del publication gate persistido por Commit 32."""
     context = _get_signal_context(signal)
@@ -300,6 +308,31 @@ FUTURES_PRE_GATE_REASON_LABELS = {
     'ATR_STRESS': 'Estrés ATR',
     'PRE_GATE_OTHER': 'Otro rechazo pre-gate',
 }
+
+
+# Commit 36G — anatomía del Execution Safety.
+# Orden y etiquetas exclusivamente diagnósticos; no cambian pesos del motor.
+EXECUTION_SAFETY_COMPONENT_ORDER = (
+    'entry_smc',
+    'sl',
+    'tp',
+    'rr',
+    'structure',
+    'trend',
+    'timeframe',
+)
+
+EXECUTION_SAFETY_COMPONENT_LABELS = {
+    'entry_smc': 'Entry SMC',
+    'sl': 'Stop Loss',
+    'tp': 'Take Profit',
+    'rr': 'Risk / Reward',
+    'structure': 'Estructura',
+    'trend': 'Tendencia',
+    'timeframe': 'Temporalidad',
+}
+
+EXECUTION_SAFETY_BREAKDOWN_VERSION = 'execution_safety_breakdown_v1'
 
 
 def _get_futures_pre_gate_context(signal: Dict) -> Dict:
@@ -1039,6 +1072,262 @@ def _calc_shadow_futures_analysis(signals: List[Dict]) -> Dict:
 
 
 # ============================================================================
+# COMMIT 36G — ANATOMÍA DIAGNÓSTICA DE EXECUTION SAFETY
+# ============================================================================
+
+def _calc_execution_safety_breakdown_analysis(signals: List[Dict]) -> Dict:
+    """
+    Resume los snapshots del Commit 36F sin modificar ninguna política.
+
+    Separa especialmente los rechazos HARD_SAFETY exactos para responder:
+    qué componentes están restando más puntos al score y cuánto falta, en
+    promedio, para llegar al mínimo operativo vigente de cada observación.
+
+    No recalcula Safety ni atribuye causas a registros históricos sin snapshot.
+    """
+    signals = list(signals or [])
+
+    instrumented = []
+    hard_safety = []
+
+    component_values_all = defaultdict(list)
+    component_values_hard = defaultdict(list)
+    component_weights_hard = defaultdict(list)
+    component_weighted_hard = defaultdict(list)
+    component_penalties_hard = defaultdict(list)
+    dominant_rank1 = defaultdict(int)
+    dominant_top3 = defaultdict(int)
+
+    raw_scores_all = []
+    raw_scores_hard = []
+    operational_minimum_hard = []
+    shortfall_hard = []
+    reconstruction_deltas = []
+    calibration_active_count = 0
+    timeframe_source_counts = defaultdict(int)
+
+    for signal in signals:
+        if not _is_clean_futures_observation(signal):
+            continue
+        if not _shadow_has_trade_geometry(signal):
+            continue
+
+        breakdown = _get_execution_safety_breakdown(signal)
+        if not breakdown:
+            continue
+
+        model_version = str(
+            breakdown.get('model_version') or ''
+        ).strip()
+        if (
+            model_version
+            and model_version != EXECUTION_SAFETY_BREAKDOWN_VERSION
+        ):
+            continue
+
+        if not _as_bool(breakdown.get('available', False)):
+            continue
+
+        components = breakdown.get('components') or {}
+        if not isinstance(components, dict) or not components:
+            continue
+
+        instrumented.append(signal)
+
+        raw_score = _safe_float(breakdown.get('raw_score'))
+        if raw_score is not None:
+            raw_scores_all.append(raw_score)
+
+        for component in EXECUTION_SAFETY_COMPONENT_ORDER:
+            value = _safe_float(components.get(component))
+            if value is not None:
+                component_values_all[component].append(value)
+
+        delta = _safe_float(breakdown.get('score_reconstruction_delta'))
+        if delta is not None:
+            reconstruction_deltas.append(delta)
+
+        if _as_bool(breakdown.get('calibration_active', False)):
+            calibration_active_count += 1
+
+        tf_source = str(
+            breakdown.get('timeframe_factor_source') or 'UNAVAILABLE'
+        ).strip().upper()
+        timeframe_source_counts[tf_source] += 1
+
+        pre_gate = _get_futures_pre_gate_context(signal)
+        is_hard_safety = bool(
+            pre_gate
+            and _as_bool(pre_gate.get('exact', False))
+            and str(pre_gate.get('reason_code') or '').strip().upper()
+            == 'HARD_SAFETY'
+        )
+        if not is_hard_safety:
+            continue
+
+        hard_safety.append(signal)
+
+        if raw_score is not None:
+            raw_scores_hard.append(raw_score)
+
+        operational_min = _safe_float(
+            breakdown.get('operational_minimum')
+        )
+        if operational_min is not None:
+            operational_minimum_hard.append(operational_min)
+
+        shortfall = _safe_float(
+            breakdown.get('shortfall_to_operational_min')
+        )
+        if shortfall is not None:
+            shortfall_hard.append(shortfall)
+
+        weights = breakdown.get('weights') or {}
+        weighted = breakdown.get('weighted_contributions') or {}
+        penalties = breakdown.get('penalties_to_perfect') or {}
+        if not isinstance(weights, dict):
+            weights = {}
+        if not isinstance(weighted, dict):
+            weighted = {}
+        if not isinstance(penalties, dict):
+            penalties = {}
+
+        for component in EXECUTION_SAFETY_COMPONENT_ORDER:
+            value = _safe_float(components.get(component))
+            weight = _safe_float(weights.get(component))
+            weighted_value = _safe_float(weighted.get(component))
+            penalty = _safe_float(penalties.get(component))
+
+            if value is not None:
+                component_values_hard[component].append(value)
+            if weight is not None:
+                component_weights_hard[component].append(weight)
+            if weighted_value is not None:
+                component_weighted_hard[component].append(weighted_value)
+            if penalty is not None:
+                component_penalties_hard[component].append(penalty)
+
+        dominant = breakdown.get('dominant_penalties') or []
+        if isinstance(dominant, list):
+            seen = set()
+            for index, item in enumerate(dominant[:3]):
+                if not isinstance(item, dict):
+                    continue
+                component = str(
+                    item.get('component') or ''
+                ).strip()
+                if component not in EXECUTION_SAFETY_COMPONENT_ORDER:
+                    continue
+                if component in seen:
+                    continue
+                seen.add(component)
+                dominant_top3[component] += 1
+                if index == 0:
+                    dominant_rank1[component] += 1
+
+    def _avg(values):
+        values = [float(v) for v in values if v is not None]
+        return round(sum(values) / len(values), 4) if values else None
+
+    component_rows = []
+    for component in EXECUTION_SAFETY_COMPONENT_ORDER:
+        row = {
+            'component': component,
+            'label': EXECUTION_SAFETY_COMPONENT_LABELS.get(
+                component,
+                component
+            ),
+            'all_n': len(component_values_all.get(component) or []),
+            'avg_all_score': _avg(
+                component_values_all.get(component) or []
+            ),
+            'hard_n': len(component_values_hard.get(component) or []),
+            'avg_hard_score': _avg(
+                component_values_hard.get(component) or []
+            ),
+            'avg_weight': _avg(
+                component_weights_hard.get(component) or []
+            ),
+            'avg_weighted_contribution': _avg(
+                component_weighted_hard.get(component) or []
+            ),
+            'avg_penalty_to_perfect': _avg(
+                component_penalties_hard.get(component) or []
+            ),
+            'dominant_rank1_count': int(
+                dominant_rank1.get(component, 0)
+            ),
+            'dominant_top3_count': int(
+                dominant_top3.get(component, 0)
+            ),
+        }
+        component_rows.append(row)
+
+    ranked_culprits = sorted(
+        [
+            row for row in component_rows
+            if row.get('avg_penalty_to_perfect') is not None
+        ],
+        key=lambda row: (
+            -float(row.get('avg_penalty_to_perfect') or 0.0),
+            -int(row.get('dominant_rank1_count') or 0),
+            str(row.get('component') or '')
+        )
+    )
+
+    abs_deltas = [abs(value) for value in reconstruction_deltas]
+    reconstruction_warning_count = sum(
+        1 for value in abs_deltas
+        if value > 0.25
+    )
+
+    hard_n = len(hard_safety)
+    if hard_n >= 25:
+        sample_status = 'REVISABLE_DIAGNOSTICAMENTE'
+    elif hard_n >= 10:
+        sample_status = 'PRELIMINAR'
+    elif hard_n > 0:
+        sample_status = 'INSUFICIENTE'
+    else:
+        sample_status = 'SIN_MUESTRA'
+
+    return {
+        'model_version': 'execution_safety_diagnostic_v1',
+        'breakdown_available': len(instrumented),
+        'hard_safety_breakdown_available': hard_n,
+        'sample_status': sample_status,
+        'avg_raw_score_all': _avg(raw_scores_all),
+        'avg_raw_score_hard': _avg(raw_scores_hard),
+        'avg_operational_minimum_hard': _avg(
+            operational_minimum_hard
+        ),
+        'avg_shortfall_hard': _avg(shortfall_hard),
+        'max_shortfall_hard': (
+            round(max(shortfall_hard), 4)
+            if shortfall_hard else None
+        ),
+        'component_rows': component_rows,
+        'ranked_culprits': ranked_culprits[:3],
+        'hard_safety_outcomes': _shadow_bucket_metrics(hard_safety),
+        'reconstruction_delta_avg_abs': _avg(abs_deltas),
+        'reconstruction_delta_max_abs': (
+            round(max(abs_deltas), 4)
+            if abs_deltas else None
+        ),
+        'reconstruction_warning_count': reconstruction_warning_count,
+        'calibration_active_count': calibration_active_count,
+        'timeframe_factor_source_counts': dict(
+            sorted(
+                timeframe_source_counts.items(),
+                key=lambda item: (-item[1], item[0])
+            )
+        ),
+        'diagnostic_only': True,
+        'policy_changed': False,
+    }
+
+
+# ============================================================================
 # v22: MAPEO ESTRATEGIA → TRADER (para auditar cobertura del comité)
 # ============================================================================
 # Cada trader emite un conjunto conocido de estrategias. Este mapa permite
@@ -1735,6 +2024,7 @@ def _fetch_learning_data() -> Dict:
         'quarantine_counts': {},
         'futures_shadow_analysis': {},
         'futures_walk_forward_analysis': {},
+        'futures_safety_breakdown_analysis': {},
         'missed_details': [],
         'last_review_log': None,
         'error': None,
@@ -1798,6 +2088,11 @@ def _fetch_learning_data() -> Dict:
         data['futures_walk_forward_analysis'] = (
             _calc_cautious_walk_forward_analysis(
                 cohorts['futures_verified'],
+                cohorts['futures_shadow']
+            )
+        )
+        data['futures_safety_breakdown_analysis'] = (
+            _calc_execution_safety_breakdown_analysis(
                 cohorts['futures_shadow']
             )
         )
@@ -2641,6 +2936,255 @@ def generate_learning_pdf() -> bytes:
         "walk-forward. Hasta entonces la política operativa permanece intacta.",
         style_note
     ))
+
+    # =============================================================
+    # COMMIT 36G — ANATOMÍA DE EXECUTION SAFETY
+    # =============================================================
+    safety_diag = data.get('futures_safety_breakdown_analysis') or {}
+
+    story.append(PageBreak())
+    story.append(Paragraph(
+        "FUTURES — anatomía de Execution Safety",
+        style_h2
+    ))
+    story.append(Paragraph(
+        "Commit 36G estudia los componentes que <b>ya calculó</b> el motor en "
+        "Commit 36F. No recalcula Safety, no cambia pesos y no baja el mínimo "
+        "operativo. El objetivo es explicar por qué una oportunidad termina en "
+        "<b>HARD_SAFETY</b> antes de llegar al Publication Gate.",
+        style_body
+    ))
+
+    hard_total_exact = int(
+        (walk.get('pre_gate_reason_counts') or {}).get(
+            'HARD_SAFETY',
+            0
+        )
+        or 0
+    )
+    breakdown_available = int(
+        safety_diag.get('breakdown_available') or 0
+    )
+    hard_breakdown = int(
+        safety_diag.get('hard_safety_breakdown_available') or 0
+    )
+    hard_coverage = (
+        hard_breakdown / hard_total_exact * 100.0
+        if hard_total_exact > 0
+        else None
+    )
+
+    def _diag_num(value, digits=2, signed=False):
+        if value is None:
+            return '—'
+        try:
+            number = float(value)
+            if signed:
+                return f"{number:+.{digits}f}"
+            return f"{number:.{digits}f}"
+        except Exception:
+            return str(value)
+
+    overview = [
+        ['Diagnóstico Execution Safety', 'Valor'],
+        ['Snapshots 36F con breakdown', str(breakdown_available)],
+        ['HARD_SAFETY exactos en funnel', str(hard_total_exact)],
+        ['HARD_SAFETY con breakdown 36F', str(hard_breakdown)],
+        [
+            'Cobertura breakdown de HARD_SAFETY',
+            '—' if hard_coverage is None else f"{hard_coverage:.1f}%"
+        ],
+        [
+            'Safety medio HARD_SAFETY',
+            _diag_num(safety_diag.get('avg_raw_score_hard'))
+        ],
+        [
+            'Mínimo operativo medio',
+            _diag_num(safety_diag.get('avg_operational_minimum_hard'))
+        ],
+        [
+            'Déficit medio hasta mínimo',
+            _diag_num(safety_diag.get('avg_shortfall_hard'))
+        ],
+        [
+            'Estado de muestra',
+            str(safety_diag.get('sample_status') or 'SIN_MUESTRA')
+        ],
+    ]
+    tdiag = Table(overview, colWidths=[10.2*cm, 5.8*cm])
+    tdiag.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), HexColor('#455a64')),
+        ('TEXTCOLOR', (0,0), (-1,0), white),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0,0), (-1,-1), 8.6),
+        ('GRID', (0,0), (-1,-1), 0.3, HexColor('#c8ccd6')),
+        ('ROWBACKGROUNDS', (0,1), (-1,-1), [HexColor('#f3f6f7'), white]),
+        ('LEFTPADDING', (0,0), (-1,-1), 6),
+        ('TOPPADDING', (0,0), (-1,-1), 4),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+    ]))
+    story.append(tdiag)
+
+    component_rows = safety_diag.get('component_rows') or []
+    story.append(Paragraph(
+        "Componentes del score en los rechazos HARD_SAFETY",
+        style_h3
+    ))
+
+    if component_rows and hard_breakdown > 0:
+        rows = [[
+            'Componente', 'Peso', 'Media all', 'Media HARD',
+            'Aporte HARD', 'Penaliz. vs 100', '#1', 'Top3'
+        ]]
+        for row in component_rows:
+            weight = row.get('avg_weight')
+            rows.append([
+                str(row.get('label') or row.get('component') or '')[:24],
+                '—' if weight is None else f"{float(weight)*100:.0f}%",
+                _diag_num(row.get('avg_all_score'), 1),
+                _diag_num(row.get('avg_hard_score'), 1),
+                _diag_num(row.get('avg_weighted_contribution'), 2),
+                _diag_num(row.get('avg_penalty_to_perfect'), 2),
+                str(row.get('dominant_rank1_count', 0)),
+                str(row.get('dominant_top3_count', 0)),
+            ])
+
+        tcomp = Table(
+            rows,
+            colWidths=[3.0*cm, 1.1*cm, 1.7*cm, 1.8*cm,
+                       1.9*cm, 2.3*cm, 1.0*cm, 1.0*cm]
+        )
+        tcomp.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), HexColor('#6d4c41')),
+            ('TEXTCOLOR', (0,0), (-1,0), white),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0,0), (-1,-1), 7.4),
+            ('GRID', (0,0), (-1,-1), 0.3, HexColor('#c8ccd6')),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [HexColor('#faf4f1'), white]),
+            ('ALIGN', (1,0), (-1,-1), 'CENTER'),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ]))
+        story.append(tcomp)
+
+        story.append(Paragraph(
+            "<b>Penaliz. vs 100</b> es la cantidad media de puntos ponderados "
+            "que ese componente deja de aportar respecto de un componente "
+            "perfecto de 100. No equivale a la distancia directa al umbral 65; "
+            "sirve para ordenar qué partes del score están restando más.",
+            style_note
+        ))
+
+        culprits = safety_diag.get('ranked_culprits') or []
+        if culprits:
+            culprit_text = []
+            for index, row in enumerate(culprits[:3], 1):
+                culprit_text.append(
+                    f"{index}. <b>{str(row.get('label') or row.get('component'))}</b>: "
+                    f"media { _diag_num(row.get('avg_hard_score'), 1) }, "
+                    f"penalización { _diag_num(row.get('avg_penalty_to_perfect'), 2) } pts, "
+                    f"#1 en {int(row.get('dominant_rank1_count') or 0)} casos."
+                )
+            story.append(Paragraph(
+                "<b>Top 3 penalizaciones observadas:</b><br/>"
+                + '<br/>'.join(culprit_text),
+                style_note
+            ))
+    else:
+        story.append(Paragraph(
+            "<i>Todavía no hay rechazos HARD_SAFETY nuevos con el breakdown del "
+            "Commit 36F. Es esperable justo después del despliegue: no se hace "
+            "backfill de los 16 rechazos anteriores.</i>",
+            style_note
+        ))
+
+    hard_outcomes = safety_diag.get('hard_safety_outcomes') or {}
+    story.append(Paragraph(
+        "Resultado posterior de la cohorte HARD_SAFETY instrumentada",
+        style_h3
+    ))
+    outcome_rows = [
+        ['N', 'Entry', 'TP', 'SL', 'Expired', 'WR %', 'Exp. R'],
+        [
+            str(hard_outcomes.get('total', 0)),
+            str(hard_outcomes.get('entry_touched', 0)),
+            str(hard_outcomes.get('tp_hit', 0)),
+            str(hard_outcomes.get('sl_hit', 0)),
+            str(hard_outcomes.get('expired', 0)),
+            '—' if hard_outcomes.get('win_rate') is None
+                else f"{hard_outcomes.get('win_rate'):.1f}",
+            '—' if hard_outcomes.get('expectancy_r') is None
+                else f"{hard_outcomes.get('expectancy_r'):+.3f}",
+        ]
+    ]
+    tout = Table(
+        outcome_rows,
+        colWidths=[1.5*cm, 1.7*cm, 1.5*cm, 1.5*cm, 1.8*cm, 1.7*cm, 2.0*cm]
+    )
+    tout.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), HexColor('#0277bd')),
+        ('TEXTCOLOR', (0,0), (-1,0), white),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0,0), (-1,-1), 8.0),
+        ('GRID', (0,0), (-1,-1), 0.3, HexColor('#c8ccd6')),
+        ('ROWBACKGROUNDS', (0,1), (-1,-1), [HexColor('#eef8fd'), white]),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+    ]))
+    story.append(tout)
+
+    delta_avg = safety_diag.get('reconstruction_delta_avg_abs')
+    delta_max = safety_diag.get('reconstruction_delta_max_abs')
+    delta_warnings = int(
+        safety_diag.get('reconstruction_warning_count') or 0
+    )
+    story.append(Paragraph(
+        "<b>Control de integridad:</b> delta absoluto medio entre el score "
+        f"persistido y la reconstrucción ponderada = {_diag_num(delta_avg, 3)}; "
+        f"máximo = {_diag_num(delta_max, 3)}; casos con |delta| &gt; 0.25 = "
+        f"{delta_warnings}. Una diferencia material no autoriza recalibrar: "
+        "primero indicaría que debemos revisar instrumentación/fórmula.",
+        style_note
+    ))
+
+    tf_sources = safety_diag.get('timeframe_factor_source_counts') or {}
+    if tf_sources:
+        source_text = ', '.join(
+            f"{key}: {value}"
+            for key, value in list(tf_sources.items())[:5]
+        )
+        story.append(Paragraph(
+            "<b>Fuente del componente temporalidad:</b> " + source_text + ". "
+            "Si permanece neutral/no calibrado, se interpreta como limitación "
+            "de evidencia y no como señal para bajar Safety.",
+            style_note
+        ))
+
+    sample_status = str(
+        safety_diag.get('sample_status') or 'SIN_MUESTRA'
+    )
+    if sample_status == 'REVISABLE_DIAGNOSTICAMENTE':
+        policy_note = (
+            "La muestra ya permite revisar técnicamente la calibración de los "
+            "componentes, pero <b>no</b> autoriza modificar pesos o umbrales: "
+            "todavía necesitamos relacionar los componentes con expectancy "
+            "fuera de muestra y costes netos."
+        )
+    elif sample_status == 'PRELIMINAR':
+        policy_note = (
+            "La muestra es preliminar. Sirve para identificar una hipótesis "
+            "dominante, no para cambiar pesos, mínimo 65 o Publication Gate."
+        )
+    else:
+        policy_note = (
+            "La muestra aún es insuficiente. Deben acumularse nuevos HARD_SAFETY "
+            "instrumentados por Commit 36F antes de inferir qué componente está "
+            "causando la timidez."
+        )
+
+    story.append(Paragraph(
+        "<b>Decisión del Commit 36G:</b> " + policy_note,
+        style_note
+    ))
+
     story.append(PageBreak())
 
     # ============ 4. TOP 20 MEJORES ESTRATEGIAS GENERALES ============
