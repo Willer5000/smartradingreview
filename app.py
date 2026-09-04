@@ -19331,6 +19331,618 @@ class TradingExpertSystem:
         except Exception as e:
             print(f"❌ Error en get_top_indicators_for_chart: {e}")
             return ['ftm', 'squeeze', 'rsi', 'volume']
+
+    def get_top_signal_indicators_for_telegram(
+        self,
+        analysis,
+        max_indicators=4
+    ):
+        """
+        Selecciona para Telegram las evidencias técnicas que REALMENTE
+        apoyaron la decisión final.
+
+        Prioridad:
+        1. Auditor de decisión: traders con APOYO_FINAL.
+        2. Estrategias de esos traders.
+        3. Razones técnicas de esos traders.
+        4. Votos técnicos de trend/momentum en la misma dirección.
+        5. Ballenas sólo si realmente apoyaron esa dirección.
+
+        No modifica ninguna decisión.
+        """
+
+        try:
+
+            if (
+                not analysis
+                or not analysis.get('success')
+            ):
+                return []
+
+            decision_data = (
+                analysis.get(
+                    'decision',
+                    {}
+                )
+                or {}
+            )
+
+            final_action = str(
+                decision_data.get(
+                    'action'
+                )
+                or ''
+            ).upper()
+
+            if final_action not in (
+                'LONG',
+                'SHORT',
+                'COMPRA_SPOT',
+                'VENTA_SPOT'
+            ):
+                return []
+
+            audit = (
+                decision_data.get(
+                    'audit'
+                )
+                or analysis.get(
+                    'decision_audit'
+                )
+                or {}
+            )
+
+            # ==========================================================
+            # COMPATIBILIDAD CON SEÑALES ANTIGUAS
+            # ==========================================================
+            #
+            # Si una señal legacy todavía no tiene auditor,
+            # utilizar el selector anterior.
+            # ==========================================================
+
+            if (
+                not isinstance(
+                    audit,
+                    dict
+                )
+                or not audit.get(
+                    'votes'
+                )
+            ):
+
+                return self.get_top_indicators_for_chart(
+                    analysis,
+                    max_indicators=max_indicators
+                )[:max_indicators]
+
+            # ==========================================================
+            # MAPA:
+            # estrategia/evidencia -> gráfico que puede representarla
+            # ==========================================================
+
+            evidence_keywords = {
+
+                'rsi_maverick': (
+                    'RSI_MAVERICK',
+                    'RSI MAVERICK',
+                ),
+
+                'ftm': (
+                    'FTM',
+                    'FUERZA_TENDENCIA',
+                    'FUERZA DE TENDENCIA',
+                ),
+
+                'squeeze': (
+                    'SQUEEZE',
+                ),
+
+                'macd': (
+                    'MACD',
+                ),
+
+                'rsi': (
+                    'RSI_',
+                    'RSI ',
+                    'DIVERGENCIA_RSI',
+                ),
+
+                'stochastic': (
+                    'STOCH',
+                    'ESTOCAST',
+                ),
+
+                'williams': (
+                    'WILLIAMS',
+                ),
+
+                'cci': (
+                    'CCI',
+                ),
+
+                'dmi': (
+                    'DMI',
+                    'ADX',
+                    'TENDENCIA_FUERTE',
+                    'ALINEACION_',
+                ),
+
+                'supertrend': (
+                    'SUPERTREND',
+                    'PULLBACK_TENDENCIA',
+                    'PULLBACK_OPORTUNIDAD',
+                ),
+
+                'ichimoku': (
+                    'ICHIMOKU',
+                    'TENKAN',
+                    'KIJUN',
+                ),
+
+                'psar': (
+                    'PSAR',
+                    'PARABOLIC',
+                ),
+
+                'bollinger': (
+                    'BOLLINGER',
+                    'BAND_WALK',
+                    'BB_',
+                ),
+
+                'atr': (
+                    'ATR',
+                    'EXPANSION_VOLATILIDAD',
+                    'VOLATILIDAD',
+                ),
+
+                'whale': (
+                    'BALLENA',
+                    'WHALE',
+                    'ICEBERG',
+                ),
+
+                'volume': (
+                    'VOLUMEN',
+                    'VOLUME',
+                    'LIQUIDITY_BALANCE',
+                    'LIQUIDITY_PRESENT',
+                    'SPIKE_ACCUMULATION',
+                ),
+
+                'obv': (
+                    'OBV',
+                ),
+
+                'mfi': (
+                    'MFI',
+                ),
+
+                'force': (
+                    'FORCE_INDEX',
+                    'FORCE INDEX',
+                ),
+
+                'fvg': (
+                    'FVG',
+                    'FAIR_VALUE_GAP',
+                    'FAIR VALUE GAP',
+                ),
+
+                'order_blocks': (
+                    'ORDER_BLOCK',
+                    'ORDER BLOCK',
+                ),
+
+                'sweeps': (
+                    'LIQUIDITY_SWEEP',
+                    'LIQUIDITY SWEEP',
+                ),
+
+                'stop_hunts': (
+                    'STOP_HUNT',
+                    'STOP HUNT',
+                ),
+
+                'volume_profile': (
+                    'POC_',
+                    'POC ',
+                    'HVN',
+                    'LVN',
+                    'VALUE_AREA',
+                    'VALUE AREA',
+                    'VOLUME_PROFILE',
+                    'VOLUME PROFILE',
+                ),
+            }
+
+            scores = {}
+
+            # ==========================================================
+            # HELPER DE PUNTUACIÓN
+            # ==========================================================
+
+            def add_score(
+                indicator,
+                value
+            ):
+
+                try:
+                    value = float(
+                        value
+                        or 0
+                    )
+
+                except (
+                    TypeError,
+                    ValueError
+                ):
+                    value = 0.0
+
+                if value <= 0:
+                    return
+
+                scores[
+                    indicator
+                ] = (
+                    scores.get(
+                        indicator,
+                        0.0
+                    )
+                    + value
+                )
+
+            # ==========================================================
+            # CONVERTIR TEXTO DE ESTRATEGIA/RAZÓN EN EVIDENCIA
+            # ==========================================================
+
+            def score_text(
+                text,
+                value,
+                trader_name=''
+            ):
+
+                text_upper = str(
+                    text
+                    or ''
+                ).upper()
+
+                trader_upper = str(
+                    trader_name
+                    or ''
+                ).upper()
+
+                # "MAVERICK" puede significar dos cosas.
+                #
+                # Si viene de TraderBallenas:
+                #     usar Ballenas.
+                #
+                # En cualquier otro caso:
+                #     RSI Maverick.
+
+                if 'MAVERICK' in text_upper:
+
+                    if 'BALLENA' in trader_upper:
+
+                        add_score(
+                            'whale',
+                            value
+                        )
+
+                    else:
+
+                        add_score(
+                            'rsi_maverick',
+                            value
+                        )
+
+                for (
+                    indicator,
+                    keywords
+                ) in evidence_keywords.items():
+
+                    if any(
+                        keyword
+                        in text_upper
+
+                        for keyword
+                        in keywords
+                    ):
+
+                        add_score(
+                            indicator,
+                            value
+                        )
+
+            # ==========================================================
+            # 1. AUDITOR:
+            #    SÓLO TRADERS QUE APOYARON LA DECISIÓN FINAL
+            # ==========================================================
+
+            for vote in (
+                audit.get(
+                    'votes'
+                )
+                or []
+            ):
+
+                if not isinstance(
+                    vote,
+                    dict
+                ):
+                    continue
+
+                if (
+                    vote.get(
+                        'disposition'
+                    )
+                    != 'APOYO_FINAL'
+                ):
+                    continue
+
+                normalized_action = str(
+                    vote.get(
+                        'normalized_action'
+                    )
+                    or ''
+                ).upper()
+
+                if (
+                    normalized_action
+                    != final_action
+                ):
+                    continue
+
+                vote_score = (
+                    vote.get(
+                        'counted_confidence'
+                    )
+                    if vote.get(
+                        'counted_confidence'
+                    ) is not None
+
+                    else vote.get(
+                        'weighted_confidence'
+                    )
+                )
+
+                if vote_score is None:
+
+                    vote_score = vote.get(
+                        'original_confidence',
+                        0
+                    )
+
+                trader_name = vote.get(
+                    'trader',
+                    ''
+                )
+
+                # ------------------------------------------------------
+                # Estrategias del trader
+                # ------------------------------------------------------
+
+                for strategy in (
+                    vote.get(
+                        'strategies'
+                    )
+                    or []
+                ):
+
+                    score_text(
+                        strategy,
+                        vote_score,
+                        trader_name
+                    )
+
+                # ------------------------------------------------------
+                # Razones técnicas
+                #
+                # Pesan menos que la estrategia explícita.
+                # ------------------------------------------------------
+
+                for reason in (
+                    vote.get(
+                        'reasons'
+                    )
+                    or []
+                ):
+
+                    score_text(
+                        reason,
+                        float(
+                            vote_score
+                            or 0
+                        )
+                        * 0.35,
+                        trader_name
+                    )
+
+            # ==========================================================
+            # 2. VOTOS TÉCNICOS DE LAS CAPAS
+            # ==========================================================
+
+            target_direction = (
+
+                'bullish'
+
+                if final_action in (
+                    'LONG',
+                    'COMPRA_SPOT'
+                )
+
+                else 'bearish'
+            )
+
+            for layer_name in (
+                'trend',
+                'momentum'
+            ):
+
+                layer = (
+                    analysis.get(
+                        layer_name,
+                        {}
+                    )
+                    or {}
+                )
+
+                for layer_vote in (
+                    layer.get(
+                        'votes'
+                    )
+                    or []
+                ):
+
+                    if not isinstance(
+                        layer_vote,
+                        dict
+                    ):
+                        continue
+
+                    vote_direction = str(
+                        layer_vote.get(
+                            'direction'
+                        )
+                        or ''
+                    ).lower()
+
+                    if (
+                        vote_direction
+                        and vote_direction
+                        != target_direction
+                    ):
+                        continue
+
+                    score_text(
+                        layer_vote.get(
+                            'source',
+                            ''
+                        ),
+                        float(
+                            layer_vote.get(
+                                'weight',
+                                1
+                            )
+                            or 1
+                        )
+                        * 0.50,
+                        ''
+                    )
+
+            # ==========================================================
+            # 3. BALLENAS
+            # ==========================================================
+
+            volume = (
+                analysis.get(
+                    'volume',
+                    {}
+                )
+                or {}
+            )
+
+            if (
+                target_direction
+                == 'bullish'
+                and volume.get(
+                    'whale_buy'
+                )
+            ):
+
+                add_score(
+                    'whale',
+                    20.0
+                )
+
+            if (
+                target_direction
+                == 'bearish'
+                and volume.get(
+                    'whale_sell'
+                )
+            ):
+
+                add_score(
+                    'whale',
+                    20.0
+                )
+
+            # ==========================================================
+            # 4. ESTRATEGIAS FINALES DEL CONSENSO
+            # ==========================================================
+
+            for strategy in (
+                decision_data.get(
+                    'estrategias'
+                )
+                or []
+            ):
+
+                score_text(
+                    strategy,
+                    15.0,
+                    ''
+                )
+
+            # ==========================================================
+            # RANKING FINAL
+            # ==========================================================
+
+            ranked = sorted(
+                scores.items(),
+
+                key=lambda item: (
+                    -item[1],
+                    item[0]
+                )
+            )
+
+            selected = [
+
+                name
+
+                for (
+                    name,
+                    score
+                ) in ranked
+
+                if score > 0
+
+            ][:max_indicators]
+
+            print(
+                "📊 Telegram - evidencias reales: "
+                f"{selected}"
+            )
+
+            return selected
+
+        except Exception as e:
+
+            print(
+                "⚠️ get_top_signal_indicators_for_telegram: "
+                f"{e}"
+            )
+
+            # ==========================================================
+            # FALLBACK DEFENSIVO
+            # ==========================================================
+            #
+            # Si algo inesperado ocurre, Telegram sigue funcionando
+            # usando el selector anterior.
+            # ==========================================================
+
+            try:
+
+                return self.get_top_indicators_for_chart(
+                    analysis,
+                    max_indicators=max_indicators
+                )[:max_indicators]
+
+            except Exception:
+
+                return []
     
     # ========================================================================
     # SOPORTE PARA GRÁFICO ANEXO EN PDF: indicadores que RESPALDAN la señal
@@ -28329,7 +28941,10 @@ def monitor_entries_loop():
                     # Generar imagen COMBINADA (principal + 4 indicadores en 1 PNG)
                     if analysis and analysis.get('success'):
                         try:
-                            top_indicators = expert_system.get_top_indicators_for_chart(analysis)
+                            top_indicators = expert_system.get_top_signal_indicators_for_telegram(
+                                analysis,
+                                max_indicators=4
+                            )
                             from chart_renderer import render_telegram_signal_chart
                             image_bytes = render_telegram_signal_chart(
                                 symbol, tf, analysis, indicators=top_indicators
