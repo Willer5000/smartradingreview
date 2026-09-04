@@ -290,6 +290,24 @@ FUTURES_PUBLICATION_REASON_LABELS = {
     'OTHER': 'Otro bloqueo',
 }
 
+# Commit 36D — rechazos exactos ocurridos ANTES del publication gate Premium.
+FUTURES_PRE_GATE_REASON_LABELS = {
+    'HARD_SAFETY': 'Safety mínimo duro',
+    'LEVERAGE_VIABILITY': 'Leverage no viable',
+    'ROI_TP': 'ROI potencial insuficiente',
+    'NET_PROFIT': 'Beneficio neto insuficiente',
+    'LOSS_AT_SL': 'Pérdida máxima al SL',
+    'ATR_STRESS': 'Estrés ATR',
+    'PRE_GATE_OTHER': 'Otro rechazo pre-gate',
+}
+
+
+def _get_futures_pre_gate_context(signal: Dict) -> Dict:
+    """Snapshot exacto de rechazo anterior al gate Premium (Commit 36C)."""
+    learning = _get_learning_context(signal)
+    pre_gate = learning.get('pre_gate_rejection') or {}
+    return pre_gate if isinstance(pre_gate, dict) else {}
+
 
 def _normalize_shadow_action(signal: Dict) -> str:
     raw = str(
@@ -601,6 +619,10 @@ def _calc_cautious_walk_forward_analysis(
     cautious_profiles = []
     cautious_candidates = []
     cautious_status_counts = defaultdict(int)
+    pre_gate_reason_counts = defaultdict(int)
+    publication_gate_reason_counts = defaultdict(int)
+    publication_gate_exact_profiles = 0
+    pre_gate_exact_profiles = 0
 
     for signal in shadow_signals or []:
         cautious = _get_cautious_shadow_context(signal)
@@ -611,6 +633,34 @@ def _calc_cautious_walk_forward_analysis(
         cautious_status_counts[
             str(cautious.get('status') or 'UNKNOWN').upper()
         ] += 1
+
+        pre_gate = _get_futures_pre_gate_context(signal)
+        if pre_gate and _as_bool(pre_gate.get('exact', False)):
+            pre_gate_exact_profiles += 1
+            code = str(
+                pre_gate.get('reason_code') or 'PRE_GATE_OTHER'
+            ).strip().upper()
+            if code not in FUTURES_PRE_GATE_REASON_LABELS:
+                code = 'PRE_GATE_OTHER'
+            pre_gate_reason_counts[code] += 1
+
+        publication = _get_futures_publication_context(signal)
+        if publication:
+            publication_gate_exact_profiles += 1
+            raw_codes = publication.get('reason_codes') or []
+            if not isinstance(raw_codes, (list, tuple)):
+                raw_codes = [raw_codes]
+            seen_codes = set()
+            for raw_code in raw_codes:
+                code = str(raw_code or '').strip().upper()
+                if not code:
+                    continue
+                if code not in FUTURES_PUBLICATION_REASON_LABELS:
+                    code = 'OTHER'
+                if code in seen_codes:
+                    continue
+                seen_codes.add(code)
+                publication_gate_reason_counts[code] += 1
 
         if _is_cautious_shadow_candidate(signal):
             cautious_candidates.append(signal)
@@ -760,8 +810,17 @@ def _calc_cautious_walk_forward_analysis(
         'calibration_ratio': CAUTIOUS_WALK_FORWARD_CALIBRATION_RATIO,
         'cutoff_created_at': cutoff,
         'cautious_profile_available': len(cautious_profiles),
+        'shadow_total_available': len(shadow_signals or []),
+        'shadow_without_cautious_profile': max(
+            0,
+            len(shadow_signals or []) - len(cautious_profiles)
+        ),
         'cautious_candidates': len(cautious_candidates),
         'cautious_status_counts': dict(cautious_status_counts),
+        'pre_gate_exact_profiles': pre_gate_exact_profiles,
+        'pre_gate_reason_counts': dict(pre_gate_reason_counts),
+        'publication_gate_exact_profiles': publication_gate_exact_profiles,
+        'publication_gate_reason_counts': dict(publication_gate_reason_counts),
         'premium_candidates': len(premium),
         'premium_all': premium_all_metrics,
         'cautious_all': cautious_all_metrics,
@@ -2390,6 +2449,188 @@ def generate_learning_pdf() -> bytes:
         "la señal. Sin embargo, este informe no inventa comisión, slippage o "
         "funding realizados. La promoción queda bloqueada hasta que los resultados "
         "resueltos persistan atribución neta verificable (por ejemplo net_pnl_pct).",
+        style_note
+    ))
+
+    story.append(Paragraph(
+        "<b>MISSING_PUBLICATION_GATE:</b> desde Commit 36C un rechazo nuevo que "
+        "ocurra antes del gate Premium se clasifica como PRE_GATE_REJECTION. Por "
+        "tanto, los MISSING históricos no se reinterpretan ni se convierten "
+        "retroactivamente en una causa que nunca fue persistida.",
+        style_note
+    ))
+
+    # =============================================================
+    # COMMIT 36D — FUNNEL EXACTO DE RECHAZOS FUTURES
+    # =============================================================
+    story.append(PageBreak())
+    story.append(Paragraph(
+        "FUTURES — funnel exacto de filtros y timidez",
+        style_h2
+    ))
+    story.append(Paragraph(
+        "Commit 36D separa por primera vez los rechazos que ocurren "
+        "<b>antes</b> del publication gate Premium de los rechazos que sí llegan "
+        "al gate. La tabla usa sólo snapshots instrumentados por los commits "
+        "recientes; el Shadow histórico sin snapshot permanece fuera del funnel "
+        "para evitar atribuirle una causa inventada. Ninguna fila de esta página "
+        "modifica el motor operativo.",
+        style_body
+    ))
+
+    shadow_total = int(walk.get('shadow_total_available') or 0)
+    instrumented = int(walk.get('cautious_profile_available') or 0)
+    historical_unclassified = int(
+        walk.get('shadow_without_cautious_profile') or 0
+    )
+    pre_gate_exact = int(walk.get('pre_gate_exact_profiles') or 0)
+    publication_exact = int(
+        walk.get('publication_gate_exact_profiles') or 0
+    )
+
+    funnel_rows = [
+        ['Etapa del funnel', 'N', 'Interpretación'],
+        [
+            'Shadow limpio (90 días)',
+            str(shadow_total),
+            'Inventario diagnóstico, no operaciones publicadas'
+        ],
+        [
+            'Snapshots instrumentados',
+            str(instrumented),
+            'Tienen perfil Cautious y pueden ubicarse en el funnel'
+        ],
+        [
+            'Histórico sin instrumentación',
+            str(historical_unclassified),
+            'No se hace backfill ni se inventa causa'
+        ],
+        [
+            'Rechazo PRE-GATE exacto',
+            str(pre_gate_exact),
+            'Falló antes de _apply_futures_publication_gate()'
+        ],
+        [
+            'Publication Gate exacto',
+            str(publication_exact),
+            'Llegó al gate Premium y conserva sus motivos exactos'
+        ],
+        [
+            'CAUTIOUS_SHADOW',
+            str(cautious_candidates),
+            'Hipótesis 0.50x; no publicada'
+        ],
+        [
+            'PREMIUM verificable',
+            str(premium_candidates),
+            'Única cohorte Futures potencialmente operable actual'
+        ],
+    ]
+    tfunnel = Table(
+        funnel_rows,
+        colWidths=[5.0*cm, 1.4*cm, 9.0*cm]
+    )
+    tfunnel.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), HexColor('#6a1b9a')),
+        ('TEXTCOLOR', (0,0), (-1,0), white),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0,0), (-1,-1), 8.0),
+        ('GRID', (0,0), (-1,-1), 0.3, HexColor('#c8ccd6')),
+        ('ROWBACKGROUNDS', (0,1), (-1,-1), [HexColor('#f7effb'), white]),
+        ('ALIGN', (1,0), (1,-1), 'CENTER'),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('LEFTPADDING', (0,0), (-1,-1), 5),
+        ('RIGHTPADDING', (0,0), (-1,-1), 5),
+        ('TOPPADDING', (0,0), (-1,-1), 4),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+    ]))
+    story.append(tfunnel)
+
+    pre_gate_counts = walk.get('pre_gate_reason_counts') or {}
+    story.append(Paragraph(
+        "Rechazos exactos ANTES del Publication Gate",
+        style_h3
+    ))
+    if pre_gate_counts:
+        rows = [['Código', 'Motivo', 'N']]
+        for code, count in sorted(
+            pre_gate_counts.items(),
+            key=lambda item: (-int(item[1]), str(item[0]))
+        ):
+            code = str(code).upper()
+            rows.append([
+                code,
+                FUTURES_PRE_GATE_REASON_LABELS.get(
+                    code,
+                    'Otro rechazo pre-gate'
+                ),
+                str(count),
+            ])
+        tpre = Table(rows, colWidths=[4.2*cm, 8.5*cm, 1.5*cm])
+        tpre.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), HexColor('#ef6c00')),
+            ('TEXTCOLOR', (0,0), (-1,0), white),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0,0), (-1,-1), 8.2),
+            ('GRID', (0,0), (-1,-1), 0.3, HexColor('#c8ccd6')),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [HexColor('#fff4e8'), white]),
+            ('ALIGN', (-1,0), (-1,-1), 'CENTER'),
+        ]))
+        story.append(tpre)
+    else:
+        story.append(Paragraph(
+            "<i>Todavía no hay rechazos pre-gate exactos persistidos en la "
+            "ventana instrumentada. Los registros históricos no se reclasifican "
+            "retroactivamente.</i>",
+            style_note
+        ))
+
+    publication_counts = walk.get('publication_gate_reason_counts') or {}
+    story.append(Paragraph(
+        "Rechazos exactos DENTRO del Publication Gate Premium",
+        style_h3
+    ))
+    if publication_counts:
+        rows = [['Código', 'Motivo', 'N']]
+        for code, count in sorted(
+            publication_counts.items(),
+            key=lambda item: (-int(item[1]), str(item[0]))
+        ):
+            code = str(code).upper()
+            rows.append([
+                code,
+                FUTURES_PUBLICATION_REASON_LABELS.get(
+                    code,
+                    'Otro bloqueo'
+                ),
+                str(count),
+            ])
+        tpub = Table(rows, colWidths=[4.2*cm, 8.5*cm, 1.5*cm])
+        tpub.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), HexColor('#1565c0')),
+            ('TEXTCOLOR', (0,0), (-1,0), white),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0,0), (-1,-1), 8.2),
+            ('GRID', (0,0), (-1,-1), 0.3, HexColor('#c8ccd6')),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [HexColor('#edf5ff'), white]),
+            ('ALIGN', (-1,0), (-1,-1), 'CENTER'),
+        ]))
+        story.append(tpub)
+    else:
+        story.append(Paragraph(
+            "<i>Todavía no hay snapshots exactos del Publication Gate entre los "
+            "perfiles instrumentados de esta ventana. No se usa el fallback "
+            "histórico para atribuir una causa exacta.</i>",
+            style_note
+        ))
+
+    story.append(Paragraph(
+        "<b>Cómo leer el funnel:</b> si predominan HARD_SAFETY, LOSS_AT_SL o "
+        "ATR_STRESS, el problema está en seguridad/riesgo y no debemos volver "
+        "Futures más agresivo. Si, con muestra suficiente, predominan bloqueos "
+        "cercanos a Premium como SAFETY o TP_QUALITY y esa subcohorte demuestra "
+        "expectancy neta positiva fuera de tiempo, recién entonces existe una "
+        "hipótesis seria para Cautious.",
         style_note
     ))
 
