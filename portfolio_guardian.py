@@ -4445,6 +4445,542 @@ class PortfolioGuardian:
                         0
                     )
             }
+
+    def _build_futures_management_plan(
+        self,
+        action,
+        entry,
+        sl,
+        tp,
+        current_price,
+        highs,
+        lows,
+        recent_change_pct,
+        fast_avg,
+        slow_avg,
+        structure_deteriorated,
+        deterioration_score
+    ):
+        """
+        Commit 28 — Plan dinámico del Futures Guardian.
+
+        IMPORTANTE:
+        - Es únicamente una RECOMENDACIÓN.
+        - NO modifica la señal.
+        - NO modifica Supabase.
+        - NO mueve realmente SL ni TP.
+        - Nunca aumenta el riesgo original.
+
+        management_action puede ser:
+            HOLD
+            PROTECT
+            EXTEND
+            PROTECT_AND_EXTEND
+            REDUCE
+            EXIT
+        """
+
+        default = {
+            'management_action': 'HOLD',
+            'suggested_stop_loss': None,
+            'suggested_take_profit': None,
+            'progress_r': 0.0,
+            'tp_progress_ratio': 0.0,
+            'momentum_with_position': False,
+            'management_reason': (
+                'No existen condiciones suficientes para modificar '
+                'la protección u objetivo original.'
+            )
+        }
+
+        try:
+
+            action = str(
+                action or ''
+            ).upper()
+
+            if action not in (
+                'LONG',
+                'SHORT'
+            ):
+                return default
+
+            risk_abs = abs(
+                float(entry)
+                - float(sl)
+            )
+
+            reward_abs = abs(
+                float(tp)
+                - float(entry)
+            )
+
+            if (
+                risk_abs <= 0
+                or reward_abs <= 0
+            ):
+                return default
+
+            # ==========================================================
+            # PROGRESO EN R
+            # ==========================================================
+
+            if action == 'LONG':
+
+                favorable_abs = max(
+                    0.0,
+                    float(current_price)
+                    - float(entry)
+                )
+
+                momentum_with_position = (
+                    recent_change_pct >= 0.15
+                    and fast_avg >= slow_avg
+                )
+
+            else:
+
+                favorable_abs = max(
+                    0.0,
+                    float(entry)
+                    - float(current_price)
+                )
+
+                momentum_with_position = (
+                    recent_change_pct <= -0.15
+                    and fast_avg <= slow_avg
+                )
+
+            progress_r = (
+                favorable_abs
+                / risk_abs
+            )
+
+            tp_progress_ratio = (
+                favorable_abs
+                / reward_abs
+            )
+
+            # ==========================================================
+            # EXIT / REDUCE TIENEN PRIORIDAD
+            # ==========================================================
+
+            if deterioration_score >= 75:
+
+                return {
+                    **default,
+                    'management_action': 'EXIT',
+                    'progress_r': round(
+                        progress_r,
+                        3
+                    ),
+                    'tp_progress_ratio': round(
+                        tp_progress_ratio,
+                        3
+                    ),
+                    'momentum_with_position':
+                        bool(
+                            momentum_with_position
+                        ),
+                    'management_reason': (
+                        'El deterioro técnico es alto. '
+                        'La prioridad es evaluar salida, '
+                        'no extender la operación.'
+                    )
+                }
+
+            if deterioration_score >= 45:
+
+                return {
+                    **default,
+                    'management_action': 'REDUCE',
+                    'progress_r': round(
+                        progress_r,
+                        3
+                    ),
+                    'tp_progress_ratio': round(
+                        tp_progress_ratio,
+                        3
+                    ),
+                    'momentum_with_position':
+                        bool(
+                            momentum_with_position
+                        ),
+                    'management_reason': (
+                        'Existe deterioro moderado. '
+                        'La prioridad es reducir/proteger '
+                        'antes de buscar extensión.'
+                    )
+                }
+
+            suggested_sl = None
+            suggested_tp = None
+
+            # ==========================================================
+            # PROTECT
+            # ==========================================================
+            #
+            # No se protege prematuramente.
+            #
+            # Antes de +0.65R:
+            #     mantener SL original.
+            #
+            # Entre +0.65R y +1R:
+            #     sólo reducir parte del riesgo.
+            #
+            # Desde +1R:
+            #     puede proteger break-even o estructura favorable.
+            #
+            # ==========================================================
+
+            if (
+                progress_r >= 0.65
+                and highs
+                and lows
+            ):
+
+                recent_highs = [
+                    float(x)
+                    for x in highs[-3:]
+                ]
+
+                recent_lows = [
+                    float(x)
+                    for x in lows[-3:]
+                ]
+
+                if action == 'LONG':
+
+                    if progress_r >= 1.0:
+
+                        base_protection = float(
+                            entry
+                        )
+
+                    else:
+
+                        base_protection = (
+                            float(sl)
+                            + risk_abs * 0.50
+                        )
+
+                    recent_support = min(
+                        recent_lows
+                    )
+
+                    structural_stop = (
+                        recent_support
+                        - risk_abs * 0.08
+                    )
+
+                    candidate = max(
+                        float(sl),
+                        base_protection,
+                        structural_stop
+                    )
+
+                    # Antes de +1R no mover el SL todavía
+                    # por encima del Entry.
+                    if progress_r < 1.0:
+
+                        candidate = min(
+                            candidate,
+                            float(entry)
+                            - risk_abs * 0.05
+                        )
+
+                    # Siempre debe quedar espacio respecto
+                    # al precio actual.
+                    candidate = min(
+                        candidate,
+                        float(current_price)
+                        - risk_abs * 0.12
+                    )
+
+                    # Nunca empeorar el SL original.
+                    if (
+                        candidate
+                        > float(sl)
+                        + risk_abs * 0.01
+                        and candidate
+                        < float(current_price)
+                    ):
+
+                        suggested_sl = candidate
+
+                else:
+
+                    if progress_r >= 1.0:
+
+                        base_protection = float(
+                            entry
+                        )
+
+                    else:
+
+                        base_protection = (
+                            float(sl)
+                            - risk_abs * 0.50
+                        )
+
+                    recent_resistance = max(
+                        recent_highs
+                    )
+
+                    structural_stop = (
+                        recent_resistance
+                        + risk_abs * 0.08
+                    )
+
+                    candidate = min(
+                        float(sl),
+                        base_protection,
+                        structural_stop
+                    )
+
+                    # Antes de +1R debe conservar
+                    # algo de espacio sobre Entry.
+                    if progress_r < 1.0:
+
+                        candidate = max(
+                            candidate,
+                            float(entry)
+                            + risk_abs * 0.05
+                        )
+
+                    candidate = max(
+                        candidate,
+                        float(current_price)
+                        + risk_abs * 0.12
+                    )
+
+                    # SHORT:
+                    # bajar SL = reducir riesgo.
+                    if (
+                        candidate
+                        < float(sl)
+                        - risk_abs * 0.01
+                        and candidate
+                        > float(current_price)
+                    ):
+
+                        suggested_sl = candidate
+
+            # ==========================================================
+            # EXTEND
+            # ==========================================================
+            #
+            # El Guardian NO inventa TP = X R.
+            #
+            # Sólo puede usar un nivel estructural observado
+            # más allá del TP original.
+            #
+            # Requisitos:
+            # - ya recorrió >=70% del objetivo;
+            # - momentum sigue alineado;
+            # - estructura no deteriorada;
+            # - existe swing real más allá del TP.
+            #
+            # ==========================================================
+
+            if (
+                tp_progress_ratio >= 0.70
+                and momentum_with_position
+                and not structure_deteriorated
+                and highs
+                and lows
+            ):
+
+                if action == 'LONG':
+
+                    targets = sorted({
+                        float(x)
+                        for x in highs
+                        if float(x) > float(tp)
+                    })
+
+                    if targets:
+
+                        candidate_tp = targets[0]
+
+                        extension = (
+                            candidate_tp
+                            - float(tp)
+                        )
+
+                        if (
+                            extension
+                            >= risk_abs * 0.15
+                            and extension
+                            <= risk_abs
+                        ):
+
+                            suggested_tp = (
+                                candidate_tp
+                            )
+
+                else:
+
+                    targets = sorted(
+                        {
+                            float(x)
+                            for x in lows
+                            if float(x) < float(tp)
+                        },
+                        reverse=True
+                    )
+
+                    if targets:
+
+                        candidate_tp = targets[0]
+
+                        extension = (
+                            float(tp)
+                            - candidate_tp
+                        )
+
+                        if (
+                            extension
+                            >= risk_abs * 0.15
+                            and extension
+                            <= risk_abs
+                        ):
+
+                            suggested_tp = (
+                                candidate_tp
+                            )
+
+            # ==========================================================
+            # ACCIÓN FINAL
+            # ==========================================================
+
+            if (
+                suggested_sl is not None
+                and suggested_tp is not None
+            ):
+
+                management_action = (
+                    'PROTECT_AND_EXTEND'
+                )
+
+            elif suggested_sl is not None:
+
+                management_action = (
+                    'PROTECT'
+                )
+
+            elif suggested_tp is not None:
+
+                management_action = (
+                    'EXTEND'
+                )
+
+            else:
+
+                management_action = (
+                    'HOLD'
+                )
+
+            # ==========================================================
+            # EXPLICACIÓN
+            # ==========================================================
+
+            if management_action == 'PROTECT':
+
+                management_reason = (
+                    f'La posición avanzó '
+                    f'{progress_r:.2f}R. '
+                    f'El Guardian sugiere reducir riesgo '
+                    f'moviendo favorablemente el SL, '
+                    f'sin ampliar nunca el riesgo original.'
+                )
+
+            elif management_action == 'EXTEND':
+
+                management_reason = (
+                    f'La posición recorrió '
+                    f'{tp_progress_ratio * 100:.0f}% '
+                    f'del objetivo original y mantiene '
+                    f'momentum/estructura favorables. '
+                    f'Existe un swing estructural posterior '
+                    f'que puede utilizarse como TP extendido.'
+                )
+
+            elif management_action == (
+                'PROTECT_AND_EXTEND'
+            ):
+
+                management_reason = (
+                    f'La posición avanzó '
+                    f'{progress_r:.2f}R y mantiene '
+                    f'continuación favorable. '
+                    f'El Guardian sugiere proteger beneficio '
+                    f'con un SL mejor y contempla extender '
+                    f'el TP hacia el siguiente swing estructural.'
+                )
+
+            else:
+
+                management_reason = (
+                    'La tesis continúa vigente, pero todavía '
+                    'no existe ventaja suficiente para mover '
+                    'SL o extender TP.'
+                )
+
+            return {
+                'management_action':
+                    management_action,
+
+                'suggested_stop_loss': (
+                    round(
+                        suggested_sl,
+                        8
+                    )
+                    if suggested_sl
+                    is not None
+                    else None
+                ),
+
+                'suggested_take_profit': (
+                    round(
+                        suggested_tp,
+                        8
+                    )
+                    if suggested_tp
+                    is not None
+                    else None
+                ),
+
+                'progress_r':
+                    round(
+                        progress_r,
+                        3
+                    ),
+
+                'tp_progress_ratio':
+                    round(
+                        tp_progress_ratio,
+                        3
+                    ),
+
+                'momentum_with_position':
+                    bool(
+                        momentum_with_position
+                    ),
+
+                'management_reason':
+                    management_reason
+            }
+
+        except Exception as e:
+
+            logger.debug(
+                f'Futures management plan: {e}'
+            )
+
+            return default    
+    
+    
     def evaluate_futures_position(
         self,
         signal,
@@ -5055,7 +5591,32 @@ class PortfolioGuardian:
                 100,
                 deterioration_score
             )
-    
+
+            # ==========================================================
+            # COMMIT 28 — PLAN DINÁMICO DE GESTIÓN
+            # ==========================================================
+
+            management = (
+                self._build_futures_management_plan(
+                    action=action,
+                    entry=entry,
+                    sl=sl,
+                    tp=tp,
+                    current_price=current_price,
+                    highs=highs,
+                    lows=lows,
+                    recent_change_pct=recent_change_pct,
+                    fast_avg=fast_avg,
+                    slow_avg=slow_avg,
+                    structure_deteriorated=(
+                        structure_deteriorated
+                    ),
+                    deterioration_score=(
+                        deterioration_score
+                    )
+                )
+            )            
+            
             # ==========================================================
             # TEXTO COMÚN
             # ==========================================================
@@ -5115,6 +5676,62 @@ class PortfolioGuardian:
                 'leverage':
                     int(
                         leverage
+                    ),
+
+                # ======================================================
+                # COMMIT 28 — GESTIÓN DINÁMICA
+                # ======================================================
+
+                'management_action':
+                    management.get(
+                        'management_action',
+                        'HOLD'
+                    ),
+
+                'original_stop_loss':
+                    round(
+                        sl,
+                        8
+                    ),
+
+                'suggested_stop_loss':
+                    management.get(
+                        'suggested_stop_loss'
+                    ),
+
+                'original_take_profit':
+                    round(
+                        tp,
+                        8
+                    ),
+
+                'suggested_take_profit':
+                    management.get(
+                        'suggested_take_profit'
+                    ),
+
+                'progress_r':
+                    management.get(
+                        'progress_r',
+                        0.0
+                    ),
+
+                'tp_progress_ratio':
+                    management.get(
+                        'tp_progress_ratio',
+                        0.0
+                    ),
+
+                'momentum_with_position':
+                    management.get(
+                        'momentum_with_position',
+                        False
+                    ),
+
+                'management_reason':
+                    management.get(
+                        'management_reason',
+                        ''
                     )
             }
     
@@ -5203,11 +5820,23 @@ class PortfolioGuardian:
                 'mae_price':
                     mae_price,    
                 'reason': (
-                    f'La tesis continúa vigente. '
-                    f'MFE observado: {mfe_pct:.2f}%. '
-                    f'MAE observado: {mae_pct:.2f}%. '
-                    f'No existe deterioro suficiente para '
-                    f'justificar una salida anticipada.'
+                    management.get(
+                        'management_reason'
+                    )
+                    if management.get(
+                        'management_action'
+                    ) in (
+                        'PROTECT',
+                        'EXTEND',
+                        'PROTECT_AND_EXTEND'
+                    )
+                    else (
+                        f'La tesis continúa vigente. '
+                        f'MFE observado: {mfe_pct:.2f}%. '
+                        f'MAE observado: {mae_pct:.2f}%. '
+                        f'No existe deterioro suficiente para '
+                        f'justificar una salida anticipada.'
+                    )
                 ),
     
                 **metrics
