@@ -127,7 +127,9 @@ FUTURES_REAL_ANALYSIS_VERSION = 'closed_v1'
 FUTURES_REAL_COHORT = 'FUTURES_PERPETUAL_REAL_CLOSED_V1'
 FUTURES_LEGACY_COHORT = 'FUTURES_LEGACY_UNVERIFIED'
 SPOT_LEARNING_COHORT = 'SPOT_ACCUMULATION_V1'
-
+CAUTIOUS_SHADOW_MODEL_VERSION = 'cautious_shadow_v1'
+CAUTIOUS_SHADOW_NEAR_MISS_RATIO = 0.80
+CAUTIOUS_SHADOW_RISK_MULTIPLIER = 0.50
 
 # ============================================================================
 # CLASE PRINCIPAL: REVIEW TRADER
@@ -314,6 +316,901 @@ class ReviewTrader:
                 or levels.get('probability_status')
             )
         }
+============================================================================
+# BLOQUE B — MÉTODOS DE ReviewTrader
+# Pegar dentro de class ReviewTrader, justo después de _build_learning_provenance()
+# y antes de _get_signal_learning().
+# ============================================================================
+
+    @staticmethod
+    def _publication_reason_code(reason: str) -> str:
+        text = str(reason or '').strip().lower()
+
+        if 'safety' in text:
+            return 'SAFETY'
+
+        if (
+            'calidad tp' in text
+            or 'tp quality' in text
+        ):
+            return 'TP_QUALITY'
+
+        if (
+            'protección sl' in text
+            or 'proteccion sl' in text
+            or 'sl quality' in text
+        ):
+            return 'SL_QUALITY'
+
+        if (
+            'r/r' in text
+            or 'risk/reward' in text
+            or 'risk_reward' in text
+        ):
+            return 'RR'
+
+        if 'roi tp' in text:
+            return 'ROI_TP'
+
+        if (
+            'beneficio neto' in text
+            or 'net profit' in text
+        ):
+            return 'NET_PROFIT'
+
+        if (
+            'pérdida estimada en sl' in text
+            or 'perdida estimada en sl' in text
+            or 'loss at sl' in text
+        ):
+            return 'LOSS_AT_SL'
+
+        if (
+            'estrés atr' in text
+            or 'estres atr' in text
+            or 'atr stress' in text
+        ):
+            return 'ATR_STRESS'
+
+        return 'OTHER'
+
+
+    def _build_futures_publication_snapshot(
+        self,
+        analysis: Dict
+    ) -> Dict:
+        """
+        Copia el publication gate EXACTO calculado por Futures.
+
+        No recalcula la decisión y no modifica analysis.
+        """
+
+        levels = (
+            analysis.get(
+                'levels',
+                {}
+            )
+            or {}
+        )
+
+        raw_gate = (
+            analysis.get(
+                'futures_publication_gate'
+            )
+            or levels.get(
+                'futures_publication_gate'
+            )
+            or {}
+        )
+
+        if not isinstance(
+            raw_gate,
+            dict
+        ) or not raw_gate:
+
+            return {}
+
+        raw_reasons = (
+            raw_gate.get(
+                'reasons'
+            )
+            or []
+        )
+
+        if not isinstance(
+            raw_reasons,
+            (list, tuple)
+        ):
+
+            raw_reasons = [
+                raw_reasons
+            ]
+
+        reasons = [
+            str(reason)[:180]
+            for reason
+            in raw_reasons[:8]
+            if str(reason or '').strip()
+        ]
+
+        reason_codes = []
+
+        for reason in reasons:
+
+            code = (
+                self._publication_reason_code(
+                    reason
+                )
+            )
+
+            if code not in reason_codes:
+
+                reason_codes.append(
+                    code
+                )
+
+        raw_thresholds = (
+            raw_gate.get(
+                'thresholds'
+            )
+            or {}
+        )
+
+        if not isinstance(
+            raw_thresholds,
+            dict
+        ):
+
+            raw_thresholds = {}
+
+        thresholds = {}
+
+        for key, value in raw_thresholds.items():
+
+            try:
+
+                number = float(
+                    value
+                )
+
+                if math.isfinite(
+                    number
+                ):
+
+                    thresholds[
+                        str(key)
+                    ] = number
+
+            except (
+                TypeError,
+                ValueError
+            ):
+                continue
+
+        def optional_float(
+            value
+        ):
+
+            try:
+
+                number = float(
+                    value
+                )
+
+                if math.isfinite(
+                    number
+                ):
+
+                    return number
+
+            except (
+                TypeError,
+                ValueError
+            ):
+                pass
+
+            return None
+
+        eligible = (
+            self._as_bool(
+                raw_gate.get(
+                    'eligible',
+                    False
+                )
+            )
+        )
+
+        return {
+            'eligible':
+                eligible,
+
+            'tier':
+                str(
+                    raw_gate.get(
+                        'tier'
+                    )
+                    or (
+                        'PREMIUM'
+                        if eligible
+                        else 'ANALYSIS_ONLY'
+                    )
+                ),
+
+            'rejection_count':
+                len(
+                    reasons
+                ),
+
+            'reason_codes':
+                reason_codes,
+
+            'reasons':
+                reasons,
+
+            'tp_touch_quality_score':
+                optional_float(
+                    raw_gate.get(
+                        'tp_touch_quality_score'
+                    )
+                ),
+
+            'sl_avoidance_quality_score':
+                optional_float(
+                    raw_gate.get(
+                        'sl_avoidance_quality_score'
+                    )
+                ),
+
+            'preferred_leverage_min':
+                optional_float(
+                    raw_gate.get(
+                        'preferred_leverage_min'
+                    )
+                ),
+
+            'preferred_leverage_max':
+                optional_float(
+                    raw_gate.get(
+                        'preferred_leverage_max'
+                    )
+                ),
+
+            'leverage_in_preferred_band':
+                self._as_bool(
+                    raw_gate.get(
+                        'leverage_in_preferred_band',
+                        False
+                    )
+                ),
+
+            'probability_status':
+                str(
+                    raw_gate.get(
+                        'probability_status'
+                    )
+                    or ''
+                ),
+
+            'thresholds':
+                thresholds
+        }
+
+
+    def _build_cautious_shadow_profile(
+        self,
+        analysis: Dict,
+        learning: Dict,
+        publication: Dict
+    ) -> Dict:
+        """
+        Commit 35 — experimento CAUTIOUS_SHADOW.
+
+        REGLA ABSOLUTA:
+        este resultado sólo sirve para aprendizaje SHADOW.
+        Nunca puede publicar una señal ni modificar Entry/SL/TP/leverage/pesos.
+
+        Candidato v1:
+        - Futures real + vela cerrada;
+        - ya fue rechazado por el gate PREMIUM;
+        - LONG/SHORT con geometría válida;
+        - TODOS los filtros duros de riesgo/economía pasan;
+        - los únicos bloqueos exactos son SAFETY y/o TP_QUALITY;
+        - Safety y TP Quality están al menos al 80% del umbral premium.
+
+        Riesgo simulado:
+        - 0.50x del riesgo monetario/margen;
+        - NO cambia el leverage técnico ni los niveles originales.
+        """
+
+        base = {
+            'model_version':
+                CAUTIOUS_SHADOW_MODEL_VERSION,
+
+            'mode':
+                'SHADOW_ONLY',
+
+            'candidate':
+                False,
+
+            'status':
+                'NOT_APPLICABLE',
+
+            'simulated_risk_multiplier':
+                CAUTIOUS_SHADOW_RISK_MULTIPLIER,
+
+            'simulated_margin_multiplier':
+                CAUTIOUS_SHADOW_RISK_MULTIPLIER,
+
+            'near_miss_ratio':
+                CAUTIOUS_SHADOW_NEAR_MISS_RATIO,
+
+            'affects_publication':
+                False,
+
+            'affects_weights':
+                False,
+
+            'affects_entry':
+                False,
+
+            'affects_stop_loss':
+                False,
+
+            'affects_take_profit':
+                False,
+
+            'affects_leverage':
+                False,
+
+            'reason_codes':
+                [],
+
+            'failed_guardrails':
+                [],
+
+            'metrics':
+                {}
+        }
+
+        if str(
+            learning.get(
+                'system_type',
+                ''
+            )
+        ).lower() != 'futures':
+
+            return base
+
+        if (
+            learning.get(
+                'cohort'
+            )
+            != FUTURES_REAL_COHORT
+        ):
+
+            return {
+                **base,
+                'status':
+                    'UNVERIFIED_FUTURES'
+            }
+
+        if (
+            learning.get(
+                'evaluation_role'
+            )
+            != 'SHADOW_ANALYSIS'
+        ):
+
+            return {
+                **base,
+                'status':
+                    'NOT_SHADOW'
+            }
+
+        decision = (
+            analysis.get(
+                'decision',
+                {}
+            )
+            or {}
+        )
+
+        action = str(
+            decision.get(
+                'action',
+                ''
+            )
+            or ''
+        ).upper()
+
+        if action not in (
+            'LONG',
+            'SHORT'
+        ):
+
+            return {
+                **base,
+                'status':
+                    'NOT_DIRECTIONAL'
+            }
+
+        levels = (
+            analysis.get(
+                'levels',
+                {}
+            )
+            or {}
+        )
+
+        def safe_float(
+            value,
+            default=None
+        ):
+
+            try:
+
+                number = float(
+                    value
+                )
+
+                if math.isfinite(
+                    number
+                ):
+
+                    return number
+
+            except (
+                TypeError,
+                ValueError
+            ):
+                pass
+
+            return default
+
+        entry = safe_float(
+            levels.get(
+                'entry'
+            )
+        )
+
+        sl = safe_float(
+            levels.get(
+                'stop_loss'
+            )
+        )
+
+        tp = safe_float(
+            levels.get(
+                'take_profit'
+            )
+        )
+
+        if not all(
+            value is not None
+            and value > 0
+            for value
+            in (
+                entry,
+                sl,
+                tp
+            )
+        ):
+
+            return {
+                **base,
+                'status':
+                    'INVALID_GEOMETRY'
+            }
+
+        if (
+            action == 'LONG'
+            and not (
+                sl < entry < tp
+            )
+        ):
+
+            return {
+                **base,
+                'status':
+                    'INVALID_GEOMETRY'
+            }
+
+        if (
+            action == 'SHORT'
+            and not (
+                tp < entry < sl
+            )
+        ):
+
+            return {
+                **base,
+                'status':
+                    'INVALID_GEOMETRY'
+            }
+
+        if not isinstance(
+            publication,
+            dict
+        ) or not publication:
+
+            return {
+                **base,
+                'status':
+                    'MISSING_PUBLICATION_GATE'
+            }
+
+        if self._as_bool(
+            publication.get(
+                'eligible',
+                False
+            )
+        ):
+
+            return {
+                **base,
+                'status':
+                    'PREMIUM_NOT_CAUTIOUS'
+            }
+
+        thresholds = (
+            publication.get(
+                'thresholds'
+            )
+            or {}
+        )
+
+        required_thresholds = (
+            'execution_safety_min',
+            'tp_quality_min',
+            'sl_avoidance_quality_min',
+            'risk_reward_min',
+            'risk_reward_max',
+            'roi_tp_min',
+            'net_profit_min_usdt',
+            'loss_at_sl_max_pct_margin',
+            'atr_stress_loss_max_pct_margin'
+        )
+
+        if not all(
+            key in thresholds
+            for key
+            in required_thresholds
+        ):
+
+            return {
+                **base,
+                'status':
+                    'MISSING_THRESHOLDS'
+            }
+
+        safety = safe_float(
+            levels.get(
+                'execution_safety',
+                levels.get(
+                    'execution_safety_score'
+                )
+            ),
+            0.0
+        )
+
+        tp_quality = safe_float(
+            publication.get(
+                'tp_touch_quality_score'
+            ),
+            safe_float(
+                levels.get(
+                    'tp_quality_score'
+                ),
+                0.0
+            )
+        )
+
+        sl_quality = safe_float(
+            publication.get(
+                'sl_avoidance_quality_score'
+            )
+        )
+
+        if sl_quality is None:
+
+            sl_quality = safe_float(
+                levels.get(
+                    'sl_reliability'
+                ),
+                0.0
+            )
+
+            if (
+                sl_quality is not None
+                and sl_quality <= 1.0
+            ):
+
+                sl_quality *= 100.0
+
+        rr = safe_float(
+            levels.get(
+                'risk_reward'
+            ),
+            0.0
+        )
+
+        roi_tp = safe_float(
+            levels.get(
+                'roi_tp'
+            ),
+            0.0
+        )
+
+        roi_sl_abs = abs(
+            safe_float(
+                levels.get(
+                    'roi_sl'
+                ),
+                0.0
+            )
+        )
+
+        net_profit = safe_float(
+            levels.get(
+                'net_profit_tp_usdt'
+            ),
+            0.0
+        )
+
+        risk_control = (
+            levels.get(
+                'risk_control',
+                {}
+            )
+            or {}
+        )
+
+        atr_stress = safe_float(
+            risk_control.get(
+                'estimated_atr_stress_loss_pct_margin'
+            ),
+            0.0
+        )
+
+        hard_checks = {
+            'SL_QUALITY':
+                (
+                    sl_quality
+                    >= float(
+                        thresholds[
+                            'sl_avoidance_quality_min'
+                        ]
+                    )
+                ),
+
+            'RR':
+                (
+                    float(
+                        thresholds[
+                            'risk_reward_min'
+                        ]
+                    )
+                    <= rr
+                    <= float(
+                        thresholds[
+                            'risk_reward_max'
+                        ]
+                    )
+                ),
+
+            'ROI_TP':
+                (
+                    roi_tp
+                    >= float(
+                        thresholds[
+                            'roi_tp_min'
+                        ]
+                    )
+                ),
+
+            'NET_PROFIT':
+                (
+                    net_profit
+                    >= float(
+                        thresholds[
+                            'net_profit_min_usdt'
+                        ]
+                    )
+                ),
+
+            'LOSS_AT_SL':
+                (
+                    roi_sl_abs
+                    <= float(
+                        thresholds[
+                            'loss_at_sl_max_pct_margin'
+                        ]
+                    )
+                ),
+
+            'ATR_STRESS':
+                (
+                    atr_stress > 0
+                    and atr_stress
+                    <= float(
+                        thresholds[
+                            'atr_stress_loss_max_pct_margin'
+                        ]
+                    )
+                )
+        }
+
+        failed_guardrails = [
+            name
+            for name, passed
+            in hard_checks.items()
+            if not passed
+        ]
+
+        reason_codes = [
+            str(code).upper()
+            for code
+            in (
+                publication.get(
+                    'reason_codes'
+                )
+                or []
+            )
+            if str(
+                code
+                or ''
+            ).strip()
+        ]
+
+        reason_set = set(
+            reason_codes
+        )
+
+        soft_only = bool(
+            reason_set
+        ) and reason_set.issubset({
+            'SAFETY',
+            'TP_QUALITY'
+        })
+
+        safety_threshold = float(
+            thresholds[
+                'execution_safety_min'
+            ]
+        )
+
+        tp_threshold = float(
+            thresholds[
+                'tp_quality_min'
+            ]
+        )
+
+        minimum_cautious_safety = (
+            safety_threshold
+            * CAUTIOUS_SHADOW_NEAR_MISS_RATIO
+        )
+
+        minimum_cautious_tp = (
+            tp_threshold
+            * CAUTIOUS_SHADOW_NEAR_MISS_RATIO
+        )
+
+        near_miss = (
+            safety
+            >= minimum_cautious_safety
+            and tp_quality
+            >= minimum_cautious_tp
+        )
+
+        candidate = bool(
+            not failed_guardrails
+            and soft_only
+            and near_miss
+        )
+
+        status = (
+            'CAUTIOUS_SHADOW'
+            if candidate
+            else 'REJECTED_SHADOW'
+        )
+
+        return {
+            **base,
+
+            'candidate':
+                candidate,
+
+            'status':
+                status,
+
+            'reason_codes':
+                reason_codes,
+
+            'failed_guardrails':
+                failed_guardrails,
+
+            'metrics': {
+                'execution_safety':
+                    round(
+                        safety,
+                        3
+                    ),
+
+                'minimum_cautious_safety':
+                    round(
+                        minimum_cautious_safety,
+                        3
+                    ),
+
+                'premium_safety_threshold':
+                    round(
+                        safety_threshold,
+                        3
+                    ),
+
+                'tp_quality':
+                    round(
+                        tp_quality,
+                        3
+                    ),
+
+                'minimum_cautious_tp_quality':
+                    round(
+                        minimum_cautious_tp,
+                        3
+                    ),
+
+                'premium_tp_quality_threshold':
+                    round(
+                        tp_threshold,
+                        3
+                    ),
+
+                'sl_quality':
+                    round(
+                        sl_quality,
+                        3
+                    ),
+
+                'risk_reward':
+                    round(
+                        rr,
+                        4
+                    ),
+
+                'roi_tp':
+                    round(
+                        roi_tp,
+                        4
+                    ),
+
+                'roi_sl_abs':
+                    round(
+                        roi_sl_abs,
+                        4
+                    ),
+
+                'net_profit_tp_usdt':
+                    round(
+                        net_profit,
+                        4
+                    ),
+
+                'atr_stress_loss_pct_margin':
+                    round(
+                        atr_stress,
+                        4
+                    ),
+
+                'original_leverage':
+                    safe_float(
+                        levels.get(
+                            'leverage'
+                        ),
+                        0.0
+                    )
+            }
+        }
 
     @staticmethod
     def _get_signal_learning(signal: Dict) -> Dict:
@@ -472,11 +1369,87 @@ class ReviewTrader:
             indicators = self._extract_indicators_snapshot(analysis_result)
             
             # Extraer contexto (sesión, día, sentimiento, etc.)
-            context = self._extract_context(analysis_result)
-            context['learning'] = self._build_learning_provenance(
-                analysis_result,
-                system_type
+# ============================================================================
+# BLOQUE C — register_signal()
+#
+# Buscar:
+#
+# context = self._extract_context(analysis_result)
+# context['learning'] = self._build_learning_provenance(
+#     analysis_result,
+#     system_type
+# )
+#
+# Reemplazar SOLO ese bloque por:
+# ============================================================================
+
+            context = self._extract_context(
+                analysis_result
             )
+
+            existing_learning = (
+                context.get(
+                    'learning',
+                    {}
+                )
+                or {}
+            )
+
+            if not isinstance(
+                existing_learning,
+                dict
+            ):
+
+                existing_learning = {}
+
+            learning = dict(
+                existing_learning
+            )
+
+            learning.update(
+                self._build_learning_provenance(
+                    analysis_result,
+                    system_type
+                )
+            )
+
+            context[
+                'learning'
+            ] = learning
+
+            if (
+                self._normalize_system_type(
+                    system_type
+                )
+                == 'futures'
+            ):
+
+                publication = (
+                    self._build_futures_publication_snapshot(
+                        analysis_result
+                    )
+                )
+
+                if publication:
+
+                    context[
+                        'futures_publication'
+                    ] = publication
+
+                context[
+                    'learning'
+                ][
+                    'cautious_shadow'
+                ] = (
+                    self._build_cautious_shadow_profile(
+                        analysis_result,
+                        context[
+                            'learning'
+                        ],
+                        publication
+                    )
+                )
+
             # ==============================================================
             # FUTURES QUANTITATIVE SHADOW — SNAPSHOT PARA APRENDIZAJE
             # ==============================================================
