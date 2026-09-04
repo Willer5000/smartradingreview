@@ -477,7 +477,235 @@ class ReviewTrader:
                 analysis_result,
                 system_type
             )
-            
+            # ==============================================================
+            # FUTURES QUANTITATIVE SHADOW — SNAPSHOT PARA APRENDIZAJE
+            # ==============================================================
+            #
+            # Sólo guarda una copia compacta del contexto cuantitativo que ya
+            # calculó futures_system.py.
+            #
+            # IMPORTANTE:
+            # - NO recalcula mercado.
+            # - NO modifica votos.
+            # - NO modifica la decisión.
+            # - NO modifica Entry, SL o TP.
+            # - NO modifica leverage.
+            # - NO modifica Execution Safety.
+            # - NO modifica publication_status.
+            #
+            # Su única función es permitir relacionar posteriormente el
+            # contexto cuantitativo original con el resultado real de la señal.
+            # ==============================================================
+
+            if self._normalize_system_type(system_type) == 'futures':
+
+                raw_quant = analysis_result.get(
+                    'futures_quantitative_context'
+                ) or {}
+
+                if isinstance(raw_quant, dict) and raw_quant:
+
+                    raw_metrics = raw_quant.get(
+                        'metrics'
+                    ) or {}
+
+                    if not isinstance(
+                        raw_metrics,
+                        dict
+                    ):
+                        raw_metrics = {}
+
+                    raw_reasons = raw_quant.get(
+                        'reasons'
+                    ) or []
+
+                    if not isinstance(
+                        raw_reasons,
+                        (list, tuple)
+                    ):
+                        raw_reasons = [
+                            raw_reasons
+                        ]
+
+                    def _optional_float(value):
+                        try:
+                            number = float(
+                                value
+                            )
+
+                            return (
+                                number
+                                if math.isfinite(
+                                    number
+                                )
+                                else None
+                            )
+
+                        except (
+                            TypeError,
+                            ValueError
+                        ):
+                            return None
+
+                    context[
+                        'learning'
+                    ][
+                        'quantitative_shadow'
+                    ] = {
+
+                        'available':
+                            self._as_bool(
+                                raw_quant.get(
+                                    'available',
+                                    False
+                                )
+                            ),
+
+                        'model_version':
+                            str(
+                                raw_quant.get(
+                                    'model_version'
+                                ) or ''
+                            ),
+
+                        'mode':
+                            str(
+                                raw_quant.get(
+                                    'mode'
+                                ) or ''
+                            ),
+
+                        'status':
+                            str(
+                                raw_quant.get(
+                                    'status'
+                                ) or ''
+                            ),
+
+                        'data_scope':
+                            str(
+                                raw_quant.get(
+                                    'data_scope'
+                                ) or ''
+                            ),
+
+                        'calibrated':
+                            self._as_bool(
+                                raw_quant.get(
+                                    'calibrated',
+                                    False
+                                )
+                            ),
+
+                        'affects_publication':
+                            self._as_bool(
+                                raw_quant.get(
+                                    'affects_publication',
+                                    False
+                                )
+                            ),
+
+                        'quality_score_status':
+                            str(
+                                raw_quant.get(
+                                    'quality_score_status'
+                                ) or ''
+                            ),
+
+                        'regime':
+                            str(
+                                raw_quant.get(
+                                    'regime'
+                                ) or 'UNAVAILABLE'
+                            ),
+
+                        'direction':
+                            str(
+                                raw_quant.get(
+                                    'direction'
+                                ) or 'NEUTRAL'
+                            ),
+
+                        'direction_alignment':
+                            str(
+                                raw_quant.get(
+                                    'direction_alignment'
+                                )
+                                or 'NOT_APPLICABLE'
+                            ),
+
+                        'entry_location':
+                            str(
+                                raw_quant.get(
+                                    'entry_location'
+                                )
+                                or 'UNAVAILABLE'
+                            ),
+
+                        'shadow_verdict':
+                            str(
+                                raw_quant.get(
+                                    'shadow_verdict'
+                                )
+                                or 'UNAVAILABLE'
+                            ),
+
+                        'quality_score':
+                            _optional_float(
+                                raw_quant.get(
+                                    'quality_score'
+                                )
+                            ),
+
+                        'reasons': [
+                            str(
+                                item
+                            )[:180]
+                            for item
+                            in raw_reasons[:6]
+                        ],
+
+                        'metrics': {
+
+                            key:
+                                _optional_float(
+                                    raw_metrics.get(
+                                        key
+                                    )
+                                )
+
+                            for key in (
+
+                                'source_price',
+
+                                'latest_return_pct',
+
+                                'return_anomaly_robust_z',
+
+                                'directional_efficiency_ratio',
+
+                                'trend_move_pct',
+
+                                'drift_strength',
+
+                                'return_autocorrelation_lag1',
+
+                                'realized_volatility_fast_pct',
+
+                                'realized_volatility_slow_pct',
+
+                                'fast_slow_volatility_ratio',
+
+                                'volatility_percentile',
+
+                                'atr_pct',
+
+                                'entry_distance_atr',
+
+                                'entry_pullback_signed_atr',
+                            )
+                        }
+                    }            
             # Datos de la señal
             decision = analysis_result.get('decision', {})
             levels = analysis_result.get('levels', {})
