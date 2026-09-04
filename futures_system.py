@@ -1718,7 +1718,111 @@ class FuturesAnalysis(TradingExpertSystem):
                 0
             )
         )
+    @staticmethod
+    def _stamp_futures_filter_trace(
+        levels: Dict,
+        stage: str,
+        reason_codes=None,
+        reason: str = '',
+        reached_publication_gate: bool = False,
+        outcome: str = 'ANALYSIS_ONLY'
+    ) -> Dict:
+        """
+        Commit 36E — instrumentación del funnel Futures en el ORIGEN.
 
+        Sólo agrega metadata diagnóstica. No cambia:
+        Entry, SL, TP, RR, leverage, Safety ni elegibilidad.
+        """
+        result = dict(levels or {})
+
+        raw_codes = reason_codes or []
+        if not isinstance(raw_codes, (list, tuple, set)):
+            raw_codes = [raw_codes]
+
+        codes = []
+        for raw_code in raw_codes:
+            code = str(raw_code or '').strip().upper()
+            if code and code not in codes:
+                codes.append(code)
+
+        normalized_stage = str(
+            stage or 'UNKNOWN'
+        ).strip().upper()
+
+        normalized_outcome = str(
+            outcome or 'ANALYSIS_ONLY'
+        ).strip().upper()
+
+        trace = {
+            'instrumentation_version':
+                'futures_filter_trace_v1',
+
+            'stage':
+                normalized_stage,
+
+            'reached_publication_gate':
+                bool(reached_publication_gate),
+
+            'outcome':
+                normalized_outcome,
+
+            'rejected':
+                bool(codes),
+
+            'reason_codes':
+                codes,
+
+            'reason':
+                str(reason or '')[:240],
+
+            'diagnostic_only':
+                True,
+
+            'affects_publication':
+                False,
+
+            'affects_weights':
+                False
+        }
+
+        result[
+            'futures_filter_trace'
+        ] = trace
+
+        result[
+            'futures_filter_stage'
+        ] = normalized_stage
+
+        result[
+            'futures_filter_reason_codes'
+        ] = list(codes)
+
+        result[
+            'futures_filter_reason_code'
+        ] = (
+            codes[0]
+            if len(codes) == 1
+            else None
+        )
+
+        result[
+            'futures_rejection_stage'
+        ] = (
+            normalized_stage
+            if codes
+            else None
+        )
+
+        result[
+            'futures_rejection_code'
+        ] = (
+            codes[0]
+            if len(codes) == 1
+            else None
+        )
+
+        return result
+        
     def _apply_futures_publication_gate(
         self,
         levels: Dict,
@@ -1805,59 +1909,145 @@ class FuturesAnalysis(TradingExpertSystem):
         }
 
         rejection_reasons = []
+        rejection_reason_codes = []
 
-        def require(condition, reason):
+        def require(condition, code, reason):
             if not condition:
                 rejection_reasons.append(reason)
 
+                normalized_code = str(
+                    code or 'OTHER'
+                ).strip().upper()
+
+                if (
+                    normalized_code
+                    and normalized_code
+                    not in rejection_reason_codes
+                ):
+                    rejection_reason_codes.append(
+                        normalized_code
+                    )
+
         require(
-            safety >= thresholds['execution_safety_min'],
-            f"Safety {safety:.1f} < {thresholds['execution_safety_min']:.1f}"
+            safety
+            >= thresholds[
+                'execution_safety_min'
+            ],
+            'SAFETY',
+            (
+                f"Safety {safety:.1f} < "
+                f"{thresholds['execution_safety_min']:.1f}"
+            )
         )
+
         require(
-            tp_quality >= thresholds['tp_quality_min'],
-            f"calidad TP {tp_quality:.1f} < {thresholds['tp_quality_min']:.1f}"
+            tp_quality
+            >= thresholds[
+                'tp_quality_min'
+            ],
+            'TP_QUALITY',
+            (
+                f"calidad TP {tp_quality:.1f} < "
+                f"{thresholds['tp_quality_min']:.1f}"
+            )
         )
+
         require(
-            sl_avoidance_quality >= thresholds['sl_avoidance_quality_min'],
-            'protección SL '
-            f"{sl_avoidance_quality:.1f} < "
-            f"{thresholds['sl_avoidance_quality_min']:.1f}"
+            sl_avoidance_quality
+            >= thresholds[
+                'sl_avoidance_quality_min'
+            ],
+            'SL_QUALITY',
+            (
+                'protección SL '
+                f"{sl_avoidance_quality:.1f} < "
+                f"{thresholds['sl_avoidance_quality_min']:.1f}"
+            )
         )
+
         require(
-            thresholds['risk_reward_min']
+            thresholds[
+                'risk_reward_min'
+            ]
             <= rr
-            <= thresholds['risk_reward_max'],
-            'R/R fuera de banda premium '
-            f"{thresholds['risk_reward_min']:.1f}-{thresholds['risk_reward_max']:.1f}"
+            <= thresholds[
+                'risk_reward_max'
+            ],
+            'RR',
+            (
+                'R/R fuera de banda premium '
+                f"{thresholds['risk_reward_min']:.1f}-"
+                f"{thresholds['risk_reward_max']:.1f}"
+            )
         )
+
         require(
-            roi_tp >= thresholds['roi_tp_min'],
-            f"ROI TP {roi_tp:.1f}% < {thresholds['roi_tp_min']:.1f}%"
+            roi_tp
+            >= thresholds[
+                'roi_tp_min'
+            ],
+            'ROI_TP',
+            (
+                f"ROI TP {roi_tp:.1f}% < "
+                f"{thresholds['roi_tp_min']:.1f}%"
+            )
         )
+
         require(
-            net_profit >= thresholds['net_profit_min_usdt'],
-            'beneficio neto '
-            f"${net_profit:.2f} < ${thresholds['net_profit_min_usdt']:.2f}"
+            net_profit
+            >= thresholds[
+                'net_profit_min_usdt'
+            ],
+            'NET_PROFIT',
+            (
+                'beneficio neto '
+                f"${net_profit:.2f} < "
+                f"${thresholds['net_profit_min_usdt']:.2f}"
+            )
         )
+
         require(
-            roi_sl_abs <= thresholds['loss_at_sl_max_pct_margin'],
-            'pérdida estimada en SL '
-            f"{roi_sl_abs:.1f}% > "
-            f"{thresholds['loss_at_sl_max_pct_margin']:.1f}% del margen"
+            roi_sl_abs
+            <= thresholds[
+                'loss_at_sl_max_pct_margin'
+            ],
+            'LOSS_AT_SL',
+            (
+                'pérdida estimada en SL '
+                f"{roi_sl_abs:.1f}% > "
+                f"{thresholds['loss_at_sl_max_pct_margin']:.1f}% "
+                'del margen'
+            )
         )
+
         require(
             0 < atr_stress_loss
-            <= thresholds['atr_stress_loss_max_pct_margin'],
-            'estrés ATR '
-            f"{atr_stress_loss:.1f}% > "
-            f"{thresholds['atr_stress_loss_max_pct_margin']:.1f}% del margen"
+            <= thresholds[
+                'atr_stress_loss_max_pct_margin'
+            ],
+            'ATR_STRESS',
+            (
+                'estrés ATR '
+                f"{atr_stress_loss:.1f}% > "
+                f"{thresholds['atr_stress_loss_max_pct_margin']:.1f}% "
+                'del margen'
+            )
         )
 
         gate = {
             'eligible': not rejection_reasons,
             'tier': 'PREMIUM' if not rejection_reasons else 'ANALYSIS_ONLY',
             'reasons': rejection_reasons,
+            'reason_codes':
+                list(
+                    rejection_reason_codes
+                ),
+
+            'stage':
+                'PUBLICATION_GATE',
+
+            'instrumentation_version':
+                'futures_filter_trace_v1',
             'preferred_leverage_min': int(preferred_min),
             'preferred_leverage_max': int(preferred_max),
             'leverage_in_preferred_band': bool(in_preferred_band),
@@ -1878,13 +2068,41 @@ class FuturesAnalysis(TradingExpertSystem):
             sl_avoidance_quality,
             2
         )
-        result['probability_status'] = 'QUALITY_PROXY_NOT_CALIBRATED'
+        result[
+            'probability_status'
+        ] = 'QUALITY_PROXY_NOT_CALIBRATED'
+
+        publication_reason = (
+            'No cumple publicación premium: '
+            + '; '.join(
+                rejection_reasons
+            )
+            if rejection_reasons
+            else ''
+        )
+
+        result = (
+            self
+            ._stamp_futures_filter_trace(
+                result,
+                stage='PUBLICATION_GATE',
+                reason_codes=(
+                    rejection_reason_codes
+                ),
+                reason=publication_reason,
+                reached_publication_gate=True,
+                outcome=(
+                    'ANALYSIS_ONLY'
+                    if rejection_reasons
+                    else 'PREMIUM'
+                )
+            )
+        )
 
         if rejection_reasons:
             return self._mark_levels_non_executable(
                 result,
-                'No cumple publicación premium: '
-                + '; '.join(rejection_reasons),
+                publication_reason,
                 recommended_leverage=leverage
             )
 
@@ -2143,8 +2361,26 @@ class FuturesAnalysis(TradingExpertSystem):
         )
         
         # Si la señal fue rechazada por el padre, propagar
+        # y conservar en qué etapa ocurrió.
         if levels.get('rejected_reason'):
-            return levels
+
+            return (
+                self
+                ._stamp_futures_filter_trace(
+                    levels,
+                    stage='PRE_GATE',
+                    reason_codes=[
+                        'BASE_LEVELS_REJECTION'
+                    ],
+                    reason=levels.get(
+                        'rejected_reason',
+                        ''
+                    ),
+                    reached_publication_gate=False,
+                    outcome='ANALYSIS_ONLY'
+                )
+            )
+
         
         # ==============================================================
         # FASE 5 — EXECUTION SAFETY
@@ -2477,12 +2713,28 @@ class FuturesAnalysis(TradingExpertSystem):
                 safety_label
             )
 
-            return self._mark_levels_non_executable(
-                levels,
-                (
-                    f"Execution Safety insuficiente "
-                    f"({safety_score:.1f}/100)"
+            rejection_reason = (
+                f"Execution Safety insuficiente "
+                f"({safety_score:.1f}/100)"
+            )
+
+            traced_levels = (
+                self
+                ._stamp_futures_filter_trace(
+                    levels,
+                    stage='PRE_GATE',
+                    reason_codes=[
+                        'HARD_SAFETY'
+                    ],
+                    reason=rejection_reason,
+                    reached_publication_gate=False,
+                    outcome='ANALYSIS_ONLY'
                 )
+            )
+
+            return self._mark_levels_non_executable(
+                traced_levels,
+                rejection_reason
             )
         
         # ==============================================================
@@ -2522,14 +2774,29 @@ class FuturesAnalysis(TradingExpertSystem):
                 safety_label
             )
 
-            return self._mark_levels_non_executable(
-                levels,
-                (
-                    "No existe leverage que cumpla "
-                    "seguridad + riesgo + rentabilidad"
+            rejection_reason = (
+                "No existe leverage que cumpla "
+                "seguridad + riesgo + rentabilidad"
+            )
+
+            traced_levels = (
+                self
+                ._stamp_futures_filter_trace(
+                    levels,
+                    stage='PRE_GATE',
+                    reason_codes=[
+                        'LEVERAGE_VIABILITY'
+                    ],
+                    reason=rejection_reason,
+                    reached_publication_gate=False,
+                    outcome='ANALYSIS_ONLY'
                 )
             )
-                
+
+            return self._mark_levels_non_executable(
+                traced_levels,
+                rejection_reason
+            )   
         # ============ CALCULAR ROI POTENCIAL ============
         direction = 'long' if decision == 'LONG' else 'short'
         
@@ -2593,14 +2860,32 @@ class FuturesAnalysis(TradingExpertSystem):
                 safety_label
             )
 
+            rejection_reason = (
+                f"ROI potencial "
+                f"{roi['roi_tp']:.1f}% "
+                f"< {min_roi_tp:.1f}% mínimo"
+            )
+
+            traced_levels = (
+                self
+                ._stamp_futures_filter_trace(
+                    levels,
+                    stage='PRE_GATE',
+                    reason_codes=[
+                        'ROI_TP'
+                    ],
+                    reason=rejection_reason,
+                    reached_publication_gate=False,
+                    outcome='ANALYSIS_ONLY'
+                )
+            )
+
             return self._mark_levels_non_executable(
-                levels,
-                (
-                    f"ROI potencial "
-                    f"{roi['roi_tp']:.1f}% "
-                    f"< {min_roi_tp:.1f}% mínimo"
-                ),
-                recommended_leverage=optimal_leverage
+                traced_levels,
+                rejection_reason,
+                recommended_leverage=(
+                    optimal_leverage
+                )
             )
         
         
@@ -2713,15 +2998,33 @@ class FuturesAnalysis(TradingExpertSystem):
                 safety_label
             )
 
+            rejection_reason = (
+                f"Beneficio neto estimado "
+                f"${net_profit_tp_usdt:.4f} "
+                f"< objetivo "
+                f"${target_net_profit:.4f}"
+            )
+
+            traced_levels = (
+                self
+                ._stamp_futures_filter_trace(
+                    levels,
+                    stage='PRE_GATE',
+                    reason_codes=[
+                        'NET_PROFIT'
+                    ],
+                    reason=rejection_reason,
+                    reached_publication_gate=False,
+                    outcome='ANALYSIS_ONLY'
+                )
+            )
+
             return self._mark_levels_non_executable(
-                levels,
-                (
-                    f"Beneficio neto estimado "
-                    f"${net_profit_tp_usdt:.4f} "
-                    f"< objetivo "
-                    f"${target_net_profit:.4f}"
-                ),
-                recommended_leverage=optimal_leverage
+                traced_levels,
+                rejection_reason,
+                recommended_leverage=(
+                    optimal_leverage
+                )
             )
         # ==============================================================
         # OPERACIÓN APROBADA
@@ -2842,16 +3145,34 @@ class FuturesAnalysis(TradingExpertSystem):
                 (1, 10)
             )
         
+            rejection_reason = (
+                f"Leverage recomendado "
+                f"{optimal_leverage}x "
+                f"fuera del rango operativo "
+                f"{min_tf}x-{max_tf}x "
+                f"para {timeframe}"
+            )
+
+            traced_levels = (
+                self
+                ._stamp_futures_filter_trace(
+                    levels,
+                    stage='PRE_GATE',
+                    reason_codes=[
+                        'LEVERAGE_VIABILITY'
+                    ],
+                    reason=rejection_reason,
+                    reached_publication_gate=False,
+                    outcome='ANALYSIS_ONLY'
+                )
+            )
+
             return self._mark_levels_non_executable(
-                levels,
-                (
-                    f"Leverage recomendado "
-                    f"{optimal_leverage}x "
-                    f"fuera del rango operativo "
-                    f"{min_tf}x-{max_tf}x "
-                    f"para {timeframe}"
-                ),
-                recommended_leverage=optimal_leverage
+                traced_levels,
+                rejection_reason,
+                recommended_leverage=(
+                    optimal_leverage
+                )
             )
 
         # Sólo las oportunidades premium alimentan Activas/Vela anterior.
