@@ -2033,6 +2033,618 @@ function renderFuturesCorrelation(payload) {
     `;
 }
 
+// ============================================================================
+// COMMIT 36L — UI DE PREFERENCIAS DE SCALPING FUTURES
+// ============================================================================
+//
+// Este bloque sólo lee/guarda preferencias del endpoint creado en 36K.
+// NO modifica análisis, señales, Safety, Entry, SL, TP ni leverage.
+// ============================================================================
+
+window._futuresScalpingPreferencesLoaded = false;
+
+
+function _futScalpingSetMessage(
+    message,
+    type = 'secondary'
+) {
+    const box = document.getElementById(
+        'futures-scalping-message'
+    );
+
+    if (!box) return;
+
+    box.className = (
+        `alert alert-${type} py-2 px-2 small mb-3`
+    );
+
+    box.textContent = String(
+        message || ''
+    );
+}
+
+
+function _futScalpingSetStatus(
+    status
+) {
+    const badge = document.getElementById(
+        'futures-scalping-status-badge'
+    );
+
+    if (!badge) return;
+
+    if (status === 'ON') {
+        badge.textContent = 'ON';
+        badge.className = 'badge bg-success';
+        return;
+    }
+
+    if (status === 'LOGIN') {
+        badge.textContent = 'LOGIN';
+        badge.className = 'badge bg-secondary';
+        return;
+    }
+
+    if (status === 'ERROR') {
+        badge.textContent = 'ERROR';
+        badge.className = 'badge bg-danger';
+        return;
+    }
+
+    badge.textContent = 'OFF';
+    badge.className = 'badge bg-secondary';
+}
+
+
+function _futScalpingApplyPreferences(
+    preferences,
+    user = null
+) {
+    const prefs = (
+        preferences
+        && typeof preferences === 'object'
+    )
+        ? preferences
+        : {};
+
+    const enabled = Boolean(
+        prefs.futures_scalping_telegram_enabled
+    );
+
+    const enabledInput = document.getElementById(
+        'futures-scalping-enabled'
+    );
+
+    if (enabledInput) {
+        enabledInput.checked = enabled;
+    }
+
+    const selectedTimeframes = new Set(
+        Array.isArray(
+            prefs.futures_scalping_timeframes
+        )
+            ? prefs.futures_scalping_timeframes
+            : []
+    );
+
+    document.querySelectorAll(
+        '[data-scalping-tf]'
+    ).forEach(input => {
+        input.checked = selectedTimeframes.has(
+            input.value
+        );
+    });
+
+    const startInput = document.getElementById(
+        'futures-scalping-start-time'
+    );
+
+    const endInput = document.getElementById(
+        'futures-scalping-end-time'
+    );
+
+    if (startInput) {
+        startInput.value = (
+            prefs.futures_scalping_start_time
+            || ''
+        );
+    }
+
+    if (endInput) {
+        endInput.value = (
+            prefs.futures_scalping_end_time
+            || ''
+        );
+    }
+
+    const selectedDays = new Set(
+        (
+            Array.isArray(
+                prefs.futures_scalping_weekdays
+            )
+                ? prefs.futures_scalping_weekdays
+                : []
+        ).map(
+            value => Number(value)
+        )
+    );
+
+    document.querySelectorAll(
+        '[data-scalping-day]'
+    ).forEach(input => {
+        input.checked = selectedDays.has(
+            Number(input.value)
+        );
+    });
+
+    const timezoneInput = document.getElementById(
+        'futures-scalping-timezone'
+    );
+
+    if (timezoneInput) {
+        timezoneInput.value = String(
+            prefs.futures_scalping_timezone
+            || 'UTC'
+        );
+    }
+
+    const userLabel = document.getElementById(
+        'futures-scalping-user-label'
+    );
+
+    if (userLabel) {
+        userLabel.textContent = (
+            user
+            ? String(user)
+            : '—'
+        );
+    }
+
+    _futScalpingSetStatus(
+        enabled
+            ? 'ON'
+            : 'OFF'
+    );
+
+    _futScalpingSetMessage(
+        enabled
+            ? 'Alertas de scalping activadas con tu horario personal.'
+            : 'Alertas de scalping desactivadas.',
+        enabled
+            ? 'success'
+            : 'secondary'
+    );
+}
+
+
+window.loadFuturesScalpingPreferences = async function(
+    options = {}
+) {
+    if (!window.IS_FUTURES_PAGE) {
+        return false;
+    }
+
+    const silent = Boolean(
+        options.silent
+    );
+
+    if (!silent) {
+        _futScalpingSetMessage(
+            'Cargando preferencias...',
+            'info'
+        );
+    }
+
+    try {
+        const response = await fetch(
+            '/api/user/futures-scalping-preferences',
+            {
+                method: 'GET',
+                credentials: 'same-origin',
+                cache: 'no-store'
+            }
+        );
+
+        let data = {};
+
+        try {
+            data = await response.json();
+        } catch (jsonError) {
+            data = {};
+        }
+
+        if (response.status === 401) {
+            window._futuresScalpingPreferencesLoaded = false;
+
+            _futScalpingSetStatus(
+                'LOGIN'
+            );
+
+            _futScalpingSetMessage(
+                'Inicia sesión para configurar tus alertas de scalping.',
+                'secondary'
+            );
+
+            const userLabel = document.getElementById(
+                'futures-scalping-user-label'
+            );
+
+            if (userLabel) {
+                userLabel.textContent = 'Invitado';
+            }
+
+            return false;
+        }
+
+        if (
+            !response.ok
+            || data.success !== true
+            || !data.preferences
+        ) {
+            throw new Error(
+                data.error
+                || `HTTP ${response.status}`
+            );
+        }
+
+        _futScalpingApplyPreferences(
+            data.preferences,
+            data.user
+        );
+
+        window._futuresScalpingPreferencesLoaded = true;
+
+        return true;
+
+    } catch (error) {
+        console.error(
+            '❌ FUTURES SCALPING PREF GET:',
+            error
+        );
+
+        window._futuresScalpingPreferencesLoaded = false;
+
+        _futScalpingSetStatus(
+            'ERROR'
+        );
+
+        _futScalpingSetMessage(
+            'No se pudieron cargar las preferencias de scalping.',
+            'danger'
+        );
+
+        return false;
+    }
+};
+
+
+function _futScalpingCollectForm() {
+    const enabled = Boolean(
+        document.getElementById(
+            'futures-scalping-enabled'
+        )?.checked
+    );
+
+    const timeframes = Array.from(
+        document.querySelectorAll(
+            '[data-scalping-tf]:checked'
+        )
+    ).map(
+        input => input.value
+    );
+
+    const weekdays = Array.from(
+        document.querySelectorAll(
+            '[data-scalping-day]:checked'
+        )
+    ).map(
+        input => Number(input.value)
+    ).filter(
+        value => (
+            Number.isInteger(value)
+            && value >= 1
+            && value <= 7
+        )
+    );
+
+    const startTime = (
+        document.getElementById(
+            'futures-scalping-start-time'
+        )?.value
+        || null
+    );
+
+    const endTime = (
+        document.getElementById(
+            'futures-scalping-end-time'
+        )?.value
+        || null
+    );
+
+    const timezone = String(
+        document.getElementById(
+            'futures-scalping-timezone'
+        )?.value
+        || 'UTC'
+    ).trim() || 'UTC';
+
+    return {
+        futures_scalping_telegram_enabled:
+            enabled,
+
+        futures_scalping_timeframes:
+            timeframes,
+
+        futures_scalping_start_time:
+            startTime,
+
+        futures_scalping_end_time:
+            endTime,
+
+        futures_scalping_weekdays:
+            weekdays,
+
+        futures_scalping_timezone:
+            timezone
+    };
+}
+
+
+function _futScalpingValidateForm(
+    payload
+) {
+    if (
+        !payload
+        || typeof payload !== 'object'
+    ) {
+        return 'Configuración inválida.';
+    }
+
+    if (
+        payload.futures_scalping_telegram_enabled
+        !== true
+    ) {
+        return null;
+    }
+
+    if (
+        !Array.isArray(
+            payload.futures_scalping_timeframes
+        )
+        || payload.futures_scalping_timeframes.length === 0
+    ) {
+        return 'Selecciona al menos 5m, 15m o 30m.';
+    }
+
+    if (
+        !payload.futures_scalping_start_time
+        || !payload.futures_scalping_end_time
+    ) {
+        return 'Define hora inicial y hora final.';
+    }
+
+    if (
+        !Array.isArray(
+            payload.futures_scalping_weekdays
+        )
+        || payload.futures_scalping_weekdays.length === 0
+    ) {
+        return 'Selecciona al menos un día de scalping.';
+    }
+
+    if (
+        !payload.futures_scalping_timezone
+    ) {
+        return 'Define una zona horaria.';
+    }
+
+    return null;
+}
+
+
+window.saveFuturesScalpingPreferences = async function() {
+    if (!window.IS_FUTURES_PAGE) {
+        return false;
+    }
+
+    const payload = (
+        _futScalpingCollectForm()
+    );
+
+    const validationError = (
+        _futScalpingValidateForm(
+            payload
+        )
+    );
+
+    if (validationError) {
+        _futScalpingSetMessage(
+            validationError,
+            'warning'
+        );
+
+        futShowToast(
+            validationError,
+            'warning'
+        );
+
+        return false;
+    }
+
+    const button = document.getElementById(
+        'btn-save-futures-scalping'
+    );
+
+    const originalHtml = (
+        button
+        ? button.innerHTML
+        : ''
+    );
+
+    if (button) {
+        button.disabled = true;
+        button.innerHTML = (
+            '<span class="spinner-border spinner-border-sm me-1"></span>'
+            + 'Guardando...'
+        );
+    }
+
+    _futScalpingSetMessage(
+        'Guardando preferencias...',
+        'info'
+    );
+
+    try {
+        const response = await fetch(
+            '/api/user/futures-scalping-preferences',
+            {
+                method: 'POST',
+                credentials: 'same-origin',
+                cache: 'no-store',
+                headers: {
+                    'Content-Type':
+                        'application/json'
+                },
+                body: JSON.stringify(
+                    payload
+                )
+            }
+        );
+
+        let data = {};
+
+        try {
+            data = await response.json();
+        } catch (jsonError) {
+            data = {};
+        }
+
+        if (response.status === 401) {
+            _futScalpingSetStatus(
+                'LOGIN'
+            );
+
+            _futScalpingSetMessage(
+                'Debes iniciar sesión antes de guardar.',
+                'warning'
+            );
+
+            futShowToast(
+                'Debes iniciar sesión para configurar scalping.',
+                'warning'
+            );
+
+            return false;
+        }
+
+        if (
+            !response.ok
+            || data.success !== true
+            || !data.preferences
+        ) {
+            throw new Error(
+                data.error
+                || `HTTP ${response.status}`
+            );
+        }
+
+        _futScalpingApplyPreferences(
+            data.preferences,
+            data.user
+        );
+
+        window._futuresScalpingPreferencesLoaded = true;
+
+        futShowToast(
+            data.preferences
+                .futures_scalping_telegram_enabled
+                ? '⚡ Alertas de scalping activadas.'
+                : '🔕 Alertas de scalping desactivadas.',
+            'success'
+        );
+
+        return true;
+
+    } catch (error) {
+        console.error(
+            '❌ FUTURES SCALPING PREF POST:',
+            error
+        );
+
+        _futScalpingSetStatus(
+            'ERROR'
+        );
+
+        _futScalpingSetMessage(
+            (
+                'No se pudo guardar: '
+                + (
+                    error.message
+                    || 'error desconocido'
+                )
+            ),
+            'danger'
+        );
+
+        futShowToast(
+            'No se pudieron guardar las preferencias de scalping.',
+            'danger'
+        );
+
+        return false;
+
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.innerHTML = (
+                originalHtml
+                || '💾 Guardar'
+            );
+        }
+    }
+};
+
+
+function _futDetectBrowserTimezone() {
+    try {
+        const timezone = (
+            Intl
+            .DateTimeFormat()
+            .resolvedOptions()
+            .timeZone
+        );
+
+        if (!timezone) {
+            throw new Error(
+                'timezone no disponible'
+            );
+        }
+
+        const input = document.getElementById(
+            'futures-scalping-timezone'
+        );
+
+        if (input) {
+            input.value = timezone;
+        }
+
+        _futScalpingSetMessage(
+            `Zona detectada: ${timezone}`,
+            'info'
+        );
+
+        return timezone;
+
+    } catch (error) {
+        _futScalpingSetMessage(
+            'El navegador no pudo detectar la zona horaria.',
+            'warning'
+        );
+
+        return null;
+    }
+}
+
 
 // ============================================================================
 // INICIALIZACIÓN
@@ -2079,6 +2691,65 @@ document.addEventListener('DOMContentLoaded', function() {
     setTimeout(() => {
         insertReviewTraderPanel();
     }, 800);
+    // =====================================================================
+    // COMMIT 36L — PREFERENCIAS SCALPING FUTURES
+    // =====================================================================
+
+    const scalpingCollapse = document.getElementById(
+        'futures-scalping-settings-body'
+    );
+
+    if (scalpingCollapse) {
+        scalpingCollapse.addEventListener(
+            'shown.bs.collapse',
+            () => {
+                // Releer al abrir: si el usuario inició sesión después
+                // de cargar la página, aquí recuperamos sus preferencias.
+                window.loadFuturesScalpingPreferences({
+                    silent:
+                        window._futuresScalpingPreferencesLoaded
+                });
+            }
+        );
+    }
+
+    document.getElementById(
+        'btn-save-futures-scalping'
+    )?.addEventListener(
+        'click',
+        window.saveFuturesScalpingPreferences
+    );
+
+    document.getElementById(
+        'btn-refresh-futures-scalping'
+    )?.addEventListener(
+        'click',
+        () => {
+            window.loadFuturesScalpingPreferences({
+                silent: false
+            });
+        }
+    );
+
+    document.getElementById(
+        'btn-detect-futures-scalping-timezone'
+    )?.addEventListener(
+        'click',
+        _futDetectBrowserTimezone
+    );
+
+    // Una lectura silenciosa actualiza el badge ON/OFF.
+    // Si todavía no hay login, queda LOGIN y se reintenta al abrir el panel.
+    setTimeout(
+        () => {
+            window.loadFuturesScalpingPreferences({
+                silent: true
+            });
+        },
+        1800
+    );
+
+    
     // ============ INICIALIZAR ANÁLISIS PRINCIPAL DE FUTUROS ============
 
     // Refrescar panel review cada 3 min (v15: reduce carga en Render Free)
