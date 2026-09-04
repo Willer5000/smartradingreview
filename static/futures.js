@@ -2936,11 +2936,595 @@ window.updateSavedSignalsList = async function() {
                 ] || {};
         
             let guardianHtml = '';
-        
+            // =========================================================
+            // COMMIT 29 — GESTIÓN DINÁMICA DEL FUTURES GUARDIAN
+            // =========================================================
+            //
+            // Retrocompatible:
+            //
+            // - Si el backend nuevo entrega management_action,
+            //   podemos mostrar PROTECT / EXTEND.
+            //
+            // - Si no existe management_action, el código antiguo
+            //   continúa funcionando exactamente igual.
+            //
+            // IMPORTANTE:
+            // Esto sólo muestra recomendaciones.
+            // No modifica la posición, SL ni TP.
+            // =========================================================
+
+            const managementAction = String(
+                guardian.management_action || ''
+            ).toUpperCase();
+
+            const guardianNumberOrNull = value => {
+
+                if (
+                    value === null
+                    || value === undefined
+                    || value === ''
+                ) {
+                    return null;
+                }
+
+                const number = Number(
+                    value
+                );
+
+                return Number.isFinite(
+                    number
+                )
+                    ? number
+                    : null;
+            };
+
+            const originalGuardianSl =
+                guardianNumberOrNull(
+                    guardian.original_stop_loss
+                )
+                ?? guardianNumberOrNull(
+                    s.stop_loss
+                );
+
+            const suggestedGuardianSl =
+                guardianNumberOrNull(
+                    guardian.suggested_stop_loss
+                );
+
+            const originalGuardianTp =
+                guardianNumberOrNull(
+                    guardian.original_take_profit
+                )
+                ?? guardianNumberOrNull(
+                    s.take_profit
+                );
+
+            const suggestedGuardianTp =
+                guardianNumberOrNull(
+                    guardian.suggested_take_profit
+                );
+
+            const guardianProgressR =
+                guardianNumberOrNull(
+                    guardian.progress_r
+                );
+
+            const guardianTpProgress =
+                guardianNumberOrNull(
+                    guardian.tp_progress_ratio
+                );
+
+            const managementReason =
+                guardian.management_reason
+                || guardian.reason
+                || '';
+
+            const guardianProtects = (
+                managementAction === 'PROTECT'
+                || managementAction
+                    === 'PROTECT_AND_EXTEND'
+            );
+
+            const guardianExtends = (
+                managementAction === 'EXTEND'
+                || managementAction
+                    === 'PROTECT_AND_EXTEND'
+            );        
             if (
                 guardian.action
             ) {
+                // =====================================================
+                // PROTECT / EXTEND
+                // =====================================================
+
                 if (
+                    guardianProtects
+                    || guardianExtends
+                ) {
+
+                    let managementLabel =
+                        'GESTIONAR';
+
+                    let managementBadge =
+                        'primary';
+
+                    let managementIcon =
+                        '🛡️';
+
+                    if (
+                        guardianProtects
+                        && guardianExtends
+                    ) {
+
+                        managementLabel =
+                            'PROTEGER + EXTENDER';
+
+                        managementBadge =
+                            'info text-dark';
+
+                        managementIcon =
+                            '🛡️🎯';
+
+                    } else if (
+                        guardianProtects
+                    ) {
+
+                        managementLabel =
+                            'PROTEGER';
+
+                        managementBadge =
+                            'primary';
+
+                        managementIcon =
+                            '🛡️';
+
+                    } else if (
+                        guardianExtends
+                    ) {
+
+                        managementLabel =
+                            'EXTENDER OBJETIVO';
+
+                        managementBadge =
+                            'success';
+
+                        managementIcon =
+                            '🎯';
+                    }
+
+                    // =============================================
+                    // BLOQUE DE PROTECCIÓN DEL SL
+                    // =============================================
+
+                    let protectHtml = '';
+
+                    if (
+                        guardianProtects
+                    ) {
+
+                        protectHtml = `
+                            <div
+                                class="
+                                    mt-2
+                                    p-2
+                                    rounded
+                                    bg-dark
+                                "
+                                style="
+                                    border-left:
+                                    3px solid #3A8BFF;
+                                "
+                            >
+                                <div
+                                    class="
+                                        small
+                                        text-info
+                                        mb-1
+                                    "
+                                >
+                                    <strong>
+                                        🛡️ Protección del riesgo
+                                    </strong>
+                                </div>
+
+                                ${
+                                    originalGuardianSl
+                                    !== null
+                                        ? `
+                                            <div
+                                                class="
+                                                    d-flex
+                                                    justify-content-between
+                                                    small
+                                                "
+                                            >
+                                                <span
+                                                    class="
+                                                        text-muted
+                                                    "
+                                                >
+                                                    SL original
+                                                </span>
+
+                                                <strong>
+                                                    ${
+                                                        futFormatPrice(
+                                                            originalGuardianSl,
+                                                            s.symbol
+                                                        )
+                                                    }
+                                                </strong>
+                                            </div>
+                                        `
+                                        : ''
+                                }
+
+                                ${
+                                    suggestedGuardianSl
+                                    !== null
+                                        ? `
+                                            <div
+                                                class="
+                                                    d-flex
+                                                    justify-content-between
+                                                    small
+                                                    mt-1
+                                                "
+                                            >
+                                                <span
+                                                    class="
+                                                        text-info
+                                                    "
+                                                >
+                                                    SL sugerido
+                                                </span>
+
+                                                <strong
+                                                    class="
+                                                        text-info
+                                                    "
+                                                >
+                                                    ${
+                                                        futFormatPrice(
+                                                            suggestedGuardianSl,
+                                                            s.symbol
+                                                        )
+                                                    }
+                                                </strong>
+                                            </div>
+                                        `
+                                        : `
+                                            <div
+                                                class="
+                                                    small
+                                                    text-muted
+                                                "
+                                            >
+                                                Nuevo SL todavía
+                                                no disponible.
+                                            </div>
+                                        `
+                                }
+
+                                <div
+                                    class="
+                                        small
+                                        text-muted
+                                        mt-1
+                                    "
+                                >
+                                    El Guardian sólo puede
+                                    reducir el riesgo original;
+                                    nunca ampliarlo.
+                                </div>
+                            </div>
+                        `;
+                    }
+
+                    // =============================================
+                    // BLOQUE DE EXTENSIÓN DEL TP
+                    // =============================================
+
+                    let extendHtml = '';
+
+                    if (
+                        guardianExtends
+                    ) {
+
+                        extendHtml = `
+                            <div
+                                class="
+                                    mt-2
+                                    p-2
+                                    rounded
+                                    bg-dark
+                                "
+                                style="
+                                    border-left:
+                                    3px solid #00C076;
+                                "
+                            >
+                                <div
+                                    class="
+                                        small
+                                        text-success
+                                        mb-1
+                                    "
+                                >
+                                    <strong>
+                                        🎯 Extensión estructural
+                                    </strong>
+                                </div>
+
+                                ${
+                                    originalGuardianTp
+                                    !== null
+                                        ? `
+                                            <div
+                                                class="
+                                                    d-flex
+                                                    justify-content-between
+                                                    small
+                                                "
+                                            >
+                                                <span
+                                                    class="
+                                                        text-muted
+                                                    "
+                                                >
+                                                    TP original
+                                                </span>
+
+                                                <strong>
+                                                    ${
+                                                        futFormatPrice(
+                                                            originalGuardianTp,
+                                                            s.symbol
+                                                        )
+                                                    }
+                                                </strong>
+                                            </div>
+                                        `
+                                        : ''
+                                }
+
+                                ${
+                                    suggestedGuardianTp
+                                    !== null
+                                        ? `
+                                            <div
+                                                class="
+                                                    d-flex
+                                                    justify-content-between
+                                                    small
+                                                    mt-1
+                                                "
+                                            >
+                                                <span
+                                                    class="
+                                                        text-success
+                                                    "
+                                                >
+                                                    TP sugerido
+                                                </span>
+
+                                                <strong
+                                                    class="
+                                                        text-success
+                                                    "
+                                                >
+                                                    ${
+                                                        futFormatPrice(
+                                                            suggestedGuardianTp,
+                                                            s.symbol
+                                                        )
+                                                    }
+                                                </strong>
+                                            </div>
+                                        `
+                                        : `
+                                            <div
+                                                class="
+                                                    small
+                                                    text-muted
+                                                "
+                                            >
+                                                Nuevo TP todavía
+                                                no disponible.
+                                            </div>
+                                        `
+                                }
+
+                                <div
+                                    class="
+                                        small
+                                        text-muted
+                                        mt-1
+                                    "
+                                >
+                                    El objetivo sólo se extiende
+                                    cuando existe una referencia
+                                    estructural posterior.
+                                </div>
+                            </div>
+                        `;
+                    }
+
+                    // =============================================
+                    // PROGRESO DE LA POSICIÓN
+                    // =============================================
+
+                    let progressHtml = '';
+
+                    if (
+                        guardianProgressR !== null
+                        || guardianTpProgress !== null
+                    ) {
+
+                        progressHtml = `
+                            <div
+                                class="
+                                    d-flex
+                                    flex-wrap
+                                    gap-2
+                                    mt-2
+                                "
+                            >
+
+                                ${
+                                    guardianProgressR
+                                    !== null
+                                        ? `
+                                            <span
+                                                class="
+                                                    badge
+                                                    bg-dark
+                                                    border
+                                                    border-secondary
+                                                "
+                                            >
+                                                Progreso:
+                                                ${
+                                                    guardianProgressR
+                                                    >= 0
+                                                        ? '+'
+                                                        : ''
+                                                }${
+                                                    guardianProgressR
+                                                        .toFixed(
+                                                            2
+                                                        )
+                                                }R
+                                            </span>
+                                        `
+                                        : ''
+                                }
+
+                                ${
+                                    guardianTpProgress
+                                    !== null
+                                        ? `
+                                            <span
+                                                class="
+                                                    badge
+                                                    bg-dark
+                                                    border
+                                                    border-secondary
+                                                "
+                                            >
+                                                TP recorrido:
+                                                ${
+                                                    Math.max(
+                                                        0,
+                                                        guardianTpProgress
+                                                        * 100
+                                                    ).toFixed(
+                                                        0
+                                                    )
+                                                }%
+                                            </span>
+                                        `
+                                        : ''
+                                }
+
+                            </div>
+                        `;
+                    }
+
+                    guardianHtml = `
+                        <div
+                            class="
+                                mt-2
+                                p-2
+                                border
+                                border-info
+                                rounded
+                            "
+                        >
+
+                            <div
+                                class="
+                                    d-flex
+                                    flex-wrap
+                                    justify-content-between
+                                    align-items-center
+                                    gap-1
+                                "
+                            >
+
+                                <span
+                                    class="
+                                        badge
+                                        bg-${managementBadge}
+                                    "
+                                >
+                                    ${managementIcon}
+                                    Guardian:
+                                    ${managementLabel}
+                                </span>
+
+                                <span
+                                    class="
+                                        badge
+                                        bg-dark
+                                    "
+                                >
+                                    Deterioro:
+                                    ${
+                                        Number(
+                                            guardian
+                                                .deterioration_score
+                                            || 0
+                                        ).toFixed(
+                                            0
+                                        )
+                                    }/100
+                                </span>
+
+                            </div>
+
+                            ${progressHtml}
+
+                            ${protectHtml}
+
+                            ${extendHtml}
+
+                            ${
+                                managementReason
+                                    ? `
+                                        <div
+                                            class="
+                                                small
+                                                text-light
+                                                mt-2
+                                            "
+                                        >
+                                            ${
+                                                futEscapeHtml(
+                                                    managementReason
+                                                )
+                                            }
+                                        </div>
+                                    `
+                                    : ''
+                            }
+
+                            <div
+                                class="
+                                    small
+                                    text-warning
+                                    mt-2
+                                "
+                            >
+                                ⚠️ Recomendación del Guardian.
+                                No modifica automáticamente
+                                la orden en el exchange.
+                            </div>
+
+                        </div>
+                    `;
+
+                } else if (
                     guardian.action
                     === 'WAIT_ENTRY'
                 ) {
