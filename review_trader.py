@@ -2081,6 +2081,300 @@ class ReviewTrader:
                 ) or ''
             )
         }
+        # ==============================================================
+        # COMMIT 36F — PERSISTIR BREAKDOWN DE EXECUTION SAFETY
+        # ==============================================================
+
+        raw_safety_breakdown = (
+            levels.get(
+                'execution_safety_breakdown',
+                {}
+            )
+            or {}
+        )
+
+        if isinstance(
+            raw_safety_breakdown,
+            dict
+        ) and raw_safety_breakdown:
+
+            allowed_components = (
+                'entry_smc',
+                'sl',
+                'tp',
+                'rr',
+                'structure',
+                'trend',
+                'timeframe'
+            )
+
+            def _compact_numeric_map(
+                raw_map
+            ):
+                if not isinstance(
+                    raw_map,
+                    dict
+                ):
+                    return {}
+
+                compact = {}
+
+                for key in allowed_components:
+
+                    if key not in raw_map:
+                        continue
+
+                    try:
+                        number = float(
+                            raw_map.get(
+                                key
+                            )
+                        )
+                    except (
+                        TypeError,
+                        ValueError
+                    ):
+                        continue
+
+                    if math.isfinite(
+                        number
+                    ):
+                        compact[
+                            key
+                        ] = round(
+                            number,
+                            4
+                        )
+
+                return compact
+
+            compact_penalties = []
+
+            raw_dominant = (
+                raw_safety_breakdown.get(
+                    'dominant_penalties'
+                )
+                or []
+            )
+
+            if isinstance(
+                raw_dominant,
+                list
+            ):
+
+                for item in raw_dominant[:3]:
+
+                    if not isinstance(
+                        item,
+                        dict
+                    ):
+                        continue
+
+                    component = str(
+                        item.get(
+                            'component',
+                            ''
+                        )
+                        or ''
+                    ).strip()
+
+                    if component not in (
+                        allowed_components
+                    ):
+                        continue
+
+                    compact_item = {
+                        'component':
+                            component
+                    }
+
+                    for field in (
+                        'score',
+                        'weight',
+                        'penalty_points'
+                    ):
+
+                        try:
+                            number = float(
+                                item.get(
+                                    field
+                                )
+                            )
+                        except (
+                            TypeError,
+                            ValueError
+                        ):
+                            continue
+
+                        if math.isfinite(
+                            number
+                        ):
+                            compact_item[
+                                field
+                            ] = round(
+                                number,
+                                4
+                            )
+
+                    compact_penalties.append(
+                        compact_item
+                    )
+
+            context[
+                'execution'
+            ][
+                'safety_breakdown'
+            ] = {
+                'model_version':
+                    str(
+                        raw_safety_breakdown.get(
+                            'model_version',
+                            ''
+                        )
+                        or ''
+                    ),
+
+                'available':
+                    bool(
+                        raw_safety_breakdown.get(
+                            'available',
+                            False
+                        )
+                    ),
+
+                'raw_score':
+                    _safe_float(
+                        raw_safety_breakdown.get(
+                            'raw_score',
+                            0
+                        )
+                    ),
+
+                'label':
+                    str(
+                        raw_safety_breakdown.get(
+                            'label',
+                            ''
+                        )
+                        or ''
+                    ),
+
+                'base_minimum':
+                    _safe_float(
+                        raw_safety_breakdown.get(
+                            'base_minimum',
+                            0
+                        )
+                    ),
+
+                'operational_minimum':
+                    _safe_float(
+                        raw_safety_breakdown.get(
+                            'operational_minimum',
+                            0
+                        )
+                    ),
+
+                'distance_to_operational_min':
+                    _safe_float(
+                        raw_safety_breakdown.get(
+                            'distance_to_operational_min',
+                            0
+                        )
+                    ),
+
+                'shortfall_to_operational_min':
+                    _safe_float(
+                        raw_safety_breakdown.get(
+                            'shortfall_to_operational_min',
+                            0
+                        )
+                    ),
+
+                'leverage_safety_score':
+                    _safe_float(
+                        raw_safety_breakdown.get(
+                            'leverage_safety_score',
+                            0
+                        )
+                    ),
+
+                'components':
+                    _compact_numeric_map(
+                        raw_safety_breakdown.get(
+                            'components'
+                        )
+                    ),
+
+                'weights':
+                    _compact_numeric_map(
+                        raw_safety_breakdown.get(
+                            'weights'
+                        )
+                    ),
+
+                'weighted_contributions':
+                    _compact_numeric_map(
+                        raw_safety_breakdown.get(
+                            'weighted_contributions'
+                        )
+                    ),
+
+                'penalties_to_perfect':
+                    _compact_numeric_map(
+                        raw_safety_breakdown.get(
+                            'penalties_to_perfect'
+                        )
+                    ),
+
+                'dominant_penalties':
+                    compact_penalties,
+
+                'reconstructed_score':
+                    _safe_float(
+                        raw_safety_breakdown.get(
+                            'reconstructed_score',
+                            0
+                        )
+                    ),
+
+                'score_reconstruction_delta':
+                    _safe_float(
+                        raw_safety_breakdown.get(
+                            'score_reconstruction_delta',
+                            0
+                        )
+                    ),
+
+                'timeframe_factor_source':
+                    str(
+                        raw_safety_breakdown.get(
+                            'timeframe_factor_source',
+                            ''
+                        )
+                        or ''
+                    ),
+
+                'calibration_active':
+                    bool(
+                        raw_safety_breakdown.get(
+                            'calibration_active',
+                            False
+                        )
+                    ),
+
+                'calibration_mode':
+                    str(
+                        raw_safety_breakdown.get(
+                            'calibration_mode',
+                            ''
+                        )
+                        or ''
+                    ),
+
+                'diagnostic_only':
+                    True
+            }
 
         # ==============================================================
         # COMMIT 32 — PUBLICATION GATE FUTURES PARA APRENDIZAJE
