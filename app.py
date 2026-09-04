@@ -31599,6 +31599,1677 @@ def learning_worker_loop():
         
         time.sleep(LEARNING_WORKER_INTERVAL)
 
+# ============================================================================
+# COMMIT 36K — ALERTAS PERSONALIZADAS DE SCALPING FUTURES
+# ============================================================================
+#
+# REGLAS:
+# - sólo EXECUTABLE_SIGNAL;
+# - sólo 5m / 15m / 30m;
+# - sólo usuarios que lo activaron explícitamente;
+# - respeta timezone, días y ventana horaria del usuario;
+# - usa el caché Futures existente: NO dispara análisis;
+# - anti-spam por usuario + signal_id.
+# ============================================================================
+
+_FUTURES_SCALPING_TFS = (
+    '5m',
+    '15m',
+    '30m'
+)
+
+_FUTURES_SCALPING_PREF_CACHE = {}
+_FUTURES_SCALPING_PREF_CACHE_LOCK = threading.Lock()
+_FUTURES_SCALPING_PREF_CACHE_TTL = 60.0
+
+_FUTURES_SCALPING_ALERT_DEDUP = {}
+_FUTURES_SCALPING_ALERT_DEDUP_LOCK = threading.Lock()
+_FUTURES_SCALPING_ALERT_RETENTION = 3 * 24 * 60 * 60
+
+_FUTURES_SCALPING_LOOP_INTERVAL = 30
+
+
+def _normalize_scalping_clock(
+    value
+):
+    """
+    Convierte TIME/str de Supabase a HH:MM.
+    """
+    if value is None:
+        return None
+
+    text = str(
+        value
+        or ''
+    ).strip()
+
+    if not text:
+        return None
+
+    try:
+        parts = text.split(':')
+
+        if len(parts) < 2:
+            return None
+
+        hour = int(
+            parts[0]
+        )
+
+        minute = int(
+            parts[1]
+        )
+
+        if not (
+            0 <= hour <= 23
+            and
+            0 <= minute <= 59
+        ):
+            return None
+
+        return (
+            f"{hour:02d}:"
+            f"{minute:02d}"
+        )
+
+    except Exception:
+        return None
+
+
+def _get_futures_scalping_preferences(
+    user,
+    force=False
+):
+    """
+    Lee preferencias con un caché corto para no consultar Supabase
+    cada 30 segundos por cada usuario.
+
+    El fallback SIEMPRE queda apagado.
+    """
+
+    defaults = {
+        'futures_scalping_telegram_enabled':
+            False,
+
+        'futures_scalping_timeframes':
+            [],
+
+        'futures_scalping_start_time':
+            None,
+
+        'futures_scalping_end_time':
+            None,
+
+        'futures_scalping_weekdays':
+            [],
+
+        'futures_scalping_timezone':
+            'UTC'
+    }
+
+    user = str(
+        user
+        or ''
+    ).strip()
+
+    if not user:
+        return dict(
+            defaults
+        )
+
+    now_ts = time.time()
+
+    if not force:
+
+        with (
+            _FUTURES_SCALPING_PREF_CACHE_LOCK
+        ):
+
+            cached = (
+                _FUTURES_SCALPING_PREF_CACHE
+                .get(
+                    user
+                )
+            )
+
+            if (
+                isinstance(
+                    cached,
+                    dict
+                )
+                and
+                (
+                    now_ts
+                    - float(
+                        cached.get(
+                            'ts',
+                            0
+                        )
+                        or 0
+                    )
+                )
+                < _FUTURES_SCALPING_PREF_CACHE_TTL
+            ):
+
+                return dict(
+                    cached.get(
+                        'data',
+                        defaults
+                    )
+                    or defaults
+                )
+
+    try:
+
+        from supabase_client import (
+            supabase_client
+        )
+
+        raw = (
+            supabase_client
+            .get_user_preferences(
+                user
+            )
+            or {}
+        )
+
+        allowed_tf = set(
+            _FUTURES_SCALPING_TFS
+        )
+
+        raw_tf = raw.get(
+            'futures_scalping_timeframes',
+            []
+        )
+
+        if not isinstance(
+            raw_tf,
+            list
+        ):
+            raw_tf = []
+
+        timeframes = [
+            tf
+            for tf
+            in _FUTURES_SCALPING_TFS
+            if tf in raw_tf
+            and tf in allowed_tf
+        ]
+
+        raw_days = raw.get(
+            'futures_scalping_weekdays',
+            []
+        )
+
+        if not isinstance(
+            raw_days,
+            list
+        ):
+            raw_days = []
+
+        weekdays = []
+
+        for day in raw_days:
+
+            try:
+                day_number = int(
+                    day
+                )
+            except (
+                TypeError,
+                ValueError
+            ):
+                continue
+
+            if (
+                1 <= day_number <= 7
+                and day_number not in weekdays
+            ):
+                weekdays.append(
+                    day_number
+                )
+
+        weekdays.sort()
+
+        timezone_name = str(
+            raw.get(
+                'futures_scalping_timezone'
+            )
+            or 'UTC'
+        ).strip() or 'UTC'
+
+        data = {
+            'futures_scalping_telegram_enabled':
+                bool(
+                    raw.get(
+                        'futures_scalping_telegram_enabled',
+                        False
+                    )
+                ),
+
+            'futures_scalping_timeframes':
+                timeframes,
+
+            'futures_scalping_start_time':
+                _normalize_scalping_clock(
+                    raw.get(
+                        'futures_scalping_start_time'
+                    )
+                ),
+
+            'futures_scalping_end_time':
+                _normalize_scalping_clock(
+                    raw.get(
+                        'futures_scalping_end_time'
+                    )
+                ),
+
+            'futures_scalping_weekdays':
+                weekdays,
+
+            'futures_scalping_timezone':
+                timezone_name
+        }
+
+    except Exception as e:
+
+        print(
+            "⚠️ Scalping Futures preferencias "
+            f"{user}: {e}"
+        )
+
+        data = dict(
+            defaults
+        )
+
+    with (
+        _FUTURES_SCALPING_PREF_CACHE_LOCK
+    ):
+
+        _FUTURES_SCALPING_PREF_CACHE[
+            user
+        ] = {
+            'ts':
+                now_ts,
+
+            'data':
+                dict(
+                    data
+                )
+        }
+
+    return data
+
+
+def _invalidate_futures_scalping_preferences(
+    user
+):
+    with (
+        _FUTURES_SCALPING_PREF_CACHE_LOCK
+    ):
+        _FUTURES_SCALPING_PREF_CACHE.pop(
+            str(
+                user
+                or ''
+            ).strip(),
+            None
+        )
+
+
+def _futures_scalping_window_state(
+    preferences,
+    timeframe,
+    now_utc=None
+):
+    """
+    Devuelve:
+        {
+            'allowed': bool,
+            'reason': str,
+            'local_now': datetime | None,
+            'session_weekday': int | None
+        }
+
+    Los días seleccionados representan el DÍA DE INICIO
+    de la sesión.
+
+    Ejemplo:
+        lunes seleccionado
+        22:00 -> 02:00
+
+    entonces:
+        lunes 23:00 = permitido
+        martes 01:00 = permitido
+        martes 03:00 = fuera
+    """
+
+    state = {
+        'allowed':
+            False,
+
+        'reason':
+            'DISABLED',
+
+        'local_now':
+            None,
+
+        'session_weekday':
+            None
+    }
+
+    if not isinstance(
+        preferences,
+        dict
+    ):
+
+        state[
+            'reason'
+        ] = 'INVALID_PREFERENCES'
+
+        return state
+
+    if not preferences.get(
+        'futures_scalping_telegram_enabled',
+        False
+    ):
+
+        return state
+
+    if timeframe not in (
+        preferences.get(
+            'futures_scalping_timeframes',
+            []
+        )
+        or []
+    ):
+
+        state[
+            'reason'
+        ] = 'TIMEFRAME_NOT_SELECTED'
+
+        return state
+
+    start_text = (
+        _normalize_scalping_clock(
+            preferences.get(
+                'futures_scalping_start_time'
+            )
+        )
+    )
+
+    end_text = (
+        _normalize_scalping_clock(
+            preferences.get(
+                'futures_scalping_end_time'
+            )
+        )
+    )
+
+    weekdays = (
+        preferences.get(
+            'futures_scalping_weekdays',
+            []
+        )
+        or []
+    )
+
+    if (
+        start_text is None
+        or end_text is None
+        or not weekdays
+    ):
+
+        state[
+            'reason'
+        ] = 'INCOMPLETE_SCHEDULE'
+
+        return state
+
+    timezone_name = str(
+        preferences.get(
+            'futures_scalping_timezone'
+        )
+        or 'UTC'
+    ).strip() or 'UTC'
+
+    try:
+
+        from datetime import (
+            timezone as _dt_timezone
+        )
+
+        from zoneinfo import (
+            ZoneInfo
+        )
+
+        tz = ZoneInfo(
+            timezone_name
+        )
+
+        if now_utc is None:
+
+            now_utc = (
+                datetime
+                .now(
+                    _dt_timezone.utc
+                )
+            )
+
+        elif (
+            getattr(
+                now_utc,
+                'tzinfo',
+                None
+            )
+            is None
+        ):
+
+            now_utc = now_utc.replace(
+                tzinfo=(
+                    _dt_timezone.utc
+                )
+            )
+
+        local_now = (
+            now_utc
+            .astimezone(
+                tz
+            )
+        )
+
+    except Exception:
+
+        state[
+            'reason'
+        ] = 'INVALID_TIMEZONE'
+
+        return state
+
+    state[
+        'local_now'
+    ] = local_now
+
+    start_hour, start_minute = [
+        int(
+            value
+        )
+        for value
+        in start_text.split(
+            ':'
+        )
+    ]
+
+    end_hour, end_minute = [
+        int(
+            value
+        )
+        for value
+        in end_text.split(
+            ':'
+        )
+    ]
+
+    start_minutes = (
+        start_hour
+        * 60
+        + start_minute
+    )
+
+    end_minutes = (
+        end_hour
+        * 60
+        + end_minute
+    )
+
+    current_minutes = (
+        local_now.hour
+        * 60
+        + local_now.minute
+    )
+
+    current_weekday = (
+        local_now.isoweekday()
+    )
+
+    # --------------------------------------------------------------
+    # Ventana dentro del mismo día
+    # --------------------------------------------------------------
+
+    if start_minutes <= end_minutes:
+
+        session_weekday = (
+            current_weekday
+        )
+
+        time_allowed = (
+            start_minutes
+            <= current_minutes
+            <= end_minutes
+        )
+
+    # --------------------------------------------------------------
+    # Ventana que cruza medianoche
+    # --------------------------------------------------------------
+
+    else:
+
+        if (
+            current_minutes
+            >= start_minutes
+        ):
+
+            # Parte nocturna:
+            # el día de sesión es hoy.
+            session_weekday = (
+                current_weekday
+            )
+
+            time_allowed = True
+
+        elif (
+            current_minutes
+            <= end_minutes
+        ):
+
+            # Parte posterior a medianoche:
+            # pertenece a la sesión iniciada AYER.
+            session_weekday = (
+                7
+                if current_weekday == 1
+                else current_weekday - 1
+            )
+
+            time_allowed = True
+
+        else:
+
+            session_weekday = (
+                current_weekday
+            )
+
+            time_allowed = False
+
+    state[
+        'session_weekday'
+    ] = session_weekday
+
+    if not time_allowed:
+
+        state[
+            'reason'
+        ] = 'OUTSIDE_TIME_WINDOW'
+
+        return state
+
+    if session_weekday not in weekdays:
+
+        state[
+            'reason'
+        ] = 'WEEKDAY_NOT_SELECTED'
+
+        return state
+
+    state[
+        'allowed'
+    ] = True
+
+    state[
+        'reason'
+    ] = 'ALLOWED'
+
+    return state
+
+
+def _futures_scalping_alert_key(
+    user,
+    result,
+    symbol,
+    timeframe
+):
+    signal_id = str(
+        (
+            result
+            or {}
+        ).get(
+            'signal_id'
+        )
+        or ''
+    ).strip()
+
+    if signal_id:
+
+        signal_identity = (
+            signal_id
+        )
+
+    else:
+
+        decision = (
+            (
+                result
+                or {}
+            ).get(
+                'decision',
+                {}
+            )
+            or {}
+        )
+
+        levels = (
+            (
+                result
+                or {}
+            ).get(
+                'levels',
+                {}
+            )
+            or {}
+        )
+
+        signal_identity = (
+            f"{symbol}|"
+            f"{timeframe}|"
+            f"{decision.get('action')}|"
+            f"{result.get('source_candle_timestamp')}|"
+            f"{levels.get('entry')}"
+        )
+
+    return (
+        str(
+            user
+            or ''
+        ),
+        'SETUP_READY',
+        signal_identity
+    )
+
+
+def _futures_scalping_alert_already_sent(
+    key
+):
+    now_ts = time.time()
+
+    with (
+        _FUTURES_SCALPING_ALERT_DEDUP_LOCK
+    ):
+
+        expired = [
+            existing_key
+            for (
+                existing_key,
+                sent_ts
+            )
+            in (
+                _FUTURES_SCALPING_ALERT_DEDUP
+                .items()
+            )
+            if (
+                now_ts
+                - float(
+                    sent_ts
+                    or 0
+                )
+                >
+                _FUTURES_SCALPING_ALERT_RETENTION
+            )
+        ]
+
+        for existing_key in expired:
+
+            _FUTURES_SCALPING_ALERT_DEDUP.pop(
+                existing_key,
+                None
+            )
+
+        return key in (
+            _FUTURES_SCALPING_ALERT_DEDUP
+        )
+
+
+def _mark_futures_scalping_alert_sent(
+    key
+):
+    with (
+        _FUTURES_SCALPING_ALERT_DEDUP_LOCK
+    ):
+        _FUTURES_SCALPING_ALERT_DEDUP[
+            key
+        ] = time.time()
+
+
+def _build_futures_scalping_message(
+    user,
+    symbol,
+    timeframe,
+    result,
+    preferences,
+    window_state
+):
+    from html import escape
+
+    decision = (
+        result.get(
+            'decision',
+            {}
+        )
+        or {}
+    )
+
+    levels = (
+        result.get(
+            'levels',
+            {}
+        )
+        or {}
+    )
+
+    action = str(
+        decision.get(
+            'action'
+        )
+        or ''
+    ).upper()
+
+    confidence = float(
+        decision.get(
+            'confidence',
+            0
+        )
+        or 0
+    )
+
+    entry = float(
+        levels.get(
+            'entry',
+            0
+        )
+        or 0
+    )
+
+    sl = float(
+        levels.get(
+            'stop_loss',
+            0
+        )
+        or 0
+    )
+
+    tp = float(
+        levels.get(
+            'take_profit',
+            0
+        )
+        or 0
+    )
+
+    safety = float(
+        levels.get(
+            'execution_safety',
+            0
+        )
+        or 0
+    )
+
+    rr = float(
+        levels.get(
+            'risk_reward',
+            0
+        )
+        or 0
+    )
+
+    leverage = int(
+        float(
+            levels.get(
+                'leverage',
+                1
+            )
+            or 1
+        )
+    )
+
+    icon = (
+        '🟢'
+        if action == 'LONG'
+        else '🔴'
+    )
+
+    timezone_name = str(
+        preferences.get(
+            'futures_scalping_timezone'
+        )
+        or 'UTC'
+    )
+
+    local_now = (
+        window_state.get(
+            'local_now'
+        )
+    )
+
+    local_text = (
+        local_now.strftime(
+            '%Y-%m-%d %H:%M'
+        )
+        if local_now is not None
+        else '--'
+    )
+
+    source_candle = str(
+        result.get(
+            'source_candle_timestamp'
+        )
+        or ''
+    )
+
+    lines = [
+        (
+            f"👤 <b>{escape(str(user))}</b>"
+        ),
+
+        (
+            "⚡ <b>SCALPING FUTURES · "
+            "SETUP LISTO</b>"
+        ),
+
+        '',
+
+        (
+            f"{icon} <b>"
+            f"{escape(symbol)} · "
+            f"{escape(timeframe)} · "
+            f"{escape(action)}"
+            f"</b>"
+        ),
+
+        (
+            f"🎯 Confianza comité: "
+            f"{confidence:.0f}%"
+        ),
+
+        (
+            f"🛡️ Execution Safety: "
+            f"{safety:.1f}"
+        ),
+
+        '',
+
+        (
+            f"💰 Entry: "
+            f"<b>{entry:.8g}</b>"
+        ),
+
+        (
+            f"🎯 TP: "
+            f"{tp:.8g}"
+        ),
+
+        (
+            f"🛑 SL: "
+            f"{sl:.8g}"
+        ),
+
+        (
+            f"⚖️ R/R: "
+            f"{rr:.2f}"
+        ),
+
+        (
+            f"⚡ Leverage técnico: "
+            f"x{leverage}"
+        ),
+
+        '',
+
+        (
+            "✅ Estado: "
+            "<b>EXECUTABLE_SIGNAL</b>"
+        ),
+
+        (
+            f"🕯️ Vela fuente cerrada: "
+            f"{escape(source_candle or '--')}"
+        ),
+
+        (
+            f"🕐 Ventana personal: "
+            f"{escape(local_text)} · "
+            f"{escape(timezone_name)}"
+        ),
+
+        '',
+
+        (
+            "ℹ️ Esta alerta respeta tu horario "
+            "personal. La preferencia de Telegram "
+            "NO modifica la decisión del motor."
+        )
+    ]
+
+    return '\n'.join(
+        lines
+    )
+
+
+@app.route(
+    '/api/user/futures-scalping-preferences',
+    methods=[
+        'GET',
+        'POST'
+    ]
+)
+def api_user_futures_scalping_preferences():
+    """
+    Configuración de alertas scalping Futures
+    asociada exclusivamente al usuario autenticado.
+    """
+
+    user = _authenticated_user()
+
+    if not user:
+
+        return jsonify({
+            'success':
+                False,
+
+            'authenticated':
+                False,
+
+            'error':
+                'Debes iniciar sesión.'
+        }), 401
+
+    try:
+
+        from supabase_client import (
+            supabase_client
+        )
+
+        # ==============================================================
+        # GET
+        # ==============================================================
+
+        if request.method == 'GET':
+
+            preferences = (
+                _get_futures_scalping_preferences(
+                    user,
+                    force=True
+                )
+            )
+
+            return jsonify({
+                'success':
+                    True,
+
+                'authenticated':
+                    True,
+
+                'user':
+                    user,
+
+                'preferences':
+                    preferences,
+
+                'allowed_timeframes':
+                    list(
+                        _FUTURES_SCALPING_TFS
+                    ),
+
+                'weekday_semantics': {
+                    '1': 'Lunes',
+                    '2': 'Martes',
+                    '3': 'Miércoles',
+                    '4': 'Jueves',
+                    '5': 'Viernes',
+                    '6': 'Sábado',
+                    '7': 'Domingo'
+                },
+
+                'default_enabled':
+                    False
+            })
+
+        # ==============================================================
+        # POST
+        # ==============================================================
+
+        data = (
+            request.get_json(
+                silent=True
+            )
+            or {}
+        )
+
+        enabled = data.get(
+            'futures_scalping_telegram_enabled',
+            False
+        )
+
+        if not isinstance(
+            enabled,
+            bool
+        ):
+
+            return jsonify({
+                'success':
+                    False,
+
+                'error':
+                    (
+                        'futures_scalping_telegram_enabled '
+                        'debe ser booleano.'
+                    )
+            }), 400
+
+        raw_tf = data.get(
+            'futures_scalping_timeframes',
+            []
+        )
+
+        if not isinstance(
+            raw_tf,
+            list
+        ):
+
+            return jsonify({
+                'success':
+                    False,
+
+                'error':
+                    (
+                        'futures_scalping_timeframes '
+                        'debe ser una lista.'
+                    )
+            }), 400
+
+        clean_tf = []
+
+        for tf in raw_tf:
+
+            tf = str(
+                tf
+                or ''
+            ).strip()
+
+            if tf not in (
+                _FUTURES_SCALPING_TFS
+            ):
+
+                return jsonify({
+                    'success':
+                        False,
+
+                    'error':
+                        (
+                            'Temporalidad Futures '
+                            f'no permitida: {tf}'
+                        )
+                }), 400
+
+            if tf not in clean_tf:
+                clean_tf.append(
+                    tf
+                )
+
+        raw_days = data.get(
+            'futures_scalping_weekdays',
+            []
+        )
+
+        if not isinstance(
+            raw_days,
+            list
+        ):
+
+            return jsonify({
+                'success':
+                    False,
+
+                'error':
+                    (
+                        'futures_scalping_weekdays '
+                        'debe ser una lista.'
+                    )
+            }), 400
+
+        clean_days = []
+
+        for day in raw_days:
+
+            try:
+                day_number = int(
+                    day
+                )
+            except (
+                TypeError,
+                ValueError
+            ):
+
+                return jsonify({
+                    'success':
+                        False,
+
+                    'error':
+                        'Día de semana inválido.'
+                }), 400
+
+            if not (
+                1 <= day_number <= 7
+            ):
+
+                return jsonify({
+                    'success':
+                        False,
+
+                    'error':
+                        (
+                            'Los días válidos son '
+                            '1 (lunes) a 7 (domingo).'
+                        )
+                }), 400
+
+            if day_number not in clean_days:
+
+                clean_days.append(
+                    day_number
+                )
+
+        clean_days.sort()
+
+        start_time = (
+            _normalize_scalping_clock(
+                data.get(
+                    'futures_scalping_start_time'
+                )
+            )
+        )
+
+        end_time = (
+            _normalize_scalping_clock(
+                data.get(
+                    'futures_scalping_end_time'
+                )
+            )
+        )
+
+        timezone_name = str(
+            data.get(
+                'futures_scalping_timezone'
+            )
+            or 'UTC'
+        ).strip() or 'UTC'
+
+        try:
+
+            from zoneinfo import (
+                ZoneInfo
+            )
+
+            ZoneInfo(
+                timezone_name
+            )
+
+        except Exception:
+
+            return jsonify({
+                'success':
+                    False,
+
+                'error':
+                    (
+                        'Zona horaria IANA inválida: '
+                        f'{timezone_name}'
+                    )
+            }), 400
+
+        if enabled:
+
+            if not clean_tf:
+
+                return jsonify({
+                    'success':
+                        False,
+
+                    'error':
+                        (
+                            'Debes seleccionar al menos '
+                            '5m, 15m o 30m.'
+                        )
+                }), 400
+
+            if (
+                start_time is None
+                or end_time is None
+            ):
+
+                return jsonify({
+                    'success':
+                        False,
+
+                    'error':
+                        (
+                            'Debes definir hora inicial '
+                            'y hora final.'
+                        )
+                }), 400
+
+            if not clean_days:
+
+                return jsonify({
+                    'success':
+                        False,
+
+                    'error':
+                        (
+                            'Debes seleccionar al menos '
+                            'un día de scalping.'
+                        )
+                }), 400
+
+        saved = (
+            supabase_client
+            .upsert_user_preferences(
+                user,
+                {
+                    'futures_scalping_telegram_enabled':
+                        enabled,
+
+                    'futures_scalping_timeframes':
+                        clean_tf,
+
+                    'futures_scalping_start_time':
+                        start_time,
+
+                    'futures_scalping_end_time':
+                        end_time,
+
+                    'futures_scalping_weekdays':
+                        clean_days,
+
+                    'futures_scalping_timezone':
+                        timezone_name
+                }
+            )
+        )
+
+        if not saved:
+
+            return jsonify({
+                'success':
+                    False,
+
+                'error':
+                    (
+                        'No se pudieron guardar las '
+                        'preferencias de scalping.'
+                    )
+            }), 500
+
+        _invalidate_futures_scalping_preferences(
+            user
+        )
+
+        preferences = (
+            _get_futures_scalping_preferences(
+                user,
+                force=True
+            )
+        )
+
+        return jsonify({
+            'success':
+                True,
+
+            'authenticated':
+                True,
+
+            'user':
+                user,
+
+            'preferences':
+                preferences
+        })
+
+    except Exception as e:
+
+        print(
+            "❌ Error preferencias "
+            f"Scalping Futures: {e}"
+        )
+
+        return jsonify({
+            'success':
+                False,
+
+            'error':
+                str(
+                    e
+                )[:200]
+        }), 500
+
+
+def futures_scalping_alert_loop():
+    """
+    Monitor liviano de SETUP LISTO.
+
+    NO analiza mercado.
+    NO consulta KuCoin.
+    NO toca señales.
+    Sólo inspecciona el último caché Futures ya calculado.
+    """
+
+    print(
+        "⚡ SCALPING FUTURES notifier iniciado "
+        "(preferencias por usuario)"
+    )
+
+    # No competir con el warm-up inicial.
+    time.sleep(
+        90
+    )
+
+    while True:
+
+        try:
+
+            # ----------------------------------------------------------
+            # 1. Usuarios actualmente habilitados
+            # ----------------------------------------------------------
+
+            active_users = []
+
+            for user in (
+                _auth_users().keys()
+            ):
+
+                preferences = (
+                    _get_futures_scalping_preferences(
+                        user
+                    )
+                )
+
+                if not preferences.get(
+                    'futures_scalping_telegram_enabled',
+                    False
+                ):
+                    continue
+
+                active_users.append(
+                    (
+                        user,
+                        preferences
+                    )
+                )
+
+            if not active_users:
+
+                time.sleep(
+                    _FUTURES_SCALPING_LOOP_INTERVAL
+                )
+
+                continue
+
+            # ----------------------------------------------------------
+            # 2. Copia liviana del caché existente
+            # ----------------------------------------------------------
+
+            try:
+
+                with (
+                    _futures_analysis_cache[
+                        'lock'
+                    ]
+                ):
+
+                    raw_data = (
+                        _futures_analysis_cache
+                        .get(
+                            'data'
+                        )
+                        or {}
+                    )
+
+                    analyses = dict(
+                        raw_data.get(
+                            'analysis'
+                        )
+                        or {}
+                    )
+
+            except Exception:
+
+                analyses = {}
+
+            if not analyses:
+
+                time.sleep(
+                    _FUTURES_SCALPING_LOOP_INTERVAL
+                )
+
+                continue
+
+            # ----------------------------------------------------------
+            # 3. Evaluar los resultados YA EXISTENTES
+            # ----------------------------------------------------------
+
+            for (
+                symbol,
+                timeframe
+            ), result in analyses.items():
+
+                if timeframe not in (
+                    _FUTURES_SCALPING_TFS
+                ):
+                    continue
+
+                if not isinstance(
+                    result,
+                    dict
+                ) or not result.get(
+                    'success'
+                ):
+                    continue
+
+                if str(
+                    result.get(
+                        'analysis_mode'
+                    )
+                    or ''
+                ).upper() != 'CLOSED_CANDLE':
+
+                    continue
+
+                if not bool(
+                    result.get(
+                        'source_candle_closed',
+                        False
+                    )
+                ):
+
+                    continue
+
+                decision = (
+                    result.get(
+                        'decision',
+                        {}
+                    )
+                    or {}
+                )
+
+                action = str(
+                    decision.get(
+                        'action'
+                    )
+                    or ''
+                ).upper()
+
+                if action not in (
+                    'LONG',
+                    'SHORT'
+                ):
+
+                    continue
+
+                levels = (
+                    result.get(
+                        'levels',
+                        {}
+                    )
+                    or {}
+                )
+
+                publication_status = str(
+                    levels.get(
+                        'publication_status'
+                    )
+                    or result.get(
+                        'publication_status'
+                    )
+                    or (
+                        'ANALYSIS_ONLY'
+                        if levels.get(
+                            'is_rejected'
+                        )
+                        else
+                        'EXECUTABLE_SIGNAL'
+                    )
+                ).upper()
+
+                if (
+                    publication_status
+                    != 'EXECUTABLE_SIGNAL'
+                ):
+
+                    continue
+
+                try:
+
+                    entry = float(
+                        levels.get(
+                            'entry',
+                            0
+                        )
+                        or 0
+                    )
+
+                    sl = float(
+                        levels.get(
+                            'stop_loss',
+                            0
+                        )
+                        or 0
+                    )
+
+                    tp = float(
+                        levels.get(
+                            'take_profit',
+                            0
+                        )
+                        or 0
+                    )
+
+                except (
+                    TypeError,
+                    ValueError
+                ):
+
+                    continue
+
+                if not (
+                    entry > 0
+                    and sl > 0
+                    and tp > 0
+                ):
+
+                    continue
+
+                # ------------------------------------------------------
+                # 4. Aplicar preferencias POR USUARIO
+                # ------------------------------------------------------
+
+                for (
+                    user,
+                    preferences
+                ) in active_users:
+
+                    window_state = (
+                        _futures_scalping_window_state(
+                            preferences,
+                            timeframe
+                        )
+                    )
+
+                    if not window_state.get(
+                        'allowed',
+                        False
+                    ):
+
+                        continue
+
+                    alert_key = (
+                        _futures_scalping_alert_key(
+                            user,
+                            result,
+                            symbol,
+                            timeframe
+                        )
+                    )
+
+                    if (
+                        _futures_scalping_alert_already_sent(
+                            alert_key
+                        )
+                    ):
+
+                        continue
+
+                    message = (
+                        _build_futures_scalping_message(
+                            user,
+                            symbol,
+                            timeframe,
+                            result,
+                            preferences,
+                            window_state
+                        )
+                    )
+
+                    sent = (
+                        expert_system
+                        .send_telegram_alert(
+                            message,
+                            None
+                        )
+                    )
+
+                    if sent:
+
+                        _mark_futures_scalping_alert_sent(
+                            alert_key
+                        )
+
+                        print(
+                            "✅ Scalping Telegram: "
+                            f"{user} · "
+                            f"{symbol} {timeframe} "
+                            f"{action}"
+                        )
+
+        except Exception as e:
+
+            print(
+                "❌ futures_scalping_alert_loop: "
+                f"{e}"
+            )
+
+            import traceback
+
+            traceback.print_exc()
+
+        time.sleep(
+            _FUTURES_SCALPING_LOOP_INTERVAL
+        )
 
 def _start_background_threads():
     """
@@ -31681,6 +33352,31 @@ def _start_background_threads():
             "⚠️ Error iniciando Guardian Telegram: "
             f"{e}"
         )    
+    # Commit 36K — notifier personalizado de scalping Futures.
+    #
+    # Es liviano: sólo lee el caché Futures existente.
+    # Con preferencias desactivadas (default) prácticamente no hace trabajo.
+    try:
+
+        t_scalping = threading.Thread(
+            target=futures_scalping_alert_loop,
+            name='futures-scalping-alerts',
+            daemon=True
+        )
+
+        t_scalping.start()
+
+        print(
+            "✅ Thread futures_scalping_alerts iniciado "
+            "(setup EXECUTABLE_SIGNAL según horario personal)"
+        )
+
+    except Exception as e:
+
+        print(
+            "⚠️ Error iniciando "
+            f"futures_scalping_alerts: {e}"
+        )
     print("=" * 60 + "\n")
 
 
