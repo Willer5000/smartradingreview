@@ -1123,209 +1123,291 @@ class SupabaseClient:
         self,
         user_name: str
     ) -> Dict:
-        """
-        Preferencias personales de comunicación.
-
-        IMPORTANTE:
-        Estas preferencias controlan CUÁNDO avisar.
-        No modifican cómo analiza o decide el Guardian.
-        """
-
-        default_preferences = {
+        defaults = {
             'spot_telegram_enabled': True,
-            'spot_telegram_timeframes': [
-                '4h',
-                '12h',
-                '1D',
-                '1W'
-            ]
+            'spot_telegram_timeframes': ['4h', '12h', '1D', '1W'],
+            'futures_scalping_telegram_enabled': False,
+            'futures_scalping_timeframes': [],
+            'futures_scalping_start_time': None,
+            'futures_scalping_end_time': None,
+            'futures_scalping_weekdays': [],
+            'futures_scalping_timezone': 'UTC'
         }
 
         if not self.enabled:
-            return default_preferences
+            return dict(defaults)
+
+        def _json_list(value):
+            if isinstance(value, list):
+                return value
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                    return parsed if isinstance(parsed, list) else []
+                except Exception:
+                    return []
+            return []
+
+        def _clock_text(value):
+            text = str(value or '').strip()
+            if not text:
+                return None
+            try:
+                parts = text.split(':')
+                hour = int(parts[0])
+                minute = int(parts[1])
+                if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                    return None
+                return f"{hour:02d}:{minute:02d}"
+            except Exception:
+                return None
 
         try:
-
             response = self._with_retry(
                 lambda: (
                     self.client
-                    .table(
-                        'user_preferences'
-                    )
-                    .select(
-                        '*'
-                    )
-                    .eq(
-                        'user_name',
-                        user_name
-                    )
-                    .limit(
-                        1
-                    )
+                    .table('user_preferences')
+                    .select('*')
+                    .eq('user_name', user_name)
+                    .limit(1)
                     .execute()
                 )
             )
 
-            rows = (
-                response.data
-                or []
-            )
-
+            rows = response.data or []
             if not rows:
-                return default_preferences
+                return dict(defaults)
 
             row = rows[0]
 
-            enabled = row.get(
-                'spot_telegram_enabled',
-                True
+            spot_allowed = ('4h', '12h', '1D', '1W')
+            raw_spot_tf = _json_list(
+                row.get('spot_telegram_timeframes')
             )
-
-            raw_timeframes = row.get(
-                'spot_telegram_timeframes'
-            )
-
-            if isinstance(
-                raw_timeframes,
-                str
-            ):
-
-                try:
-                    raw_timeframes = json.loads(
-                        raw_timeframes
-                    )
-
-                except Exception:
-                    raw_timeframes = []
-
-            if not isinstance(
-                raw_timeframes,
-                list
-            ):
-
-                raw_timeframes = []
-
-            allowed = {
-                '4h',
-                '12h',
-                '1D',
-                '1W'
-            }
-
-            timeframes = [
-                tf
-                for tf
-                in raw_timeframes
-                if tf in allowed
+            spot_timeframes = [
+                tf for tf in spot_allowed if tf in raw_spot_tf
             ]
 
-            return {
-                'spot_telegram_enabled':
-                    bool(
-                        enabled
-                    ),
+            scalping_allowed = ('5m', '15m', '30m')
+            raw_scalping_tf = _json_list(
+                row.get('futures_scalping_timeframes')
+            )
+            scalping_timeframes = [
+                tf for tf in scalping_allowed if tf in raw_scalping_tf
+            ]
 
-                'spot_telegram_timeframes':
-                    timeframes
+            raw_weekdays = _json_list(
+                row.get('futures_scalping_weekdays')
+            )
+
+            weekdays = []
+            for day in raw_weekdays:
+                try:
+                    day_number = int(day)
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= day_number <= 7 and day_number not in weekdays:
+                    weekdays.append(day_number)
+            weekdays.sort()
+
+            timezone_name = str(
+                row.get('futures_scalping_timezone') or 'UTC'
+            ).strip() or 'UTC'
+
+            return {
+                'spot_telegram_enabled': bool(
+                    row.get('spot_telegram_enabled', True)
+                ),
+                'spot_telegram_timeframes': spot_timeframes,
+                'futures_scalping_telegram_enabled': bool(
+                    row.get('futures_scalping_telegram_enabled', False)
+                ),
+                'futures_scalping_timeframes': scalping_timeframes,
+                'futures_scalping_start_time': _clock_text(
+                    row.get('futures_scalping_start_time')
+                ),
+                'futures_scalping_end_time': _clock_text(
+                    row.get('futures_scalping_end_time')
+                ),
+                'futures_scalping_weekdays': weekdays,
+                'futures_scalping_timezone': timezone_name
             }
 
         except Exception as e:
-
             logger.warning(
                 "get_user_preferences "
                 f"({user_name}): {e}"
             )
-
-            # Si Supabase tiene un fallo temporal,
-            # no cambiamos silenciosamente la política
-            # que el sistema tenía antes del commit.
-            return default_preferences
-
+            return dict(defaults)
 
     def upsert_user_preferences(
         self,
         user_name: str,
         preferences: Dict
     ) -> bool:
-        """
-        Guarda únicamente preferencias permitidas.
-
-        La identidad user_name debe venir de la sesión Flask,
-        nunca del navegador.
-        """
-
         if not self.enabled:
             return False
 
         try:
-
-            user_name = str(
-                user_name
-                or ''
-            ).strip()
-
+            user_name = str(user_name or '').strip()
             if not user_name:
                 return False
 
-            allowed = (
-                '4h',
-                '12h',
-                '1D',
-                '1W'
+            if not isinstance(preferences, dict):
+                return False
+
+            current = self.get_user_preferences(user_name)
+            merged = dict(current)
+
+            allowed_keys = (
+                'spot_telegram_enabled',
+                'spot_telegram_timeframes',
+                'futures_scalping_telegram_enabled',
+                'futures_scalping_timeframes',
+                'futures_scalping_start_time',
+                'futures_scalping_end_time',
+                'futures_scalping_weekdays',
+                'futures_scalping_timezone'
             )
 
-            requested = (
-                preferences.get(
-                    'spot_telegram_timeframes',
-                    []
+            for key in allowed_keys:
+                if key in preferences:
+                    merged[key] = preferences[key]
+
+            spot_allowed = ('4h', '12h', '1D', '1W')
+            requested_spot = (
+                merged.get('spot_telegram_timeframes', []) or []
+            )
+            if not isinstance(requested_spot, list):
+                requested_spot = []
+            clean_spot = [
+                tf for tf in spot_allowed if tf in requested_spot
+            ]
+
+            scalping_allowed = ('5m', '15m', '30m')
+            requested_scalping = (
+                merged.get('futures_scalping_timeframes', []) or []
+            )
+            if not isinstance(requested_scalping, list):
+                requested_scalping = []
+            clean_scalping = [
+                tf for tf in scalping_allowed if tf in requested_scalping
+            ]
+
+            requested_weekdays = (
+                merged.get('futures_scalping_weekdays', []) or []
+            )
+            if not isinstance(requested_weekdays, list):
+                requested_weekdays = []
+
+            clean_weekdays = []
+            for day in requested_weekdays:
+                try:
+                    day_number = int(day)
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= day_number <= 7 and day_number not in clean_weekdays:
+                    clean_weekdays.append(day_number)
+            clean_weekdays.sort()
+
+            def _normalize_clock(value):
+                if value is None:
+                    return None
+                text = str(value or '').strip()
+                if not text:
+                    return None
+
+                parts = text.split(':')
+                if len(parts) < 2:
+                    raise ValueError('Hora inválida; usar HH:MM.')
+
+                hour = int(parts[0])
+                minute = int(parts[1])
+
+                if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                    raise ValueError('Hora fuera de rango.')
+
+                return f"{hour:02d}:{minute:02d}"
+
+            start_time = _normalize_clock(
+                merged.get('futures_scalping_start_time')
+            )
+            end_time = _normalize_clock(
+                merged.get('futures_scalping_end_time')
+            )
+
+            timezone_name = str(
+                merged.get('futures_scalping_timezone') or 'UTC'
+            ).strip() or 'UTC'
+
+            try:
+                from zoneinfo import ZoneInfo
+                ZoneInfo(timezone_name)
+            except Exception as timezone_error:
+                raise ValueError(
+                    'Zona horaria IANA inválida: '
+                    f'{timezone_name}'
+                ) from timezone_error
+
+            futures_enabled = bool(
+                merged.get(
+                    'futures_scalping_telegram_enabled',
+                    False
                 )
-                or []
             )
 
-            if not isinstance(
-                requested,
-                list
-            ):
-
-                requested = []
-
-            clean_timeframes = []
-
-            for tf in allowed:
-
-                if tf in requested:
-
-                    clean_timeframes.append(
-                        tf
+            if futures_enabled:
+                if not clean_scalping:
+                    raise ValueError(
+                        'Debes elegir al menos una temporalidad '
+                        'de scalping Futures.'
+                    )
+                if start_time is None or end_time is None:
+                    raise ValueError(
+                        'Debes definir hora inicial y hora final.'
+                    )
+                if not clean_weekdays:
+                    raise ValueError(
+                        'Debes elegir al menos un día de la semana.'
                     )
 
-            enabled = bool(
-                preferences.get(
-                    'spot_telegram_enabled',
-                    True
-                )
+            futures_keys = {
+                'futures_scalping_telegram_enabled',
+                'futures_scalping_timeframes',
+                'futures_scalping_start_time',
+                'futures_scalping_end_time',
+                'futures_scalping_weekdays',
+                'futures_scalping_timezone'
+            }
+
+            futures_changed = any(
+                key in preferences for key in futures_keys
             )
 
+            now_iso = datetime.utcnow().isoformat()
+
             payload = {
-                'user_name':
-                    user_name,
-
-                'spot_telegram_enabled':
-                    enabled,
-
-                'spot_telegram_timeframes':
-                    clean_timeframes,
-
-                'updated_at':
-                    datetime.utcnow().isoformat()
+                'user_name': user_name,
+                'spot_telegram_enabled': bool(
+                    merged.get('spot_telegram_enabled', True)
+                ),
+                'spot_telegram_timeframes': clean_spot,
+                'futures_scalping_telegram_enabled': futures_enabled,
+                'futures_scalping_timeframes': clean_scalping,
+                'futures_scalping_start_time': start_time,
+                'futures_scalping_end_time': end_time,
+                'futures_scalping_weekdays': clean_weekdays,
+                'futures_scalping_timezone': timezone_name,
+                'updated_at': now_iso
             }
+
+            if futures_changed:
+                payload['futures_scalping_updated_at'] = now_iso
 
             response = self._with_retry(
                 lambda: (
                     self.client
-                    .table(
-                        'user_preferences'
-                    )
+                    .table('user_preferences')
                     .upsert(
                         payload,
                         on_conflict='user_name'
@@ -1334,18 +1416,13 @@ class SupabaseClient:
                 )
             )
 
-            return (
-                response.data
-                is not None
-            )
+            return response.data is not None
 
         except Exception as e:
-
             logger.error(
                 "upsert_user_preferences "
                 f"({user_name}): {e}"
             )
-
             return False
     # ========================================================================
     # USER PORTFOLIO
