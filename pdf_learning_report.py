@@ -56,6 +56,14 @@ SHADOW_SL_QUALITY_REFERENCE = 60.0
 SHADOW_RR_MIN_REFERENCE = 1.8
 SHADOW_RR_MAX_REFERENCE = 3.5
 
+# Commit 36 — validación temporal CAUTIOUS_SHADOW.
+# Son umbrales de INFORME/validación; no cambian el motor operativo.
+CAUTIOUS_SHADOW_MODEL_VERSION = 'cautious_shadow_v1'
+CAUTIOUS_WALK_FORWARD_VERSION = 'temporal_holdout_v1'
+CAUTIOUS_WALK_FORWARD_CALIBRATION_RATIO = 0.70
+CAUTIOUS_PROMOTION_MIN_TOTAL_RESOLVED = 25
+CAUTIOUS_PROMOTION_MIN_VALIDATION_RESOLVED = 10
+
 
 def _as_bool(value) -> bool:
     if isinstance(value, bool):
@@ -318,7 +326,13 @@ def _shadow_entry_state(signal: Dict) -> str:
     status = str(signal.get('status') or '').strip().lower()
     notes = _signal_notes(signal).lower()
 
-    if status in ('tp_hit', 'sl_hit', 'ambiguous', 'expired_after_entry'):
+    if status in (
+        'entry_touched',
+        'tp_hit',
+        'sl_hit',
+        'ambiguous',
+        'expired_after_entry'
+    ):
         return 'entry_touched'
     if status == 'expired_no_entry':
         return 'no_entry'
@@ -394,6 +408,383 @@ def _shadow_bucket_metrics(signals: List[Dict]) -> Dict:
         'outcome_samples': len(r_values),
     }
 
+
+
+def _get_cautious_shadow_context(signal: Dict) -> Dict:
+    """Snapshot CAUTIOUS_SHADOW persistido por Commit 35."""
+    learning = _get_learning_context(signal)
+    cautious = learning.get('cautious_shadow') or {}
+    return cautious if isinstance(cautious, dict) else {}
+
+
+def _is_cautious_shadow_candidate(signal: Dict) -> bool:
+    cautious = _get_cautious_shadow_context(signal)
+    return bool(
+        cautious.get('model_version') == CAUTIOUS_SHADOW_MODEL_VERSION
+        and str(cautious.get('mode') or '').upper() == 'SHADOW_ONLY'
+        and _as_bool(cautious.get('candidate', False))
+        and str(cautious.get('status') or '').upper() == 'CAUTIOUS_SHADOW'
+        and not _as_bool(cautious.get('affects_publication', True))
+        and not _as_bool(cautious.get('affects_weights', True))
+    )
+
+
+def _signal_created_at_key(signal: Dict) -> str:
+    """
+    Clave temporal para validación fuera de muestra.
+
+    Sólo usa timestamps persistidos; no inventa una fecha si falta.
+    Supabase entrega created_at en ISO-8601, por lo que el orden lexicográfico
+    conserva el orden cronológico dentro de esta cohorte.
+    """
+    raw = str(
+        signal.get('created_at')
+        or signal.get('candle_timestamp')
+        or ''
+    ).strip()
+    return raw
+
+
+def _signal_risk_multiplier(signal: Dict, default: float = 1.0) -> float:
+    cautious = _get_cautious_shadow_context(signal)
+    value = _safe_float(
+        cautious.get('simulated_risk_multiplier'),
+        default
+    )
+    if value is None or value <= 0:
+        return default
+    return min(1.0, float(value))
+
+
+def _net_outcome_r_if_persisted(signal: Dict) -> Optional[float]:
+    """
+    Devuelve R NETO sólo si el resultado real ya persiste net_pnl_pct.
+
+    No resta una comisión teórica ni inventa funding/slippage. Mientras el
+    lifecycle no persista costes realizados, la promoción Cautious permanece
+    bloqueada por falta de atribución neta verificable.
+    """
+    status = str(signal.get('status') or '').strip().lower()
+    if status not in ('tp_hit', 'sl_hit'):
+        return None
+
+    result = _latest_signal_result(signal)
+    raw_net = result.get('net_pnl_pct')
+    if raw_net is None:
+        return None
+
+    try:
+        net_pnl_pct = float(raw_net)
+        entry = float(signal.get('entry_price') or 0)
+        sl = float(signal.get('stop_loss') or 0)
+    except (TypeError, ValueError):
+        return None
+
+    if entry <= 0 or sl <= 0:
+        return None
+
+    risk_pct = abs(entry - sl) / entry * 100
+    if risk_pct <= 0:
+        return None
+
+    return net_pnl_pct / risk_pct
+
+
+def _walk_forward_metrics(
+    signals: List[Dict],
+    default_risk_multiplier: float
+) -> Dict:
+    """
+    Métricas de una cohorte para Commit 36.
+
+    - Expectancy R: R geométrico observado Entry→SL/TP.
+    - Exp. presupuesto R: contribución equivalente si sólo se arriesgara el
+      multiplicador indicado (0.50x para Cautious, 1.00x Premium).
+    - DD presupuesto: drawdown máximo de la secuencia resuelta, expresado en R
+      del presupuesto normal. No es dinero real ni incorpora funding.
+    """
+    ordered = sorted(
+        list(signals or []),
+        key=lambda signal: _signal_created_at_key(signal)
+    )
+
+    base = _shadow_bucket_metrics(ordered)
+    r_values = []
+    budget_r_values = []
+    net_r_values = []
+    net_budget_r_values = []
+    multiplier_values = []
+
+    cumulative = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+
+    for signal in ordered:
+        _pnl_pct, r_multiple = _outcome_values(signal)
+        if r_multiple is None:
+            continue
+
+        multiplier = _signal_risk_multiplier(
+            signal,
+            default=default_risk_multiplier
+        )
+
+        r_multiple = float(r_multiple)
+        budget_r = r_multiple * multiplier
+
+        r_values.append(r_multiple)
+        budget_r_values.append(budget_r)
+        multiplier_values.append(multiplier)
+
+        cumulative += budget_r
+        peak = max(peak, cumulative)
+        max_drawdown = max(max_drawdown, peak - cumulative)
+
+        net_r = _net_outcome_r_if_persisted(signal)
+        if net_r is not None:
+            net_r_values.append(float(net_r))
+            net_budget_r_values.append(float(net_r) * multiplier)
+
+    total = len(ordered)
+    entry_touched = int(base.get('entry_touched') or 0)
+
+    return {
+        **base,
+        'entry_touch_rate': (
+            round(entry_touched / total * 100, 1)
+            if total else None
+        ),
+        'risk_multiplier_avg': (
+            round(sum(multiplier_values) / len(multiplier_values), 3)
+            if multiplier_values else default_risk_multiplier
+        ),
+        'budget_expectancy_r': (
+            round(sum(budget_r_values) / len(budget_r_values), 4)
+            if budget_r_values else None
+        ),
+        'max_drawdown_budget_r': (
+            round(max_drawdown, 4)
+            if budget_r_values else None
+        ),
+        'net_expectancy_r': (
+            round(sum(net_r_values) / len(net_r_values), 4)
+            if net_r_values else None
+        ),
+        'net_budget_expectancy_r': (
+            round(sum(net_budget_r_values) / len(net_budget_r_values), 4)
+            if net_budget_r_values else None
+        ),
+        'net_outcome_samples': len(net_r_values),
+    }
+
+
+def _calc_cautious_walk_forward_analysis(
+    premium_signals: List[Dict],
+    shadow_signals: List[Dict]
+) -> Dict:
+    """
+    Commit 36 — comparación temporal Premium vs CAUTIOUS_SHADOW.
+
+    No optimiza parámetros usando el bloque de validación. Las reglas Cautious
+    quedaron fijadas en Commit 35. Aquí sólo se separa cronológicamente una
+    primera zona de calibración (70%) y una zona posterior (30%) para observar
+    comportamiento fuera de tiempo.
+
+    La función nunca promueve ni publica señales.
+    """
+    premium = [
+        signal for signal in (premium_signals or [])
+        if _is_verified_futures_trade(signal)
+        and _shadow_has_trade_geometry(signal)
+    ]
+
+    cautious_profiles = []
+    cautious_candidates = []
+    cautious_status_counts = defaultdict(int)
+
+    for signal in shadow_signals or []:
+        cautious = _get_cautious_shadow_context(signal)
+        if not cautious:
+            continue
+
+        cautious_profiles.append(signal)
+        cautious_status_counts[
+            str(cautious.get('status') or 'UNKNOWN').upper()
+        ] += 1
+
+        if _is_cautious_shadow_candidate(signal):
+            cautious_candidates.append(signal)
+
+    # Sólo timestamps demostrables entran al corte temporal.
+    comparable = [
+        ('PREMIUM', signal)
+        for signal in premium
+        if _signal_created_at_key(signal)
+    ] + [
+        ('CAUTIOUS_SHADOW', signal)
+        for signal in cautious_candidates
+        if _signal_created_at_key(signal)
+    ]
+
+    comparable.sort(
+        key=lambda item: _signal_created_at_key(item[1])
+    )
+
+    cutoff = None
+    if len(comparable) >= 2:
+        cut_index = int(
+            len(comparable)
+            * CAUTIOUS_WALK_FORWARD_CALIBRATION_RATIO
+        )
+        cut_index = max(
+            1,
+            min(len(comparable) - 1, cut_index)
+        )
+        cutoff = _signal_created_at_key(
+            comparable[cut_index][1]
+        )
+
+    def split(items):
+        if not cutoff:
+            return list(items), []
+        calibration = [
+            signal for signal in items
+            if _signal_created_at_key(signal)
+            and _signal_created_at_key(signal) < cutoff
+        ]
+        validation = [
+            signal for signal in items
+            if _signal_created_at_key(signal)
+            and _signal_created_at_key(signal) >= cutoff
+        ]
+        return calibration, validation
+
+    premium_cal, premium_val = split(premium)
+    cautious_cal, cautious_val = split(cautious_candidates)
+
+    premium_all_metrics = _walk_forward_metrics(
+        premium,
+        default_risk_multiplier=1.0
+    )
+    cautious_all_metrics = _walk_forward_metrics(
+        cautious_candidates,
+        default_risk_multiplier=0.50
+    )
+
+    premium_cal_metrics = _walk_forward_metrics(
+        premium_cal,
+        default_risk_multiplier=1.0
+    )
+    premium_val_metrics = _walk_forward_metrics(
+        premium_val,
+        default_risk_multiplier=1.0
+    )
+    cautious_cal_metrics = _walk_forward_metrics(
+        cautious_cal,
+        default_risk_multiplier=0.50
+    )
+    cautious_val_metrics = _walk_forward_metrics(
+        cautious_val,
+        default_risk_multiplier=0.50
+    )
+
+    promotion_reasons = []
+
+    cautious_total_resolved = int(
+        cautious_all_metrics.get('resolved') or 0
+    )
+    cautious_validation_resolved = int(
+        cautious_val_metrics.get('resolved') or 0
+    )
+
+    if not cautious_candidates:
+        promotion_reasons.append(
+            'Sin candidatos CAUTIOUS_SHADOW todavía.'
+        )
+
+    if (
+        cautious_total_resolved
+        < CAUTIOUS_PROMOTION_MIN_TOTAL_RESOLVED
+    ):
+        promotion_reasons.append(
+            'Muestra total resuelta insuficiente: '
+            f'{cautious_total_resolved}/'
+            f'{CAUTIOUS_PROMOTION_MIN_TOTAL_RESOLVED}.'
+        )
+
+    if (
+        cautious_validation_resolved
+        < CAUTIOUS_PROMOTION_MIN_VALIDATION_RESOLVED
+    ):
+        promotion_reasons.append(
+            'Validación temporal insuficiente: '
+            f'{cautious_validation_resolved}/'
+            f'{CAUTIOUS_PROMOTION_MIN_VALIDATION_RESOLVED} resultados.'
+        )
+
+    total_expectancy = cautious_all_metrics.get('expectancy_r')
+    if (
+        total_expectancy is None
+        or total_expectancy <= 0
+    ):
+        promotion_reasons.append(
+            'Expectancy R total Cautious todavía no es positiva.'
+        )
+
+    validation_expectancy = cautious_val_metrics.get('expectancy_r')
+    if (
+        validation_expectancy is None
+        or validation_expectancy <= 0
+    ):
+        promotion_reasons.append(
+            'Expectancy R fuera de tiempo todavía no es positiva.'
+        )
+
+    # Costes: el candidato Cautious ya pasó el guardrail NET_PROFIT en el
+    # momento de creación, pero para promotion exigimos resultados NETOS
+    # realizados. Si el lifecycle no persiste net_pnl_pct, no inventamos fees,
+    # slippage o funding en retrospectiva.
+    if (
+        int(cautious_val_metrics.get('net_outcome_samples') or 0)
+        < cautious_validation_resolved
+    ):
+        promotion_reasons.append(
+            'Falta atribución neta realizada de comisión/slippage/funding '
+            'para toda la muestra de validación.'
+        )
+
+    promotion_ready = not promotion_reasons
+
+    return {
+        'model_version': CAUTIOUS_WALK_FORWARD_VERSION,
+        'calibration_ratio': CAUTIOUS_WALK_FORWARD_CALIBRATION_RATIO,
+        'cutoff_created_at': cutoff,
+        'cautious_profile_available': len(cautious_profiles),
+        'cautious_candidates': len(cautious_candidates),
+        'cautious_status_counts': dict(cautious_status_counts),
+        'premium_candidates': len(premium),
+        'premium_all': premium_all_metrics,
+        'cautious_all': cautious_all_metrics,
+        'calibration': {
+            'premium': premium_cal_metrics,
+            'cautious': cautious_cal_metrics,
+        },
+        'validation': {
+            'premium': premium_val_metrics,
+            'cautious': cautious_val_metrics,
+        },
+        'promotion_ready': promotion_ready,
+        'promotion_status': (
+            'READY_FOR_COMMIT_37_REVIEW'
+            if promotion_ready
+            else 'NOT_READY'
+        ),
+        'promotion_reasons': promotion_reasons,
+        'cost_policy': (
+            'Cautious exige NET_PROFIT guardrail en creación; la promoción '
+            'requiere además net_pnl_pct realizado. No se inventan costes.'
+        ),
+    }
 
 def _calc_shadow_futures_analysis(signals: List[Dict]) -> Dict:
     """
@@ -1284,6 +1675,7 @@ def _fetch_learning_data() -> Dict:
         'metrics_by_market': {},
         'quarantine_counts': {},
         'futures_shadow_analysis': {},
+        'futures_walk_forward_analysis': {},
         'missed_details': [],
         'last_review_log': None,
         'error': None,
@@ -1343,6 +1735,12 @@ def _fetch_learning_data() -> Dict:
         }
         data['futures_shadow_analysis'] = _calc_shadow_futures_analysis(
             cohorts['futures_shadow']
+        )
+        data['futures_walk_forward_analysis'] = (
+            _calc_cautious_walk_forward_analysis(
+                cohorts['futures_verified'],
+                cohorts['futures_shadow']
+            )
         )
         data['total_signals'] = len(eligible_signals)
         data['pending_signals'] = (
@@ -1822,6 +2220,178 @@ def generate_learning_pdf() -> bytes:
             "cohorte nueva aún no tiene registros disponibles.</i>",
             style_body
         ))
+
+    # =============================================================
+    # COMMIT 36 — PREMIUM VS CAUTIOUS_SHADOW / VALIDACIÓN TEMPORAL
+    # =============================================================
+    walk = data.get('futures_walk_forward_analysis') or {}
+
+    story.append(PageBreak())
+    story.append(Paragraph(
+        "FUTURES — validación temporal Premium vs CAUTIOUS_SHADOW",
+        style_h2
+    ))
+    story.append(Paragraph(
+        "Commit 36 <b>no modifica ninguna decisión</b>. Las reglas de "
+        "CAUTIOUS_SHADOW quedaron fijadas antes de observar esta validación. "
+        "El informe separa cronológicamente una zona inicial de calibración "
+        "(70%) y una zona posterior de validación (30%). Cautious conserva "
+        "Entry/SL/TP/leverage originales y simula sólo <b>0.50x del presupuesto "
+        "de riesgo</b>.",
+        style_body
+    ))
+
+    profile_available = int(
+        walk.get('cautious_profile_available') or 0
+    )
+    cautious_candidates = int(
+        walk.get('cautious_candidates') or 0
+    )
+    premium_candidates = int(
+        walk.get('premium_candidates') or 0
+    )
+    cutoff = str(
+        walk.get('cutoff_created_at') or '—'
+    )
+
+    overview_rows = [
+        ['Validación Commit 36', 'Valor'],
+        ['Snapshots Cautious disponibles', str(profile_available)],
+        ['Candidatos CAUTIOUS_SHADOW', str(cautious_candidates)],
+        ['Futures Premium verificables', str(premium_candidates)],
+        ['Corte temporal 70/30', cutoff[:32]],
+        ['Estado promoción', str(walk.get('promotion_status') or 'NOT_READY')],
+    ]
+    twalk = Table(overview_rows, colWidths=[10.5*cm, 5.5*cm])
+    twalk.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), HexColor('#1565c0')),
+        ('TEXTCOLOR', (0,0), (-1,0), white),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0,0), (-1,-1), 9),
+        ('GRID', (0,0), (-1,-1), 0.3, HexColor('#c8ccd6')),
+        ('ROWBACKGROUNDS', (0,1), (-1,-1), [HexColor('#edf5ff'), white]),
+        ('LEFTPADDING', (0,0), (-1,-1), 6),
+        ('TOPPADDING', (0,0), (-1,-1), 4),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+    ]))
+    story.append(twalk)
+
+    def _wf_text(value, fmt='.3f', suffix=''):
+        if value is None:
+            return '—'
+        try:
+            return f"{float(value):{fmt}}{suffix}"
+        except Exception:
+            return str(value)
+
+    def _append_wf_table(title, block):
+        story.append(Paragraph(title, style_h3))
+        rows = [[
+            'Cohorte', 'N', 'Entry', 'TP', 'SL', 'WR %',
+            'Exp.R', 'Exp.R riesgo', 'DD riesgo R', 'N neto'
+        ]]
+
+        for label, key in (
+            ('PREMIUM', 'premium'),
+            ('CAUTIOUS', 'cautious'),
+        ):
+            metrics = (block.get(key) or {}) if isinstance(block, dict) else {}
+            rows.append([
+                label,
+                str(metrics.get('total', 0)),
+                str(metrics.get('entry_touched', 0)),
+                str(metrics.get('tp_hit', 0)),
+                str(metrics.get('sl_hit', 0)),
+                '—' if metrics.get('win_rate') is None else f"{metrics.get('win_rate'):.1f}",
+                '—' if metrics.get('expectancy_r') is None else f"{metrics.get('expectancy_r'):+.3f}",
+                '—' if metrics.get('budget_expectancy_r') is None else f"{metrics.get('budget_expectancy_r'):+.3f}",
+                '—' if metrics.get('max_drawdown_budget_r') is None else f"{metrics.get('max_drawdown_budget_r'):.3f}",
+                str(metrics.get('net_outcome_samples', 0)),
+            ])
+
+        table = Table(
+            rows,
+            colWidths=[2.2*cm, 0.8*cm, 1.0*cm, 0.8*cm, 0.8*cm,
+                       1.2*cm, 1.3*cm, 1.7*cm, 1.7*cm, 1.1*cm]
+        )
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), HexColor('#3949ab')),
+            ('TEXTCOLOR', (0,0), (-1,0), white),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0,0), (-1,-1), 7.4),
+            ('GRID', (0,0), (-1,-1), 0.3, HexColor('#c8ccd6')),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [HexColor('#f1f3ff'), white]),
+            ('ALIGN', (1,0), (-1,-1), 'CENTER'),
+        ]))
+        story.append(table)
+
+    _append_wf_table(
+        "Calibración temporal — primeros 70%",
+        walk.get('calibration') or {}
+    )
+    _append_wf_table(
+        "Validación fuera de tiempo — últimos 30%",
+        walk.get('validation') or {}
+    )
+
+    story.append(Paragraph(
+        "<b>Exp.R riesgo</b> expresa la contribución al presupuesto normal de "
+        "riesgo: Premium usa 1.00x y Cautious 0.50x. El R geométrico de la "
+        "operación no cambia. <b>DD riesgo R</b> es el drawdown secuencial de "
+        "resultados resueltos expresado en ese mismo presupuesto; no es dinero "
+        "real.",
+        style_note
+    ))
+
+    status_counts = walk.get('cautious_status_counts') or {}
+    if status_counts:
+        story.append(Paragraph("Cobertura del experimento Cautious", style_h3))
+        rows = [['Estado Cautious', 'N']]
+        for key, value in sorted(
+            status_counts.items(),
+            key=lambda item: (-int(item[1]), str(item[0]))
+        ):
+            rows.append([str(key)[:45], str(value)])
+        tcov = Table(rows, colWidths=[11*cm, 2.5*cm])
+        tcov.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), HexColor('#00838f')),
+            ('TEXTCOLOR', (0,0), (-1,0), white),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0,0), (-1,-1), 8.5),
+            ('GRID', (0,0), (-1,-1), 0.3, HexColor('#c8ccd6')),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [HexColor('#edfafa'), white]),
+        ]))
+        story.append(tcov)
+
+    story.append(Paragraph("Gate de promoción al Commit 37", style_h3))
+    if walk.get('promotion_ready'):
+        story.append(Paragraph(
+            "<b>READY_FOR_COMMIT_37_REVIEW</b>: la cohorte supera los guardrails "
+            "estadísticos de este informe. Esto NO la publica automáticamente; "
+            "sólo habilita una revisión explícita antes de tocar producción.",
+            style_note
+        ))
+    else:
+        reasons = walk.get('promotion_reasons') or [
+            'Todavía no existe evidencia suficiente.'
+        ]
+        reason_text = '<br/>'.join(
+            f"• {str(reason)}"
+            for reason in reasons[:8]
+        )
+        story.append(Paragraph(
+            "<b>NO PROMOVER.</b><br/>" + reason_text,
+            style_note
+        ))
+
+    story.append(Paragraph(
+        "<b>Costes:</b> para ser CAUTIOUS_SHADOW el setup ya tuvo que pasar el "
+        "guardrail económico NET_PROFIT calculado por Futures en el momento de "
+        "la señal. Sin embargo, este informe no inventa comisión, slippage o "
+        "funding realizados. La promoción queda bloqueada hasta que los resultados "
+        "resueltos persistan atribución neta verificable (por ejemplo net_pnl_pct).",
+        style_note
+    ))
 
     story.append(Paragraph(
         "<b>Regla de interpretación:</b> un Shadow que habría tocado TP no prueba "
