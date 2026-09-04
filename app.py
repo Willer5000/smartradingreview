@@ -28556,7 +28556,33 @@ def ejecutar_analisis_completo(timeframe):
                     decision = resultado['decision']['action']
                     confianza = resultado['decision']['confidence']
                     print(f"   ✅ {par}: {decision} ({confianza:.0f}%)")
-                    
+                    # ======================================================
+                    # TELEGRAM v23 — SPOT SÓLO CUANDO TOCA ENTRY
+                    # ======================================================
+                    #
+                    # Este scheduler debe seguir analizando Spot normalmente:
+                    # - BTC-USDT
+                    # - PAXG-USDT
+                    # - PAXG-BTC
+                    #
+                    # También conserva los resultados para que los siguientes
+                    # pares puedan utilizar BTC/PAXG como contexto.
+                    #
+                    # Lo único que se elimina es la alerta PREMATURA que antes
+                    # se enviaba apenas aparecía COMPRA/VENTA.
+                    #
+                    # La alerta operativa correcta la gestiona
+                    # monitor_entries_loop() cuando el precio alcanza Entry.
+                    #
+                    # NO modifica la señal ni su análisis.
+                    # ======================================================
+
+                    print(
+                        f"   🔕 Telegram Spot: análisis registrado; "
+                        f"se esperará toque de Entry para alertar."
+                    )
+
+                    continue                    
                     # ============ VERIFICAR SI DEBE ENVIARSE ============
                     # 1. ¿Es señal de trading?
                     if decision not in ['COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT']:
