@@ -316,7 +316,7 @@ class ReviewTrader:
                 or levels.get('probability_status')
             )
         }
-============================================================================
+# ============================================================================
 # BLOQUE B — MÉTODOS DE ReviewTrader
 # Pegar dentro de class ReviewTrader, justo después de _build_learning_provenance()
 # y antes de _get_signal_learning().
