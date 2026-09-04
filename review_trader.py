@@ -947,7 +947,345 @@ class ReviewTrader:
                     ''
                 ) or ''
             )
-        }        
+        }
+
+        # ==============================================================
+        # COMMIT 32 — PUBLICATION GATE FUTURES PARA APRENDIZAJE
+        # ==============================================================
+        #
+        # El motor Futures ya conoce exactamente por qué una oportunidad
+        # fue publicada o rechazada.
+        #
+        # Hasta ahora ReviewTrader guardaba las métricas individuales,
+        # pero NO la decisión completa del publication gate.
+        #
+        # Este snapshot permite estudiar posteriormente:
+        #
+        #   Safety
+        #   TP Quality
+        #   SL Quality
+        #   RR
+        #   ROI TP
+        #   beneficio neto
+        #   pérdida en SL
+        #   estrés ATR
+        #
+        # IMPORTANTE:
+        # - NO cambia ninguna decisión.
+        # - NO cambia Safety.
+        # - NO cambia Entry / SL / TP.
+        # - NO cambia leverage.
+        # - NO cambia pesos.
+        # - Sólo persiste el diagnóstico que YA calculó Futures.
+        # ==============================================================
+
+        raw_gate = (
+            levels.get(
+                'futures_publication_gate'
+            )
+            or {}
+        )
+
+        if isinstance(
+            raw_gate,
+            dict
+        ) and raw_gate:
+
+            raw_reasons = (
+                raw_gate.get(
+                    'reasons'
+                )
+                or []
+            )
+
+            if not isinstance(
+                raw_reasons,
+                (list, tuple)
+            ):
+
+                raw_reasons = [
+                    raw_reasons
+                ]
+
+            raw_thresholds = (
+                raw_gate.get(
+                    'thresholds'
+                )
+                or {}
+            )
+
+            if not isinstance(
+                raw_thresholds,
+                dict
+            ):
+
+                raw_thresholds = {}
+
+            def _publication_optional_float(
+                value
+            ):
+
+                try:
+
+                    number = float(
+                        value
+                    )
+
+                    return (
+                        number
+                        if math.isfinite(
+                            number
+                        )
+                        else None
+                    )
+
+                except (
+                    TypeError,
+                    ValueError
+                ):
+
+                    return None
+
+            # ==========================================================
+            # NORMALIZAR MOTIVOS
+            # ==========================================================
+            #
+            # La descripción humana original se conserva.
+            #
+            # Además creamos códigos estables para estadísticas:
+            #
+            # SAFETY
+            # TP_QUALITY
+            # SL_QUALITY
+            # RR
+            # ROI_TP
+            # NET_PROFIT
+            # LOSS_AT_SL
+            # ATR_STRESS
+            # OTHER
+            # ==========================================================
+
+            reason_codes = []
+
+            for reason in raw_reasons:
+
+                reason_text = str(
+                    reason
+                    or ''
+                ).strip()
+
+                reason_lower = (
+                    reason_text.lower()
+                )
+
+                if (
+                    'safety'
+                    in reason_lower
+                ):
+
+                    code = (
+                        'SAFETY'
+                    )
+
+                elif (
+                    'calidad tp'
+                    in reason_lower
+                    or 'tp quality'
+                    in reason_lower
+                ):
+
+                    code = (
+                        'TP_QUALITY'
+                    )
+
+                elif (
+                    'protección sl'
+                    in reason_lower
+                    or 'proteccion sl'
+                    in reason_lower
+                    or 'sl quality'
+                    in reason_lower
+                ):
+
+                    code = (
+                        'SL_QUALITY'
+                    )
+
+                elif (
+                    'r/r'
+                    in reason_lower
+                    or 'risk_reward'
+                    in reason_lower
+                ):
+
+                    code = (
+                        'RR'
+                    )
+
+                elif (
+                    'roi tp'
+                    in reason_lower
+                ):
+
+                    code = (
+                        'ROI_TP'
+                    )
+
+                elif (
+                    'beneficio neto'
+                    in reason_lower
+                ):
+
+                    code = (
+                        'NET_PROFIT'
+                    )
+
+                elif (
+                    'pérdida estimada en sl'
+                    in reason_lower
+                    or 'perdida estimada en sl'
+                    in reason_lower
+                ):
+
+                    code = (
+                        'LOSS_AT_SL'
+                    )
+
+                elif (
+                    'estrés atr'
+                    in reason_lower
+                    or 'estres atr'
+                    in reason_lower
+                ):
+
+                    code = (
+                        'ATR_STRESS'
+                    )
+
+                else:
+
+                    code = (
+                        'OTHER'
+                    )
+
+                if code not in reason_codes:
+
+                    reason_codes.append(
+                        code
+                    )
+
+            context[
+                'futures_publication'
+            ] = {
+
+                'eligible':
+                    self._as_bool(
+                        raw_gate.get(
+                            'eligible',
+                            False
+                        )
+                    ),
+
+                'tier':
+                    str(
+                        raw_gate.get(
+                            'tier'
+                        )
+                        or (
+                            'PREMIUM'
+                            if self._as_bool(
+                                raw_gate.get(
+                                    'eligible',
+                                    False
+                                )
+                            )
+                            else 'ANALYSIS_ONLY'
+                        )
+                    ),
+
+                'rejection_count':
+                    len(
+                        raw_reasons
+                    ),
+
+                'reason_codes':
+                    reason_codes,
+
+                # Guardamos también el texto para auditoría humana.
+                # Máximo 8 motivos y longitud limitada para no inflar JSON.
+                'reasons': [
+
+                    str(
+                        reason
+                    )[:180]
+
+                    for reason
+                    in raw_reasons[:8]
+
+                ],
+
+                'tp_touch_quality_score':
+                    _publication_optional_float(
+                        raw_gate.get(
+                            'tp_touch_quality_score'
+                        )
+                    ),
+
+                'sl_avoidance_quality_score':
+                    _publication_optional_float(
+                        raw_gate.get(
+                            'sl_avoidance_quality_score'
+                        )
+                    ),
+
+                'preferred_leverage_min':
+                    _publication_optional_float(
+                        raw_gate.get(
+                            'preferred_leverage_min'
+                        )
+                    ),
+
+                'preferred_leverage_max':
+                    _publication_optional_float(
+                        raw_gate.get(
+                            'preferred_leverage_max'
+                        )
+                    ),
+
+                'leverage_in_preferred_band':
+                    self._as_bool(
+                        raw_gate.get(
+                            'leverage_in_preferred_band',
+                            False
+                        )
+                    ),
+
+                'probability_status':
+                    str(
+                        raw_gate.get(
+                            'probability_status'
+                        )
+                        or ''
+                    ),
+
+                'thresholds': {
+
+                    str(
+                        key
+                    ):
+                        _publication_optional_float(
+                            value
+                        )
+
+                    for key, value
+                    in raw_thresholds.items()
+
+                    if _publication_optional_float(
+                        value
+                    ) is not None
+                }
+            }
+
         return context
     
     # ========================================================================
