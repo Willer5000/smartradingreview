@@ -31,7 +31,26 @@ let lastPrices = {
 };
 
 let lastTGPResult = null;
+// ============================================================================
+// COMMIT 34D — PREFERENCIAS TELEGRAM GUARDIAN SPOT
+// ============================================================================
 
+const SPOT_TELEGRAM_TIMEFRAMES = [
+    '4h',
+    '12h',
+    '1D',
+    '1W'
+];
+
+let spotTelegramPreferences = {
+    spot_telegram_enabled: true,
+    spot_telegram_timeframes: [
+        '4h',
+        '12h',
+        '1D',
+        '1W'
+    ]
+};
 
 // ============================================================================
 // ESTADO DE AUTENTICACIÓN
@@ -68,7 +87,27 @@ function clearPrivateUserState() {
     };
 
     lastTGPResult = null;
+    spotTelegramPreferences = {
+        spot_telegram_enabled: true,
+        spot_telegram_timeframes: [
+            '4h',
+            '12h',
+            '1D',
+            '1W'
+        ]
+    };
 
+    const telegramPrefsCard =
+        document.getElementById(
+            'spot-telegram-preferences-card'
+        );
+
+    if (telegramPrefsCard) {
+
+        telegramPrefsCard.classList.add(
+            'd-none'
+        );
+    }
     const loginPrompt =
         document.getElementById('portfolio-login-prompt');
 
@@ -281,6 +320,699 @@ async function loadUserPortfolio() {
     }
 }
 
+// ============================================================================
+// COMMIT 34D — TELEGRAM SPOT POR USUARIO
+// ============================================================================
+
+function ensureSpotTelegramPreferencesUI() {
+
+    // Este panel pertenece exclusivamente a Spot.
+    if (window.IS_FUTURES_PAGE) {
+        return null;
+    }
+
+    let card = document.getElementById(
+        'spot-telegram-preferences-card'
+    );
+
+    if (card) {
+        return card;
+    }
+
+    const portfolioPanel =
+        document.getElementById(
+            'portfolio-panel'
+        );
+
+    if (!portfolioPanel) {
+        return null;
+    }
+
+    card = document.createElement(
+        'div'
+    );
+
+    card.id =
+        'spot-telegram-preferences-card';
+
+    card.className =
+        'card bg-dark border-info mb-3 d-none';
+
+    card.innerHTML = `
+        <div
+            class="
+                card-header
+                d-flex
+                justify-content-between
+                align-items-center
+                py-2
+            "
+        >
+            <span
+                class="
+                    fw-bold
+                    text-info
+                "
+            >
+                🔔 Guardian Spot · Telegram
+            </span>
+
+            <button
+                type="button"
+                id="btn-toggle-spot-telegram-prefs"
+                class="
+                    btn
+                    btn-sm
+                    btn-outline-info
+                "
+                title="Mostrar/ocultar"
+            >
+                +
+            </button>
+        </div>
+
+        <div
+            id="spot-telegram-preferences-body"
+            class="card-body p-3 d-none"
+        >
+            <div
+                class="
+                    form-check
+                    form-switch
+                    mb-3
+                "
+            >
+                <input
+                    class="form-check-input"
+                    type="checkbox"
+                    id="spot-telegram-enabled"
+                >
+
+                <label
+                    class="form-check-label"
+                    for="spot-telegram-enabled"
+                >
+                    Alertas Guardian Spot activadas
+                </label>
+            </div>
+
+            <div
+                class="
+                    small
+                    text-muted
+                    mb-2
+                "
+            >
+                Avisarme cuando termine el análisis:
+            </div>
+
+            <div
+                class="
+                    d-flex
+                    flex-wrap
+                    gap-2
+                    mb-3
+                "
+                id="spot-telegram-timeframes"
+            >
+                <label
+                    class="
+                        form-check
+                        form-check-inline
+                        m-0
+                    "
+                >
+                    <input
+                        class="
+                            form-check-input
+                            spot-telegram-tf
+                        "
+                        type="checkbox"
+                        value="4h"
+                    >
+                    <span
+                        class="form-check-label"
+                    >
+                        4h
+                    </span>
+                </label>
+
+                <label
+                    class="
+                        form-check
+                        form-check-inline
+                        m-0
+                    "
+                >
+                    <input
+                        class="
+                            form-check-input
+                            spot-telegram-tf
+                        "
+                        type="checkbox"
+                        value="12h"
+                    >
+                    <span
+                        class="form-check-label"
+                    >
+                        12h
+                    </span>
+                </label>
+
+                <label
+                    class="
+                        form-check
+                        form-check-inline
+                        m-0
+                    "
+                >
+                    <input
+                        class="
+                            form-check-input
+                            spot-telegram-tf
+                        "
+                        type="checkbox"
+                        value="1D"
+                    >
+                    <span
+                        class="form-check-label"
+                    >
+                        1D
+                    </span>
+                </label>
+
+                <label
+                    class="
+                        form-check
+                        form-check-inline
+                        m-0
+                    "
+                >
+                    <input
+                        class="
+                            form-check-input
+                            spot-telegram-tf
+                        "
+                        type="checkbox"
+                        value="1W"
+                    >
+                    <span
+                        class="form-check-label"
+                    >
+                        1W
+                    </span>
+                </label>
+            </div>
+
+            <div
+                class="
+                    p-2
+                    rounded
+                    bg-black
+                    bg-opacity-25
+                    small
+                    text-muted
+                    mb-3
+                "
+            >
+                ℹ️ Esto sólo define
+                <strong>
+                    cuándo recibir Telegram
+                </strong>.
+                El Guardian continúa usando el
+                contexto multitemporal disponible
+                para tomar su decisión.
+            </div>
+
+            <button
+                type="button"
+                id="btn-save-spot-telegram-prefs"
+                class="
+                    btn
+                    btn-sm
+                    btn-outline-info
+                    w-100
+                "
+            >
+                💾 Guardar preferencias
+            </button>
+
+            <div
+                id="spot-telegram-prefs-status"
+                class="
+                    small
+                    text-muted
+                    mt-2
+                "
+            ></div>
+        </div>
+    `;
+
+    portfolioPanel.insertAdjacentElement(
+        'afterend',
+        card
+    );
+
+    const toggleButton =
+        document.getElementById(
+            'btn-toggle-spot-telegram-prefs'
+        );
+
+    const body =
+        document.getElementById(
+            'spot-telegram-preferences-body'
+        );
+
+    if (
+        toggleButton
+        && body
+    ) {
+
+        toggleButton.addEventListener(
+            'click',
+            () => {
+
+                body.classList.toggle(
+                    'd-none'
+                );
+
+                toggleButton.textContent =
+                    body.classList.contains(
+                        'd-none'
+                    )
+                        ? '+'
+                        : '−';
+            }
+        );
+    }
+
+    const enabled =
+        document.getElementById(
+            'spot-telegram-enabled'
+        );
+
+    if (enabled) {
+
+        enabled.addEventListener(
+            'change',
+            syncSpotTelegramPreferenceControls
+        );
+    }
+
+    const saveButton =
+        document.getElementById(
+            'btn-save-spot-telegram-prefs'
+        );
+
+    if (saveButton) {
+
+        saveButton.addEventListener(
+            'click',
+            saveSpotTelegramPreferences
+        );
+    }
+
+    return card;
+}
+
+
+function setSpotTelegramPreferencesVisible(
+    visible
+) {
+
+    const card =
+        ensureSpotTelegramPreferencesUI();
+
+    if (!card) {
+        return;
+    }
+
+    if (visible) {
+
+        card.classList.remove(
+            'd-none'
+        );
+
+    } else {
+
+        card.classList.add(
+            'd-none'
+        );
+    }
+}
+
+
+function syncSpotTelegramPreferenceControls() {
+
+    const enabledInput =
+        document.getElementById(
+            'spot-telegram-enabled'
+        );
+
+    const enabled =
+        enabledInput?.checked === true;
+
+    document
+        .querySelectorAll(
+            '.spot-telegram-tf'
+        )
+        .forEach(
+            input => {
+
+                input.disabled =
+                    !enabled;
+            }
+        );
+}
+
+
+function renderSpotTelegramPreferences() {
+
+    ensureSpotTelegramPreferencesUI();
+
+    const enabledInput =
+        document.getElementById(
+            'spot-telegram-enabled'
+        );
+
+    if (enabledInput) {
+
+        enabledInput.checked =
+            spotTelegramPreferences
+                .spot_telegram_enabled
+            === true;
+    }
+
+    const selected =
+        new Set(
+            spotTelegramPreferences
+                .spot_telegram_timeframes
+            || []
+        );
+
+    document
+        .querySelectorAll(
+            '.spot-telegram-tf'
+        )
+        .forEach(
+            input => {
+
+                input.checked =
+                    selected.has(
+                        input.value
+                    );
+            }
+        );
+
+    syncSpotTelegramPreferenceControls();
+
+    setSpotTelegramPreferencesVisible(
+        isAuthenticated()
+    );
+}
+
+
+async function loadSpotTelegramPreferences() {
+
+    if (
+        window.IS_FUTURES_PAGE
+        || !isAuthenticated()
+    ) {
+
+        setSpotTelegramPreferencesVisible(
+            false
+        );
+
+        return false;
+    }
+
+    ensureSpotTelegramPreferencesUI();
+
+    try {
+
+        const response = await fetch(
+            '/api/user/telegram-preferences',
+            {
+                method: 'GET',
+                credentials: 'same-origin',
+                cache: 'no-store'
+            }
+        );
+
+        const data =
+            await response.json();
+
+        if (
+            !response.ok
+            || data.success !== true
+            || data.authenticated !== true
+            || !data.preferences
+        ) {
+
+            throw new Error(
+                data.error
+                || 'No se pudieron cargar las preferencias.'
+            );
+        }
+
+        spotTelegramPreferences = {
+            spot_telegram_enabled:
+                data.preferences
+                    .spot_telegram_enabled
+                === true,
+
+            spot_telegram_timeframes:
+                Array.isArray(
+                    data.preferences
+                        .spot_telegram_timeframes
+                )
+                    ? data.preferences
+                        .spot_telegram_timeframes
+                    : []
+        };
+
+        renderSpotTelegramPreferences();
+
+        const status =
+            document.getElementById(
+                'spot-telegram-prefs-status'
+            );
+
+        if (status) {
+
+            status.textContent =
+                `Preferencias de ${currentUser} cargadas.`;
+        }
+
+        return true;
+
+    } catch (error) {
+
+        console.error(
+            '❌ Telegram Spot preferences:',
+            error
+        );
+
+        setSpotTelegramPreferencesVisible(
+            true
+        );
+
+        const status =
+            document.getElementById(
+                'spot-telegram-prefs-status'
+            );
+
+        if (status) {
+
+            status.textContent =
+                '⚠️ No se pudieron cargar las preferencias.';
+
+            status.className =
+                'small text-warning mt-2';
+        }
+
+        return false;
+    }
+}
+
+
+async function saveSpotTelegramPreferences() {
+
+    if (!isAuthenticated()) {
+
+        showToast(
+            'Debes iniciar sesión.',
+            'warning'
+        );
+
+        return false;
+    }
+
+    const enabled =
+        document.getElementById(
+            'spot-telegram-enabled'
+        )?.checked === true;
+
+    const selectedTimeframes =
+        Array.from(
+            document.querySelectorAll(
+                '.spot-telegram-tf:checked'
+            )
+        )
+        .map(
+            input => input.value
+        )
+        .filter(
+            tf => (
+                SPOT_TELEGRAM_TIMEFRAMES
+                .includes(
+                    tf
+                )
+            )
+        );
+
+    const saveButton =
+        document.getElementById(
+            'btn-save-spot-telegram-prefs'
+        );
+
+    if (saveButton) {
+
+        saveButton.disabled =
+            true;
+
+        saveButton.textContent =
+            'Guardando...';
+    }
+
+    try {
+
+        const response = await fetch(
+            '/api/user/telegram-preferences',
+            {
+                method: 'POST',
+
+                headers: {
+                    'Content-Type':
+                        'application/json'
+                },
+
+                credentials:
+                    'same-origin',
+
+                body: JSON.stringify({
+                    spot_telegram_enabled:
+                        enabled,
+
+                    spot_telegram_timeframes:
+                        selectedTimeframes
+                })
+            }
+        );
+
+        const data =
+            await response.json();
+
+        if (
+            !response.ok
+            || data.success !== true
+            || !data.preferences
+        ) {
+
+            throw new Error(
+                data.error
+                || 'No se pudieron guardar las preferencias.'
+            );
+        }
+
+        spotTelegramPreferences = {
+            spot_telegram_enabled:
+                data.preferences
+                    .spot_telegram_enabled
+                === true,
+
+            spot_telegram_timeframes:
+                Array.isArray(
+                    data.preferences
+                        .spot_telegram_timeframes
+                )
+                    ? data.preferences
+                        .spot_telegram_timeframes
+                    : []
+        };
+
+        renderSpotTelegramPreferences();
+
+        showToast(
+            'Preferencias Telegram guardadas.',
+            'success'
+        );
+
+        const status =
+            document.getElementById(
+                'spot-telegram-prefs-status'
+            );
+
+        if (status) {
+
+            if (
+                !spotTelegramPreferences
+                    .spot_telegram_enabled
+            ) {
+
+                status.textContent =
+                    '🔕 Telegram Spot desactivado.';
+
+            } else if (
+                spotTelegramPreferences
+                    .spot_telegram_timeframes
+                    .length === 0
+            ) {
+
+                status.textContent =
+                    '🔕 Sin temporalidades seleccionadas.';
+
+            } else {
+
+                status.textContent =
+                    '🔔 Avisos en: '
+                    + spotTelegramPreferences
+                        .spot_telegram_timeframes
+                        .join(', ');
+            }
+
+            status.className =
+                'small text-info mt-2';
+        }
+
+        return true;
+
+    } catch (error) {
+
+        console.error(
+            '❌ Guardando Telegram Spot:',
+            error
+        );
+
+        showToast(
+            'No se pudieron guardar las preferencias Telegram.',
+            'danger'
+        );
+
+        return false;
+
+    } finally {
+
+        if (saveButton) {
+
+            saveButton.disabled =
+                false;
+
+            saveButton.textContent =
+                '💾 Guardar preferencias';
+        }
+    }
+}
 
 // ============================================================================
 // GUARDAR PORTFOLIO REAL EN SERVIDOR
@@ -803,6 +1535,8 @@ async function initTGPSession() {
 
     await loadUserPortfolio();
 
+    await loadSpotTelegramPreferences();
+
     updatePortfolioUI();
 
     console.log(
@@ -885,6 +1619,8 @@ async function doLogin() {
         isLoggedIn = true;
 
         await loadUserPortfolio();
+
+        await loadSpotTelegramPreferences();
 
         updatePortfolioUI();
 
