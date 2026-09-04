@@ -29308,7 +29308,1078 @@ def ejecutar_analisis_completo(timeframe):
         import traceback
         traceback.print_exc()
 
+# ============================================================================
+# COMMIT 30 — GUARDIAN TELEGRAM COMPARTIDO + ANTI-SPAM
+# ============================================================================
+#
+# Filosofía:
+#
+# - Un solo chat Telegram para todos los usuarios autorizados.
+# - Cada mensaje identifica claramente al propietario.
+# - HOLD y WAIT_ENTRY nunca generan mensajes.
+# - PROTECT / EXTEND / REDUCE / EXIT sí pueden generar alerta.
+# - Nunca modifica posiciones, SL, TP o Supabase.
+# - No cambia TELEGRAM_BOT_TOKEN ni TELEGRAM_CHAT_ID.
+#
+# La deduplicación se persiste en /tmp para sobrevivir al reciclado normal
+# del worker de Gunicorn.
+# ============================================================================
 
+GUARDIAN_TELEGRAM_CHECK_INTERVAL = 180       # 3 minutos
+GUARDIAN_TELEGRAM_MIN_INTERVAL = 45 * 60     # 45 min entre gestiones no urgentes
+GUARDIAN_TELEGRAM_RETENTION = 7 * 24 * 3600  # 7 días
+
+_GUARDIAN_TELEGRAM_FILE = os.environ.get(
+    'GUARDIAN_TELEGRAM_FILE',
+    '/tmp/guardian_telegram_events.json'
+)
+
+_guardian_telegram_events = {}
+_guardian_telegram_lock = threading.Lock()
+
+
+def _telegram_escape(value):
+    """Escape mínimo para mensajes HTML de Telegram."""
+    return (
+        str(value or '')
+        .replace('&', '&amp;')
+        .replace('<', '&lt;')
+        .replace('>', '&gt;')
+    )
+
+
+def _telegram_price(value):
+    """Formato compacto de precios para Telegram."""
+    try:
+        value = float(value)
+
+        if value >= 1000:
+            return f'${value:,.2f}'
+
+        if value >= 1:
+            return f'${value:,.4f}'
+
+        return f'${value:.8f}'.rstrip('0').rstrip('.')
+
+    except Exception:
+        return '—'
+
+
+# ============================================================================
+# PERMISOS POR MERCADO
+# ============================================================================
+#
+# Por defecto:
+# todos los usuarios que ya existen en _auth_users() reciben ambos mercados.
+#
+# Opcionalmente en Render se pueden crear:
+#
+# SMARTRADING_SPOT_USERS=Willer,Danilo
+# SMARTRADING_FUTURES_USERS=Willer
+#
+# No es obligatorio crear esas variables.
+# ============================================================================
+
+def _telegram_market_users(market):
+
+    market = str(
+        market or ''
+    ).strip().lower()
+
+    env_name = (
+        'SMARTRADING_FUTURES_USERS'
+        if market == 'futures'
+        else 'SMARTRADING_SPOT_USERS'
+    )
+
+    raw = str(
+        os.environ.get(
+            env_name,
+            ''
+        )
+        or ''
+    ).strip()
+
+    system_users = set(
+        _auth_users().keys()
+    )
+
+    # Retrocompatibilidad:
+    # sin configuración especial → todos los usuarios del sistema.
+    if not raw:
+        return system_users
+
+    configured = {
+        item.strip()
+        for item in raw.split(',')
+        if item.strip()
+    }
+
+    return (
+        configured
+        & system_users
+    )
+
+
+def _telegram_user_has_market_permission(
+    user,
+    market
+):
+
+    return (
+        user
+        in _telegram_market_users(
+            market
+        )
+    )
+
+
+# ============================================================================
+# PERSISTENCIA DE DEDUP
+# ============================================================================
+
+def _load_guardian_telegram_events():
+
+    global _guardian_telegram_events
+
+    try:
+
+        if not os.path.exists(
+            _GUARDIAN_TELEGRAM_FILE
+        ):
+            return
+
+        with open(
+            _GUARDIAN_TELEGRAM_FILE,
+            'r'
+        ) as f:
+
+            data = json.load(
+                f
+            )
+
+        if not isinstance(
+            data,
+            dict
+        ):
+            return
+
+        cutoff = (
+            time.time()
+            - GUARDIAN_TELEGRAM_RETENTION
+        )
+
+        _guardian_telegram_events = {
+
+            str(key):
+                float(value)
+
+            for key, value
+            in data.items()
+
+            if isinstance(
+                value,
+                (int, float)
+            )
+            and float(value) >= cutoff
+        }
+
+        print(
+            "📂 Guardian Telegram: "
+            f"{len(_guardian_telegram_events)} "
+            "eventos deduplicados cargados."
+        )
+
+    except Exception as e:
+
+        print(
+            "⚠️ Guardian Telegram: "
+            f"no se pudo cargar dedup: {e}"
+        )
+
+        _guardian_telegram_events = {}
+
+
+def _save_guardian_telegram_events():
+
+    try:
+
+        with _guardian_telegram_lock:
+
+            snapshot = dict(
+                _guardian_telegram_events
+            )
+
+        tmp_path = (
+            _GUARDIAN_TELEGRAM_FILE
+            + '.tmp'
+        )
+
+        with open(
+            tmp_path,
+            'w'
+        ) as f:
+
+            json.dump(
+                snapshot,
+                f
+            )
+
+        os.replace(
+            tmp_path,
+            _GUARDIAN_TELEGRAM_FILE
+        )
+
+    except Exception as e:
+
+        print(
+            "⚠️ Guardian Telegram: "
+            f"no se pudo guardar dedup: {e}"
+        )
+
+
+_load_guardian_telegram_events()
+
+
+# ============================================================================
+# IDENTIDAD DE EVENTO
+# ============================================================================
+
+def _guardian_event_key(
+    user,
+    market,
+    subject,
+    action,
+    bucket=''
+):
+
+    return (
+        f"{user}|"
+        f"{market}|"
+        f"{subject}|"
+        f"{action}|"
+        f"{bucket}"
+    )
+
+
+def _guardian_throttle_key(
+    user,
+    market,
+    subject
+):
+
+    return (
+        f"_LAST_|"
+        f"{user}|"
+        f"{market}|"
+        f"{subject}"
+    )
+
+
+def _guardian_alert_can_send(
+    user,
+    market,
+    subject,
+    action,
+    bucket='',
+    min_interval=None
+):
+    """
+    Retorna (event_key, throttle_key) si puede alertar.
+    Retorna None si debe permanecer en silencio.
+    """
+
+    if not _telegram_user_has_market_permission(
+        user,
+        market
+    ):
+
+        return None
+
+    action = str(
+        action or ''
+    ).upper()
+
+    event_key = (
+        _guardian_event_key(
+            user,
+            market,
+            subject,
+            action,
+            bucket
+        )
+    )
+
+    throttle_key = (
+        _guardian_throttle_key(
+            user,
+            market,
+            subject
+        )
+    )
+
+    now = time.time()
+
+    if min_interval is None:
+
+        min_interval = (
+            GUARDIAN_TELEGRAM_MIN_INTERVAL
+        )
+
+    with _guardian_telegram_lock:
+
+        # Exactamente este evento ya fue enviado.
+        if (
+            event_key
+            in _guardian_telegram_events
+        ):
+
+            return None
+
+        # EXIT es urgente:
+        # puede superar el cooldown, pero no duplicarse.
+        if action != 'EXIT':
+
+            last_ts = float(
+                _guardian_telegram_events.get(
+                    throttle_key,
+                    0
+                )
+                or 0
+            )
+
+            if (
+                last_ts > 0
+                and now - last_ts
+                < min_interval
+            ):
+
+                return None
+
+    return (
+        event_key,
+        throttle_key
+    )
+
+
+def _guardian_alert_mark_sent(
+    reservation
+):
+
+    if not reservation:
+        return
+
+    event_key, throttle_key = (
+        reservation
+    )
+
+    now = time.time()
+
+    with _guardian_telegram_lock:
+
+        _guardian_telegram_events[
+            event_key
+        ] = now
+
+        _guardian_telegram_events[
+            throttle_key
+        ] = now
+
+        # Protección de memoria.
+        if len(
+            _guardian_telegram_events
+        ) > 1000:
+
+            cutoff = (
+                now
+                - GUARDIAN_TELEGRAM_RETENTION
+            )
+
+            old_keys = [
+                key
+                for key, value
+                in _guardian_telegram_events.items()
+                if float(value or 0)
+                < cutoff
+            ]
+
+            for key in old_keys:
+
+                _guardian_telegram_events.pop(
+                    key,
+                    None
+                )
+
+    _save_guardian_telegram_events()
+
+
+# ============================================================================
+# ESCALÓN MATERIAL DE SL / TP
+# ============================================================================
+
+def _guardian_futures_level_bucket(
+    signal,
+    advice,
+    management_action
+):
+    """
+    Evita mandar otro mensaje porque el SL cambió unos centavos.
+
+    Cada nuevo escalón equivale aproximadamente a 0.25R
+    respecto al riesgo inicial Entry–SL.
+    """
+
+    try:
+
+        entry = float(
+            signal.get(
+                'entry',
+                signal.get(
+                    'entry_price',
+                    0
+                )
+            )
+            or 0
+        )
+
+        original_sl = float(
+            signal.get(
+                'stop_loss',
+                0
+            )
+            or 0
+        )
+
+        original_tp = float(
+            signal.get(
+                'take_profit',
+                0
+            )
+            or 0
+        )
+
+        risk_abs = abs(
+            entry
+            - original_sl
+        )
+
+        if risk_abs <= 0:
+
+            return 'STATE'
+
+        parts = []
+
+        action = str(
+            management_action
+            or ''
+        ).upper()
+
+        if action in (
+            'PROTECT',
+            'PROTECT_AND_EXTEND'
+        ):
+
+            suggested_sl = advice.get(
+                'suggested_stop_loss'
+            )
+
+            if suggested_sl is not None:
+
+                delta_r = (
+                    abs(
+                        float(suggested_sl)
+                        - original_sl
+                    )
+                    / risk_abs
+                )
+
+                step = int(
+                    delta_r
+                    / 0.25
+                )
+
+                parts.append(
+                    f"SL{step}"
+                )
+
+        if action in (
+            'EXTEND',
+            'PROTECT_AND_EXTEND'
+        ):
+
+            suggested_tp = advice.get(
+                'suggested_take_profit'
+            )
+
+            if suggested_tp is not None:
+
+                delta_r = (
+                    abs(
+                        float(suggested_tp)
+                        - original_tp
+                    )
+                    / risk_abs
+                )
+
+                step = int(
+                    delta_r
+                    / 0.25
+                )
+
+                parts.append(
+                    f"TP{step}"
+                )
+
+        return (
+            '-'.join(
+                parts
+            )
+            or 'STATE'
+        )
+
+    except Exception:
+
+        return 'STATE'
+
+
+# ============================================================================
+# MENSAJE FUTURES GUARDIAN
+# ============================================================================
+
+def _build_futures_guardian_telegram_message(
+    user,
+    signal,
+    advice,
+    current_price,
+    management_action
+):
+
+    symbol = str(
+        signal.get(
+            'symbol',
+            '?'
+        )
+    )
+
+    timeframe = str(
+        signal.get(
+            'timeframe',
+            '?'
+        )
+    )
+
+    direction = str(
+        signal.get(
+            'action',
+            '?'
+        )
+    ).upper()
+
+    leverage = signal.get(
+        'leverage'
+    )
+
+    original_sl = signal.get(
+        'stop_loss'
+    )
+
+    original_tp = signal.get(
+        'take_profit'
+    )
+
+    suggested_sl = advice.get(
+        'suggested_stop_loss'
+    )
+
+    suggested_tp = advice.get(
+        'suggested_take_profit'
+    )
+
+    progress_r = advice.get(
+        'progress_r'
+    )
+
+    deterioration = advice.get(
+        'deterioration_score',
+        0
+    )
+
+    reason = (
+        advice.get(
+            'management_reason'
+        )
+        or advice.get(
+            'reason'
+        )
+        or ''
+    )
+
+    labels = {
+
+        'PROTECT':
+            '🛡️ <b>PROTEGER POSICIÓN</b>',
+
+        'EXTEND':
+            '🎯 <b>EXTENDER OBJETIVO</b>',
+
+        'PROTECT_AND_EXTEND':
+            '🛡️🎯 <b>PROTEGER + EXTENDER</b>',
+
+        'REDUCE':
+            '🟡 <b>REDUCIR / PROTEGER</b>',
+
+        'EXIT':
+            '🔴 <b>SALIR DE LA OPERACIÓN</b>'
+    }
+
+    headline = labels.get(
+        management_action,
+        management_action
+    )
+
+    lines = [
+
+        f"👤 <b>{_telegram_escape(user)}</b>",
+        "🛡️ <b>FUTURES GUARDIAN</b>",
+        '',
+        headline,
+        '',
+        (
+            f"<b>{_telegram_escape(symbol)}</b> "
+            f"· {timeframe} · {direction}"
+        )
+    ]
+
+    if leverage:
+
+        try:
+
+            lines[-1] += (
+                f" · x{int(float(leverage))}"
+            )
+
+        except Exception:
+            pass
+
+    lines.extend([
+        '',
+        (
+            "💹 Precio actual: "
+            f"<b>{_telegram_price(current_price)}</b>"
+        )
+    ])
+
+    if management_action in (
+        'PROTECT',
+        'PROTECT_AND_EXTEND'
+    ):
+
+        lines.extend([
+            '',
+            '🛡️ <b>Protección de riesgo</b>',
+            (
+                "SL original: "
+                f"{_telegram_price(original_sl)}"
+            ),
+            (
+                "SL sugerido: "
+                f"<b>{_telegram_price(suggested_sl)}</b>"
+            )
+        ])
+
+    if management_action in (
+        'EXTEND',
+        'PROTECT_AND_EXTEND'
+    ):
+
+        lines.extend([
+            '',
+            '🎯 <b>Objetivo</b>',
+            (
+                "TP original: "
+                f"{_telegram_price(original_tp)}"
+            ),
+            (
+                "TP sugerido: "
+                f"<b>{_telegram_price(suggested_tp)}</b>"
+            )
+        ])
+
+    if progress_r is not None:
+
+        try:
+
+            progress_r = float(
+                progress_r
+            )
+
+            lines.extend([
+                '',
+                (
+                    "📈 Progreso: "
+                    f"<b>{progress_r:+.2f}R</b>"
+                )
+            ])
+
+        except Exception:
+            pass
+
+    try:
+
+        lines.append(
+            "⚠️ Deterioro: "
+            f"{float(deterioration):.0f}/100"
+        )
+
+    except Exception:
+        pass
+
+    if reason:
+
+        lines.extend([
+            '',
+            (
+                "💡 "
+                + _telegram_escape(
+                    reason
+                )
+            )
+        ])
+
+    lines.extend([
+        '',
+        (
+            "⚠️ <i>Recomendación del Guardian. "
+            "No modifica automáticamente la orden.</i>"
+        )
+    ])
+
+    return '\n'.join(
+        lines
+    )
+
+
+# ============================================================================
+# MONITOR PROACTIVO FUTURES GUARDIAN
+# ============================================================================
+
+def monitor_guardian_telegram_loop():
+    """
+    Vigila exclusivamente señales Futures realmente activadas.
+
+    No analiza nuevas oportunidades.
+    No publica señales.
+    No toca posiciones.
+
+    Sólo evalúa saved_signals con status=entry_touched.
+    """
+
+    print("=" * 60)
+    print("🛡️📱 FUTURES GUARDIAN TELEGRAM iniciado")
+    print(
+        "   Intervalo: "
+        f"{GUARDIAN_TELEGRAM_CHECK_INTERVAL}s"
+    )
+    print("   HOLD / WAIT_ENTRY → silencio")
+    print("=" * 60)
+
+    # No competir con warmups iniciales.
+    time.sleep(
+        150
+    )
+
+    while True:
+
+        try:
+
+            from saved_signals import (
+                list_saved_signals
+            )
+
+            futures_market = (
+                _get_futures_system()
+            )
+
+            if futures_market is None:
+
+                time.sleep(
+                    GUARDIAN_TELEGRAM_CHECK_INTERVAL
+                )
+
+                continue
+
+            for user in sorted(
+                _telegram_market_users(
+                    'futures'
+                )
+            ):
+
+                try:
+
+                    signals = (
+                        list_saved_signals(
+                            status_filter=[
+                                'entry_touched'
+                            ],
+                            limit=50,
+                            user_name=user
+                        )
+                        or []
+                    )
+
+                except Exception as e:
+
+                    print(
+                        "⚠️ Guardian Telegram "
+                        f"{user}: saved_signals: {e}"
+                    )
+
+                    continue
+
+                if not signals:
+                    continue
+
+                # ======================================================
+                # Agrupar para UNA petición de mercado por symbol/TF
+                # ======================================================
+
+                grouped = {}
+
+                for sig in signals:
+
+                    symbol = sig.get(
+                        'symbol'
+                    )
+
+                    timeframe = sig.get(
+                        'timeframe'
+                    )
+
+                    if not symbol or not timeframe:
+                        continue
+
+                    grouped.setdefault(
+                        (
+                            symbol,
+                            timeframe
+                        ),
+                        []
+                    ).append(
+                        sig
+                    )
+
+                for (
+                    symbol,
+                    timeframe
+                ), group in grouped.items():
+
+                    try:
+
+                        # Commit 27:
+                        # SIEMPRE Futures Perpetual.
+                        df = (
+                            futures_market
+                            .get_kucoin_data(
+                                symbol,
+                                timeframe
+                            )
+                        )
+
+                        if (
+                            df is None
+                            or len(df) < 8
+                        ):
+
+                            continue
+
+                        recent = (
+                            df.tail(
+                                20
+                            )
+                            .copy()
+                        )
+
+                        current_price = float(
+                            recent[
+                                'close'
+                            ].iloc[-1]
+                        )
+
+                        candles = {
+
+                            'close': [
+                                float(v)
+                                for v
+                                in recent[
+                                    'close'
+                                ].tolist()
+                            ],
+
+                            'high': [
+                                float(v)
+                                for v
+                                in recent[
+                                    'high'
+                                ].tolist()
+                            ],
+
+                            'low': [
+                                float(v)
+                                for v
+                                in recent[
+                                    'low'
+                                ].tolist()
+                            ]
+                        }
+
+                        for sig in group:
+
+                            advice = (
+                                portfolio_guardian
+                                .evaluate_futures_position(
+                                    signal=sig,
+                                    current_price=(
+                                        current_price
+                                    ),
+                                    candles=candles
+                                )
+                            )
+
+                            if not isinstance(
+                                advice,
+                                dict
+                            ):
+
+                                continue
+
+                            base_action = str(
+                                advice.get(
+                                    'action',
+                                    'HOLD'
+                                )
+                            ).upper()
+
+                            management_action = str(
+                                advice.get(
+                                    'management_action',
+                                    base_action
+                                )
+                            ).upper()
+
+                            # EXIT / REDUCE tienen prioridad.
+                            if base_action in (
+                                'EXIT',
+                                'REDUCE'
+                            ):
+
+                                event_action = (
+                                    base_action
+                                )
+
+                            else:
+
+                                event_action = (
+                                    management_action
+                                )
+
+                            if event_action not in (
+                                'PROTECT',
+                                'EXTEND',
+                                'PROTECT_AND_EXTEND',
+                                'REDUCE',
+                                'EXIT'
+                            ):
+
+                                # HOLD / WAIT_ENTRY = silencio.
+                                continue
+
+                            signal_id = str(
+                                sig.get(
+                                    'id'
+                                )
+                                or (
+                                    f"{symbol}-"
+                                    f"{timeframe}-"
+                                    f"{sig.get('created_at', '')}"
+                                )
+                            )
+
+                            bucket = (
+                                _guardian_futures_level_bucket(
+                                    sig,
+                                    advice,
+                                    event_action
+                                )
+                            )
+
+                            reservation = (
+                                _guardian_alert_can_send(
+                                    user=user,
+                                    market='futures',
+                                    subject=signal_id,
+                                    action=event_action,
+                                    bucket=bucket,
+                                    min_interval=(
+                                        GUARDIAN_TELEGRAM_MIN_INTERVAL
+                                    )
+                                )
+                            )
+
+                            if not reservation:
+                                continue
+
+                            message = (
+                                _build_futures_guardian_telegram_message(
+                                    user=user,
+                                    signal=sig,
+                                    advice=advice,
+                                    current_price=(
+                                        current_price
+                                    ),
+                                    management_action=(
+                                        event_action
+                                    )
+                                )
+                            )
+
+                            ok = (
+                                expert_system
+                                .send_telegram_alert(
+                                    message,
+                                    None
+                                )
+                            )
+
+                            if ok:
+
+                                _guardian_alert_mark_sent(
+                                    reservation
+                                )
+
+                                print(
+                                    "🛡️📱 Guardian Futures: "
+                                    f"{event_action} "
+                                    f"{user} "
+                                    f"{symbol} {timeframe}"
+                                )
+
+                    except Exception as e:
+
+                        print(
+                            "⚠️ Guardian Telegram "
+                            f"{symbol} {timeframe}: {e}"
+                        )
+
+        except Exception as e:
+
+            print(
+                "❌ monitor_guardian_telegram_loop: "
+                f"{e}"
+            )
+
+        time.sleep(
+            GUARDIAN_TELEGRAM_CHECK_INTERVAL
+        )
 # ============================================================================
 # FASE 7: FUNCIÓN DEL CICLO DIARIO DEL REVIEWTRADER
 # ============================================================================
@@ -29563,7 +30634,36 @@ def _start_background_threads():
         print("✅ Thread learning_worker iniciado (evalúa pending cada 15 min)")
     except Exception as e:
         print(f"⚠️ Error iniciando learning_worker: {e}")
-    
+    # ==============================================================
+    # 4. FUTURES GUARDIAN TELEGRAM
+    # ==============================================================
+    #
+    # Sólo avisa cambios accionables:
+    # PROTECT / EXTEND / REDUCE / EXIT.
+    # HOLD y WAIT_ENTRY permanecen silenciosos.
+    # ==============================================================
+
+    try:
+
+        t4 = threading.Thread(
+            target=monitor_guardian_telegram_loop,
+            name='guardian-telegram',
+            daemon=True
+        )
+
+        t4.start()
+
+        print(
+            "✅ Thread Guardian Telegram iniciado "
+            f"(cada {GUARDIAN_TELEGRAM_CHECK_INTERVAL}s)"
+        )
+
+    except Exception as e:
+
+        print(
+            "⚠️ Error iniciando Guardian Telegram: "
+            f"{e}"
+        )    
     print("=" * 60 + "\n")
 
 
@@ -30914,7 +32014,65 @@ def send_tgp_telegram_alert(tgp_result, user, symbol, timeframe, prices):
         target = tgp_result.get('target_asset', '')
         state = tgp_result.get('state', '')
         veto = tgp_result.get('veto', False)
-        
+        # ==============================================================
+        # COMMIT 30 — PERMISO + ANTI-SPAM SPOT
+        # ==============================================================
+
+        if not _telegram_user_has_market_permission(
+            user,
+            'spot'
+        ):
+
+            print(
+                f"   🔕 TGP Telegram: "
+                f"{user} sin permiso Spot."
+            )
+
+            return
+
+        # La misma recomendación sólo puede repetirse
+        # como máximo una vez cada 6 horas.
+        spot_window = int(
+            time.time()
+            // (
+                6
+                * 60
+                * 60
+            )
+        )
+
+        spot_subject = (
+            f"{state}|"
+            f"{source}|"
+            f"{target}|"
+            f"{int(bool(veto))}"
+        )
+
+        spot_reservation = (
+            _guardian_alert_can_send(
+                user=user,
+                market='spot',
+                subject=spot_subject,
+                action=action,
+                bucket=str(
+                    spot_window
+                ),
+                min_interval=(
+                    6
+                    * 60
+                    * 60
+                )
+            )
+        )
+
+        if not spot_reservation:
+
+            print(
+                "   🔕 TGP Telegram: "
+                "evento ya informado/cooldown."
+            )
+
+            return        
         # Emoji según acción
         action_emojis = {
             'BUY_BTC': '🟢 COMPRAR BTC',
@@ -30982,7 +32140,14 @@ def send_tgp_telegram_alert(tgp_result, user, symbol, timeframe, prices):
         
         response = requests.post(url, data=payload, timeout=10)
         if response.status_code == 200:
-            print(f"   ✅ TGP Telegram enviado a {user}")
+
+            _guardian_alert_mark_sent(
+                spot_reservation
+            )
+
+            print(
+                f"   ✅ TGP Telegram enviado a {user}"
+            )
         else:
             print(f"   ⚠️ TGP Telegram error: {response.text[:100]}")
             
