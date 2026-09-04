@@ -14881,6 +14881,23 @@ class TradingExpertSystem:
                             symbol
                         ),
 
+                    # Mantener también el diagnóstico Entry SMC aunque
+                    # el setup termine ANALYSIS_ONLY por ausencia de TP.
+                    'entry_source':
+                        str(
+                            entry_source
+                            or ''
+                        ),
+
+                    'entry_score':
+                        round(
+                            float(
+                                entry_score
+                                or 0
+                            ),
+                            1
+                        ),
+
                     'stop_loss':
                         self._round_price(
                             sl_price,
@@ -15004,6 +15021,31 @@ class TradingExpertSystem:
                     self._round_price(
                         entry,
                         symbol
+                    ),
+
+                # ======================================================
+                # COMMIT 36H — PERSISTIR CALIDAD REAL DEL ENTRY SMC
+                # ======================================================
+                #
+                # _select_optimal_entry() ya calculó entry_score.
+                # Futures Execution Safety consume levels['entry_score'].
+                # Antes este valor se perdía al construir levels y
+                # Futures lo interpretaba como 0.
+                # ======================================================
+
+                'entry_source':
+                    str(
+                        entry_source
+                        or ''
+                    ),
+
+                'entry_score':
+                    round(
+                        float(
+                            entry_score
+                            or 0
+                        ),
+                        1
                     ),
 
                 'stop_loss':
