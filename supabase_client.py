@@ -1115,7 +1115,238 @@ class SupabaseClient:
             logger.error(f"Health check falló: {e}")
         
         return result
+    # ========================================================================
+    # USER TELEGRAM PREFERENCES
+    # ========================================================================
 
+    def get_user_preferences(
+        self,
+        user_name: str
+    ) -> Dict:
+        """
+        Preferencias personales de comunicación.
+
+        IMPORTANTE:
+        Estas preferencias controlan CUÁNDO avisar.
+        No modifican cómo analiza o decide el Guardian.
+        """
+
+        default_preferences = {
+            'spot_telegram_enabled': True,
+            'spot_telegram_timeframes': [
+                '4h',
+                '12h',
+                '1D',
+                '1W'
+            ]
+        }
+
+        if not self.enabled:
+            return default_preferences
+
+        try:
+
+            response = self._with_retry(
+                lambda: (
+                    self.client
+                    .table(
+                        'user_preferences'
+                    )
+                    .select(
+                        '*'
+                    )
+                    .eq(
+                        'user_name',
+                        user_name
+                    )
+                    .limit(
+                        1
+                    )
+                    .execute()
+                )
+            )
+
+            rows = (
+                response.data
+                or []
+            )
+
+            if not rows:
+                return default_preferences
+
+            row = rows[0]
+
+            enabled = row.get(
+                'spot_telegram_enabled',
+                True
+            )
+
+            raw_timeframes = row.get(
+                'spot_telegram_timeframes'
+            )
+
+            if isinstance(
+                raw_timeframes,
+                str
+            ):
+
+                try:
+                    raw_timeframes = json.loads(
+                        raw_timeframes
+                    )
+
+                except Exception:
+                    raw_timeframes = []
+
+            if not isinstance(
+                raw_timeframes,
+                list
+            ):
+
+                raw_timeframes = []
+
+            allowed = {
+                '4h',
+                '12h',
+                '1D',
+                '1W'
+            }
+
+            timeframes = [
+                tf
+                for tf
+                in raw_timeframes
+                if tf in allowed
+            ]
+
+            return {
+                'spot_telegram_enabled':
+                    bool(
+                        enabled
+                    ),
+
+                'spot_telegram_timeframes':
+                    timeframes
+            }
+
+        except Exception as e:
+
+            logger.warning(
+                "get_user_preferences "
+                f"({user_name}): {e}"
+            )
+
+            # Si Supabase tiene un fallo temporal,
+            # no cambiamos silenciosamente la política
+            # que el sistema tenía antes del commit.
+            return default_preferences
+
+
+    def upsert_user_preferences(
+        self,
+        user_name: str,
+        preferences: Dict
+    ) -> bool:
+        """
+        Guarda únicamente preferencias permitidas.
+
+        La identidad user_name debe venir de la sesión Flask,
+        nunca del navegador.
+        """
+
+        if not self.enabled:
+            return False
+
+        try:
+
+            user_name = str(
+                user_name
+                or ''
+            ).strip()
+
+            if not user_name:
+                return False
+
+            allowed = (
+                '4h',
+                '12h',
+                '1D',
+                '1W'
+            )
+
+            requested = (
+                preferences.get(
+                    'spot_telegram_timeframes',
+                    []
+                )
+                or []
+            )
+
+            if not isinstance(
+                requested,
+                list
+            ):
+
+                requested = []
+
+            clean_timeframes = []
+
+            for tf in allowed:
+
+                if tf in requested:
+
+                    clean_timeframes.append(
+                        tf
+                    )
+
+            enabled = bool(
+                preferences.get(
+                    'spot_telegram_enabled',
+                    True
+                )
+            )
+
+            payload = {
+                'user_name':
+                    user_name,
+
+                'spot_telegram_enabled':
+                    enabled,
+
+                'spot_telegram_timeframes':
+                    clean_timeframes,
+
+                'updated_at':
+                    datetime.utcnow().isoformat()
+            }
+
+            response = self._with_retry(
+                lambda: (
+                    self.client
+                    .table(
+                        'user_preferences'
+                    )
+                    .upsert(
+                        payload,
+                        on_conflict='user_name'
+                    )
+                    .execute()
+                )
+            )
+
+            return (
+                response.data
+                is not None
+            )
+
+        except Exception as e:
+
+            logger.error(
+                "upsert_user_preferences "
+                f"({user_name}): {e}"
+            )
+
+            return False
     # ========================================================================
     # USER PORTFOLIO
     # ========================================================================
