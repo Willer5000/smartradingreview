@@ -6,8 +6,9 @@ Genera un PDF que explica QUÉ está aprendiendo el ReviewTrader.
 Estructura del informe:
   1. Métricas coherentes por mercado y cohorte
   2. QUÉ HA APRENDIDO EL SISTEMA (resumen humano automático)
-  3. Mejores/peores estrategias separadas para Spot y Futuros
-  4. Combinaciones específicas por mercado
+  3. Métricas separadas Spot/Futuros
+  4. Futures Shadow: Safety, resultados y contexto cuantitativo
+  5. Mejores/peores estrategias operables y combinaciones por mercado
   7. ESTRATEGIAS POR TRADER (cobertura del comité) — v22
   8. Aprendizaje por PAR (win rate por símbolo)
   9. Aprendizaje por TIMEFRAME
@@ -43,6 +44,17 @@ REPORT_DAYS_BACK = 90
 LEARNING_CONTRACT_VERSION = 'market_separated_v1'
 FUTURES_REAL_DATA_SOURCE = 'KUCOIN_FUTURES_PERPETUAL_REST'
 FUTURES_REAL_COHORT = 'FUTURES_PERPETUAL_REAL_CLOSED_V1'
+
+# ============================================================================
+# v26: BANDAS DE DIAGNÓSTICO SHADOW FUTURES
+# ============================================================================
+# Referencias exclusivas del informe: NO cambian el motor operativo.
+SHADOW_EXECUTION_FLOOR = 65.0
+SHADOW_PUBLICATION_SAFETY = 75.0
+SHADOW_TP_QUALITY_REFERENCE = 55.0
+SHADOW_SL_QUALITY_REFERENCE = 60.0
+SHADOW_RR_MIN_REFERENCE = 1.8
+SHADOW_RR_MAX_REFERENCE = 3.5
 
 
 def _as_bool(value) -> bool:
@@ -216,6 +228,245 @@ def _split_learning_cohorts(signals: List[Dict]) -> Dict[str, List[Dict]]:
         else:
             cohorts['unscoped'].append(signal)
     return cohorts
+
+
+# ============================================================================
+# v26: ANALÍTICA SHADOW FUTURES
+# ============================================================================
+# SHADOW nunca entra en métricas operativas ni modifica decisiones.
+# Sólo permite estudiar si algún filtro podría ser demasiado estricto.
+# ============================================================================
+
+def _get_signal_context(signal: Dict) -> Dict:
+    """Devuelve context como dict, tolerando JSON serializado."""
+    context = signal.get('context') or {}
+    if isinstance(context, str):
+        try:
+            context = json.loads(context)
+        except Exception:
+            return {}
+    return context if isinstance(context, dict) else {}
+
+
+def _safe_float(value, default=None):
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _get_execution_context(signal: Dict) -> Dict:
+    context = _get_signal_context(signal)
+    execution = context.get('execution') or {}
+    return execution if isinstance(execution, dict) else {}
+
+
+def _normalize_shadow_action(signal: Dict) -> str:
+    raw = str(
+        signal.get('action_normalized')
+        or signal.get('action')
+        or ''
+    ).strip().upper()
+    if raw.endswith('LONG'):
+        return 'LONG'
+    if raw.endswith('SHORT'):
+        return 'SHORT'
+    return raw
+
+
+def _shadow_has_trade_geometry(signal: Dict) -> bool:
+    """True sólo si hay LONG/SHORT con Entry, SL y TP numéricos válidos."""
+    action = _normalize_shadow_action(signal)
+    if action not in ('LONG', 'SHORT'):
+        return False
+
+    entry = _safe_float(signal.get('entry_price'), 0.0) or 0.0
+    sl = _safe_float(signal.get('stop_loss'), 0.0) or 0.0
+    tp = _safe_float(signal.get('take_profit'), 0.0) or 0.0
+
+    if entry <= 0 or sl <= 0 or tp <= 0:
+        return False
+    if action == 'LONG':
+        return sl < entry < tp
+    return tp < entry < sl
+
+
+def _shadow_entry_state(signal: Dict) -> str:
+    """Infiere sólo estados de Entry demostrables por status/notas."""
+    status = str(signal.get('status') or '').strip().lower()
+    notes = _signal_notes(signal).lower()
+
+    if status in ('tp_hit', 'sl_hit', 'ambiguous', 'expired_after_entry'):
+        return 'entry_touched'
+    if status == 'expired_no_entry':
+        return 'no_entry'
+    if status == 'expired':
+        if 'outcome_reason=expired_after_entry' in notes:
+            return 'entry_touched'
+        if 'outcome_reason=expired_no_entry' in notes:
+            return 'no_entry'
+    return 'unknown'
+
+
+def _normalized_sl_quality(execution: Dict) -> Optional[float]:
+    """Normaliza sl_reliability histórico 0-1 o 0-100 a escala 0-100."""
+    raw = _safe_float(execution.get('sl_reliability'))
+    if raw is None:
+        return None
+    if 0 <= raw <= 1:
+        return raw * 100.0
+    return raw
+
+
+def _shadow_safety_bucket(safety: Optional[float]) -> str:
+    if safety is None or safety <= 0:
+        return 'Sin dato'
+    if safety < SHADOW_EXECUTION_FLOOR:
+        return '<65'
+    if safety < 70:
+        return '65-69'
+    if safety < SHADOW_PUBLICATION_SAFETY:
+        return '70-74'
+    return '>=75'
+
+
+def _shadow_bucket_metrics(signals: List[Dict]) -> Dict:
+    counts = defaultdict(int)
+    pnl_values = []
+    r_values = []
+
+    for signal in signals:
+        status = str(signal.get('status') or 'unknown').strip().lower()
+        counts[status] += 1
+        counts[_shadow_entry_state(signal)] += 1
+
+        pnl_pct, r_multiple = _outcome_values(signal)
+        if pnl_pct is not None:
+            pnl_values.append(pnl_pct)
+        if r_multiple is not None:
+            r_values.append(r_multiple)
+
+    resolved = counts['tp_hit'] + counts['sl_hit']
+    return {
+        'total': len(signals),
+        'pending': counts['pending'],
+        'tp_hit': counts['tp_hit'],
+        'sl_hit': counts['sl_hit'],
+        'resolved': resolved,
+        'expired': (
+            counts['expired']
+            + counts['expired_no_entry']
+            + counts['expired_after_entry']
+        ),
+        'ambiguous': counts['ambiguous'],
+        'invalid_setup': counts['invalid_setup'],
+        'entry_touched': counts['entry_touched'],
+        'no_entry': counts['no_entry'],
+        'entry_unknown': counts['unknown'],
+        'win_rate': round(counts['tp_hit'] / resolved * 100, 1)
+        if resolved else None,
+        'expectancy_r': round(sum(r_values) / len(r_values), 4)
+        if r_values else None,
+        'avg_pnl_pct': round(sum(pnl_values) / len(pnl_values), 4)
+        if pnl_values else None,
+        'outcome_samples': len(r_values),
+    }
+
+
+def _calc_shadow_futures_analysis(signals: List[Dict]) -> Dict:
+    """
+    Resume la cohorte SHADOW sin concederle autoridad operativa.
+
+    Las banderas de referencia NO son el motivo histórico exacto de rechazo:
+    ReviewTrader no persiste hoy toda la lista del publication gate.
+    """
+    signals = list(signals or [])
+    directional = [
+        s for s in signals
+        if _normalize_shadow_action(s) in ('LONG', 'SHORT')
+    ]
+    geometry = [s for s in directional if _shadow_has_trade_geometry(s)]
+
+    summary = _shadow_bucket_metrics(signals)
+    summary['directional'] = len(directional)
+    summary['valid_geometry'] = len(geometry)
+
+    by_safety_raw = defaultdict(list)
+    reference_flags = defaultdict(int)
+    quant_regime_raw = defaultdict(list)
+    quant_alignment_raw = defaultdict(list)
+    quant_verdict_raw = defaultdict(list)
+    quant_available = 0
+
+    for signal in geometry:
+        execution = _get_execution_context(signal)
+        safety = _safe_float(execution.get('execution_safety'))
+        tp_quality = _safe_float(execution.get('tp_quality_score'))
+        sl_quality = _normalized_sl_quality(execution)
+        rr = _safe_float(
+            execution.get('risk_reward'),
+            _safe_float(signal.get('risk_reward'))
+        )
+
+        by_safety_raw[_shadow_safety_bucket(safety)].append(signal)
+
+        if safety is not None and safety > 0 and safety < SHADOW_PUBLICATION_SAFETY:
+            reference_flags['Safety < 75'] += 1
+        if tp_quality is not None and tp_quality > 0 and tp_quality < SHADOW_TP_QUALITY_REFERENCE:
+            reference_flags['Calidad TP < 55'] += 1
+        if sl_quality is not None and sl_quality > 0 and sl_quality < SHADOW_SL_QUALITY_REFERENCE:
+            reference_flags['Protección SL < 60'] += 1
+        if rr is not None and rr > 0:
+            if rr < SHADOW_RR_MIN_REFERENCE:
+                reference_flags['RR < 1.8'] += 1
+            elif rr > SHADOW_RR_MAX_REFERENCE:
+                reference_flags['RR > 3.5'] += 1
+
+        learning = _get_learning_context(signal)
+        quant = learning.get('quantitative_shadow') or {}
+        if isinstance(quant, dict) and quant:
+            quant_available += 1
+            regime = str(quant.get('regime') or 'UNAVAILABLE').strip().upper()
+            alignment = str(
+                quant.get('direction_alignment') or 'NOT_APPLICABLE'
+            ).strip().upper()
+            verdict = str(
+                quant.get('shadow_verdict') or 'UNAVAILABLE'
+            ).strip().upper()
+            quant_regime_raw[regime].append(signal)
+            quant_alignment_raw[alignment].append(signal)
+            quant_verdict_raw[verdict].append(signal)
+
+    by_safety = []
+    for bucket in ['<65', '65-69', '70-74', '>=75', 'Sin dato']:
+        items = by_safety_raw.get(bucket) or []
+        if items:
+            row = _shadow_bucket_metrics(items)
+            row['bucket'] = bucket
+            by_safety.append(row)
+
+    def _group_rows(raw_groups, key_name):
+        rows = []
+        for key, items in raw_groups.items():
+            row = _shadow_bucket_metrics(items)
+            row[key_name] = key
+            rows.append(row)
+        return sorted(rows, key=lambda r: (-r.get('total', 0), str(r.get(key_name, ''))))
+
+    return {
+        'summary': summary,
+        'by_safety': by_safety,
+        'reference_flags': sorted(
+            reference_flags.items(),
+            key=lambda item: (-item[1], item[0])
+        ),
+        'quant_available': quant_available,
+        'by_quant_regime': _group_rows(quant_regime_raw, 'regime'),
+        'by_quant_alignment': _group_rows(quant_alignment_raw, 'alignment'),
+        'by_quant_verdict': _group_rows(quant_verdict_raw, 'verdict'),
+    }
 
 
 # ============================================================================
@@ -913,6 +1164,7 @@ def _fetch_learning_data() -> Dict:
         'signals_with_indicators': [],
         'metrics_by_market': {},
         'quarantine_counts': {},
+        'futures_shadow_analysis': {},
         'missed_details': [],
         'last_review_log': None,
         'error': None,
@@ -970,6 +1222,9 @@ def _fetch_learning_data() -> Dict:
             'futures_shadow': len(cohorts['futures_shadow']),
             'unscoped': len(cohorts['unscoped'])
         }
+        data['futures_shadow_analysis'] = _calc_shadow_futures_analysis(
+            cohorts['futures_shadow']
+        )
         data['total_signals'] = len(eligible_signals)
         data['pending_signals'] = (
             spot_metrics['pending'] + futures_metrics['pending']
@@ -1157,6 +1412,180 @@ def generate_learning_pdf() -> bytes:
     
     story.append(PageBreak())
     
+    # ============ 4. FUTURES SHADOW — DIAGNÓSTICO DE TIMIDEZ ============
+    shadow = data.get('futures_shadow_analysis') or {}
+    shadow_summary = shadow.get('summary') or {}
+
+    story.append(Paragraph(
+        "FUTURES — aprendizaje Shadow (diagnóstico de timidez)",
+        style_h2
+    ))
+    story.append(Paragraph(
+        "Esta sección estudia análisis de Futuros <b>reales, de perpetuos y vela "
+        "cerrada</b> que NO superaron la publicación. Son observaciones hipotéticas: "
+        "<b>no son operaciones autorizadas</b>, no entran al win rate oficial y no "
+        "pueden modificar pesos, Safety, Entry, SL, TP ni leverage. Su función es "
+        "descubrir si alguna puerta de publicación podría estar descartando edge.",
+        style_body
+    ))
+
+    if shadow_summary.get('total'):
+        def _shadow_metric_text(value, suffix=''):
+            return '—' if value is None else f'{value}{suffix}'
+
+        shadow_metrics_rows = [
+            ['Métrica Shadow', 'Valor'],
+            ['Observaciones limpias no publicadas',
+             str(shadow_summary.get('total', 0))],
+            ['Candidatos LONG/SHORT',
+             str(shadow_summary.get('directional', 0))],
+            ['Con Entry + SL + TP geométricamente válidos',
+             str(shadow_summary.get('valid_geometry', 0))],
+            ['Entry demostrado / No Entry / Indeterminado', (
+                f"{shadow_summary.get('entry_touched', 0)} / "
+                f"{shadow_summary.get('no_entry', 0)} / "
+                f"{shadow_summary.get('entry_unknown', 0)}"
+            )],
+            ['TP / SL / Expired / Ambiguous', (
+                f"{shadow_summary.get('tp_hit', 0)} / "
+                f"{shadow_summary.get('sl_hit', 0)} / "
+                f"{shadow_summary.get('expired', 0)} / "
+                f"{shadow_summary.get('ambiguous', 0)}"
+            )],
+            ['Win rate hipotético / Expectancy R', (
+                f"{_shadow_metric_text(shadow_summary.get('win_rate'), '%')} / "
+                f"{_shadow_metric_text(shadow_summary.get('expectancy_r'), 'R')}"
+            )],
+            ['PnL bruto medio de resultados TP/SL',
+             _shadow_metric_text(shadow_summary.get('avg_pnl_pct'), '%')],
+        ]
+
+        tshadow = Table(shadow_metrics_rows, colWidths=[11*cm, 5*cm])
+        tshadow.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), HexColor('#6c4ab6')),
+            ('TEXTCOLOR', (0,0), (-1,0), white),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0,0), (-1,-1), 9.3),
+            ('GRID', (0,0), (-1,-1), 0.35, HexColor('#c8ccd6')),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [HexColor('#f6f2ff'), white]),
+            ('LEFTPADDING', (0,0), (-1,-1), 6),
+            ('TOPPADDING', (0,0), (-1,-1), 4),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+        ]))
+        story.append(tshadow)
+
+        if shadow.get('by_safety'):
+            story.append(Paragraph("Shadow por banda de Execution Safety", style_h3))
+            story.append(Paragraph(
+                "Las bandas 65-69 y 70-74 son diagnósticas. El motor operativo "
+                "permanece sin cambios. Una banda sólo debería promoverse si acumula "
+                "muestra suficiente, expectancy positiva neta y valida después en "
+                "walk-forward.",
+                style_note
+            ))
+            rows = [['Safety', 'N', 'Entry', 'TP', 'SL', 'WR %', 'Exp. R']]
+            for row in shadow.get('by_safety') or []:
+                rows.append([
+                    row.get('bucket', '—'),
+                    str(row.get('total', 0)),
+                    str(row.get('entry_touched', 0)),
+                    str(row.get('tp_hit', 0)),
+                    str(row.get('sl_hit', 0)),
+                    '—' if row.get('win_rate') is None else f"{row.get('win_rate'):.1f}",
+                    '—' if row.get('expectancy_r') is None else f"{row.get('expectancy_r'):+.3f}",
+                ])
+            tsafety = Table(
+                rows,
+                colWidths=[2.2*cm, 1.5*cm, 1.7*cm, 1.4*cm, 1.4*cm, 1.7*cm, 2.0*cm]
+            )
+            tsafety.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), HexColor('#3f51b5')),
+                ('TEXTCOLOR', (0,0), (-1,0), white),
+                ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0,0), (-1,-1), 8.5),
+                ('GRID', (0,0), (-1,-1), 0.3, HexColor('#c8ccd6')),
+                ('ROWBACKGROUNDS', (0,1), (-1,-1), [HexColor('#f3f5ff'), white]),
+                ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+            ]))
+            story.append(tsafety)
+
+        if shadow.get('reference_flags'):
+            story.append(Paragraph(
+                "Métricas por debajo de bandas de referencia",
+                style_h3
+            ))
+            story.append(Paragraph(
+                "Estas banderas se reconstruyen con los valores que ReviewTrader "
+                "sí guardó. <b>No equivalen al motivo exacto histórico de rechazo</b>, "
+                "porque la lista completa del publication gate no se persiste todavía. "
+                "Sirven para localizar qué métrica merece una auditoría posterior.",
+                style_note
+            ))
+            rows = [['Banda observada', 'Casos']]
+            for label, count in shadow.get('reference_flags') or []:
+                rows.append([label, str(count)])
+            tflags = Table(rows, colWidths=[11*cm, 3*cm])
+            tflags.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), HexColor('#e8a500')),
+                ('TEXTCOLOR', (0,0), (-1,0), white),
+                ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0,0), (-1,-1), 9),
+                ('GRID', (0,0), (-1,-1), 0.3, HexColor('#c8ccd6')),
+                ('ROWBACKGROUNDS', (0,1), (-1,-1), [HexColor('#fff9e6'), white]),
+            ]))
+            story.append(tflags)
+
+        if shadow.get('quant_available'):
+            story.append(Paragraph("Contexto cuantitativo Shadow", style_h3))
+            story.append(Paragraph(
+                f"{int(shadow.get('quant_available') or 0)} candidatos ya contienen "
+                "el snapshot cuantitativo del Commit 22. Sigue en modo observación: "
+                "ninguna fila de esta tabla puede aprobar o rechazar una operación.",
+                style_note
+            ))
+            quant_rows = shadow.get('by_quant_regime') or []
+            if quant_rows:
+                rows = [['Régimen', 'N', 'TP', 'SL', 'WR %', 'Exp. R']]
+                for row in quant_rows[:10]:
+                    rows.append([
+                        str(row.get('regime') or 'UNAVAILABLE')[:24],
+                        str(row.get('total', 0)),
+                        str(row.get('tp_hit', 0)),
+                        str(row.get('sl_hit', 0)),
+                        '—' if row.get('win_rate') is None else f"{row.get('win_rate'):.1f}",
+                        '—' if row.get('expectancy_r') is None else f"{row.get('expectancy_r'):+.3f}",
+                    ])
+                tq = Table(
+                    rows,
+                    colWidths=[5.2*cm, 1.4*cm, 1.4*cm, 1.4*cm, 1.7*cm, 2.0*cm]
+                )
+                tq.setStyle(TableStyle([
+                    ('BACKGROUND', (0,0), (-1,0), HexColor('#00838f')),
+                    ('TEXTCOLOR', (0,0), (-1,0), white),
+                    ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0,0), (-1,-1), 8.5),
+                    ('GRID', (0,0), (-1,-1), 0.3, HexColor('#c8ccd6')),
+                    ('ROWBACKGROUNDS', (0,1), (-1,-1), [HexColor('#edfafa'), white]),
+                    ('ALIGN', (1,0), (-1,-1), 'CENTER'),
+                ]))
+                story.append(tq)
+    else:
+        story.append(Paragraph(
+            "<i>Todavía no hay observaciones Shadow Futures limpias dentro de la "
+            "ventana del informe. Esto no es un error del PDF: significa que la "
+            "cohorte nueva aún no tiene registros disponibles.</i>",
+            style_body
+        ))
+
+    story.append(Paragraph(
+        "<b>Regla de interpretación:</b> un Shadow que habría tocado TP no prueba "
+        "por sí solo que debió publicarse. Para relajar Futuros necesitaremos una "
+        "cohorte suficiente, expectancy positiva después de costos y validación "
+        "walk-forward. Hasta entonces la política operativa permanece intacta.",
+        style_note
+    ))
+    story.append(PageBreak())
+
     # ============ 4. TOP 20 MEJORES ESTRATEGIAS GENERALES ============
     story.append(Paragraph("Mejores estrategias por mercado", style_h2))
     story.append(Paragraph(
@@ -1543,8 +1972,11 @@ def generate_learning_pdf() -> bytes:
         f"marca TP, SL, expiración, ambigüedad o setup inválido."
         f"<br/>• TP y SL en la misma vela no cuentan como win ni loss hasta resolver "
         f"su orden con datos más finos."
-        f"<br/>• Futuros sólo usa contratos perpetuos reales, vela fuente cerrada y "
-        f"señales que superaron el filtro de publicación. El legado queda en cuarentena."
+        f"<br/>• Las estadísticas OPERABLES de Futuros sólo usan contratos perpetuos "
+        f"reales, vela fuente cerrada y señales que superaron el filtro de publicación. "
+        f"El legado queda en cuarentena."
+        f"<br/>• Los análisis Futures limpios que no superaron publicación se conservan "
+        f"como SHADOW para estudiar timidez/filtros, pero no cambian pesos ni win rate oficial."
         f"<br/>• Cada 4 horas se recalculan las estadísticas cachedas y las recomendaciones."
         f"<br/>• A las 20:00 hora Bolivia corre el ciclo diario completo (evaluación + "
         f"detección de oportunidades perdidas + recalculo + optimización)."
