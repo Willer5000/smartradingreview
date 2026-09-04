@@ -263,6 +263,26 @@ def _get_execution_context(signal: Dict) -> Dict:
     return execution if isinstance(execution, dict) else {}
 
 
+def _get_futures_publication_context(signal: Dict) -> Dict:
+    """Snapshot exacto del publication gate persistido por Commit 32."""
+    context = _get_signal_context(signal)
+    publication = context.get('futures_publication') or {}
+    return publication if isinstance(publication, dict) else {}
+
+
+FUTURES_PUBLICATION_REASON_LABELS = {
+    'SAFETY': 'Execution Safety',
+    'TP_QUALITY': 'Calidad TP',
+    'SL_QUALITY': 'Protección SL',
+    'RR': 'Risk / Reward',
+    'ROI_TP': 'ROI mínimo del TP',
+    'NET_PROFIT': 'Beneficio neto mínimo',
+    'LOSS_AT_SL': 'Pérdida máxima al SL',
+    'ATR_STRESS': 'Estrés ATR',
+    'OTHER': 'Otro bloqueo',
+}
+
+
 def _normalize_shadow_action(signal: Dict) -> str:
     raw = str(
         signal.get('action_normalized')
@@ -379,8 +399,11 @@ def _calc_shadow_futures_analysis(signals: List[Dict]) -> Dict:
     """
     Resume la cohorte SHADOW sin concederle autoridad operativa.
 
-    Las banderas de referencia NO son el motivo histórico exacto de rechazo:
-    ReviewTrader no persiste hoy toda la lista del publication gate.
+    Commit 33:
+    - usa el publication gate EXACTO cuando existe (Commit 32);
+    - mantiene un fallback reconstruido sólo para registros anteriores;
+    - mide outcome / expectancy por causa y por combinación de causas;
+    - nunca cambia publicación, pesos, Safety, Entry, SL, TP o leverage.
     """
     signals = list(signals or [])
     directional = [
@@ -395,6 +418,14 @@ def _calc_shadow_futures_analysis(signals: List[Dict]) -> Dict:
 
     by_safety_raw = defaultdict(list)
     reference_flags = defaultdict(int)
+
+    # Commit 33: causas exactas del publication gate.
+    exact_reason_raw = defaultdict(list)
+    exact_combo_raw = defaultdict(list)
+    publication_exact_available = 0
+    publication_exact_without_reasons = 0
+    publication_exact_inconsistent = 0
+
     quant_regime_raw = defaultdict(list)
     quant_alignment_raw = defaultdict(list)
     quant_verdict_raw = defaultdict(list)
@@ -412,17 +443,76 @@ def _calc_shadow_futures_analysis(signals: List[Dict]) -> Dict:
 
         by_safety_raw[_shadow_safety_bucket(safety)].append(signal)
 
-        if safety is not None and safety > 0 and safety < SHADOW_PUBLICATION_SAFETY:
-            reference_flags['Safety < 75'] += 1
-        if tp_quality is not None and tp_quality > 0 and tp_quality < SHADOW_TP_QUALITY_REFERENCE:
-            reference_flags['Calidad TP < 55'] += 1
-        if sl_quality is not None and sl_quality > 0 and sl_quality < SHADOW_SL_QUALITY_REFERENCE:
-            reference_flags['Protección SL < 60'] += 1
-        if rr is not None and rr > 0:
-            if rr < SHADOW_RR_MIN_REFERENCE:
-                reference_flags['RR < 1.8'] += 1
-            elif rr > SHADOW_RR_MAX_REFERENCE:
-                reference_flags['RR > 3.5'] += 1
+        # =============================================================
+        # COMMIT 33 — CAUSA EXACTA DEL RECHAZO
+        # =============================================================
+        publication = _get_futures_publication_context(signal)
+
+        if publication:
+            publication_exact_available += 1
+
+            eligible = _as_bool(publication.get('eligible', False))
+            raw_codes = publication.get('reason_codes') or []
+            if not isinstance(raw_codes, (list, tuple)):
+                raw_codes = [raw_codes]
+
+            reason_codes = []
+            for raw_code in raw_codes:
+                code = str(raw_code or '').strip().upper()
+                if not code:
+                    continue
+                if code not in FUTURES_PUBLICATION_REASON_LABELS:
+                    code = 'OTHER'
+                if code not in reason_codes:
+                    reason_codes.append(code)
+
+            # Una señal de la cohorte Shadow no debería aparecer como elegible.
+            # No la corregimos: sólo la contamos para auditoría.
+            if eligible:
+                publication_exact_inconsistent += 1
+
+            if not eligible and reason_codes:
+                for code in reason_codes:
+                    exact_reason_raw[code].append(signal)
+
+                combo = ' + '.join(sorted(reason_codes))
+                exact_combo_raw[combo].append(signal)
+
+            elif not eligible:
+                publication_exact_without_reasons += 1
+
+        else:
+            # =========================================================
+            # FALLBACK HISTÓRICO
+            # =========================================================
+            # Sólo para señales anteriores al Commit 32.
+            # Estas banderas son inferencias, NO causas históricas exactas.
+            if (
+                safety is not None
+                and safety > 0
+                and safety < SHADOW_PUBLICATION_SAFETY
+            ):
+                reference_flags['Safety < 75'] += 1
+
+            if (
+                tp_quality is not None
+                and tp_quality > 0
+                and tp_quality < SHADOW_TP_QUALITY_REFERENCE
+            ):
+                reference_flags['Calidad TP < 55'] += 1
+
+            if (
+                sl_quality is not None
+                and sl_quality > 0
+                and sl_quality < SHADOW_SL_QUALITY_REFERENCE
+            ):
+                reference_flags['Protección SL < 60'] += 1
+
+            if rr is not None and rr > 0:
+                if rr < SHADOW_RR_MIN_REFERENCE:
+                    reference_flags['RR < 1.8'] += 1
+                elif rr > SHADOW_RR_MAX_REFERENCE:
+                    reference_flags['RR > 3.5'] += 1
 
         learning = _get_learning_context(signal)
         quant = learning.get('quantitative_shadow') or {}
@@ -453,15 +543,44 @@ def _calc_shadow_futures_analysis(signals: List[Dict]) -> Dict:
             row = _shadow_bucket_metrics(items)
             row[key_name] = key
             rows.append(row)
-        return sorted(rows, key=lambda r: (-r.get('total', 0), str(r.get(key_name, ''))))
+        return sorted(
+            rows,
+            key=lambda r: (-r.get('total', 0), str(r.get(key_name, '')))
+        )
+
+    exact_reason_rows = _group_rows(exact_reason_raw, 'reason_code')
+    for row in exact_reason_rows:
+        row['reason_label'] = FUTURES_PUBLICATION_REASON_LABELS.get(
+            row.get('reason_code'),
+            row.get('reason_code', 'OTHER')
+        )
+
+    exact_combo_rows = _group_rows(exact_combo_raw, 'reason_combo')
+
+    coverage_pct = (
+        round(publication_exact_available / len(geometry) * 100, 1)
+        if geometry else None
+    )
 
     return {
         'summary': summary,
         'by_safety': by_safety,
+
+        # Exacto desde Commit 32.
+        'publication_exact_available': publication_exact_available,
+        'publication_exact_missing': max(0, len(geometry) - publication_exact_available),
+        'publication_exact_coverage_pct': coverage_pct,
+        'publication_exact_without_reasons': publication_exact_without_reasons,
+        'publication_exact_inconsistent': publication_exact_inconsistent,
+        'by_exact_rejection_reason': exact_reason_rows,
+        'by_exact_rejection_combo': exact_combo_rows,
+
+        # Sólo registros antiguos sin snapshot exacto.
         'reference_flags': sorted(
             reference_flags.items(),
             key=lambda item: (-item[1], item[0])
         ),
+
         'quant_available': quant_available,
         'by_quant_regime': _group_rows(quant_regime_raw, 'regime'),
         'by_quant_alignment': _group_rows(quant_alignment_raw, 'alignment'),
@@ -1441,6 +1560,11 @@ def generate_learning_pdf() -> bytes:
              str(shadow_summary.get('directional', 0))],
             ['Con Entry + SL + TP geométricamente válidos',
              str(shadow_summary.get('valid_geometry', 0))],
+            ['Con causa EXACTA de publicación (Commit 32)', (
+                f"{int(shadow.get('publication_exact_available') or 0)} / "
+                f"{int(shadow_summary.get('valid_geometry') or 0)} "
+                f"({_shadow_metric_text(shadow.get('publication_exact_coverage_pct'), '%')})"
+            )],
             ['Entry demostrado / No Entry / Indeterminado', (
                 f"{shadow_summary.get('entry_touched', 0)} / "
                 f"{shadow_summary.get('no_entry', 0)} / "
@@ -1509,22 +1633,144 @@ def generate_learning_pdf() -> bytes:
             ]))
             story.append(tsafety)
 
+        # =============================================================
+        # COMMIT 33 — CAUSAS EXACTAS DEL PUBLICATION GATE
+        # =============================================================
+        exact_available = int(
+            shadow.get('publication_exact_available') or 0
+        )
+        exact_missing = int(
+            shadow.get('publication_exact_missing') or 0
+        )
+
+        story.append(Paragraph(
+            "Causas exactas del publication gate (Commit 32)",
+            style_h3
+        ))
+
+        if exact_available:
+            coverage = shadow.get('publication_exact_coverage_pct')
+            coverage_text = '—' if coverage is None else f"{coverage:.1f}%"
+
+            story.append(Paragraph(
+                f"{exact_available} candidatos con geometría válida ya conservan la "
+                f"decisión exacta del publication gate ({coverage_text} de cobertura "
+                f"en esta cohorte). Otros {exact_missing} son anteriores al Commit 32 "
+                "o todavía no contienen ese snapshot. <b>Las causas pueden solaparse</b>: "
+                "una misma señal puede fallar Safety y TP Quality al mismo tiempo, por "
+                "lo que los N por causa no deben sumarse entre sí.",
+                style_note
+            ))
+
+            reason_rows = shadow.get('by_exact_rejection_reason') or []
+            if reason_rows:
+                rows = [['Bloqueo exacto', 'N', 'Entry', 'TP', 'SL', 'WR %', 'Exp. R']]
+                for row in reason_rows[:10]:
+                    rows.append([
+                        str(row.get('reason_label') or row.get('reason_code') or 'OTHER')[:31],
+                        str(row.get('total', 0)),
+                        str(row.get('entry_touched', 0)),
+                        str(row.get('tp_hit', 0)),
+                        str(row.get('sl_hit', 0)),
+                        '—' if row.get('win_rate') is None else f"{row.get('win_rate'):.1f}",
+                        '—' if row.get('expectancy_r') is None else f"{row.get('expectancy_r'):+.3f}",
+                    ])
+
+                treasons = Table(
+                    rows,
+                    colWidths=[5.4*cm, 1.2*cm, 1.5*cm, 1.2*cm, 1.2*cm, 1.6*cm, 1.9*cm]
+                )
+                treasons.setStyle(TableStyle([
+                    ('BACKGROUND', (0,0), (-1,0), HexColor('#7b1fa2')),
+                    ('TEXTCOLOR', (0,0), (-1,0), white),
+                    ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0,0), (-1,-1), 8.2),
+                    ('GRID', (0,0), (-1,-1), 0.3, HexColor('#c8ccd6')),
+                    ('ROWBACKGROUNDS', (0,1), (-1,-1), [HexColor('#f8f0fb'), white]),
+                    ('ALIGN', (1,0), (-1,-1), 'CENTER'),
+                ]))
+                story.append(treasons)
+
+            combo_rows = shadow.get('by_exact_rejection_combo') or []
+            if combo_rows:
+                story.append(Paragraph(
+                    "Combinaciones exactas de bloqueos",
+                    style_h3
+                ))
+                story.append(Paragraph(
+                    "Esta tabla es especialmente útil para distinguir una puerta aislada "
+                    "demasiado severa de candidatos que fallan varias condiciones a la vez.",
+                    style_note
+                ))
+                rows = [['Combinación', 'N', 'Entry', 'TP', 'SL', 'Exp. R']]
+                for row in combo_rows[:8]:
+                    combo = str(row.get('reason_combo') or 'OTHER')
+                    rows.append([
+                        combo[:58],
+                        str(row.get('total', 0)),
+                        str(row.get('entry_touched', 0)),
+                        str(row.get('tp_hit', 0)),
+                        str(row.get('sl_hit', 0)),
+                        '—' if row.get('expectancy_r') is None else f"{row.get('expectancy_r'):+.3f}",
+                    ])
+                tcombos = Table(
+                    rows,
+                    colWidths=[7.7*cm, 1.2*cm, 1.5*cm, 1.2*cm, 1.2*cm, 1.9*cm]
+                )
+                tcombos.setStyle(TableStyle([
+                    ('BACKGROUND', (0,0), (-1,0), HexColor('#512da8')),
+                    ('TEXTCOLOR', (0,0), (-1,0), white),
+                    ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0,0), (-1,-1), 7.8),
+                    ('GRID', (0,0), (-1,-1), 0.3, HexColor('#c8ccd6')),
+                    ('ROWBACKGROUNDS', (0,1), (-1,-1), [HexColor('#f4f1fb'), white]),
+                    ('ALIGN', (1,0), (-1,-1), 'CENTER'),
+                ]))
+                story.append(tcombos)
+
+            inconsistent = int(
+                shadow.get('publication_exact_inconsistent') or 0
+            )
+            no_reasons = int(
+                shadow.get('publication_exact_without_reasons') or 0
+            )
+            if inconsistent or no_reasons:
+                story.append(Paragraph(
+                    f"Auditoría de integridad: {inconsistent} Shadow aparecen como "
+                    f"eligible y {no_reasons} rechazados no traen reason_codes. Estos "
+                    "casos se señalan para depuración; no se reinterpretan ni se corrigen "
+                    "automáticamente.",
+                    style_note
+                ))
+
+        else:
+            story.append(Paragraph(
+                "La cohorte visible todavía no contiene snapshots exactos del Commit 32. "
+                "Esto es esperable inmediatamente después del despliegue: no se hace "
+                "backfill inventado de señales históricas. Las nuevas observaciones irán "
+                "aumentando esta cobertura de forma natural.",
+                style_note
+            ))
+
+        # =============================================================
+        # FALLBACK HISTÓRICO — SÓLO SIN SNAPSHOT EXACTO
+        # =============================================================
         if shadow.get('reference_flags'):
             story.append(Paragraph(
-                "Métricas por debajo de bandas de referencia",
+                "Fallback histórico: métricas reconstruidas",
                 style_h3
             ))
             story.append(Paragraph(
-                "Estas banderas se reconstruyen con los valores que ReviewTrader "
-                "sí guardó. <b>No equivalen al motivo exacto histórico de rechazo</b>, "
-                "porque la lista completa del publication gate no se persiste todavía. "
-                "Sirven para localizar qué métrica merece una auditoría posterior.",
+                "Estas banderas se calculan <b>sólo para candidatos que todavía no "
+                "tienen el publication gate exacto</b>. Son una aproximación útil para "
+                "el legado reciente, pero no deben mezclarse ni sumarse con las causas "
+                "exactas del Commit 32.",
                 style_note
             ))
-            rows = [['Banda observada', 'Casos']]
+            rows = [['Banda reconstruida', 'Casos sin gate exacto']]
             for label, count in shadow.get('reference_flags') or []:
                 rows.append([label, str(count)])
-            tflags = Table(rows, colWidths=[11*cm, 3*cm])
+            tflags = Table(rows, colWidths=[10.5*cm, 3.5*cm])
             tflags.setStyle(TableStyle([
                 ('BACKGROUND', (0,0), (-1,0), HexColor('#e8a500')),
                 ('TEXTCOLOR', (0,0), (-1,0), white),
