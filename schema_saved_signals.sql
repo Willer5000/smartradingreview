@@ -217,6 +217,58 @@ ALTER TABLE public.saved_signals
     ADD COLUMN IF NOT EXISTS economics_cost_components_complete BOOLEAN DEFAULT FALSE,
 
     ADD COLUMN IF NOT EXISTS economics_calculated_at TIMESTAMPTZ;
+
+-- ============================================================================
+-- COMMIT 36O.2
+-- COSTES FUTURES POR PROCEDENCIA + FUNDING PÚBLICO OBSERVADO
+-- ============================================================================
+
+ALTER TABLE public.saved_signals
+
+    ADD COLUMN IF NOT EXISTS
+        fee_slippage_cost_source TEXT,
+
+    ADD COLUMN IF NOT EXISTS
+        estimated_fee_slippage_cost_usdt NUMERIC(20, 8),
+
+    ADD COLUMN IF NOT EXISTS
+        funding_data_source TEXT,
+
+    ADD COLUMN IF NOT EXISTS
+        funding_calculation_status TEXT,
+
+    ADD COLUMN IF NOT EXISTS
+        funding_contract_symbol TEXT,
+
+    ADD COLUMN IF NOT EXISTS
+        funding_settlements_count INTEGER,
+
+    ADD COLUMN IF NOT EXISTS
+        funding_rate_sum NUMERIC(20, 12),
+
+    ADD COLUMN IF NOT EXISTS
+        estimated_funding_cost_usdt NUMERIC(20, 8),
+
+    ADD COLUMN IF NOT EXISTS
+        funding_window_start_at TIMESTAMPTZ,
+
+    ADD COLUMN IF NOT EXISTS
+        funding_window_end_at TIMESTAMPTZ,
+
+    ADD COLUMN IF NOT EXISTS
+        funding_observed_at TIMESTAMPTZ;
+
+
+CREATE INDEX IF NOT EXISTS
+    idx_saved_signals_funding_pending
+
+ON public.saved_signals (
+    funding_calculation_status
+)
+
+WHERE
+    funding_calculation_status = 'PENDING';
+
 CREATE INDEX IF NOT EXISTS idx_saved_signals_status ON saved_signals(status);
 CREATE INDEX IF NOT EXISTS idx_saved_signals_symbol_tf ON saved_signals(symbol, timeframe);
 CREATE INDEX IF NOT EXISTS idx_saved_signals_created ON saved_signals(created_at DESC);
