@@ -2386,7 +2386,1869 @@ def _observe_early_exit_shadow(
         )
 
         return None
+# ============================================================================
+# COMMIT 36Q — GUARDIAN LEARNING
+# ============================================================================
+#
+# 36Q.1
+#     Event Ledger
+#
+# 36Q.2
+#     Contrafactual
+#
+# 36Q.3
+#     Outcome / Delta-R
+#
+# 36Q.4
+#     Estadísticas
+#
+# IMPORTANTE:
+#
+# Todo este bloque es SHADOW_ONLY.
+#
+# NO:
+# - modifica Guardian;
+# - modifica saved signal;
+# - mueve Entry;
+# - mueve SL;
+# - mueve TP;
+# - cambia leverage;
+# - ejecuta órdenes;
+# - cambia Safety;
+# - cambia Publication Gate.
+# ============================================================================
 
+
+_GUARDIAN_LEARNING_ACTIONS = {
+    'PROTECT',
+    'EXTEND',
+    'PROTECT_AND_EXTEND',
+    'REDUCE',
+    'EXIT',
+}
+
+
+def _guardian_learning_empty_summary() -> Dict:
+    """
+    Respuesta estable cuando todavía no existe muestra.
+    """
+
+    return {
+        'mode':
+            'SHADOW_ONLY',
+
+        'authority':
+            'NONE',
+
+        'events_total':
+            0,
+
+        'evaluated':
+            0,
+
+        'helpful':
+            0,
+
+        'harmful':
+            0,
+
+        'neutral':
+            0,
+
+        'helpful_rate':
+            0.0,
+
+        'avg_delta_r':
+            None,
+
+        'total_delta_r':
+            0.0,
+
+        'pending':
+            0,
+
+        'not_quantifiable':
+            0,
+
+        'by_action':
+            {},
+
+        'by_context':
+            {},
+    }
+
+
+# ============================================================================
+# 36Q.1 — EVENT LEDGER
+# ============================================================================
+
+def record_guardian_learning_event(
+    signal: Dict,
+    advice: Dict,
+    current_price: float,
+    event_action: str,
+    event_bucket: str = 'STATE',
+    user_name: Optional[str] = None
+) -> bool:
+    """
+    Registra una recomendación accionable del Guardian.
+
+    Una combinación:
+
+        signal_id
+        + action
+        + bucket
+
+    se guarda una sola vez.
+
+    Por ejemplo:
+
+        BTC 4h
+        PROTECT
+        SL2
+
+    no se escribe cada minuto.
+    """
+
+    db = _get_db()
+
+    if db is None:
+        return False
+
+    try:
+
+        signal_id = str(
+            signal.get(
+                'id',
+                ''
+            )
+            or ''
+        ).strip()
+
+
+        action = str(
+            event_action
+            or ''
+        ).upper()
+
+
+        bucket = str(
+            event_bucket
+            or 'STATE'
+        )[:80]
+
+
+        price = float(
+            current_price
+            or 0
+        )
+
+
+        if (
+            not signal_id
+            or action
+            not in _GUARDIAN_LEARNING_ACTIONS
+            or price <= 0
+        ):
+            return False
+
+
+        # ============================================================
+        # DEDUP PERSISTENTE
+        # ============================================================
+
+        def _find_existing():
+
+            return (
+                db.client
+                .table(
+                    'guardian_learning_events'
+                )
+                .select(
+                    'id'
+                )
+                .eq(
+                    'signal_id',
+                    signal_id
+                )
+                .eq(
+                    'event_action',
+                    action
+                )
+                .eq(
+                    'event_bucket',
+                    bucket
+                )
+                .limit(
+                    1
+                )
+                .execute()
+            )
+
+
+        existing = db._with_retry(
+            _find_existing
+        )
+
+
+        if (
+            existing
+            and existing.data
+        ):
+            return False
+
+
+        reason = (
+            advice.get(
+                'management_reason'
+            )
+            or advice.get(
+                'reason'
+            )
+            or ''
+        )
+
+
+        payload = {
+
+            'signal_id':
+                signal_id,
+
+            'user_name':
+                str(
+                    user_name
+                    or signal.get(
+                        'user_name',
+                        ''
+                    )
+                    or ''
+                )[:120],
+
+            'symbol':
+                str(
+                    signal.get(
+                        'symbol',
+                        ''
+                    )
+                    or ''
+                )[:40],
+
+            'timeframe':
+                str(
+                    signal.get(
+                        'timeframe',
+                        ''
+                    )
+                    or ''
+                )[:20],
+
+            'direction':
+                str(
+                    signal.get(
+                        'action',
+                        ''
+                    )
+                    or ''
+                ).upper()[:10],
+
+            'risk_class':
+                str(
+                    signal.get(
+                        'risk_class',
+                        ''
+                    )
+                    or ''
+                ).upper()[:30],
+
+            'event_action':
+                action,
+
+            'event_bucket':
+                bucket,
+
+            'observed_at':
+                datetime.utcnow()
+                .isoformat(),
+
+            'observed_price':
+                round(
+                    price,
+                    8
+                ),
+
+            'observed_r':
+                _calculate_trade_r(
+                    signal,
+                    price
+                ),
+
+            'deterioration_score':
+                float(
+                    advice.get(
+                        'deterioration_score',
+                        0
+                    )
+                    or 0
+                ),
+
+            'progress_r':
+                float(
+                    advice.get(
+                        'progress_r',
+                        0
+                    )
+                    or 0
+                ),
+
+            'suggested_stop_loss':
+                (
+                    float(
+                        advice.get(
+                            'suggested_stop_loss'
+                        )
+                    )
+                    if advice.get(
+                        'suggested_stop_loss'
+                    ) is not None
+                    else None
+                ),
+
+            'suggested_take_profit':
+                (
+                    float(
+                        advice.get(
+                            'suggested_take_profit'
+                        )
+                    )
+                    if advice.get(
+                        'suggested_take_profit'
+                    ) is not None
+                    else None
+                ),
+
+            'original_entry':
+                float(
+                    signal.get(
+                        'entry',
+                        0
+                    )
+                    or 0
+                ),
+
+            'original_stop_loss':
+                float(
+                    signal.get(
+                        'stop_loss',
+                        0
+                    )
+                    or 0
+                ),
+
+            'original_take_profit':
+                float(
+                    signal.get(
+                        'take_profit',
+                        0
+                    )
+                    or 0
+                ),
+
+            'reason':
+                str(
+                    reason
+                )[:1500],
+
+            'counterfactual_status':
+                'PENDING',
+
+            'updated_at':
+                datetime.utcnow()
+                .isoformat(),
+        }
+
+
+        def _insert():
+
+            return (
+                db.client
+                .table(
+                    'guardian_learning_events'
+                )
+                .insert(
+                    payload
+                )
+                .execute()
+            )
+
+
+        result = db._with_retry(
+            _insert
+        )
+
+
+        return bool(
+            result
+            and result.data
+        )
+
+
+    except Exception as e:
+
+        # ------------------------------------------------------------
+        # FAIL OPEN
+        #
+        # Un fallo del aprendizaje JAMÁS rompe Guardian.
+        # ------------------------------------------------------------
+
+        logger.warning(
+            "record_guardian_learning_event: "
+            f"{e}"
+        )
+
+        return False
+
+
+# ============================================================================
+# 36Q.2 — CONTRAFACTUAL PROTECT
+# ============================================================================
+
+def _guardian_protect_counterfactual(
+    event: Dict,
+    signal: Dict,
+    actual_exit_price: float,
+    actual_r: float,
+    price_fetcher=None
+) -> Dict:
+    """
+    Evalúa una recomendación PROTECT.
+
+    Sólo usa velas que comienzan DESPUÉS de la recomendación.
+
+    Así evitamos usar movimientos que ocurrieron antes de que
+    Guardian hiciera la recomendación.
+
+    También evitamos inventar el orden intrabar.
+    """
+
+    suggested_sl = event.get(
+        'suggested_stop_loss'
+    )
+
+
+    try:
+
+        suggested_sl = float(
+            suggested_sl
+        )
+
+    except (
+        TypeError,
+        ValueError
+    ):
+
+        return {
+            'counterfactual_status':
+                'NOT_QUANTIFIABLE_MISSING_SL',
+
+            'evaluation_note':
+                (
+                    'PROTECT no incluyó un SL '
+                    'sugerido válido.'
+                )
+        }
+
+
+    if (
+        suggested_sl <= 0
+        or price_fetcher is None
+    ):
+
+        return {
+            'counterfactual_status':
+                'NOT_QUANTIFIABLE_PATH_UNAVAILABLE',
+
+            'evaluation_note':
+                (
+                    'No existe camino de velas '
+                    'suficiente para evaluar PROTECT.'
+                )
+        }
+
+
+    try:
+
+        import pandas as pd
+
+
+        df = price_fetcher(
+            signal.get(
+                'symbol'
+            ),
+            signal.get(
+                'timeframe'
+            )
+        )
+
+
+        if (
+            df is None
+            or len(
+                df
+            ) == 0
+            or 'time'
+            not in df
+        ):
+
+            return {
+                'counterfactual_status':
+                    'NOT_QUANTIFIABLE_PATH_UNAVAILABLE',
+
+                'evaluation_note':
+                    (
+                        'No existen velas Futures '
+                        'para evaluar PROTECT.'
+                    )
+            }
+
+
+        observed_at = pd.Timestamp(
+            event.get(
+                'observed_at'
+            )
+        )
+
+
+        closed_at = pd.Timestamp(
+            signal.get(
+                'closed_at'
+            )
+        )
+
+
+        if observed_at.tz is None:
+
+            observed_at = (
+                observed_at
+                .tz_localize(
+                    'UTC'
+                )
+            )
+
+        else:
+
+            observed_at = (
+                observed_at
+                .tz_convert(
+                    'UTC'
+                )
+            )
+
+
+        if closed_at.tz is None:
+
+            closed_at = (
+                closed_at
+                .tz_localize(
+                    'UTC'
+                )
+            )
+
+        else:
+
+            closed_at = (
+                closed_at
+                .tz_convert(
+                    'UTC'
+                )
+            )
+
+
+        df_time = pd.to_datetime(
+            df[
+                'time'
+            ],
+            utc=True
+        )
+
+
+        # ============================================================
+        # NO USAR LA VELA YA ABIERTA CUANDO OCURRIÓ EL EVENTO
+        # ============================================================
+        #
+        # No sabemos qué parte de su high/low ocurrió
+        # antes o después de la recomendación.
+        # ============================================================
+
+        path = df[
+            (
+                df_time
+                > observed_at
+            )
+            & (
+                df_time
+                <= closed_at
+            )
+        ]
+
+
+        if len(
+            path
+        ) == 0:
+
+            return {
+                'counterfactual_status':
+                    'NOT_QUANTIFIABLE_INTRABAR_WINDOW',
+
+                'evaluation_note':
+                    (
+                        'No existe una vela posterior completa '
+                        'entre PROTECT y el cierre.'
+                    )
+            }
+
+
+        direction = str(
+            signal.get(
+                'action',
+                ''
+            )
+            or ''
+        ).upper()
+
+
+        if direction == 'LONG':
+
+            hit_mask = (
+                path[
+                    'low'
+                ].astype(
+                    float
+                )
+                <= suggested_sl
+            )
+
+
+        elif direction == 'SHORT':
+
+            hit_mask = (
+                path[
+                    'high'
+                ].astype(
+                    float
+                )
+                >= suggested_sl
+            )
+
+
+        else:
+
+            return {
+                'counterfactual_status':
+                    'NOT_QUANTIFIABLE_DIRECTION',
+
+                'evaluation_note':
+                    'Dirección LONG/SHORT inválida.'
+            }
+
+
+        # ============================================================
+        # EL SL PROTECTOR HABRÍA SIDO TOCADO
+        # ============================================================
+
+        if bool(
+            hit_mask.any()
+        ):
+
+            first_hit_index = (
+                hit_mask[
+                    hit_mask
+                ].index[0]
+            )
+
+
+            first_hit_candle = (
+                path.loc[
+                    first_hit_index
+                ]
+            )
+
+
+            close_reason = str(
+                signal.get(
+                    'close_reason',
+                    signal.get(
+                        'status',
+                        ''
+                    )
+                )
+                or ''
+            ).lower()
+
+
+            # ========================================================
+            # EVITAR INVENTAR ORDEN INTRABAR
+            # ========================================================
+
+            actual_hit_same_candle = (
+                False
+            )
+
+
+            if close_reason == 'tp_hit':
+
+                actual_hit_same_candle = (
+                    float(
+                        first_hit_candle[
+                            'high'
+                        ]
+                    )
+                    >= actual_exit_price
+                    if direction == 'LONG'
+                    else float(
+                        first_hit_candle[
+                            'low'
+                        ]
+                    )
+                    <= actual_exit_price
+                )
+
+
+            elif close_reason == 'sl_hit':
+
+                actual_hit_same_candle = (
+                    float(
+                        first_hit_candle[
+                            'low'
+                        ]
+                    )
+                    <= actual_exit_price
+                    if direction == 'LONG'
+                    else float(
+                        first_hit_candle[
+                            'high'
+                        ]
+                    )
+                    >= actual_exit_price
+                )
+
+
+            if actual_hit_same_candle:
+
+                return {
+                    'counterfactual_status':
+                        (
+                            'NOT_QUANTIFIABLE_'
+                            'SAME_CANDLE_ORDER'
+                        ),
+
+                    'evaluation_note':
+                        (
+                            'El SL protector y el cierre real '
+                            'aparecen en la misma vela. '
+                            'No se inventa el orden intrabar.'
+                        )
+                }
+
+
+            counterfactual_r = (
+                _calculate_trade_r(
+                    signal,
+                    suggested_sl
+                )
+            )
+
+
+            delta_r = (
+                counterfactual_r
+                - actual_r
+            )
+
+
+            return {
+
+                'counterfactual_status':
+                    'EVALUATED_TRIGGERED',
+
+                'counterfactual_exit_price':
+                    round(
+                        suggested_sl,
+                        8
+                    ),
+
+                'counterfactual_r':
+                    round(
+                        counterfactual_r,
+                        6
+                    ),
+
+                'delta_r':
+                    round(
+                        delta_r,
+                        6
+                    ),
+
+                'would_help':
+                    bool(
+                        delta_r > 0
+                    ),
+
+                'evaluation_note':
+                    (
+                        'El SL protector habría sido '
+                        'tocado en una vela posterior '
+                        'observable.'
+                    )
+            }
+
+
+        # ============================================================
+        # EL PROTECT NO HABRÍA CAMBIADO LA SALIDA
+        # ============================================================
+
+        return {
+
+            'counterfactual_status':
+                'EVALUATED_NOT_TRIGGERED',
+
+            'counterfactual_exit_price':
+                round(
+                    actual_exit_price,
+                    8
+                ),
+
+            'counterfactual_r':
+                round(
+                    actual_r,
+                    6
+                ),
+
+            'delta_r':
+                0.0,
+
+            'would_help':
+                False,
+
+            'evaluation_note':
+                (
+                    'El SL protector no fue tocado. '
+                    'El cierre habría permanecido igual.'
+                )
+        }
+
+
+    except Exception as e:
+
+        logger.warning(
+            "_guardian_protect_counterfactual: "
+            f"{e}"
+        )
+
+        return {
+            'counterfactual_status':
+                'NOT_QUANTIFIABLE_PATH_ERROR',
+
+            'evaluation_note':
+                (
+                    'No se pudo reconstruir '
+                    'el camino de PROTECT.'
+                )
+        }
+
+
+# ============================================================================
+# 36Q.2 + 36Q.3
+# CERRAR EL CONTRAFACTUAL CUANDO TERMINA LA OPERACIÓN REAL
+# ============================================================================
+
+def settle_pending_guardian_learning_events(
+    price_fetcher=None,
+    limit: int = 100
+) -> Dict:
+    """
+    Procesa eventos PENDING cuando saved_signal ya cerró.
+
+    HOY podemos cuantificar con rigor:
+
+        EXIT
+        PROTECT
+
+    HOY NO cuantificamos artificialmente:
+
+        REDUCE
+        EXTEND
+        PROTECT_AND_EXTEND
+
+    Razones:
+
+    REDUCE:
+        Guardian todavía no especifica porcentaje exacto.
+
+    EXTEND:
+        se necesitaría seguir precio después del TP/cierre original.
+
+    PROTECT_AND_EXTEND:
+        evaluar sólo una pata sería atribuir un delta-R incompleto.
+    """
+
+    stats = {
+
+        'pending':
+            0,
+
+        'settled':
+            0,
+
+        'evaluated':
+            0,
+
+        'not_quantifiable':
+            0,
+
+        'errors':
+            0,
+    }
+
+
+    db = _get_db()
+
+
+    if db is None:
+
+        return stats
+
+
+    try:
+
+        safe_limit = max(
+            1,
+            min(
+                int(
+                    limit
+                ),
+                500
+            )
+        )
+
+
+        def _op_pending():
+
+            return (
+                db.client
+                .table(
+                    'guardian_learning_events'
+                )
+                .select(
+                    '*'
+                )
+                .eq(
+                    'counterfactual_status',
+                    'PENDING'
+                )
+                .order(
+                    'observed_at',
+                    desc=False
+                )
+                .limit(
+                    safe_limit
+                )
+                .execute()
+            )
+
+
+        response = db._with_retry(
+            _op_pending
+        )
+
+
+        events = (
+            response.data
+            if (
+                response
+                and response.data
+            )
+            else []
+        )
+
+
+        stats[
+            'pending'
+        ] = len(
+            events
+        )
+
+
+        for event in events:
+
+            try:
+
+                signal_id = (
+                    event.get(
+                        'signal_id'
+                    )
+                )
+
+
+                if not signal_id:
+
+                    continue
+
+
+                signal = (
+                    get_saved_signal(
+                        signal_id
+                    )
+                )
+
+
+                if not signal:
+
+                    continue
+
+
+                status = str(
+                    signal.get(
+                        'status',
+                        ''
+                    )
+                    or ''
+                ).lower()
+
+
+                # ====================================================
+                # SÓLO OPERACIONES REALMENTE TERMINADAS
+                # ====================================================
+
+                if status not in (
+                    'tp_hit',
+                    'sl_hit',
+                    'closed_manual'
+                ):
+
+                    continue
+
+
+                if not bool(
+                    signal.get(
+                        'entry_touched'
+                    )
+                ):
+
+                    continue
+
+
+                actual_exit_price = float(
+                    signal.get(
+                        'closed_price',
+                        0
+                    )
+                    or 0
+                )
+
+
+                if actual_exit_price <= 0:
+
+                    continue
+
+
+                actual_r_raw = (
+                    signal.get(
+                        'actual_close_r'
+                    )
+                )
+
+
+                actual_r = (
+                    float(
+                        actual_r_raw
+                    )
+                    if actual_r_raw
+                    is not None
+                    else _calculate_trade_r(
+                        signal,
+                        actual_exit_price
+                    )
+                )
+
+
+                action = str(
+                    event.get(
+                        'event_action',
+                        ''
+                    )
+                    or ''
+                ).upper()
+
+
+                now_iso = (
+                    datetime.utcnow()
+                    .isoformat()
+                )
+
+
+                # ====================================================
+                # RESULTADO REAL
+                # ====================================================
+
+                result = {
+
+                    'actual_close_price':
+                        round(
+                            actual_exit_price,
+                            8
+                        ),
+
+                    'actual_close_r':
+                        round(
+                            actual_r,
+                            6
+                        ),
+
+                    'actual_close_reason':
+                        str(
+                            signal.get(
+                                'close_reason',
+                                status
+                            )
+                            or status
+                        )[:80],
+
+                    'evaluated_at':
+                        now_iso,
+
+                    'updated_at':
+                        now_iso,
+                }
+
+
+                # ====================================================
+                # EXIT
+                # ====================================================
+
+                if action == 'EXIT':
+
+                    observed_price = float(
+                        event.get(
+                            'observed_price',
+                            0
+                        )
+                        or 0
+                    )
+
+
+                    event_r_raw = (
+                        event.get(
+                            'observed_r'
+                        )
+                    )
+
+
+                    event_r = (
+                        float(
+                            event_r_raw
+                        )
+                        if event_r_raw
+                        is not None
+                        else _calculate_trade_r(
+                            signal,
+                            observed_price
+                        )
+                    )
+
+
+                    delta_r = (
+                        event_r
+                        - actual_r
+                    )
+
+
+                    result.update({
+
+                        'counterfactual_status':
+                            'EVALUATED',
+
+                        'counterfactual_exit_price':
+                            round(
+                                observed_price,
+                                8
+                            ),
+
+                        'counterfactual_r':
+                            round(
+                                event_r,
+                                6
+                            ),
+
+                        'delta_r':
+                            round(
+                                delta_r,
+                                6
+                            ),
+
+                        'would_help':
+                            bool(
+                                delta_r > 0
+                            ),
+
+                        'evaluation_note':
+                            (
+                                'EXIT se compara como cierre '
+                                'total en el precio observado '
+                                'por Guardian.'
+                            )
+                    })
+
+
+                # ====================================================
+                # PROTECT
+                # ====================================================
+
+                elif action == 'PROTECT':
+
+                    result.update(
+                        _guardian_protect_counterfactual(
+                            event=event,
+                            signal=signal,
+                            actual_exit_price=(
+                                actual_exit_price
+                            ),
+                            actual_r=(
+                                actual_r
+                            ),
+                            price_fetcher=(
+                                price_fetcher
+                            )
+                        )
+                    )
+
+
+                # ====================================================
+                # REDUCE
+                # ====================================================
+
+                elif action == 'REDUCE':
+
+                    result.update({
+
+                        'counterfactual_status':
+                            (
+                                'NOT_QUANTIFIABLE_'
+                                'REDUCE_SIZE'
+                            ),
+
+                        'evaluation_note':
+                            (
+                                'Guardian recomienda REDUCE, '
+                                'pero actualmente no persiste '
+                                'un porcentaje exacto. '
+                                'No se inventa 25%, 50% '
+                                'u otro tamaño.'
+                            )
+                    })
+
+
+                # ====================================================
+                # EXTEND
+                # ====================================================
+
+                elif action == 'EXTEND':
+
+                    result.update({
+
+                        'counterfactual_status':
+                            (
+                                'NOT_QUANTIFIABLE_'
+                                'POST_CLOSE_PATH'
+                            ),
+
+                        'evaluation_note':
+                            (
+                                'EXTEND necesita observar el '
+                                'precio después del TP/cierre '
+                                'original. Ese horizonte aún '
+                                'no se conserva.'
+                            )
+                    })
+
+
+                # ====================================================
+                # PROTECT + EXTEND
+                # ====================================================
+
+                elif action == 'PROTECT_AND_EXTEND':
+
+                    result.update({
+
+                        'counterfactual_status':
+                            (
+                                'NOT_QUANTIFIABLE_'
+                                'COMBINED_ACTION'
+                            ),
+
+                        'evaluation_note':
+                            (
+                                'La acción combina mover SL '
+                                'y TP. Medir sólo una pata '
+                                'produciría un delta-R '
+                                'incompleto.'
+                            )
+                    })
+
+
+                else:
+
+                    result.update({
+
+                        'counterfactual_status':
+                            'NOT_QUANTIFIABLE_ACTION',
+
+                        'evaluation_note':
+                            (
+                                'Acción Guardian '
+                                'no reconocida.'
+                            )
+                    })
+
+
+                # ====================================================
+                # PERSISTIR SIN TOCAR saved_signals
+                # ====================================================
+
+                def _update_event():
+
+                    return (
+                        db.client
+                        .table(
+                            'guardian_learning_events'
+                        )
+                        .update(
+                            result
+                        )
+                        .eq(
+                            'id',
+                            event[
+                                'id'
+                            ]
+                        )
+                        .execute()
+                    )
+
+
+                db._with_retry(
+                    _update_event
+                )
+
+
+                stats[
+                    'settled'
+                ] += 1
+
+
+                final_status = str(
+                    result.get(
+                        'counterfactual_status',
+                        ''
+                    )
+                    or ''
+                )
+
+
+                if final_status.startswith(
+                    'EVALUATED'
+                ):
+
+                    stats[
+                        'evaluated'
+                    ] += 1
+
+
+                elif final_status.startswith(
+                    'NOT_QUANTIFIABLE'
+                ):
+
+                    stats[
+                        'not_quantifiable'
+                    ] += 1
+
+
+            except Exception as event_error:
+
+                stats[
+                    'errors'
+                ] += 1
+
+
+                logger.warning(
+                    "settle_guardian_learning_event "
+                    f"{event.get('id')}: "
+                    f"{event_error}"
+                )
+
+
+        return stats
+
+
+    except Exception as e:
+
+        stats[
+            'errors'
+        ] += 1
+
+
+        logger.warning(
+            "settle_pending_guardian_learning_events: "
+            f"{e}"
+        )
+
+
+        return stats
+
+
+# ============================================================================
+# 36Q.4 — ESTADÍSTICAS GUARDIAN
+# ============================================================================
+
+def get_guardian_learning_summary(
+    user_name: Optional[str] = None
+) -> Dict:
+    """
+    Resume el aprendizaje Guardian.
+
+    Métrica principal:
+
+        delta_r =
+            resultado hipotético Guardian
+            -
+            resultado real
+
+    Interpretación:
+
+        delta_r > 0
+            Guardian habría ayudado.
+
+        delta_r < 0
+            Guardian habría perjudicado.
+
+        delta_r = 0
+            no habría cambiado el resultado.
+
+    Sigue siendo SHADOW_ONLY.
+    """
+
+    empty = (
+        _guardian_learning_empty_summary()
+    )
+
+
+    db = _get_db()
+
+
+    if db is None:
+
+        return empty
+
+
+    try:
+
+        def _op():
+
+            q = (
+                db.client
+                .table(
+                    'guardian_learning_events'
+                )
+                .select(
+                    (
+                        'symbol,'
+                        'timeframe,'
+                        'direction,'
+                        'event_action,'
+                        'counterfactual_status,'
+                        'delta_r'
+                    )
+                )
+            )
+
+
+            if user_name:
+
+                q = q.eq(
+                    'user_name',
+                    str(
+                        user_name
+                    ).strip()
+                )
+
+
+            return q.execute()
+
+
+        response = db._with_retry(
+            _op
+        )
+
+
+        rows = (
+            response.data
+            if (
+                response
+                and response.data
+            )
+            else []
+        )
+
+
+        evaluated = []
+
+        pending = 0
+
+        not_quantifiable = 0
+
+        by_action = {}
+
+        by_context_values = {}
+
+
+        for row in rows:
+
+            action = str(
+                row.get(
+                    'event_action',
+                    ''
+                )
+                or ''
+            ).upper()
+
+
+            status = str(
+                row.get(
+                    'counterfactual_status',
+                    ''
+                )
+                or ''
+            ).upper()
+
+
+            action_stats = (
+                by_action.setdefault(
+                    action,
+                    {
+                        'events':
+                            0,
+
+                        'evaluated':
+                            0,
+
+                        'helpful':
+                            0,
+
+                        'harmful':
+                            0,
+
+                        'neutral':
+                            0,
+
+                        'avg_delta_r':
+                            None,
+
+                        'not_quantifiable':
+                            0,
+
+                        'pending':
+                            0,
+
+                        '_deltas':
+                            [],
+                    }
+                )
+            )
+
+
+            action_stats[
+                'events'
+            ] += 1
+
+
+            if status == 'PENDING':
+
+                pending += 1
+
+                action_stats[
+                    'pending'
+                ] += 1
+
+                continue
+
+
+            if status.startswith(
+                'NOT_QUANTIFIABLE'
+            ):
+
+                not_quantifiable += 1
+
+                action_stats[
+                    'not_quantifiable'
+                ] += 1
+
+                continue
+
+
+            if not status.startswith(
+                'EVALUATED'
+            ):
+
+                continue
+
+
+            delta_raw = row.get(
+                'delta_r'
+            )
+
+
+            if delta_raw is None:
+
+                continue
+
+
+            try:
+
+                delta_r = float(
+                    delta_raw
+                )
+
+            except (
+                TypeError,
+                ValueError
+            ):
+
+                continue
+
+
+            evaluated.append(
+                delta_r
+            )
+
+
+            action_stats[
+                'evaluated'
+            ] += 1
+
+
+            action_stats[
+                '_deltas'
+            ].append(
+                delta_r
+            )
+
+
+            if delta_r > 0:
+
+                action_stats[
+                    'helpful'
+                ] += 1
+
+
+            elif delta_r < 0:
+
+                action_stats[
+                    'harmful'
+                ] += 1
+
+
+            else:
+
+                action_stats[
+                    'neutral'
+                ] += 1
+
+
+            context_key = (
+                f"{row.get('symbol', '')}|"
+                f"{row.get('timeframe', '')}|"
+                f"{row.get('direction', '')}|"
+                f"{action}"
+            )
+
+
+            by_context_values.setdefault(
+                context_key,
+                []
+            ).append(
+                delta_r
+            )
+
+
+        # ============================================================
+        # RESULTADO POR ACCIÓN
+        # ============================================================
+
+        for values in (
+            by_action.values()
+        ):
+
+            deltas = values.pop(
+                '_deltas',
+                []
+            )
+
+
+            values[
+                'avg_delta_r'
+            ] = (
+                round(
+                    sum(
+                        deltas
+                    )
+                    / len(
+                        deltas
+                    ),
+                    4
+                )
+                if deltas
+                else None
+            )
+
+
+        helpful = sum(
+            1
+            for value in evaluated
+            if value > 0
+        )
+
+
+        harmful = sum(
+            1
+            for value in evaluated
+            if value < 0
+        )
+
+
+        neutral = (
+            len(
+                evaluated
+            )
+            - helpful
+            - harmful
+        )
+
+
+        by_context = {
+
+            key: {
+
+                'sample':
+                    len(
+                        deltas
+                    ),
+
+                'avg_delta_r':
+                    round(
+                        sum(
+                            deltas
+                        )
+                        / len(
+                            deltas
+                        ),
+                        4
+                    )
+
+            }
+
+            for (
+                key,
+                deltas
+            )
+            in by_context_values.items()
+
+            if deltas
+        }
+
+
+        return {
+
+            'mode':
+                'SHADOW_ONLY',
+
+            'authority':
+                'NONE',
+
+            'events_total':
+                len(
+                    rows
+                ),
+
+            'evaluated':
+                len(
+                    evaluated
+                ),
+
+            'helpful':
+                helpful,
+
+            'harmful':
+                harmful,
+
+            'neutral':
+                neutral,
+
+            'helpful_rate':
+                round(
+                    (
+                        helpful
+                        / len(
+                            evaluated
+                        )
+                        * 100.0
+                    )
+                    if evaluated
+                    else 0.0,
+                    2
+                ),
+
+            'avg_delta_r':
+                (
+                    round(
+                        sum(
+                            evaluated
+                        )
+                        / len(
+                            evaluated
+                        ),
+                        4
+                    )
+                    if evaluated
+                    else None
+                ),
+
+            'total_delta_r':
+                round(
+                    sum(
+                        evaluated
+                    ),
+                    4
+                ),
+
+            'pending':
+                pending,
+
+            'not_quantifiable':
+                not_quantifiable,
+
+            'by_action':
+                by_action,
+
+            'by_context':
+                by_context,
+        }
+
+
+    except Exception as e:
+
+        logger.warning(
+            "get_guardian_learning_summary: "
+            f"{e}"
+        )
+
+        return empty
 # ============================================================================
 # CRUD
 # ============================================================================
