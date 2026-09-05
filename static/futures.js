@@ -186,7 +186,144 @@ function futRenderDecisionAudit(audit) {
         </details>
     `;
 }
+// ============================================================================
+// COMMIT 36M — GUARDADO MANUAL DE ANALYSIS_ONLY CLASIFICADO POR RIESGO
+// ============================================================================
 
+window._manualAnalysisCandidates = (
+    window._manualAnalysisCandidates
+    || {}
+);
+
+
+window.openManualAnalysisSave = function(
+    manualKey
+) {
+    const candidate = (
+        window._manualAnalysisCandidates[
+            manualKey
+        ]
+    );
+
+    if (!candidate) {
+        futShowToast(
+            'El análisis ya no está disponible. Actualiza la lista.',
+            'warning'
+        );
+        return;
+    }
+
+    if (
+        candidate.manual_save_allowed
+        !== true
+    ) {
+        futShowToast(
+            candidate.manual_risk_reason
+            || 'Este análisis no puede guardarse como operación.',
+            'warning'
+        );
+        return;
+    }
+
+    const riskClass = String(
+        candidate.manual_risk_class
+        || ''
+    ).toUpperCase();
+
+    const confirmationText = (
+        riskClass === 'MEDIUM'
+            ? (
+                'RIESGO MEDIO: esta hipótesis superó el Safety mínimo, '
+                + 'pero NO superó la publicación Premium.\n\n'
+                + 'Guardarla no significa que el sistema la recomiende. '
+                + '¿Deseas seguirla manualmente?'
+            )
+            : (
+                'RIESGO ALTO: esta hipótesis NO supera el Safety mínimo '
+                + 'operativo; sólo está en la banda BAJA 55–64.9.\n\n'
+                + 'No es una señal oficial. ¿Deseas guardarla como '
+                + 'seguimiento manual experimental?'
+            )
+    );
+
+    if (!window.confirm(confirmationText)) {
+        return;
+    }
+
+    const sig = {
+        symbol:
+            candidate.symbol,
+
+        timeframe:
+            candidate.timeframe,
+
+        action:
+            candidate.action,
+
+        confidence:
+            candidate.confidence,
+
+        entry:
+            candidate.entry,
+
+        stop_loss:
+            candidate.stop_loss,
+
+        take_profit:
+            candidate.take_profit,
+
+        leverage:
+            candidate.leverage || 1,
+
+        risk_reward:
+            candidate.risk_reward,
+
+        candle_timestamp:
+            candidate.source_candle_timestamp,
+
+        source_signal_id:
+            candidate.signal_id,
+
+        execution_origin:
+            'USER_MANUAL_ANALYSIS',
+
+        manual_risk_class:
+            riskClass,
+
+        manual_save_allowed:
+            true,
+
+        manual_override_ack:
+            true,
+
+        manual_risk_reason:
+            candidate.manual_risk_reason,
+
+        execution_safety:
+            candidate.execution_safety,
+
+        execution_safety_minimum:
+            candidate.execution_safety_minimum
+    };
+
+    // En un override manual NO generamos niveles artificiales.
+    if (
+        !(Number(sig.entry) > 0)
+        || !(Number(sig.stop_loss) > 0)
+        || !(Number(sig.take_profit) > 0)
+    ) {
+        futShowToast(
+            'El análisis no conserva Entry/SL/TP válidos; no puede guardarse.',
+            'warning'
+        );
+        return;
+    }
+
+    window.openSaveSignalModal(
+        sig,
+        false
+    );
+};
 function futRenderAnalysisDiagnostics(json, context) {
     const summary = json && json.analysis_summary;
     const candidates = Array.isArray(json && json.analysis_candidates)
@@ -270,7 +407,55 @@ function futRenderAnalysisDiagnostics(json, context) {
                 </span>
             `;
         }
+        let manualSaveHtml = '';
 
+        if (
+            classification === 'ANALYSIS_ONLY'
+            && candidate.manual_save_allowed === true
+            && candidate.signal_id
+        ) {
+            const manualKey = String(
+                candidate.signal_id
+            );
+
+            window._manualAnalysisCandidates[
+                manualKey
+            ] = candidate;
+
+            const riskClass = String(
+                candidate.manual_risk_class
+                || ''
+            ).toUpperCase();
+
+            const isMedium = (
+                riskClass === 'MEDIUM'
+            );
+
+            manualSaveHtml = `
+                <div class="mt-2">
+                    <span class="badge ${isMedium ? 'bg-warning text-dark' : 'bg-danger'} me-1">
+                        ${isMedium ? 'RIESGO MEDIO' : 'RIESGO ALTO'}
+                    </span>
+
+                    <button
+                        type="button"
+                        class="btn btn-sm ${isMedium ? 'btn-outline-warning' : 'btn-outline-danger'}"
+                        onclick="event.stopPropagation(); window.openManualAnalysisSave('${manualKey}');"
+                    >
+                        ${isMedium
+                            ? '💾 Guardar manual'
+                            : '🧪 Guardar experimental'}
+                    </button>
+
+                    <div class="small text-muted mt-1">
+                        ${futEscapeHtml(
+                            candidate.manual_risk_reason
+                            || ''
+                        )}
+                    </div>
+                </div>
+            `;
+        }
         let lifecycleHtml = '';
         if (
             classification === 'EXECUTABLE_SIGNAL'
@@ -302,8 +487,21 @@ function futRenderAnalysisDiagnostics(json, context) {
                     ${safetyHtml}
                 </div>
                 ${lifecycleHtml}
+                ${lifecycleHtml}
+                ${manualSaveHtml}
+
                 <div class="small text-muted mt-1">
-                    Información diagnóstica: no se puede guardar como operación.
+                    ${
+                        manualSaveHtml
+                            ? (
+                                'Sigue siendo ANALYSIS_ONLY: guardarla '
+                                + 'sólo crea seguimiento personal.'
+                            )
+                            : (
+                                'Información diagnóstica: '
+                                + 'no se puede guardar como operación.'
+                            )
+                    }
                 </div>
                 ${futRenderDecisionAudit(candidate.decision_audit)}
             </div>
@@ -2890,6 +3088,25 @@ window.openSaveSignalModal = function(sig, alreadyInPosition = false) {
 
     window._currentPrevSignal = sig;
     window._saveSignalAlreadyInPosition = Boolean(alreadyInPosition);
+    const isManualAnalysis = (
+        sig.execution_origin
+        === 'USER_MANUAL_ANALYSIS'
+    );
+
+    if (
+        isManualAnalysis
+        && (
+            !(Number(sig.entry) > 0)
+            || !(Number(sig.stop_loss) > 0)
+            || !(Number(sig.take_profit) > 0)
+        )
+    ) {
+        futShowToast(
+            'No se puede guardar manualmente: faltan niveles originales válidos.',
+            'warning'
+        );
+        return;
+    }
 
     // Cerrar el modal actual de justificación
     const prevModal = bootstrap.Modal.getInstance(document.getElementById('prevSignalModal'));
@@ -2939,9 +3156,22 @@ window.openSaveSignalModal = function(sig, alreadyInPosition = false) {
     const modalTitle = modalElement?.querySelector('.modal-title');
     const confirmButton = modalElement?.querySelector('.modal-footer .btn-success');
     if (modalTitle) {
-        modalTitle.innerHTML = alreadyInPosition
-            ? '<i class="fas fa-check-circle me-2 text-success"></i>Guardar operación ya iniciada'
-            : '<i class="fas fa-bookmark me-2 text-success"></i>Guardar señal y esperar Entry';
+        if (isManualAnalysis) {
+            const riskClass = String(
+                sig.manual_risk_class
+                || ''
+            ).toUpperCase();
+
+            modalTitle.innerHTML = (
+                riskClass === 'MEDIUM'
+                    ? '🟠 Guardar seguimiento manual · Riesgo medio'
+                    : '🔴 Guardar seguimiento experimental · Riesgo alto'
+            );
+        } else {
+            modalTitle.innerHTML = alreadyInPosition
+                ? '<i class="fas fa-check-circle me-2 text-success"></i>Guardar operación ya iniciada'
+                : '<i class="fas fa-bookmark me-2 text-success"></i>Guardar señal y esperar Entry';
+        }
     }
     if (confirmButton) {
         confirmButton.innerHTML = alreadyInPosition
@@ -3085,6 +3315,27 @@ window.confirmSaveSignal = async function() {
         candle_timestamp: sig.candle_timestamp,
         entry_at: entryAtISO,
         already_in_position: Boolean(window._saveSignalAlreadyInPosition),
+        execution_origin:
+            sig.execution_origin
+            || 'SYSTEM_EXECUTABLE',
+
+        risk_class:
+            sig.manual_risk_class
+            || 'PREMIUM',
+
+        source_signal_id:
+            sig.source_signal_id
+            || null,
+
+        manual_override_ack:
+            Boolean(
+                sig.manual_override_ack
+            ),
+
+        system_executable:
+            sig.execution_origin
+            !== 'USER_MANUAL_ANALYSIS',
+
         notes,
     };
 
