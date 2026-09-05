@@ -161,7 +161,33 @@ ALTER TABLE saved_signals
     ADD COLUMN IF NOT EXISTS actual_close_r NUMERIC(10, 4),
     ADD COLUMN IF NOT EXISTS early_exit_delta_r NUMERIC(10, 4),
     ADD COLUMN IF NOT EXISTS early_exit_would_help BOOLEAN;
+-- ============================================================================
+-- COMMIT 36N — TELEGRAM LIFECYCLE PARA SAVED FUTURES NUEVAS
+-- ============================================================================
+--
+-- IMPORTANTE:
+-- telegram_lifecycle_armed_at NO tiene DEFAULT NOW().
+--
+-- Los registros históricos deben permanecer NULL para impedir
+-- cualquier backfill de Telegram después de un deploy/restart.
+-- ============================================================================
 
+ALTER TABLE public.saved_signals
+    ADD COLUMN IF NOT EXISTS telegram_lifecycle_armed_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS telegram_entry_notified_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS telegram_tp_notified_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS telegram_sl_notified_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS telegram_guardian_last_notified_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS telegram_guardian_last_action TEXT,
+    ADD COLUMN IF NOT EXISTS telegram_guardian_last_bucket TEXT;
+
+
+CREATE INDEX IF NOT EXISTS idx_saved_signals_telegram_lifecycle
+ON public.saved_signals (
+    status,
+    telegram_lifecycle_armed_at
+)
+WHERE telegram_lifecycle_armed_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_saved_signals_status ON saved_signals(status);
 CREATE INDEX IF NOT EXISTS idx_saved_signals_symbol_tf ON saved_signals(symbol, timeframe);
 CREATE INDEX IF NOT EXISTS idx_saved_signals_created ON saved_signals(created_at DESC);
