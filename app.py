@@ -25354,16 +25354,78 @@ def api_saved_signals_close(signal_id):
         data = request.get_json() or {}
         current_price = data.get('current_price')
         
-        # Si no viene precio, consultarlo (best-effort)
-        if current_price is None or float(current_price) <= 0:
+        # Si no viene precio, consultarlo directamente
+        # desde FUTURES PERPETUAL real.
+        if (
+            current_price is None
+            or float(
+                current_price
+            ) <= 0
+        ):
+
             try:
-                df = expert_system.get_kucoin_data(sig['symbol'], sig['timeframe'])
-                if df is not None and len(df) > 0:
-                    current_price = float(df['close'].iloc[-1])
+
+                futures_market = (
+                    _get_futures_system()
+                )
+
+                if futures_market is None:
+
+                    return jsonify({
+                        'success':
+                            False,
+
+                        'error':
+                            (
+                                'Mercado Futures '
+                                'no disponible'
+                            )
+                    }), 200
+
+                df = (
+                    futures_market
+                    .get_kucoin_data(
+                        sig['symbol'],
+                        sig['timeframe']
+                    )
+                )
+
+                if (
+                    df is not None
+                    and len(df) > 0
+                ):
+
+                    current_price = float(
+                        df[
+                            'close'
+                        ].iloc[-1]
+                    )
+
                 else:
-                    return jsonify({'success': False, 'error': 'No se pudo obtener precio'}), 200
+
+                    return jsonify({
+                        'success':
+                            False,
+
+                        'error':
+                            (
+                                'No se pudo obtener '
+                                'precio Futures'
+                            )
+                    }), 200
+
             except Exception as e:
-                return jsonify({'success': False, 'error': f'Precio no disponible: {e}'}), 200
+
+                return jsonify({
+                    'success':
+                        False,
+
+                    'error':
+                        (
+                            'Precio Futures '
+                            f'no disponible: {e}'
+                        )
+                }), 200
         
         result = close_saved_signal_manual(signal_id, float(current_price))
         if not result:
@@ -25422,9 +25484,11 @@ def api_futures_position_guardian():
     try:
 
         from saved_signals import (
-            list_saved_signals
+            list_saved_signals,
+            update_saved_signal_telegram_state
         )
 
+        
         user = _authenticated_user()
 
         if not user:
@@ -29434,37 +29498,22 @@ def _get_signals_for_entry_monitor():
     except Exception as e:
         print(f"⚠️ monitor_entries: error leyendo señales spot: {e}")
     
-    # 2. Futures: leer del caché global (ya alimentado por warm-up)
-    try:
-        with app.test_client() as client:
-            r = client.get('/api/futures/signals/previous?min_confidence=55')
-            if r.status_code == 200:
-                data = r.get_json() or {}
-                for sig in (data.get('signals') or []):
-                    tf = sig.get('timeframe')
-                    if tf not in MONITOR_ENTRY_TIMEFRAMES:
-                        continue
-                    if sig.get('action') not in ('LONG', 'SHORT'):
-                        continue
-                    if sig.get('activa') != 1:
-                        continue
-                    signals.append({
-                        'system': 'futures',
-                        'symbol': sig.get('symbol'),
-                        'timeframe': tf,
-                        'action': sig.get('action'),
-                        'entry': sig.get('entry'),
-                        'stop_loss': sig.get('stop_loss'),
-                        'take_profit': sig.get('take_profit'),
-                        'confidence': sig.get('confidence'),
-                        'current_price': sig.get('current_price'),
-                        'candle_timestamp': sig.get('candle_timestamp'),
-                        'leverage': sig.get('leverage'),
-                        'risk_reward': sig.get('risk_reward'),
-                        'message': sig.get('message', ''),  # justificación futures (nuevo)
-                    })
-    except Exception as e:
-        print(f"⚠️ monitor_entries: error leyendo señales futures: {e}")
+    # ================================================================
+    # COMMIT 36N
+    # ================================================================
+    #
+    # FUTURES YA NO SE MONITOREA DESDE Previous.
+    #
+    # Una Previous no guardada:
+    # - NO genera Entry Telegram personal;
+    # - NO entra al Guardian personal;
+    # - NO genera TP/SL personales.
+    #
+    # El lifecycle Futures vive exclusivamente en saved_signals.
+    #
+    # Spot conserva este monitor antiguo.
+    # ================================================================
+
     
     return signals
 
@@ -29601,6 +29650,530 @@ def monitor_entries_loop():
         
         time.sleep(MONITOR_CHECK_INTERVAL)
 
+# ============================================================================
+# COMMIT 36N — SAVED FUTURES LIFECYCLE
+# ============================================================================
+#
+# RESPONSABILIDAD:
+#
+# - evaluar exclusivamente saved Futures;
+# - utilizar Futures perpetual real;
+# - detectar Entry / TP / SL;
+# - enviar Telegram sólo para señales armadas;
+# - nunca notificar históricos;
+# - nunca activar Guardian sobre cerradas.
+#
+# NO:
+# - publica nuevas señales;
+# - cambia Safety;
+# - cambia Entry / SL / TP;
+# - recalcula traders;
+# - modifica pesos;
+# - ejecuta órdenes.
+# ============================================================================
+
+_SAVED_FUTURES_LIFECYCLE_INTERVAL = 60
+
+
+def _build_saved_futures_lifecycle_message(
+    user,
+    signal,
+    event
+):
+    """
+    Construye mensajes personales para:
+    ENTRY / TP / SL.
+    """
+
+    event = str(
+        event
+        or ''
+    ).upper()
+
+    event_labels = {
+        'ENTRY': (
+            '📍',
+            'ENTRY TOCADO'
+        ),
+        'TP': (
+            '✅',
+            'TAKE PROFIT ALCANZADO'
+        ),
+        'SL': (
+            '🛑',
+            'STOP LOSS ALCANZADO'
+        ),
+    }
+
+    emoji, label = (
+        event_labels.get(
+            event,
+            (
+                '📌',
+                event
+            )
+        )
+    )
+
+    symbol = str(
+        signal.get(
+            'symbol',
+            ''
+        )
+        or ''
+    )
+
+    timeframe = str(
+        signal.get(
+            'timeframe',
+            ''
+        )
+        or ''
+    )
+
+    action = str(
+        signal.get(
+            'action',
+            ''
+        )
+        or ''
+    ).upper()
+
+    risk_class = str(
+        signal.get(
+            'risk_class',
+            'PREMIUM'
+        )
+        or 'PREMIUM'
+    ).upper()
+
+    entry = signal.get(
+        'entry'
+    )
+
+    stop_loss = signal.get(
+        'stop_loss'
+    )
+
+    take_profit = signal.get(
+        'take_profit'
+    )
+
+    lines = [
+        (
+            f"{emoji} "
+            f"<b>{label}</b>"
+        ),
+        (
+            "👤 Usuario: "
+            f"<b>{_telegram_escape(user)}</b>"
+        ),
+        "📊 Mercado: <b>FUTURES</b>",
+        (
+            "💱 "
+            f"<b>{_telegram_escape(symbol)}</b>"
+            " · "
+            f"{_telegram_escape(timeframe)}"
+        ),
+        (
+            "Dirección: "
+            f"<b>{_telegram_escape(action)}</b>"
+        ),
+        (
+            "Riesgo: "
+            f"<b>{_telegram_escape(risk_class)}</b>"
+        ),
+        '',
+        (
+            "💰 Entry: "
+            f"{_telegram_price(entry)}"
+        ),
+        (
+            "🎯 TP: "
+            f"{_telegram_price(take_profit)}"
+        ),
+        (
+            "🛑 SL: "
+            f"{_telegram_price(stop_loss)}"
+        ),
+    ]
+
+    if event in (
+        'TP',
+        'SL'
+    ):
+
+        pnl_pct = signal.get(
+            'pnl_pct'
+        )
+
+        pnl_usdt = signal.get(
+            'pnl_usdt'
+        )
+
+        if pnl_pct is not None:
+
+            try:
+                lines.append(
+                    (
+                        "📈 Resultado: "
+                        f"<b>{float(pnl_pct):+.2f}%</b>"
+                    )
+                )
+            except Exception:
+                pass
+
+        if pnl_usdt is not None:
+
+            try:
+                lines.append(
+                    (
+                        "💵 PnL: "
+                        f"<b>{float(pnl_usdt):+.2f} USDT</b>"
+                    )
+                )
+            except Exception:
+                pass
+
+    return '\n'.join(
+        lines
+    )
+
+
+def _send_saved_futures_lifecycle_notifications():
+    """
+    Envía únicamente eventos pendientes de Saved Futures ARMADAS.
+
+    Históricos:
+        telegram_lifecycle_armed_at = NULL
+        -> jamás llegan aquí.
+    """
+
+    from saved_signals import (
+        list_saved_signals,
+        update_saved_signal_telegram_state
+    )
+
+    for user in sorted(
+        _telegram_market_users(
+            'futures'
+        )
+    ):
+
+        signals = (
+            list_saved_signals(
+                status_filter=[
+                    'entry_touched',
+                    'tp_hit',
+                    'sl_hit'
+                ],
+                limit=200,
+                user_name=user
+            )
+            or []
+        )
+
+        for sig in signals:
+
+            # ========================================================
+            # ANTI-BACKFILL PRINCIPAL
+            # ========================================================
+
+            if not sig.get(
+                'telegram_lifecycle_armed_at'
+            ):
+                continue
+
+            signal_id = sig.get(
+                'id'
+            )
+
+            if not signal_id:
+                continue
+
+            status = str(
+                sig.get(
+                    'status',
+                    ''
+                )
+                or ''
+            ).lower()
+
+            # --------------------------------------------------------
+            # ENTRY
+            # --------------------------------------------------------
+            #
+            # También se comprueba entry_touched para que si dentro del
+            # mismo ciclo ya llegó a TP/SL, pueda conservarse el evento
+            # Entry antes de informar el cierre.
+            # --------------------------------------------------------
+
+            if (
+                bool(
+                    sig.get(
+                        'entry_touched'
+                    )
+                )
+                and not sig.get(
+                    'telegram_entry_notified_at'
+                )
+            ):
+
+                message = (
+                    _build_saved_futures_lifecycle_message(
+                        user=user,
+                        signal=sig,
+                        event='ENTRY'
+                    )
+                )
+
+                sent = (
+                    expert_system
+                    .send_telegram_alert(
+                        message,
+                        None
+                    )
+                )
+
+                if sent:
+
+                    now_iso = (
+                        datetime.utcnow()
+                        .isoformat()
+                    )
+
+                    update_saved_signal_telegram_state(
+                        signal_id,
+                        {
+                            'telegram_entry_notified_at':
+                                now_iso
+                        }
+                    )
+
+                    sig[
+                        'telegram_entry_notified_at'
+                    ] = now_iso
+
+                    print(
+                        "📍📱 Saved Futures ENTRY: "
+                        f"{user} "
+                        f"{sig.get('symbol')} "
+                        f"{sig.get('timeframe')}"
+                    )
+
+            # --------------------------------------------------------
+            # TAKE PROFIT
+            # --------------------------------------------------------
+
+            if (
+                status == 'tp_hit'
+                and not sig.get(
+                    'telegram_tp_notified_at'
+                )
+            ):
+
+                message = (
+                    _build_saved_futures_lifecycle_message(
+                        user=user,
+                        signal=sig,
+                        event='TP'
+                    )
+                )
+
+                sent = (
+                    expert_system
+                    .send_telegram_alert(
+                        message,
+                        None
+                    )
+                )
+
+                if sent:
+
+                    update_saved_signal_telegram_state(
+                        signal_id,
+                        {
+                            'telegram_tp_notified_at':
+                                (
+                                    datetime.utcnow()
+                                    .isoformat()
+                                )
+                        }
+                    )
+
+                    print(
+                        "✅📱 Saved Futures TP: "
+                        f"{user} "
+                        f"{sig.get('symbol')} "
+                        f"{sig.get('timeframe')}"
+                    )
+
+            # --------------------------------------------------------
+            # STOP LOSS
+            # --------------------------------------------------------
+
+            if (
+                status == 'sl_hit'
+                and not sig.get(
+                    'telegram_sl_notified_at'
+                )
+            ):
+
+                message = (
+                    _build_saved_futures_lifecycle_message(
+                        user=user,
+                        signal=sig,
+                        event='SL'
+                    )
+                )
+
+                sent = (
+                    expert_system
+                    .send_telegram_alert(
+                        message,
+                        None
+                    )
+                )
+
+                if sent:
+
+                    update_saved_signal_telegram_state(
+                        signal_id,
+                        {
+                            'telegram_sl_notified_at':
+                                (
+                                    datetime.utcnow()
+                                    .isoformat()
+                                )
+                        }
+                    )
+
+                    print(
+                        "🛑📱 Saved Futures SL: "
+                        f"{user} "
+                        f"{sig.get('symbol')} "
+                        f"{sig.get('timeframe')}"
+                    )
+
+
+def saved_futures_lifecycle_loop():
+    """
+    Lifecycle exclusivo de señales Futures guardadas.
+
+    Utiliza Futures perpetual real.
+    """
+
+    print("=" * 60)
+    print(
+        "💾📱 SAVED FUTURES LIFECYCLE iniciado"
+    )
+    print(
+        "   Sólo señales ARMADAS después de 36N"
+    )
+    print(
+        "   Históricos: bloqueados"
+    )
+    print(
+        "   Cerradas: fuera del Guardian"
+    )
+    print("=" * 60)
+
+    # No competir con warm-up inicial.
+    time.sleep(
+        150
+    )
+
+    while True:
+
+        try:
+
+            from saved_signals import (
+                evaluate_saved_signals
+            )
+
+            futures_market = (
+                _get_futures_system()
+            )
+
+            if futures_market is None:
+
+                time.sleep(
+                    _SAVED_FUTURES_LIFECYCLE_INTERVAL
+                )
+
+                continue
+
+            # ========================================================
+            # Una sola consulta de mercado por symbol/timeframe/ciclo.
+            # ========================================================
+
+            price_cache = {}
+
+            def _saved_futures_price_fetcher(
+                symbol,
+                timeframe
+            ):
+
+                key = (
+                    symbol,
+                    timeframe
+                )
+
+                if key not in price_cache:
+
+                    price_cache[
+                        key
+                    ] = (
+                        futures_market
+                        .get_kucoin_data(
+                            symbol,
+                            timeframe
+                        )
+                    )
+
+                return price_cache[
+                    key
+                ]
+
+            stats = (
+                evaluate_saved_signals(
+                    _saved_futures_price_fetcher
+                )
+                or {}
+            )
+
+            if stats.get(
+                'checked',
+                0
+            ) > 0:
+
+                print(
+                    "💾 [FUTURES LIFECYCLE] "
+                    f"revisadas={stats.get('checked', 0)} "
+                    f"entry={stats.get('entry_touched', 0)} "
+                    f"TP={stats.get('tp_hit', 0)} "
+                    f"SL={stats.get('sl_hit', 0)} "
+                    f"expired={stats.get('expired', 0)}"
+                )
+
+            # Después de persistir las transiciones
+            # revisamos si existe Telegram pendiente.
+            _send_saved_futures_lifecycle_notifications()
+
+        except Exception as e:
+
+            print(
+                "❌ saved_futures_lifecycle_loop: "
+                f"{e}"
+            )
+
+            import traceback
+
+            traceback.print_exc()
+
+        time.sleep(
+            _SAVED_FUTURES_LIFECYCLE_INTERVAL
+        )
 
 def verificar_y_ejecutar():
     """
@@ -30762,6 +31335,31 @@ def monitor_guardian_telegram_loop():
                     continue
 
                 # ======================================================
+                # COMMIT 36N — GUARDIAN SÓLO SAVED NUEVAS ARMADAS
+                # ======================================================
+                #
+                # status=entry_touched ya excluye:
+                # - tp_hit
+                # - sl_hit
+                # - closed_manual
+                # - expired
+                #
+                # Ahora además excluimos todo registro histórico
+                # anterior a 36N.
+                # ======================================================
+
+                signals = [
+                    sig
+                    for sig in signals
+                    if sig.get(
+                        'telegram_lifecycle_armed_at'
+                    )
+                ]
+
+                if not signals:
+                    continue
+
+                # ======================================================
                 # Agrupar para UNA petición de mercado por symbol/TF
                 # ======================================================
 
@@ -30934,6 +31532,44 @@ def monitor_guardian_telegram_loop():
                                 )
                             )
 
+                            # ==========================================
+                            # COMMIT 36N
+                            # DEDUP PERSISTENTE EN SUPABASE
+                            # ==========================================
+                            #
+                            # Aunque Render reinicie y pierda memoria
+                            # local, el mismo evento exacto no vuelve
+                            # a notificarse.
+                            # ==========================================
+
+                            last_guardian_action = str(
+                                sig.get(
+                                    'telegram_guardian_last_action',
+                                    ''
+                                )
+                                or ''
+                            ).upper()
+
+                            last_guardian_bucket = str(
+                                sig.get(
+                                    'telegram_guardian_last_bucket',
+                                    ''
+                                )
+                                or ''
+                            )
+
+                            if (
+                                last_guardian_action
+                                == event_action
+                                and
+                                last_guardian_bucket
+                                == str(
+                                    bucket
+                                    or ''
+                                )
+                            ):
+                                continue
+
                             reservation = (
                                 _guardian_alert_can_send(
                                     user=user,
@@ -30977,6 +31613,37 @@ def monitor_guardian_telegram_loop():
                                 _guardian_alert_mark_sent(
                                     reservation
                                 )
+
+                                # ======================================
+                                # COMMIT 36N
+                                # DEDUP GUARDIAN PERSISTENTE
+                                # ======================================
+
+                                if sig.get(
+                                    'id'
+                                ):
+
+                                    update_saved_signal_telegram_state(
+                                        sig[
+                                            'id'
+                                        ],
+                                        {
+                                            'telegram_guardian_last_notified_at':
+                                                (
+                                                    datetime.utcnow()
+                                                    .isoformat()
+                                                ),
+
+                                            'telegram_guardian_last_action':
+                                                event_action,
+
+                                            'telegram_guardian_last_bucket':
+                                                str(
+                                                    bucket
+                                                    or ''
+                                                ),
+                                        }
+                                    )
 
                                 print(
                                     "🛡️📱 Guardian Futures: "
@@ -32051,22 +32718,21 @@ def learning_worker_loop():
                 print(f"⚠️ learning_worker.evaluate_pending_signals: {ev_err}")
                 import traceback; traceback.print_exc()
             
-            # 1b. v22.9: Evaluar SEÑALES GUARDADAS por el usuario (solo futuros).
-            # Detecta si el precio tocó entry, TP o SL desde la última evaluación.
-            try:
-                from saved_signals import evaluate_saved_signals
-                def _price_fetcher_saved(sym, tf):
-                    return expert_system.get_kucoin_data(sym, tf)
-                
-                ss_stats = evaluate_saved_signals(_price_fetcher_saved)
-                if ss_stats.get('checked', 0) > 0:
-                    et = ss_stats.get('entry_touched', 0)
-                    ss_tp = ss_stats.get('tp_hit', 0)
-                    ss_sl = ss_stats.get('sl_hit', 0)
-                    print(f"💾 [SAVED] Evaluadas {ss_stats['checked']} guardadas: "
-                          f"{et} entry_touched, {ss_tp} TP, {ss_sl} SL")
-            except Exception as ss_err:
-                print(f"⚠️ learning_worker.evaluate_saved_signals: {ss_err}")
+            # ============================================================
+            # COMMIT 36N
+            # ============================================================
+            #
+            # Saved Futures YA NO se evalúa dentro del learning worker.
+            #
+            # Motivos:
+            # 1. evitar dos evaluadores compitiendo;
+            # 2. usar siempre Futures perpetual real;
+            # 3. separar learning de lifecycle operacional;
+            # 4. permitir detección más frecuente de Entry / TP / SL.
+            #
+            # El responsable ahora es:
+            # saved_futures_lifecycle_loop()
+            # ============================================================
             
             # 2. Cada 4 horas (16 ciclos * 15 min): recalcular stats + recomendaciones
             stats_counter += 1
@@ -33815,6 +34481,43 @@ def _start_background_threads():
         print("✅ Thread learning_worker iniciado (evalúa pending cada 15 min)")
     except Exception as e:
         print(f"⚠️ Error iniciando learning_worker: {e}")
+
+    # ==============================================================
+    # 36N — SAVED FUTURES LIFECYCLE
+    # ==============================================================
+    #
+    # Es independiente de:
+    # - señales Active;
+    # - Previous no guardadas;
+    # - scalping Telegram.
+    #
+    # Sólo trabaja con saved_signals.
+    # ==============================================================
+
+    try:
+
+        t_saved_lifecycle = threading.Thread(
+            target=saved_futures_lifecycle_loop,
+            name='saved-futures-lifecycle',
+            daemon=True
+        )
+
+        t_saved_lifecycle.start()
+
+        print(
+            "✅ Thread saved_futures_lifecycle iniciado "
+            f"(cada {_SAVED_FUTURES_LIFECYCLE_INTERVAL}s)"
+        )
+
+    except Exception as e:
+
+        print(
+            "⚠️ Error iniciando "
+            "saved_futures_lifecycle: "
+            f"{e}"
+        )
+   
+
     # ==============================================================
     # 4. FUTURES GUARDIAN TELEGRAM
     # ==============================================================
