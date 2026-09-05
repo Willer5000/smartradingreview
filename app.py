@@ -25871,6 +25871,102 @@ def api_futures_position_guardian():
             'positions': []
         }), 200
 
+# ============================================================================
+# COMMIT 36Q.4
+# GUARDIAN LEARNING STATISTICS
+# ============================================================================
+
+@app.route(
+    '/api/saved_signals/guardian-learning',
+    methods=['GET']
+)
+def api_saved_signals_guardian_learning():
+    """
+    Estadísticas privadas del aprendizaje Guardian.
+
+    SHADOW_ONLY.
+
+    No modifica trading.
+    """
+
+    try:
+
+        from saved_signals import (
+            get_guardian_learning_summary
+        )
+
+
+        user = _authenticated_user()
+
+
+        if not user:
+
+            return jsonify({
+
+                'success':
+                    False,
+
+                'authenticated':
+                    False,
+
+                'error':
+                    'Debes iniciar sesión.'
+
+            }), 401
+
+
+        summary = (
+            get_guardian_learning_summary(
+                user_name=user
+            )
+        )
+
+
+        return jsonify({
+
+            'success':
+                True,
+
+            'data':
+                summary
+
+        })
+
+
+    except Exception as e:
+
+        print(
+            "❌ api_saved_signals_guardian_learning: "
+            f"{e}"
+        )
+
+
+        return jsonify({
+
+            'success':
+                False,
+
+            'error':
+                str(
+                    e
+                )[:200],
+
+            'data': {
+                'mode':
+                    'SHADOW_ONLY',
+
+                'authority':
+                    'NONE',
+
+                'events_total':
+                    0,
+
+                'evaluated':
+                    0
+            }
+
+        }), 200
+        
 @app.route(
     '/api/saved_signals/kpis',
     methods=['GET']
@@ -30177,7 +30273,8 @@ def saved_futures_lifecycle_loop():
 
             from saved_signals import (
                 evaluate_saved_signals,
-                enrich_pending_funding_economics
+                enrich_pending_funding_economics,
+                settle_pending_guardian_learning_events
             )
 
             futures_market = (
@@ -30348,6 +30445,77 @@ def saved_futures_lifecycle_loop():
                     "Funding no disponible: "
                     f"{funding_err}"
                 )
+
+
+            # ========================================================
+            # COMMIT 36Q.2 + 36Q.3
+            # GUARDIAN COUNTERFACTUAL SETTLEMENT
+            # ========================================================
+            #
+            # Se ejecuta DESPUÉS de:
+            #
+            # 1. cerrar TP/SL,
+            # 2. persistir lifecycle,
+            # 3. Telegram,
+            # 4. economics.
+            #
+            # Por tanto un error de aprendizaje
+            # JAMÁS bloquea el cierre real.
+            # ========================================================
+
+            try:
+
+                guardian_learning_stats = (
+                    settle_pending_guardian_learning_events(
+                        price_fetcher=(
+                            _saved_futures_price_fetcher
+                        ),
+                        limit=100
+                    )
+                    or {}
+                )
+
+
+                if (
+                    guardian_learning_stats.get(
+                        'settled',
+                        0
+                    ) > 0
+                    or guardian_learning_stats.get(
+                        'errors',
+                        0
+                    ) > 0
+                ):
+
+                    print(
+                        "🧠 [36Q] "
+                        f"pending="
+                        f"{guardian_learning_stats.get('pending', 0)} "
+                        f"settled="
+                        f"{guardian_learning_stats.get('settled', 0)} "
+                        f"evaluated="
+                        f"{guardian_learning_stats.get('evaluated', 0)} "
+                        f"not_quantifiable="
+                        f"{guardian_learning_stats.get('not_quantifiable', 0)} "
+                        f"errors="
+                        f"{guardian_learning_stats.get('errors', 0)}"
+                    )
+
+
+            except Exception as guardian_learning_err:
+
+                # ====================================================
+                # FAIL OPEN
+                #
+                # Aprendizaje nunca rompe lifecycle.
+                # ====================================================
+
+                print(
+                    "⚠️ [36Q] "
+                    "Guardian learning no disponible: "
+                    f"{guardian_learning_err}"
+                )
+
 
         except Exception as e:
 
@@ -31478,7 +31646,8 @@ def monitor_guardian_telegram_loop():
 
             from saved_signals import (
                 list_saved_signals,
-                update_saved_signal_telegram_state
+                update_saved_signal_telegram_state,
+                record_guardian_learning_event
             )
 
             futures_market = (
@@ -31759,6 +31928,66 @@ def monitor_guardian_telegram_loop():
                                 )
                             ):
                                 continue
+
+
+                            # ==========================================
+                            # COMMIT 36Q.1
+                            # GUARDIAN EVENT LEDGER
+                            # ==========================================
+                            #
+                            # Se registra ANTES de Telegram.
+                            #
+                            # Por tanto el aprendizaje representa
+                            # lo que Guardian recomendó,
+                            # no solamente mensajes enviados.
+                            #
+                            # Si el ledger falla:
+                            # Guardian y Telegram continúan.
+                            # ==========================================
+
+                            try:
+
+                                recorded = (
+                                    record_guardian_learning_event(
+                                        signal=sig,
+                                        advice=advice,
+                                        current_price=(
+                                            current_price
+                                        ),
+                                        event_action=(
+                                            event_action
+                                        ),
+                                        event_bucket=(
+                                            bucket
+                                        ),
+                                        user_name=(
+                                            user
+                                        )
+                                    )
+                                )
+
+
+                                if recorded:
+
+                                    print(
+                                        "🧠 [36Q.1] "
+                                        "Guardian event: "
+                                        f"{event_action} "
+                                        f"{user} "
+                                        f"{symbol} "
+                                        f"{timeframe} "
+                                        f"bucket={bucket}"
+                                    )
+
+
+                            except Exception as learning_err:
+
+                                print(
+                                    "⚠️ [36Q.1] "
+                                    "Guardian learning: "
+                                    f"{learning_err}"
+                                )
+
 
                             reservation = (
                                 _guardian_alert_can_send(
