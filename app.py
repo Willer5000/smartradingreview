@@ -27615,55 +27615,6 @@ def _classify_futures_analysis_result(
         result
     )
 
-Luego, dentro del dict final que empieza con:
-
-    return {
-        'symbol': symbol,
-
-agregar, preferentemente después de:
-
-        'is_executable': classification == 'EXECUTABLE_SIGNAL',
-
-estas claves:
-
-        'manual_save_allowed':
-            bool(
-                manual_risk.get(
-                    'allowed',
-                    False
-                )
-            ),
-
-        'manual_risk_class':
-            manual_risk.get(
-                'risk_class',
-                'BLOCKED'
-            ),
-
-        'manual_risk_reason':
-            manual_risk.get(
-                'reason',
-                ''
-            ),
-
-        'manual_requires_ack':
-            bool(
-                manual_risk.get(
-                    'requires_ack',
-                    False
-                )
-            ),
-
-        'manual_rejection_stage':
-            manual_risk.get(
-                'rejection_stage'
-            ),
-
-        'manual_rejection_codes':
-            manual_risk.get(
-                'rejection_codes',
-                []
-            ),
     signal_id = str(result.get('signal_id') or '') or None
     record = (
         lifecycle.get(signal_id, {})
@@ -27720,6 +27671,44 @@ estas claves:
         'confidence': round(confidence, 2),
         'directional': directional,
         'is_executable': classification == 'EXECUTABLE_SIGNAL',
+        'manual_save_allowed':
+            bool(
+                manual_risk.get(
+                    'allowed',
+                    False
+                )
+            ),
+
+        'manual_risk_class':
+            manual_risk.get(
+                'risk_class',
+                'BLOCKED'
+            ),
+
+        'manual_risk_reason':
+            manual_risk.get(
+                'reason',
+                ''
+            ),
+
+        'manual_requires_ack':
+            bool(
+                manual_risk.get(
+                    'requires_ack',
+                    False
+                )
+            ),
+
+        'manual_rejection_stage':
+            manual_risk.get(
+                'rejection_stage'
+            ),
+
+        'manual_rejection_codes':
+            manual_risk.get(
+                'rejection_codes',
+                []
+            ),
         'is_active': is_active,
         'lifecycle_status': lifecycle_status,
         'signal_id': signal_id,
