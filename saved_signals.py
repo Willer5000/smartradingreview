@@ -4315,20 +4315,164 @@ def get_saved_signals_kpis(
     user_name: Optional[str] = None
 ) -> Dict:
     """
-    Retorna KPIs de las señales guardadas cerradas (winrate + PnL).
-    
-    Reglas:
-    - Solo cuentan las cerradas: tp_hit, sl_hit, closed_manual
-    - Adicionalmente entry_touched=True
-    - Win: pnl_pct > 0 | Loss: pnl_pct < 0 | Neutral: pnl_pct == 0
+    KPIs de Saved Futures.
+
+    COMMIT 36O.3
+
+    Conserva:
+    - Win Rate bruto actual.
+    - PnL bruto actual.
+    - Early Exit learning actual.
+
+    Añade en paralelo:
+    - Gross Expectancy R.
+    - Net Expectancy R ESTIMADA.
+    - Gross vs Net sobre la misma muestra.
+    - Costes estimados.
+    - Cobertura económica.
+
+    IMPORTANTE:
+    Esta economía es OBSERVACIONAL.
+    NO autoriza Commit 37.
     """
+
+    def _empty_economics() -> Dict:
+
+        return {
+            'model_version':
+                '36O_V3',
+
+            'mode':
+                'OBSERVATIONAL_ONLY',
+
+            'official_for_commit37':
+                False,
+
+            'net_quality':
+                (
+                    'ESTIMATED_FEE_SLIPPAGE'
+                    '+PUBLIC_FUNDING_RATES'
+                ),
+
+            'closed_total':
+                0,
+
+            'gross_r_samples':
+                0,
+
+            'gross_expectancy_r':
+                None,
+
+            'net_samples':
+                0,
+
+            'coverage_pct':
+                0.0,
+
+            'coverage_status':
+                'NO_SAMPLE',
+
+            'gross_pnl_same_sample_usdt':
+                0.0,
+
+            'estimated_net_pnl_total_usdt':
+                0.0,
+
+            'estimated_net_expectancy_r':
+                None,
+
+            'estimated_total_cost_usdt':
+                0.0,
+
+            'estimated_fee_slippage_total_usdt':
+                0.0,
+
+            'estimated_funding_total_usdt':
+                0.0,
+
+            'funding_observed_rates':
+                0,
+
+            'funding_no_settlements':
+                0,
+
+            'funding_pending':
+                0,
+
+            'funding_unavailable':
+                0,
+        }
+
+
+    def _empty_result() -> Dict:
+
+        return {
+            'total':
+                0,
+
+            'wins':
+                0,
+
+            'losses':
+                0,
+
+            'win_rate':
+                0.0,
+
+            'pnl_total_pct':
+                0.0,
+
+            'pnl_total_usdt':
+                0.0,
+
+            'active':
+                0,
+
+            'early_exit_learning':
+                _build_early_exit_learning_summary(
+                    []
+                ),
+
+            'economics':
+                _empty_economics(),
+        }
+
+
+    def _float_or_none(
+        value
+    ):
+
+        try:
+
+            if value is None:
+                return None
+
+            return float(
+                value
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+
+            return None
+
+
     db = _get_db()
+
+
     if db is None:
-        return {'total': 0, 'wins': 0, 'losses': 0, 'win_rate': 0.0,
-                'pnl_total_pct': 0.0, 'pnl_total_usdt': 0.0, 'active': 0}
-    
+
+        return _empty_result()
+
+
     try:
-        # Cerradas (para winrate)
+
+        # ============================================================
+        # 1. OPERACIONES CERRADAS
+        # ============================================================
+
         def _op_closed():
 
             q = (
@@ -4349,7 +4493,24 @@ def get_saved_signals_kpis(
                         'early_exit_candidate_r,'
                         'actual_close_r,'
                         'early_exit_delta_r,'
-                        'early_exit_would_help'
+                        'early_exit_would_help,'
+                        'gross_pnl_pct,'
+                        'gross_pnl_usdt,'
+                        'gross_r,'
+                        'economics_model_version,'
+                        'economics_cost_model_source,'
+                        'fee_slippage_cost_source,'
+                        'estimated_fee_slippage_cost_usdt,'
+                        'funding_data_source,'
+                        'funding_calculation_status,'
+                        'funding_settlements_count,'
+                        'funding_rate_sum,'
+                        'estimated_funding_cost_usdt,'
+                        'estimated_total_cost_usdt,'
+                        'estimated_net_pnl_pct,'
+                        'estimated_net_pnl_usdt,'
+                        'estimated_net_r,'
+                        'economics_cost_components_complete'
                     )
                 )
                 .in_(
@@ -4366,6 +4527,7 @@ def get_saved_signals_kpis(
                 )
             )
 
+
             if user_name:
 
                 q = q.eq(
@@ -4375,11 +4537,29 @@ def get_saved_signals_kpis(
                     ).strip()
                 )
 
+
             return q.execute()
-        r_closed = db._with_retry(_op_closed)
-        closed = r_closed.data if r_closed and r_closed.data else []
-        
-        # Activas (no cuentan para winrate pero sí para 'activas')
+
+
+        r_closed = db._with_retry(
+            _op_closed
+        )
+
+
+        closed = (
+            r_closed.data
+            if (
+                r_closed
+                and r_closed.data
+            )
+            else []
+        )
+
+
+        # ============================================================
+        # 2. OPERACIONES ABIERTAS
+        # ============================================================
+
         def _op_active():
 
             q = (
@@ -4403,6 +4583,7 @@ def get_saved_signals_kpis(
                 )
             )
 
+
             if user_name:
 
                 q = q.eq(
@@ -4412,40 +4593,103 @@ def get_saved_signals_kpis(
                     ).strip()
                 )
 
+
             return q.execute()
-        r_active = db._with_retry(_op_active)
-        active_count = r_active.count if hasattr(r_active, 'count') and r_active.count is not None else 0
-        
-        wins = sum(1 for s in closed if float(s.get('pnl_pct') or 0) > 0)
-        losses = sum(1 for s in closed if float(s.get('pnl_pct') or 0) < 0)
-        total = len(closed)
-        win_rate = (wins / total * 100.0) if total > 0 else 0.0
+
+
+        r_active = db._with_retry(
+            _op_active
+        )
+
+
+        active_count = (
+            r_active.count
+            if (
+                hasattr(
+                    r_active,
+                    'count'
+                )
+                and r_active.count
+                is not None
+            )
+            else 0
+        )
+
+
+        # ============================================================
+        # 3. KPIs BRUTOS EXISTENTES
+        # ============================================================
+        #
+        # NO CAMBIAN.
+        # ============================================================
+
+        wins = sum(
+            1
+            for signal in closed
+            if float(
+                signal.get(
+                    'pnl_pct'
+                )
+                or 0
+            ) > 0
+        )
+
+
+        losses = sum(
+            1
+            for signal in closed
+            if float(
+                signal.get(
+                    'pnl_pct'
+                )
+                or 0
+            ) < 0
+        )
+
+
+        total = len(
+            closed
+        )
+
+
+        win_rate = (
+            wins
+            / total
+            * 100.0
+            if total > 0
+            else 0.0
+        )
+
+
         pnl_total_pct = sum(
+
             float(
-                s.get(
+                signal.get(
                     'pnl_pct'
                 )
                 or 0
             )
-            for s in closed
+
+            for signal in closed
         )
 
+
         pnl_total_usdt = sum(
+
             float(
-                s.get(
+                signal.get(
                     'pnl_usdt'
                 )
                 or 0
             )
-            for s in closed
+
+            for signal in closed
         )
 
-        # ==============================================================
-        # FASE 7D.4 — APRENDIZAJE EARLY EXIT
-        # ==============================================================
-        # Reutiliza exactamente las mismas filas que ya cargamos
-        # para los KPIs.
-        # ==============================================================
+
+        # ============================================================
+        # 4. EARLY EXIT EXISTENTE
+        # ============================================================
 
         early_exit_learning = (
             _build_early_exit_learning_summary(
@@ -4453,11 +4697,509 @@ def get_saved_signals_kpis(
             )
         )
 
+
+        # ============================================================
+        # 5. COMMIT 36O.3
+        #    MUESTRA ECONÓMICA
+        # ============================================================
+        #
+        # Una operación entra en la muestra NET solamente si:
+        #
+        # - fee+slippage tiene procedencia conocida;
+        # - Funding terminó su evaluación;
+        # - Net PnL está calculado;
+        # - Net R está calculado.
+        #
+        # PENDING NO cuenta como dato neto completo.
+        # ============================================================
+
+        gross_r_values = []
+
+        net_rows = []
+
+
+        funding_observed_rates = 0
+
+        funding_no_settlements = 0
+
+        funding_pending = 0
+
+        funding_unavailable = 0
+
+
+        for row in closed:
+
+            # --------------------------------------------------------
+            # Gross R
+            # --------------------------------------------------------
+
+            gross_r = _float_or_none(
+                row.get(
+                    'gross_r'
+                )
+            )
+
+
+            if gross_r is not None:
+
+                gross_r_values.append(
+                    gross_r
+                )
+
+
+            # --------------------------------------------------------
+            # Funding status
+            # --------------------------------------------------------
+
+            funding_status = str(
+
+                row.get(
+                    'funding_calculation_status',
+                    ''
+                )
+
+                or ''
+
+            ).upper()
+
+
+            if (
+                funding_status
+                == 'OBSERVED_RATES'
+            ):
+
+                funding_observed_rates += 1
+
+
+            elif (
+                funding_status
+                == 'NO_SETTLEMENTS_IN_WINDOW'
+            ):
+
+                funding_no_settlements += 1
+
+
+            elif (
+                funding_status
+                == 'PENDING'
+            ):
+
+                funding_pending += 1
+
+
+            elif funding_status:
+
+                funding_unavailable += 1
+
+
+            # --------------------------------------------------------
+            # Fee + slippage
+            # --------------------------------------------------------
+
+            fee_source = str(
+
+                row.get(
+                    'fee_slippage_cost_source',
+                    ''
+                )
+
+                or ''
+
+            ).upper()
+
+
+            # --------------------------------------------------------
+            # Net
+            # --------------------------------------------------------
+
+            net_usdt = _float_or_none(
+                row.get(
+                    'estimated_net_pnl_usdt'
+                )
+            )
+
+
+            net_r = _float_or_none(
+                row.get(
+                    'estimated_net_r'
+                )
+            )
+
+
+            funding_usable = (
+
+                funding_status
+                in (
+                    'OBSERVED_RATES',
+                    'NO_SETTLEMENTS_IN_WINDOW'
+                )
+            )
+
+
+            fee_usable = (
+                fee_source
+                == 'ESTIMATED_CONFIG_COMBINED'
+            )
+
+
+            if (
+                funding_usable
+                and fee_usable
+                and net_usdt is not None
+                and net_r is not None
+            ):
+
+                net_rows.append(
+                    row
+                )
+
+
+        # ============================================================
+        # 6. EXPECTANCY R BRUTA
+        # ============================================================
+
+        gross_expectancy_r = (
+
+            sum(
+                gross_r_values
+            )
+
+            / len(
+                gross_r_values
+            )
+
+            if gross_r_values
+
+            else None
+        )
+
+
+        # ============================================================
+        # 7. EXPECTANCY R NETA ESTIMADA
+        # ============================================================
+
+        net_r_values = [
+
+            float(
+                row.get(
+                    'estimated_net_r'
+                )
+            )
+
+            for row in net_rows
+        ]
+
+
+        estimated_net_expectancy_r = (
+
+            sum(
+                net_r_values
+            )
+
+            / len(
+                net_r_values
+            )
+
+            if net_r_values
+
+            else None
+        )
+
+
+        # ============================================================
+        # 8. GROSS VS NET
+        #
+        # IMPORTANTE:
+        # usamos LA MISMA MUESTRA para comparar.
+        # ============================================================
+
+        gross_pnl_same_sample_usdt = sum(
+
+            float(
+                (
+                    row.get(
+                        'gross_pnl_usdt'
+                    )
+
+                    if row.get(
+                        'gross_pnl_usdt'
+                    ) is not None
+
+                    else row.get(
+                        'pnl_usdt'
+                    )
+                )
+
+                or 0
+            )
+
+            for row in net_rows
+        )
+
+
+        estimated_net_pnl_total_usdt = sum(
+
+            float(
+                row.get(
+                    'estimated_net_pnl_usdt'
+                )
+                or 0
+            )
+
+            for row in net_rows
+        )
+
+
+        estimated_total_cost_usdt = sum(
+
+            float(
+                row.get(
+                    'estimated_total_cost_usdt'
+                )
+                or 0
+            )
+
+            for row in net_rows
+        )
+
+
+        estimated_fee_slippage_total_usdt = sum(
+
+            float(
+                row.get(
+                    'estimated_fee_slippage_cost_usdt'
+                )
+                or 0
+            )
+
+            for row in net_rows
+        )
+
+
+        estimated_funding_total_usdt = sum(
+
+            float(
+                row.get(
+                    'estimated_funding_cost_usdt'
+                )
+                or 0
+            )
+
+            for row in net_rows
+        )
+
+
+        # ============================================================
+        # 9. COBERTURA ECONÓMICA
+        # ============================================================
+
+        net_samples = len(
+            net_rows
+        )
+
+
+        coverage_pct = (
+
+            net_samples
+            / total
+            * 100.0
+
+            if total > 0
+
+            else 0.0
+        )
+
+
+        if total == 0:
+
+            coverage_status = (
+                'NO_SAMPLE'
+            )
+
+
+        elif net_samples == total:
+
+            coverage_status = (
+                'COMPLETE'
+            )
+
+
+        elif net_samples > 0:
+
+            coverage_status = (
+                'PARTIAL'
+            )
+
+
+        else:
+
+            coverage_status = (
+                'NO_NET_DATA'
+            )
+
+
+        # ============================================================
+        # 10. OBJETO ECONÓMICO
+        # ============================================================
+
+        economics = {
+
+            'model_version':
+                '36O_V3',
+
+            'mode':
+                'OBSERVATIONAL_ONLY',
+
+            # ========================================================
+            # NO puede desbloquear Commit 37.
+            #
+            # Es economía PERSONAL de Saved Futures.
+            # ========================================================
+
+            'official_for_commit37':
+                False,
+
+            'net_quality':
+                (
+                    'ESTIMATED_FEE_SLIPPAGE'
+                    '+PUBLIC_FUNDING_RATES'
+                ),
+
+            'closed_total':
+                total,
+
+            # --------------------------------------------------------
+            # Gross R
+            # --------------------------------------------------------
+
+            'gross_r_samples':
+                len(
+                    gross_r_values
+                ),
+
+            'gross_expectancy_r':
+                (
+                    round(
+                        gross_expectancy_r,
+                        4
+                    )
+
+                    if gross_expectancy_r
+                    is not None
+
+                    else None
+                ),
+
+            # --------------------------------------------------------
+            # Net sample
+            # --------------------------------------------------------
+
+            'net_samples':
+                net_samples,
+
+            'coverage_pct':
+                round(
+                    coverage_pct,
+                    2
+                ),
+
+            'coverage_status':
+                coverage_status,
+
+            # --------------------------------------------------------
+            # Gross vs Net sobre misma muestra
+            # --------------------------------------------------------
+
+            'gross_pnl_same_sample_usdt':
+                round(
+                    gross_pnl_same_sample_usdt,
+                    4
+                ),
+
+            'estimated_net_pnl_total_usdt':
+                round(
+                    estimated_net_pnl_total_usdt,
+                    4
+                ),
+
+            'estimated_net_expectancy_r':
+                (
+                    round(
+                        estimated_net_expectancy_r,
+                        4
+                    )
+
+                    if estimated_net_expectancy_r
+                    is not None
+
+                    else None
+                ),
+
+            # --------------------------------------------------------
+            # Costes
+            # --------------------------------------------------------
+
+            'estimated_total_cost_usdt':
+                round(
+                    estimated_total_cost_usdt,
+                    4
+                ),
+
+            'estimated_fee_slippage_total_usdt':
+                round(
+                    estimated_fee_slippage_total_usdt,
+                    4
+                ),
+
+            'estimated_funding_total_usdt':
+                round(
+                    estimated_funding_total_usdt,
+                    4
+                ),
+
+            # --------------------------------------------------------
+            # Funding quality
+            # --------------------------------------------------------
+
+            'funding_observed_rates':
+                funding_observed_rates,
+
+            'funding_no_settlements':
+                funding_no_settlements,
+
+            'funding_pending':
+                funding_pending,
+
+            'funding_unavailable':
+                funding_unavailable,
+        }
+
+
+        # ============================================================
+        # 11. RESPUESTA
+        # ============================================================
+
         return {
-            'total': total,
-            'wins': wins,
-            'losses': losses,
-            'win_rate': round(win_rate, 2),
+
+            # --------------------------------------------------------
+            # KPIs ANTIGUOS
+            # --------------------------------------------------------
+
+            'total':
+                total,
+
+            'wins':
+                wins,
+
+            'losses':
+                losses,
+
+            'win_rate':
+                round(
+                    win_rate,
+                    2
+                ),
+
             'pnl_total_pct':
                 round(
                     pnl_total_pct,
@@ -4475,11 +5217,26 @@ def get_saved_signals_kpis(
                     active_count
                 ),
 
-            # FASE 7D.4
+            # --------------------------------------------------------
+            # EARLY EXIT EXISTENTE
+            # --------------------------------------------------------
+
             'early_exit_learning':
                 early_exit_learning,
+
+            # --------------------------------------------------------
+            # COMMIT 36O.3
+            # --------------------------------------------------------
+
+            'economics':
+                economics,
         }
+
+
     except Exception as e:
-        logger.error(f"get_saved_signals_kpis: {e}")
-        return {'total': 0, 'wins': 0, 'losses': 0, 'win_rate': 0.0,
-                'pnl_total_pct': 0.0, 'pnl_total_usdt': 0.0, 'active': 0}
+
+        logger.error(
+            f"get_saved_signals_kpis: {e}"
+        )
+
+        return _empty_result()
