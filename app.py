@@ -32072,6 +32072,906 @@ _BACKGROUND_LOCK = threading.Lock()
 # ============================================================================
 LEARNING_WORKER_INTERVAL = 30 * 60  # 30 minutos entre evaluaciones (antes 15min - reduce carga)
 
+# ============================================================================
+# COMMIT 36N — LIFECYCLE TELEGRAM + GUARDIAN DE SEÑALES FUTURES GUARDADAS
+# ============================================================================
+#
+# ACLARACIÓN DE MODELO:
+#
+# "Señales Activas" del frontend:
+#     - NO son saved_signals;
+#     - NO se guardan;
+#     - sólo sirven para navegar a par/TF/gráfico.
+#
+# "Señales confirmadas / vela anterior":
+#     - son la ÚNICA fuente desde la cual se permite crear saved_signals.
+#
+# Este monitor sólo trabaja con saved_signals creadas desde PREVIOUS_CONFIRMED.
+# No publica señales, no ejecuta operaciones y no modifica Entry/SL/TP.
+# ============================================================================
+
+_SAVED_FUTURES_MONITOR_INTERVAL = 5 * 60
+
+
+def _is_confirmed_saved_futures_signal(signal):
+    """
+    36N: sólo seguimiento de guardados nacidos en VELA ANTERIOR.
+
+    Los registros legacy sin source_context se aceptan porque saved_signals.py
+    históricamente sólo se creó desde el modal de "Señal Anterior".
+    """
+    if not isinstance(signal, dict):
+        return False
+
+    context = str(
+        signal.get('source_context')
+        or ''
+    ).upper()
+
+    return context in (
+        '',
+        'PREVIOUS_CONFIRMED'
+    )
+
+
+def _saved_futures_risk_meta(signal):
+    risk_class = str(
+        (signal or {}).get('risk_class')
+        or 'PREMIUM'
+    ).upper()
+
+    if risk_class == 'HIGH':
+        return {
+            'risk_class': 'HIGH',
+            'label': 'RIESGO ALTO',
+            'icon': '🔴',
+            'guardian_profile': 'FULL',
+            'guardian_label': 'FULL APOYO',
+            'repeat_minutes': 10
+        }
+
+    if risk_class == 'MEDIUM':
+        return {
+            'risk_class': 'MEDIUM',
+            'label': 'RIESGO MEDIO',
+            'icon': '🟠',
+            'guardian_profile': 'REINFORCED',
+            'guardian_label': 'APOYO REFORZADO',
+            'repeat_minutes': 20
+        }
+
+    return {
+        'risk_class': 'PREMIUM',
+        'label': 'PREMIUM',
+        'icon': '🟢',
+        'guardian_profile': 'NORMAL',
+        'guardian_label': 'APOYO NORMAL',
+        'repeat_minutes': 45
+    }
+
+
+def _build_saved_futures_lifecycle_message(
+    signal,
+    event_type
+):
+    from html import escape
+
+    sig = signal or {}
+    meta = _saved_futures_risk_meta(sig)
+
+    user = escape(
+        str(
+            sig.get('user_name')
+            or 'Usuario'
+        )
+    )
+
+    symbol = escape(
+        str(
+            sig.get('symbol')
+            or ''
+        ).replace(
+            '-',
+            '/'
+        )
+    )
+
+    timeframe = escape(
+        str(
+            sig.get('timeframe')
+            or ''
+        )
+    )
+
+    action = escape(
+        str(
+            sig.get('action')
+            or ''
+        ).upper()
+    )
+
+    origin = str(
+        sig.get('execution_origin')
+        or 'SYSTEM_EXECUTABLE'
+    ).upper()
+
+    origin_label = (
+        'MANUAL'
+        if origin == 'USER_MANUAL_ANALYSIS'
+        else 'SISTEMA'
+    )
+
+    try:
+        entry = float(sig.get('entry') or 0)
+    except Exception:
+        entry = 0.0
+
+    try:
+        sl = float(sig.get('stop_loss') or 0)
+    except Exception:
+        sl = 0.0
+
+    try:
+        tp = float(sig.get('take_profit') or 0)
+    except Exception:
+        tp = 0.0
+
+    try:
+        pnl_pct = float(sig.get('pnl_pct') or 0)
+    except Exception:
+        pnl_pct = 0.0
+
+    try:
+        pnl_usdt = float(sig.get('pnl_usdt') or 0)
+    except Exception:
+        pnl_usdt = 0.0
+
+    event_type = str(
+        event_type
+        or ''
+    ).upper()
+
+    if event_type == 'ENTRY':
+        headline = '🎯 <b>ENTRY TOCADO</b>'
+        detail = (
+            f'El precio alcanzó el Entry guardado '
+            f'<b>{entry:.8g}</b>.'
+        )
+
+    elif event_type == 'TP':
+        headline = '✅ <b>TAKE PROFIT ALCANZADO</b>'
+        detail = (
+            f'TP <b>{tp:.8g}</b> · '
+            f'PnL registrado {pnl_pct:+.2f}% '
+            f'({pnl_usdt:+.2f} USDT).'
+        )
+
+    elif event_type == 'SL':
+        headline = '🛑 <b>STOP LOSS ALCANZADO</b>'
+        detail = (
+            f'SL <b>{sl:.8g}</b> · '
+            f'PnL registrado {pnl_pct:+.2f}% '
+            f'({pnl_usdt:+.2f} USDT).'
+        )
+
+    else:
+        headline = 'ℹ️ <b>ACTUALIZACIÓN FUTURES</b>'
+        detail = ''
+
+    return '\n'.join([
+        f'👤 <b>{user}</b>',
+        (
+            f"{meta['icon']} <b>{meta['label']}</b> "
+            f'· {origin_label}'
+        ),
+        headline,
+        '',
+        f'<b>{symbol} · {timeframe} · {action}</b>',
+        f'Entry: {entry:.8g}',
+        f'TP: {tp:.8g}',
+        f'SL: {sl:.8g}',
+        '',
+        detail,
+        '',
+        (
+            '🛡️ Guardian: '
+            f"<b>{meta['guardian_label']}</b>"
+        ),
+        (
+            'ℹ️ Seguimiento personal de una señal guardada '
+            'desde la vela anterior.'
+        )
+    ])
+
+
+def _send_pending_saved_futures_lifecycle_alerts():
+    """
+    Envía ENTRY / TP / SL exactamente una vez por saved_signal.
+
+    La marca de deduplicación se guarda en Supabase, por lo que un restart
+    de Render no vuelve a enviar el mismo evento.
+    """
+
+    try:
+        from supabase_client import supabase_db
+
+        if not supabase_db or not supabase_db.enabled:
+            return 0
+
+        event_specs = (
+            (
+                'ENTRY',
+                'telegram_entry_notified_at',
+                lambda q: (
+                    q.eq('entry_touched', True)
+                    .neq('status', 'deleted')
+                )
+            ),
+            (
+                'TP',
+                'telegram_tp_notified_at',
+                lambda q: q.eq('status', 'tp_hit')
+            ),
+            (
+                'SL',
+                'telegram_sl_notified_at',
+                lambda q: q.eq('status', 'sl_hit')
+            )
+        )
+
+        sent_count = 0
+
+        for (
+            event_type,
+            notified_column,
+            apply_filter
+        ) in event_specs:
+
+            def _read_pending():
+                query = (
+                    supabase_db.client
+                    .table('saved_signals')
+                    .select('*')
+                    .is_(
+                        notified_column,
+                        'null'
+                    )
+                )
+
+                query = apply_filter(
+                    query
+                )
+
+                return (
+                    query
+                    .order(
+                        'created_at',
+                        desc=False
+                    )
+                    .limit(50)
+                    .execute()
+                )
+
+            response = supabase_db._with_retry(
+                _read_pending
+            )
+
+            rows = (
+                response.data
+                if response and response.data
+                else []
+            )
+
+            for signal in rows:
+
+                if not _is_confirmed_saved_futures_signal(
+                    signal
+                ):
+                    continue
+
+                # Sólo usuarios reales.
+                if not str(
+                    signal.get('user_name')
+                    or ''
+                ).strip():
+                    continue
+
+                message = (
+                    _build_saved_futures_lifecycle_message(
+                        signal,
+                        event_type
+                    )
+                )
+
+                ok = (
+                    expert_system
+                    .send_telegram_alert(
+                        message,
+                        None
+                    )
+                )
+
+                if not ok:
+                    # No marcar: se reintenta en el próximo ciclo.
+                    continue
+
+                now_iso = (
+                    datetime.utcnow()
+                    .isoformat()
+                )
+
+                def _mark_sent():
+                    return (
+                        supabase_db.client
+                        .table('saved_signals')
+                        .update({
+                            notified_column:
+                                now_iso,
+
+                            'updated_at':
+                                now_iso
+                        })
+                        .eq(
+                            'id',
+                            signal.get('id')
+                        )
+                        .execute()
+                    )
+
+                supabase_db._with_retry(
+                    _mark_sent
+                )
+
+                sent_count += 1
+
+        return sent_count
+
+    except Exception as e:
+        print(
+            '⚠️ lifecycle Telegram saved Futures: '
+            f'{e}'
+        )
+        return 0
+
+
+def _build_saved_futures_guardian_message(
+    signal,
+    advice
+):
+    from html import escape
+
+    sig = signal or {}
+    advice = advice or {}
+    meta = _saved_futures_risk_meta(sig)
+
+    user = escape(
+        str(
+            sig.get('user_name')
+            or 'Usuario'
+        )
+    )
+
+    symbol = escape(
+        str(
+            sig.get('symbol')
+            or ''
+        ).replace(
+            '-',
+            '/'
+        )
+    )
+
+    timeframe = escape(
+        str(
+            sig.get('timeframe')
+            or ''
+        )
+    )
+
+    position_action = escape(
+        str(
+            sig.get('action')
+            or ''
+        ).upper()
+    )
+
+    guardian_action = escape(
+        str(
+            advice.get('action')
+            or 'HOLD'
+        ).upper()
+    )
+
+    severity = escape(
+        str(
+            advice.get('severity')
+            or 'NONE'
+        ).upper()
+    )
+
+    reason = escape(
+        str(
+            advice.get('reason')
+            or ''
+        )[:900]
+    )
+
+    try:
+        current_price = float(
+            advice.get('current_price')
+            or 0
+        )
+    except Exception:
+        current_price = 0.0
+
+    return '\n'.join([
+        f'👤 <b>{user}</b>',
+        (
+            f"{meta['icon']} <b>{meta['label']}</b> "
+            f"· Guardian {meta['guardian_label']}"
+        ),
+        '',
+        (
+            '🛡️ <b>GUARDIAN FUTURES: '
+            f'{guardian_action}</b>'
+        ),
+        f'<b>{symbol} · {timeframe} · {position_action}</b>',
+        f'Severidad: {severity}',
+        (
+            f'Precio observado: {current_price:.8g}'
+            if current_price > 0
+            else ''
+        ),
+        '',
+        reason,
+        '',
+        (
+            '⚠️ Recomendación de gestión. '
+            'El Guardian NO ejecuta cierres ni modifica la orden.'
+        )
+    ])
+
+
+def _send_saved_futures_guardian_alerts(
+    market_cache
+):
+    """
+    Guardian para saved_signals que YA tocaron Entry.
+
+    Diferenciación:
+      PREMIUM -> evaluación cada 5m; recordatorio accionable máx. cada 45m.
+      MEDIUM  -> evaluación cada 5m; recordatorio accionable máx. cada 20m.
+      HIGH    -> evaluación cada 5m; recordatorio accionable máx. cada 10m.
+
+    Los UMBRALES internos del Guardian NO se cambian aquí.
+    La diferencia es intensidad de vigilancia/notificación.
+    """
+
+    try:
+        import hashlib
+        from datetime import timezone
+
+        from saved_signals import (
+            list_saved_signals
+        )
+
+        from supabase_client import (
+            supabase_db
+        )
+
+        if not supabase_db or not supabase_db.enabled:
+            return 0
+
+        signals = list_saved_signals(
+            status_filter=[
+                'entry_touched'
+            ],
+            limit=100
+        )
+
+        if not signals:
+            return 0
+
+        sent_count = 0
+        now_utc = datetime.now(
+            timezone.utc
+        )
+
+        actionable = {
+            'PROTECT',
+            'EXTEND',
+            'PROTECT_AND_EXTEND',
+            'REDUCE',
+            'EXIT'
+        }
+
+        for signal in signals:
+
+            if not _is_confirmed_saved_futures_signal(
+                signal
+            ):
+                continue
+
+            symbol = str(
+                signal.get('symbol')
+                or ''
+            )
+
+            timeframe = str(
+                signal.get('timeframe')
+                or ''
+            )
+
+            if not symbol or not timeframe:
+                continue
+
+            key = (
+                symbol,
+                timeframe
+            )
+
+            df = market_cache.get(
+                key
+            )
+
+            if df is None:
+
+                try:
+                    df = (
+                        expert_system
+                        .get_kucoin_data(
+                            symbol,
+                            timeframe
+                        )
+                    )
+                except Exception:
+                    df = None
+
+                market_cache[
+                    key
+                ] = df
+
+            if (
+                df is None
+                or len(df) < 8
+            ):
+                continue
+
+            recent = df.tail(
+                20
+            )
+
+            candles = {
+                'close': [
+                    float(v)
+                    for v
+                    in recent[
+                        'close'
+                    ].tolist()
+                ],
+
+                'high': [
+                    float(v)
+                    for v
+                    in recent[
+                        'high'
+                    ].tolist()
+                ],
+
+                'low': [
+                    float(v)
+                    for v
+                    in recent[
+                        'low'
+                    ].tolist()
+                ]
+            }
+
+            current_price = float(
+                recent[
+                    'close'
+                ].iloc[-1]
+            )
+
+            advice = (
+                portfolio_guardian
+                .evaluate_futures_position(
+                    signal=signal,
+                    current_price=current_price,
+                    candles=candles
+                )
+            )
+
+            if not isinstance(
+                advice,
+                dict
+            ):
+                continue
+
+            advice[
+                'current_price'
+            ] = current_price
+
+            guardian_action = str(
+                advice.get('action')
+                or 'HOLD'
+            ).upper()
+
+            # HOLD queda silencioso para no crear ruido.
+            if guardian_action not in actionable:
+                continue
+
+            meta = _saved_futures_risk_meta(
+                signal
+            )
+
+            signature_raw = '|'.join([
+                guardian_action,
+                str(
+                    advice.get(
+                        'severity'
+                    )
+                    or ''
+                ),
+                str(
+                    advice.get(
+                        'reason'
+                    )
+                    or ''
+                )[:500]
+            ])
+
+            signature = hashlib.sha256(
+                signature_raw.encode(
+                    'utf-8'
+                )
+            ).hexdigest()
+
+            last_signature = str(
+                signal.get(
+                    'guardian_last_alert_signature'
+                )
+                or ''
+            )
+
+            last_at_raw = signal.get(
+                'guardian_last_alert_at'
+            )
+
+            minutes_since_last = (
+                10**9
+            )
+
+            if last_at_raw:
+                try:
+                    parsed = datetime.fromisoformat(
+                        str(
+                            last_at_raw
+                        ).replace(
+                            'Z',
+                            '+00:00'
+                        )
+                    )
+
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(
+                            tzinfo=timezone.utc
+                        )
+
+                    minutes_since_last = max(
+                        0.0,
+                        (
+                            now_utc
+                            - parsed.astimezone(
+                                timezone.utc
+                            )
+                        ).total_seconds()
+                        / 60.0
+                    )
+
+                except Exception:
+                    pass
+
+            same_advice = (
+                signature
+                == last_signature
+            )
+
+            if (
+                same_advice
+                and minutes_since_last
+                < float(
+                    meta[
+                        'repeat_minutes'
+                    ]
+                )
+            ):
+                continue
+
+            message = (
+                _build_saved_futures_guardian_message(
+                    signal,
+                    advice
+                )
+            )
+
+            ok = (
+                expert_system
+                .send_telegram_alert(
+                    message,
+                    None
+                )
+            )
+
+            if not ok:
+                continue
+
+            now_iso = (
+                now_utc
+                .isoformat()
+            )
+
+            def _mark_guardian():
+                return (
+                    supabase_db.client
+                    .table('saved_signals')
+                    .update({
+                        'guardian_last_alert_action':
+                            guardian_action,
+
+                        'guardian_last_alert_signature':
+                            signature,
+
+                        'guardian_last_alert_at':
+                            now_iso,
+
+                        'updated_at':
+                            now_iso
+                    })
+                    .eq(
+                        'id',
+                        signal.get('id')
+                    )
+                    .execute()
+                )
+
+            supabase_db._with_retry(
+                _mark_guardian
+            )
+
+            sent_count += 1
+
+        return sent_count
+
+    except Exception as e:
+        print(
+            '⚠️ Guardian Telegram saved Futures: '
+            f'{e}'
+        )
+        return 0
+
+
+def saved_futures_monitor_loop():
+    """
+    Monitor dedicado y controlado.
+
+    - cada 5 minutos;
+    - una descarga por par/TF aunque existan varias señales guardadas;
+    - detecta Entry/TP/SL usando el evaluador existente;
+    - después notifica eventos pendientes;
+    - después evalúa Guardian sólo para posiciones con Entry tocado.
+    """
+
+    import gc
+
+    print(
+        '💾 FUTURES saved monitor iniciado '
+        '(cada 5 min)'
+    )
+
+    # Dejar terminar warm-up inicial.
+    time.sleep(
+        150
+    )
+
+    while True:
+
+        try:
+
+            from saved_signals import (
+                evaluate_saved_signals
+            )
+
+            market_cache = {}
+
+            def _cached_price_fetcher(
+                symbol,
+                timeframe
+            ):
+                key = (
+                    symbol,
+                    timeframe
+                )
+
+                if key not in market_cache:
+
+                    try:
+                        market_cache[
+                            key
+                        ] = (
+                            expert_system
+                            .get_kucoin_data(
+                                symbol,
+                                timeframe
+                            )
+                        )
+
+                    except Exception:
+                        market_cache[
+                            key
+                        ] = None
+
+                return market_cache[
+                    key
+                ]
+
+            stats = evaluate_saved_signals(
+                _cached_price_fetcher
+            )
+
+            if stats.get(
+                'checked',
+                0
+            ) > 0:
+
+                print(
+                    '💾 [SAVED-5M] '
+                    f"checked={stats.get('checked', 0)} "
+                    f"entry={stats.get('entry_touched', 0)} "
+                    f"TP={stats.get('tp_hit', 0)} "
+                    f"SL={stats.get('sl_hit', 0)}"
+                )
+
+            lifecycle_sent = (
+                _send_pending_saved_futures_lifecycle_alerts()
+            )
+
+            guardian_sent = (
+                _send_saved_futures_guardian_alerts(
+                    market_cache
+                )
+            )
+
+            if (
+                lifecycle_sent
+                or guardian_sent
+            ):
+
+                print(
+                    '📨 [SAVED-FUTURES] '
+                    f'lifecycle={lifecycle_sent} '
+                    f'guardian={guardian_sent}'
+                )
+
+        except Exception as e:
+
+            print(
+                '❌ saved_futures_monitor_loop: '
+                f'{e}'
+            )
+
+            import traceback
+
+            traceback.print_exc()
+
+        try:
+            gc.collect()
+        except Exception:
+            pass
+
+        time.sleep(
+            _SAVED_FUTURES_MONITOR_INTERVAL
+        )
 
 def learning_worker_loop():
     """
@@ -32117,22 +33017,13 @@ def learning_worker_loop():
                 print(f"⚠️ learning_worker.evaluate_pending_signals: {ev_err}")
                 import traceback; traceback.print_exc()
             
-            # 1b. v22.9: Evaluar SEÑALES GUARDADAS por el usuario (solo futuros).
-            # Detecta si el precio tocó entry, TP o SL desde la última evaluación.
-            try:
-                from saved_signals import evaluate_saved_signals
-                def _price_fetcher_saved(sym, tf):
-                    return expert_system.get_kucoin_data(sym, tf)
-                
-                ss_stats = evaluate_saved_signals(_price_fetcher_saved)
-                if ss_stats.get('checked', 0) > 0:
-                    et = ss_stats.get('entry_touched', 0)
-                    ss_tp = ss_stats.get('tp_hit', 0)
-                    ss_sl = ss_stats.get('sl_hit', 0)
-                    print(f"💾 [SAVED] Evaluadas {ss_stats['checked']} guardadas: "
-                          f"{et} entry_touched, {ss_tp} TP, {ss_sl} SL")
-            except Exception as ss_err:
-                print(f"⚠️ learning_worker.evaluate_saved_signals: {ss_err}")
+            # ==========================================================
+            # COMMIT 36N
+            # ==========================================================
+            # saved_signals ya se evalúa en saved_futures_monitor_loop()
+            # cada 5 minutos con caché por symbol/timeframe.
+            # No repetir aquí para evitar carreras y llamadas duplicadas.
+            # ==========================================================
             
             # 2. Cada 4 horas (16 ciclos * 15 min): recalcular stats + recomendaciones
             stats_counter += 1
@@ -33936,6 +34827,29 @@ def _start_background_threads():
             "⚠️ Error iniciando "
             f"futures_scalping_alerts: {e}"
         )
+    # Commit 36N — lifecycle de saved Futures + Guardian.
+    try:
+
+        t_saved_futures = threading.Thread(
+            target=saved_futures_monitor_loop,
+            name='saved-futures-monitor',
+            daemon=True
+        )
+
+        t_saved_futures.start()
+
+        print(
+            '✅ Thread saved-futures-monitor iniciado '
+            '(Entry/TP/SL + Guardian cada 5 min)'
+        )
+
+    except Exception as e:
+
+        print(
+            '⚠️ Error iniciando saved-futures-monitor: '
+            f'{e}'
+        )
+
     print("=" * 60 + "\n")
 
 
