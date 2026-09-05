@@ -635,6 +635,9 @@
                 </div>
                 {% endif %}              
                 <!-- ========================================================= -->
+                {% if is_futures %}
+
+                    <!-- ========================================================= -->
                 <!-- COMMIT 36P — PERFIL PERSONAL DE RIESGO FUTURES -->
                 <!-- ========================================================= -->
 
@@ -655,14 +658,9 @@
                             <span class="fw-bold text-info">
                                 🛡️ Mi Riesgo Futures
                             </span>
-
-                            <div class="small text-muted">
-                                Sizing personal después del Quality Gate
-                            </div>
                         </div>
 
                         <div class="d-flex align-items-center gap-2">
-
                             <span
                                 id="futures-risk-status-badge"
                                 class="badge bg-secondary"
@@ -671,7 +669,6 @@
                             </span>
 
                             <i class="fas fa-chevron-down"></i>
-
                         </div>
                     </div>
 
@@ -680,25 +677,34 @@
                         id="futures-risk-settings-body"
                         class="collapse"
                     >
-
                         <div class="card-body p-3">
 
                             <div
                                 id="futures-risk-message"
                                 class="alert alert-secondary py-2 px-2 small mb-3"
                             >
-                                Modo manual. El comportamiento actual
-                                permanece sin cambios.
+                                Modo manual: tú eliges el margen y el leverage.
+                                El sistema no ajusta automáticamente el tamaño
+                                según tus límites personales.
                             </div>
 
 
-                            <div class="mb-3">
+                            <!-- ================================================= -->
+                            <!-- MODO -->
+                            <!-- ================================================= -->
 
+                            <div class="mb-3">
                                 <label
                                     class="form-label small text-muted"
                                     for="futures-risk-mode"
                                 >
                                     Modo
+
+                                    <i
+                                        class="fas fa-circle-info text-info ms-1"
+                                        style="cursor: help;"
+                                        title="En cristiano: decide si quieres seguir usando el sistema como hasta ahora o si quieres que use tus límites personales para sugerirte cuánto margen y leverage usar. Ejemplo: MANUAL = tú decides; PERFIL PERSONAL = el sistema puede sugerir 6 USDT en vez de 10 USDT si 10 sería demasiado riesgo para ti."
+                                    ></i>
                                 </label>
 
                                 <select
@@ -706,24 +712,32 @@
                                     class="form-select form-select-sm bg-dark text-light border-secondary"
                                 >
                                     <option value="MANUAL">
-                                        Manual — comportamiento actual
+                                        Manual — yo decido el tamaño
                                     </option>
 
                                     <option value="PROFILE_ADVISORY">
-                                        Perfil personal — sizing sugerido
+                                        Perfil personal — sugerir tamaño según mis límites
                                     </option>
                                 </select>
-
                             </div>
 
 
-                            <div class="mb-3">
+                            <!-- ================================================= -->
+                            <!-- POLÍTICA DE MARGEN -->
+                            <!-- ================================================= -->
 
+                            <div class="mb-3">
                                 <label
                                     class="form-label small text-muted"
                                     for="futures-margin-policy"
                                 >
                                     Política de margen
+
+                                    <i
+                                        class="fas fa-circle-info text-info ms-1"
+                                        style="cursor: help;"
+                                        title="En cristiano: indica cómo quieres decidir cuánto dinero poner como margen en cada operación. Ejemplo: Margen fijo = normalmente usar 10 USDT. % de mi equity = si tienes 100 USDT destinados a Futures y eliges 10%, el punto de partida serán 10 USDT."
+                                    ></i>
                                 </label>
 
                                 <select
@@ -735,20 +749,28 @@
                                     </option>
 
                                     <option value="EQUITY_PCT">
-                                        % de mi equity Futures
+                                        % de mi capital Futures
                                     </option>
                                 </select>
-
                             </div>
 
 
-                            <div class="mb-3">
+                            <!-- ================================================= -->
+                            <!-- EQUITY -->
+                            <!-- ================================================= -->
 
+                            <div class="mb-3">
                                 <label
                                     class="form-label small text-muted"
                                     for="futures-risk-equity"
                                 >
-                                    Equity destinada a Futures (USDT)
+                                    Capital destinado a Futures (USDT)
+
+                                    <i
+                                        class="fas fa-circle-info text-info ms-1"
+                                        style="cursor: help;"
+                                        title="En cristiano: es el dinero total que has separado para operar Futures, no todo tu patrimonio. Ejemplo: si en Binance tienes 500 USDT pero sólo quieres usar 100 USDT para este sistema de Futures, escribe 100."
+                                    ></i>
                                 </label>
 
                                 <input
@@ -759,19 +781,27 @@
                                     step="0.01"
                                     placeholder="Ej.: 100"
                                 >
-
                             </div>
 
 
                             <div class="row g-2 mb-3">
 
-                                <div class="col-6">
+                                <!-- ============================================= -->
+                                <!-- MÁXIMO MARGEN -->
+                                <!-- ============================================= -->
 
+                                <div class="col-6">
                                     <label
                                         class="form-label small text-muted"
                                         for="futures-risk-allocation"
                                     >
                                         Máx. margen %
+
+                                        <i
+                                            class="fas fa-circle-info text-info ms-1"
+                                            style="cursor: help;"
+                                            title="En cristiano: limita qué parte de tu capital Futures quieres poner como margen en una sola operación. Ejemplo: capital Futures = 100 USDT y Máx. margen = 10% → como máximo 10 USDT de margen."
+                                        ></i>
                                     </label>
 
                                     <input
@@ -781,19 +811,27 @@
                                         min="0.01"
                                         max="100"
                                         step="0.01"
-                                        placeholder="10"
+                                        placeholder="Ej.: 10"
                                     >
-
                                 </div>
 
 
-                                <div class="col-6">
+                                <!-- ============================================= -->
+                                <!-- MÁXIMA PÉRDIDA -->
+                                <!-- ============================================= -->
 
+                                <div class="col-6">
                                     <label
                                         class="form-label small text-muted"
                                         for="futures-risk-max-loss"
                                     >
                                         Máx. pérdida %
+
+                                        <i
+                                            class="fas fa-circle-info text-info ms-1"
+                                            style="cursor: help;"
+                                            title="En cristiano: es cuánto de tu capital Futures aceptarías perder si el precio llega al Stop Loss. NO es el margen. Ejemplo: capital = 100 USDT y Máx. pérdida = 1% → el sistema intentará que el SL represente como máximo aproximadamente 1 USDT de pérdida."
+                                        ></i>
                                     </label>
 
                                     <input
@@ -805,7 +843,6 @@
                                         step="0.01"
                                         placeholder="Ej.: 1"
                                     >
-
                                 </div>
 
                             </div>
@@ -813,13 +850,22 @@
 
                             <div class="row g-2 mb-3">
 
-                                <div class="col-6">
+                                <!-- ============================================= -->
+                                <!-- MARGEN PREFERIDO -->
+                                <!-- ============================================= -->
 
+                                <div class="col-6">
                                     <label
                                         class="form-label small text-muted"
                                         for="futures-risk-preferred-margin"
                                     >
                                         Margen preferido
+
+                                        <i
+                                            class="fas fa-circle-info text-info ms-1"
+                                            style="cursor: help;"
+                                            title="En cristiano: cuánto dinero te gusta poner como margen normalmente cuando usas la opción Margen fijo. Ejemplo: si normalmente quieres abrir con 10 USDT de margen, escribe 10. El sistema podrá sugerir menos si ese monto supera tu límite de pérdida."
+                                        ></i>
                                     </label>
 
                                     <input
@@ -828,19 +874,27 @@
                                         class="form-control form-control-sm bg-dark text-light border-secondary"
                                         min="0.01"
                                         step="0.01"
-                                        placeholder="10"
+                                        placeholder="Ej.: 10"
                                     >
-
                                 </div>
 
 
-                                <div class="col-6">
+                                <!-- ============================================= -->
+                                <!-- LEVERAGE -->
+                                <!-- ============================================= -->
 
+                                <div class="col-6">
                                     <label
                                         class="form-label small text-muted"
                                         for="futures-risk-max-leverage"
                                     >
                                         Máx. leverage
+
+                                        <i
+                                            class="fas fa-circle-info text-info ms-1"
+                                            style="cursor: help;"
+                                            title="En cristiano: es tu techo personal de apalancamiento. Ejemplo: si el análisis técnico permite 30x pero tú pones máximo 20x, el perfil usará como máximo 20x. Este ajuste sólo puede limitar el leverage; nunca debe aumentar el que permite el sistema."
+                                        ></i>
                                     </label>
 
                                     <input
@@ -850,17 +904,27 @@
                                         min="1"
                                         max="50"
                                         step="1"
-                                        placeholder="50"
+                                        placeholder="Ej.: 20"
                                     >
-
                                 </div>
 
                             </div>
 
 
-                            <div class="small text-muted mb-3">
+                            <!-- ================================================= -->
+                            <!-- USUARIO -->
+                            <!-- ================================================= -->
 
-                                Usuario:
+                            <div class="small text-muted mb-3">
+                                Usuario
+
+                                <i
+                                    class="fas fa-circle-info text-info ms-1"
+                                    style="cursor: help;"
+                                    title="Este perfil se guarda por usuario. Ejemplo: Willer puede usar un límite de 1% de pérdida y Danilo otro diferente; los perfiles no deben mezclarse."
+                                ></i>
+
+                                :
 
                                 <span
                                     id="futures-risk-user-label"
@@ -868,7 +932,6 @@
                                 >
                                     —
                                 </span>
-
                             </div>
 
 
@@ -886,7 +949,7 @@
                                     type="button"
                                     class="btn btn-sm btn-outline-secondary"
                                     id="btn-refresh-futures-risk"
-                                    title="Recargar perfil"
+                                    title="Volver a cargar mi perfil guardado"
                                 >
                                     ↻
                                 </button>
@@ -894,23 +957,48 @@
                             </div>
 
 
-                            <div class="small text-muted mt-3">
+                            <!-- ================================================= -->
+                            <!-- EXPLICACIÓN EN CRISTIANO -->
+                            <!-- ================================================= -->
 
-                                <strong>
-                                    Quality Gate primero.
-                                    Sizing después.
-                                </strong>
+                            <div
+                                class="alert alert-dark border-secondary small mt-3 mb-0"
+                            >
+                                <strong>¿Qué hace realmente este panel?</strong>
 
                                 <br>
 
-                                Este perfil NO modifica Safety,
-                                Entry, SL, TP, RR ni Publication Gate.
+                                Primero, el sistema decide si la oportunidad
+                                es suficientemente buena para operar.
 
+                                <br>
+
+                                Después, este panel responde otra pregunta:
+
+                                <strong>
+                                    “Si la operación es válida, ¿qué tamaño
+                                    puedo usar sin arriesgar más de lo que quiero?”
+                                </strong>
+
+                                <br><br>
+
+                                Por eso tus límites personales pueden reducir
+                                el margen o el leverage sugerido, pero
+
+                                <strong>
+                                    no convierten una señal mala en una señal buena
+                                </strong>
+
+                                y no inventan nuevos precios de Entrada,
+                                Stop Loss o Take Profit.
                             </div>
 
                         </div>
                     </div>
                 </div>
+
+                {% endif %}
+                {% if not is_futures %}   
                 <!-- ====== PANEL DE PORTAFOLIO DEL USUARIO (TGP) ====== -->
                 <!-- ====== PANEL DE PORTAFOLIO (TGP) ====== -->
                 <div id="portfolio-panel" class="card bg-dark border-secondary mb-3">
@@ -980,7 +1068,7 @@
                 </div>
                 <!-- ====== FIN PANEL PORTAFOLIO ====== -->
                 <!-- ====== FIN PANEL PORTAFOLIO ====== -->
-
+                {% endif %}
 
                 
                 <!-- ====== FIN PANEL PORTAFOLIO ====== -->
@@ -1982,28 +2070,11 @@
                     </div>
                 </div>
 
-                <!-- Resumen del Análisis -->
-                <div class="card bg-dark border-info mb-4">
-                    <div class="card-header bg-info bg-opacity-25">
-                        <h5 class="mb-0"><i class="fas fa-chart-pie me-2"></i>Resumen del Análisis</h5>
-                    </div>
-                    <div class="card-body">
-                        <div id="analysis-summary">
-                            <div class="text-center py-3">
-                                <div class="spinner-border spinner-border-sm text-info" role="status">
-                                    <span class="visually-hidden">Analizando...</span>
-                                </div>
-                                <p class="mt-2 mb-0 small">Analizando 30+ indicadores...</p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
                 <!-- OPERACIÓN ACTUAL - FUSIONADA -->
                 <div class="card bg-dark border-warning mb-4">
                     <div class="card-header bg-warning bg-opacity-25 d-flex justify-content-between align-items-center">
                         <h5 class="mb-0"><i class="fas fa-bullhorn me-2"></i>Operación Actual</h5>
-                        <span class="badge bg-dark" id="op-timeframe-badge">1D</span>
+                        <span class="badge bg-dark" id="op-timeframe">1D</span>
                     </div>
                     <div class="card-body">
                         <div class="row">
@@ -2467,55 +2538,6 @@
                 </div>
                 <!-- ====== FIN MODAL ====== -->                
           
-                <!-- Señales Confirmadas -->
-                <div class="card bg-dark border-success mb-4">
-                    <div class="card-header bg-success bg-opacity-25">
-                        <h5 class="mb-0"><i class="fas fa-check-circle me-2"></i>Señales Confirmadas</h5>
-                    </div>
-                    <div class="card-body p-0">
-                        <div class="table-responsive">
-                            <table class="table table-dark table-sm table-hover mb-0">
-                                <thead>
-                                    <tr>
-                                        <th>Par</th>
-                                        <th>TF</th>
-                                        <th>Señal</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="confirmed-signals">
-                                    <tr>
-                                        <td colspan="3" class="text-center py-3 small">Cargando señales...</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Alertas de Mercado -->
-                <div class="card bg-dark border-danger">
-                    <div class="card-header bg-danger bg-opacity-25">
-                        <h5 class="mb-0"><i class="fas fa-exclamation-triangle me-2"></i>Alertas de Mercado</h5>
-                    </div>
-                    <div class="card-body p-0">
-                        <div class="table-responsive">
-                            <table class="table table-dark table-sm table-hover mb-0">
-                                <thead>
-                                    <tr>
-                                        <th>Tipo</th>
-                                        <th>Descripción</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="market-alerts">
-                                    <tr>
-                                        <td colspan="2" class="text-center py-3 small">No hay alertas activas</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-
                 <!-- Últimos Patrones Detectados -->
                 <div class="card bg-dark border-secondary mt-4">
                     <div class="card-header">
