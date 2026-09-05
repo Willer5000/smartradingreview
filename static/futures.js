@@ -3160,23 +3160,83 @@ window.openSaveSignalModal = function(sig, alreadyInPosition = false) {
     document.getElementById('ss-leverage').value = sig.leverage || 1;
     document.getElementById('ss-leverage-hint').textContent = `Sugerido por el sistema: ${sig.leverage || 1}x`;
     
-    // Fallback: si no hay entry/sl/tp en la señal, usar el precio actual del mercado como base
-    const currentPrice = Number(
-        sig.current_price
-        || sig.live_price
-        || window.lastPrices?.[sig.symbol]
-        || window.currentAnalysis?.current_price
+    // ============================================================
+    // 36M FINAL — NO INVENTAR ENTRY / SL / TP
+    // ============================================================
+    // Las señales Previous deben conservar los niveles estructurales
+    // calculados por el sistema.
+    //
+    // El precio live sólo puede servir como referencia de Entry cuando
+    // el usuario declara explícitamente "Guardar en operación".
+    // Nunca se fabrican SL/TP porcentuales de respaldo.
+    // ============================================================
+    
+    const sourceEntry = Number(
+        sig.entry
+        || sig.entry_price
         || 0
     );
-    const defaultEntry = currentPrice > 0 ? currentPrice.toFixed(2) : '';
-    const defaultSL = currentPrice > 0 ? (currentPrice * 0.95).toFixed(2) : '';  // 5% abajo
-    const defaultTP = currentPrice > 0 ? (currentPrice * 1.10).toFixed(2) : '';  // 10% arriba
     
-    document.getElementById('ss-entry').value = alreadyInPosition
-        ? (defaultEntry || sig.entry || sig.entry_price || '')
-        : (sig.entry || sig.entry_price || defaultEntry);
-    document.getElementById('ss-sl').value = sig.stop_loss || defaultSL;
-    document.getElementById('ss-tp').value = sig.take_profit || defaultTP;
+    const sourceSL = Number(
+        sig.stop_loss
+        || 0
+    );
+    
+    const sourceTP = Number(
+        sig.take_profit
+        || 0
+    );
+    
+    // Una Previous guardable debe conservar siempre SL y TP reales.
+    if (
+        !(sourceSL > 0)
+        || !(sourceTP > 0)
+    ) {
+        futShowToast(
+            'No se puede guardar: la señal no conserva SL/TP estructurales válidos.',
+            'warning'
+        );
+        return;
+    }
+    
+    // Si todavía NO estamos en posición, también debe existir
+    // el Entry estructural original.
+    if (
+        !alreadyInPosition
+        && !(sourceEntry > 0)
+    ) {
+        futShowToast(
+            'No se puede guardar: la señal no conserva un Entry estructural válido.',
+            'warning'
+        );
+        return;
+    }
+    
+    // Sólo "Guardar en operación" puede sugerir el precio live
+    // como Entry editable. Nunca se usa para fabricar SL o TP.
+    const liveEntryPrice = alreadyInPosition
+        ? Number(
+            sig.current_price
+            || sig.live_price
+            || window.lastPrices?.[sig.symbol]
+            || 0
+        )
+        : 0;
+    
+    document.getElementById('ss-entry').value =
+        alreadyInPosition
+            ? (
+                liveEntryPrice > 0
+                    ? liveEntryPrice.toFixed(2)
+                    : sourceEntry
+            )
+            : sourceEntry;
+    
+    document.getElementById('ss-sl').value =
+        sourceSL;
+    
+    document.getElementById('ss-tp').value =
+        sourceTP;
     document.getElementById('ss-notes').value = '';
     // v22.9.4: fecha/hora de ingreso — default = ahora en zona local del navegador
     document.getElementById('ss-entry-at').value = _nowLocalDatetimeInput();
@@ -3353,8 +3413,9 @@ window.confirmSaveSignal = async function() {
             || 'PREMIUM',
 
         source_signal_id:
-                    sig.source_signal_id
-                    || null,
+            sig.source_signal_id
+            || sig.signal_id
+            || null,
         
                 source_context:
                     sig.source_context
