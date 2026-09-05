@@ -1424,6 +1424,330 @@ class SupabaseClient:
                 f"({user_name}): {e}"
             )
             return False
+
+    # ========================================================================
+    # COMMIT 36P — FUTURES RISK PROFILE
+    # ========================================================================
+
+    def get_user_futures_risk_profile(
+        self,
+        user_name: str
+    ) -> Dict:
+        """
+        Perfil PERSONAL de sizing Futures.
+
+        No modifica:
+        - Safety
+        - Entry
+        - SL
+        - TP
+        - RR
+        - Publication Gate
+        """
+
+        defaults = {
+            'futures_risk_mode':
+                'MANUAL',
+
+            'futures_margin_policy':
+                'FIXED_USDT',
+
+            'futures_equity_usdt':
+                None,
+
+            'futures_max_allocation_pct':
+                None,
+
+            'futures_max_loss_pct_equity_per_trade':
+                None,
+
+            'futures_preferred_margin_usdt':
+                None,
+
+            'futures_personal_max_leverage':
+                None,
+
+            'futures_risk_updated_at':
+                None,
+        }
+
+        if not self.enabled:
+            return dict(
+                defaults
+            )
+
+        def _number_or_none(
+            value
+        ):
+
+            try:
+
+                if value is None:
+                    return None
+
+                return float(
+                    value
+                )
+
+            except (
+                TypeError,
+                ValueError
+            ):
+
+                return None
+
+        try:
+
+            response = self._with_retry(
+                lambda: (
+                    self.client
+                    .table(
+                        'user_preferences'
+                    )
+                    .select(
+                        (
+                            'futures_risk_mode,'
+                            'futures_margin_policy,'
+                            'futures_equity_usdt,'
+                            'futures_max_allocation_pct,'
+                            'futures_max_loss_pct_equity_per_trade,'
+                            'futures_preferred_margin_usdt,'
+                            'futures_personal_max_leverage,'
+                            'futures_risk_updated_at'
+                        )
+                    )
+                    .eq(
+                        'user_name',
+                        user_name
+                    )
+                    .limit(
+                        1
+                    )
+                    .execute()
+                )
+            )
+
+            rows = (
+                response.data
+                or []
+            )
+
+            if not rows:
+                return dict(
+                    defaults
+                )
+
+            row = rows[0]
+
+            mode = str(
+                row.get(
+                    'futures_risk_mode'
+                )
+                or 'MANUAL'
+            ).upper()
+
+            if mode not in (
+                'MANUAL',
+                'PROFILE_ADVISORY'
+            ):
+                mode = 'MANUAL'
+
+            margin_policy = str(
+                row.get(
+                    'futures_margin_policy'
+                )
+                or 'FIXED_USDT'
+            ).upper()
+
+            if margin_policy not in (
+                'FIXED_USDT',
+                'EQUITY_PCT'
+            ):
+                margin_policy = (
+                    'FIXED_USDT'
+                )
+
+            raw_max_leverage = (
+                row.get(
+                    'futures_personal_max_leverage'
+                )
+            )
+
+            try:
+
+                personal_max_leverage = (
+                    int(
+                        raw_max_leverage
+                    )
+                    if raw_max_leverage
+                    is not None
+                    else None
+                )
+
+            except (
+                TypeError,
+                ValueError
+            ):
+
+                personal_max_leverage = (
+                    None
+                )
+
+            return {
+                'futures_risk_mode':
+                    mode,
+
+                'futures_margin_policy':
+                    margin_policy,
+
+                'futures_equity_usdt':
+                    _number_or_none(
+                        row.get(
+                            'futures_equity_usdt'
+                        )
+                    ),
+
+                'futures_max_allocation_pct':
+                    _number_or_none(
+                        row.get(
+                            'futures_max_allocation_pct'
+                        )
+                    ),
+
+                'futures_max_loss_pct_equity_per_trade':
+                    _number_or_none(
+                        row.get(
+                            'futures_max_loss_pct_equity_per_trade'
+                        )
+                    ),
+
+                'futures_preferred_margin_usdt':
+                    _number_or_none(
+                        row.get(
+                            'futures_preferred_margin_usdt'
+                        )
+                    ),
+
+                'futures_personal_max_leverage':
+                    personal_max_leverage,
+
+                'futures_risk_updated_at':
+                    row.get(
+                        'futures_risk_updated_at'
+                    ),
+            }
+
+        except Exception as e:
+
+            logger.warning(
+                "get_user_futures_risk_profile "
+                f"({user_name}): {e}"
+            )
+
+            return dict(
+                defaults
+            )
+
+
+    def upsert_user_futures_risk_profile(
+        self,
+        user_name: str,
+        profile: Dict
+    ) -> bool:
+        """
+        Guarda exclusivamente preferencias PERSONALES
+        de sizing Futures.
+        """
+
+        if not self.enabled:
+            return False
+
+        try:
+
+            now_iso = (
+                datetime.utcnow()
+                .isoformat()
+            )
+
+            payload = {
+                'user_name':
+                    str(
+                        user_name
+                    ).strip(),
+
+                'futures_risk_mode':
+                    profile.get(
+                        'futures_risk_mode',
+                        'MANUAL'
+                    ),
+
+                'futures_margin_policy':
+                    profile.get(
+                        'futures_margin_policy',
+                        'FIXED_USDT'
+                    ),
+
+                'futures_equity_usdt':
+                    profile.get(
+                        'futures_equity_usdt'
+                    ),
+
+                'futures_max_allocation_pct':
+                    profile.get(
+                        'futures_max_allocation_pct'
+                    ),
+
+                'futures_max_loss_pct_equity_per_trade':
+                    profile.get(
+                        'futures_max_loss_pct_equity_per_trade'
+                    ),
+
+                'futures_preferred_margin_usdt':
+                    profile.get(
+                        'futures_preferred_margin_usdt'
+                    ),
+
+                'futures_personal_max_leverage':
+                    profile.get(
+                        'futures_personal_max_leverage'
+                    ),
+
+                'futures_risk_updated_at':
+                    now_iso,
+
+                'updated_at':
+                    now_iso,
+            }
+
+            response = self._with_retry(
+                lambda: (
+                    self.client
+                    .table(
+                        'user_preferences'
+                    )
+                    .upsert(
+                        payload,
+                        on_conflict='user_name'
+                    )
+                    .execute()
+                )
+            )
+
+            return (
+                response.data
+                is not None
+            )
+
+        except Exception as e:
+
+            logger.error(
+                "upsert_user_futures_risk_profile "
+                f"({user_name}): {e}"
+            )
+
+            return False    
+
+    
     # ========================================================================
     # USER PORTFOLIO
     # ========================================================================
