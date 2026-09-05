@@ -70,6 +70,294 @@ def _calc_pnl(entry: float, current: float, leverage: int, investment: float,
         'pct': round(leveraged_pct, 4),
         'usdt': round(pnl_usdt, 4)
     }
+# ============================================================================
+# COMMIT 36O.1 — ECONOMÍA FUTURES OBSERVACIONAL
+# ============================================================================
+
+def _build_estimated_economics(
+    signal: Dict,
+    exit_price: float,
+    gross_pnl: Dict
+) -> Dict:
+    """
+    Construye una segunda capa económica para una operación cerrada.
+
+    IMPORTANTE:
+
+    - pnl_pct / pnl_usdt actuales siguen siendo BRUTOS.
+    - NO modifica win rate.
+    - NO cambia status.
+    - NO cambia Entry / SL / TP.
+    - NO cambia leverage.
+    - NO presenta costes estimados como realizados.
+
+    Si no existe procedencia verificable del modelo de costes,
+    conserva sólo los datos brutos y deja el neto estimado en NULL.
+    """
+
+    try:
+
+        gross_pct = float(
+            (gross_pnl or {}).get(
+                'pct',
+                0
+            )
+            or 0
+        )
+
+        gross_usdt = float(
+            (gross_pnl or {}).get(
+                'usdt',
+                0
+            )
+            or 0
+        )
+
+        result = {
+            'economics_model_version':
+                '36O_V1',
+
+            'gross_pnl_pct':
+                round(
+                    gross_pct,
+                    6
+                ),
+
+            'gross_pnl_usdt':
+                round(
+                    gross_usdt,
+                    8
+                ),
+
+            'gross_r':
+                _calculate_trade_r(
+                    signal,
+                    exit_price
+                ),
+
+            'economics_calculated_at':
+                datetime.utcnow()
+                .isoformat(),
+
+            # Todavía NO tenemos maker/taker + slippage +
+            # funding observados individualmente.
+            'economics_cost_components_complete':
+                False,
+        }
+
+        source = str(
+            signal.get(
+                'economics_cost_model_source',
+                ''
+            )
+            or ''
+        ).upper()
+
+        rate_raw = signal.get(
+            'economics_round_trip_cost_rate'
+        )
+
+        # ============================================================
+        # HISTÓRICOS / COSTE NO VERIFICABLE
+        # ============================================================
+        #
+        # No hacemos backfill inventando que el histórico utilizó
+        # el modelo 36O.
+        # ============================================================
+
+        if (
+            source != 'ESTIMATED_CONFIG_COMBINED'
+            or rate_raw is None
+        ):
+
+            result[
+                'economics_cost_model_source'
+            ] = (
+                source
+                or 'UNVERIFIED_LEGACY'
+            )
+
+            result[
+                'estimated_total_cost_usdt'
+            ] = None
+
+            result[
+                'estimated_net_pnl_pct'
+            ] = None
+
+            result[
+                'estimated_net_pnl_usdt'
+            ] = None
+
+            result[
+                'estimated_net_r'
+            ] = None
+
+            return result
+
+        rate = float(
+            rate_raw
+            or 0
+        )
+
+        investment = float(
+            signal.get(
+                'investment_usdt',
+                0
+            )
+            or 0
+        )
+
+        leverage = float(
+            signal.get(
+                'leverage',
+                1
+            )
+            or 1
+        )
+
+        entry = float(
+            signal.get(
+                'entry',
+                0
+            )
+            or 0
+        )
+
+        stop_loss = float(
+            signal.get(
+                'stop_loss',
+                0
+            )
+            or 0
+        )
+
+        if (
+            rate < 0
+            or investment <= 0
+            or leverage <= 0
+        ):
+            return result
+
+        # ============================================================
+        # MISMA HIPÓTESIS QUE FUTURES_SYSTEM
+        # ============================================================
+        #
+        # notional = margen × leverage
+        # coste = notional × round-trip estimate
+        #
+        # NO decimos que sea fee realizada.
+        # ============================================================
+
+        notional_usdt = (
+            investment
+            * leverage
+        )
+
+        estimated_cost_usdt = (
+            notional_usdt
+            * rate
+        )
+
+        estimated_net_usdt = (
+            gross_usdt
+            - estimated_cost_usdt
+        )
+
+        estimated_cost_pct_margin = (
+            estimated_cost_usdt
+            / investment
+            * 100.0
+        )
+
+        estimated_net_pct = (
+            gross_pct
+            - estimated_cost_pct_margin
+        )
+
+        # ============================================================
+        # RIESGO MONETARIO ORIGINAL
+        # ============================================================
+
+        risk_usdt = 0.0
+
+        if (
+            entry > 0
+            and stop_loss > 0
+        ):
+
+            risk_usdt = (
+                investment
+                * leverage
+                * abs(
+                    entry - stop_loss
+                )
+                / entry
+            )
+
+        estimated_net_r = None
+
+        if risk_usdt > 0:
+
+            estimated_net_r = (
+                estimated_net_usdt
+                / risk_usdt
+            )
+
+        result.update({
+            'economics_cost_model_source':
+                'ESTIMATED_CONFIG_COMBINED',
+
+            'economics_round_trip_cost_rate':
+                round(
+                    rate,
+                    8
+                ),
+
+            'estimated_total_cost_usdt':
+                round(
+                    estimated_cost_usdt,
+                    8
+                ),
+
+            'estimated_net_pnl_pct':
+                round(
+                    estimated_net_pct,
+                    6
+                ),
+
+            'estimated_net_pnl_usdt':
+                round(
+                    estimated_net_usdt,
+                    8
+                ),
+
+            'estimated_net_r':
+                (
+                    round(
+                        estimated_net_r,
+                        6
+                    )
+                    if estimated_net_r
+                    is not None
+                    else None
+                ),
+        })
+
+        return result
+
+    except Exception as e:
+
+        # La economía Shadow JAMÁS debe impedir que una operación
+        # cierre correctamente.
+
+        logger.warning(
+            "_build_estimated_economics: "
+            f"{e}"
+        )
+
+        return {}
+
 
 
 def _check_entry_touched(entry: float, high: float, low: float,
@@ -1079,6 +1367,50 @@ def create_saved_signal(data: Dict) -> Optional[Dict]:
                     )
                  ).strip(),
 
+              # ========================================================
+            # COMMIT 36O.1 — SNAPSHOT ECONÓMICO
+            # ========================================================
+            #
+            # Estos campos describen el modelo vigente al guardar.
+            #
+            # No significan que el coste haya sido observado
+            # realmente en el exchange.
+            # ========================================================
+
+            'economics_model_version':
+                str(
+                    data.get(
+                        'economics_model_version',
+                        '36O_V1'
+                    )
+                    or '36O_V1'
+                )[:40],
+
+            'economics_cost_model_source':
+                str(
+                    data.get(
+                        'economics_cost_model_source',
+                        'UNVERIFIED'
+                    )
+                    or 'UNVERIFIED'
+                )[:60],
+
+            'economics_round_trip_cost_rate':
+                (
+                    float(
+                        data.get(
+                            'economics_round_trip_cost_rate'
+                        )
+                    )
+                    if data.get(
+                        'economics_round_trip_cost_rate'
+                    ) is not None
+                    else None
+                ),
+
+            'economics_cost_components_complete':
+                False,
+        
             # ========================================================
             # COMMIT 36N — LIFECYCLE TELEGRAM
             # ========================================================
@@ -1537,13 +1869,26 @@ def close_saved_signal_manual(signal_id: str, current_price: float) -> Optional[
             if entry_touched
             else {}
         )
-
+        economics_snapshot = (
+            _build_estimated_economics(
+                sig,
+                current_price,
+                pnl
+            )
+            if entry_touched
+            else {}
+        )
         updates = {
             'status': 'closed_manual',
             'closed_at': datetime.utcnow().isoformat(),
             'closed_price': float(current_price),
             'pnl_pct': pnl['pct'],
             'pnl_usdt': pnl['usdt'],
+
+            # COMMIT 36O.1
+            # Economía paralela; NO reemplaza el PnL bruto.
+            **economics_snapshot,
+
             'close_reason': 'manual',
 
             **early_exit_comparison,
@@ -2034,9 +2379,15 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                                 'pnl_usdt':
                                     pnl['usdt'],
 
+                                # COMMIT 36O.1
+                                **_build_estimated_economics(
+                                    sig,
+                                    sl,
+                                    pnl
+                                ),
+
                                 'close_reason':
                                     'sl_hit',
-
                                 # ======================================
                                 # FASE 7D.3
                                 # ======================================
@@ -2103,6 +2454,13 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                                 'pnl_usdt':
                                     pnl['usdt'],
 
+                                # COMMIT 36O.1
+                                **_build_estimated_economics(
+                                    sig,
+                                    tp,
+                                    pnl
+                                ),
+
                                 'close_reason':
                                     'tp_hit',
 
@@ -2168,6 +2526,13 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                                 'pnl_usdt':
                                     pnl['usdt'],
 
+                                # COMMIT 36O.1
+                                **_build_estimated_economics(
+                                    sig,
+                                    sl,
+                                    pnl
+                                ),
+
                                 'close_reason':
                                     'sl_hit',
 
@@ -2229,6 +2594,13 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
 
                                 'pnl_usdt':
                                     pnl['usdt'],
+
+                                # COMMIT 36O.1
+                                **_build_estimated_economics(
+                                    sig,
+                                    tp,
+                                    pnl
+                                ),
 
                                 'close_reason':
                                     'tp_hit',
