@@ -25025,6 +25025,125 @@ def api_saved_signals_create():
         # Agregar usuario a los datos
         data['user_name'] = user
         # ==============================================================
+        # COMMIT 36N — SAVED_SIGNALS SÓLO DESDE VELA ANTERIOR
+        # ==============================================================
+
+        source_context = str(
+            data.get(
+                'source_context'
+            )
+            or ''
+        ).upper()
+
+        if source_context != 'PREVIOUS_CONFIRMED':
+
+            return jsonify({
+                'success':
+                    False,
+
+                'error':
+                    (
+                        'Sólo se pueden guardar señales confirmadas '
+                        'de la vela anterior.'
+                    )
+            }), 403
+
+        source_signal_id = str(
+            data.get(
+                'source_signal_id'
+            )
+            or ''
+        ).strip()
+
+        if not source_signal_id:
+
+            return jsonify({
+                'success':
+                    False,
+
+                'error':
+                    (
+                        'Falta el signal_id de la señal confirmada.'
+                    )
+            }), 400
+
+        # Confirmar que el signal_id corresponde al análisis canónico
+        # de una vela REALMENTE cerrada.
+        source_cache = (
+            _get_or_refresh_futures_analysis()
+        )
+
+        source_result = None
+
+        for raw_result in (
+            source_cache.get(
+                'analysis'
+            )
+            or {}
+        ).values():
+
+            if (
+                isinstance(
+                    raw_result,
+                    dict
+                )
+                and str(
+                    raw_result.get(
+                        'signal_id'
+                    )
+                    or ''
+                )
+                == source_signal_id
+            ):
+
+                source_result = (
+                    raw_result
+                )
+
+                break
+
+        if source_result is None:
+
+            return jsonify({
+                'success':
+                    False,
+
+                'error':
+                    (
+                        'La señal confirmada ya no está disponible '
+                        'en el snapshot Futures actual.'
+                    )
+            }), 409
+
+        if (
+            str(
+                source_result.get(
+                    'analysis_mode'
+                )
+                or ''
+            ).upper()
+            != 'CLOSED_CANDLE'
+            or source_result.get(
+                'source_candle_closed'
+            )
+            is not True
+        ):
+
+            return jsonify({
+                'success':
+                    False,
+
+                'error':
+                    (
+                        'El origen no corresponde a una vela '
+                        'confirmada/cerrada.'
+                    )
+            }), 403
+
+        data[
+            'source_context'
+        ] = 'PREVIOUS_CONFIRMED'
+        # ==============================================================
         # COMMIT 36M — VALIDAR OVERRIDE MANUAL EN EL SERVIDOR
         # ==============================================================
         execution_origin = str(
