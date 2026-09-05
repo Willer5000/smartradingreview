@@ -33899,6 +33899,440 @@ def _build_futures_scalping_message(
         lines
     )
 
+# ============================================================================
+# COMMIT 36P — PERFIL PERSONAL DE RIESGO FUTURES
+# ============================================================================
+
+@app.route(
+    '/api/user/futures-risk-profile',
+    methods=[
+        'GET',
+        'POST'
+    ]
+)
+def api_user_futures_risk_profile():
+    """
+    Perfil PERSONAL de sizing Futures.
+
+    Quality Gate primero.
+    Sizing después.
+
+    Este endpoint NO modifica la calidad técnica
+    del setup.
+    """
+
+    user = _authenticated_user()
+
+    if not user:
+
+        return jsonify({
+            'success':
+                False,
+
+            'authenticated':
+                False,
+
+            'error':
+                'Debes iniciar sesión.'
+        }), 401
+
+    try:
+
+        from supabase_client import (
+            supabase_client
+        )
+
+        # ==============================================================
+        # GET
+        # ==============================================================
+
+        if request.method == 'GET':
+
+            profile = (
+                supabase_client
+                .get_user_futures_risk_profile(
+                    user
+                )
+            )
+
+            return jsonify({
+                'success':
+                    True,
+
+                'authenticated':
+                    True,
+
+                'user':
+                    user,
+
+                'profile':
+                    profile,
+            })
+
+
+        # ==============================================================
+        # POST
+        # ==============================================================
+
+        data = (
+            request.get_json(
+                silent=True
+            )
+            or {}
+        )
+
+
+        import math
+
+
+        def _optional_positive_number(
+            key,
+            maximum=None
+        ):
+
+            raw = data.get(
+                key
+            )
+
+            if (
+                raw is None
+                or raw == ''
+            ):
+                return None
+
+            try:
+
+                value = float(
+                    raw
+                )
+
+            except (
+                TypeError,
+                ValueError
+            ):
+
+                raise ValueError(
+                    f'{key} debe ser numérico.'
+                )
+
+            if (
+                not math.isfinite(
+                    value
+                )
+                or value <= 0
+            ):
+
+                raise ValueError(
+                    f'{key} debe ser mayor a 0.'
+                )
+
+            if (
+                maximum is not None
+                and value > maximum
+            ):
+
+                raise ValueError(
+                    (
+                        f'{key} no puede superar '
+                        f'{maximum}.'
+                    )
+                )
+
+            return value
+
+
+        mode = str(
+            data.get(
+                'futures_risk_mode',
+                'MANUAL'
+            )
+            or 'MANUAL'
+        ).upper()
+
+
+        if mode not in (
+            'MANUAL',
+            'PROFILE_ADVISORY'
+        ):
+
+            return jsonify({
+                'success':
+                    False,
+
+                'error':
+                    'Modo de riesgo inválido.'
+            }), 400
+
+
+        margin_policy = str(
+            data.get(
+                'futures_margin_policy',
+                'FIXED_USDT'
+            )
+            or 'FIXED_USDT'
+        ).upper()
+
+
+        if margin_policy not in (
+            'FIXED_USDT',
+            'EQUITY_PCT'
+        ):
+
+            return jsonify({
+                'success':
+                    False,
+
+                'error':
+                    'Política de margen inválida.'
+            }), 400
+
+
+        try:
+
+            equity = (
+                _optional_positive_number(
+                    'futures_equity_usdt'
+                )
+            )
+
+            allocation_pct = (
+                _optional_positive_number(
+                    'futures_max_allocation_pct',
+                    maximum=100
+                )
+            )
+
+            max_loss_pct = (
+                _optional_positive_number(
+                    'futures_max_loss_pct_equity_per_trade',
+                    maximum=100
+                )
+            )
+
+            preferred_margin = (
+                _optional_positive_number(
+                    'futures_preferred_margin_usdt'
+                )
+            )
+
+        except ValueError as validation_error:
+
+            return jsonify({
+                'success':
+                    False,
+
+                'error':
+                    str(
+                        validation_error
+                    )
+            }), 400
+
+
+        raw_max_leverage = data.get(
+            'futures_personal_max_leverage'
+        )
+
+        personal_max_leverage = None
+
+
+        if (
+            raw_max_leverage is not None
+            and raw_max_leverage != ''
+        ):
+
+            try:
+
+                leverage_float = float(
+                    raw_max_leverage
+                )
+
+                if (
+                    not leverage_float.is_integer()
+                    or leverage_float < 1
+                    or leverage_float > 50
+                ):
+
+                    raise ValueError
+
+                personal_max_leverage = int(
+                    leverage_float
+                )
+
+            except (
+                TypeError,
+                ValueError
+            ):
+
+                return jsonify({
+                    'success':
+                        False,
+
+                    'error':
+                        (
+                            'El leverage personal máximo '
+                            'debe ser un entero entre 1 y 50.'
+                        )
+                }), 400
+
+
+        # ==============================================================
+        # VALIDACIÓN DEL MODO PERSONAL
+        # ==============================================================
+
+        if mode == 'PROFILE_ADVISORY':
+
+            if (
+                margin_policy
+                == 'FIXED_USDT'
+                and preferred_margin
+                is None
+            ):
+
+                return jsonify({
+                    'success':
+                        False,
+
+                    'error':
+                        (
+                            'En FIXED_USDT debes definir '
+                            'el margen preferido.'
+                        )
+                }), 400
+
+
+            if (
+                margin_policy
+                == 'EQUITY_PCT'
+                and (
+                    equity is None
+                    or allocation_pct
+                    is None
+                )
+            ):
+
+                return jsonify({
+                    'success':
+                        False,
+
+                    'error':
+                        (
+                            'En EQUITY_PCT debes definir '
+                            'equity Futures y % máximo '
+                            'asignado.'
+                        )
+                }), 400
+
+
+            if (
+                max_loss_pct is not None
+                and equity is None
+            ):
+
+                return jsonify({
+                    'success':
+                        False,
+
+                    'error':
+                        (
+                            'Para calcular la pérdida máxima '
+                            'debes definir Futures Equity.'
+                        )
+                }), 400
+
+
+        profile = {
+            'futures_risk_mode':
+                mode,
+
+            'futures_margin_policy':
+                margin_policy,
+
+            'futures_equity_usdt':
+                equity,
+
+            'futures_max_allocation_pct':
+                allocation_pct,
+
+            'futures_max_loss_pct_equity_per_trade':
+                max_loss_pct,
+
+            'futures_preferred_margin_usdt':
+                preferred_margin,
+
+            'futures_personal_max_leverage':
+                personal_max_leverage,
+        }
+
+
+        saved = (
+            supabase_client
+            .upsert_user_futures_risk_profile(
+                user,
+                profile
+            )
+        )
+
+
+        if not saved:
+
+            return jsonify({
+                'success':
+                    False,
+
+                'authenticated':
+                    True,
+
+                'error':
+                    (
+                        'No se pudo guardar '
+                        'el perfil de riesgo.'
+                    )
+            }), 500
+
+
+        refreshed = (
+            supabase_client
+            .get_user_futures_risk_profile(
+                user
+            )
+        )
+
+
+        return jsonify({
+            'success':
+                True,
+
+            'authenticated':
+                True,
+
+            'user':
+                user,
+
+            'profile':
+                refreshed,
+        })
+
+
+    except Exception as e:
+
+        print(
+            "❌ /api/user/futures-risk-profile: "
+            f"{e}"
+        )
+
+        return jsonify({
+            'success':
+                False,
+
+            'authenticated':
+                True,
+
+            'error':
+                str(
+                    e
+                )[:200]
+        }), 500
+
 
 @app.route(
     '/api/user/futures-scalping-preferences',
