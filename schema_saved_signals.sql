@@ -188,6 +188,35 @@ ON public.saved_signals (
     telegram_lifecycle_armed_at
 )
 WHERE telegram_lifecycle_armed_at IS NOT NULL;
+-- ============================================================================
+-- COMMIT 36O.1
+-- ECONOMÍA FUTURES OBSERVACIONAL / SHADOW
+-- ============================================================================
+
+ALTER TABLE public.saved_signals
+    ADD COLUMN IF NOT EXISTS economics_model_version TEXT,
+
+    ADD COLUMN IF NOT EXISTS economics_cost_model_source TEXT,
+
+    ADD COLUMN IF NOT EXISTS economics_round_trip_cost_rate NUMERIC(12, 8),
+
+    ADD COLUMN IF NOT EXISTS gross_pnl_pct NUMERIC(12, 6),
+
+    ADD COLUMN IF NOT EXISTS gross_pnl_usdt NUMERIC(20, 8),
+
+    ADD COLUMN IF NOT EXISTS gross_r NUMERIC(12, 6),
+
+    ADD COLUMN IF NOT EXISTS estimated_total_cost_usdt NUMERIC(20, 8),
+
+    ADD COLUMN IF NOT EXISTS estimated_net_pnl_pct NUMERIC(12, 6),
+
+    ADD COLUMN IF NOT EXISTS estimated_net_pnl_usdt NUMERIC(20, 8),
+
+    ADD COLUMN IF NOT EXISTS estimated_net_r NUMERIC(12, 6),
+
+    ADD COLUMN IF NOT EXISTS economics_cost_components_complete BOOLEAN DEFAULT FALSE,
+
+    ADD COLUMN IF NOT EXISTS economics_calculated_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_saved_signals_status ON saved_signals(status);
 CREATE INDEX IF NOT EXISTS idx_saved_signals_symbol_tf ON saved_signals(symbol, timeframe);
 CREATE INDEX IF NOT EXISTS idx_saved_signals_created ON saved_signals(created_at DESC);
