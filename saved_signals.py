@@ -71,8 +71,80 @@ def _calc_pnl(entry: float, current: float, leverage: int, investment: float,
         'usdt': round(pnl_usdt, 4)
     }
 # ============================================================================
-# COMMIT 36O.1 — ECONOMÍA FUTURES OBSERVACIONAL
+# COMMIT 36O.2 — COSTES POR PROCEDENCIA + FUNDING PÚBLICO OBSERVADO
 # ============================================================================
+#
+# PRINCIPIOS:
+#
+# - NO cambia pnl_pct / pnl_usdt brutos.
+# - NO cambia win rate.
+# - NO cambia Safety / Entry / SL / TP / leverage.
+#
+# - Fee + slippage siguen juntos porque el 0.0012 actual es una
+#   estimación combinada.
+#
+#   Separarlos sin evidencia sería inventar.
+#
+# - Funding se consulta DESPUÉS del cierre.
+# - Un fallo de Funding NO puede impedir TP / SL / cierre manual.
+# ============================================================================
+
+
+_SAVED_FUTURES_CONTRACT_SYMBOLS = {
+    'BTC-USDT': 'XBTUSDTM',
+    'ETH-USDT': 'ETHUSDTM',
+    'SOL-USDT': 'SOLUSDTM',
+    'XRP-USDT': 'XRPUSDTM',
+    'ADA-USDT': 'ADAUSDTM',
+}
+
+
+_KUCOIN_FUNDING_HISTORY_URL = (
+    'https://api.kucoin.com/'
+    'api/ua/v1/market/funding-rate-history'
+)
+
+
+def _timestamp_to_utc_ms(
+    value
+) -> Optional[int]:
+    """
+    Convierte un timestamp de Saved Futures
+    a epoch milisegundos UTC.
+    """
+
+    if value is None:
+        return None
+
+    try:
+
+        import pandas as pd
+
+        ts = pd.Timestamp(
+            value
+        )
+
+        if ts.tz is None:
+
+            ts = ts.tz_localize(
+                'UTC'
+            )
+
+        else:
+
+            ts = ts.tz_convert(
+                'UTC'
+            )
+
+        return int(
+            ts.timestamp()
+            * 1000
+        )
+
+    except Exception:
+
+        return None
+
 
 def _build_estimated_economics(
     signal: Dict,
@@ -80,25 +152,33 @@ def _build_estimated_economics(
     gross_pnl: Dict
 ) -> Dict:
     """
-    Construye una segunda capa económica para una operación cerrada.
+    COMMIT 36O.2
 
-    IMPORTANTE:
+    Este cálculo ocurre DURANTE el cierre,
+    pero NO hace llamadas a Internet.
 
-    - pnl_pct / pnl_usdt actuales siguen siendo BRUTOS.
-    - NO modifica win rate.
-    - NO cambia status.
-    - NO cambia Entry / SL / TP.
-    - NO cambia leverage.
-    - NO presenta costes estimados como realizados.
+    Primero persiste:
 
-    Si no existe procedencia verificable del modelo de costes,
-    conserva sólo los datos brutos y deja el neto estimado en NULL.
+    - Gross PnL.
+    - Fee + slippage estimado.
+    - Net provisional SIN funding.
+    - Funding = PENDING.
+
+    Funding será completado después por:
+
+        enrich_pending_funding_economics()
+
+    De esta manera un fallo externo jamás puede impedir
+    cerrar correctamente una operación.
     """
 
     try:
 
         gross_pct = float(
-            (gross_pnl or {}).get(
+            (
+                gross_pnl
+                or {}
+            ).get(
                 'pct',
                 0
             )
@@ -106,7 +186,10 @@ def _build_estimated_economics(
         )
 
         gross_usdt = float(
-            (gross_pnl or {}).get(
+            (
+                gross_pnl
+                or {}
+            ).get(
                 'usdt',
                 0
             )
@@ -114,8 +197,9 @@ def _build_estimated_economics(
         )
 
         result = {
+
             'economics_model_version':
-                '36O_V1',
+                '36O_V2',
 
             'gross_pnl_pct':
                 round(
@@ -139,11 +223,70 @@ def _build_estimated_economics(
                 datetime.utcnow()
                 .isoformat(),
 
-            # Todavía NO tenemos maker/taker + slippage +
-            # funding observados individualmente.
+            # --------------------------------------------------------
+            # Todavía FALSE.
+            #
+            # Fee y slippage siguen siendo una estimación combinada.
+            # --------------------------------------------------------
+
             'economics_cost_components_complete':
                 False,
+
+            # --------------------------------------------------------
+            # FUNDING
+            # --------------------------------------------------------
+
+            'funding_data_source':
+                None,
+
+            'funding_calculation_status':
+                (
+                    'PENDING'
+                    if (
+                        signal.get(
+                            'entry_touched_at'
+                        )
+                        or signal.get(
+                            'entry_at'
+                        )
+                    )
+                    else
+                    'NO_ENTRY_TIMESTAMP'
+                ),
+
+            'funding_contract_symbol':
+                None,
+
+            'funding_settlements_count':
+                None,
+
+            'funding_rate_sum':
+                None,
+
+            'estimated_funding_cost_usdt':
+                None,
+
+            'funding_window_start_at':
+                (
+                    signal.get(
+                        'entry_touched_at'
+                    )
+                    or signal.get(
+                        'entry_at'
+                    )
+                ),
+
+            'funding_window_end_at':
+                None,
+
+            'funding_observed_at':
+                None,
         }
+
+
+        # ============================================================
+        # MODELO FEE + SLIPPAGE
+        # ============================================================
 
         source = str(
             signal.get(
@@ -153,52 +296,65 @@ def _build_estimated_economics(
             or ''
         ).upper()
 
+
         rate_raw = signal.get(
             'economics_round_trip_cost_rate'
         )
 
+
         # ============================================================
-        # HISTÓRICOS / COSTE NO VERIFICABLE
-        # ============================================================
-        #
-        # No hacemos backfill inventando que el histórico utilizó
-        # el modelo 36O.
+        # LEGACY / COSTE BASE NO VERIFICABLE
         # ============================================================
 
         if (
-            source != 'ESTIMATED_CONFIG_COMBINED'
+            source
+            != 'ESTIMATED_CONFIG_COMBINED'
             or rate_raw is None
         ):
 
-            result[
-                'economics_cost_model_source'
-            ] = (
-                source
-                or 'UNVERIFIED_LEGACY'
-            )
+            result.update({
 
-            result[
-                'estimated_total_cost_usdt'
-            ] = None
+                'economics_cost_model_source':
+                    (
+                        source
+                        or 'UNVERIFIED_LEGACY'
+                    ),
 
-            result[
-                'estimated_net_pnl_pct'
-            ] = None
+                'fee_slippage_cost_source':
+                    'UNVERIFIED',
 
-            result[
-                'estimated_net_pnl_usdt'
-            ] = None
+                'estimated_fee_slippage_cost_usdt':
+                    None,
 
-            result[
-                'estimated_net_r'
-            ] = None
+                'estimated_total_cost_usdt':
+                    None,
+
+                'estimated_net_pnl_pct':
+                    None,
+
+                'estimated_net_pnl_usdt':
+                    None,
+
+                'estimated_net_r':
+                    None,
+
+                # Sin coste base verificable no calculamos
+                # un "neto completo".
+                'funding_calculation_status':
+                    (
+                        'NOT_REQUESTED_'
+                        'UNVERIFIED_COST_BASE'
+                    ),
+            })
 
             return result
+
 
         rate = float(
             rate_raw
             or 0
         )
+
 
         investment = float(
             signal.get(
@@ -208,6 +364,7 @@ def _build_estimated_economics(
             or 0
         )
 
+
         leverage = float(
             signal.get(
                 'leverage',
@@ -215,6 +372,7 @@ def _build_estimated_economics(
             )
             or 1
         )
+
 
         entry = float(
             signal.get(
@@ -224,6 +382,7 @@ def _build_estimated_economics(
             or 0
         )
 
+
         stop_loss = float(
             signal.get(
                 'stop_loss',
@@ -232,21 +391,39 @@ def _build_estimated_economics(
             or 0
         )
 
+
         if (
             rate < 0
             or investment <= 0
             or leverage <= 0
         ):
+
+            result.update({
+
+                'fee_slippage_cost_source':
+                    'INVALID_INPUT',
+
+                'funding_calculation_status':
+                    (
+                        'NOT_REQUESTED_'
+                        'INVALID_INPUT'
+                    ),
+            })
+
             return result
 
+
         # ============================================================
-        # MISMA HIPÓTESIS QUE FUTURES_SYSTEM
+        # FEE + SLIPPAGE
         # ============================================================
         #
-        # notional = margen × leverage
-        # coste = notional × round-trip estimate
+        # Conservamos exactamente la hipótesis que ya usaba 36O.1:
         #
-        # NO decimos que sea fee realizada.
+        # notional = margin × leverage
+        #
+        # estimated cost =
+        # notional × round_trip_cost_pct
+        #
         # ============================================================
 
         notional_usdt = (
@@ -254,32 +431,52 @@ def _build_estimated_economics(
             * leverage
         )
 
-        estimated_cost_usdt = (
+
+        fee_slippage_cost_usdt = (
             notional_usdt
             * rate
         )
 
-        estimated_net_usdt = (
-            gross_usdt
-            - estimated_cost_usdt
+
+        # ============================================================
+        # NET PROVISIONAL
+        # ============================================================
+        #
+        # Por ahora sólo descuenta fee + slippage.
+        #
+        # Funding será agregado DESPUÉS DEL CIERRE.
+        # ============================================================
+
+        provisional_total_cost = (
+            fee_slippage_cost_usdt
         )
 
-        estimated_cost_pct_margin = (
-            estimated_cost_usdt
+
+        provisional_net_usdt = (
+            gross_usdt
+            - provisional_total_cost
+        )
+
+
+        provisional_cost_pct_margin = (
+            provisional_total_cost
             / investment
             * 100.0
         )
 
-        estimated_net_pct = (
+
+        provisional_net_pct = (
             gross_pct
-            - estimated_cost_pct_margin
+            - provisional_cost_pct_margin
         )
 
+
         # ============================================================
-        # RIESGO MONETARIO ORIGINAL
+        # RIESGO ORIGINAL EN USDT
         # ============================================================
 
         risk_usdt = 0.0
+
 
         if (
             entry > 0
@@ -290,23 +487,31 @@ def _build_estimated_economics(
                 investment
                 * leverage
                 * abs(
-                    entry - stop_loss
+                    entry
+                    - stop_loss
                 )
                 / entry
             )
 
-        estimated_net_r = None
+
+        provisional_net_r = None
+
 
         if risk_usdt > 0:
 
-            estimated_net_r = (
-                estimated_net_usdt
+            provisional_net_r = (
+                provisional_net_usdt
                 / risk_usdt
             )
 
+
         result.update({
+
             'economics_cost_model_source':
-                'ESTIMATED_CONFIG_COMBINED',
+                (
+                    'ESTIMATED_FEE_SLIPPAGE_'
+                    'PENDING_FUNDING'
+                ),
 
             'economics_round_trip_cost_rate':
                 round(
@@ -314,42 +519,61 @@ def _build_estimated_economics(
                     8
                 ),
 
+            'fee_slippage_cost_source':
+                'ESTIMATED_CONFIG_COMBINED',
+
+            'estimated_fee_slippage_cost_usdt':
+                round(
+                    fee_slippage_cost_usdt,
+                    8
+                ),
+
+            # Hasta enriquecer funding conserva el mismo
+            # resultado económico que ya producía 36O.1.
+
             'estimated_total_cost_usdt':
                 round(
-                    estimated_cost_usdt,
+                    provisional_total_cost,
                     8
                 ),
 
             'estimated_net_pnl_pct':
                 round(
-                    estimated_net_pct,
+                    provisional_net_pct,
                     6
                 ),
 
             'estimated_net_pnl_usdt':
                 round(
-                    estimated_net_usdt,
+                    provisional_net_usdt,
                     8
                 ),
 
             'estimated_net_r':
                 (
                     round(
-                        estimated_net_r,
+                        provisional_net_r,
                         6
                     )
-                    if estimated_net_r
+                    if provisional_net_r
                     is not None
                     else None
                 ),
         })
 
+
         return result
+
 
     except Exception as e:
 
-        # La economía Shadow JAMÁS debe impedir que una operación
-        # cierre correctamente.
+        # ============================================================
+        # FAIL OPEN ECONÓMICO
+        # ============================================================
+        #
+        # Un error de métricas económicas JAMÁS debe impedir
+        # cerrar TP / SL / manual.
+        # ============================================================
 
         logger.warning(
             "_build_estimated_economics: "
@@ -358,6 +582,974 @@ def _build_estimated_economics(
 
         return {}
 
+
+def _fetch_public_funding_observation(
+    signal: Dict
+) -> Dict:
+    """
+    Consulta el historial PÚBLICO de funding de KuCoin.
+
+    IMPORTANTE:
+
+    La TASA es observada del mercado.
+
+    El importe monetario continúa siendo ESTIMADO porque:
+
+    - Saved Futures no confirma fills reales de una cuenta.
+    - usamos investment_usdt × leverage como notional aproximado.
+    - no conocemos cambios del notional durante la operación.
+
+    Convención:
+
+    estimated_funding_cost_usdt > 0
+        = coste.
+
+    estimated_funding_cost_usdt < 0
+        = crédito recibido.
+    """
+
+    base = {
+
+        'funding_data_source':
+            'KUCOIN_PUBLIC_FUNDING_HISTORY',
+
+        'funding_calculation_status':
+            'UNAVAILABLE',
+
+        'funding_contract_symbol':
+            None,
+
+        'funding_settlements_count':
+            None,
+
+        'funding_rate_sum':
+            None,
+
+        'estimated_funding_cost_usdt':
+            None,
+
+        'funding_window_start_at':
+            None,
+
+        'funding_window_end_at':
+            None,
+
+        'funding_observed_at':
+            datetime.utcnow()
+            .isoformat(),
+    }
+
+
+    try:
+
+        symbol = str(
+            signal.get(
+                'symbol',
+                ''
+            )
+            or ''
+        ).upper()
+
+
+        action = str(
+            signal.get(
+                'action',
+                ''
+            )
+            or ''
+        ).upper()
+
+
+        contract_symbol = (
+            _SAVED_FUTURES_CONTRACT_SYMBOLS
+            .get(
+                symbol
+            )
+        )
+
+
+        base[
+            'funding_contract_symbol'
+        ] = contract_symbol
+
+
+        if (
+            not contract_symbol
+            or action not in (
+                'LONG',
+                'SHORT'
+            )
+        ):
+
+            base[
+                'funding_calculation_status'
+            ] = 'UNSUPPORTED_SIGNAL'
+
+            return base
+
+
+        # ============================================================
+        # VENTANA DE LA POSICIÓN
+        # ============================================================
+
+        start_value = (
+            signal.get(
+                'entry_touched_at'
+            )
+            or signal.get(
+                'entry_at'
+            )
+        )
+
+
+        end_value = (
+            signal.get(
+                'closed_at'
+            )
+            or signal.get(
+                'updated_at'
+            )
+        )
+
+
+        start_ms = (
+            _timestamp_to_utc_ms(
+                start_value
+            )
+        )
+
+
+        end_ms = (
+            _timestamp_to_utc_ms(
+                end_value
+            )
+        )
+
+
+        base[
+            'funding_window_start_at'
+        ] = start_value
+
+
+        base[
+            'funding_window_end_at'
+        ] = end_value
+
+
+        if (
+            start_ms is None
+            or end_ms is None
+            or end_ms <= start_ms
+        ):
+
+            base[
+                'funding_calculation_status'
+            ] = 'INVALID_WINDOW'
+
+            return base
+
+
+        # ============================================================
+        # CONSULTA PÚBLICA
+        # ============================================================
+
+        import requests
+
+
+        response = requests.get(
+
+            _KUCOIN_FUNDING_HISTORY_URL,
+
+            params={
+
+                'symbol':
+                    contract_symbol,
+
+                'startAt':
+                    start_ms,
+
+                'endAt':
+                    end_ms,
+            },
+
+            timeout=6
+        )
+
+
+        if response.status_code != 200:
+
+            base[
+                'funding_calculation_status'
+            ] = (
+                'HTTP_'
+                f'{response.status_code}'
+            )
+
+            return base
+
+
+        payload = response.json()
+
+
+        if (
+            not isinstance(
+                payload,
+                dict
+            )
+            or payload.get(
+                'code'
+            ) != '200000'
+        ):
+
+            base[
+                'funding_calculation_status'
+            ] = 'API_REJECTED'
+
+            return base
+
+
+        data = (
+            payload.get(
+                'data'
+            )
+            or {}
+        )
+
+
+        if isinstance(
+            data,
+            dict
+        ):
+
+            rows = (
+                data.get(
+                    'list'
+                )
+                or []
+            )
+
+        elif isinstance(
+            data,
+            list
+        ):
+
+            rows = data
+
+        else:
+
+            rows = []
+
+
+        # ============================================================
+        # FILTRAR SETTLEMENTS REALES DENTRO DE LA POSICIÓN
+        # ============================================================
+
+        valid_rates = []
+
+
+        for item in rows:
+
+            if not isinstance(
+                item,
+                dict
+            ):
+
+                continue
+
+
+            try:
+
+                rate = float(
+                    item.get(
+                        'fundingRate'
+                    )
+                )
+
+
+                ts_ms = int(
+                    item.get(
+                        'ts',
+                        item.get(
+                            'timepoint',
+                            0
+                        )
+                    )
+                    or 0
+                )
+
+
+            except (
+                TypeError,
+                ValueError
+            ):
+
+                continue
+
+
+            if (
+                start_ms
+                <= ts_ms
+                <= end_ms
+            ):
+
+                valid_rates.append(
+                    rate
+                )
+
+
+        funding_rate_sum = sum(
+            valid_rates
+        )
+
+
+        investment = float(
+            signal.get(
+                'investment_usdt',
+                0
+            )
+            or 0
+        )
+
+
+        leverage = float(
+            signal.get(
+                'leverage',
+                1
+            )
+            or 1
+        )
+
+
+        if (
+            investment <= 0
+            or leverage <= 0
+        ):
+
+            base.update({
+
+                'funding_calculation_status':
+                    'INVALID_POSITION_SIZE',
+
+                'funding_settlements_count':
+                    len(
+                        valid_rates
+                    ),
+
+                'funding_rate_sum':
+                    round(
+                        funding_rate_sum,
+                        10
+                    ),
+            })
+
+            return base
+
+
+        notional_usdt = (
+            investment
+            * leverage
+        )
+
+
+        # ============================================================
+        # DIRECCIÓN DEL FUNDING
+        # ============================================================
+        #
+        # Funding positivo:
+        #
+        # LONG  paga   -> coste positivo
+        # SHORT recibe -> coste negativo
+        #
+        # Funding negativo:
+        #
+        # LONG  recibe
+        # SHORT paga
+        # ============================================================
+
+        side_multiplier = (
+            1.0
+            if action == 'LONG'
+            else -1.0
+        )
+
+
+        estimated_funding_cost = (
+            notional_usdt
+            * funding_rate_sum
+            * side_multiplier
+        )
+
+
+        base.update({
+
+            'funding_calculation_status':
+                (
+                    'OBSERVED_RATES'
+                    if valid_rates
+                    else
+                    'NO_SETTLEMENTS_IN_WINDOW'
+                ),
+
+            'funding_settlements_count':
+                len(
+                    valid_rates
+                ),
+
+            'funding_rate_sum':
+                round(
+                    funding_rate_sum,
+                    10
+                ),
+
+            'estimated_funding_cost_usdt':
+                round(
+                    estimated_funding_cost,
+                    8
+                ),
+        })
+
+
+        return base
+
+
+    except Exception as e:
+
+        logger.warning(
+            "_fetch_public_funding_observation: "
+            f"{e}"
+        )
+
+        return base
+
+
+def enrich_pending_funding_economics(
+    limit: int = 20
+) -> Dict:
+    """
+    Enriquece operaciones YA CERRADAS cuyo funding quedó PENDING.
+
+    SEGURIDAD:
+
+    - No toca señales abiertas.
+    - No cambia status.
+    - No cambia PnL bruto.
+    - No cambia Entry.
+    - No cambia SL.
+    - No cambia TP.
+    - No cambia leverage.
+    - No hace backfill de históricos cuyo funding status sea NULL.
+    """
+
+    stats = {
+
+        'pending': 0,
+        'enriched': 0,
+        'no_settlements': 0,
+        'unavailable': 0,
+        'errors': 0,
+    }
+
+
+    db = _get_db()
+
+
+    if db is None:
+
+        return stats
+
+
+    try:
+
+        # ============================================================
+        # SÓLO CERRADAS GENERADAS POR 36O.2
+        # ============================================================
+
+        def _op():
+
+            return (
+
+                db.client
+
+                .table(
+                    'saved_signals'
+                )
+
+                .select(
+                    '*'
+                )
+
+                .in_(
+                    'status',
+                    [
+                        'tp_hit',
+                        'sl_hit',
+                        'closed_manual'
+                    ]
+                )
+
+                .eq(
+                    'entry_touched',
+                    True
+                )
+
+                .eq(
+                    'funding_calculation_status',
+                    'PENDING'
+                )
+
+                .order(
+                    'closed_at',
+                    desc=False
+                )
+
+                .limit(
+                    max(
+                        1,
+                        min(
+                            int(
+                                limit
+                            ),
+                            100
+                        )
+                    )
+                )
+
+                .execute()
+            )
+
+
+        response = db._with_retry(
+            _op
+        )
+
+
+        signals = (
+            response.data
+
+            if (
+                response
+                and response.data
+            )
+
+            else []
+        )
+
+
+        stats[
+            'pending'
+        ] = len(
+            signals
+        )
+
+
+        # ============================================================
+        # ENRIQUECER UNA POR UNA
+        # ============================================================
+
+        for signal in signals:
+
+            try:
+
+                signal_id = (
+                    signal.get(
+                        'id'
+                    )
+                )
+
+
+                if not signal_id:
+
+                    continue
+
+
+                funding = (
+                    _fetch_public_funding_observation(
+                        signal
+                    )
+                )
+
+
+                funding_status = str(
+
+                    funding.get(
+                        'funding_calculation_status',
+                        'UNAVAILABLE'
+                    )
+
+                    or 'UNAVAILABLE'
+
+                )
+
+
+                updates = dict(
+                    funding
+                )
+
+
+                # ====================================================
+                # COSTE BASE FEE + SLIPPAGE YA CALCULADO AL CIERRE
+                # ====================================================
+
+                fee_slippage_raw = (
+                    signal.get(
+                        'estimated_fee_slippage_cost_usdt'
+                    )
+                )
+
+
+                gross_usdt_raw = (
+                    signal.get(
+                        'gross_pnl_usdt'
+                    )
+                )
+
+
+                if gross_usdt_raw is None:
+
+                    gross_usdt_raw = (
+                        signal.get(
+                            'pnl_usdt'
+                        )
+                    )
+
+
+                gross_pct_raw = (
+                    signal.get(
+                        'gross_pnl_pct'
+                    )
+                )
+
+
+                if gross_pct_raw is None:
+
+                    gross_pct_raw = (
+                        signal.get(
+                            'pnl_pct'
+                        )
+                    )
+
+
+                funding_cost_raw = (
+                    funding.get(
+                        'estimated_funding_cost_usdt'
+                    )
+                )
+
+
+                funding_usable = (
+
+                    funding_status
+                    in (
+                        'OBSERVED_RATES',
+                        'NO_SETTLEMENTS_IN_WINDOW'
+                    )
+
+                    and funding_cost_raw
+                    is not None
+                )
+
+
+                # ====================================================
+                # RECALCULAR NET SÓLO SI AMBAS PARTES SON UTILIZABLES
+                # ====================================================
+
+                if (
+                    fee_slippage_raw is not None
+                    and gross_usdt_raw is not None
+                    and gross_pct_raw is not None
+                    and funding_usable
+                ):
+
+                    fee_slippage_cost = float(
+                        fee_slippage_raw
+                    )
+
+
+                    funding_cost = float(
+                        funding_cost_raw
+                    )
+
+
+                    gross_usdt = float(
+                        gross_usdt_raw
+                    )
+
+
+                    gross_pct = float(
+                        gross_pct_raw
+                    )
+
+
+                    investment = float(
+                        signal.get(
+                            'investment_usdt',
+                            0
+                        )
+                        or 0
+                    )
+
+
+                    leverage = float(
+                        signal.get(
+                            'leverage',
+                            1
+                        )
+                        or 1
+                    )
+
+
+                    entry = float(
+                        signal.get(
+                            'entry',
+                            0
+                        )
+                        or 0
+                    )
+
+
+                    stop_loss = float(
+                        signal.get(
+                            'stop_loss',
+                            0
+                        )
+                        or 0
+                    )
+
+
+                    total_cost = (
+                        fee_slippage_cost
+                        + funding_cost
+                    )
+
+
+                    net_usdt = (
+                        gross_usdt
+                        - total_cost
+                    )
+
+
+                    net_pct = None
+
+
+                    if investment > 0:
+
+                        net_pct = (
+
+                            gross_pct
+
+                            - (
+                                total_cost
+                                / investment
+                                * 100.0
+                            )
+                        )
+
+
+                    # ================================================
+                    # NET R
+                    # ================================================
+
+                    risk_usdt = 0.0
+
+
+                    if (
+                        investment > 0
+                        and leverage > 0
+                        and entry > 0
+                        and stop_loss > 0
+                    ):
+
+                        risk_usdt = (
+
+                            investment
+                            * leverage
+
+                            * abs(
+                                entry
+                                - stop_loss
+                            )
+
+                            / entry
+                        )
+
+
+                    net_r = None
+
+
+                    if risk_usdt > 0:
+
+                        net_r = (
+                            net_usdt
+                            / risk_usdt
+                        )
+
+
+                    updates.update({
+
+                        'economics_model_version':
+                            '36O_V2',
+
+                        'economics_cost_model_source':
+                            (
+                                'ESTIMATED_FEE_SLIPPAGE'
+                                '+PUBLIC_FUNDING_RATES'
+                            ),
+
+                        'estimated_total_cost_usdt':
+                            round(
+                                total_cost,
+                                8
+                            ),
+
+                        'estimated_net_pnl_usdt':
+                            round(
+                                net_usdt,
+                                8
+                            ),
+
+                        'estimated_net_pnl_pct':
+                            (
+                                round(
+                                    net_pct,
+                                    6
+                                )
+
+                                if net_pct
+                                is not None
+
+                                else None
+                            ),
+
+                        'estimated_net_r':
+                            (
+                                round(
+                                    net_r,
+                                    6
+                                )
+
+                                if net_r
+                                is not None
+
+                                else None
+                            ),
+
+                        'economics_calculated_at':
+                            datetime.utcnow()
+                            .isoformat(),
+                    })
+
+
+                updates[
+                    'updated_at'
+                ] = (
+                    datetime.utcnow()
+                    .isoformat()
+                )
+
+
+                # ====================================================
+                # UPDATE CON CONDICIÓN
+                # ====================================================
+                #
+                # Sólo actualiza si sigue PENDING.
+                #
+                # Evita que dos ciclos simultáneos pisen el mismo
+                # enriquecimiento.
+                # ====================================================
+
+                def _update():
+
+                    return (
+
+                        db.client
+
+                        .table(
+                            'saved_signals'
+                        )
+
+                        .update(
+                            updates
+                        )
+
+                        .eq(
+                            'id',
+                            signal_id
+                        )
+
+                        .eq(
+                            'funding_calculation_status',
+                            'PENDING'
+                        )
+
+                        .execute()
+                    )
+
+
+                db._with_retry(
+                    _update
+                )
+
+
+                if (
+                    funding_status
+                    == 'OBSERVED_RATES'
+                ):
+
+                    stats[
+                        'enriched'
+                    ] += 1
+
+
+                elif (
+                    funding_status
+                    == 'NO_SETTLEMENTS_IN_WINDOW'
+                ):
+
+                    stats[
+                        'no_settlements'
+                    ] += 1
+
+
+                else:
+
+                    stats[
+                        'unavailable'
+                    ] += 1
+
+
+            except Exception as signal_err:
+
+                stats[
+                    'errors'
+                ] += 1
+
+
+                logger.warning(
+
+                    "enrich_pending_funding_economics "
+                    f"{signal.get('id')}: "
+                    f"{signal_err}"
+
+                )
+
+
+        return stats
+
+
+    except Exception as e:
+
+        stats[
+            'errors'
+        ] += 1
+
+
+        logger.warning(
+            "enrich_pending_funding_economics: "
+            f"{e}"
+        )
+
+
+        return stats
 
 
 def _check_entry_touched(entry: float, high: float, low: float,
