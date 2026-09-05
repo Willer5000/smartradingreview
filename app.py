@@ -30176,7 +30176,8 @@ def saved_futures_lifecycle_loop():
         try:
 
             from saved_signals import (
-                evaluate_saved_signals
+                evaluate_saved_signals,
+                enrich_pending_funding_economics
             )
 
             futures_market = (
@@ -30244,9 +30245,109 @@ def saved_futures_lifecycle_loop():
                     f"expired={stats.get('expired', 0)}"
                 )
 
-            # Después de persistir las transiciones
-            # revisamos si existe Telegram pendiente.
+            # ========================================================
+            # PRIMERO: TELEGRAM LIFECYCLE 36N
+            # ========================================================
+            #
+            # Entry / TP / SL tienen prioridad.
+            #
+            # Funding económico NO debe retrasar ni impedir
+            # una notificación operacional.
+            # ========================================================
+
             _send_saved_futures_lifecycle_notifications()
+
+
+            # ========================================================
+            # DESPUÉS: COMMIT 36O.2
+            # FUNDING ECONÓMICO OBSERVACIONAL
+            # ========================================================
+            #
+            # Sólo procesa operaciones YA CERRADAS cuyo estado sea:
+            #
+            # funding_calculation_status = PENDING
+            #
+            # Un fallo aquí NO afecta:
+            # - TP
+            # - SL
+            # - Telegram
+            # - Guardian
+            # - lifecycle
+            # ========================================================
+
+            try:
+
+                funding_stats = (
+                    enrich_pending_funding_economics(
+                        limit=20
+                    )
+                    or {}
+                )
+
+
+                funding_processed = (
+
+                    int(
+                        funding_stats.get(
+                            'enriched',
+                            0
+                        )
+                        or 0
+                    )
+
+                    + int(
+                        funding_stats.get(
+                            'no_settlements',
+                            0
+                        )
+                        or 0
+                    )
+                )
+
+
+                if (
+                    funding_processed > 0
+                    or funding_stats.get(
+                        'errors',
+                        0
+                    ) > 0
+                ):
+
+                    print(
+
+                        "💰 [36O.2 FUNDING] "
+
+                        f"pendientes="
+                        f"{funding_stats.get('pending', 0)} "
+
+                        f"observadas="
+                        f"{funding_stats.get('enriched', 0)} "
+
+                        f"sin_settlement="
+                        f"{funding_stats.get('no_settlements', 0)} "
+
+                        f"no_disponibles="
+                        f"{funding_stats.get('unavailable', 0)} "
+
+                        f"errores="
+                        f"{funding_stats.get('errors', 0)}"
+                    )
+
+
+            except Exception as funding_err:
+
+                # ====================================================
+                # FAIL OPEN
+                # ====================================================
+                #
+                # Funding nunca rompe el lifecycle.
+                # ====================================================
+
+                print(
+                    "⚠️ [36O.2] "
+                    "Funding no disponible: "
+                    f"{funding_err}"
+                )
 
         except Exception as e:
 
