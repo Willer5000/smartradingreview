@@ -3098,8 +3098,9 @@ function _futApplyRiskProfileForm(
         _futRiskSetMessage(
             (
                 'Perfil personal activo. '
-                + 'No cambia la calidad del setup; '
-                + 'sólo propone sizing.'
+                + 'El sistema usará tus límites para '
+                + 'sugerirte cuánto margen y leverage usar. '
+                + 'No convierte una señal mala en buena.'
             ),
             'info'
         );
@@ -3108,9 +3109,10 @@ function _futApplyRiskProfileForm(
 
         _futRiskSetMessage(
             (
-                'Modo manual. '
-                + 'El comportamiento anterior '
-                + 'permanece sin cambios.'
+                'Modo manual: tú decides cuánto margen '
+                + 'y leverage utilizar. '
+                + 'Tus límites personales no se aplican '
+                + 'automáticamente.'
             ),
             'secondary'
         );
