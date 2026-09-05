@@ -3803,28 +3803,296 @@ window.updateSavedSignalsList = async function() {
         const kJson = await kRes.json();
         if (kJson.success) {
             const k = kJson.data || {};
-            const wrEl = document.getElementById('ss-kpi-winrate');
-            const pnlEl = document.getElementById('ss-kpi-pnl');
-            const cntEl = document.getElementById('ss-kpi-count');
+            const wrEl =
+                document.getElementById(
+                    'ss-kpi-winrate'
+                );
+
+            const pnlEl =
+                document.getElementById(
+                    'ss-kpi-pnl'
+                );
+
+            const netEl =
+                document.getElementById(
+                    'ss-kpi-net'
+                );
+
+            const economicsEl =
+                document.getElementById(
+                    'ss-kpi-econ-coverage'
+                );
+
+            const cntEl =
+                document.getElementById(
+                    'ss-kpi-count'
+                );
+
+
+            // ========================================================
+            // KPI ANTIGUO — WIN RATE
+            // ========================================================
+
             if (wrEl) {
-                wrEl.textContent = `WR: ${(k.win_rate || 0).toFixed(1)}%`;
-                let cls = 'bg-secondary';
+
+                wrEl.textContent =
+                    `WR: ${(k.win_rate || 0).toFixed(1)}%`;
+
+                let cls =
+                    'bg-secondary';
+
                 if (k.total >= 5) {
-                    cls = k.win_rate >= 55 ? 'bg-success' : (k.win_rate >= 40 ? 'bg-warning text-dark' : 'bg-danger');
+
+                    cls =
+                        k.win_rate >= 55
+                            ? 'bg-success'
+                            : (
+                                k.win_rate >= 40
+                                    ? 'bg-warning text-dark'
+                                    : 'bg-danger'
+                            );
                 }
-                wrEl.className = 'badge ' + cls;
+
+                wrEl.className =
+                    'badge ' + cls;
             }
+
+
+            // ========================================================
+            // KPI BRUTO EXISTENTE
+            // ========================================================
+
             if (pnlEl) {
-                const sign = (k.pnl_total_usdt || 0) >= 0 ? '+' : '';
-                pnlEl.textContent = `PnL: ${sign}${(k.pnl_total_usdt || 0).toFixed(2)} USDT`;
-                let cls = 'bg-secondary';
+
+                const grossPnl =
+                    Number(
+                        k.pnl_total_usdt
+                        || 0
+                    );
+
+                const sign =
+                    grossPnl >= 0
+                        ? '+'
+                        : '';
+
+                pnlEl.textContent =
+                    (
+                        `PnL bruto: `
+                        + `${sign}`
+                        + `${grossPnl.toFixed(2)} USDT`
+                    );
+
+                let cls =
+                    'bg-secondary';
+
                 if (k.total >= 5) {
-                    cls = k.pnl_total_usdt > 0 ? 'bg-success' : (k.pnl_total_usdt < 0 ? 'bg-danger' : 'bg-warning text-dark');
+
+                    cls =
+                        grossPnl > 0
+                            ? 'bg-success'
+                            : (
+                                grossPnl < 0
+                                    ? 'bg-danger'
+                                    : 'bg-warning text-dark'
+                            );
                 }
-                pnlEl.className = 'badge ' + cls;
+
+                pnlEl.className =
+                    'badge ' + cls;
             }
+
+
+            // ========================================================
+            // COMMIT 36O.3
+            // ECONOMÍA NET ESTIMADA
+            // ========================================================
+
+            const economics =
+                (
+                    k.economics
+                    && typeof k.economics === 'object'
+                )
+                    ? k.economics
+                    : {};
+
+
+            const netSamples =
+                Number(
+                    economics.net_samples
+                    || 0
+                );
+
+
+            const closedTotal =
+                Number(
+                    economics.closed_total
+                    ?? k.total
+                    ?? 0
+                );
+
+
+            const coveragePct =
+                Number(
+                    economics.coverage_pct
+                    || 0
+                );
+
+
+            if (netEl) {
+
+                if (netSamples > 0) {
+
+                    const netPnl =
+                        Number(
+                            economics
+                                .estimated_net_pnl_total_usdt
+                            || 0
+                        );
+
+                    const netSign =
+                        netPnl >= 0
+                            ? '+'
+                            : '';
+
+                    netEl.textContent =
+                        (
+                            `Neto est.: `
+                            + `${netSign}`
+                            + `${netPnl.toFixed(2)} USDT`
+                        );
+
+
+                    // Deliberadamente neutral:
+                    // es una estimación económica,
+                    // NO una señal de trading.
+
+                    netEl.className =
+                        'badge bg-secondary';
+
+
+                    const netExp =
+                        economics
+                            .estimated_net_expectancy_r;
+
+
+                    const netExpText =
+                        (
+                            netExp === null
+                            || netExp === undefined
+                        )
+                            ? '--'
+                            : Number(
+                                netExp
+                            ).toFixed(3);
+
+
+                    netEl.title =
+                        (
+                            `36O — Neto ESTIMADO. `
+                            + `Muestra: ${netSamples}. `
+                            + `Expectancy neta est.: `
+                            + `${netExpText}R. `
+                            + `Fee/slippage estimados; `
+                            + `funding rates públicos observados. `
+                            + `No autoriza Commit 37.`
+                        );
+
+                } else {
+
+                    netEl.textContent =
+                        'Neto est.: --';
+
+                    netEl.className =
+                        'badge bg-secondary';
+
+                    netEl.title =
+                        (
+                            'Todavía no existen operaciones '
+                            + 'cerradas con economía 36O '
+                            + 'completa.'
+                        );
+                }
+            }
+
+
+            // ========================================================
+            // COMMIT 36O.3
+            // COBERTURA ECONÓMICA
+            // ========================================================
+
+            if (economicsEl) {
+
+                economicsEl.textContent =
+                    (
+                        `Costes: `
+                        + `${netSamples}/`
+                        + `${closedTotal} `
+                        + `(${coveragePct.toFixed(0)}%)`
+                    );
+
+
+                // También se mantiene neutral.
+                // Cobertura != rentabilidad.
+
+                economicsEl.className =
+                    'badge bg-dark';
+
+
+                const grossExp =
+                    economics
+                        .gross_expectancy_r;
+
+
+                const netExp =
+                    economics
+                        .estimated_net_expectancy_r;
+
+
+                const grossExpText =
+                    (
+                        grossExp === null
+                        || grossExp === undefined
+                    )
+                        ? '--'
+                        : Number(
+                            grossExp
+                        ).toFixed(3);
+
+
+                const netExpText =
+                    (
+                        netExp === null
+                        || netExp === undefined
+                    )
+                        ? '--'
+                        : Number(
+                            netExp
+                        ).toFixed(3);
+
+
+                economicsEl.title =
+                    (
+                        `Cobertura económica 36O: `
+                        + `${netSamples}/${closedTotal}. `
+                        + `Expectancy bruta: `
+                        + `${grossExpText}R. `
+                        + `Expectancy neta estimada: `
+                        + `${netExpText}R.`
+                    );
+            }
+
+
+            // ========================================================
+            // CONTADOR EXISTENTE
+            // ========================================================
+
             if (cntEl) {
-                cntEl.textContent = `${k.total || 0} cerradas / ${k.active || 0} activas`;
+
+                cntEl.textContent =
+                    (
+                        `${k.total || 0} cerradas / `
+                        + `${k.active || 0} activas`
+                    );
             }
         }
         
