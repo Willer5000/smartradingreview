@@ -1008,7 +1008,121 @@ def create_saved_signal(data: Dict) -> Optional[Dict]:
             'status': 'active',
             'entry_touched': False,
             'notes': str(data.get('notes', '') or '')[:500],
-            'user_name': str(data.get('user_name', data.get('user', 'Invitado'))).strip(),
+            'user_name':
+                str(
+                    data.get(
+                        'user_name',
+                        data.get(
+                            'user',
+                            'Invitado'
+                        )
+                    )
+                ).strip(),
+
+            # Commit 36M — procedencia/riesgo del guardado.
+            'execution_origin':
+                str(
+                    data.get(
+                        'execution_origin',
+                        'SYSTEM_EXECUTABLE'
+                    )
+                    or 'SYSTEM_EXECUTABLE'
+                ).upper(),
+
+            'risk_class':
+                str(
+                    data.get(
+                        'risk_class',
+                        'PREMIUM'
+                    )
+                    or 'PREMIUM'
+                ).upper(),
+
+            'system_executable':
+                bool(
+                    data.get(
+                        'system_executable',
+                        True
+                    )
+                ),
+
+            'engine_publication_status':
+                str(
+                    data.get(
+                        'engine_publication_status',
+                        ''
+                    )
+                    or ''
+                )[:60]
+                or None,
+
+            'execution_safety_at_save':
+                (
+                    float(
+                        data.get(
+                            'execution_safety_at_save'
+                        )
+                    )
+                    if data.get(
+                        'execution_safety_at_save'
+                    ) is not None
+                    else None
+                ),
+
+            'execution_safety_minimum_at_save':
+                (
+                    float(
+                        data.get(
+                            'execution_safety_minimum_at_save'
+                        )
+                    )
+                    if data.get(
+                        'execution_safety_minimum_at_save'
+                    ) is not None
+                    else None
+                ),
+
+            'original_risk_reward':
+                (
+                    float(
+                        data.get(
+                            'original_risk_reward'
+                        )
+                    )
+                    if data.get(
+                        'original_risk_reward'
+                    ) is not None
+                    else None
+                ),
+
+            'source_signal_id':
+                str(
+                    data.get(
+                        'source_signal_id',
+                        ''
+                    )
+                    or ''
+                )[:120]
+                or None,
+
+            'manual_override_ack':
+                bool(
+                    data.get(
+                        'manual_override_ack',
+                        False
+                    )
+                ),
+
+            'original_rejection_reason':
+                str(
+                    data.get(
+                        'original_rejection_reason',
+                        ''
+                    )
+                    or ''
+                )[:1000]
+                or None,
+
         }
         
         # ============ INSERT ============
