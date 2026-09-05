@@ -1314,6 +1314,108 @@ def get_saved_signal(signal_id: str) -> Optional[Dict]:
         logger.error(f"get_saved_signal: {e}")
         return None
 
+# ============================================================================
+# COMMIT 36N — ESTADO TELEGRAM PERSISTENTE
+# ============================================================================
+
+_TELEGRAM_STATE_FIELDS = {
+    'telegram_entry_notified_at',
+    'telegram_tp_notified_at',
+    'telegram_sl_notified_at',
+    'telegram_guardian_last_notified_at',
+    'telegram_guardian_last_action',
+    'telegram_guardian_last_bucket',
+}
+
+
+def update_saved_signal_telegram_state(
+    signal_id: str,
+    updates: Dict
+) -> Optional[Dict]:
+    """
+    Actualiza exclusivamente campos de lifecycle Telegram.
+
+    No puede modificar:
+    - status
+    - Entry
+    - SL
+    - TP
+    - leverage
+    - riesgo
+    - resultado
+
+    Esto mantiene separado:
+    lifecycle de comunicación
+    vs.
+    lifecycle económico de la operación.
+    """
+
+    db = _get_db()
+
+    if db is None:
+        return None
+
+    safe_updates = {
+        key: value
+        for key, value in (
+            updates
+            or {}
+        ).items()
+        if key
+        in _TELEGRAM_STATE_FIELDS
+    }
+
+    if not safe_updates:
+        return get_saved_signal(
+            signal_id
+        )
+
+    safe_updates[
+        'updated_at'
+    ] = (
+        datetime.utcnow()
+        .isoformat()
+    )
+
+    try:
+
+        def _op():
+            return (
+                db.client
+                .table(
+                    'saved_signals'
+                )
+                .update(
+                    safe_updates
+                )
+                .eq(
+                    'id',
+                    signal_id
+                )
+                .execute()
+            )
+
+        result = db._with_retry(
+            _op
+        )
+
+        if (
+            result
+            and result.data
+        ):
+            return result.data[0]
+
+        return None
+
+    except Exception as e:
+
+        logger.error(
+            "update_saved_signal_telegram_state: "
+            f"{e}"
+        )
+
+        return None
+
 
 def update_saved_signal(signal_id: str, updates: Dict) -> Optional[Dict]:
     """
