@@ -2883,6 +2883,936 @@ function _futDetectBrowserTimezone() {
     }
 }
 
+// ============================================================================
+// COMMIT 36P — PERFIL PERSONAL DE RIESGO FUTURES
+// ============================================================================
+
+window._futuresRiskProfile = null;
+
+
+function _futRiskNumber(value) {
+
+    const number = Number(
+        value
+    );
+
+    if (
+        !Number.isFinite(
+            number
+        )
+        || number <= 0
+    ) {
+        return null;
+    }
+
+    return number;
+}
+
+
+function _futRiskInputValue(
+    id,
+    value
+) {
+
+    const element =
+        document.getElementById(
+            id
+        );
+
+    if (!element) {
+        return;
+    }
+
+    element.value =
+        value === null
+        || value === undefined
+            ? ''
+            : value;
+}
+
+
+function _futRiskSetStatus(
+    mode
+) {
+
+    const badge =
+        document.getElementById(
+            'futures-risk-status-badge'
+        );
+
+    if (!badge) {
+        return;
+    }
+
+    if (
+        mode === 'PROFILE_ADVISORY'
+    ) {
+
+        badge.textContent =
+            'PERFIL';
+
+        badge.className =
+            'badge bg-info text-dark';
+
+    } else {
+
+        badge.textContent =
+            'MANUAL';
+
+        badge.className =
+            'badge bg-secondary';
+    }
+}
+
+
+function _futRiskSetMessage(
+    text,
+    type = 'secondary'
+) {
+
+    const element =
+        document.getElementById(
+            'futures-risk-message'
+        );
+
+    if (!element) {
+        return;
+    }
+
+    element.className =
+        (
+            'alert '
+            + `alert-${type} `
+            + 'py-2 px-2 small mb-3'
+        );
+
+    element.textContent =
+        text;
+}
+
+
+function _futApplyRiskProfileForm(
+    profile,
+    user
+) {
+
+    profile =
+        profile
+        || {};
+
+    window._futuresRiskProfile =
+        profile;
+
+
+    const mode =
+        String(
+            profile.futures_risk_mode
+            || 'MANUAL'
+        ).toUpperCase();
+
+
+    const policy =
+        String(
+            profile.futures_margin_policy
+            || 'FIXED_USDT'
+        ).toUpperCase();
+
+
+    const modeEl =
+        document.getElementById(
+            'futures-risk-mode'
+        );
+
+    const policyEl =
+        document.getElementById(
+            'futures-margin-policy'
+        );
+
+
+    if (modeEl) {
+        modeEl.value =
+            mode;
+    }
+
+
+    if (policyEl) {
+        policyEl.value =
+            policy;
+    }
+
+
+    _futRiskInputValue(
+        'futures-risk-equity',
+        profile.futures_equity_usdt
+    );
+
+
+    _futRiskInputValue(
+        'futures-risk-allocation',
+        profile.futures_max_allocation_pct
+    );
+
+
+    _futRiskInputValue(
+        'futures-risk-max-loss',
+        profile
+            .futures_max_loss_pct_equity_per_trade
+    );
+
+
+    _futRiskInputValue(
+        'futures-risk-preferred-margin',
+        profile.futures_preferred_margin_usdt
+    );
+
+
+    _futRiskInputValue(
+        'futures-risk-max-leverage',
+        profile.futures_personal_max_leverage
+    );
+
+
+    const userLabel =
+        document.getElementById(
+            'futures-risk-user-label'
+        );
+
+
+    if (userLabel) {
+
+        userLabel.textContent =
+            user
+            || '—';
+    }
+
+
+    _futRiskSetStatus(
+        mode
+    );
+
+
+    if (
+        mode === 'PROFILE_ADVISORY'
+    ) {
+
+        _futRiskSetMessage(
+            (
+                'Perfil personal activo. '
+                + 'No cambia la calidad del setup; '
+                + 'sólo propone sizing.'
+            ),
+            'info'
+        );
+
+    } else {
+
+        _futRiskSetMessage(
+            (
+                'Modo manual. '
+                + 'El comportamiento anterior '
+                + 'permanece sin cambios.'
+            ),
+            'secondary'
+        );
+    }
+}
+
+
+window.loadFuturesRiskProfile =
+async function({
+    silent = false
+} = {}) {
+
+    if (
+        !window.IS_FUTURES_PAGE
+    ) {
+        return null;
+    }
+
+
+    try {
+
+        const response =
+            await fetch(
+                '/api/user/futures-risk-profile',
+                {
+                    method:
+                        'GET',
+
+                    credentials:
+                        'same-origin',
+
+                    cache:
+                        'no-store'
+                }
+            );
+
+
+        const json =
+            await response.json();
+
+
+        if (
+            !response.ok
+            || !json.success
+        ) {
+
+            if (
+                response.status === 401
+            ) {
+
+                window._futuresRiskProfile =
+                    null;
+
+                _futRiskSetStatus(
+                    'MANUAL'
+                );
+
+                _futRiskSetMessage(
+                    (
+                        'Inicia sesión para usar '
+                        + 'tu perfil de riesgo Futures.'
+                    ),
+                    'secondary'
+                );
+
+                return null;
+            }
+
+
+            throw new Error(
+                json.error
+                || 'No se pudo cargar el perfil.'
+            );
+        }
+
+
+        _futApplyRiskProfileForm(
+            json.profile,
+            json.user
+        );
+
+
+        return json.profile;
+
+
+    } catch (error) {
+
+        console.warn(
+            '⚠️ 36P perfil de riesgo:',
+            error
+        );
+
+
+        if (!silent) {
+
+            _futRiskSetMessage(
+                (
+                    'No se pudo cargar el perfil. '
+                    + 'Se conserva modo manual.'
+                ),
+                'warning'
+            );
+        }
+
+
+        return null;
+    }
+};
+
+
+function _futCollectRiskProfile() {
+
+    const mode =
+        String(
+            document
+                .getElementById(
+                    'futures-risk-mode'
+                )
+                ?.value
+            || 'MANUAL'
+        ).toUpperCase();
+
+
+    const policy =
+        String(
+            document
+                .getElementById(
+                    'futures-margin-policy'
+                )
+                ?.value
+            || 'FIXED_USDT'
+        ).toUpperCase();
+
+
+    const optionalNumber =
+        id => {
+
+            const value =
+                document
+                    .getElementById(
+                        id
+                    )
+                    ?.value;
+
+            if (
+                value === ''
+                || value === undefined
+                || value === null
+            ) {
+                return null;
+            }
+
+            const number =
+                Number(
+                    value
+                );
+
+            return Number.isFinite(
+                number
+            )
+                ? number
+                : null;
+        };
+
+
+    return {
+        futures_risk_mode:
+            mode,
+
+        futures_margin_policy:
+            policy,
+
+        futures_equity_usdt:
+            optionalNumber(
+                'futures-risk-equity'
+            ),
+
+        futures_max_allocation_pct:
+            optionalNumber(
+                'futures-risk-allocation'
+            ),
+
+        futures_max_loss_pct_equity_per_trade:
+            optionalNumber(
+                'futures-risk-max-loss'
+            ),
+
+        futures_preferred_margin_usdt:
+            optionalNumber(
+                'futures-risk-preferred-margin'
+            ),
+
+        futures_personal_max_leverage:
+            optionalNumber(
+                'futures-risk-max-leverage'
+            ),
+    };
+}
+
+
+window.saveFuturesRiskProfile =
+async function() {
+
+    try {
+
+        const profile =
+            _futCollectRiskProfile();
+
+
+        const response =
+            await fetch(
+                '/api/user/futures-risk-profile',
+                {
+                    method:
+                        'POST',
+
+                    credentials:
+                        'same-origin',
+
+                    headers: {
+                        'Content-Type':
+                            'application/json'
+                    },
+
+                    body:
+                        JSON.stringify(
+                            profile
+                        )
+                }
+            );
+
+
+        const json =
+            await response.json();
+
+
+        if (
+            !response.ok
+            || !json.success
+        ) {
+
+            throw new Error(
+                json.error
+                || 'No se pudo guardar.'
+            );
+        }
+
+
+        _futApplyRiskProfileForm(
+            json.profile,
+            json.user
+        );
+
+
+        futShowToast(
+            '🛡️ Perfil Futures guardado',
+            'success'
+        );
+
+
+    } catch (error) {
+
+        _futRiskSetMessage(
+            error.message,
+            'danger'
+        );
+
+
+        futShowToast(
+            (
+                'Perfil de riesgo: '
+                + error.message
+            ),
+            'danger'
+        );
+    }
+};
+
+
+function _futCalculatePersonalSizing(
+    signal,
+    entry,
+    stopLoss
+) {
+
+    const profile =
+        window._futuresRiskProfile
+        || {};
+
+
+    const mode =
+        String(
+            profile.futures_risk_mode
+            || 'MANUAL'
+        ).toUpperCase();
+
+
+    const technicalLeverage =
+        Math.max(
+            1,
+            Math.floor(
+                Number(
+                    signal?.leverage
+                )
+                || 1
+            )
+        );
+
+
+    let appliedLeverage =
+        technicalLeverage;
+
+
+    const personalMax =
+        _futRiskNumber(
+            profile
+                .futures_personal_max_leverage
+        );
+
+
+    if (
+        mode === 'PROFILE_ADVISORY'
+        && personalMax
+    ) {
+
+        appliedLeverage =
+            Math.min(
+                technicalLeverage,
+                Math.max(
+                    1,
+                    Math.floor(
+                        personalMax
+                    )
+                )
+            );
+    }
+
+
+    // ================================================================
+    // DEFAULT ANTIGUO
+    // ================================================================
+
+    let baseMargin =
+        10.0;
+
+    let marginSource =
+        'DEFAULT_10_USDT';
+
+
+    const equity =
+        _futRiskNumber(
+            profile
+                .futures_equity_usdt
+        );
+
+
+    const allocationPct =
+        _futRiskNumber(
+            profile
+                .futures_max_allocation_pct
+        );
+
+
+    const preferredMargin =
+        _futRiskNumber(
+            profile
+                .futures_preferred_margin_usdt
+        );
+
+
+    const maxLossPct =
+        _futRiskNumber(
+            profile
+                .futures_max_loss_pct_equity_per_trade
+        );
+
+
+    const marginPolicy =
+        String(
+            profile.futures_margin_policy
+            || 'FIXED_USDT'
+        ).toUpperCase();
+
+
+    if (
+        mode === 'PROFILE_ADVISORY'
+    ) {
+
+        if (
+            marginPolicy === 'EQUITY_PCT'
+            && equity
+            && allocationPct
+        ) {
+
+            baseMargin =
+                equity
+                * allocationPct
+                / 100.0;
+
+            marginSource =
+                'EQUITY_PCT';
+
+
+        } else if (
+            preferredMargin
+        ) {
+
+            baseMargin =
+                preferredMargin;
+
+            marginSource =
+                'FIXED_USDT';
+        }
+    }
+
+
+    let suggestedMargin =
+        baseMargin;
+
+
+    let riskBudgetUsdt =
+        null;
+
+
+    let maxMarginBySL =
+        null;
+
+
+    const entryNumber =
+        Number(
+            entry
+        );
+
+
+    const stopNumber =
+        Number(
+            stopLoss
+        );
+
+
+    let stopFraction =
+        null;
+
+
+    if (
+        Number.isFinite(
+            entryNumber
+        )
+        && entryNumber > 0
+        && Number.isFinite(
+            stopNumber
+        )
+        && stopNumber > 0
+    ) {
+
+        stopFraction =
+            Math.abs(
+                entryNumber
+                - stopNumber
+            )
+            / entryNumber;
+    }
+
+
+    // ================================================================
+    // PERSONAL MAX LOSS CAP
+    // ================================================================
+    //
+    // NO mueve el SL.
+    //
+    // Reduce margen sugerido si el sizing original implicaría
+    // una pérdida superior al presupuesto personal.
+    // ================================================================
+
+    if (
+        mode === 'PROFILE_ADVISORY'
+        && equity
+        && maxLossPct
+        && stopFraction
+        && stopFraction > 0
+    ) {
+
+        riskBudgetUsdt =
+            equity
+            * maxLossPct
+            / 100.0;
+
+
+        const lossPerMarginUsdt =
+            appliedLeverage
+            * stopFraction;
+
+
+        if (
+            lossPerMarginUsdt > 0
+        ) {
+
+            maxMarginBySL =
+                riskBudgetUsdt
+                / lossPerMarginUsdt;
+
+
+            suggestedMargin =
+                Math.min(
+                    suggestedMargin,
+                    maxMarginBySL
+                );
+        }
+    }
+
+
+    suggestedMargin =
+        Math.max(
+            0.01,
+            suggestedMargin
+        );
+
+
+    const estimatedLossAtSL =
+        (
+            stopFraction
+            && stopFraction > 0
+        )
+            ? (
+                suggestedMargin
+                * appliedLeverage
+                * stopFraction
+            )
+            : null;
+
+
+    return {
+        mode:
+            mode,
+
+        marginSource:
+            marginSource,
+
+        technicalLeverage:
+            technicalLeverage,
+
+        appliedLeverage:
+            appliedLeverage,
+
+        baseMargin:
+            baseMargin,
+
+        suggestedMargin:
+            suggestedMargin,
+
+        riskBudgetUsdt:
+            riskBudgetUsdt,
+
+        maxMarginBySL:
+            maxMarginBySL,
+
+        estimatedLossAtSL:
+            estimatedLossAtSL,
+    };
+}
+
+
+function _futApplyRiskProfileToSaveModal(
+    signal,
+    entry,
+    stopLoss
+) {
+
+    const investmentEl =
+        document.getElementById(
+            'ss-investment'
+        );
+
+    const leverageEl =
+        document.getElementById(
+            'ss-leverage'
+        );
+
+    const leverageHint =
+        document.getElementById(
+            'ss-leverage-hint'
+        );
+
+    const preview =
+        document.getElementById(
+            'ss-risk-profile-preview'
+        );
+
+
+    if (
+        !investmentEl
+        || !leverageEl
+    ) {
+        return;
+    }
+
+
+    const sizing =
+        _futCalculatePersonalSizing(
+            signal,
+            entry,
+            stopLoss
+        );
+
+
+    if (
+        sizing.mode
+        !== 'PROFILE_ADVISORY'
+    ) {
+
+        if (preview) {
+
+            preview.className =
+                (
+                    'alert alert-secondary '
+                    + 'py-2 px-3 small mb-0'
+                );
+
+            preview.textContent =
+                (
+                    'Perfil 36P: MANUAL. '
+                    + 'Se conserva el sizing actual.'
+                );
+        }
+
+
+        return;
+    }
+
+
+    investmentEl.value =
+        sizing
+            .suggestedMargin
+            .toFixed(
+                2
+            );
+
+
+    leverageEl.value =
+        sizing.appliedLeverage;
+
+
+    if (leverageHint) {
+
+        leverageHint.textContent =
+            (
+                'Leverage técnico: '
+                + `${sizing.technicalLeverage}x`
+                + ' · perfil usado: '
+                + `${sizing.appliedLeverage}x`
+            );
+    }
+
+
+    if (preview) {
+
+        const lossText =
+            sizing.estimatedLossAtSL
+            !== null
+                ? (
+                    sizing
+                        .estimatedLossAtSL
+                        .toFixed(
+                            2
+                        )
+                    + ' USDT'
+                )
+                : '--';
+
+
+        const budgetText =
+            sizing.riskBudgetUsdt
+            !== null
+                ? (
+                    sizing
+                        .riskBudgetUsdt
+                        .toFixed(
+                            2
+                        )
+                    + ' USDT'
+                )
+                : '--';
+
+
+        preview.className =
+            (
+                'alert alert-info '
+                + 'py-2 px-3 small mb-0'
+            );
+
+
+        preview.textContent =
+            (
+                '36P · Margen sugerido: '
+                + `${sizing.suggestedMargin.toFixed(2)} USDT`
+                + ' · pérdida aprox. al SL: '
+                + lossText
+                + ' · límite personal: '
+                + budgetText
+            );
+    }
+}
 
 // ============================================================================
 // INICIALIZACIÓN
@@ -2987,7 +3917,81 @@ document.addEventListener('DOMContentLoaded', function() {
         1800
     );
 
-    
+
+    // =====================================================================
+    // COMMIT 36P — PERFIL PERSONAL DE RIESGO FUTURES
+    // =====================================================================
+
+    const riskCollapse =
+        document.getElementById(
+            'futures-risk-settings-body'
+        );
+
+
+    if (riskCollapse) {
+
+        riskCollapse.addEventListener(
+            'shown.bs.collapse',
+            () => {
+
+                window.loadFuturesRiskProfile({
+                    silent: false
+                });
+            }
+        );
+    }
+
+
+    const saveRiskButton =
+        document.getElementById(
+            'btn-save-futures-risk'
+        );
+
+
+    if (saveRiskButton) {
+
+        saveRiskButton.addEventListener(
+            'click',
+            () => {
+
+                window.saveFuturesRiskProfile();
+            }
+        );
+    }
+
+
+    const refreshRiskButton =
+        document.getElementById(
+            'btn-refresh-futures-risk'
+        );
+
+
+    if (refreshRiskButton) {
+
+        refreshRiskButton.addEventListener(
+            'click',
+            () => {
+
+                window.loadFuturesRiskProfile({
+                    silent: false
+                });
+            }
+        );
+    }
+
+
+    setTimeout(
+        () => {
+
+            window.loadFuturesRiskProfile({
+                silent: true
+            });
+
+        },
+        2200
+    );
+
+
     // ============ INICIALIZAR ANÁLISIS PRINCIPAL DE FUTUROS ============
 
     // Refrescar panel review cada 3 min (v15: reduce carga en Render Free)
@@ -3237,6 +4241,30 @@ window.openSaveSignalModal = function(sig, alreadyInPosition = false) {
     
     document.getElementById('ss-tp').value =
         sourceTP;
+
+    // ============================================================
+    // COMMIT 36P
+    // QUALITY GATE YA OCURRIÓ.
+    // AHORA SÓLO APLICAMOS SIZING PERSONAL.
+    // ============================================================
+
+    const riskSizingEntry =
+        Number(
+            document
+                .getElementById(
+                    'ss-entry'
+                )
+                ?.value
+            || sourceEntry
+        );
+
+
+    _futApplyRiskProfileToSaveModal(
+        sig,
+        riskSizingEntry,
+        sourceSL
+    );
+    
     document.getElementById('ss-notes').value = '';
     // v22.9.4: fecha/hora de ingreso — default = ahora en zona local del navegador
     document.getElementById('ss-entry-at').value = _nowLocalDatetimeInput();
