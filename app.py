@@ -31288,7 +31288,8 @@ def monitor_guardian_telegram_loop():
         try:
 
             from saved_signals import (
-                list_saved_signals
+                list_saved_signals,
+                update_saved_signal_telegram_state
             )
 
             futures_market = (
