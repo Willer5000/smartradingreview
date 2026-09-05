@@ -257,7 +257,6 @@ window.openManualAnalysisSave = function(
         timeframe:
             candidate.timeframe,
 
-
         action:
             candidate.action,
 
@@ -300,9 +299,6 @@ window.openManualAnalysisSave = function(
         manual_risk_reason:
             candidate.manual_risk_reason,
 
-        save_source:
-            'PREVIOUS_CONFIRMED',
-        
         execution_safety:
             candidate.execution_safety,
 
@@ -414,12 +410,10 @@ function futRenderAnalysisDiagnostics(json, context) {
         let manualSaveHtml = '';
 
         if (
-            context === 'previous'
-            && classification === 'ANALYSIS_ONLY'
+            classification === 'ANALYSIS_ONLY'
             && candidate.manual_save_allowed === true
             && candidate.signal_id
         ) {
-
             const manualKey = String(
                 candidate.signal_id
             );
@@ -1337,16 +1331,7 @@ function _encodeFuturesSignal(sig) {
 function _decodeFuturesSignal(encodedSignal) {
     return JSON.parse(decodeURIComponent(encodedSignal));
 }
-// 36N — sólo VELA ANTERIOR puede originar un saved_signal.
-function _futuresMarkPreviousConfirmedSignal(
-    signal
-) {
-    return {
-        ...(signal || {}),
-        save_source:
-            'PREVIOUS_CONFIRMED'
-    };
-}
+
 window.openSaveSignalFromCard = function(event, encodedSignal, alreadyInPosition) {
     if (event) event.stopPropagation();
     const sig = _decodeFuturesSignal(encodedSignal);
@@ -1779,16 +1764,8 @@ window.updatePreviousSignals = async function() {
                     ? 'opacity-50'
                     : '';
 
-            const confirmedSignal =
-                _futuresMarkPreviousConfirmedSignal(
-                    sig
-                );
-
             const signalData =
-                _encodeFuturesSignal(
-                    confirmedSignal
-                );
-
+                _encodeFuturesSignal(sig);
 
             const saveButtons = inactive
                 ? ''
@@ -3062,10 +3039,6 @@ window._currentSavedSignal = null;
 
     window.showFuturesPrevJustif = function(sig) {
         // Guardar la señal en una variable global PERO también pasarla directamente al botón
-        sig = _futuresMarkPreviousConfirmedSignal(
-            sig
-        );
-
         window._currentPrevSignal = sig;
         original(sig);
         
@@ -3090,17 +3063,26 @@ window.openSaveSignalModal = function(sig, alreadyInPosition = false) {
     if (!sig) {
         sig = window._currentPrevSignal;
     }
+    
+    // Si sigue sin haber señal, intentar usar el análisis actual del panel principal
+    if (!sig && window.currentAnalysis && window.currentAnalysis.decision) {
+        const d = window.currentAnalysis.decision;
+        const l = window.currentAnalysis.levels || {};
+        sig = {
+            symbol: window.currentAnalysis.symbol || window.currentSymbol,
+            timeframe: window.currentAnalysis.timeframe || window.currentInterval,
+            action: (d.action === 'SHORT' || d.action === 'VENTA_SPOT') ? 'SHORT' : 'LONG',
+            confidence: d.confidence || 0,
+            entry: l.entry || window.currentAnalysis.current_price,
+            stop_loss: l.stop_loss || 0,
+            take_profit: l.take_profit || 0,
+            leverage: l.leverage || 1
+        };
+        console.log('✅ Usando análisis actual como fallback:', sig.symbol, sig.action);
     }
     
-    if (
-        !sig
-        || sig.save_source !== 'PREVIOUS_CONFIRMED'
-    ) {
-        showToast(
-            'Sólo se pueden guardar señales confirmadas de la vela anterior.',
-            'warning'
-        );
-    
+    if (!sig) {
+        showToast('No hay señal activa ni seleccionada. Esperá a que cargue el análisis o hacé clic en una señal de la vela anterior.', 'warning');
         return;
     }
 
@@ -3149,55 +3131,23 @@ window.openSaveSignalModal = function(sig, alreadyInPosition = false) {
     document.getElementById('ss-leverage').value = sig.leverage || 1;
     document.getElementById('ss-leverage-hint').textContent = `Sugerido por el sistema: ${sig.leverage || 1}x`;
     
-    // ==============================================================
-    // COMMIT 36N — NO INVENTAR NIVELES AL GUARDAR
-    // ==============================================================
-    //
-    // Una señal confirmada sólo es guardable si conserva los niveles
-    // reales que produjo el sistema. Nunca fabricar Entry/SL/TP desde
-    // el precio vivo.
-    // ==============================================================
-    
-    const confirmedEntry = Number(
-        sig.entry
-        || sig.entry_price
+    // Fallback: si no hay entry/sl/tp en la señal, usar el precio actual del mercado como base
+    const currentPrice = Number(
+        sig.current_price
+        || sig.live_price
+        || window.lastPrices?.[sig.symbol]
+        || window.currentAnalysis?.current_price
         || 0
     );
+    const defaultEntry = currentPrice > 0 ? currentPrice.toFixed(2) : '';
+    const defaultSL = currentPrice > 0 ? (currentPrice * 0.95).toFixed(2) : '';  // 5% abajo
+    const defaultTP = currentPrice > 0 ? (currentPrice * 1.10).toFixed(2) : '';  // 10% arriba
     
-    const confirmedSL = Number(
-        sig.stop_loss
-        || 0
-    );
-    
-    const confirmedTP = Number(
-        sig.take_profit
-        || 0
-    );
-    
-    if (
-        !(confirmedEntry > 0)
-        || !(confirmedSL > 0)
-        || !(confirmedTP > 0)
-    ) {
-        showToast(
-            'La señal confirmada no conserva Entry/SL/TP válidos y no puede guardarse.',
-            'warning'
-        );
-    
-        return;
-    }
-    
-    document.getElementById(
-        'ss-entry'
-    ).value = confirmedEntry;
-    
-    document.getElementById(
-        'ss-sl'
-    ).value = confirmedSL;
-    
-    document.getElementById(
-        'ss-tp'
-    ).value = confirmedTP;
+    document.getElementById('ss-entry').value = alreadyInPosition
+        ? (defaultEntry || sig.entry || sig.entry_price || '')
+        : (sig.entry || sig.entry_price || defaultEntry);
+    document.getElementById('ss-sl').value = sig.stop_loss || defaultSL;
+    document.getElementById('ss-tp').value = sig.take_profit || defaultTP;
     document.getElementById('ss-notes').value = '';
     // v22.9.4: fecha/hora de ingreso — default = ahora en zona local del navegador
     document.getElementById('ss-entry-at').value = _nowLocalDatetimeInput();
@@ -3365,13 +3315,6 @@ window.confirmSaveSignal = async function() {
         candle_timestamp: sig.candle_timestamp,
         entry_at: entryAtISO,
         already_in_position: Boolean(window._saveSignalAlreadyInPosition),
-        source_context:
-            'PREVIOUS_CONFIRMED',
-
-        source_signal_id:
-            sig.source_signal_id
-            || sig.signal_id
-            || null, 
         execution_origin:
             sig.execution_origin
             || 'SYSTEM_EXECUTABLE',
