@@ -272,7 +272,125 @@ WHERE
 CREATE INDEX IF NOT EXISTS idx_saved_signals_status ON saved_signals(status);
 CREATE INDEX IF NOT EXISTS idx_saved_signals_symbol_tf ON saved_signals(symbol, timeframe);
 CREATE INDEX IF NOT EXISTS idx_saved_signals_created ON saved_signals(created_at DESC);
+-- ============================================================================
+-- COMMIT 36Q
+-- GUARDIAN LEARNING EVENT LEDGER
+-- ============================================================================
 
+CREATE TABLE IF NOT EXISTS public.guardian_learning_events (
+
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+
+    signal_id UUID NOT NULL
+        REFERENCES public.saved_signals(id)
+        ON DELETE CASCADE,
+
+    user_name TEXT,
+
+    symbol TEXT NOT NULL,
+
+    timeframe TEXT NOT NULL,
+
+    direction TEXT NOT NULL,
+
+    risk_class TEXT,
+
+    event_action TEXT NOT NULL,
+
+    event_bucket TEXT NOT NULL DEFAULT 'STATE',
+
+    observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    observed_price NUMERIC(20, 8) NOT NULL,
+
+    observed_r NUMERIC(12, 6),
+
+    deterioration_score NUMERIC(8, 2),
+
+    progress_r NUMERIC(12, 6),
+
+    suggested_stop_loss NUMERIC(20, 8),
+
+    suggested_take_profit NUMERIC(20, 8),
+
+    original_entry NUMERIC(20, 8),
+
+    original_stop_loss NUMERIC(20, 8),
+
+    original_take_profit NUMERIC(20, 8),
+
+    reason TEXT,
+
+    counterfactual_status TEXT NOT NULL DEFAULT 'PENDING',
+
+    counterfactual_exit_price NUMERIC(20, 8),
+
+    counterfactual_r NUMERIC(12, 6),
+
+    actual_close_price NUMERIC(20, 8),
+
+    actual_close_r NUMERIC(12, 6),
+
+    actual_close_reason TEXT,
+
+    delta_r NUMERIC(12, 6),
+
+    would_help BOOLEAN,
+
+    evaluation_note TEXT,
+
+    evaluated_at TIMESTAMPTZ,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+
+CREATE UNIQUE INDEX IF NOT EXISTS
+    uq_guardian_learning_signal_action_bucket
+
+ON public.guardian_learning_events (
+    signal_id,
+    event_action,
+    event_bucket
+);
+
+
+CREATE INDEX IF NOT EXISTS
+    idx_guardian_learning_signal
+
+ON public.guardian_learning_events (
+    signal_id
+);
+
+
+CREATE INDEX IF NOT EXISTS
+    idx_guardian_learning_user
+
+ON public.guardian_learning_events (
+    user_name
+);
+
+
+CREATE INDEX IF NOT EXISTS
+    idx_guardian_learning_pending
+
+ON public.guardian_learning_events (
+    counterfactual_status
+)
+
+WHERE
+    counterfactual_status = 'PENDING';
+
+
+CREATE INDEX IF NOT EXISTS
+    idx_guardian_learning_action
+
+ON public.guardian_learning_events (
+    event_action,
+    counterfactual_status
+);
 -- ============================================================================
 -- Verificación de la tabla creada
 -- ============================================================================
