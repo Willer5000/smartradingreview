@@ -1105,6 +1105,16 @@ def create_saved_signal(data: Dict) -> Optional[Dict]:
                 )[:120]
                 or None,
 
+            'source_context':
+                  str(
+                      data.get(
+                          'source_context',
+                          ''
+                      )
+                      or ''
+                  ).upper()
+                  or None,
+          
             'manual_override_ack':
                 bool(
                     data.get(
