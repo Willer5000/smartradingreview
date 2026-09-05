@@ -25031,9 +25031,39 @@ def api_saved_signals_create():
             data.get('execution_origin')
             or 'SYSTEM_EXECUTABLE'
         ).upper()
+        source_context = str(
+            data.get('source_context')
+            or ''
+        ).upper()
 
+        if source_context not in (
+            'PREVIOUS_CONFIRMED',
+            'PREVIOUS_ANALYSIS_ONLY'
+        ):
+            return jsonify({
+                'success': False,
+                'error': (
+                    'Sólo las señales de Vela Anterior '
+                    'pueden guardarse.'
+                )
+            }), 403
+
+        data['source_context'] = (
+            source_context
+        )
         if execution_origin == 'USER_MANUAL_ANALYSIS':
-
+            if (
+                source_context
+                != 'PREVIOUS_ANALYSIS_ONLY'
+            ):
+                return jsonify({
+                    'success': False,
+                    'error': (
+                        'El guardado manual sólo se '
+                        'permite desde el diagnóstico '
+                        'de Vela Anterior.'
+                    )
+                }), 403
             if data.get('manual_override_ack') is not True:
                 return jsonify({
                     'success': False,
@@ -25179,10 +25209,33 @@ def api_saved_signals_create():
             )
 
         else:
-            # Compatibilidad total con guardados ejecutables existentes.
-            data['execution_origin'] = 'SYSTEM_EXECUTABLE'
-            data.setdefault('risk_class', 'PREMIUM')
-            data.setdefault('system_executable', True)
+        
+                    if (
+                        source_context
+                        != 'PREVIOUS_CONFIRMED'
+                    ):
+                        return jsonify({
+                            'success': False,
+                            'error': (
+                                'La señal ejecutable sólo puede '
+                                'guardarse desde Vela Anterior.'
+                            )
+                        }), 403
+        
+                    # Guardado ejecutable legítimo desde Previous.
+                    data['execution_origin'] = (
+                        'SYSTEM_EXECUTABLE'
+                    )
+        
+                    data.setdefault(
+                        'risk_class',
+                        'PREMIUM'
+                    )
+        
+                    data.setdefault(
+                        'system_executable',
+                        True
+                    )
         
         # Asegurar que el campo candle_timestamp esté presente
         if not data.get('candle_timestamp'):
