@@ -25240,7 +25240,95 @@ def api_saved_signals_create():
         # Asegurar que el campo candle_timestamp esté presente
         if not data.get('candle_timestamp'):
             data['candle_timestamp'] = datetime.now().isoformat()
-        
+
+        # ==============================================================
+        # COMMIT 36O.1
+        # SNAPSHOT DE LA HIPÓTESIS ECONÓMICA AL GUARDAR
+        # ==============================================================
+        #
+        # IMPORTANTE:
+        #
+        # round_trip_cost_pct es actualmente una ESTIMACIÓN
+        # combinada utilizada por FuturesSystem.
+        #
+        # NO la presentamos como fee realizada.
+        # NO modificamos su valor.
+        # NO modifica la decisión actual.
+        #
+        # Sólo persistimos qué supuesto económico estaba vigente
+        # cuando el usuario decidió guardar esta señal.
+        # ==============================================================
+
+        try:
+
+            from futures_system import (
+                FUTURES_RISK_CONFIG
+            )
+
+            round_trip_rate = float(
+                FUTURES_RISK_CONFIG.get(
+                    'round_trip_cost_pct',
+                    0
+                )
+                or 0
+            )
+
+            if round_trip_rate > 0:
+
+                data[
+                    'economics_model_version'
+                ] = '36O_V1'
+
+                data[
+                    'economics_cost_model_source'
+                ] = (
+                    'ESTIMATED_CONFIG_COMBINED'
+                )
+
+                data[
+                    'economics_round_trip_cost_rate'
+                ] = round_trip_rate
+
+            else:
+
+                data[
+                    'economics_model_version'
+                ] = '36O_V1'
+
+                data[
+                    'economics_cost_model_source'
+                ] = 'UNVERIFIED'
+
+                data[
+                    'economics_round_trip_cost_rate'
+                ] = None
+
+        except Exception as economics_err:
+
+            # La incapacidad de obtener el modelo económico
+            # NO debe impedir guardar la señal.
+            #
+            # En ese caso conservamos la procedencia como
+            # UNVERIFIED y NO inventamos un coste.
+
+            data[
+                'economics_model_version'
+            ] = '36O_V1'
+
+            data[
+                'economics_cost_model_source'
+            ] = 'UNVERIFIED'
+
+            data[
+                'economics_round_trip_cost_rate'
+            ] = None
+
+            print(
+                "⚠️ [36O] Modelo económico "
+                f"no verificable al guardar: "
+                f"{economics_err}"
+            )
+
         result, error_msg = create_saved_signal(data)
         if error_msg:
             return jsonify({'success': False, 'error': error_msg}), 400
