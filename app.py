@@ -25024,6 +25024,165 @@ def api_saved_signals_create():
         
         # Agregar usuario a los datos
         data['user_name'] = user
+        # ==============================================================
+        # COMMIT 36M — VALIDAR OVERRIDE MANUAL EN EL SERVIDOR
+        # ==============================================================
+        execution_origin = str(
+            data.get('execution_origin')
+            or 'SYSTEM_EXECUTABLE'
+        ).upper()
+
+        if execution_origin == 'USER_MANUAL_ANALYSIS':
+
+            if data.get('manual_override_ack') is not True:
+                return jsonify({
+                    'success': False,
+                    'error': (
+                        'Debes confirmar explícitamente que es '
+                        'una señal manual no recomendada por el sistema.'
+                    )
+                }), 400
+
+            source_signal_id = str(
+                data.get('source_signal_id')
+                or ''
+            ).strip()
+
+            if not source_signal_id:
+                return jsonify({
+                    'success': False,
+                    'error': 'Falta source_signal_id del análisis original.'
+                }), 400
+
+            # Usar exclusivamente el análisis YA EXISTENTE del caché.
+            # No dispara un nuevo trade ni recalcula niveles.
+            current_cache = _get_or_refresh_futures_analysis()
+            raw_analysis = (
+                current_cache.get('analysis')
+                or {}
+            )
+
+            source_result = None
+
+            for raw_result in raw_analysis.values():
+                if (
+                    isinstance(raw_result, dict)
+                    and str(
+                        raw_result.get('signal_id')
+                        or ''
+                    ) == source_signal_id
+                ):
+                    source_result = raw_result
+                    break
+
+            if source_result is None:
+                return jsonify({
+                    'success': False,
+                    'error': (
+                        'El análisis original ya no está en el caché actual. '
+                        'Actualiza las señales y vuelve a intentarlo.'
+                    )
+                }), 409
+
+            server_profile = _futures_manual_risk_profile(
+                source_result
+            )
+
+            if not server_profile.get('allowed'):
+                return jsonify({
+                    'success': False,
+                    'error': (
+                        server_profile.get('reason')
+                        or 'El análisis no admite guardado manual.'
+                    )
+                }), 403
+
+            requested_risk_class = str(
+                data.get('risk_class')
+                or ''
+            ).upper()
+
+            if requested_risk_class != server_profile.get(
+                'risk_class'
+            ):
+                return jsonify({
+                    'success': False,
+                    'error': (
+                        'La clasificación de riesgo cambió. '
+                        'Actualiza el diagnóstico antes de guardar.'
+                    )
+                }), 409
+
+            source_decision = (
+                source_result.get('decision')
+                or {}
+            )
+
+            source_levels = (
+                source_result.get('levels')
+                or {}
+            )
+
+            # Trazabilidad ORIGINAL siempre tomada del servidor.
+            # El usuario puede editar sus niveles personales en el modal,
+            # pero no puede falsificar la evidencia que originó el setup.
+            data['execution_origin'] = 'USER_MANUAL_ANALYSIS'
+            data['risk_class'] = server_profile['risk_class']
+            data['system_executable'] = False
+            data['engine_publication_status'] = str(
+                source_levels.get('publication_status')
+                or source_result.get('publication_status')
+                or 'ANALYSIS_ONLY'
+            ).upper()
+            data['execution_safety_at_save'] = (
+                server_profile.get('execution_safety')
+            )
+            data['execution_safety_minimum_at_save'] = (
+                server_profile.get('execution_safety_minimum')
+            )
+            data['original_risk_reward'] = (
+                server_profile.get('risk_reward')
+            )
+            data['source_signal_id'] = source_signal_id
+            data['manual_override_ack'] = True
+            data['original_rejection_reason'] = _futures_reason_text(
+                (
+                    source_levels.get('rejected_reason')
+                    or source_result.get('rejected_reason')
+                ),
+                'ANALYSIS_ONLY'
+            )
+
+            data['original_confidence'] = float(
+                source_decision.get('confidence')
+                or 0
+            )
+            data['original_entry'] = float(
+                source_levels.get('entry')
+                or 0
+            )
+            data['original_stop_loss'] = float(
+                source_levels.get('stop_loss')
+                or 0
+            )
+            data['original_take_profit'] = float(
+                source_levels.get('take_profit')
+                or 0
+            )
+            data['original_leverage'] = int(
+                source_levels.get('leverage')
+                or 1
+            )
+            data['candle_timestamp'] = (
+                source_result.get('source_candle_timestamp')
+                or data.get('candle_timestamp')
+            )
+
+        else:
+            # Compatibilidad total con guardados ejecutables existentes.
+            data['execution_origin'] = 'SYSTEM_EXECUTABLE'
+            data.setdefault('risk_class', 'PREMIUM')
+            data.setdefault('system_executable', True)
         
         # Asegurar que el campo candle_timestamp esté presente
         if not data.get('candle_timestamp'):
@@ -27093,6 +27252,246 @@ def _futures_decision_audit_for_api(result):
     }
     return audit
 
+def _futures_manual_risk_profile(result):
+    """
+    Commit 36M — clasificación MANUAL de un ANALYSIS_ONLY.
+
+    IMPORTANTE:
+    - NO cambia publication_status.
+    - NO convierte el setup en EXECUTABLE_SIGNAL.
+    - Sólo decide si puede ofrecerse al usuario como guardado manual.
+    - Falla cerrado si falta trazabilidad 36E.
+
+    Clases:
+      MEDIUM:
+        llegó al Publication Gate y sólo falló SAFETY/TP_QUALITY,
+        con Safety >= mínimo duro.
+
+      HIGH:
+        fue rechazado únicamente por HARD_SAFETY,
+        pero está en banda BAJA (55 <= Safety < mínimo duro).
+
+      BLOCKED:
+        cualquier otro caso.
+    """
+
+    blocked = {
+        'allowed': False,
+        'risk_class': 'BLOCKED',
+        'reason': (
+            'No cumple las condiciones mínimas para guardado manual.'
+        ),
+        'requires_ack': False,
+        'system_executable': False
+    }
+
+    if not isinstance(result, dict) or not result.get('success'):
+        return dict(blocked)
+
+    decision = result.get('decision') or {}
+    levels = result.get('levels') or {}
+
+    action = str(
+        decision.get('action') or ''
+    ).upper()
+
+    if action not in ('LONG', 'SHORT'):
+        return dict(blocked)
+
+    # Sólo perpetuo real y vela cerrada.
+    if str(
+        result.get('analysis_mode') or ''
+    ).upper() != 'CLOSED_CANDLE':
+        return dict(blocked)
+
+    if result.get('source_candle_closed') is not True:
+        return dict(blocked)
+
+    if result.get('market_data_is_synthetic') is not False:
+        return dict(blocked)
+
+    engine_status = str(
+        levels.get('publication_status')
+        or result.get('publication_status')
+        or (
+            'ANALYSIS_ONLY'
+            if levels.get('is_rejected')
+            else 'EXECUTABLE_SIGNAL'
+        )
+    ).upper()
+
+    # Una señal Premium/ejecutable no necesita override manual.
+    if engine_status == 'EXECUTABLE_SIGNAL':
+        return dict(blocked)
+
+    def _num(value, default=None):
+        try:
+            number = float(value)
+            if not math.isfinite(number):
+                return default
+            return number
+        except (TypeError, ValueError):
+            return default
+
+    entry = _num(levels.get('entry'))
+    stop_loss = _num(levels.get('stop_loss'))
+    take_profit = _num(levels.get('take_profit'))
+    safety = _num(levels.get('execution_safety'))
+    minimum = _num(
+        levels.get('execution_safety_operational_min'),
+        65.0
+    )
+    rr = _num(levels.get('risk_reward'))
+
+    if not all(
+        value is not None and value > 0
+        for value in (entry, stop_loss, take_profit)
+    ):
+        return dict(blocked)
+
+    geometry_ok = (
+        (
+            action == 'LONG'
+            and stop_loss < entry < take_profit
+        )
+        or
+        (
+            action == 'SHORT'
+            and take_profit < entry < stop_loss
+        )
+    )
+
+    if not geometry_ok:
+        return dict(blocked)
+
+    # Si RR no vino persistido, reconstruirlo sólo para validación.
+    if rr is None:
+        risk_distance = abs(entry - stop_loss)
+        reward_distance = abs(take_profit - entry)
+        if risk_distance <= 0:
+            return dict(blocked)
+        rr = reward_distance / risk_distance
+
+    # Mantener la banda económica/estructural Premium para el override.
+    # El usuario puede asumir más incertidumbre de Safety/TP Quality,
+    # pero no una geometría de RR incoherente.
+    if not (1.8 <= rr <= 3.5):
+        result_blocked = dict(blocked)
+        result_blocked['reason'] = (
+            f'R/R {rr:.2f} fuera de 1.8–3.5; '
+            'no se habilita guardado manual.'
+        )
+        return result_blocked
+
+    if safety is None or minimum is None:
+        return dict(blocked)
+
+    trace = (
+        levels.get('futures_filter_trace')
+        or {}
+    )
+
+    stage = str(
+        trace.get('stage')
+        or levels.get('futures_filter_stage')
+        or ''
+    ).upper()
+
+    raw_codes = (
+        trace.get('reason_codes')
+        or levels.get('futures_filter_reason_codes')
+        or []
+    )
+
+    if not isinstance(raw_codes, (list, tuple, set)):
+        raw_codes = [raw_codes]
+
+    codes = {
+        str(code or '').strip().upper()
+        for code in raw_codes
+        if str(code or '').strip()
+    }
+
+    # Fallar cerrado sin trazabilidad exacta.
+    if not stage or not codes:
+        result_blocked = dict(blocked)
+        result_blocked['reason'] = (
+            'Falta trazabilidad exacta 36E; '
+            'no se permite convertir el diagnóstico en seguimiento manual.'
+        )
+        return result_blocked
+
+    # ---------------------------------------------------------------
+    # RIESGO MEDIO
+    # ---------------------------------------------------------------
+    # Llegó realmente al Publication Gate y sólo falló criterios
+    # "near-Premium" que ya utiliza el experimento Cautious.
+    if (
+        stage == 'PUBLICATION_GATE'
+        and codes.issubset({'SAFETY', 'TP_QUALITY'})
+        and safety >= minimum
+    ):
+        return {
+            'allowed': True,
+            'risk_class': 'MEDIUM',
+            'reason': (
+                'Superó el Safety mínimo duro, pero no alcanzó '
+                'la publicación Premium. Guardado manual opcional.'
+            ),
+            'requires_ack': True,
+            'system_executable': False,
+            'execution_safety': round(safety, 2),
+            'execution_safety_minimum': round(minimum, 2),
+            'risk_reward': round(rr, 4),
+            'rejection_stage': stage,
+            'rejection_codes': sorted(codes)
+        }
+
+    # ---------------------------------------------------------------
+    # RIESGO ALTO
+    # ---------------------------------------------------------------
+    # Sólo HARD_SAFETY, nunca fallos económicos/leverage/ATR/etc.
+    # Safety <55 permanece RECHAZAR y no es guardable como operación.
+    if (
+        stage == 'PRE_GATE'
+        and codes == {'HARD_SAFETY'}
+        and 55.0 <= safety < minimum
+    ):
+        return {
+            'allowed': True,
+            'risk_class': 'HIGH',
+            'reason': (
+                'Safety en banda BAJA (55–64.9). '
+                'No es señal oficial; sólo seguimiento manual experimental.'
+            ),
+            'requires_ack': True,
+            'system_executable': False,
+            'execution_safety': round(safety, 2),
+            'execution_safety_minimum': round(minimum, 2),
+            'risk_reward': round(rr, 4),
+            'rejection_stage': stage,
+            'rejection_codes': sorted(codes)
+        }
+
+    result_blocked = dict(blocked)
+
+    if safety < 55:
+        result_blocked['reason'] = (
+            f'Safety {safety:.1f} está en RECHAZAR (<55). '
+            'No se permite guardado manual como operación.'
+        )
+    elif stage == 'PRE_GATE':
+        result_blocked['reason'] = (
+            'El rechazo ocurrió antes del gate por una causa distinta '
+            'de HARD_SAFETY; no se permite override manual.'
+        )
+    else:
+        result_blocked['reason'] = (
+            'El rechazo incluye guardrails que no deben ignorarse manualmente.'
+        )
+
+    return result_blocked
+
 
 def _classify_futures_analysis_result(
     symbol,
@@ -27212,7 +27611,59 @@ def _classify_futures_analysis_result(
         except Exception:
             # Mantiene el mismo fallback tolerante usado por los endpoints.
             pass
+    manual_risk = _futures_manual_risk_profile(
+        result
+    )
 
+Luego, dentro del dict final que empieza con:
+
+    return {
+        'symbol': symbol,
+
+agregar, preferentemente después de:
+
+        'is_executable': classification == 'EXECUTABLE_SIGNAL',
+
+estas claves:
+
+        'manual_save_allowed':
+            bool(
+                manual_risk.get(
+                    'allowed',
+                    False
+                )
+            ),
+
+        'manual_risk_class':
+            manual_risk.get(
+                'risk_class',
+                'BLOCKED'
+            ),
+
+        'manual_risk_reason':
+            manual_risk.get(
+                'reason',
+                ''
+            ),
+
+        'manual_requires_ack':
+            bool(
+                manual_risk.get(
+                    'requires_ack',
+                    False
+                )
+            ),
+
+        'manual_rejection_stage':
+            manual_risk.get(
+                'rejection_stage'
+            ),
+
+        'manual_rejection_codes':
+            manual_risk.get(
+                'rejection_codes',
+                []
+            ),
     signal_id = str(result.get('signal_id') or '') or None
     record = (
         lifecycle.get(signal_id, {})
