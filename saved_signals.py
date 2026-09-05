@@ -4307,7 +4307,639 @@ def _build_early_exit_learning_summary(
             'by_context': {}
         }
 
+# ============================================================================
+# COMMIT 36O.3 — KPIs ECONÓMICOS OBSERVACIONALES
+# ============================================================================
 
+
+def _empty_saved_economics_kpis() -> Dict:
+    """
+    Respuesta económica segura cuando todavía no existe muestra
+    o cuando la consulta económica no está disponible.
+    """
+
+    return {
+        'model_version':
+            '36O_V3',
+
+        'mode':
+            'OBSERVATIONAL_ONLY',
+
+        'official_for_commit37':
+            False,
+
+        'net_quality':
+            (
+                'ESTIMATED_FEE_SLIPPAGE'
+                '+PUBLIC_FUNDING_RATES'
+            ),
+
+        'closed_total':
+            0,
+
+        'gross_r_samples':
+            0,
+
+        'gross_expectancy_r':
+            None,
+
+        'net_samples':
+            0,
+
+        'coverage_pct':
+            0.0,
+
+        'coverage_status':
+            'NO_SAMPLE',
+
+        'gross_pnl_same_sample_usdt':
+            0.0,
+
+        'estimated_net_pnl_total_usdt':
+            0.0,
+
+        'estimated_net_expectancy_r':
+            None,
+
+        'estimated_total_cost_usdt':
+            0.0,
+
+        'estimated_fee_slippage_total_usdt':
+            0.0,
+
+        'estimated_funding_total_usdt':
+            0.0,
+
+        'funding_observed_rates':
+            0,
+
+        'funding_no_settlements':
+            0,
+
+        'funding_pending':
+            0,
+
+        'funding_unavailable':
+            0,
+
+        'data_error':
+            None,
+    }
+
+
+def _saved_float_or_none(
+    value
+):
+    """
+    Convierte valores numéricos de Supabase sin romper
+    la estadística si existe NULL o un valor inesperado.
+    """
+
+    try:
+
+        if value is None:
+            return None
+
+        return float(
+            value
+        )
+
+    except (
+        TypeError,
+        ValueError
+    ):
+
+        return None
+
+
+def _build_saved_economics_kpis(
+    user_name: Optional[str] = None
+) -> Dict:
+    """
+    COMMIT 36O.3
+
+    Capa económica OBSERVACIONAL de Saved Futures.
+
+    IMPORTANTE:
+
+    - consulta separada de los KPIs antiguos;
+    - si falla, WR/PnL bruto continúan funcionando;
+    - NO cambia status;
+    - NO modifica señales;
+    - NO cambia Safety;
+    - NO cambia Entry/SL/TP;
+    - NO cambia leverage;
+    - NO autoriza Commit 37.
+    """
+
+    empty = (
+        _empty_saved_economics_kpis()
+    )
+
+    db = _get_db()
+
+    if db is None:
+        return empty
+
+    try:
+
+        def _op():
+
+            q = (
+                db.client
+                .table(
+                    'saved_signals'
+                )
+                .select(
+                    (
+                        'gross_pnl_usdt,'
+                        'gross_r,'
+                        'estimated_net_pnl_usdt,'
+                        'estimated_net_r,'
+                        'estimated_total_cost_usdt,'
+                        'estimated_fee_slippage_cost_usdt,'
+                        'estimated_funding_cost_usdt,'
+                        'fee_slippage_cost_source,'
+                        'funding_calculation_status'
+                    )
+                )
+                .in_(
+                    'status',
+                    [
+                        'tp_hit',
+                        'sl_hit',
+                        'closed_manual'
+                    ]
+                )
+                .eq(
+                    'entry_touched',
+                    True
+                )
+            )
+
+            if user_name:
+
+                q = q.eq(
+                    'user_name',
+                    str(
+                        user_name
+                    ).strip()
+                )
+
+            return q.execute()
+
+
+        response = (
+            db._with_retry(
+                _op
+            )
+        )
+
+
+        rows = (
+            response.data
+            if (
+                response
+                and response.data
+            )
+            else []
+        )
+
+
+        closed_total = len(
+            rows
+        )
+
+        gross_r_values = []
+
+        net_rows = []
+
+
+        funding_observed_rates = 0
+
+        funding_no_settlements = 0
+
+        funding_pending = 0
+
+        funding_unavailable = 0
+
+
+        for row in rows:
+
+            # ========================================================
+            # GROSS R
+            # ========================================================
+
+            gross_r = (
+                _saved_float_or_none(
+                    row.get(
+                        'gross_r'
+                    )
+                )
+            )
+
+            if gross_r is not None:
+
+                gross_r_values.append(
+                    gross_r
+                )
+
+
+            # ========================================================
+            # FUNDING QUALITY
+            # ========================================================
+
+            funding_status = str(
+                row.get(
+                    'funding_calculation_status',
+                    ''
+                )
+                or ''
+            ).upper()
+
+
+            if (
+                funding_status
+                == 'OBSERVED_RATES'
+            ):
+
+                funding_observed_rates += 1
+
+
+            elif (
+                funding_status
+                == 'NO_SETTLEMENTS_IN_WINDOW'
+            ):
+
+                funding_no_settlements += 1
+
+
+            elif (
+                funding_status
+                == 'PENDING'
+            ):
+
+                funding_pending += 1
+
+
+            elif funding_status:
+
+                funding_unavailable += 1
+
+
+            # ========================================================
+            # FEE / SLIPPAGE QUALITY
+            # ========================================================
+
+            fee_source = str(
+                row.get(
+                    'fee_slippage_cost_source',
+                    ''
+                )
+                or ''
+            ).upper()
+
+
+            net_usdt = (
+                _saved_float_or_none(
+                    row.get(
+                        'estimated_net_pnl_usdt'
+                    )
+                )
+            )
+
+
+            net_r = (
+                _saved_float_or_none(
+                    row.get(
+                        'estimated_net_r'
+                    )
+                )
+            )
+
+
+            funding_usable = (
+                funding_status
+                in (
+                    'OBSERVED_RATES',
+                    'NO_SETTLEMENTS_IN_WINDOW'
+                )
+            )
+
+
+            fee_usable = (
+                fee_source
+                == 'ESTIMATED_CONFIG_COMBINED'
+            )
+
+
+            # ========================================================
+            # MUESTRA NET
+            # ========================================================
+
+            if (
+                funding_usable
+                and fee_usable
+                and net_usdt is not None
+                and net_r is not None
+            ):
+
+                net_rows.append(
+                    row
+                )
+
+
+        # ============================================================
+        # EXPECTANCY GROSS
+        # ============================================================
+
+        gross_expectancy_r = (
+            (
+                sum(
+                    gross_r_values
+                )
+                / len(
+                    gross_r_values
+                )
+            )
+            if gross_r_values
+            else None
+        )
+
+
+        # ============================================================
+        # EXPECTANCY NET
+        # ============================================================
+
+        net_r_values = [
+            float(
+                row.get(
+                    'estimated_net_r'
+                )
+            )
+            for row in net_rows
+        ]
+
+
+        estimated_net_expectancy_r = (
+            (
+                sum(
+                    net_r_values
+                )
+                / len(
+                    net_r_values
+                )
+            )
+            if net_r_values
+            else None
+        )
+
+
+        # ============================================================
+        # GROSS VS NET
+        #
+        # IMPORTANTE:
+        # misma muestra.
+        # ============================================================
+
+        gross_pnl_same_sample_usdt = sum(
+            float(
+                row.get(
+                    'gross_pnl_usdt'
+                )
+                or 0
+            )
+            for row in net_rows
+        )
+
+
+        estimated_net_pnl_total_usdt = sum(
+            float(
+                row.get(
+                    'estimated_net_pnl_usdt'
+                )
+                or 0
+            )
+            for row in net_rows
+        )
+
+
+        estimated_total_cost_usdt = sum(
+            float(
+                row.get(
+                    'estimated_total_cost_usdt'
+                )
+                or 0
+            )
+            for row in net_rows
+        )
+
+
+        estimated_fee_slippage_total_usdt = sum(
+            float(
+                row.get(
+                    'estimated_fee_slippage_cost_usdt'
+                )
+                or 0
+            )
+            for row in net_rows
+        )
+
+
+        estimated_funding_total_usdt = sum(
+            float(
+                row.get(
+                    'estimated_funding_cost_usdt'
+                )
+                or 0
+            )
+            for row in net_rows
+        )
+
+
+        # ============================================================
+        # COBERTURA
+        # ============================================================
+
+        net_samples = len(
+            net_rows
+        )
+
+
+        coverage_pct = (
+            (
+                net_samples
+                / closed_total
+                * 100.0
+            )
+            if closed_total > 0
+            else 0.0
+        )
+
+
+        if closed_total == 0:
+
+            coverage_status = (
+                'NO_SAMPLE'
+            )
+
+
+        elif (
+            net_samples
+            == closed_total
+        ):
+
+            coverage_status = (
+                'COMPLETE'
+            )
+
+
+        elif net_samples > 0:
+
+            coverage_status = (
+                'PARTIAL'
+            )
+
+
+        else:
+
+            coverage_status = (
+                'NO_NET_DATA'
+            )
+
+
+        return {
+            'model_version':
+                '36O_V3',
+
+            'mode':
+                'OBSERVATIONAL_ONLY',
+
+            # ========================================================
+            # MUY IMPORTANTE:
+            #
+            # Saved Futures personales NO desbloquean Commit 37.
+            # ========================================================
+
+            'official_for_commit37':
+                False,
+
+            'net_quality':
+                (
+                    'ESTIMATED_FEE_SLIPPAGE'
+                    '+PUBLIC_FUNDING_RATES'
+                ),
+
+            'closed_total':
+                closed_total,
+
+            'gross_r_samples':
+                len(
+                    gross_r_values
+                ),
+
+            'gross_expectancy_r':
+                (
+                    round(
+                        gross_expectancy_r,
+                        4
+                    )
+                    if gross_expectancy_r
+                    is not None
+                    else None
+                ),
+
+            'net_samples':
+                net_samples,
+
+            'coverage_pct':
+                round(
+                    coverage_pct,
+                    2
+                ),
+
+            'coverage_status':
+                coverage_status,
+
+            'gross_pnl_same_sample_usdt':
+                round(
+                    gross_pnl_same_sample_usdt,
+                    4
+                ),
+
+            'estimated_net_pnl_total_usdt':
+                round(
+                    estimated_net_pnl_total_usdt,
+                    4
+                ),
+
+            'estimated_net_expectancy_r':
+                (
+                    round(
+                        estimated_net_expectancy_r,
+                        4
+                    )
+                    if estimated_net_expectancy_r
+                    is not None
+                    else None
+                ),
+
+            'estimated_total_cost_usdt':
+                round(
+                    estimated_total_cost_usdt,
+                    4
+                ),
+
+            'estimated_fee_slippage_total_usdt':
+                round(
+                    estimated_fee_slippage_total_usdt,
+                    4
+                ),
+
+            'estimated_funding_total_usdt':
+                round(
+                    estimated_funding_total_usdt,
+                    4
+                ),
+
+            'funding_observed_rates':
+                funding_observed_rates,
+
+            'funding_no_settlements':
+                funding_no_settlements,
+
+            'funding_pending':
+                funding_pending,
+
+            'funding_unavailable':
+                funding_unavailable,
+
+            'data_error':
+                None
+        }
+
+
+    except Exception as e:
+
+        # ============================================================
+        # FAIL OPEN
+        #
+        # Si 36O.3 falla:
+        # los KPIs antiguos continúan funcionando.
+        # ============================================================
+
+        logger.warning(
+            "_build_saved_economics_kpis: "
+            f"{e}"
+        )
+
+        empty[
+            'data_error'
+        ] = (
+            'ECONOMICS_UNAVAILABLE'
+        )
+
+        return empty
 # ============================================================================
 # ESTADÍSTICAS (KPIs propios de la pestaña de señales guardadas)
 # ============================================================================
