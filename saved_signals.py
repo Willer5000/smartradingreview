@@ -987,7 +987,42 @@ def create_saved_signal(data: Dict) -> Optional[Dict]:
                 entry_at = datetime.utcnow().isoformat()
         else:
             entry_at = datetime.utcnow().isoformat()
-        
+
+        # ============================================================
+        # COMMIT 36N.1 — ARMAR LIFECYCLE SÓLO PARA SAVED NUEVAS
+        # ============================================================
+        #
+        # No existe DEFAULT en Supabase.
+        #
+        # Sólo create_saved_signal() asigna este timestamp.
+        # Por tanto:
+        #
+        # - históricos anteriores a 36N -> NULL
+        # - señales nuevas -> timestamp
+        #
+        # Esto evita backfill después de deploy/restart.
+        # ============================================================
+
+        lifecycle_armed_at = (
+            datetime.utcnow()
+            .isoformat()
+        )
+
+        # El frontend ya envía already_in_position.
+        # Hasta ahora Python ignoraba ese dato.
+        already_in_position = (
+            data.get(
+                'already_in_position'
+            )
+            is True
+        )
+
+        initial_status = (
+            'entry_touched'
+            if already_in_position
+            else 'active'
+        )
+
         payload = {
             'symbol': symbol,
             'timeframe': timeframe,
@@ -1005,9 +1040,34 @@ def create_saved_signal(data: Dict) -> Optional[Dict]:
             'original_leverage': int(data.get('original_leverage', 0) or 0) or None,
             'candle_timestamp': candle_ts,
             'entry_at': entry_at,
-            'status': 'active',
-            'entry_touched': False,
-            'notes': str(data.get('notes', '') or '')[:500],
+            'status':
+                initial_status,
+
+            'entry_touched':
+                already_in_position,
+
+            'entry_touched_at':
+                (
+                    entry_at
+                    if already_in_position
+                    else None
+                ),
+
+            'entry_touched_price':
+                (
+                    entry
+                    if already_in_position
+                    else None
+                ),
+
+            'notes':
+                str(
+                    data.get(
+                        'notes',
+                        ''
+                    )
+                    or ''
+                )[:500],
             'user_name':
                 str(
                     data.get(
@@ -1017,7 +1077,41 @@ def create_saved_signal(data: Dict) -> Optional[Dict]:
                             'Invitado'
                         )
                     )
-                ).strip(),
+                 ).strip(),
+
+            # ========================================================
+            # COMMIT 36N — LIFECYCLE TELEGRAM
+            # ========================================================
+
+            'telegram_lifecycle_armed_at':
+                lifecycle_armed_at,
+
+            # Si el usuario eligió "Guardar en operación",
+            # ya sabe que el Entry ocurrió.
+            #
+            # No necesitamos enviarle inmediatamente un mensaje
+            # "ENTRY TOCADO" de algo que él acaba de declarar.
+            'telegram_entry_notified_at':
+                (
+                    lifecycle_armed_at
+                    if already_in_position
+                    else None
+                ),
+
+            'telegram_tp_notified_at':
+                None,
+
+            'telegram_sl_notified_at':
+                None,
+
+            'telegram_guardian_last_notified_at':
+                None,
+
+            'telegram_guardian_last_action':
+                None,
+
+            'telegram_guardian_last_bucket':
+                None,
 
             # Commit 36M — procedencia/riesgo del guardado.
             'execution_origin':
