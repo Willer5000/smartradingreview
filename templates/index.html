@@ -634,6 +634,283 @@
                     </div>
                 </div>
                 {% endif %}              
+                <!-- ========================================================= -->
+                <!-- COMMIT 36P — PERFIL PERSONAL DE RIESGO FUTURES -->
+                <!-- ========================================================= -->
+
+                <div
+                    id="futures-risk-settings-card"
+                    class="card bg-dark border-info mb-3"
+                >
+                    <div
+                        class="card-header bg-info bg-opacity-25 d-flex justify-content-between align-items-center py-2"
+                        role="button"
+                        data-bs-toggle="collapse"
+                        data-bs-target="#futures-risk-settings-body"
+                        aria-expanded="false"
+                        aria-controls="futures-risk-settings-body"
+                        style="cursor: pointer;"
+                    >
+                        <div>
+                            <span class="fw-bold text-info">
+                                🛡️ Mi Riesgo Futures
+                            </span>
+
+                            <div class="small text-muted">
+                                Sizing personal después del Quality Gate
+                            </div>
+                        </div>
+
+                        <div class="d-flex align-items-center gap-2">
+
+                            <span
+                                id="futures-risk-status-badge"
+                                class="badge bg-secondary"
+                            >
+                                MANUAL
+                            </span>
+
+                            <i class="fas fa-chevron-down"></i>
+
+                        </div>
+                    </div>
+
+
+                    <div
+                        id="futures-risk-settings-body"
+                        class="collapse"
+                    >
+
+                        <div class="card-body p-3">
+
+                            <div
+                                id="futures-risk-message"
+                                class="alert alert-secondary py-2 px-2 small mb-3"
+                            >
+                                Modo manual. El comportamiento actual
+                                permanece sin cambios.
+                            </div>
+
+
+                            <div class="mb-3">
+
+                                <label
+                                    class="form-label small text-muted"
+                                    for="futures-risk-mode"
+                                >
+                                    Modo
+                                </label>
+
+                                <select
+                                    id="futures-risk-mode"
+                                    class="form-select form-select-sm bg-dark text-light border-secondary"
+                                >
+                                    <option value="MANUAL">
+                                        Manual — comportamiento actual
+                                    </option>
+
+                                    <option value="PROFILE_ADVISORY">
+                                        Perfil personal — sizing sugerido
+                                    </option>
+                                </select>
+
+                            </div>
+
+
+                            <div class="mb-3">
+
+                                <label
+                                    class="form-label small text-muted"
+                                    for="futures-margin-policy"
+                                >
+                                    Política de margen
+                                </label>
+
+                                <select
+                                    id="futures-margin-policy"
+                                    class="form-select form-select-sm bg-dark text-light border-secondary"
+                                >
+                                    <option value="FIXED_USDT">
+                                        Margen preferido fijo
+                                    </option>
+
+                                    <option value="EQUITY_PCT">
+                                        % de mi equity Futures
+                                    </option>
+                                </select>
+
+                            </div>
+
+
+                            <div class="mb-3">
+
+                                <label
+                                    class="form-label small text-muted"
+                                    for="futures-risk-equity"
+                                >
+                                    Equity destinada a Futures (USDT)
+                                </label>
+
+                                <input
+                                    type="number"
+                                    id="futures-risk-equity"
+                                    class="form-control form-control-sm bg-dark text-light border-secondary"
+                                    min="0.01"
+                                    step="0.01"
+                                    placeholder="Ej.: 100"
+                                >
+
+                            </div>
+
+
+                            <div class="row g-2 mb-3">
+
+                                <div class="col-6">
+
+                                    <label
+                                        class="form-label small text-muted"
+                                        for="futures-risk-allocation"
+                                    >
+                                        Máx. margen %
+                                    </label>
+
+                                    <input
+                                        type="number"
+                                        id="futures-risk-allocation"
+                                        class="form-control form-control-sm bg-dark text-light border-secondary"
+                                        min="0.01"
+                                        max="100"
+                                        step="0.01"
+                                        placeholder="10"
+                                    >
+
+                                </div>
+
+
+                                <div class="col-6">
+
+                                    <label
+                                        class="form-label small text-muted"
+                                        for="futures-risk-max-loss"
+                                    >
+                                        Máx. pérdida %
+                                    </label>
+
+                                    <input
+                                        type="number"
+                                        id="futures-risk-max-loss"
+                                        class="form-control form-control-sm bg-dark text-light border-secondary"
+                                        min="0.01"
+                                        max="100"
+                                        step="0.01"
+                                        placeholder="Ej.: 1"
+                                    >
+
+                                </div>
+
+                            </div>
+
+
+                            <div class="row g-2 mb-3">
+
+                                <div class="col-6">
+
+                                    <label
+                                        class="form-label small text-muted"
+                                        for="futures-risk-preferred-margin"
+                                    >
+                                        Margen preferido
+                                    </label>
+
+                                    <input
+                                        type="number"
+                                        id="futures-risk-preferred-margin"
+                                        class="form-control form-control-sm bg-dark text-light border-secondary"
+                                        min="0.01"
+                                        step="0.01"
+                                        placeholder="10"
+                                    >
+
+                                </div>
+
+
+                                <div class="col-6">
+
+                                    <label
+                                        class="form-label small text-muted"
+                                        for="futures-risk-max-leverage"
+                                    >
+                                        Máx. leverage
+                                    </label>
+
+                                    <input
+                                        type="number"
+                                        id="futures-risk-max-leverage"
+                                        class="form-control form-control-sm bg-dark text-light border-secondary"
+                                        min="1"
+                                        max="50"
+                                        step="1"
+                                        placeholder="50"
+                                    >
+
+                                </div>
+
+                            </div>
+
+
+                            <div class="small text-muted mb-3">
+
+                                Usuario:
+
+                                <span
+                                    id="futures-risk-user-label"
+                                    class="text-light"
+                                >
+                                    —
+                                </span>
+
+                            </div>
+
+
+                            <div class="d-flex gap-2">
+
+                                <button
+                                    type="button"
+                                    class="btn btn-sm btn-info flex-fill"
+                                    id="btn-save-futures-risk"
+                                >
+                                    💾 Guardar
+                                </button>
+
+                                <button
+                                    type="button"
+                                    class="btn btn-sm btn-outline-secondary"
+                                    id="btn-refresh-futures-risk"
+                                    title="Recargar perfil"
+                                >
+                                    ↻
+                                </button>
+
+                            </div>
+
+
+                            <div class="small text-muted mt-3">
+
+                                <strong>
+                                    Quality Gate primero.
+                                    Sizing después.
+                                </strong>
+
+                                <br>
+
+                                Este perfil NO modifica Safety,
+                                Entry, SL, TP, RR ni Publication Gate.
+
+                            </div>
+
+                        </div>
+                    </div>
+                </div>
                 <!-- ====== PANEL DE PORTAFOLIO DEL USUARIO (TGP) ====== -->
                 <!-- ====== PANEL DE PORTAFOLIO (TGP) ====== -->
                 <div id="portfolio-panel" class="card bg-dark border-secondary mb-3">
@@ -1901,17 +2178,50 @@
                                 <div id="save-signal-info" class="mb-3"></div>
                                 <div class="row g-3">
                                     <div class="col-md-6">
-                                        <label class="form-label">💰 Monto a invertir (USDT)</label>
-                                        <input type="number" class="form-control bg-dark text-white" id="ss-investment"
-                                               min="1" step="0.01" value="10">
-                                        <small class="text-muted">Cuánto USDT quieres arriesgar en esta operación.</small>
+                                        <label class="form-label">
+                                            💰 Margen de posición (USDT)
+                                        </label>
+
+                                        <input
+                                            type="number"
+                                            class="form-control bg-dark text-white"
+                                            id="ss-investment"
+                                            min="0.01"
+                                            step="0.01"
+                                            value="10"
+                                        >
+
+                                        <small class="text-muted">
+                                            Margen/tamaño usado para la posición.
+                                            La pérdida al SL se calcula por separado.
+                                        </small>
                                     </div>
                                     <div class="col-md-6">
                                         <label class="form-label">⚡ Apalancamiento (x)</label>
                                         <input type="number" class="form-control bg-dark text-white" id="ss-leverage"
                                                min="1" max="125" step="1" value="1">
-                                        <small class="text-muted" id="ss-leverage-hint">Sugerido por el sistema: --</small>
+                                        <small
+                                            class="text-muted"
+                                            id="ss-leverage-hint"
+                                        >
+                                            Sugerido por el sistema: --
+                                        </small>
                                     </div>
+
+
+                                    <div class="col-12">
+
+                                        <div
+                                            id="ss-risk-profile-preview"
+                                            class="alert alert-secondary py-2 px-3 small mb-0"
+                                        >
+                                            Perfil 36P: modo manual.
+                                            El sizing actual no ha sido modificado.
+                                        </div>
+
+                                    </div>
+
+
                                     <div class="col-md-4">
                                         <label class="form-label text-primary">📍 Entry</label>
                                         <input type="number" class="form-control bg-dark text-white" id="ss-entry"
