@@ -285,7 +285,10 @@ window.openManualAnalysisSave = function(
             candidate.signal_id,
 
         execution_origin:
-            'USER_MANUAL_ANALYSIS',
+                    'USER_MANUAL_ANALYSIS',
+
+        source_context:
+            'PREVIOUS_ANALYSIS_ONLY',
 
         manual_risk_class:
             riskClass,
@@ -382,10 +385,29 @@ function futRenderAnalysisDiagnostics(json, context) {
         );
         const meta = statusMeta[classification]
             || statusMeta.ANALYSIS_ERROR;
-        const symbol = futEscapeHtml(
-            String(candidate.symbol || '').replace('-', '/')
-        );
-        const timeframe = futEscapeHtml(candidate.timeframe || '--');
+        const rawSymbol = String(
+                    candidate.symbol || ''
+                );
+        
+                const rawTimeframe = String(
+                    candidate.timeframe || ''
+                );
+        
+                const symbol = futEscapeHtml(
+                    rawSymbol.replace('-', '/')
+                );
+        
+                const timeframe = futEscapeHtml(
+                    rawTimeframe || '--'
+                );
+        
+                const navSymbol = futEscapeHtml(
+                    rawSymbol
+                );
+        
+                const navTimeframe = futEscapeHtml(
+                    rawTimeframe
+                );
         const action = futEscapeHtml(candidate.action || 'NO_OPERAR');
         const confidence = fmtConfidence(candidate.confidence);
         const reason = futEscapeHtml(
@@ -410,7 +432,8 @@ function futRenderAnalysisDiagnostics(json, context) {
         let manualSaveHtml = '';
 
         if (
-            classification === 'ANALYSIS_ONLY'
+            context === 'previous'
+            && classification === 'ANALYSIS_ONLY'
             && candidate.manual_save_allowed === true
             && candidate.signal_id
         ) {
@@ -469,7 +492,16 @@ function futRenderAnalysisDiagnostics(json, context) {
         }
 
         excludedHtml += `
-            <div class="border-bottom border-secondary py-2">
+                    <div
+                        class="border-bottom border-secondary py-2"
+                        style="cursor:pointer;"
+                        data-nav-symbol="${navSymbol}"
+                        data-nav-timeframe="${navTimeframe}"
+                        onclick="window.changeToSignal(
+                            this.dataset.navSymbol,
+                            this.dataset.navTimeframe
+                        )"
+                    >
                 <div class="d-flex flex-wrap justify-content-between gap-1">
                     <div>
                         <span class="badge bg-${meta.badge} me-1">
@@ -486,7 +518,6 @@ function futRenderAnalysisDiagnostics(json, context) {
                     ${reason}
                     ${safetyHtml}
                 </div>
-                ${lifecycleHtml}
                 ${lifecycleHtml}
                 ${manualSaveHtml}
 
@@ -1334,10 +1365,19 @@ function _decodeFuturesSignal(encodedSignal) {
 
 window.openSaveSignalFromCard = function(event, encodedSignal, alreadyInPosition) {
     if (event) event.stopPropagation();
-    const sig = _decodeFuturesSignal(encodedSignal);
-    window.openSaveSignalModal(sig, Boolean(alreadyInPosition));
-};
 
+    const sig = _decodeFuturesSignal(
+        encodedSignal
+    );
+
+    sig.source_context =
+        'PREVIOUS_CONFIRMED';
+
+    window.openSaveSignalModal(
+        sig,
+        Boolean(alreadyInPosition)
+    );
+};
 
 // ============================================================================
 // SOBREESCRIBIR: updatePreviousSignals (vela ANTERIOR — estática)
@@ -3038,8 +3078,13 @@ window._currentSavedSignal = null;
     if (typeof original !== 'function') return;
 
     window.showFuturesPrevJustif = function(sig) {
-        // Guardar la señal en una variable global PERO también pasarla directamente al botón
-        window._currentPrevSignal = sig;
+    
+            sig.source_context =
+                sig.source_context
+                || 'PREVIOUS_CONFIRMED';
+    
+            // Guardar la señal en una variable global PERO también pasarla directamente al botón
+            window._currentPrevSignal = sig;
         original(sig);
         
         // Configurar el botón GUARDAR para que pase la señal DIRECTAMENTE
@@ -3064,23 +3109,7 @@ window.openSaveSignalModal = function(sig, alreadyInPosition = false) {
         sig = window._currentPrevSignal;
     }
     
-    // Si sigue sin haber señal, intentar usar el análisis actual del panel principal
-    if (!sig && window.currentAnalysis && window.currentAnalysis.decision) {
-        const d = window.currentAnalysis.decision;
-        const l = window.currentAnalysis.levels || {};
-        sig = {
-            symbol: window.currentAnalysis.symbol || window.currentSymbol,
-            timeframe: window.currentAnalysis.timeframe || window.currentInterval,
-            action: (d.action === 'SHORT' || d.action === 'VENTA_SPOT') ? 'SHORT' : 'LONG',
-            confidence: d.confidence || 0,
-            entry: l.entry || window.currentAnalysis.current_price,
-            stop_loss: l.stop_loss || 0,
-            take_profit: l.take_profit || 0,
-            leverage: l.leverage || 1
-        };
-        console.log('✅ Usando análisis actual como fallback:', sig.symbol, sig.action);
-    }
-    
+   
     if (!sig) {
         showToast('No hay señal activa ni seleccionada. Esperá a que cargue el análisis o hacé clic en una señal de la vela anterior.', 'warning');
         return;
@@ -3324,11 +3353,15 @@ window.confirmSaveSignal = async function() {
             || 'PREMIUM',
 
         source_signal_id:
-            sig.source_signal_id
-            || null,
-
-        manual_override_ack:
-            Boolean(
+                    sig.source_signal_id
+                    || null,
+        
+                source_context:
+                    sig.source_context
+                    || null,
+        
+                manual_override_ack:
+                    Boolean(
                 sig.manual_override_ack
             ),
 
