@@ -8546,149 +8546,409 @@ window.updateRecommendation = function(data) {
     }
 };
 
-function updateInstantRecommendation(data) {
-    if (!data) return;
-    
-    const badge = document.getElementById('rec-badge');
-    const actionEl = document.getElementById('rec-action');
-    const symbolEl = document.getElementById('rec-symbol');
-    const confidenceEl = document.getElementById('rec-confidence');
-    const entryEl = document.getElementById('op-entry');
-    const slEl = document.getElementById('op-sl');
-    const tpEl = document.getElementById('op-tp');
-    const leverageEl = document.getElementById('op-leverage');
-    const timeframeEl = document.getElementById('op-timeframe');
-    const opTypeEl = document.getElementById('op-type-text');
-    
-    const action = data.decision?.action || 'NO_OPERAR';
-    const confidence = data.decision?.confidence || 0;
-    
-    let badgeClass = 'bg-secondary';
-    let badgeText = 'ESPERANDO';
-    
+window.updateInstantRecommendation = function updateInstantRecommendation(
+    data
+) {
+    if (
+        !data
+        || typeof data !== 'object'
+    ) {
+        console.warn(
+            '⚠️ Operación Actual: análisis vacío'
+        );
+
+        return;
+    }
+
+
+    const badge =
+        document.getElementById(
+            'rec-badge'
+        );
+
+    const actionEl =
+        document.getElementById(
+            'rec-action'
+        );
+
+    const symbolEl =
+        document.getElementById(
+            'rec-symbol'
+        );
+
+    const confidenceEl =
+        document.getElementById(
+            'rec-confidence'
+        );
+
+    const entryEl =
+        document.getElementById(
+            'op-entry'
+        );
+
+    const slEl =
+        document.getElementById(
+            'op-sl'
+        );
+
+    const tpEl =
+        document.getElementById(
+            'op-tp'
+        );
+
+    const leverageEl =
+        document.getElementById(
+            'op-leverage'
+        );
+
+    const timeframeEl =
+        document.getElementById(
+            'op-timeframe'
+        );
+
+    const opTypeEl =
+        document.getElementById(
+            'op-type-text'
+        );
+
+
+    const decision =
+        (
+            data.decision
+            && typeof data.decision === 'object'
+        )
+            ? data.decision
+            : {};
+
+
+    const levels =
+        (
+            data.levels
+            && typeof data.levels === 'object'
+        )
+            ? data.levels
+            : {};
+
+
+    const action =
+        String(
+            decision.action
+            || 'NO_OPERAR'
+        ).toUpperCase();
+
+
+    const confidence =
+        Number(
+            decision.confidence
+            || 0
+        );
+
+
+    const symbol =
+        String(
+            data.symbol
+            || window.currentSymbol
+            || window.PAGE_CONFIG?.defaultSymbol
+            || 'BTC-USDT'
+        );
+
+
+    const timeframe =
+        String(
+            data.timeframe
+            || window.currentInterval
+            || window.PAGE_CONFIG?.defaultTimeframe
+            || '1D'
+        );
+
+
+    // ============================================================
+    // BADGE DE DECISIÓN
+    // ============================================================
+
+    let badgeClass =
+        'bg-secondary';
+
+    let badgeText =
+        'NO OPERAR';
+
+
     if (
         action === 'COMPRA_SPOT'
     ) {
-    
-        badgeClass = 'bg-success';
-        badgeText = 'COMPRA';
-    
+        badgeClass =
+            'bg-success';
+
+        badgeText =
+            'COMPRA';
     }
+
     else if (
         action === 'VENTA_SPOT'
     ) {
-    
-        badgeClass = 'bg-danger';
-        badgeText = 'VENTA';
-    
+        badgeClass =
+            'bg-danger';
+
+        badgeText =
+            'VENTA';
     }
+
     else if (
         action === 'LONG'
     ) {
-    
-        badgeClass = 'bg-info';
-        badgeText = 'LONG';
-    
+        badgeClass =
+            'bg-info text-dark';
+
+        badgeText =
+            'LONG';
     }
+
     else if (
         action === 'SHORT'
     ) {
-    
-        badgeClass = 'bg-warning';
-        badgeText = 'SHORT';
-    
+        badgeClass =
+            'bg-warning text-dark';
+
+        badgeText =
+            'SHORT';
     }
-    else if (
-        action === 'NO_OPERAR'
-    ) {
-    
-        badgeClass = 'bg-secondary';
-        badgeText = 'NO OPERAR';
-    
-    }
+
     else if (
         action === 'ESPERAR'
     ) {
-    
-        badgeClass = 'bg-warning';
-        badgeText = 'ESPERAR';
-    
+        badgeClass =
+            'bg-warning text-dark';
+
+        badgeText =
+            'ESPERAR';
     }
+
     else if (
         action === 'CAUTION'
+        || action === 'CAUTIOUS'
     ) {
-    
-        badgeClass = 'bg-warning';
-        badgeText = 'PRECAUCIÓN';
+        badgeClass =
+            'bg-warning text-dark';
+
+        badgeText =
+            'PRECAUCIÓN';
     }
-    
-    if (badge) badge.innerHTML = `<span class="badge ${badgeClass}">${badgeText}</span>`;
-    if (actionEl) actionEl.textContent = action.replace('_', ' ');
-    if (symbolEl) symbolEl.textContent = data.symbol?.replace('-', '/') || 'BTC/USDT';
-    if (confidenceEl) confidenceEl.textContent = `Confianza: ${fmtConfidence(confidence)}%`;
+
+
+    if (badge) {
+        badge.innerHTML =
+            (
+                `<span class="badge ${badgeClass}">`
+                + `${badgeText}`
+                + '</span>'
+            );
+    }
+
+
+    if (actionEl) {
+
+        const visibleAction = {
+            'COMPRA_SPOT':
+                'COMPRA',
+
+            'VENTA_SPOT':
+                'VENTA',
+
+            'LONG':
+                'LONG',
+
+            'SHORT':
+                'SHORT',
+
+            'NO_OPERAR':
+                'NO OPERAR',
+
+            'ESPERAR':
+                'ESPERAR',
+
+            'CAUTION':
+                'PRECAUCIÓN',
+
+            'CAUTIOUS':
+                'PRECAUCIÓN'
+        };
+
+        actionEl.textContent =
+            (
+                visibleAction[
+                    action
+                ]
+                || action.replaceAll(
+                    '_',
+                    ' '
+                )
+            );
+    }
+
+
+    if (symbolEl) {
+
+        symbolEl.textContent =
+            symbol.replace(
+                '-',
+                '/'
+            );
+    }
+
+
+    if (confidenceEl) {
+
+        confidenceEl.textContent =
+            (
+                'Confianza: '
+                + `${fmtConfidence(confidence)}%`
+            );
+    }
+
+
+    // ============================================================
+    // ENTRY / SL / TP
+    //
+    // Nunca inventamos niveles.
+    // Si el backend no los entrega, mostramos "--".
+    // ============================================================
+
     if (entryEl) {
+
         entryEl.textContent =
             formatTradingLevel(
-                data.levels?.entry,
-                data.symbol
+                levels.entry,
+                symbol
             );
     }
+
 
     if (slEl) {
+
         slEl.textContent =
             formatTradingLevel(
-                data.levels?.stop_loss,
-                data.symbol
+                levels.stop_loss,
+                symbol
             );
     }
 
+
     if (tpEl) {
+
         tpEl.textContent =
             formatTradingLevel(
-                data.levels?.take_profit,
-                data.symbol
+                levels.take_profit,
+                symbol
             );
     }
-    if (leverageEl) leverageEl.textContent = `${data.levels?.leverage || 1}x`;
-    if (timeframeEl) timeframeEl.textContent = getIntervalName(data.timeframe || '1D');
-    if (
-        opTypeEl
-    ) {
-    
+
+
+    // ============================================================
+    // LEVERAGE
+    //
+    // No mostrar 1x inventado cuando no existe valor válido.
+    // ============================================================
+
+    if (leverageEl) {
+
+        const leverage =
+            Number(
+                levels.leverage
+            );
+
+        leverageEl.textContent =
+            (
+                Number.isFinite(
+                    leverage
+                )
+                && leverage > 0
+            )
+                ? `${leverage}x`
+                : '--x';
+    }
+
+
+    // ============================================================
+    // TIMEFRAME
+    // ============================================================
+
+    if (timeframeEl) {
+
+        timeframeEl.textContent =
+            (
+                typeof window.getIntervalName
+                === 'function'
+            )
+                ? window.getIntervalName(
+                    timeframe
+                )
+                : timeframe;
+    }
+
+
+    if (opTypeEl) {
+
         if (
             action === 'NO_OPERAR'
         ) {
-    
             opTypeEl.textContent =
                 'No operar';
-    
         }
+
         else if (
             action === 'ESPERAR'
         ) {
-    
             opTypeEl.textContent =
                 'Esperar confirmación';
-    
         }
+
         else if (
             action === 'CAUTION'
+            || action === 'CAUTIOUS'
         ) {
-    
             opTypeEl.textContent =
                 'Precaución';
-    
         }
+
         else {
-    
             opTypeEl.textContent =
-                action.replace(
+                action.replaceAll(
                     '_',
                     ' '
                 );
         }
     }
-}
+
+
+    console.log(
+        '✅ Operación Actual actualizada:',
+        {
+            symbol:
+                symbol,
+
+            timeframe:
+                timeframe,
+
+            action:
+                action,
+
+            confidence:
+                confidence,
+
+            entry:
+                levels.entry,
+
+            stop_loss:
+                levels.stop_loss,
+
+            take_profit:
+                levels.take_profit,
+
+            leverage:
+                levels.leverage
+        }
+    );
+};
 
 function updateAnalysisSummary(data) {
     const summaryEl = document.getElementById('analysis-summary');
