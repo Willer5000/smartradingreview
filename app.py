@@ -38561,34 +38561,39 @@ def api_ai_advice():
 
 
         # ================================================================
-        # UNA EVALUACIÓN NUEVA POR HORA
+        # UNA EVALUACIÓN NUEVA CADA 30 MINUTOS
         # ================================================================
         #
-        # Este valor forma parte del fingerprint.
+        # Conservamos el nombre interno `hour_bucket`
+        # por compatibilidad con ai_advisor.py y Supabase,
+        # pero ahora existen dos buckets por hora:
         #
-        # Durante la misma hora:
-        #     misma evaluación → caché.
+        #     10:00
+        #     10:30
         #
-        # Al cambiar de hora:
-        #     fingerprint nuevo → nueva llamada IA.
+        # Una recarga dentro del mismo bloque reutiliza caché.
         # ================================================================
-
         now_utc = datetime.now(
             pytz.UTC
         )
 
+        minute_bucket = (
+            '00'
+            if now_utc.minute < 30
+            else '30'
+        )
 
         hour_bucket = (
             now_utc.strftime(
                 '%Y-%m-%dT%H'
             )
+            + ':'
+            + minute_bucket
         )
-
 
         context[
             'hour_bucket'
         ] = hour_bucket
-
 
         context[
             'hourly_advice_contract'
@@ -38601,7 +38606,16 @@ def api_ai_advice():
                 True,
 
             'minimum_concrete_facts':
-                2,
+                3,
+
+            'interval_minutes':
+                30,
+
+            'must_use_independent_trader_judgment':
+                True,
+
+            'must_use_user_configuration':
+                True,
 
             'priority':
                 (
