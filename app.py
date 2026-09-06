@@ -38736,7 +38736,228 @@ def _start_background_threads():
 
 # NOTA: la llamada real a _start_background_threads() se hace más abajo,
 # DESPUÉS de que verificar_y_ejecutar y monitor_entries_loop estén definidos.
+def _evaluate_36s_spot_tgp_shadow(
+    ai_result,
+    context
+):
+    """
+    36S.2B.1 — SPOT/TGP SHADOW CONTROL.
 
+    Observa qué habría hecho la capa IA sobre una señal Spot,
+    pero NO modifica:
+
+    - recomendación;
+    - portfolio;
+    - Entry;
+    - SL;
+    - TP;
+    - Guardian;
+    - pesos;
+    - ejecución.
+
+    Su única finalidad es acumular evidencia antes de conceder
+    autoridad activa sobre TGP.
+    """
+
+    shadow = {
+        "mode":
+            "SHADOW_ONLY",
+
+        "applied":
+            False,
+
+        "would_block":
+            False,
+
+        "reason":
+            None,
+
+        "ai_verdict":
+            None,
+
+        "ai_confidence":
+            0,
+
+        "focus_action":
+            None,
+
+        "focus_symbol":
+            None,
+
+        "focus_timeframe":
+            None,
+
+        "portfolio_percentages":
+            {}
+    }
+
+    # ================================================================
+    # IA NO DISPONIBLE
+    # ================================================================
+
+    if (
+        not isinstance(
+            ai_result,
+            dict
+        )
+        or not ai_result.get(
+            "success"
+        )
+    ):
+        shadow[
+            "reason"
+        ] = "AI_UNAVAILABLE_OR_FAILED"
+
+        return shadow
+
+    data = (
+        ai_result.get(
+            "data"
+        )
+        or {}
+    )
+
+    verdict = str(
+        data.get(
+            "verdict"
+        )
+        or ""
+    ).upper()
+
+    try:
+        confidence = int(
+            float(
+                data.get(
+                    "confidence"
+                )
+                or 0
+            )
+        )
+
+    except (
+        TypeError,
+        ValueError
+    ):
+        confidence = 0
+
+    context = (
+        context
+        if isinstance(
+            context,
+            dict
+        )
+        else {}
+    )
+
+    snapshot = (
+        context.get(
+            "hourly_market_snapshot"
+        )
+        or {}
+    )
+
+    focus = (
+        snapshot.get(
+            "focus_signal"
+        )
+        or {}
+    )
+
+    portfolio = (
+        snapshot.get(
+            "portfolio_percentages"
+        )
+        or context.get(
+            "portfolio_percentages"
+        )
+        or {}
+    )
+
+    action = str(
+        focus.get(
+            "action"
+        )
+        or ""
+    ).upper()
+
+    shadow.update({
+        "ai_verdict":
+            verdict,
+
+        "ai_confidence":
+            confidence,
+
+        "focus_action":
+            action
+            or None,
+
+        "focus_symbol":
+            focus.get(
+                "symbol"
+            ),
+
+        "focus_timeframe":
+            focus.get(
+                "timeframe"
+            ),
+
+        "portfolio_percentages":
+            (
+                portfolio
+                if isinstance(
+                    portfolio,
+                    dict
+                )
+                else {}
+            )
+    })
+
+    # ================================================================
+    # SÓLO DECISIONES DIRECCIONALES SPOT
+    # ================================================================
+
+    if action not in (
+        "COMPRA_SPOT",
+        "VENTA_SPOT"
+    ):
+        shadow[
+            "reason"
+        ] = "NO_DIRECTIONAL_SPOT_SIGNAL"
+
+        return shadow
+
+    # ================================================================
+    # HIPÓTESIS SHADOW
+    # ================================================================
+    #
+    # Mismo criterio prudente inicial que Futures:
+    #
+    # DISAGREE >= 80
+    #
+    # PERO todavía NO se aplica.
+    # ================================================================
+
+    if (
+        verdict == "DISAGREE"
+        and confidence >= 80
+    ):
+        shadow[
+            "would_block"
+        ] = True
+
+        shadow[
+            "reason"
+        ] = (
+            "AI_STRONG_DISAGREE_SHADOW"
+        )
+
+        return shadow
+
+    shadow[
+        "reason"
+    ] = "NO_SHADOW_BLOCK"
+
+    return shadow
 # ============================================================================
 # COMMIT 36R
 # ENDPOINTS AI ADVISOR / ASISTENTE PERSONAL
@@ -39120,6 +39341,47 @@ def api_ai_advice():
             )
         )
 
+        # ================================================================
+        # COMMIT 36S.2B.1
+        # SPOT TGP SHADOW CONTROL
+        # ================================================================
+        #
+        # Reutiliza la evaluación IA ya realizada.
+        # NO genera una llamada adicional.
+        # NO modifica la recomendación Spot.
+        # ================================================================
+
+        if market == 'SPOT':
+            try:
+                result[
+                    'spot_tgp_shadow_control'
+                ] = (
+                    _evaluate_36s_spot_tgp_shadow(
+                        ai_result=result,
+                        context=context
+                    )
+                )
+
+            except Exception as shadow_error:
+                # Fail-open absoluto.
+                result[
+                    'spot_tgp_shadow_control'
+                ] = {
+                    'mode':
+                        'SHADOW_ONLY',
+
+                    'applied':
+                        False,
+
+                    'would_block':
+                        False,
+
+                    'reason':
+                        (
+                            'SHADOW_ERROR: '
+                            f'{str(shadow_error)[:120]}'
+                        )
+                }        
 
         result[
             'resolved_context'
