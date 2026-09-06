@@ -112,12 +112,41 @@ LIMIT_MANUAL_DAY = max(
 )
 
 
+LIMIT_HOURLY_ADVICE_DAY = max(
+    1,
+    int(
+        os.getenv(
+            "AI_HOURLY_ADVICE_DAILY_LIMIT",
+            "30"
+        )
+    )
+)
+
+
+LIMIT_AUTO_CONTROL_DAY = max(
+    1,
+    int(
+        os.getenv(
+            "AI_AUTO_CONTROL_DAILY_LIMIT",
+            "60"
+        )
+    )
+)
+
+
+# Límite agregado informativo.
+#
+# Ya NO será el gate que mezcle Consejo horario,
+# Guardian y Decision Control.
+#
+# Se conserva por compatibilidad con el endpoint
+# de estado y para observar el consumo AUTO total.
 LIMIT_AUTO_DAY = max(
     1,
     int(
         os.getenv(
             "AI_AUTOMATIC_DAILY_LIMIT",
-            "30"
+            "150"
         )
     )
 )
@@ -134,12 +163,16 @@ LIMIT_LEARNING_DAY = max(
 )
 
 
+# También se mantiene como métrica agregada.
+#
+# Las categorías tienen sus propios gates para impedir
+# que una actividad agote la cuota de otra.
 LIMIT_GLOBAL_DAY = max(
     1,
     int(
         os.getenv(
             "AI_GLOBAL_DAILY_LIMIT",
-            "60"
+            "180"
         )
     )
 )
@@ -396,7 +429,8 @@ def _now():
 def _count_usage(
     since_iso,
     user_name=None,
-    usage_type=None
+    usage_type=None,
+    context_type=None
 ):
 
     db = _db()
@@ -415,7 +449,6 @@ def _count_usage(
     try:
 
         def _op():
-
             q = (
                 db.client
                 .table(
@@ -438,7 +471,6 @@ def _count_usage(
                 )
             )
 
-
             if user_name:
 
                 q = q.eq(
@@ -459,13 +491,22 @@ def _count_usage(
                 )
 
 
+            if context_type:
+
+                q = q.eq(
+                    "context_type",
+                    str(
+                        context_type
+                    ).upper()
+                )
+
+
             return q.execute()
 
 
         result = db._with_retry(
             _op
         )
-
 
         return int(
             result.count
@@ -483,7 +524,6 @@ def _count_usage(
         )
 
         return -1
-
 
 def get_ai_quota_status(
     user_name
@@ -508,6 +548,26 @@ def get_ai_quota_status(
     ).isoformat()
 
 
+    # ================================================================
+    # CUOTAS SEPARADAS
+    # ================================================================
+    #
+    # MANUAL:
+    #     por usuario.
+    #
+    # HOURLY_MARKET_ADVICE:
+    #     por usuario.
+    #
+    # DECISION_CONTROL + GUARDIAN:
+    #     presupuesto automático del sistema.
+    #
+    # LEARNING:
+    #     presupuesto independiente.
+    #
+    # Esto evita que Guardian / Decision Control consuman
+    # el presupuesto del consejo horario del usuario.
+    # ================================================================
+
     values = {
 
         "mh":
@@ -524,11 +584,40 @@ def get_ai_quota_status(
                 "MANUAL"
             ),
 
+        # AUTO total.
+        # Sólo para observabilidad / compatibilidad.
         "ad":
             _count_usage(
                 day,
                 None,
                 "AUTO"
+            ),
+
+        # Consejo horario PERSONAL.
+        "had":
+            _count_usage(
+                day,
+                user_name,
+                "AUTO",
+                "HOURLY_MARKET_ADVICE"
+            ),
+
+        # Controles automáticos Futures.
+        "dc":
+            _count_usage(
+                day,
+                None,
+                "AUTO",
+                "DECISION_CONTROL"
+            ),
+
+        # Guardian IA.
+        "gu":
+            _count_usage(
+                day,
+                None,
+                "AUTO",
+                "GUARDIAN"
             ),
 
         "ld":
@@ -538,11 +627,28 @@ def get_ai_quota_status(
                 "LEARNING"
             ),
 
+        # Total general.
+        # Se conserva como información de diagnóstico.
         "gd":
             _count_usage(
                 day
             )
     }
+
+
+    if (
+        values["dc"] < 0
+        or values["gu"] < 0
+    ):
+
+        auto_control_used = -1
+
+    else:
+
+        auto_control_used = (
+            values["dc"]
+            + values["gu"]
+        )
 
 
     def item(
@@ -570,6 +676,18 @@ def get_ai_quota_status(
         }
 
 
+    storage_values = [
+        values["mh"],
+        values["md"],
+        values["ad"],
+        values["had"],
+        values["dc"],
+        values["gu"],
+        values["ld"],
+        values["gd"],
+    ]
+
+
     return {
 
         "enabled":
@@ -582,7 +700,7 @@ def get_ai_quota_status(
             AI_MODEL,
 
         # Ventanas móviles:
-        # "última hora" y "últimas 24 horas".
+        # última hora / últimas 24 horas.
         "window":
             "ROLLING",
 
@@ -598,6 +716,26 @@ def get_ai_quota_status(
                 LIMIT_MANUAL_DAY
             ),
 
+        # ============================================================
+        # CONSEJO HORARIO PERSONAL
+        # ============================================================
+        "hourly_advice_daily":
+            item(
+                values["had"],
+                LIMIT_HOURLY_ADVICE_DAY
+            ),
+
+        # ============================================================
+        # CONTROL AUTOMÁTICO DEL SISTEMA
+        # ============================================================
+        "auto_control_daily":
+            item(
+                auto_control_used,
+                LIMIT_AUTO_CONTROL_DAY
+            ),
+
+        # AUTO agregado.
+        # Informativo, no mezcla los gates.
         "automatic_daily":
             item(
                 values["ad"],
@@ -610,6 +748,7 @@ def get_ai_quota_status(
                 LIMIT_LEARNING_DAY
             ),
 
+        # Total agregado para diagnóstico.
         "global_daily":
             item(
                 values["gd"],
@@ -620,14 +759,14 @@ def get_ai_quota_status(
             all(
                 value >= 0
                 for value
-                in values.values()
+                in storage_values
             )
     }
 
-
 def _quota_allowed(
     user_name,
-    usage_type
+    usage_type,
+    context_type=None
 ):
 
     quota = (
@@ -637,8 +776,7 @@ def _quota_allowed(
     )
 
 
-    # Si Supabase falla,
-    # protegemos presupuesto IA.
+    # Si Supabase falla, protegemos presupuesto IA.
     if not quota[
         "quota_storage_ok"
     ]:
@@ -653,29 +791,20 @@ def _quota_allowed(
         )
 
 
-    if (
-        quota[
-            "global_daily"
-        ][
-            "remaining"
-        ]
-        <= 0
-    ):
-
-        return (
-            False,
-            (
-                "Se alcanzó el límite "
-                "diario global de IA."
-            ),
-            quota
-        )
-
-
     usage_type = str(
         usage_type
     ).upper()
 
+
+    context_type = str(
+        context_type
+        or ""
+    ).upper()
+
+
+    # ================================================================
+    # CHAT MANUAL
+    # ================================================================
 
     if usage_type == "MANUAL":
 
@@ -692,7 +821,8 @@ def _quota_allowed(
                 False,
                 (
                     "Ya usaste tus "
-                    "3 preguntas disponibles "
+                    f"{LIMIT_MANUAL_HOUR} "
+                    "preguntas disponibles "
                     "en la última hora."
                 ),
                 quota
@@ -718,35 +848,78 @@ def _quota_allowed(
             )
 
 
-    elif (
-        usage_type
-        == "AUTO"
-    ):
+    # ================================================================
+    # AUTOMÁTICO
+    # ================================================================
+
+    elif usage_type == "AUTO":
+
+        # ------------------------------------------------------------
+        # CONSEJO HORARIO
+        # ------------------------------------------------------------
+        #
+        # Tiene presupuesto PERSONAL e independiente.
+        #
+        # Guardian y Decision Control NO pueden agotarlo.
+        # ------------------------------------------------------------
 
         if (
-            quota[
-                "automatic_daily"
-            ][
-                "remaining"
-            ]
-            <= 0
+            context_type
+            == "HOURLY_MARKET_ADVICE"
         ):
 
-            return (
-                False,
-                (
-                    "Se alcanzó el límite "
-                    "diario de consejos "
-                    "automáticos."
-                ),
-                quota
-            )
+            if (
+                quota[
+                    "hourly_advice_daily"
+                ][
+                    "remaining"
+                ]
+                <= 0
+            ):
+
+                return (
+                    False,
+                    (
+                        "Se alcanzó el límite "
+                        "diario de consejos "
+                        "horarios para este "
+                        "usuario."
+                    ),
+                    quota
+                )
 
 
-    elif (
-        usage_type
-        == "LEARNING"
-    ):
+        # ------------------------------------------------------------
+        # DECISION CONTROL / GUARDIAN
+        # ------------------------------------------------------------
+
+        else:
+
+            if (
+                quota[
+                    "auto_control_daily"
+                ][
+                    "remaining"
+                ]
+                <= 0
+            ):
+
+                return (
+                    False,
+                    (
+                        "Se alcanzó el límite "
+                        "diario de controles "
+                        "automáticos de IA."
+                    ),
+                    quota
+                )
+
+
+    # ================================================================
+    # LEARNING
+    # ================================================================
+
+    elif usage_type == "LEARNING":
 
         if (
             quota[
@@ -781,7 +954,6 @@ def _quota_allowed(
         None,
         quota
     )
-
 
 def _record_usage(
     user_name,
@@ -938,39 +1110,124 @@ def _fingerprint(
     question
 ):
 
-    raw = json.dumps(
+    normalized_context_type = str(
+        context_type
+        or ""
+    ).strip().upper()
 
-        {
-            "context":
-                context,
 
-            "context_type":
-                context_type,
+    # ================================================================
+    # CONSEJO HORARIO
+    # ================================================================
+    #
+    # Para HOURLY_MARKET_ADVICE el contrato real es:
+    #
+    #     1 usuario
+    #     + 1 mercado
+    #     + 1 hora
+    #     = máximo 1 llamada real a Groq.
+    #
+    # _cache_get() ya filtra por usuario y context_type.
+    #
+    # Por eso aquí NO incluimos el contexto dinámico en el hash.
+    # Si cambian señales/KPIs durante la misma hora, una recarga
+    # del navegador reutiliza el consejo ya generado.
+    #
+    # Al cambiar hour_bucket, se genera automáticamente uno nuevo.
+    # ================================================================
 
-            "event_type":
-                event_type,
+    if (
+        normalized_context_type
+        == "HOURLY_MARKET_ADVICE"
+    ):
 
-            "market":
-                market,
+        hour_bucket = ""
 
-            "question":
-                str(
-                    question
-                    or ""
-                ).strip()
-        },
+        if isinstance(
+            context,
+            dict
+        ):
 
-        ensure_ascii=False,
+            hour_bucket = str(
+                context.get(
+                    "hour_bucket"
+                )
+                or ""
+            ).strip()
 
-        sort_keys=True,
 
-        separators=(
-            ",",
-            ":"
-        ),
+        raw = json.dumps(
 
-        default=str
-    )
+            {
+                "context_type":
+                    normalized_context_type,
+
+                "market":
+                    str(
+                        market
+                        or ""
+                    ).strip().upper(),
+
+                "hour_bucket":
+                    hour_bucket
+            },
+
+            ensure_ascii=False,
+
+            sort_keys=True,
+
+            separators=(
+                ",",
+                ":"
+            ),
+
+            default=str
+        )
+
+
+    # ================================================================
+    # RESTO DE FUNCIONES IA
+    # ================================================================
+    #
+    # Para señales, Guardian, Learning y chat seguimos usando
+    # fingerprint contextual.
+    # ================================================================
+
+    else:
+
+        raw = json.dumps(
+
+            {
+                "context":
+                    context,
+
+                "context_type":
+                    normalized_context_type,
+
+                "event_type":
+                    event_type,
+
+                "market":
+                    market,
+
+                "question":
+                    str(
+                        question
+                        or ""
+                    ).strip()
+            },
+
+            ensure_ascii=False,
+
+            sort_keys=True,
+
+            separators=(
+                ",",
+                ":"
+            ),
+
+            default=str
+        )
 
 
     return hashlib.sha256(
@@ -2262,7 +2519,8 @@ def run_ai_advisor(
     allowed, reason, quota = (
         _quota_allowed(
             user_name,
-            usage_type
+            usage_type,
+            context_type
         )
     )
 
