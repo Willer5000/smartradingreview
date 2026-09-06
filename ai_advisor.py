@@ -429,6 +429,10 @@ def _count_usage(
                     "created_at",
                     since_iso
                 )
+                .eq(
+                    "status",
+                    "SUCCESS"
+                )
                 .limit(
                     1
                 )
@@ -1223,6 +1227,380 @@ Nunca puedes modificar automáticamente:
 # ============================================================================
 # GROQ
 # ============================================================================
+# ============================================================================
+# COMMIT 36R-FIX4
+# NORMALIZACIÓN LOCAL DE RESPUESTAS IA
+# ============================================================================
+
+_AI_ALLOWED_VERDICTS = {
+    "SUPPORT",
+    "CAUTION",
+    "DISAGREE",
+    "NO_EDGE",
+    "INFO"
+}
+
+
+_AI_VERDICT_ALIASES = {
+
+    "APOYA":
+        "SUPPORT",
+
+    "APOYAR":
+        "SUPPORT",
+
+    "PRECAUCIÓN":
+        "CAUTION",
+
+    "PRECAUCION":
+        "CAUTION",
+
+    "CAUTELA":
+        "CAUTION",
+
+    "DISCREPA":
+        "DISAGREE",
+
+    "DESACUERDO":
+        "DISAGREE",
+
+    "SIN VENTAJA":
+        "NO_EDGE",
+
+    "SIN EDGE":
+        "NO_EDGE",
+
+    "NO HAY VENTAJA":
+        "NO_EDGE",
+
+    "INFORMACIÓN":
+        "INFO",
+
+    "INFORMACION":
+        "INFO"
+}
+
+
+def _ai_clean_text(
+    value,
+    default="",
+    max_len=2400
+):
+
+    if value is None:
+
+        return default
+
+
+    if isinstance(
+        value,
+        (
+            dict,
+            list,
+            tuple
+        )
+    ):
+
+        try:
+
+            value = json.dumps(
+                value,
+                ensure_ascii=False
+            )
+
+        except Exception:
+
+            value = str(
+                value
+            )
+
+
+    text = str(
+        value
+    ).strip()
+
+
+    if not text:
+
+        return default
+
+
+    return text[
+        :max_len
+    ]
+
+
+def _ai_clean_list(
+    value,
+    max_items=5
+):
+
+    if value is None:
+
+        return []
+
+
+    if isinstance(
+        value,
+        str
+    ):
+
+        value = [
+            value
+        ]
+
+
+    if not isinstance(
+        value,
+        (
+            list,
+            tuple
+        )
+    ):
+
+        return []
+
+
+    cleaned = []
+
+
+    for item in value:
+
+        text = _ai_clean_text(
+            item,
+            "",
+            800
+        )
+
+
+        if not text:
+
+            continue
+
+
+        cleaned.append(
+            text
+        )
+
+
+        if (
+            len(
+                cleaned
+            )
+            >= max_items
+        ):
+
+            break
+
+
+    return cleaned
+
+
+def _normalize_ai_advice(
+    payload
+):
+    """
+    Convierte cualquier JSON válido de Groq
+    al contrato interno estable de SmartradingReview.
+
+    IMPORTANTE:
+    36S nunca recibe directamente el JSON libre
+    producido por el modelo.
+    """
+
+    if not isinstance(
+        payload,
+        dict
+    ):
+
+        payload = {}
+
+
+    raw_verdict = str(
+
+        payload.get(
+            "verdict",
+            "INFO"
+        )
+
+        or "INFO"
+
+    ).strip().upper()
+
+
+    verdict = (
+        _AI_VERDICT_ALIASES.get(
+            raw_verdict,
+            raw_verdict
+        )
+    )
+
+
+    if (
+        verdict
+        not in _AI_ALLOWED_VERDICTS
+    ):
+
+        verdict = "INFO"
+
+
+    try:
+
+        confidence = int(
+            round(
+                float(
+                    payload.get(
+                        "confidence",
+                        0
+                    )
+                    or 0
+                )
+            )
+        )
+
+    except (
+        TypeError,
+        ValueError
+    ):
+
+        confidence = 0
+
+
+    confidence = max(
+        0,
+        min(
+            100,
+            confidence
+        )
+    )
+
+
+    headline = _ai_clean_text(
+
+        payload.get(
+            "headline"
+        ),
+
+        "Evaluación del sistema",
+
+        300
+    )
+
+
+    advice = _ai_clean_text(
+
+        payload.get(
+            "advice"
+        ),
+
+        (
+            "No existe información suficiente "
+            "para emitir una recomendación "
+            "más específica."
+        ),
+
+        3000
+    )
+
+
+    normalized = {
+
+        "verdict":
+            verdict,
+
+        "confidence":
+            confidence,
+
+        "headline":
+            headline,
+
+        "advice":
+            advice,
+
+        "why":
+            _ai_clean_list(
+                payload.get(
+                    "why"
+                ),
+                5
+            ),
+
+        "risks":
+            _ai_clean_list(
+                payload.get(
+                    "risks"
+                ),
+                5
+            ),
+
+        "what_to_watch":
+            _ai_clean_list(
+                payload.get(
+                    "what_to_watch"
+                ),
+                5
+            ),
+
+        "learning_hypotheses":
+            _ai_clean_list(
+                payload.get(
+                    "learning_hypotheses"
+                ),
+                5
+            ),
+
+        "system_alignment":
+            _ai_clean_text(
+                payload.get(
+                    "system_alignment"
+                ),
+                "",
+                1200
+            ),
+
+        "personal_risk_note":
+            _ai_clean_text(
+                payload.get(
+                    "personal_risk_note"
+                ),
+                "",
+                1200
+            ),
+
+        "portfolio_note":
+            _ai_clean_text(
+                payload.get(
+                    "portfolio_note"
+                ),
+                "",
+                1200
+            ),
+
+        # ================================================================
+        # GUARDRAILS
+        # ================================================================
+
+        "authority":
+            "ADVISORY_ONLY",
+
+        "affect_decision":
+            False,
+
+        "affect_safety":
+            False,
+
+        "affect_levels":
+            False,
+
+        "affect_leverage":
+            False,
+
+        "affect_weights":
+            False
+    }
+
+
+    return normalized
 
 def _call_groq(
     context,
@@ -1271,9 +1649,62 @@ def _call_groq(
         )
 
 
+    # ========================================================================
+    # CONTRATO JSON
+    # ========================================================================
+    #
+    # Ya NO usamos JSON Schema del proveedor.
+    #
+    # Groq garantiza JSON sintácticamente válido.
+    # SmartradingReview normaliza y valida localmente.
+    # ========================================================================
+
+    output_contract = """
+FORMATO TÉCNICO OBLIGATORIO:
+
+Responde EXCLUSIVAMENTE con un objeto JSON válido.
+No escribas markdown.
+No escribas ```json.
+No escribas texto antes ni después del JSON.
+
+Usa esta estructura:
+
+{
+  "verdict": "SUPPORT",
+  "confidence": 0,
+  "headline": "",
+  "advice": "",
+  "why": [],
+  "risks": [],
+  "what_to_watch": [],
+  "learning_hypotheses": [],
+  "system_alignment": "",
+  "personal_risk_note": "",
+  "portfolio_note": ""
+}
+
+REGLAS:
+
+verdict debe representar una de estas ideas:
+SUPPORT, CAUTION, DISAGREE, NO_EDGE o INFO.
+
+confidence debe ser un número de 0 a 100.
+
+why, risks, what_to_watch y learning_hypotheses
+deben ser listas de textos.
+
+Todos los textos visibles deben estar en español.
+
+Nunca incluyas datos que no estén presentes
+en el contexto recibido.
+""".strip()
+
+
     prompt = (
         "CONTEXTO DEL SISTEMA:\n"
         f"{context_text}"
+        "\n\n"
+        f"{output_contract}"
     )
 
 
@@ -1292,6 +1723,7 @@ def _call_groq(
         GROQ_URL,
 
         headers={
+
             "Authorization":
                 f"Bearer {key}",
 
@@ -1332,13 +1764,18 @@ def _call_groq(
             "reasoning_effort":
                 "low",
 
+            # ============================================================
+            # FIX 36R
+            #
+            # JSON válido sin JSON-Schema remoto rígido.
+            #
+            # La validación real ocurre después
+            # dentro de SmartradingReview.
+            # ============================================================
+
             "response_format": {
-
                 "type":
-                    "json_schema",
-
-                "json_schema":
-                    AI_SCHEMA
+                    "json_object"
             }
         },
 
@@ -1356,7 +1793,7 @@ def _call_groq(
             (
                 f"Groq HTTP "
                 f"{response.status_code}: "
-                f"{response.text[:160]}"
+                f"{response.text[:200]}"
             )
         )
 
@@ -1379,39 +1816,44 @@ def _call_groq(
         )
 
 
-    advice = json.loads(
-        choices[0][
-            "message"
-        ][
+    content = (
+
+        choices[0]
+        .get(
+            "message",
+            {}
+        )
+        .get(
             "content"
-        ]
+        )
+
+        or ""
     )
 
 
-    # ================================================================
-    # GUARDRAILS DUROS
-    # ================================================================
+    try:
 
-    advice.update({
+        generated = json.loads(
+            content
+        )
 
-        "authority":
-            "ADVISORY_ONLY",
 
-        "affect_decision":
-            False,
+    except Exception as json_error:
 
-        "affect_safety":
-            False,
+        raise RuntimeError(
+            (
+                "Groq devolvió JSON "
+                "no interpretable: "
+                f"{str(json_error)[:120]}"
+            )
+        )
 
-        "affect_levels":
-            False,
 
-        "affect_leverage":
-            False,
-
-        "affect_weights":
-            False
-    })
+    advice = (
+        _normalize_ai_advice(
+            generated
+        )
+    )
 
 
     return (
@@ -1421,7 +1863,6 @@ def _call_groq(
         )
         or {}
     )
-
 
 # ============================================================================
 # PERSISTENCIA
