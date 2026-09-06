@@ -2,7 +2,7 @@
 /* COMMIT 36R/36S — IA AISLADA DEL FRONTEND PRINCIPAL */
 
 console.log(
-    '🤖 AI Assistant JS 20260906-01 cargado'
+    '🤖 AI Assistant JS 20260906-FIX3 cargado'
 );
 
 // ============================================================================
@@ -186,40 +186,37 @@ console.log(
         card.innerHTML = `
 
             <div
-                class="card-header bg-info bg-opacity-25 d-flex flex-wrap justify-content-between align-items-center gap-2"
+                class="card-header bg-info bg-opacity-25 d-flex justify-content-between align-items-center py-1 px-2"
+                style="min-height: 0;"
             >
 
-                <div>
-
-                    <strong
-                        class="text-info"
-                        style="font-size: 0.95rem;"
-                    >
-                        🧠 Asistente IA
-                    </strong>
-
-                    <div
-                        class="text-muted"
-                        style="font-size: 0.76rem;"
-                    >
-                        Trader experto · apoyo al sistema
-                    </div>
-
-                </div>
+                <strong
+                    class="text-info mb-0"
+                    style="
+                        font-size: 0.84rem;
+                        line-height: 1.1;
+                        font-weight: 600;
+                    "
+                >
+                    🧠 Asistente IA
+                </strong>
 
 
-                <div class="d-flex gap-1 flex-wrap">
+                <div
+                    class="d-flex align-items-center gap-1"
+                    style="font-size: 0.68rem;"
+                >
 
                     <span
                         id="ai-assistant-market"
-                        class="badge bg-dark"
+                        class="badge bg-dark py-1 px-2"
                     >
                         ${market()}
                     </span>
 
                     <span
                         id="ai-assistant-quota"
-                        class="badge bg-secondary"
+                        class="badge bg-secondary py-1 px-2"
                     >
                         3/h
                     </span>
@@ -236,10 +233,13 @@ console.log(
 
                 <div
                     id="ai-assistant-state"
-                    class="small text-muted mb-2"
+                    class="text-muted mb-1"
+                    style="
+                        font-size: 0.70rem;
+                        line-height: 1.15;
+                    "
                 >
-                    La IA analiza sólo cuando existe
-                    contexto relevante del sistema.
+                    Preparando contexto...
                 </div>
 
 
@@ -507,6 +507,13 @@ console.log(
             !== true
         ) {
 
+            if (state) {
+
+                state.textContent =
+                    '';
+            }
+
+
             const reason =
                 (
                     result?.reason
@@ -575,12 +582,39 @@ console.log(
 
         if (state) {
 
+            const resolved =
+                result.resolved_context
+                || {};
+
+
+            const shownMarket =
+                resolved.market
+                || market();
+
+
+            const shownSymbol =
+                resolved.symbol
+                || symbol();
+
+
+            const shownTimeframe =
+                resolved.timeframe
+                || timeframe();
+
+
             state.textContent =
                 (
-                    `${label} · `
-                    + `${market()} · `
-                    + `${symbol().replace('-', '/')} · `
-                    + `${timeframe()}`
+                    'Contexto · '
+                    + `${shownMarket} · `
+                    + `${
+                        String(
+                            shownSymbol
+                        ).replace(
+                            '-',
+                            '/'
+                        )
+                    } · `
+                    + `${shownTimeframe}`
                     + (
                         result.cached
                             ? ' · caché'
@@ -727,7 +761,89 @@ console.log(
         `;
     }
 
+    // ========================================================================
+    // COMMIT 36R-FIX3
+    // LECTOR SEGURO DE RESPUESTAS API
+    // ========================================================================
+    //
+    // Antes se hacía directamente response.json().
+    //
+    // Si Render respondía con HTML de un 502/503,
+    // perdíamos el error real y sólo veíamos:
+    //
+    // "No se pudo consultar el Asistente IA."
+    //
+    // Ahora veremos el problema verdadero.
+    // ========================================================================
 
+    async function readApiJson(
+        response
+    ) {
+
+        const text =
+            await response.text();
+
+
+        let json = null;
+
+
+        try {
+
+            json = (
+                text
+                    ? JSON.parse(
+                        text
+                    )
+                    : {}
+            );
+
+
+        } catch (parseError) {
+
+            const preview =
+                String(
+                    text
+                    || ''
+                )
+                .replace(
+                    /\s+/g,
+                    ' '
+                )
+                .trim()
+                .slice(
+                    0,
+                    160
+                );
+
+
+            throw new Error(
+                (
+                    `HTTP ${response.status}: `
+                    + 'el servidor no devolvió JSON'
+                    + (
+                        preview
+                            ? ` · ${preview}`
+                            : ''
+                    )
+                )
+            );
+        }
+
+
+        if (!response.ok) {
+
+            throw new Error(
+                (
+                    json?.reason
+                    || json?.error
+                    || `HTTP ${response.status}`
+                )
+            );
+        }
+
+
+        return json;
+    }
     // ========================================================================
     // CONSEJO AUTOMÁTICO
     // ========================================================================
@@ -806,7 +922,9 @@ console.log(
 
 
             const json =
-                await response.json();
+                await readApiJson(
+                    response
+                );
 
 
             render(
@@ -817,6 +935,12 @@ console.log(
 
         } catch (error) {
 
+            console.error(
+                '❌ AI Advisor automático:',
+                error
+            );
+
+
             render({
 
                 success:
@@ -824,8 +948,11 @@ console.log(
 
                 reason:
                     (
-                        'No se pudo consultar '
-                        + 'el Asistente IA.'
+                        error?.message
+                        || (
+                            'No se pudo consultar '
+                            + 'el Asistente IA.'
+                        )
                     )
             });
         }
@@ -931,7 +1058,9 @@ console.log(
 
 
             const json =
-                await response.json();
+                await readApiJson(
+                    response
+                );
 
 
             render(
@@ -952,6 +1081,12 @@ console.log(
 
         } catch (error) {
 
+            console.error(
+                '❌ AI Assistant pregunta:',
+                error
+            );
+
+
             render({
 
                 success:
@@ -959,8 +1094,11 @@ console.log(
 
                 reason:
                     (
-                        'No se pudo enviar '
-                        + 'la pregunta.'
+                        error?.message
+                        || (
+                            'No se pudo enviar '
+                            + 'la pregunta.'
+                        )
                     )
             });
 
