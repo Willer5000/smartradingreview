@@ -2174,6 +2174,7 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
     offset = 0
 
     for _ in range(50):  # cap 50k filas
+        response, error = _execute_page(
             cutoff,
             snapshot_end,
             offset,
@@ -2210,7 +2211,7 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
                 f'primary_no_progress_offset_{offset}'
             )
             logger.warning(
-                'Paginación principal sin progreso; se activa fallback temporal.'
+                'Paginación principal sin progreso; se detiene de forma segura.'
             )
             break
 
