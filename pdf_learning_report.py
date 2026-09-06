@@ -54,8 +54,23 @@ REPORT_DAYS_BACK = 90
 # Estos límites NO reducen la ventana estadística de 90 días.
 # Sólo detienen de forma segura una lectura que está tardando
 # demasiado.
-REPORT_FETCH_SOFT_BUDGET_SECONDS = 45.0
-REPORT_STRATEGY_SOFT_BUDGET_SECONDS = 60.0
+REPORT_FETCH_SOFT_BUDGET_SECONDS = 20.0
+REPORT_STRATEGY_SOFT_BUDGET_SECONDS = 20.0
+
+# ================================================================
+# SAFE SNAPSHOT
+# ================================================================
+#
+# El PDF descargable no debe poder monopolizar un worker de Render.
+#
+# Recuperamos como máximo 1.000 señales en páginas pequeñas.
+# Si esa muestra no alcanza el final real de la ventana de 90 días,
+# el informe queda explícitamente INCOMPLETO y Commit 37 = NOT_READY.
+#
+# Esto NO redefine la cohorte oficial ni reduce el requisito de
+# validación. Sólo garantiza una ruta de diagnóstico liviana.
+REPORT_SAFE_PAGE_SIZE = 250
+REPORT_SAFE_MAX_ROWS = 1000
 
 LEARNING_CONTRACT_VERSION = 'market_separated_v1'
 FUTURES_REAL_DATA_SOURCE = 'KUCOIN_FUTURES_PERPETUAL_REST'
@@ -2030,34 +2045,42 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
         'strategy_hydration_skipped': False,
         'time_budget_exhausted': False,
         'fetch_elapsed_seconds': 0.0,
+
+        'safe_snapshot_mode': True,
+        'safe_max_rows': REPORT_SAFE_MAX_ROWS,
+        'safe_page_size': REPORT_SAFE_PAGE_SIZE,
+        'reached_window_end': False,
+        'count_skipped': True,
+
         'result_mode': 'LEVEL_RECONSTRUCTED_NO_RESULT_JOIN',
         'errors': [],
-        'model_version': 'report_fetch_memory_v5'
+        'model_version': 'report_fetch_safe_v6'
     }
 
     # ------------------------------------------------------------------
-    # Count exacto de la misma ventana del informe.
+    # SAFE SNAPSHOT v6
     # ------------------------------------------------------------------
-    try:
-        r_count = (
-            db.client
-            .table('signals')
-            .select('id', count='exact')
-            .gte('created_at', cutoff)
-            .lt('created_at', snapshot_end)
-            .limit(1)
-            .execute()
-        )
-        diagnostics['expected_rows'] = int(
-            getattr(r_count, 'count', 0) or 0
-        )
-    except Exception as e:
-        diagnostics['errors'].append(
-            f'count_window_failed: {str(e)[:180]}'
-        )
-        logger.warning(
-            f'No se pudo contar la ventana de {days_back} días: {e}'
-        )
+    #
+    # Omitimos deliberadamente COUNT exacto.
+    #
+    # Un COUNT de toda la ventana agrega otra consulta completa antes
+    # de empezar a recuperar las señales y no es necesario para que el
+    # PDF diagnóstico pueda existir.
+    #
+    # La integridad se determina así:
+    #
+    # - si una página devuelve menos de REPORT_SAFE_PAGE_SIZE,
+    #   sabemos que llegamos al final de la ventana;
+    #
+    # - si alcanzamos REPORT_SAFE_MAX_ROWS sin llegar al final,
+    #   la cohorte queda INCOMPLETA y Commit 37 se bloquea.
+    diagnostics[
+        'expected_rows'
+    ] = None
+
+    diagnostics[
+        'count_skipped'
+    ] = True
 
     def _append_unique(target, seen_ids, batch):
         added = 0
@@ -2159,15 +2182,31 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
     all_data = []
     seen_ids = set()
 
-    # v3:
-    # la consulta ya no transporta los contextos completos.
+    # ================================================================
+    # SAFE SNAPSHOT v6
+    # ================================================================
     #
-    # Podemos recuperar más señales por request y reducir de forma
-    # importante el número total de llamadas HTTP a Supabase.
-    page_size = 1000
+    # La finalidad inmediata es que el informe sea descargable sin
+    # monopolizar el worker.
+    #
+    # No asumimos que 1.000 filas representen toda la ventana de 90d.
+    # Sólo declaramos COMPLETE si demostrablemente llegamos al final.
+    page_size = REPORT_SAFE_PAGE_SIZE
     offset = 0
 
-    for _ in range(50):  # cap 50k filas
+    max_pages = max(
+        1,
+        (
+            REPORT_SAFE_MAX_ROWS
+            + page_size
+            - 1
+        )
+        // page_size
+    )
+
+    reached_window_end = False
+
+    for _ in range(max_pages):
         elapsed = (
             time.monotonic()
             - started_at
@@ -2184,15 +2223,14 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
             diagnostics[
                 'errors'
             ].append(
-                'primary_soft_time_budget_exhausted'
+                'safe_snapshot_time_budget_exhausted'
             )
 
             logger.warning(
-                '⚠️ Learning PDF: presupuesto '
-                'de lectura principal agotado '
+                '⚠️ Learning PDF SAFE: '
+                'presupuesto de lectura agotado '
                 f'({elapsed:.1f}s). '
-                'Se genera informe parcial '
-                'y Commit 37 queda bloqueado.'
+                'El PDF continuará como NOT_READY.'
             )
 
             break
@@ -2205,18 +2243,33 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
         )
 
         if error is not None:
-            diagnostics['errors'].append(
-                f'primary_offset_{offset}: {str(error)[:180]}'
+            diagnostics[
+                'errors'
+            ].append(
+                'safe_snapshot_offset_'
+                f'{offset}: '
+                f'{str(error)[:180]}'
             )
+
             logger.warning(
-                f'Paginación principal falló offset={offset}: {error}'
+                '⚠️ Learning PDF SAFE: '
+                f'falló offset={offset}: '
+                f'{error}'
             )
+
             break
 
-        batch = response.data or []
-        diagnostics['primary_pages'] += 1
+        batch = (
+            response.data
+            or []
+        )
+
+        diagnostics[
+            'primary_pages'
+        ] += 1
 
         if not batch:
+            reached_window_end = True
             break
 
         added = _append_unique(
@@ -2225,95 +2278,93 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
             batch
         )
 
-        # Avanzamos por filas REALMENTE devueltas, no por el tamaño pedido.
-        # Esto evita asumir que el servidor respetó exactamente page_size.
-        offset += len(batch)
+        offset += len(
+            batch
+        )
 
         if added == 0:
-            diagnostics['errors'].append(
-                f'primary_no_progress_offset_{offset}'
+            diagnostics[
+                'errors'
+            ].append(
+                'safe_snapshot_no_progress_'
+                f'offset_{offset}'
             )
+
             logger.warning(
-                'Paginación principal sin progreso; se detiene de forma segura.'
+                '⚠️ Learning PDF SAFE: '
+                'paginación sin progreso.'
             )
+
             break
 
-        expected = diagnostics.get('expected_rows')
-        if expected is not None and len(all_data) >= expected:
+        # Si el servidor devolvió menos filas que las pedidas,
+        # llegamos al final real de la ventana.
+        if len(batch) < page_size:
+            reached_window_end = True
             break
 
-    expected = diagnostics.get('expected_rows')
-    primary_incomplete = (
-        expected is not None
-        and len(all_data) < expected
-    )
+        if (
+            len(all_data)
+            >= REPORT_SAFE_MAX_ROWS
+        ):
+            break
 
-    # ------------------------------------------------------------------
-    # PASO B — política fail-safe v3
-    # ------------------------------------------------------------------
-    #
-    # La versión anterior volvía a descargar la ventana completa de
-    # 90 días dividida en slices de 3 días si la primera lectura quedaba
-    # incompleta.
-    #
-    # En Render esto podía duplicar:
-    #
-    #     all_data
-    #     +
-    #     fallback_data
-    #
-    # y además duplicaba gran parte del tiempo de consultas.
-    #
-    # Desde v3 NO hacemos una segunda descarga masiva dentro del mismo
-    # request HTTP.
-    #
-    # Si la primera lectura queda incompleta:
-    # - el PDF puede seguir generándose;
-    # - la cobertura queda explícitamente marcada;
-    # - Commit 37 queda bloqueado a NOT_READY más adelante.
-    #
-    # Nunca presentamos una muestra parcial como evidencia suficiente.
-    # ------------------------------------------------------------------
-
-    if primary_incomplete:
-        diagnostics[
-            'fallback_used'
-        ] = False
-
-        diagnostics[
-            'errors'
-        ].append(
-            'primary_incomplete_no_heavy_fallback'
-        )
-
-        logger.warning(
-            '⚠️ Fetch 90d incompleto: '
-            f'{len(all_data)}/{expected}. '
-            'Se omite el fallback pesado para proteger '
-            'memoria/timeout; la promoción quedará bloqueada.'
-        )
-
-    # Orden determinista global para tablas y walk-forward.
+    # Orden temporal determinista.
     all_data.sort(
-        key=lambda row: str(row.get('created_at') or ''),
+        key=lambda row: str(
+            row.get(
+                'created_at'
+            )
+            or ''
+        ),
         reverse=True
     )
 
-    diagnostics['fetched_rows'] = len(all_data)
+    diagnostics[
+        'fetched_rows'
+    ] = len(
+        all_data
+    )
 
-    expected = diagnostics.get('expected_rows')
-    if expected is not None:
-        diagnostics['complete'] = (
-            len(all_data) == expected
+    diagnostics[
+        'reached_window_end'
+    ] = reached_window_end
+
+    diagnostics[
+        'complete'
+    ] = bool(
+        reached_window_end
+        and not diagnostics[
+            'errors'
+        ]
+    )
+
+    diagnostics[
+        'coverage_pct'
+    ] = (
+        100.0
+        if diagnostics[
+            'complete'
+        ]
+        else None
+    )
+
+    if not diagnostics[
+        'complete'
+    ]:
+        diagnostics[
+            'errors'
+        ].append(
+            'safe_snapshot_not_full_90d_cohort'
         )
-        diagnostics['coverage_pct'] = round(
-            (len(all_data) / expected * 100.0)
-            if expected > 0
-            else 100.0,
-            2
+
+        logger.warning(
+            '⚠️ Learning PDF SAFE: '
+            f'{len(all_data)} señales recuperadas. '
+            'No se demostró cobertura completa de '
+            f'{days_back} días. '
+            'Commit 37 queda bloqueado.'
         )
-    else:
-        diagnostics['complete'] = not diagnostics['errors']
     # ------------------------------------------------------------------
     # v4: hidratar estrategias FUERA de la consulta principal.
     # ------------------------------------------------------------------
@@ -2363,9 +2414,15 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
     #
     # No tiene sentido gastar más segundos hidratando estrategias
     # cuando el gate ya debe quedar NOT_READY.
-    if not diagnostics.get(
-        'complete',
-        False
+    if (
+        diagnostics.get(
+            'safe_snapshot_mode',
+            False
+        )
+        or not diagnostics.get(
+            'complete',
+            False
+        )
     ):
         strategy_ids = []
 
@@ -3019,20 +3076,21 @@ def _fetch_learning_data() -> Dict:
     
     data['supabase_connected'] = True
     
-    # El total histórico se muestra sólo como inventario; no se mezcla con la
-    # ventana estadística del informe.
-    try:
-        r_total = (db.client.table('signals').select('id', count='exact').limit(1).execute())
-        data['all_time_signals'] = int(getattr(r_total, 'count', 0) or 0)
-    except Exception as e:
-        logger.warning(f'Error contando signals: {e}')
-    
-    # Missed opportunities dedicated table
-    try:
-        r = db.client.table('missed_opportunities').select('id', count='exact').limit(1).execute()
-        data['missed_opportunities'] = int(getattr(r, 'count', None) or 0)
-    except Exception:
-        pass
+    # ================================================================
+    # SAFE SNAPSHOT v6 — inventarios auxiliares
+    # ================================================================
+    #
+    # Estos dos COUNT no participan del gate del Commit 37 y agregan
+    # consultas antes de generar el documento.
+    #
+    # Se omiten en la ruta descargable segura.
+    data[
+        'all_time_signals'
+    ] = None
+
+    data[
+        'missed_opportunities'
+    ] = None
     
     # Traer una sola ventana y separar las cohortes antes de calcular cualquier
     # win rate. Así el encabezado y las tablas hablan del mismo conjunto.
@@ -3153,48 +3211,21 @@ def _fetch_learning_data() -> Dict:
         logger.warning(f'Error trayendo signals con indicadores: {e}')
     
     # ================================================================
-    # MISSED OPPORTUNITIES — AUXILIAR
+    # MISSED OPPORTUNITIES — SAFE SNAPSHOT
     # ================================================================
     #
-    # No es parte del gate obligatorio del Commit 37.
-    # Si la lectura principal ya agotó su presupuesto de tiempo,
-    # omitimos este fetch para asegurar que ReportLab tenga tiempo
-    # de construir y devolver el PDF.
-    if not (
-        data.get(
-            'fetch_diagnostics',
-            {}
-        ).get(
-            'time_budget_exhausted',
-            False
-        )
-    ):
-        try:
-            data[
-                'missed_details'
-            ] = _fetch_missed_opp_indicators(
-                db,
-                limit=500
-            )
-        except Exception:
-            pass
-    else:
-        logger.warning(
-            '⚠️ Learning PDF: oportunidades '
-            'perdidas omitidas por presupuesto '
-            'de tiempo.'
-        )
-    
-    # Último ciclo review_log
-    try:
-        r = (db.client.table('review_logs').select('*').order('created_at', desc=True)
-             .limit(1).execute())
-        if r.data:
-            data['last_review_log'] = r.data[0]
-    except Exception:
-        pass
-    
-    return data
+    # El análisis de oportunidades perdidas es útil, pero no debe
+    # impedir que se descargue el gate diagnóstico principal.
+    #
+    # Lo restauraremos en el snapshot estadístico completo.
+    data[
+        'missed_details'
+    ] = []
+
+    logger.info(
+        'Learning PDF SAFE: '
+        'missed opportunities omitidas.'
+    )
 
 
 # ============================================================================
@@ -3380,7 +3411,20 @@ def generate_learning_pdf() -> bytes:
 
     metrics_data = [
         ['Métrica', 'Valor'],
-        ['Inventario histórico total (no usado como cohorte)', str(data['all_time_signals'])],
+        [
+            'Inventario histórico total (no usado como cohorte)',
+            (
+                str(
+                    data[
+                        'all_time_signals'
+                    ]
+                )
+                if data.get(
+                    'all_time_signals'
+                ) is not None
+                else 'NO CALCULADO — SAFE MODE'
+            )
+        ],
         [f'Cohorte estadística verificable ({REPORT_DAYS_BACK} días)', str(data['total_signals'])],
         [
             f'Cobertura lectura Supabase ({REPORT_DAYS_BACK} días)',
@@ -3435,7 +3479,20 @@ def generate_learning_pdf() -> bytes:
         ['Futuros antiguos/no verificables en cuarentena', str(quarantine.get('futures_legacy', 0))],
         ['Análisis Futures shadow (no publicados)', str(quarantine.get('futures_shadow', 0))],
         ['Registros sin mercado en cuarentena', str(quarantine.get('unscoped', 0))],
-        ['Oportunidades perdidas (diagnóstico no separado)', str(data['missed_opportunities'])],
+        [
+            'Oportunidades perdidas (diagnóstico no separado)',
+            (
+                str(
+                    data[
+                        'missed_opportunities'
+                    ]
+                )
+                if data.get(
+                    'missed_opportunities'
+                ) is not None
+                else 'NO CALCULADO — SAFE MODE'
+            )
+        ],
     ]
     tmet = Table(metrics_data, colWidths=[11*cm, 5*cm])
     tmet.setStyle(TableStyle([
