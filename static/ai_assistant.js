@@ -1,19 +1,23 @@
 /* static/ai_assistant.js */
-/* COMMIT 36R/36S — IA AISLADA DEL FRONTEND PRINCIPAL */
+/* COMMIT 36R UX4 — CONSEJO HORARIO + CHAT MINIMIZADO */
 
 console.log(
-    '🤖 AI Assistant JS 20260906-FIX3 cargado'
+    '🤖 AI Assistant JS 20260906-UX4 cargado'
 );
-
-// ============================================================================
-// COMMIT 36R
-// ASISTENTE IA — SPOT + FUTURES
-// ============================================================================
 
 (function initAITradingAssistant() {
 
-    const AUTO_REFRESH_MS =
-        10 * 60 * 1000;
+    'use strict';
+
+
+    let lastAdviceHourKey =
+        null;
+
+    let adviceLoading =
+        false;
+
+    let chatLoading =
+        false;
 
 
     function esc(value) {
@@ -55,6 +59,7 @@ console.log(
     function symbol() {
 
         return (
+
             window.currentSymbol
 
             || document
@@ -71,6 +76,7 @@ console.log(
     function timeframe() {
 
         return (
+
             window.currentInterval
 
             || document
@@ -88,7 +94,129 @@ console.log(
     }
 
 
-    function listHtml(
+    function loggedIn() {
+
+        if (
+            typeof isLoggedIn
+            !== 'undefined'
+        ) {
+
+            return Boolean(
+                isLoggedIn
+            );
+        }
+
+
+        return Boolean(
+            window.isLoggedIn
+        );
+    }
+
+
+    function currentHourKey() {
+
+        const now =
+            new Date();
+
+
+        return [
+
+            market(),
+
+            now.getFullYear(),
+
+            String(
+                now.getMonth() + 1
+            ).padStart(
+                2,
+                '0'
+            ),
+
+            String(
+                now.getDate()
+            ).padStart(
+                2,
+                '0'
+            ),
+
+            String(
+                now.getHours()
+            ).padStart(
+                2,
+                '0'
+            )
+
+        ].join(
+            '|'
+        );
+    }
+
+
+    function verdictMeta(
+        verdictRaw
+    ) {
+
+        const verdict =
+            String(
+                verdictRaw
+                || 'INFO'
+            ).toUpperCase();
+
+
+        const map = {
+
+            SUPPORT: {
+                label:
+                    'APOYA',
+
+                css:
+                    'success'
+            },
+
+            CAUTION: {
+                label:
+                    'PRECAUCIÓN',
+
+                css:
+                    'warning text-dark'
+            },
+
+            DISAGREE: {
+                label:
+                    'DISCREPA',
+
+                css:
+                    'danger'
+            },
+
+            NO_EDGE: {
+                label:
+                    'SIN VENTAJA',
+
+                css:
+                    'secondary'
+            },
+
+            INFO: {
+                label:
+                    'INFORMACIÓN',
+
+                css:
+                    'info text-dark'
+            }
+        };
+
+
+        return (
+            map[
+                verdict
+            ]
+            || map.INFO
+        );
+    }
+
+
+    function compactList(
         title,
         values,
         css = 'text-light'
@@ -108,21 +236,32 @@ console.log(
         return `
             <div class="mt-2">
 
-                <div class="small fw-bold ${css}">
+                <div
+                    class="fw-semibold ${css}"
+                    style="font-size: 0.76rem;"
+                >
                     ${esc(title)}
                 </div>
 
-                <ul class="small mb-1 ps-3">
-
+                <ul
+                    class="mb-0 ps-3"
+                    style="
+                        font-size: 0.76rem;
+                        line-height: 1.3;
+                    "
+                >
                     ${
                         values
+                            .slice(
+                                0,
+                                4
+                            )
                             .map(
                                 item =>
                                     `<li>${esc(item)}</li>`
                             )
                             .join('')
                     }
-
                 </ul>
 
             </div>
@@ -130,13 +269,31 @@ console.log(
     }
 
 
+    function getAnchor() {
+
+        return window.IS_FUTURES_PAGE
+
+            ? document.getElementById(
+                'recommendation-card'
+            )
+
+            : document.getElementById(
+                'tgp-banner'
+            );
+    }
+
+
     // ========================================================================
-    // CREAR VENTANA
+    // CREAR LAS DOS VENTANAS
     // ========================================================================
 
     function mount() {
 
         if (
+            document.getElementById(
+                'ai-hourly-advice-card'
+            )
+            &&
             document.getElementById(
                 'ai-trading-assistant-card'
             )
@@ -146,79 +303,83 @@ console.log(
         }
 
 
-        const card =
+        const anchor =
+            getAnchor();
+
+
+        if (
+            !anchor
+            || !anchor.parentNode
+        ) {
+
+            console.warn(
+                '⚠️ IA: no se encontró '
+                + 'el ancla principal.'
+            );
+
+            return false;
+        }
+
+
+        // ================================================================
+        // CONSEJO IA
+        // ================================================================
+
+        const adviceCard =
             document.createElement(
                 'div'
             );
 
 
-        card.id =
-            'ai-trading-assistant-card';
+        adviceCard.id =
+            'ai-hourly-advice-card';
 
 
-        card.className =
+        adviceCard.className =
             (
                 'card bg-dark '
                 + 'border-info mb-3'
             );
 
 
-        // ================================================================
-        // COMMIT 36R UX
-        // La IA es una capa de apoyo.
-        //
-        // Debe verse claramente, pero NO competir visualmente con:
-        // - Recomendación del Sistema;
-        // - Guardian;
-        // - gráficos.
-        // ================================================================
-
-        card.style.fontSize =
-            '0.88rem';
-
-        card.style.borderWidth =
-            '1px';
-
-        card.style.opacity =
-            '0.96';
+        adviceCard.style.fontSize =
+            '0.82rem';
 
 
-        card.innerHTML = `
+        adviceCard.innerHTML = `
 
             <div
-                class="card-header bg-info bg-opacity-25 d-flex justify-content-between align-items-center py-1 px-2"
-                style="min-height: 0;"
+                class="card-header bg-info bg-opacity-10 d-flex justify-content-between align-items-center py-1 px-2"
             >
 
                 <strong
-                    class="text-info mb-0"
+                    class="text-info"
                     style="
                         font-size: 0.84rem;
                         line-height: 1.1;
-                        font-weight: 600;
                     "
                 >
-                    🧠 Asistente IA
+                    🧠 Consejo IA
                 </strong>
 
 
                 <div
                     class="d-flex align-items-center gap-1"
-                    style="font-size: 0.68rem;"
                 >
 
                     <span
-                        id="ai-assistant-market"
-                        class="badge bg-dark py-1 px-2"
+                        class="badge bg-dark"
+                        style="font-size: 0.64rem;"
                     >
                         ${market()}
                     </span>
 
                     <span
-                        id="ai-assistant-quota"
-                        class="badge bg-secondary py-1 px-2"
+                        id="ai-advice-hour"
+                        class="text-muted"
+                        style="font-size: 0.66rem;"
                     >
-                        3/h
+                        --:--
                     </span>
 
                 </div>
@@ -227,90 +388,175 @@ console.log(
 
 
             <div
-                class="card-body py-2 px-3"
-                style="font-size: 0.84rem;"
+                class="card-body py-2 px-2"
+                style="
+                    font-size: 0.80rem;
+                    line-height: 1.35;
+                "
             >
 
                 <div
-                    id="ai-assistant-state"
-                    class="text-muted mb-1"
-                    style="
-                        font-size: 0.70rem;
-                        line-height: 1.15;
-                    "
+                    id="ai-hourly-advice-state"
+                    class="text-muted"
+                    style="font-size: 0.68rem;"
                 >
-                    Preparando contexto...
+                    Preparando evaluación horaria
+                    del sistema...
                 </div>
 
 
                 <div
-                    id="ai-assistant-answer"
-                    class="border border-secondary rounded p-2 mb-2"
-                    style="
-                        font-size: 0.82rem;
-                        line-height: 1.35;
-                        background: rgba(255,255,255,0.015);
-                    "
+                    id="ai-hourly-advice-answer"
+                    class="mt-1"
                 >
 
-                    <div class="text-muted small">
-                        Inicia sesión y espera el primer
-                        análisis del mercado.
-                    </div>
+                    <span class="text-muted">
+                        El consejo aparecerá
+                        automáticamente.
+                    </span>
+
+                </div>
+
+            </div>
+        `;
+
+
+        // ================================================================
+        // CHAT IA
+        // ================================================================
+
+        const chatCard =
+            document.createElement(
+                'div'
+            );
+
+
+        chatCard.id =
+            'ai-trading-assistant-card';
+
+
+        chatCard.className =
+            (
+                'card bg-dark '
+                + 'border-secondary mb-3'
+            );
+
+
+        chatCard.style.fontSize =
+            '0.80rem';
+
+
+        chatCard.innerHTML = `
+
+            <div
+                id="ai-chat-toggle"
+                class="card-header d-flex justify-content-between align-items-center py-1 px-2"
+                role="button"
+                tabindex="0"
+                aria-expanded="false"
+                style="
+                    cursor: pointer;
+                    min-height: 0;
+                "
+            >
+
+                <div
+                    class="d-flex align-items-center gap-2"
+                >
+
+                    <strong
+                        class="text-light"
+                        style="
+                            font-size: 0.82rem;
+                            line-height: 1.1;
+                        "
+                    >
+                        💬 Asistente IA
+                    </strong>
+
+
+                    <span
+                        id="ai-assistant-quota"
+                        class="badge bg-secondary"
+                        style="font-size: 0.62rem;"
+                    >
+                        3/h
+                    </span>
 
                 </div>
 
 
-                <label
-                    for="ai-assistant-question"
-                    class="form-label small text-muted"
+                <i
+                    id="ai-chat-chevron"
+                    class="fas fa-chevron-down text-muted"
+                    style="font-size: 0.68rem;"
+                ></i>
+
+            </div>
+
+
+            <div
+                id="ai-chat-body"
+                class="card-body py-2 px-2"
+                style="
+                    display: none;
+                    font-size: 0.80rem;
+                "
+            >
+
+                <div
+                    id="ai-chat-answer"
+                    class="mb-2"
+                    style="display: none;"
+                ></div>
+
+
+                <div
+                    class="input-group input-group-sm align-items-end"
                 >
-                    Pregunta sobre señales, mercado,
-                    oportunidades, riesgo, Guardian
-                    o portafolio
-                </label>
 
+                    <textarea
+                        id="ai-assistant-question"
+                        class="form-control bg-dark text-light border-secondary"
+                        rows="1"
+                        maxlength="800"
+                        placeholder="Pregunta sobre señales, riesgo, Guardian, portafolio u oportunidades..."
+                        style="
+                            resize: none;
+                            min-height: 34px;
+                            max-height: 88px;
+                            font-size: 0.78rem;
+                        "
+                    ></textarea>
 
-                <textarea
-                    id="ai-assistant-question"
-                    class="form-control form-control-sm bg-dark text-light border-secondary"
-                    rows="2"
-                    maxlength="800"
-                    placeholder="Ej.: ¿Cuál de las señales actuales merece más atención según mi riesgo?"
-                ></textarea>
-
-
-                <div class="d-flex gap-2 mt-2">
 
                     <button
                         id="ai-assistant-ask"
                         type="button"
-                        class="btn btn-sm btn-info flex-fill"
+                        class="btn btn-outline-info"
+                        title="Enviar"
+                        aria-label="Enviar pregunta"
+                        style="
+                            width: 38px;
+                            min-width: 38px;
+                            height: 34px;
+                            padding: 0;
+                        "
                     >
-                        Preguntar
-                    </button>
-
-
-                    <button
-                        id="ai-assistant-refresh"
-                        type="button"
-                        class="btn btn-sm btn-outline-info"
-                    >
-                        ↻ Consejo
+                        <i
+                            class="fas fa-arrow-right"
+                        ></i>
                     </button>
 
                 </div>
 
 
-                <div class="small text-muted mt-2">
-
+                <div
+                    class="text-muted mt-1"
+                    style="font-size: 0.66rem;"
+                >
                     Máx. 3 preguntas por hora.
-
-                    La IA aconseja y aprende;
-                    no modifica Safety, votos,
-                    Entry, SL, TP, leverage ni
-                    Guardian automáticamente.
-
+                    Enter envía · Shift+Enter agrega una línea.
                 </div>
 
             </div>
@@ -320,104 +566,88 @@ console.log(
         // ================================================================
         // UBICACIÓN
         // ================================================================
-
-        // ================================================================
-        // UBICACIÓN 36R UX
-        // ================================================================
         //
         // SPOT:
-        //     Recomendación
-        //     ↓
-        //     Guardian TGP
-        //     ↓
-        //     Asistente IA
-        //     ↓
-        //     gráficos
+        // Guardian -> Consejo -> Chat -> gráficos
         //
         // FUTURES:
-        //     Recomendación
-        //     ↓
-        //     Asistente IA
-        //     ↓
-        //     resto del análisis
-        //
-        // El Asistente deja de vivir en la barra lateral.
+        // Recomendación -> Consejo -> Chat
         // ================================================================
 
-        const anchor =
-            window.IS_FUTURES_PAGE
-
-                ? document.getElementById(
-                    'recommendation-card'
-                )
-
-                : document.getElementById(
-                    'tgp-banner'
-                );
+        anchor.insertAdjacentElement(
+            'afterend',
+            adviceCard
+        );
 
 
-        if (
-            anchor
-            && anchor.parentNode
-        ) {
+        adviceCard.insertAdjacentElement(
+            'afterend',
+            chatCard
+        );
 
-            anchor.insertAdjacentElement(
-                'afterend',
-                card
+
+        const toggle =
+            document.getElementById(
+                'ai-chat-toggle'
             );
 
-        } else {
 
-            // ============================================================
-            // FALLBACK
-            //
-            // Nunca volver al sidebar.
-            // La IA debe permanecer en contenido principal.
-            // ============================================================
-
-            const mainContent =
-                document.querySelector(
-                    '.col-lg-7'
-                );
-
-
-            if (!mainContent) {
-
-                console.warn(
-                    '⚠️ Asistente IA: '
-                    + 'no se encontró el contenido principal.'
-                );
-
-                return false;
-            }
-
-
-            mainContent.prepend(
-                card
+        const input =
+            document.getElementById(
+                'ai-assistant-question'
             );
-        }
 
 
-        document
-            .getElementById(
+        const send =
+            document.getElementById(
                 'ai-assistant-ask'
-            )
-            ?.addEventListener(
-                'click',
-                ask
             );
 
 
-        document
-            .getElementById(
-                'ai-assistant-refresh'
-            )
-            ?.addEventListener(
-                'click',
-                () => loadAuto(
-                    true
-                )
-            );
+        toggle?.addEventListener(
+            'click',
+            () => toggleChat()
+        );
+
+
+        toggle?.addEventListener(
+            'keydown',
+            event => {
+
+                if (
+                    event.key === 'Enter'
+                    || event.key === ' '
+                ) {
+
+                    event.preventDefault();
+
+                    toggleChat();
+                }
+            }
+        );
+
+
+        send?.addEventListener(
+            'click',
+            ask
+        );
+
+
+        input?.addEventListener(
+            'keydown',
+            event => {
+
+                if (
+                    event.key === 'Enter'
+                    && !event.shiftKey
+                ) {
+
+                    event.preventDefault();
+
+                    ask();
+                }
+            }
+        );
 
 
         return true;
@@ -425,8 +655,96 @@ console.log(
 
 
     // ========================================================================
-    // CUOTA
+    // MINIMIZAR / ABRIR CHAT
     // ========================================================================
+
+    function toggleChat(
+        forceOpen = null
+    ) {
+
+        const body =
+            document.getElementById(
+                'ai-chat-body'
+            );
+
+
+        const toggle =
+            document.getElementById(
+                'ai-chat-toggle'
+            );
+
+
+        const chevron =
+            document.getElementById(
+                'ai-chat-chevron'
+            );
+
+
+        if (!body) {
+
+            return;
+        }
+
+
+        const currentlyOpen =
+            body.style.display !== 'none';
+
+
+        const shouldOpen =
+            forceOpen === null
+
+                ? !currentlyOpen
+
+                : Boolean(
+                    forceOpen
+                );
+
+
+        body.style.display =
+            shouldOpen
+                ? 'block'
+                : 'none';
+
+
+        toggle?.setAttribute(
+            'aria-expanded',
+            shouldOpen
+                ? 'true'
+                : 'false'
+        );
+
+
+        if (chevron) {
+
+            chevron.className =
+                shouldOpen
+
+                    ? (
+                        'fas fa-chevron-up '
+                        + 'text-muted'
+                    )
+
+                    : (
+                        'fas fa-chevron-down '
+                        + 'text-muted'
+                    );
+        }
+
+
+        if (shouldOpen) {
+
+            setTimeout(
+                () =>
+                    document
+                        .getElementById(
+                            'ai-assistant-question'
+                        )
+                        ?.focus(),
+                50
+            );
+        }
+    }
+
 
     function updateQuota(
         quota
@@ -452,328 +770,24 @@ console.log(
             || {};
 
 
-        const daily =
-            quota.manual_daily
-            || {};
-
-
         el.textContent =
             (
                 `${hourly.remaining ?? '--'}`
-                + `/`
+                + '/'
                 + `${hourly.limit ?? 3}`
-                + ' esta hora · '
-                + `${daily.remaining ?? '--'}`
-                + ' hoy'
+            );
+
+
+        el.title =
+            (
+                'Preguntas disponibles '
+                + 'esta hora'
             );
     }
 
 
     // ========================================================================
-    // RENDER RESPUESTA
-    // ========================================================================
-
-    function render(
-        result,
-        label = 'Consejo IA'
-    ) {
-
-        const state =
-            document.getElementById(
-                'ai-assistant-state'
-            );
-
-
-        const answer =
-            document.getElementById(
-                'ai-assistant-answer'
-            );
-
-
-        if (!answer) {
-
-            return;
-        }
-
-
-        updateQuota(
-            result?.quota
-        );
-
-
-        if (
-            !result
-            || result.success
-            !== true
-        ) {
-
-            if (state) {
-
-                state.textContent =
-                    '';
-            }
-
-
-            const reason =
-                (
-                    result?.reason
-                    || result?.error
-                    || (
-                        'IA temporalmente '
-                        + 'no disponible.'
-                    )
-                );
-
-
-            answer.innerHTML =
-                (
-                    '<div class="small text-warning">'
-                    + esc(
-                        reason
-                    )
-                    + '</div>'
-                );
-
-
-            return;
-        }
-
-
-        const data =
-            result.data
-            || {};
-
-
-        const verdict =
-            String(
-                data.verdict
-                || 'INFO'
-            ).toUpperCase();
-
-
-        // ================================================================
-        // Traducción visual.
-        //
-        // El valor interno permanece en inglés porque forma parte
-        // del contrato backend / estadísticas 36R-36S.
-        // ================================================================
-
-        const verdictLabel = {
-
-            SUPPORT:
-                'APOYA',
-
-            CAUTION:
-                'PRECAUCIÓN',
-
-            DISAGREE:
-                'DISCREPA',
-
-            NO_EDGE:
-                'SIN VENTAJA',
-
-            INFO:
-                'INFORMACIÓN'
-
-        }[
-            verdict
-        ] || 'INFORMACIÓN';
-
-
-        if (state) {
-
-            const resolved =
-                result.resolved_context
-                || {};
-
-
-            const shownMarket =
-                resolved.market
-                || market();
-
-
-            const shownSymbol =
-                resolved.symbol
-                || symbol();
-
-
-            const shownTimeframe =
-                resolved.timeframe
-                || timeframe();
-
-
-            state.textContent =
-                (
-                    'Contexto · '
-                    + `${shownMarket} · `
-                    + `${
-                        String(
-                            shownSymbol
-                        ).replace(
-                            '-',
-                            '/'
-                        )
-                    } · `
-                    + `${shownTimeframe}`
-                    + (
-                        result.cached
-                            ? ' · caché'
-                            : ''
-                    )
-                );
-        }
-
-
-        answer.innerHTML = `
-
-            <div
-                class="d-flex flex-wrap justify-content-between gap-2 align-items-center"
-            >
-
-                <strong>
-                    ${esc(
-                        data.headline
-                        || 'Consejo del asistente'
-                    )}
-                </strong>
-
-
-                <span class="badge bg-${badge}">
-
-                    ${esc(verdictLabel)}
-
-                    ·
-
-                    ${
-                        Number(
-                            data.confidence
-                            || 0
-                        ).toFixed(
-                            0
-                        )
-                    }%
-
-                </span>
-
-            </div>
-
-
-            <div class="mt-2">
-                ${esc(
-                    data.advice
-                    || ''
-                )}
-            </div>
-
-
-            ${
-                listHtml(
-                    'Por qué',
-                    data.why
-                )
-            }
-
-
-            ${
-                listHtml(
-                    'Riesgos',
-                    data.risks,
-                    'text-warning'
-                )
-            }
-
-
-            ${
-                listHtml(
-                    'Qué vigilar',
-                    data.what_to_watch,
-                    'text-info'
-                )
-            }
-
-
-            ${
-                listHtml(
-                    'Hipótesis para mejorar el sistema',
-                    data.learning_hypotheses,
-                    'text-success'
-                )
-            }
-
-
-            ${
-                data.personal_risk_note
-
-                    ? `
-                        <div class="small mt-2">
-
-                            <strong>
-                                Tu riesgo:
-                            </strong>
-
-                            ${esc(
-                                data.personal_risk_note
-                            )}
-
-                        </div>
-                    `
-
-                    : ''
-            }
-
-
-            ${
-                data.portfolio_note
-
-                    ? `
-                        <div class="small mt-1">
-
-                            <strong>
-                                Tu portafolio:
-                            </strong>
-
-                            ${esc(
-                                data.portfolio_note
-                            )}
-
-                        </div>
-                    `
-
-                    : ''
-            }
-
-
-            <div
-                class="small text-muted border-top border-secondary mt-2 pt-2"
-            >
-
-                ${esc(
-                    data.system_alignment
-                    || ''
-                )}
-
-                <br>
-
-                Autoridad:
-                ADVISORY_ONLY
-
-            </div>
-        `;
-    }
-
-    // ========================================================================
-    // COMMIT 36R-FIX3
-    // LECTOR SEGURO DE RESPUESTAS API
-    // ========================================================================
-    //
-    // Antes se hacía directamente response.json().
-    //
-    // Si Render respondía con HTML de un 502/503,
-    // perdíamos el error real y sólo veíamos:
-    //
-    // "No se pudo consultar el Asistente IA."
-    //
-    // Ahora veremos el problema verdadero.
+    // API
     // ========================================================================
 
     async function readApiJson(
@@ -784,42 +798,42 @@ console.log(
             await response.text();
 
 
-        let json = null;
+        let json;
 
 
         try {
 
-            json = (
-                text
-                    ? JSON.parse(
-                        text
-                    )
-                    : {}
-            );
+            json = text
+
+                ? JSON.parse(
+                    text
+                )
+
+                : {};
 
 
-        } catch (parseError) {
+        } catch (error) {
 
             const preview =
                 String(
                     text
                     || ''
                 )
-                .replace(
-                    /\s+/g,
-                    ' '
-                )
-                .trim()
-                .slice(
-                    0,
-                    160
-                );
+                    .replace(
+                        /\s+/g,
+                        ' '
+                    )
+                    .trim()
+                    .slice(
+                        0,
+                        160
+                    );
 
 
             throw new Error(
                 (
                     `HTTP ${response.status}: `
-                    + 'el servidor no devolvió JSON'
+                    + 'respuesta no JSON'
                     + (
                         preview
                             ? ` · ${preview}`
@@ -844,45 +858,494 @@ console.log(
 
         return json;
     }
+
+
     // ========================================================================
-    // CONSEJO AUTOMÁTICO
+    // DIBUJAR CONSEJO
     // ========================================================================
 
-    async function loadAuto(
-        force = false
+    function renderHourlyAdvice(
+        result
     ) {
 
-        if (!mount()) {
-
-            return;
-        }
-
-
-        if (
-            !isLoggedIn
-            || !currentUser
-        ) {
-
-            return;
-        }
+        const state =
+            document.getElementById(
+                'ai-hourly-advice-state'
+            );
 
 
         const answer =
             document.getElementById(
-                'ai-assistant-answer'
+                'ai-hourly-advice-answer'
             );
 
 
+        const hour =
+            document.getElementById(
+                'ai-advice-hour'
+            );
+
+
+        if (!answer) {
+
+            return;
+        }
+
+
+        updateQuota(
+            result?.quota
+        );
+
+
         if (
-            force
-            && answer
+            !result
+            || result.success !== true
+        ) {
+
+            if (state) {
+
+                state.textContent =
+                    'Consejo horario no disponible';
+            }
+
+
+            answer.innerHTML =
+                (
+                    '<div class="text-warning">'
+                    + esc(
+                        result?.reason
+                        || result?.error
+                        || (
+                            'La IA no pudo evaluar '
+                            + 'el contexto actual.'
+                        )
+                    )
+                    + '</div>'
+                );
+
+
+            return;
+        }
+
+
+        const data =
+            result.data
+            || {};
+
+
+        const meta =
+            verdictMeta(
+                data.verdict
+            );
+
+
+        const resolved =
+            result.resolved_context
+            || {};
+
+
+        if (state) {
+
+            const focus =
+                resolved.focus_symbol
+
+                    ? (
+                        ' · foco '
+                        + String(
+                            resolved.focus_symbol
+                        ).replace(
+                            '-',
+                            '/'
+                        )
+                        + (
+                            resolved.focus_timeframe
+                                ? ` ${resolved.focus_timeframe}`
+                                : ''
+                        )
+                    )
+
+                    : '';
+
+
+            state.textContent =
+                (
+                    'Evaluación horaria · '
+                    + (
+                        resolved.market
+                        || market()
+                    )
+                    + focus
+                    + (
+                        result.cached
+                            ? ' · caché horario'
+                            : ''
+                    )
+                );
+        }
+
+
+        if (hour) {
+
+            const generated =
+                resolved.generated_at
+
+                    ? new Date(
+                        resolved.generated_at
+                    )
+
+                    : new Date();
+
+
+            hour.textContent =
+                generated.toLocaleTimeString(
+                    [],
+                    {
+                        hour:
+                            '2-digit',
+
+                        minute:
+                            '2-digit'
+                    }
+                );
+        }
+
+
+        answer.innerHTML = `
+
+            <div
+                class="d-flex flex-wrap justify-content-between align-items-center gap-2"
+            >
+
+                <strong
+                    style="font-size: 0.82rem;"
+                >
+                    ${
+                        esc(
+                            data.headline
+                            || 'Evaluación del mercado'
+                        )
+                    }
+                </strong>
+
+
+                <span
+                    class="badge bg-${meta.css}"
+                    style="font-size: 0.64rem;"
+                >
+                    ${esc(meta.label)}
+                    ·
+                    ${
+                        Number(
+                            data.confidence
+                            || 0
+                        ).toFixed(
+                            0
+                        )
+                    }%
+                </span>
+
+            </div>
+
+
+            <div class="mt-1">
+                ${esc(
+                    data.advice
+                    || ''
+                )}
+            </div>
+
+
+            ${
+                compactList(
+                    'Evidencia destacada',
+                    data.why
+                )
+            }
+
+
+            ${
+                compactList(
+                    'Riesgo / protección',
+                    data.risks,
+                    'text-warning'
+                )
+            }
+
+
+            ${
+                compactList(
+                    'Qué vigilar',
+                    data.what_to_watch,
+                    'text-info'
+                )
+            }
+
+
+            ${
+                data.personal_risk_note
+
+                    ? `
+                        <div class="mt-2">
+                            <strong>
+                                Riesgo personal:
+                            </strong>
+                            ${
+                                esc(
+                                    data.personal_risk_note
+                                )
+                            }
+                        </div>
+                    `
+
+                    : ''
+            }
+
+
+            ${
+                data.portfolio_note
+
+                    ? `
+                        <div class="mt-1">
+                            <strong>
+                                Portafolio:
+                            </strong>
+                            ${
+                                esc(
+                                    data.portfolio_note
+                                )
+                            }
+                        </div>
+                    `
+
+                    : ''
+            }
+        `;
+    }
+
+
+    // ========================================================================
+    // DIBUJAR RESPUESTA CHAT
+    // ========================================================================
+
+    function renderChat(
+        result
+    ) {
+
+        const answer =
+            document.getElementById(
+                'ai-chat-answer'
+            );
+
+
+        if (!answer) {
+
+            return;
+        }
+
+
+        updateQuota(
+            result?.quota
+        );
+
+
+        answer.style.display =
+            'block';
+
+
+        if (
+            !result
+            || result.success !== true
         ) {
 
             answer.innerHTML =
                 (
-                    '<div class="small text-info">'
-                    + '🧠 Analizando contexto actual...'
+                    '<div class="text-warning">'
+                    + esc(
+                        result?.reason
+                        || result?.error
+                        || (
+                            'No se pudo responder '
+                            + 'la pregunta.'
+                        )
+                    )
                     + '</div>'
+                );
+
+
+            return;
+        }
+
+
+        const data =
+            result.data
+            || {};
+
+
+        const meta =
+            verdictMeta(
+                data.verdict
+            );
+
+
+        const resolved =
+            result.resolved_context
+            || {};
+
+
+        const contextText = [
+
+            resolved.market,
+
+            resolved.symbol
+
+                ? String(
+                    resolved.symbol
+                ).replace(
+                    '-',
+                    '/'
+                )
+
+                : null,
+
+            resolved.timeframe
+
+        ]
+            .filter(
+                Boolean
+            )
+            .join(
+                ' · '
+            );
+
+
+        answer.innerHTML = `
+
+            ${
+                contextText
+
+                    ? `
+                        <div
+                            class="text-muted mb-1"
+                            style="font-size: 0.66rem;"
+                        >
+                            Contexto:
+                            ${esc(contextText)}
+                        </div>
+                    `
+
+                    : ''
+            }
+
+
+            <div
+                class="d-flex justify-content-between align-items-center gap-2"
+            >
+
+                <strong
+                    style="font-size: 0.80rem;"
+                >
+                    ${
+                        esc(
+                            data.headline
+                            || 'Respuesta'
+                        )
+                    }
+                </strong>
+
+
+                <span
+                    class="badge bg-${meta.css}"
+                    style="font-size: 0.62rem;"
+                >
+                    ${esc(meta.label)}
+                </span>
+
+            </div>
+
+
+            <div class="mt-1">
+                ${esc(
+                    data.advice
+                    || ''
+                )}
+            </div>
+
+
+            ${
+                compactList(
+                    'Por qué',
+                    data.why
+                )
+            }
+
+
+            ${
+                compactList(
+                    'Riesgos',
+                    data.risks,
+                    'text-warning'
+                )
+            }
+
+
+            ${
+                compactList(
+                    'Qué vigilar',
+                    data.what_to_watch,
+                    'text-info'
+                )
+            }
+        `;
+    }
+
+
+    // ========================================================================
+    // CONSEJO AUTOMÁTICO
+    // ========================================================================
+
+    async function loadHourlyAdvice() {
+
+        if (
+            !mount()
+            || adviceLoading
+            || !loggedIn()
+        ) {
+
+            return;
+        }
+
+
+        const hourKey =
+            currentHourKey();
+
+
+        if (
+            lastAdviceHourKey
+            === hourKey
+        ) {
+
+            return;
+        }
+
+
+        adviceLoading =
+            true;
+
+
+        const answer =
+            document.getElementById(
+                'ai-hourly-advice-answer'
+            );
+
+
+        if (answer) {
+
+            answer.innerHTML =
+                (
+                    '<span class="text-info">'
+                    + '🧠 Evaluando señales, mercado, '
+                    + 'riesgo y portafolio...'
+                    + '</span>'
                 );
         }
 
@@ -893,13 +1356,7 @@ console.log(
                 new URLSearchParams({
 
                     market:
-                        market(),
-
-                    symbol:
-                        symbol(),
-
-                    timeframe:
-                        timeframe()
+                        market()
                 });
 
 
@@ -927,21 +1384,27 @@ console.log(
                 );
 
 
-            render(
-                json,
-                'Consejo automático'
+            renderHourlyAdvice(
+                json
             );
+
+
+            if (json.success) {
+
+                lastAdviceHourKey =
+                    hourKey;
+            }
 
 
         } catch (error) {
 
             console.error(
-                '❌ AI Advisor automático:',
+                '❌ Consejo IA horario:',
                 error
             );
 
 
-            render({
+            renderHourlyAdvice({
 
                 success:
                     false,
@@ -950,27 +1413,44 @@ console.log(
                     (
                         error?.message
                         || (
-                            'No se pudo consultar '
-                            + 'el Asistente IA.'
+                            'No se pudo generar '
+                            + 'el consejo horario.'
                         )
                     )
             });
+
+
+        } finally {
+
+            adviceLoading =
+                false;
         }
     }
 
 
     // ========================================================================
-    // PREGUNTA MANUAL
+    // CHAT MANUAL
     // ========================================================================
 
     async function ask() {
 
         if (
-            !isLoggedIn
-            || !currentUser
+            !mount()
+            || chatLoading
         ) {
 
-            render({
+            return;
+        }
+
+
+        toggleChat(
+            true
+        );
+
+
+        if (!loggedIn()) {
+
+            renderChat({
 
                 success:
                     false,
@@ -993,6 +1473,12 @@ console.log(
             );
 
 
+        const button =
+            document.getElementById(
+                'ai-assistant-ask'
+            );
+
+
         const question =
             String(
                 input?.value
@@ -1006,10 +1492,8 @@ console.log(
         }
 
 
-        const button =
-            document.getElementById(
-                'ai-assistant-ask'
-            );
+        chatLoading =
+            true;
 
 
         if (button) {
@@ -1063,9 +1547,8 @@ console.log(
                 );
 
 
-            render(
-                json,
-                'Respuesta a tu pregunta'
+            renderChat(
+                json
             );
 
 
@@ -1082,12 +1565,12 @@ console.log(
         } catch (error) {
 
             console.error(
-                '❌ AI Assistant pregunta:',
+                '❌ Asistente IA pregunta:',
                 error
             );
 
 
-            render({
+            renderChat({
 
                 success:
                     false,
@@ -1105,6 +1588,10 @@ console.log(
 
         } finally {
 
+            chatLoading =
+                false;
+
+
             if (button) {
 
                 button.disabled =
@@ -1115,80 +1602,61 @@ console.log(
 
 
     // ========================================================================
-    // INICIALIZACIÓN
+    // INICIO
     // ========================================================================
 
     document.addEventListener(
         'DOMContentLoaded',
         () => {
 
-            // Esperar autenticación + caches.
-
+            // Esperar login + caches.
             setTimeout(
                 () => {
 
-                    if (!mount()) {
+                    if (mount()) {
 
-                        return;
+                        loadHourlyAdvice();
                     }
-
-
-                    loadAuto(
-                        false
-                    );
-
                 },
                 7000
             );
 
 
-            // Si el usuario cambia símbolo o TF,
-            // revisamos el nuevo contexto.
-
-            document
-                .getElementById(
-                    'symbol-select'
-                )
-                ?.addEventListener(
-                    'change',
-                    () => {
-
-                        setTimeout(
-                            () => loadAuto(
-                                false
-                            ),
-                            2500
-                        );
-                    }
-                );
-
-
-            document
-                .getElementById(
-                    'interval-select'
-                )
-                ?.addEventListener(
-                    'change',
-                    () => {
-
-                        setTimeout(
-                            () => loadAuto(
-                                false
-                            ),
-                            2500
-                        );
-                    }
-                );
-
-
-            // La llamada real suele salir de caché.
-            // No implica una llamada Groq cada 10 minutos.
+            // Revisa una vez por minuto si cambió la hora.
+            // NO llama Groq otra vez durante la misma hora.
 
             setInterval(
-                () => loadAuto(
-                    false
-                ),
-                AUTO_REFRESH_MS
+                () => {
+
+                    if (
+                        currentHourKey()
+                        !== lastAdviceHourKey
+                    ) {
+
+                        loadHourlyAdvice();
+                    }
+                },
+                60 * 1000
+            );
+
+
+            // Si el equipo estuvo suspendido,
+            // comprobar al volver a la pestaña.
+
+            document.addEventListener(
+                'visibilitychange',
+                () => {
+
+                    if (
+                        !document.hidden
+                        &&
+                        currentHourKey()
+                        !== lastAdviceHourKey
+                    ) {
+
+                        loadHourlyAdvice();
+                    }
+                }
             );
         }
     );
