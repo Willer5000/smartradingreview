@@ -38590,7 +38590,7 @@ def _start_background_threads():
     Arranca los threads de background del sistema:
     - verificar_y_ejecutar: análisis programado por ventana horaria + review diario
     - monitor_entries: alertas Telegram cuando precio toca entry de señal previa
-    - learning_worker: evalúa signals pendientes y actualiza aprendizaje (cada 15 min)
+    - learning_worker: evalúa signals pendientes y actualiza aprendizaje (cada 30 min)
     
     Idempotente: si ya se arrancaron, no hace nada.
     Se desactiva con la variable de entorno DISABLE_SCHEDULER=1 (para tests).
@@ -38958,6 +38958,269 @@ def _evaluate_36s_spot_tgp_shadow(
     ] = "NO_SHADOW_BLOCK"
 
     return shadow
+def _evaluate_36s_spot_tgp_shadow(
+    ai_result,
+    context
+):
+    """
+    COMMIT 36S.2B.1
+    SPOT / TGP AI SHADOW CONTROL.
+
+    La IA observa qué habría hecho frente a una señal Spot,
+    pero NO modifica ninguna decisión real.
+
+    NO modifica:
+    - COMPRA_SPOT;
+    - VENTA_SPOT;
+    - NO_OPERAR;
+    - portfolio;
+    - Guardian TGP;
+    - Entry;
+    - SL;
+    - TP;
+    - pesos;
+    - ejecución.
+
+    Su objetivo es acumular evidencia para decidir posteriormente
+    si la IA merece una autoridad limitada en Spot.
+    """
+
+    shadow = {
+        'mode':
+            'SHADOW_ONLY',
+
+        'applied':
+            False,
+
+        'would_block':
+            False,
+
+        'ai_verdict':
+            None,
+
+        'ai_confidence':
+            0,
+
+        'focus_action':
+            None,
+
+        'focus_symbol':
+            None,
+
+        'focus_timeframe':
+            None,
+
+        'portfolio_percentages':
+            {},
+
+        'reason':
+            None
+    }
+
+    # ================================================================
+    # IA NO DISPONIBLE
+    # ================================================================
+
+    if not isinstance(
+        ai_result,
+        dict
+    ):
+        shadow[
+            'reason'
+        ] = 'AI_RESULT_INVALID'
+
+        return shadow
+
+    if not ai_result.get(
+        'success'
+    ):
+        shadow[
+            'reason'
+        ] = 'AI_UNAVAILABLE_OR_FAILED'
+
+        return shadow
+
+    ai_data = (
+        ai_result.get(
+            'data'
+        )
+        or {}
+    )
+
+    if not isinstance(
+        ai_data,
+        dict
+    ):
+        shadow[
+            'reason'
+        ] = 'AI_DATA_INVALID'
+
+        return shadow
+
+    verdict = str(
+        ai_data.get(
+            'verdict'
+        )
+        or ''
+    ).strip().upper()
+
+    try:
+        confidence = int(
+            round(
+                float(
+                    ai_data.get(
+                        'confidence'
+                    )
+                    or 0
+                )
+            )
+        )
+
+    except (
+        TypeError,
+        ValueError
+    ):
+        confidence = 0
+
+    confidence = max(
+        0,
+        min(
+            100,
+            confidence
+        )
+    )
+
+    context = (
+        context
+        if isinstance(
+            context,
+            dict
+        )
+        else {}
+    )
+
+    snapshot = (
+        context.get(
+            'hourly_market_snapshot'
+        )
+        or {}
+    )
+
+    if not isinstance(
+        snapshot,
+        dict
+    ):
+        snapshot = {}
+
+    focus = (
+        snapshot.get(
+            'focus_signal'
+        )
+        or {}
+    )
+
+    if not isinstance(
+        focus,
+        dict
+    ):
+        focus = {}
+
+    portfolio = (
+        snapshot.get(
+            'portfolio_percentages'
+        )
+        or context.get(
+            'portfolio_percentages'
+        )
+        or {}
+    )
+
+    if not isinstance(
+        portfolio,
+        dict
+    ):
+        portfolio = {}
+
+    action = str(
+        focus.get(
+            'action'
+        )
+        or ''
+    ).strip().upper()
+
+    shadow.update({
+        'ai_verdict':
+            verdict
+            or None,
+
+        'ai_confidence':
+            confidence,
+
+        'focus_action':
+            action
+            or None,
+
+        'focus_symbol':
+            focus.get(
+                'symbol'
+            ),
+
+        'focus_timeframe':
+            focus.get(
+                'timeframe'
+            ),
+
+        'portfolio_percentages':
+            portfolio
+    })
+
+    # ================================================================
+    # SÓLO SEÑALES SPOT DIRECCIONALES
+    # ================================================================
+
+    if action not in (
+        'COMPRA_SPOT',
+        'VENTA_SPOT'
+    ):
+        shadow[
+            'reason'
+        ] = 'NO_DIRECTIONAL_SPOT_SIGNAL'
+
+        return shadow
+
+    # ================================================================
+    # HIPÓTESIS SHADOW
+    # ================================================================
+    #
+    # Replicamos la filosofía prudente de Futures:
+    #
+    # DISAGREE fuerte puede ser una señal de que la operación
+    # merecía ser frenada.
+    #
+    # PERO EN 36S.2B.1 NO SE APLICA.
+    # ================================================================
+
+    if (
+        verdict == 'DISAGREE'
+        and confidence >= 80
+    ):
+        shadow[
+            'would_block'
+        ] = True
+
+        shadow[
+            'reason'
+        ] = 'AI_STRONG_DISAGREE_SHADOW'
+
+        return shadow
+
+    shadow[
+        'reason'
+    ] = 'NO_SHADOW_BLOCK'
+
+    return shadow
+
+
 # ============================================================================
 # COMMIT 36R
 # ENDPOINTS AI ADVISOR / ASISTENTE PERSONAL
@@ -39037,7 +39300,7 @@ def api_ai_advice():
 
     Consejo IA automático de mercado.
 
-    - Uno nuevo por hora.
+    - Uno nuevo cada 30 minutos.
     - Independiente para Spot / Futures.
     - Usa contexto GLOBAL del mercado, no sólo el selector actual.
     - Personalizado por usuario.
@@ -39382,7 +39645,52 @@ def api_ai_advice():
                             f'{str(shadow_error)[:120]}'
                         )
                 }        
+        # ================================================================
+        # COMMIT 36S.2B.1
+        # SPOT / TGP AI SHADOW CONTROL
+        # ================================================================
+        #
+        # Reutiliza exactamente la misma evaluación IA del Consejo.
+        #
+        # NO hace otra llamada al proveedor.
+        # NO modifica la recomendación Spot.
+        # NO modifica Guardian.
+        # ================================================================
 
+        if market == 'SPOT':
+            try:
+                result[
+                    'spot_tgp_shadow_control'
+                ] = (
+                    _evaluate_36s_spot_tgp_shadow(
+                        ai_result=result,
+                        context=context
+                    )
+                )
+
+            except Exception as shadow_error:
+                # Fail-open absoluto.
+                #
+                # Incluso un bug dentro del módulo Shadow no puede
+                # impedir que el Consejo IA ni Spot respondan.
+                result[
+                    'spot_tgp_shadow_control'
+                ] = {
+                    'mode':
+                        'SHADOW_ONLY',
+
+                    'applied':
+                        False,
+
+                    'would_block':
+                        False,
+
+                    'reason':
+                        (
+                            'SHADOW_ERROR: '
+                            f'{str(shadow_error)[:120]}'
+                        )
+                }
         result[
             'resolved_context'
         ] = {
