@@ -32430,6 +32430,337 @@ def _ai_portfolio_percentages(
                 )[:120]
         }
 
+def _ai_compact_technical_context(
+    result
+):
+    """
+    Extrae únicamente contexto técnico REAL ya presente en el
+    resultado del sistema.
+
+    No calcula indicadores nuevos.
+    No inventa valores.
+    No modifica decisiones.
+
+    Su finalidad es permitir que la IA forme una tesis técnica
+    propia antes de comparar con la conclusión del Comité.
+    """
+    result = (
+        result
+        if isinstance(
+            result,
+            dict
+        )
+        else {}
+    )
+
+    containers = [
+        result
+    ]
+
+    # Distintas versiones del sistema pueden guardar los indicadores
+    # bajo nombres diferentes. Sólo añadimos contenedores que existan.
+    for key in (
+        'indicators',
+        'technical_indicators',
+        'indicator_values',
+        'market_context',
+        'analysis_context',
+        'context'
+    ):
+        value = result.get(
+            key
+        )
+
+        if isinstance(
+            value,
+            dict
+        ):
+            containers.append(
+                value
+            )
+
+    def _first_value(
+        *names
+    ):
+        for container in containers:
+            for name in names:
+                if (
+                    name in container
+                    and container.get(
+                        name
+                    ) is not None
+                ):
+                    return container.get(
+                        name
+                    )
+
+        return None
+
+    def _compact_object(
+        value
+    ):
+        if not isinstance(
+            value,
+            dict
+        ):
+            return None
+
+        compact = {}
+
+        for key, item in value.items():
+            if len(
+                compact
+            ) >= 12:
+                break
+
+            if (
+                isinstance(
+                    item,
+                    (
+                        str,
+                        int,
+                        float,
+                        bool
+                    )
+                )
+                or item is None
+            ):
+                compact[
+                    str(
+                        key
+                    )
+                ] = item
+
+            elif (
+                isinstance(
+                    item,
+                    list
+                )
+                and len(
+                    item
+                ) <= 8
+                and all(
+                    (
+                        isinstance(
+                            part,
+                            (
+                                str,
+                                int,
+                                float,
+                                bool
+                            )
+                        )
+                        or part is None
+                    )
+                    for part in item
+                )
+            ):
+                compact[
+                    str(
+                        key
+                    )
+                ] = item[:8]
+
+        return (
+            compact
+            or None
+        )
+
+    technical = {}
+
+    # ================================================================
+    # INDICADORES NUMÉRICOS
+    # ================================================================
+    numeric_fields = {
+        'rsi': (
+            'rsi',
+            'rsi_value'
+        ),
+
+        'adx': (
+            'adx',
+            'adx_value'
+        ),
+
+        'plus_di': (
+            'plus_di',
+            'di_plus',
+            'dmi_plus'
+        ),
+
+        'minus_di': (
+            'minus_di',
+            'di_minus',
+            'dmi_minus'
+        ),
+
+        'ema_9': (
+            'ema_9',
+            'ema9'
+        ),
+
+        'ema_21': (
+            'ema_21',
+            'ema21'
+        ),
+
+        'ema_50': (
+            'ema_50',
+            'ema50'
+        ),
+
+        'ema_200': (
+            'ema_200',
+            'ema200'
+        ),
+
+        'mfi': (
+            'mfi',
+            'money_flow_index'
+        ),
+
+        'volume': (
+            'volume',
+            'current_volume'
+        ),
+
+        'atr': (
+            'atr',
+            'atr_value'
+        ),
+    }
+
+    for (
+        target,
+        aliases
+    ) in numeric_fields.items():
+
+        value = _first_value(
+            *aliases
+        )
+
+        number = _ai_number(
+            value,
+            None
+        )
+
+        if number is not None:
+            technical[
+                target
+            ] = number
+
+    # ================================================================
+    # ESTRUCTURA / SMART MONEY
+    # ================================================================
+    text_fields = {
+        'regime': (
+            'regime',
+            'market_regime'
+        ),
+
+        'trend': (
+            'trend',
+            'market_trend'
+        ),
+
+        'structure': (
+            'structure',
+            'market_structure'
+        ),
+
+        'liquidity': (
+            'liquidity',
+            'liquidity_state'
+        ),
+
+        'sweep': (
+            'sweep',
+            'liquidity_sweep'
+        ),
+
+        'mss': (
+            'mss',
+            'market_structure_shift'
+        ),
+
+        'displacement': (
+            'displacement',
+            'displacement_state'
+        ),
+
+        'poi': (
+            'poi',
+            'point_of_interest'
+        ),
+    }
+
+    for (
+        target,
+        aliases
+    ) in text_fields.items():
+
+        value = _first_value(
+            *aliases
+        )
+
+        if isinstance(
+            value,
+            (
+                str,
+                int,
+                float,
+                bool
+            )
+        ):
+            technical[
+                target
+            ] = value
+
+    # ================================================================
+    # CONTEXTOS PEQUEÑOS
+    # ================================================================
+    object_fields = {
+        'smart_money': (
+            'smart_money',
+            'smc'
+        ),
+
+        'volume_profile': (
+            'volume_profile',
+            'volume_profile_analysis'
+        ),
+
+        'fibonacci': (
+            'fibonacci',
+            'fib'
+        ),
+
+        'multi_timeframe': (
+            'multi_timeframe',
+            'mtf',
+            'multi_timeframe_analysis'
+        ),
+    }
+
+    for (
+        target,
+        aliases
+    ) in object_fields.items():
+
+        value = _first_value(
+            *aliases
+        )
+
+        compact = _compact_object(
+            value
+        )
+
+        if compact:
+            technical[
+                target
+            ] = compact
+
+    return technical
 
 def _ai_compact_analysis(
     result,
@@ -32702,6 +33033,13 @@ def _ai_compact_analysis(
 
         'trader_votes':
             votes,
+
+        # Datos técnicos reales disponibles para que la IA forme
+        # una tesis independiente antes de comparar con el Comité.
+        'technical_context':
+            _ai_compact_technical_context(
+                result
+            ),
 
         'source_signal_id':
             (
@@ -33690,6 +34028,11 @@ def _build_ai_advisor_context(
                         )
                         or ''
                     )[:800],
+
+                'technical_context':
+                    _ai_compact_technical_context(
+                        item
+                    ),
 
                 'source_signal_id':
                     item.get(
