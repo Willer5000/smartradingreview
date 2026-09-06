@@ -1547,8 +1547,18 @@ def _compact_signal_for_learning_report(row: Dict) -> Dict:
     # --------------------------------------------------------------
     # 1. CONTEXT
     # --------------------------------------------------------------
-    # El context original puede ser muy grande. Para este PDF sólo
-    # necesitamos tres subbloques.
+    # Compatibilidad doble:
+    #
+    # A) una fila antigua/interna puede todavía traer `context`
+    #    completo;
+    #
+    # B) el fetch optimizado del PDF trae exclusivamente tres rutas
+    #    JSON proyectadas desde Supabase.
+    #
+    # En ambos casos reconstruimos la misma estructura interna que
+    # esperan todos los cálculos del informe.
+    compact_context = {}
+
     context = row.get('context') or {}
 
     if isinstance(context, str):
@@ -1556,8 +1566,6 @@ def _compact_signal_for_learning_report(row: Dict) -> Dict:
             context = json.loads(context)
         except Exception:
             context = {}
-
-    compact_context = {}
 
     if isinstance(context, dict):
         for key in (
@@ -1570,7 +1578,52 @@ def _compact_signal_for_learning_report(row: Dict) -> Dict:
             if isinstance(value, dict) and value:
                 compact_context[key] = value
 
+    projected_contexts = (
+        (
+            'learning',
+            'learning_context'
+        ),
+        (
+            'execution',
+            'execution_context'
+        ),
+        (
+            'futures_publication',
+            'futures_publication_context'
+        ),
+    )
+
+    for target_key, source_key in projected_contexts:
+        value = row.get(source_key)
+
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except Exception:
+                value = {}
+
+        if isinstance(value, dict) and value:
+            compact_context[target_key] = value
+
     compact['context'] = compact_context
+
+    # Los aliases sólo son una representación de transporte desde
+    # Supabase. Una vez reconstruido `context`, no deben permanecer
+    # duplicados dentro de cada señal.
+    compact.pop(
+        'learning_context',
+        None
+    )
+
+    compact.pop(
+        'execution_context',
+        None
+    )
+
+    compact.pop(
+        'futures_publication_context',
+        None
+    )
 
     # --------------------------------------------------------------
     # 2. INDICADORES / ESTRATEGIAS
@@ -1660,7 +1713,7 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
     Esta versión:
     - congela una ventana temporal [cutoff, snapshot_end);
     - obtiene count exacto de esa MISMA ventana;
-    - pagina en bloques de 500 con reintentos;
+    - pagina en bloques de 250 con reintentos;
     - NO asume que un batch parcial sea necesariamente el último;
     - deduplica por id;
     - si la paginación normal queda incompleta, reintenta por ventanas
@@ -1685,7 +1738,10 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
     select_fields = (
         'id, symbol, timeframe, action_normalized, status, '
         'confidence, entry_price, stop_loss, take_profit, leverage, '
-        'created_at, candle_timestamp, system_type, context, '
+        'created_at, candle_timestamp, system_type, '
+        'learning_context:context->learning, '
+        'execution_context:context->execution, '
+        'futures_publication_context:context->futures_publication, '
         'signal_indicators(strategy_name), '
         'signal_results(status, pnl_pct, notes, created_at)'
     )
@@ -1702,7 +1758,7 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
         'fallback_used': False,
         'fallback_slices': 0,
         'errors': [],
-        'model_version': 'report_fetch_pagination_v1'
+        'model_version': 'report_fetch_memory_v2'
     }
 
     # ------------------------------------------------------------------
@@ -1782,25 +1838,69 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
 
         return added
 
-    def _execute_page(start_iso, end_iso, offset, page_size):
+    def _execute_page(
+        start_iso,
+        end_iso,
+        offset,
+        page_size
+    ):
         last_error = None
+
         for attempt in range(3):
             try:
-                return (
+                query = (
                     db.client
-                    .table('signals')
-                    .select(select_fields)
-                    .gte('created_at', start_iso)
-                    .lt('created_at', end_iso)
-                    .order('created_at', desc=True)
-                    .range(offset, offset + page_size - 1)
-                    .execute()
-                ), None
+                    .table(
+                        'signals'
+                    )
+                    .select(
+                        select_fields
+                    )
+                    .gte(
+                        'created_at',
+                        start_iso
+                    )
+                    .lt(
+                        'created_at',
+                        end_iso
+                    )
+                    .order(
+                        'created_at',
+                        desc=True
+                    )
+                    .order(
+                        'created_at',
+                        desc=True,
+                        foreign_table='signal_results'
+                    )
+                    .limit(
+                        1,
+                        foreign_table='signal_results'
+                    )
+                    .range(
+                        offset,
+                        offset + page_size - 1
+                    )
+                )
+
+                return (
+                    query.execute(),
+                    None
+                )
+
             except Exception as exc:
                 last_error = exc
+
                 if attempt < 2:
-                    time.sleep(0.20 * (attempt + 1))
-        return None, last_error
+                    time.sleep(
+                        0.20
+                        * (attempt + 1)
+                    )
+
+        return (
+            None,
+            last_error
+        )
 
     # ------------------------------------------------------------------
     # PASO A: paginación normal de toda la ventana.
