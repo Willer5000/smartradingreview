@@ -1977,7 +1977,6 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
         'id, symbol, timeframe, action_normalized, status, '
         'confidence, entry_price, stop_loss, take_profit, leverage, '
         'created_at, candle_timestamp, system_type, '
-
         'learning_contract_version:context->learning->>contract_version, '
         'learning_cohort:context->learning->>cohort, '
         'learning_market_data_source:context->learning->>market_data_source, '
@@ -1985,22 +1984,16 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
         'learning_source_candle_closed:context->learning->>source_candle_closed, '
         'learning_statistically_eligible:context->learning->>statistically_eligible, '
         'learning_evaluation_role:context->learning->>evaluation_role, '
-
         'learning_pre_gate_rejection:context->learning->pre_gate_rejection, '
         'learning_cautious_shadow:context->learning->cautious_shadow, '
         'learning_quantitative_shadow:context->learning->quantitative_shadow, '
-
         'execution_safety:context->execution->>execution_safety, '
         'execution_tp_quality_score:context->execution->>tp_quality_score, '
         'execution_sl_reliability:context->execution->>sl_reliability, '
         'execution_risk_reward:context->execution->>risk_reward, '
         'execution_safety_breakdown:context->execution->safety_breakdown, '
-
         'publication_eligible:context->futures_publication->>eligible, '
-        'publication_reason_codes:context->futures_publication->reason_codes, '
-
-        'signal_indicators(strategy_name), '
-        'signal_results(status, pnl_pct, notes, created_at)'
+        'publication_reason_codes:context->futures_publication->reason_codes'
     )
 
     diagnostics = {
@@ -2014,8 +2007,12 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
         'primary_pages': 0,
         'fallback_used': False,
         'fallback_slices': 0,
+        'strategy_rows': 0,
+        'strategy_batches': 0,
+        'strategy_hydration_complete': True,
+        'result_mode': 'LEVEL_RECONSTRUCTED_NO_RESULT_JOIN',
         'errors': [],
-        'model_version': 'report_fetch_memory_v3'
+        'model_version': 'report_fetch_memory_v4'
     }
 
     # ------------------------------------------------------------------
@@ -2105,43 +2102,22 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
 
         for attempt in range(3):
             try:
-                query = (
+                response = (
                     db.client
-                    .table(
-                        'signals'
-                    )
-                    .select(
-                        select_fields
-                    )
-                    .gte(
-                        'created_at',
-                        start_iso
-                    )
-                    .lt(
-                        'created_at',
-                        end_iso
-                    )
-                    .order(
-                        'created_at',
-                        desc=True
-                    )
-                    .order(
-                        'created_at',
-                        desc=True,
-                        foreign_table='signal_results'
-                    )
-                    .limit(
-                        1,
-                        foreign_table='signal_results'
-                    )
+                    .table('signals')
+                    .select(select_fields)
+                    .gte('created_at', start_iso)
+                    .lt('created_at', end_iso)
+                    .order('created_at', desc=True)
                     .range(
                         offset,
                         offset + page_size - 1
                     )
+                    .execute()
                 )
 
                 return (
-                    query.execute(),
+                    response,
                     None
                 )
 
@@ -2150,15 +2126,13 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
 
                 if attempt < 2:
                     time.sleep(
-                        0.20
-                        * (attempt + 1)
+                        0.20 * (attempt + 1)
                     )
 
         return (
             None,
             last_error
         )
-
     # ------------------------------------------------------------------
     # PASO A: paginación normal de toda la ventana.
     # ------------------------------------------------------------------
@@ -2291,7 +2265,145 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
         )
     else:
         diagnostics['complete'] = not diagnostics['errors']
+    # ------------------------------------------------------------------
+    # v4: hidratar estrategias FUERA de la consulta principal.
+    # ------------------------------------------------------------------
+    # Sólo se necesitan para las tablas de estrategia/trader.
+    # El gate Futures, Safety, Shadow y walk-forward no dependen de este join.
+    signal_by_id = {
+        str(row.get('id')): row
+        for row in all_data
+        if row.get('id')
+    }
 
+    strategy_ids = []
+
+    for row in all_data:
+        status = str(
+            row.get('status') or ''
+        ).strip().lower()
+
+        if status not in (
+            'tp_hit',
+            'sl_hit',
+            'expired',
+            'missed_opportunity'
+        ):
+            continue
+
+        market = _normalize_market(row)
+
+        if (
+            market != 'spot'
+            and not _is_verified_futures_trade(row)
+        ):
+            continue
+
+        row_id = str(
+            row.get('id') or ''
+        ).strip()
+
+        if row_id:
+            strategy_ids.append(row_id)
+
+    relation_batch_size = 300
+
+    for start in range(
+        0,
+        len(strategy_ids),
+        relation_batch_size
+    ):
+        id_batch = strategy_ids[
+            start:start + relation_batch_size
+        ]
+
+        try:
+            relation_response = (
+                db.client
+                .table('signal_indicators')
+                .select(
+                    'signal_id, strategy_name'
+                )
+                .in_(
+                    'signal_id',
+                    id_batch
+                )
+                .execute()
+            )
+
+            diagnostics[
+                'strategy_batches'
+            ] += 1
+
+            for item in (
+                relation_response.data
+                or []
+            ):
+                if not isinstance(
+                    item,
+                    dict
+                ):
+                    continue
+
+                signal_id = str(
+                    item.get(
+                        'signal_id'
+                    )
+                    or ''
+                ).strip()
+
+                strategy_name = (
+                    item.get(
+                        'strategy_name'
+                    )
+                )
+
+                target = signal_by_id.get(
+                    signal_id
+                )
+
+                if (
+                    target is None
+                    or not strategy_name
+                ):
+                    continue
+
+                target.setdefault(
+                    'signal_indicators',
+                    []
+                ).append({
+                    'strategy_name':
+                        strategy_name
+                })
+
+                diagnostics[
+                    'strategy_rows'
+                ] += 1
+
+        except Exception as exc:
+            diagnostics[
+                'strategy_hydration_complete'
+            ] = False
+
+            diagnostics[
+                'errors'
+            ].append(
+                'strategy_hydration_'
+                f'{start}: '
+                f'{str(exc)[:180]}'
+            )
+
+            logger.warning(
+                '⚠️ No se pudieron hidratar '
+                'estrategias '
+                f'[{start}:'
+                f'{start + len(id_batch)}]: '
+                f'{exc}'
+            )
+
+            # Fail-open:
+            # el PDF principal y el gate continúan.
+            continue
     if not diagnostics['complete']:
         logger.warning(
             '⚠️ Cohorte PDF incompleta: '
