@@ -1523,62 +1523,80 @@ def _calc_stats_by_trader(signals: List[Dict]) -> List[Dict]:
 
 def _compact_signal_for_learning_report(row: Dict) -> Dict:
     """
-    Conserva sólo la información que este PDF realmente utiliza.
+    Construye la representación mínima que necesita el Informe de Aprendizaje.
 
-    Motivo:
-    `signals.context` puede contener snapshots grandes. Si se guardan completos
-    para miles de señales, el worker de Render puede quedarse sin memoria.
+    No modifica la señal original ni Supabase.
 
-    El informe sólo necesita:
-    - context.learning
-    - context.execution
-    - context.futures_publication
-    - estrategias de signal_indicators
-    - el resultado más reciente de signal_results
-
-    No modifica datos en Supabase. Sólo reduce la copia mantenida en RAM
-    mientras se genera el informe.
+    Soporta tres formatos:
+    1. context completo, por compatibilidad;
+    2. subcontextos proyectados de versiones anteriores del fetch;
+    3. campos JSON mínimos proyectados por report_fetch_memory_v3.
     """
     if not isinstance(row, dict):
         return {}
 
-    compact = dict(row)
+    def _decode_json_value(value):
+        if not isinstance(value, str):
+            return value
 
-    # --------------------------------------------------------------
-    # 1. CONTEXT
-    # --------------------------------------------------------------
-    # Compatibilidad doble:
-    #
-    # A) una fila antigua/interna puede todavía traer `context`
-    #    completo;
-    #
-    # B) el fetch optimizado del PDF trae exclusivamente tres rutas
-    #    JSON proyectadas desde Supabase.
-    #
-    # En ambos casos reconstruimos la misma estructura interna que
-    # esperan todos los cálculos del informe.
+        text = value.strip()
+
+        if not text:
+            return None
+
+        try:
+            return json.loads(text)
+        except Exception:
+            return value
+
+    # ==============================================================
+    # CAMPOS BASE
+    # ==============================================================
+    # En lugar de copiar toda la fila recibida desde PostgREST,
+    # conservamos exclusivamente los campos utilizados por el PDF.
+    compact = {
+        'id': row.get('id'),
+        'symbol': row.get('symbol'),
+        'timeframe': row.get('timeframe'),
+        'action_normalized': row.get('action_normalized'),
+        'status': row.get('status'),
+        'confidence': row.get('confidence'),
+        'entry_price': row.get('entry_price'),
+        'stop_loss': row.get('stop_loss'),
+        'take_profit': row.get('take_profit'),
+        'leverage': row.get('leverage'),
+        'created_at': row.get('created_at'),
+        'candle_timestamp': row.get('candle_timestamp'),
+        'system_type': row.get('system_type'),
+    }
+
+    # ==============================================================
+    # CONTEXT
+    # ==============================================================
     compact_context = {}
 
-    context = row.get('context') or {}
+    # --------------------------------------------------------------
+    # A. Compatibilidad con context completo
+    # --------------------------------------------------------------
+    original_context = _decode_json_value(
+        row.get('context')
+    )
 
-    if isinstance(context, str):
-        try:
-            context = json.loads(context)
-        except Exception:
-            context = {}
-
-    if isinstance(context, dict):
+    if isinstance(original_context, dict):
         for key in (
             'learning',
             'execution',
             'futures_publication'
         ):
-            value = context.get(key)
+            value = original_context.get(key)
 
             if isinstance(value, dict) and value:
-                compact_context[key] = value
+                compact_context[key] = dict(value)
 
-    projected_contexts = (
+    # --------------------------------------------------------------
+    # B. Compatibilidad con proyección v2
+    # --------------------------------------------------------------
+    legacy_projected_contexts = (
         (
             'learning',
             'learning_context'
@@ -1593,105 +1611,325 @@ def _compact_signal_for_learning_report(row: Dict) -> Dict:
         ),
     )
 
-    for target_key, source_key in projected_contexts:
-        value = row.get(source_key)
-
-        if isinstance(value, str):
-            try:
-                value = json.loads(value)
-            except Exception:
-                value = {}
+    for target_key, source_key in legacy_projected_contexts:
+        value = _decode_json_value(
+            row.get(source_key)
+        )
 
         if isinstance(value, dict) and value:
-            compact_context[target_key] = value
-
-    compact['context'] = compact_context
-
-    # Los aliases sólo son una representación de transporte desde
-    # Supabase. Una vez reconstruido `context`, no deben permanecer
-    # duplicados dentro de cada señal.
-    compact.pop(
-        'learning_context',
-        None
-    )
-
-    compact.pop(
-        'execution_context',
-        None
-    )
-
-    compact.pop(
-        'futures_publication_context',
-        None
-    )
+            compact_context[target_key] = dict(value)
 
     # --------------------------------------------------------------
-    # 2. INDICADORES / ESTRATEGIAS
+    # C. LEARNING mínimo — v3
     # --------------------------------------------------------------
-    indicators = row.get('signal_indicators') or []
+    learning = dict(
+        compact_context.get('learning')
+        or {}
+    )
 
-    if isinstance(indicators, dict):
-        indicators = [indicators]
+    learning_scalar_fields = (
+        (
+            'contract_version',
+            'learning_contract_version'
+        ),
+        (
+            'cohort',
+            'learning_cohort'
+        ),
+        (
+            'market_data_source',
+            'learning_market_data_source'
+        ),
+        (
+            'market_data_is_synthetic',
+            'learning_market_data_is_synthetic'
+        ),
+        (
+            'source_candle_closed',
+            'learning_source_candle_closed'
+        ),
+        (
+            'statistically_eligible',
+            'learning_statistically_eligible'
+        ),
+        (
+            'evaluation_role',
+            'learning_evaluation_role'
+        ),
+    )
 
-    if isinstance(indicators, list):
-        compact['signal_indicators'] = [
+    for target_key, source_key in learning_scalar_fields:
+        value = _decode_json_value(
+            row.get(source_key)
+        )
+
+        if value is not None:
+            learning[target_key] = value
+
+    learning_object_fields = (
+        (
+            'pre_gate_rejection',
+            'learning_pre_gate_rejection'
+        ),
+        (
+            'cautious_shadow',
+            'learning_cautious_shadow'
+        ),
+        (
+            'quantitative_shadow',
+            'learning_quantitative_shadow'
+        ),
+    )
+
+    for target_key, source_key in learning_object_fields:
+        value = _decode_json_value(
+            row.get(source_key)
+        )
+
+        if isinstance(value, dict) and value:
+            learning[target_key] = value
+
+    if learning:
+        compact_context['learning'] = learning
+
+    # --------------------------------------------------------------
+    # D. EXECUTION mínimo — v3
+    # --------------------------------------------------------------
+    execution = dict(
+        compact_context.get('execution')
+        or {}
+    )
+
+    execution_scalar_fields = (
+        (
+            'execution_safety',
+            'execution_safety'
+        ),
+        (
+            'tp_quality_score',
+            'execution_tp_quality_score'
+        ),
+        (
+            'sl_reliability',
+            'execution_sl_reliability'
+        ),
+        (
+            'risk_reward',
+            'execution_risk_reward'
+        ),
+    )
+
+    for target_key, source_key in execution_scalar_fields:
+        value = _decode_json_value(
+            row.get(source_key)
+        )
+
+        if value is not None:
+            execution[target_key] = value
+
+    safety_breakdown = _decode_json_value(
+        row.get(
+            'execution_safety_breakdown'
+        )
+    )
+
+    if (
+        isinstance(
+            safety_breakdown,
+            dict
+        )
+        and safety_breakdown
+    ):
+        execution[
+            'safety_breakdown'
+        ] = safety_breakdown
+
+    if execution:
+        compact_context[
+            'execution'
+        ] = execution
+
+    # --------------------------------------------------------------
+    # E. PUBLICATION mínimo — v3
+    # --------------------------------------------------------------
+    publication = dict(
+        compact_context.get(
+            'futures_publication'
+        )
+        or {}
+    )
+
+    publication_eligible = (
+        _decode_json_value(
+            row.get(
+                'publication_eligible'
+            )
+        )
+    )
+
+    if publication_eligible is not None:
+        publication[
+            'eligible'
+        ] = publication_eligible
+
+    publication_reason_codes = (
+        _decode_json_value(
+            row.get(
+                'publication_reason_codes'
+            )
+        )
+    )
+
+    if (
+        publication_reason_codes
+        is not None
+    ):
+        publication[
+            'reason_codes'
+        ] = publication_reason_codes
+
+    if publication:
+        compact_context[
+            'futures_publication'
+        ] = publication
+
+    compact[
+        'context'
+    ] = compact_context
+
+    # ==============================================================
+    # INDICADORES / ESTRATEGIAS
+    # ==============================================================
+    indicators = (
+        row.get(
+            'signal_indicators'
+        )
+        or []
+    )
+
+    if isinstance(
+        indicators,
+        dict
+    ):
+        indicators = [
+            indicators
+        ]
+
+    if isinstance(
+        indicators,
+        list
+    ):
+        compact[
+            'signal_indicators'
+        ] = [
             {
-                'strategy_name': item.get('strategy_name')
+                'strategy_name':
+                    item.get(
+                        'strategy_name'
+                    )
             }
             for item in indicators
             if (
-                isinstance(item, dict)
-                and item.get('strategy_name')
+                isinstance(
+                    item,
+                    dict
+                )
+                and item.get(
+                    'strategy_name'
+                )
             )
         ]
     else:
-        compact['signal_indicators'] = []
+        compact[
+            'signal_indicators'
+        ] = []
 
-    # --------------------------------------------------------------
-    # 3. RESULTADO
-    # --------------------------------------------------------------
-    # El informe siempre usa _latest_signal_result(), por lo que no
-    # necesitamos mantener en RAM todo el historial de resultados.
-    results = row.get('signal_results') or []
+    # ==============================================================
+    # ÚLTIMO RESULTADO
+    # ==============================================================
+    results = (
+        row.get(
+            'signal_results'
+        )
+        or []
+    )
 
-    if isinstance(results, dict):
-        results = [results]
+    if isinstance(
+        results,
+        dict
+    ):
+        results = [
+            results
+        ]
 
     latest = {}
 
-    if isinstance(results, list) and results:
+    if (
+        isinstance(
+            results,
+            list
+        )
+        and results
+    ):
         latest = max(
             (
                 item
-                for item in results
-                if isinstance(item, dict)
+                for item
+                in results
+                if isinstance(
+                    item,
+                    dict
+                )
             ),
             key=lambda item: str(
-                item.get('created_at') or ''
+                item.get(
+                    'created_at'
+                )
+                or ''
             ),
             default={}
         )
 
     if latest:
         latest_compact = {
-            'status': latest.get('status'),
-            'pnl_pct': latest.get('pnl_pct'),
-            'notes': latest.get('notes'),
-            'created_at': latest.get('created_at'),
+            'status':
+                latest.get(
+                    'status'
+                ),
+            'pnl_pct':
+                latest.get(
+                    'pnl_pct'
+                ),
+            'notes':
+                latest.get(
+                    'notes'
+                ),
+            'created_at':
+                latest.get(
+                    'created_at'
+                ),
         }
 
-        # Compatibilidad futura:
-        # si signal_results incorpora net_pnl_pct, no lo perderemos.
-        if 'net_pnl_pct' in latest:
-            latest_compact['net_pnl_pct'] = (
-                latest.get('net_pnl_pct')
+        if (
+            'net_pnl_pct'
+            in latest
+        ):
+            latest_compact[
+                'net_pnl_pct'
+            ] = latest.get(
+                'net_pnl_pct'
             )
 
-        compact['signal_results'] = [
+        compact[
+            'signal_results'
+        ] = [
             latest_compact
         ]
+
     else:
-        compact['signal_results'] = []
+        compact[
+            'signal_results'
+        ] = []
 
     return compact
 
@@ -1713,11 +1951,11 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
     Esta versión:
     - congela una ventana temporal [cutoff, snapshot_end);
     - obtiene count exacto de esa MISMA ventana;
-    - pagina en bloques de 250 con reintentos;
+    - pagina en bloques de 1000 con proyección JSON mínima y reintentos;
     - NO asume que un batch parcial sea necesariamente el último;
     - deduplica por id;
-    - si la paginación normal queda incompleta, reintenta por ventanas
-      temporales de 3 días;
+    - si la paginación queda incompleta, conserva el diagnóstico y bloquea
+      cualquier promoción en lugar de ejecutar una segunda descarga masiva;
     - devuelve diagnóstico de cobertura para que el PDF nunca presente una
       muestra truncada como si fuera completa.
 
@@ -1739,9 +1977,28 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
         'id, symbol, timeframe, action_normalized, status, '
         'confidence, entry_price, stop_loss, take_profit, leverage, '
         'created_at, candle_timestamp, system_type, '
-        'learning_context:context->learning, '
-        'execution_context:context->execution, '
-        'futures_publication_context:context->futures_publication, '
+
+        'learning_contract_version:context->learning->>contract_version, '
+        'learning_cohort:context->learning->>cohort, '
+        'learning_market_data_source:context->learning->>market_data_source, '
+        'learning_market_data_is_synthetic:context->learning->>market_data_is_synthetic, '
+        'learning_source_candle_closed:context->learning->>source_candle_closed, '
+        'learning_statistically_eligible:context->learning->>statistically_eligible, '
+        'learning_evaluation_role:context->learning->>evaluation_role, '
+
+        'learning_pre_gate_rejection:context->learning->pre_gate_rejection, '
+        'learning_cautious_shadow:context->learning->cautious_shadow, '
+        'learning_quantitative_shadow:context->learning->quantitative_shadow, '
+
+        'execution_safety:context->execution->>execution_safety, '
+        'execution_tp_quality_score:context->execution->>tp_quality_score, '
+        'execution_sl_reliability:context->execution->>sl_reliability, '
+        'execution_risk_reward:context->execution->>risk_reward, '
+        'execution_safety_breakdown:context->execution->safety_breakdown, '
+
+        'publication_eligible:context->futures_publication->>eligible, '
+        'publication_reason_codes:context->futures_publication->reason_codes, '
+
         'signal_indicators(strategy_name), '
         'signal_results(status, pnl_pct, notes, created_at)'
     )
@@ -1758,7 +2015,7 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
         'fallback_used': False,
         'fallback_slices': 0,
         'errors': [],
-        'model_version': 'report_fetch_memory_v2'
+        'model_version': 'report_fetch_memory_v3'
     }
 
     # ------------------------------------------------------------------
@@ -1908,13 +2165,15 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
     all_data = []
     seen_ids = set()
 
-    # Menos filas simultáneas por respuesta = menor pico de RAM.
-    # Conservamos el mismo máximo teórico de 50k señales.
-    page_size = 250
+    # v3:
+    # la consulta ya no transporta los contextos completos.
+    #
+    # Podemos recuperar más señales por request y reducir de forma
+    # importante el número total de llamadas HTTP a Supabase.
+    page_size = 1000
     offset = 0
 
-    for _ in range(200):  # cap 50k filas
-        response, error = _execute_page(
+    for _ in range(50):  # cap 50k filas
             cutoff,
             snapshot_end,
             offset,
@@ -1966,69 +2225,49 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
     )
 
     # ------------------------------------------------------------------
-    # PASO B: fallback por ventanas de 3 días.
-    # Sólo se ejecuta si el count exacto demuestra que faltan filas.
+    # PASO B — política fail-safe v3
     # ------------------------------------------------------------------
+    #
+    # La versión anterior volvía a descargar la ventana completa de
+    # 90 días dividida en slices de 3 días si la primera lectura quedaba
+    # incompleta.
+    #
+    # En Render esto podía duplicar:
+    #
+    #     all_data
+    #     +
+    #     fallback_data
+    #
+    # y además duplicaba gran parte del tiempo de consultas.
+    #
+    # Desde v3 NO hacemos una segunda descarga masiva dentro del mismo
+    # request HTTP.
+    #
+    # Si la primera lectura queda incompleta:
+    # - el PDF puede seguir generándose;
+    # - la cobertura queda explícitamente marcada;
+    # - Commit 37 queda bloqueado a NOT_READY más adelante.
+    #
+    # Nunca presentamos una muestra parcial como evidencia suficiente.
+    # ------------------------------------------------------------------
+
     if primary_incomplete:
-        diagnostics['fallback_used'] = True
-        logger.warning(
-            'Fetch 90d incompleto: '
-            f'{len(all_data)}/{expected}. Reintentando por ventanas temporales.'
+        diagnostics[
+            'fallback_used'
+        ] = False
+
+        diagnostics[
+            'errors'
+        ].append(
+            'primary_incomplete_no_heavy_fallback'
         )
 
-        fallback_data = []
-        fallback_seen = set()
-        slice_start = cutoff_dt
-        slice_size = timedelta(days=3)
-
-        while slice_start < snapshot_end_dt:
-            slice_end = min(
-                slice_start + slice_size,
-                snapshot_end_dt
-            )
-            diagnostics['fallback_slices'] += 1
-
-            slice_offset = 0
-            for _ in range(40):  # hasta 10k por slice con páginas de 250
-                response, error = _execute_page(
-                    slice_start.isoformat(),
-                    slice_end.isoformat(),
-                    slice_offset,
-                    page_size
-                )
-
-                if error is not None:
-                    diagnostics['errors'].append(
-                        'fallback_'
-                        f'{slice_start.isoformat()}_offset_{slice_offset}: '
-                        f'{str(error)[:180]}'
-                    )
-                    logger.warning(
-                        'Fallback temporal falló '
-                        f'{slice_start.isoformat()} offset={slice_offset}: {error}'
-                    )
-                    break
-
-                batch = response.data or []
-                if not batch:
-                    break
-
-                added = _append_unique(
-                    fallback_data,
-                    fallback_seen,
-                    batch
-                )
-                slice_offset += len(batch)
-
-                if added == 0:
-                    break
-
-            slice_start = slice_end
-
-        # El fallback reemplaza al primario sólo si recupera más filas.
-        if len(fallback_data) > len(all_data):
-            all_data = fallback_data
-            seen_ids = fallback_seen
+        logger.warning(
+            '⚠️ Fetch 90d incompleto: '
+            f'{len(all_data)}/{expected}. '
+            'Se omite el fallback pesado para proteger '
+            'memoria/timeout; la promoción quedará bloqueada.'
+        )
 
     # Orden determinista global para tablas y walk-forward.
     all_data.sort(
@@ -2599,12 +2838,65 @@ def _fetch_learning_data() -> Dict:
         data['futures_shadow_analysis'] = _calc_shadow_futures_analysis(
             cohorts['futures_shadow']
         )
-        data['futures_walk_forward_analysis'] = (
+        walk_forward_analysis = (
             _calc_cautious_walk_forward_analysis(
                 cohorts['futures_verified'],
                 cohorts['futures_shadow']
             )
         )
+
+        # ==========================================================
+        # GATE DE INTEGRIDAD DE DATOS
+        # ==========================================================
+        #
+        # Una lectura parcial nunca puede autorizar Commit 37,
+        # aunque las métricas calculadas sobre ese subconjunto
+        # parezcan positivas.
+        #
+        # Esto sólo afecta al gate del informe.
+        # No modifica reglas operativas ni señales.
+        if not fetch_diagnostics.get(
+            'complete',
+            False
+        ):
+            promotion_reasons = list(
+                walk_forward_analysis.get(
+                    'promotion_reasons'
+                )
+                or []
+            )
+
+            integrity_reason = (
+                'Lectura Supabase de la cohorte '
+                f'{REPORT_DAYS_BACK}d incompleta: '
+                'no se permite promoción con una '
+                'muestra potencialmente truncada.'
+            )
+
+            if (
+                integrity_reason
+                not in promotion_reasons
+            ):
+                promotion_reasons.append(
+                    integrity_reason
+                )
+
+            walk_forward_analysis[
+                'promotion_ready'
+            ] = False
+
+            walk_forward_analysis[
+                'promotion_status'
+            ] = 'NOT_READY'
+
+            walk_forward_analysis[
+                'promotion_reasons'
+            ] = promotion_reasons
+
+        data[
+            'futures_walk_forward_analysis'
+        ] = walk_forward_analysis
+      
         data['futures_safety_breakdown_analysis'] = (
             _calc_execution_safety_breakdown_analysis(
                 cohorts['futures_shadow']
