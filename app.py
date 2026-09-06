@@ -26498,9 +26498,34 @@ def api_futures_analyze():
         symbol = data.get('symbol', 'BTC-USDT')
         timeframe = data.get('timeframe', '1h')
         
-        result = futures.analyze_futures_market(symbol, timeframe)
-        
+        result = futures.analyze_futures_market(
+            symbol,
+            timeframe
+        )
+
         if not result:
+
+            return jsonify({
+                'success':
+                    False,
+
+                'error':
+                    'Análisis vacío'
+            }), 500
+
+
+        # ============================================================
+        # COMMIT 36S.1
+        # SEGUNDA PUERTA DE CALIDAD IA
+        # ============================================================
+
+        result = (
+            _apply_36s_futures_ai_control(
+                result,
+                symbol,
+                timeframe
+            )
+        )
             return jsonify({'success': False, 'error': 'Análisis vacío'}), 500
 
         analysis_status = _classify_futures_analysis_result(
@@ -27016,7 +27041,423 @@ def _refresh_futures_signal_lifecycle(
         )
         return lifecycle
 
+# ============================================================================
+# COMMIT 36S.1 — AI ACTIVE CONTROL PARA FUTURES
+# ============================================================================
 
+def _apply_36s_futures_ai_control(
+    result,
+    symbol,
+    timeframe
+):
+    """
+    Segunda puerta de calidad.
+
+    Sólo puede BLOQUEAR una señal Futures que el motor
+    ya aprobó.
+
+    Nunca promociona una señal rechazada.
+    Nunca modifica Entry / SL / TP / leverage.
+    """
+
+    if (
+        not isinstance(
+            result,
+            dict
+        )
+        or not result.get(
+            "success"
+        )
+    ):
+
+        return result
+
+
+    decision = (
+        result.get(
+            "decision"
+        )
+        or {}
+    )
+
+
+    levels = (
+        result.get(
+            "levels"
+        )
+        or {}
+    )
+
+
+    action = str(
+        decision.get(
+            "action"
+        )
+        or ""
+    ).upper()
+
+
+    publication_status = str(
+
+        levels.get(
+            "publication_status"
+        )
+
+        or result.get(
+            "publication_status"
+        )
+
+        or (
+            "ANALYSIS_ONLY"
+            if levels.get(
+                "is_rejected"
+            )
+            else
+            "EXECUTABLE_SIGNAL"
+        )
+
+    ).upper()
+
+
+    # Sólo interviene sobre una señal
+    # que YA superó el motor.
+
+    if (
+        action
+        not in (
+            "LONG",
+            "SHORT"
+        )
+
+        or publication_status
+        != "EXECUTABLE_SIGNAL"
+    ):
+
+        return result
+
+
+    # Mismo contrato temporal:
+    # vela cerrada + perpetuo real.
+
+    if (
+        str(
+            result.get(
+                "analysis_mode"
+            )
+            or ""
+        ).upper()
+        != "CLOSED_CANDLE"
+
+        or result.get(
+            "source_candle_closed"
+        )
+        is not True
+
+        or result.get(
+            "market_data_is_synthetic"
+        )
+        is not False
+    ):
+
+        return result
+
+
+    try:
+
+        from ai_advisor import (
+            run_ai_advisor,
+            evaluate_ai_control,
+            record_ai_control_event,
+            get_ai_control_event,
+        )
+
+
+        source_signal_id = (
+
+            result.get(
+                "signal_id"
+            )
+
+            or levels.get(
+                "signal_id"
+            )
+        )
+
+
+        source_candle = (
+
+            result.get(
+                "source_candle_timestamp"
+            )
+
+            or result.get(
+                "previous_candle_timestamp"
+            )
+        )
+
+
+        dedup_key = (
+            "FUTURES_SIGNAL|"
+            f"{source_signal_id or symbol}|"
+            f"{timeframe}|"
+            f"{source_candle or ''}"
+        )
+
+
+        # ============================================================
+        # UNA VELA FUENTE = UNA DECISIÓN 36S
+        # ============================================================
+
+        control = (
+            get_ai_control_event(
+                dedup_key
+            )
+        )
+
+
+        ai_result = None
+
+
+        if control is None:
+
+            context = {
+
+                "policy": {
+
+                    "goal":
+                        (
+                            "Improve net expectancy and "
+                            "win rate without weakening "
+                            "hard risk controls."
+                        ),
+
+                    "authority":
+                        "36S_CAUTIOUS_OVERLAY",
+
+                    "cannot_promote_rejected_signal":
+                        True,
+                },
+
+
+                "market":
+                    "FUTURES",
+
+
+                "event_type":
+                    "EXECUTABLE_SIGNAL_REVIEW",
+
+
+                "selected_signal":
+                    _ai_compact_analysis(
+                        result,
+                        symbol,
+                        timeframe,
+                    ),
+
+
+                "reviewtrader":
+                    _ai_review_snapshot(
+                        symbol,
+                        timeframe,
+                        action,
+                        "futures",
+                    ),
+            }
+
+
+            ai_result = (
+                run_ai_advisor(
+
+                    user_name=
+                        "SYSTEM",
+
+                    usage_type=
+                        "AUTO",
+
+                    context_type=
+                        "DECISION_CONTROL",
+
+                    event_type=
+                        "FUTURES_EXECUTABLE",
+
+                    market=
+                        "FUTURES",
+
+                    context=
+                        context,
+
+                    symbol=
+                        symbol,
+
+                    timeframe=
+                        timeframe,
+
+                    source_signal_id=(
+                        source_signal_id
+                    ),
+                )
+            )
+
+
+            control = (
+                evaluate_ai_control(
+
+                    ai_result=
+                        ai_result,
+
+                    context_type=
+                        "SIGNAL",
+
+                    original_action=
+                        action,
+
+                    original_publication_status=(
+                        publication_status
+                    ),
+                )
+            )
+
+
+            record_ai_control_event(
+
+                dedup_key=
+                    dedup_key,
+
+                context_type=
+                    "SIGNAL",
+
+                market=
+                    "FUTURES",
+
+                symbol=
+                    symbol,
+
+                timeframe=
+                    timeframe,
+
+                control=
+                    control,
+
+                source_signal_id=(
+                    source_signal_id
+                ),
+
+                source_candle_timestamp=(
+                    source_candle
+                ),
+            )
+
+
+        result[
+            "ai_control"
+        ] = control
+
+
+        if (
+            isinstance(
+                ai_result,
+                dict
+            )
+
+            and ai_result.get(
+                "success"
+            )
+        ):
+
+            result[
+                "ai_advisor_decision"
+            ] = (
+                ai_result.get(
+                    "data"
+                )
+                or {}
+            )
+
+
+        if not control.get(
+            "applied"
+        ):
+
+            return result
+
+
+        # ============================================================
+        # BLOQUEO ACTIVO
+        # ============================================================
+        #
+        # Conservamos LONG/SHORT para auditoría.
+        #
+        # La IA revoca PUBLICACIÓN,
+        # no reescribe la historia.
+        # ============================================================
+
+        levels[
+            "publication_status"
+        ] = "AI_BLOCKED"
+
+
+        levels[
+            "is_rejected"
+        ] = True
+
+
+        levels[
+            "ai_control_blocked"
+        ] = True
+
+
+        levels[
+            "ai_control_reason"
+        ] = control.get(
+            "reason"
+        )
+
+
+        result[
+            "publication_status"
+        ] = "AI_BLOCKED"
+
+
+        result[
+            "publication_eligible"
+        ] = False
+
+
+        result[
+            "ai_control_blocked"
+        ] = True
+
+
+        result[
+            "levels"
+        ] = levels
+
+
+        print(
+            "🤖🛑 [36S.1] "
+            f"AI bloqueó {action} "
+            f"{symbol} {timeframe} "
+            f"conf="
+            f"{control.get('ai_confidence')}"
+        )
+
+
+        return result
+
+
+    except Exception as e:
+
+        # IA falla:
+        # sistema determinista continúa.
+
+        print(
+            "⚠️ [36S.1] "
+            "AI Control Futures "
+            f"no disponible: {e}"
+        )
+
+
+        return result
 def _analyze_futures_all_parallel():
     """
     Ejecuta los 30 análisis de Futuros de forma secuencial para limitar memoria,
@@ -27185,8 +27626,39 @@ def _analyze_futures_all_parallel():
             
                 del _df
 
-            results[(symbol, timeframe)] = r
-            lifecycle = _refresh_futures_signal_lifecycle(
+            # =========================================================
+            # COMMIT 36S.1
+            # =========================================================
+            #
+            # Una decisión pertenece a la VELA CERRADA.
+            #
+            # Si estamos reutilizando exactamente la misma vela,
+            # conservamos la decisión 36S anterior.
+            # =========================================================
+
+            if not r.get(
+                '_reused_closed_candle'
+            ):
+
+                r = (
+                    _apply_36s_futures_ai_control(
+                        r,
+                        symbol,
+                        timeframe
+                    )
+                )
+
+
+            results[
+                (
+                    symbol,
+                    timeframe
+                )
+            ] = r
+
+
+            lifecycle = (
+                _refresh_futures_signal_lifecycle(
                 lifecycle,
                 symbol,
                 timeframe,
@@ -27621,8 +28093,46 @@ def _futures_manual_risk_profile(result):
         )
     ).upper()
 
-    # Una señal Premium/ejecutable no necesita override manual.
-    if engine_status == 'EXECUTABLE_SIGNAL':
+
+    # ================================================================
+    # COMMIT 36S.1
+    # ================================================================
+    #
+    # Si el AI Control bloqueó una Premium,
+    # NO puede reingresar por el guardado manual.
+    # ================================================================
+
+    if (
+        engine_status
+        == 'AI_BLOCKED'
+    ):
+
+        ai_blocked = dict(
+            blocked
+        )
+
+        ai_blocked[
+            'reason'
+        ] = (
+            'La señal superó el motor técnico, '
+            'pero fue bloqueada por la segunda '
+            'puerta de calidad IA 36S.'
+        )
+
+        return ai_blocked
+
+
+    # Una señal Premium/ejecutable
+    # no necesita override manual.
+
+    if (
+        engine_status
+        == 'EXECUTABLE_SIGNAL'
+    ):
+
+        return dict(
+            blocked
+        )
         return dict(blocked)
 
     def _num(value, default=None):
@@ -33617,35 +34127,31 @@ def monitor_guardian_telegram_loop():
 
 
                             # ==========================================
-                            # COMMIT 36Q.1
-                            # GUARDIAN EVENT LEDGER
-                            # ==========================================
-                            #
-                            # Se registra ANTES de Telegram.
-                            #
-                            # Por tanto el aprendizaje representa
-                            # lo que Guardian recomendó,
-                            # no solamente mensajes enviados.
-                            #
-                            # Si el ledger falla:
-                            # Guardian y Telegram continúan.
+                            # 36Q
+                            # GUARDIAN ORIGINAL PARA APRENDIZAJE
                             # ==========================================
 
                             try:
 
                                 recorded = (
                                     record_guardian_learning_event(
+
                                         signal=sig,
+
                                         advice=advice,
+
                                         current_price=(
                                             current_price
                                         ),
+
                                         event_action=(
                                             event_action
                                         ),
+
                                         event_bucket=(
                                             bucket
                                         ),
+
                                         user_name=(
                                             user
                                         )
@@ -33655,114 +34161,6 @@ def monitor_guardian_telegram_loop():
 
                                 if recorded:
 
-                                    # ==========================================
-                                    # COMMIT 36R.3
-                                    # AI CRITIC DEL GUARDIAN
-                                    # ==========================================
-
-                                    try:
-
-                                        from ai_advisor import (
-                                            run_ai_advisor
-                                        )
-
-
-                                        ai_guardian_context = (
-                                            _build_ai_guardian_context(
-
-                                                user=user,
-
-                                                signal=sig,
-
-                                                advice=advice,
-
-                                                current_price=(
-                                                    current_price
-                                                ),
-
-                                                event_action=(
-                                                    event_action
-                                                ),
-
-                                                bucket=(
-                                                    bucket
-                                                )
-                                            )
-                                        )
-
-
-                                        ai_guardian_result = (
-                                            run_ai_advisor(
-
-                                                user_name=user,
-
-                                                usage_type='AUTO',
-
-                                                context_type='GUARDIAN',
-
-                                                event_type=(
-                                                    f'GUARDIAN_'
-                                                    f'{event_action}'
-                                                ),
-
-                                                market='FUTURES',
-
-                                                context=(
-                                                    ai_guardian_context
-                                                ),
-
-                                                symbol=symbol,
-
-                                                timeframe=timeframe,
-
-                                                related_saved_signal_id=(
-                                                    sig.get(
-                                                        'id'
-                                                    )
-                                                ),
-
-                                                source_signal_id=(
-                                                    sig.get(
-                                                        'source_signal_id'
-                                                    )
-                                                )
-                                            )
-                                        )
-
-
-                                        if (
-                                            ai_guardian_result.get(
-                                                'success'
-                                            )
-                                        ):
-
-                                            ai_data = (
-                                                ai_guardian_result.get(
-                                                    'data',
-                                                    {}
-                                                )
-                                                or {}
-                                            )
-
-
-                                            print(
-                                                "🤖 [36R.3] "
-                                                "Guardian AI: "
-                                                f"{event_action} → "
-                                                f"{ai_data.get('verdict')} "
-                                                f"{symbol} "
-                                                f"{timeframe}"
-                                            )
-
-
-                                    except Exception as ai_guardian_err:
-
-                                        # IA jamás rompe Guardian.
-                                        print(
-                                            "⚠️ [36R.3] "
-                                            "AI Guardian no disponible: "
-                                            f"{ai_guardian_err}"
-                                        )
                                     print(
                                         "🧠 [36Q.1] "
                                         "Guardian event: "
@@ -33782,6 +34180,335 @@ def monitor_guardian_telegram_loop():
                                     f"{learning_err}"
                                 )
 
+
+                            # ==========================================
+                            # COMMIT 36S.1
+                            # AI CONTROL ACTIVO DEL GUARDIAN
+                            # ==========================================
+                            #
+                            # 36Q conserva lo que Guardian ORIGINAL
+                            # recomendó.
+                            #
+                            # 36S puede limitar únicamente:
+                            #
+                            # EXTEND
+                            #     -> HOLD
+                            #
+                            # PROTECT_AND_EXTEND
+                            #     -> PROTECT
+                            #
+                            # Nunca debilita:
+                            #
+                            # PROTECT
+                            # REDUCE
+                            # EXIT
+                            # ==========================================
+
+                            effective_event_action = (
+                                event_action
+                            )
+
+
+                            effective_advice = (
+                                advice
+                            )
+
+
+                            try:
+
+                                from ai_advisor import (
+                                    run_ai_advisor,
+                                    evaluate_ai_control,
+                                    record_ai_control_event,
+                                    get_ai_control_event,
+                                )
+
+
+                                control_key = (
+                                    "GUARDIAN|"
+                                    f"{sig.get('id')}|"
+                                    f"{event_action}|"
+                                    f"{bucket}"
+                                )
+
+
+                                # ======================================
+                                # UNA VEZ POR EVENTO/BANDA
+                                # ======================================
+
+                                control = (
+                                    get_ai_control_event(
+                                        control_key
+                                    )
+                                )
+
+
+                                if control is None:
+
+                                    ai_guardian_context = (
+                                        _build_ai_guardian_context(
+
+                                            user=user,
+
+                                            signal=sig,
+
+                                            advice=advice,
+
+                                            current_price=(
+                                                current_price
+                                            ),
+
+                                            event_action=(
+                                                event_action
+                                            ),
+
+                                            bucket=(
+                                                bucket
+                                            )
+                                        )
+                                    )
+
+
+                                    ai_guardian_result = (
+                                        run_ai_advisor(
+
+                                            user_name=user,
+
+                                            usage_type='AUTO',
+
+                                            context_type='GUARDIAN',
+
+                                            event_type=(
+                                                f'GUARDIAN_'
+                                                f'{event_action}'
+                                            ),
+
+                                            market='FUTURES',
+
+                                            context=(
+                                                ai_guardian_context
+                                            ),
+
+                                            symbol=symbol,
+
+                                            timeframe=timeframe,
+
+                                            related_saved_signal_id=(
+                                                sig.get(
+                                                    'id'
+                                                )
+                                            ),
+
+                                            source_signal_id=(
+                                                sig.get(
+                                                    'source_signal_id'
+                                                )
+                                            )
+                                        )
+                                    )
+
+
+                                    control = (
+                                        evaluate_ai_control(
+
+                                            ai_result=(
+                                                ai_guardian_result
+                                            ),
+
+                                            context_type=
+                                                'GUARDIAN',
+
+                                            original_action=(
+                                                event_action
+                                            )
+                                        )
+                                    )
+
+
+                                    record_ai_control_event(
+
+                                        dedup_key=(
+                                            control_key
+                                        ),
+
+                                        context_type=
+                                            'GUARDIAN',
+
+                                        market=
+                                            'FUTURES',
+
+                                        symbol=
+                                            symbol,
+
+                                        timeframe=
+                                            timeframe,
+
+                                        control=
+                                            control,
+
+                                        related_saved_signal_id=(
+                                            sig.get(
+                                                'id'
+                                            )
+                                        ),
+
+                                        source_signal_id=(
+                                            sig.get(
+                                                'source_signal_id'
+                                            )
+                                        )
+                                    )
+
+
+                                    if (
+                                        ai_guardian_result.get(
+                                            'success'
+                                        )
+                                    ):
+
+                                        ai_data = (
+                                            ai_guardian_result.get(
+                                                'data'
+                                            )
+                                            or {}
+                                        )
+
+
+                                        print(
+                                            "🤖 [36S.1] "
+                                            "Guardian AI: "
+                                            f"{event_action} → "
+                                            f"{ai_data.get('verdict')} "
+                                            f"{symbol} "
+                                            f"{timeframe}"
+                                        )
+
+
+                                # ======================================
+                                # APLICAR AUTORIDAD
+                                # ======================================
+
+                                if control.get(
+                                    'applied'
+                                ):
+
+                                    final_action = str(
+
+                                        control.get(
+                                            'final_action',
+                                            event_action
+                                        )
+
+                                        or event_action
+
+                                    ).upper()
+
+
+                                    # ==============================
+                                    # EXTEND → HOLD
+                                    # ==============================
+
+                                    if (
+                                        final_action
+                                        == 'HOLD'
+                                    ):
+
+                                        print(
+                                            "🤖🛡️ [36S.1] "
+                                            "EXTEND bloqueado "
+                                            "por IA "
+                                            f"{user} "
+                                            f"{symbol} "
+                                            f"{timeframe}"
+                                        )
+
+
+                                        # 36Q ya guardó el evento
+                                        # ORIGINAL para aprendizaje.
+
+                                        continue
+
+
+                                    effective_event_action = (
+                                        final_action
+                                    )
+
+
+                                    # ==============================
+                                    # PROTECT_AND_EXTEND
+                                    #        ↓
+                                    # PROTECT
+                                    # ==============================
+
+                                    if (
+                                        event_action
+                                        == 'PROTECT_AND_EXTEND'
+
+                                        and final_action
+                                        == 'PROTECT'
+                                    ):
+
+                                        effective_advice = dict(
+                                            advice
+                                        )
+
+
+                                        effective_advice[
+                                            'management_action'
+                                        ] = 'PROTECT'
+
+
+                                        print(
+                                            "🤖🛡️ [36S.1] "
+                                            "PROTECT_AND_EXTEND "
+                                            "reducido a PROTECT "
+                                            f"{user} "
+                                            f"{symbol} "
+                                            f"{timeframe}"
+                                        )
+
+
+                            except Exception as ai_guardian_err:
+
+                                # ======================================
+                                # FAIL OPEN
+                                # ======================================
+                                #
+                                # Groq caído:
+                                # Guardian original sigue funcionando.
+                                # ======================================
+
+                                print(
+                                    "⚠️ [36S.1] "
+                                    "AI Guardian Control "
+                                    "no disponible: "
+                                    f"{ai_guardian_err}"
+                                )
+
+
+                            event_action = (
+                                effective_event_action
+                            )
+
+
+                            advice = (
+                                effective_advice
+                            )
+
+
+                            # Si 36S cambió la acción,
+                            # recalcular bucket para Telegram/dedup.
+
+                            bucket = (
+                                _guardian_futures_level_bucket(
+
+                                    sig,
+
+                                    advice,
+
+                                    event_action
+                                )
+                            )
 
                             reservation = (
                                 _guardian_alert_can_send(
