@@ -26526,7 +26526,6 @@ def api_futures_analyze():
                 timeframe
             )
         )
-            return jsonify({'success': False, 'error': 'Análisis vacío'}), 500
 
         analysis_status = _classify_futures_analysis_result(
             symbol=symbol,
@@ -27659,10 +27658,11 @@ def _analyze_futures_all_parallel():
 
             lifecycle = (
                 _refresh_futures_signal_lifecycle(
-                lifecycle,
-                symbol,
-                timeframe,
-                r
+                    lifecycle,
+                    symbol,
+                    timeframe,
+                    r
+                )
             )
 
             # ---------------------------------------------------------
@@ -28133,7 +28133,6 @@ def _futures_manual_risk_profile(result):
         return dict(
             blocked
         )
-        return dict(blocked)
 
     def _num(value, default=None):
         try:
