@@ -30515,7 +30515,58 @@ def saved_futures_lifecycle_loop():
                     "Guardian learning no disponible: "
                     f"{guardian_learning_err}"
                 )
+            # ========================================================
+            # COMMIT 36R.7
+            # RESULTADOS DE LA PROPIA IA
+            # ========================================================
 
+            try:
+
+                from ai_advisor import (
+                    settle_ai_outcomes
+                )
+
+
+                ai_outcome_stats = (
+                    settle_ai_outcomes(
+                        limit=100
+                    )
+                    or {}
+                )
+
+
+                if (
+                    ai_outcome_stats.get(
+                        'settled',
+                        0
+                    ) > 0
+
+                    or ai_outcome_stats.get(
+                        'errors',
+                        0
+                    ) > 0
+                ):
+
+                    print(
+                        "🤖 [36R.7] "
+                        f"pending="
+                        f"{ai_outcome_stats.get('pending', 0)} "
+                        f"settled="
+                        f"{ai_outcome_stats.get('settled', 0)} "
+                        f"errors="
+                        f"{ai_outcome_stats.get('errors', 0)}"
+                    )
+
+
+            except Exception as ai_outcome_err:
+
+                # La evaluación IA nunca rompe lifecycle.
+
+                print(
+                    "⚠️ [36R.7] "
+                    "AI outcome no disponible: "
+                    f"{ai_outcome_err}"
+                )
 
         except Exception as e:
 
@@ -31610,6 +31661,1641 @@ def _build_futures_guardian_telegram_message(
         lines
     )
 
+# ============================================================================
+# COMMIT 36R — CONTEXTO IA
+# ============================================================================
+
+def _ai_number(
+    value,
+    default=None
+):
+
+    try:
+
+        number = float(
+            value
+        )
+
+        return (
+            number
+            if math.isfinite(
+                number
+            )
+            else default
+        )
+
+    except (
+        TypeError,
+        ValueError
+    ):
+
+        return default
+
+
+def _ai_portfolio_percentages(
+    user
+):
+    """
+    La IA recibe porcentajes.
+    No recibe cantidades BTC/PAXG del usuario.
+    """
+
+    try:
+
+        from supabase_client import (
+            supabase_client
+        )
+
+
+        portfolio = (
+            supabase_client
+            .get_user_portfolio(
+                user
+            )
+            or {}
+        )
+
+
+        btc = (
+            _ai_number(
+                portfolio.get(
+                    'btc'
+                ),
+                0.0
+            )
+            or 0.0
+        )
+
+
+        paxg = (
+            _ai_number(
+                portfolio.get(
+                    'paxg'
+                ),
+                0.0
+            )
+            or 0.0
+        )
+
+
+        usdt = (
+            _ai_number(
+                portfolio.get(
+                    'usdt'
+                ),
+                0.0
+            )
+            or 0.0
+        )
+
+
+        btc_price = (
+            _ai_number(
+                portfolio.get(
+                    'btc_price_at_update'
+                ),
+                0.0
+            )
+            or 0.0
+        )
+
+
+        paxg_price = (
+            _ai_number(
+                portfolio.get(
+                    'paxg_price_at_update'
+                ),
+                0.0
+            )
+            or 0.0
+        )
+
+
+        # Si tenemos precios Spot más recientes
+        # en el caché, preferirlos.
+
+        spot_cache = (
+            getattr(
+                expert_system,
+                'spot_active_signals_cache',
+                {}
+            )
+            or {}
+        )
+
+
+        for item in (
+            spot_cache.values()
+        ):
+
+            if not isinstance(
+                item,
+                dict
+            ):
+
+                continue
+
+
+            symbol = str(
+                item.get(
+                    'symbol',
+                    ''
+                )
+                or ''
+            ).upper()
+
+
+            price = (
+                _ai_number(
+                    item.get(
+                        'current_price'
+                    ),
+                    None
+                )
+            )
+
+
+            if (
+                price is None
+                or price <= 0
+            ):
+
+                continue
+
+
+            if (
+                symbol
+                == 'BTC-USDT'
+            ):
+
+                btc_price = price
+
+
+            elif (
+                symbol
+                == 'PAXG-USDT'
+            ):
+
+                paxg_price = price
+
+
+        btc_value = (
+            btc
+            * btc_price
+        )
+
+
+        paxg_value = (
+            paxg
+            * paxg_price
+        )
+
+
+        total = (
+            btc_value
+            + paxg_value
+            + usdt
+        )
+
+
+        if total <= 0:
+
+            return {
+                'available':
+                    False,
+
+                'BTC_pct':
+                    None,
+
+                'PAXG_pct':
+                    None,
+
+                'USDT_pct':
+                    None
+            }
+
+
+        return {
+
+            'available':
+                True,
+
+            'BTC_pct':
+                round(
+                    btc_value
+                    / total
+                    * 100.0,
+                    2
+                ),
+
+            'PAXG_pct':
+                round(
+                    paxg_value
+                    / total
+                    * 100.0,
+                    2
+                ),
+
+            'USDT_pct':
+                round(
+                    usdt
+                    / total
+                    * 100.0,
+                    2
+                ),
+
+            'note':
+                'PERCENTAGES_ONLY'
+        }
+
+
+    except Exception as e:
+
+        return {
+            'available':
+                False,
+
+            'error':
+                str(
+                    e
+                )[:120]
+        }
+
+
+def _ai_compact_analysis(
+    result,
+    symbol=None,
+    timeframe=None
+):
+
+    result = (
+        result
+        if isinstance(
+            result,
+            dict
+        )
+        else {}
+    )
+
+
+    decision = (
+        result.get(
+            'decision',
+            {}
+        )
+        or {}
+    )
+
+
+    levels = (
+        result.get(
+            'levels',
+            {}
+        )
+        or {}
+    )
+
+
+    registro = (
+        decision.get(
+            'registro_votacion',
+            {}
+        )
+
+        or result.get(
+            'registro_votacion',
+            {}
+        )
+
+        or {}
+    )
+
+
+    votes = []
+
+
+    for vote in (
+        registro.get(
+            'todos_los_votos',
+            []
+        )
+        or []
+    )[:12]:
+
+        if not isinstance(
+            vote,
+            dict
+        ):
+
+            continue
+
+
+        votes.append({
+
+            'trader':
+                (
+                    vote.get(
+                        'trader'
+                    )
+                    or vote.get(
+                        'nombre'
+                    )
+                    or vote.get(
+                        'trader_name'
+                    )
+                ),
+
+            'action':
+                (
+                    vote.get(
+                        'action'
+                    )
+                    or vote.get(
+                        'accion'
+                    )
+                    or vote.get(
+                        'senal'
+                    )
+                    or vote.get(
+                        'señal'
+                    )
+                ),
+
+            'confidence':
+                _ai_number(
+                    vote.get(
+                        'confidence',
+                        vote.get(
+                            'confianza',
+                            vote.get(
+                                'confianza_original'
+                            )
+                        )
+                    ),
+                    None
+                ),
+
+            'strategies':
+                (
+                    vote.get(
+                        'strategies'
+                    )
+                    or vote.get(
+                        'estrategias'
+                    )
+                    or []
+                )[:4]
+        })
+
+
+    publication = (
+        result.get(
+            'futures_publication_gate'
+        )
+        or levels.get(
+            'futures_publication_gate'
+        )
+        or {}
+    )
+
+
+    return {
+
+        'symbol':
+            (
+                symbol
+                or result.get(
+                    'symbol'
+                )
+            ),
+
+        'timeframe':
+            (
+                timeframe
+                or result.get(
+                    'timeframe'
+                )
+            ),
+
+        'action':
+            str(
+                decision.get(
+                    'action'
+                )
+                or result.get(
+                    'action'
+                )
+                or 'NO_OPERAR'
+            ).upper(),
+
+        'confidence':
+            round(
+                _ai_number(
+                    decision.get(
+                        'confidence',
+                        result.get(
+                            'confidence'
+                        )
+                    ),
+                    0.0
+                )
+                or 0.0,
+                2
+            ),
+
+        'entry':
+            _ai_number(
+                levels.get(
+                    'entry'
+                ),
+                None
+            ),
+
+        'stop_loss':
+            _ai_number(
+                levels.get(
+                    'stop_loss'
+                ),
+                None
+            ),
+
+        'take_profit':
+            _ai_number(
+                levels.get(
+                    'take_profit'
+                ),
+                None
+            ),
+
+        'leverage':
+            _ai_number(
+                levels.get(
+                    'leverage'
+                ),
+                None
+            ),
+
+        'risk_reward':
+            _ai_number(
+                levels.get(
+                    'risk_reward',
+                    levels.get(
+                        'rr'
+                    )
+                ),
+                None
+            ),
+
+        'execution_safety':
+            _ai_number(
+                levels.get(
+                    'execution_safety',
+                    result.get(
+                        'execution_safety'
+                    )
+                ),
+                None
+            ),
+
+        'publication_status':
+            (
+                result.get(
+                    'publication_status'
+                )
+                or levels.get(
+                    'publication_status'
+                )
+            ),
+
+        'publication_eligible':
+            bool(
+                result.get(
+                    'publication_eligible',
+                    levels.get(
+                        'publication_eligible',
+                        False
+                    )
+                )
+            ),
+
+        'publication_reasons':
+            (
+                publication.get(
+                    'reasons',
+                    []
+                )
+                if isinstance(
+                    publication,
+                    dict
+                )
+                else []
+            )[:5],
+
+        'trader_votes':
+            votes,
+
+        'source_signal_id':
+            (
+                result.get(
+                    'signal_id'
+                )
+                or levels.get(
+                    'signal_id'
+                )
+            )
+    }
+
+
+def _ai_saved_context(
+    user
+):
+
+    from saved_signals import (
+        list_saved_signals,
+        get_saved_signals_kpis,
+        get_guardian_learning_summary
+    )
+
+
+    open_signals = (
+        list_saved_signals(
+
+            status_filter=[
+                'active',
+                'entry_touched'
+            ],
+
+            limit=20,
+
+            user_name=user
+        )
+
+        or []
+    )
+
+
+    compact_open = [
+
+        {
+            'id':
+                sig.get(
+                    'id'
+                ),
+
+            'symbol':
+                sig.get(
+                    'symbol'
+                ),
+
+            'timeframe':
+                sig.get(
+                    'timeframe'
+                ),
+
+            'action':
+                sig.get(
+                    'action'
+                ),
+
+            'status':
+                sig.get(
+                    'status'
+                ),
+
+            'risk_class':
+                sig.get(
+                    'risk_class'
+                ),
+
+            'entry':
+                _ai_number(
+                    sig.get(
+                        'entry'
+                    ),
+                    None
+                ),
+
+            'stop_loss':
+                _ai_number(
+                    sig.get(
+                        'stop_loss'
+                    ),
+                    None
+                ),
+
+            'take_profit':
+                _ai_number(
+                    sig.get(
+                        'take_profit'
+                    ),
+                    None
+                ),
+
+            'leverage':
+                _ai_number(
+                    sig.get(
+                        'leverage'
+                    ),
+                    None
+                ),
+
+            'margin_usdt':
+                _ai_number(
+                    sig.get(
+                        'investment_usdt'
+                    ),
+                    None
+                )
+        }
+
+        for sig
+        in open_signals[:8]
+    ]
+
+
+    kpis = (
+        get_saved_signals_kpis(
+            user_name=user
+        )
+        or {}
+    )
+
+
+    return {
+
+        'open_saved_count':
+            len(
+                open_signals
+            ),
+
+        'open_saved':
+            compact_open,
+
+        'saved_kpis': {
+
+            'total':
+                kpis.get(
+                    'total'
+                ),
+
+            'win_rate':
+                kpis.get(
+                    'win_rate'
+                ),
+
+            'pnl_total_usdt':
+                kpis.get(
+                    'pnl_total_usdt'
+                ),
+
+            'economics':
+                kpis.get(
+                    'economics',
+                    {}
+                )
+        },
+
+        'guardian_learning':
+            (
+                get_guardian_learning_summary(
+                    user_name=user
+                )
+                or {}
+            )
+    }
+
+
+def _ai_review_snapshot(
+    symbol=None,
+    timeframe=None,
+    action=None,
+    market='spot'
+):
+
+    snapshot = {
+        'general_recommendations':
+            []
+    }
+
+
+    try:
+
+        snapshot[
+            'general_recommendations'
+        ] = (
+            review_trader
+            .get_general_recommendations()
+            or []
+        )[:10]
+
+
+    except Exception:
+
+        pass
+
+
+    if (
+        symbol
+        and timeframe
+        and action
+        and str(
+            action
+        ).upper()
+        not in (
+            'NO_OPERAR',
+            'ESPERAR'
+        )
+    ):
+
+        try:
+
+            snapshot[
+                'selected_recommendation'
+            ] = (
+                review_trader
+                .get_recommendations_for(
+
+                    symbol=symbol,
+
+                    timeframe=timeframe,
+
+                    action=action,
+
+                    system_type=
+                        str(
+                            market
+                        ).lower()
+                )
+
+                or {}
+            )
+
+
+        except Exception:
+
+            snapshot[
+                'selected_recommendation'
+            ] = {}
+
+
+    return snapshot
+
+
+def _build_ai_advisor_context(
+    user,
+    market,
+    symbol=None,
+    timeframe=None
+):
+
+    market = str(
+        market
+        or 'SPOT'
+    ).upper()
+
+
+    saved = (
+        _ai_saved_context(
+            user
+        )
+    )
+
+
+    context = {
+
+        'policy': {
+
+            'style':
+                (
+                    'ASERTIVO PERO CAUTO; '
+                    'PRECAVIDO PERO NO TIMIDO; '
+                    'RENTABLE'
+                ),
+
+            'primary_goal':
+                (
+                    'positive net expectancy '
+                    '+ capital preservation'
+                ),
+
+            'secondary_goal':
+                (
+                    'improve win rate without '
+                    'sacrificing net expectancy'
+                ),
+
+            'smc_priority':
+                (
+                    'Liquidity>Sweep>MSS>'
+                    'Displacement>POI>Entry'
+                ),
+
+            'ai_authority':
+                'ADVISORY_ONLY'
+        },
+
+        'market':
+            market,
+
+        'selected_symbol':
+            symbol,
+
+        'selected_timeframe':
+            timeframe,
+
+        **saved
+    }
+
+
+    selected = None
+
+    candidates = []
+
+
+    # ========================================================================
+    # FUTURES
+    # ========================================================================
+
+    if market == 'FUTURES':
+
+        from supabase_client import (
+            supabase_client
+        )
+
+
+        context[
+            'personal_risk_profile'
+        ] = (
+            supabase_client
+            .get_user_futures_risk_profile(
+                user
+            )
+            or {}
+        )
+
+
+        cache = (
+            _get_or_refresh_futures_analysis(
+                force_wait=False
+            )
+            or {}
+        )
+
+
+        analysis_map = (
+            cache.get(
+                'analysis',
+                {}
+            )
+            or {}
+        )
+
+
+        for (
+            key,
+            result
+        ) in analysis_map.items():
+
+            if not isinstance(
+                result,
+                dict
+            ):
+
+                continue
+
+
+            key_symbol = (
+                key[0]
+                if (
+                    isinstance(
+                        key,
+                        tuple
+                    )
+                    and len(
+                        key
+                    ) >= 2
+                )
+                else None
+            )
+
+
+            key_tf = (
+                key[1]
+                if (
+                    isinstance(
+                        key,
+                        tuple
+                    )
+                    and len(
+                        key
+                    ) >= 2
+                )
+                else None
+            )
+
+
+            compact = (
+                _ai_compact_analysis(
+                    result,
+                    key_symbol,
+                    key_tf
+                )
+            )
+
+
+            if (
+                symbol
+                and timeframe
+
+                and str(
+                    compact.get(
+                        'symbol'
+                    )
+                )
+                == str(
+                    symbol
+                )
+
+                and str(
+                    compact.get(
+                        'timeframe'
+                    )
+                )
+                == str(
+                    timeframe
+                )
+            ):
+
+                selected = compact
+
+
+            if (
+                compact.get(
+                    'action'
+                )
+                in (
+                    'LONG',
+                    'SHORT'
+                )
+            ):
+
+                candidates.append(
+                    compact
+                )
+
+
+        candidates.sort(
+            key=lambda x: float(
+                x.get(
+                    'confidence'
+                )
+                or 0
+            ),
+            reverse=True
+        )
+
+
+        context[
+            'signals'
+        ] = candidates[:8]
+
+
+        context[
+            'selected_signal'
+        ] = (
+            selected
+            or {}
+        )
+
+
+        if selected:
+
+            context[
+                'system_action'
+            ] = selected.get(
+                'action'
+            )
+
+
+        context[
+            'reviewtrader'
+        ] = (
+            _ai_review_snapshot(
+                symbol,
+                timeframe,
+                (
+                    selected.get(
+                        'action'
+                    )
+                    if selected
+                    else None
+                ),
+                'futures'
+            )
+        )
+
+
+        if (
+            saved[
+                'open_saved_count'
+            ]
+            >= 2
+        ):
+
+            event_type = (
+                'RISK_REVIEW'
+            )
+
+
+        elif (
+            len(
+                candidates
+            )
+            >= 3
+        ):
+
+            event_type = (
+                'ACTIVE_MANY_SIGNALS'
+            )
+
+
+        elif not candidates:
+
+            event_type = (
+                'PASSIVE_MARKET'
+            )
+
+
+        else:
+
+            event_type = (
+                'SIGNAL_REVIEW'
+            )
+
+
+    # ========================================================================
+    # SPOT
+    # ========================================================================
+
+    else:
+
+        context[
+            'portfolio_percentages'
+        ] = (
+            _ai_portfolio_percentages(
+                user
+            )
+        )
+
+
+        spot_cache = (
+            getattr(
+                expert_system,
+                'spot_active_signals_cache',
+                {}
+            )
+            or {}
+        )
+
+
+        for item in (
+            spot_cache.values()
+        ):
+
+            if not isinstance(
+                item,
+                dict
+            ):
+
+                continue
+
+
+            compact = {
+
+                'symbol':
+                    item.get(
+                        'symbol'
+                    ),
+
+                'timeframe':
+                    item.get(
+                        'timeframe'
+                    ),
+
+                'action':
+                    str(
+                        item.get(
+                            'action'
+                        )
+                        or 'NO_OPERAR'
+                    ).upper(),
+
+                'confidence':
+                    _ai_number(
+                        item.get(
+                            'confidence'
+                        ),
+                        0.0
+                    ),
+
+                'entry':
+                    _ai_number(
+                        item.get(
+                            'entry'
+                        ),
+                        None
+                    ),
+
+                'stop_loss':
+                    _ai_number(
+                        item.get(
+                            'stop_loss'
+                        ),
+                        None
+                    ),
+
+                'take_profit':
+                    _ai_number(
+                        item.get(
+                            'take_profit'
+                        ),
+                        None
+                    ),
+
+                'source_signal_id':
+                    item.get(
+                        'signal_id'
+                    )
+            }
+
+
+            if (
+                symbol
+                and timeframe
+
+                and str(
+                    compact.get(
+                        'symbol'
+                    )
+                )
+                == str(
+                    symbol
+                )
+
+                and str(
+                    compact.get(
+                        'timeframe'
+                    )
+                )
+                == str(
+                    timeframe
+                )
+            ):
+
+                selected = compact
+
+
+            if (
+                compact[
+                    'action'
+                ]
+                in (
+                    'COMPRA_SPOT',
+                    'VENTA_SPOT'
+                )
+            ):
+
+                candidates.append(
+                    compact
+                )
+
+
+        candidates.sort(
+            key=lambda x: float(
+                x.get(
+                    'confidence'
+                )
+                or 0
+            ),
+            reverse=True
+        )
+
+
+        context[
+            'signals'
+        ] = candidates[:8]
+
+
+        context[
+            'selected_signal'
+        ] = (
+            selected
+            or {}
+        )
+
+
+        if selected:
+
+            context[
+                'system_action'
+            ] = selected.get(
+                'action'
+            )
+
+
+        context[
+            'reviewtrader'
+        ] = (
+            _ai_review_snapshot(
+                symbol,
+                timeframe,
+                (
+                    selected.get(
+                        'action'
+                    )
+                    if selected
+                    else None
+                ),
+                'spot'
+            )
+        )
+
+
+        portfolio = (
+            context.get(
+                'portfolio_percentages',
+                {}
+            )
+            or {}
+        )
+
+
+        pct_values = [
+
+            _ai_number(
+                portfolio.get(
+                    'BTC_pct'
+                ),
+                0.0
+            )
+            or 0.0,
+
+            _ai_number(
+                portfolio.get(
+                    'PAXG_pct'
+                ),
+                0.0
+            )
+            or 0.0,
+
+            _ai_number(
+                portfolio.get(
+                    'USDT_pct'
+                ),
+                0.0
+            )
+            or 0.0
+        ]
+
+
+        if any(
+            str(
+                sig.get(
+                    'symbol'
+                )
+            )
+            == 'PAXG-BTC'
+
+            for sig
+            in candidates
+        ):
+
+            event_type = (
+                'POSSIBLE_ROTATION'
+            )
+
+
+        elif (
+            max(
+                pct_values
+                or [0]
+            )
+            >= 70
+        ):
+
+            event_type = (
+                'PORTFOLIO_REVIEW'
+            )
+
+
+        elif (
+            len(
+                candidates
+            )
+            >= 3
+        ):
+
+            event_type = (
+                'ACTIVE_MANY_SIGNALS'
+            )
+
+
+        elif not candidates:
+
+            event_type = (
+                'PASSIVE_MARKET'
+            )
+
+
+        else:
+
+            event_type = (
+                'SIGNAL_REVIEW'
+            )
+
+
+    context[
+        'event_type'
+    ] = event_type
+
+
+    return context
+
+
+def _build_ai_guardian_context(
+    user,
+    signal,
+    advice,
+    current_price,
+    event_action,
+    bucket
+):
+
+    from supabase_client import (
+        supabase_client
+    )
+
+
+    from saved_signals import (
+        get_saved_signals_kpis,
+        get_guardian_learning_summary
+    )
+
+
+    return {
+
+        'policy': {
+            'goal':
+                (
+                    'increase incremental net expectancy '
+                    'without weakening risk protection'
+                ),
+
+            'authority':
+                'ADVISORY_ONLY'
+        },
+
+        'market':
+            'FUTURES',
+
+        'event_type':
+            f'GUARDIAN_{event_action}',
+
+        'system_action':
+            event_action,
+
+        'signal': {
+
+            'id':
+                signal.get(
+                    'id'
+                ),
+
+            'symbol':
+                signal.get(
+                    'symbol'
+                ),
+
+            'timeframe':
+                signal.get(
+                    'timeframe'
+                ),
+
+            'direction':
+                signal.get(
+                    'action'
+                ),
+
+            'risk_class':
+                signal.get(
+                    'risk_class'
+                ),
+
+            'entry':
+                _ai_number(
+                    signal.get(
+                        'entry'
+                    ),
+                    None
+                ),
+
+            'stop_loss':
+                _ai_number(
+                    signal.get(
+                        'stop_loss'
+                    ),
+                    None
+                ),
+
+            'take_profit':
+                _ai_number(
+                    signal.get(
+                        'take_profit'
+                    ),
+                    None
+                ),
+
+            'leverage':
+                _ai_number(
+                    signal.get(
+                        'leverage'
+                    ),
+                    None
+                ),
+
+            'margin_usdt':
+                _ai_number(
+                    signal.get(
+                        'investment_usdt'
+                    ),
+                    None
+                )
+        },
+
+        'guardian': {
+
+            'action':
+                event_action,
+
+            'bucket':
+                bucket,
+
+            'current_price':
+                _ai_number(
+                    current_price,
+                    None
+                ),
+
+            'progress_r':
+                _ai_number(
+                    advice.get(
+                        'progress_r'
+                    ),
+                    None
+                ),
+
+            'deterioration_score':
+                _ai_number(
+                    advice.get(
+                        'deterioration_score'
+                    ),
+                    None
+                ),
+
+            'suggested_stop_loss':
+                _ai_number(
+                    advice.get(
+                        'suggested_stop_loss'
+                    ),
+                    None
+                ),
+
+            'suggested_take_profit':
+                _ai_number(
+                    advice.get(
+                        'suggested_take_profit'
+                    ),
+                    None
+                ),
+
+            'reason':
+                (
+                    advice.get(
+                        'management_reason'
+                    )
+                    or advice.get(
+                        'reason'
+                    )
+                )
+        },
+
+        'personal_risk_profile':
+            (
+                supabase_client
+                .get_user_futures_risk_profile(
+                    user
+                )
+                or {}
+            ),
+
+        'economics':
+            (
+                get_saved_signals_kpis(
+                    user_name=user
+                )
+                or {}
+            ).get(
+                'economics',
+                {}
+            ),
+
+        'guardian_learning':
+            (
+                get_guardian_learning_summary(
+                    user_name=user
+                )
+                or {}
+            )
+    }
+
+
+def _build_ai_learning_context():
+
+    from saved_signals import (
+        get_saved_signals_kpis,
+        get_guardian_learning_summary
+    )
+
+
+    kpis = (
+        get_saved_signals_kpis(
+            user_name=None
+        )
+        or {}
+    )
+
+
+    try:
+
+        review_general = (
+            review_trader
+            .get_general_recommendations()
+            or []
+        )[:20]
+
+
+    except Exception:
+
+        review_general = []
+
+
+    return {
+
+        'policy': {
+
+            'goal':
+                (
+                    'find testable hypotheses that improve '
+                    'net expectancy and secondarily win rate'
+                ),
+
+            'no_parameter_changes':
+                True,
+
+            'authority':
+                'SHADOW_ONLY'
+        },
+
+        'event_type':
+            'LEARNING_UPDATE',
+
+        'saved_futures_economics':
+            kpis.get(
+                'economics',
+                {}
+            ),
+
+        'saved_futures_wr':
+            kpis.get(
+                'win_rate'
+            ),
+
+        'saved_futures_pnl_usdt':
+            kpis.get(
+                'pnl_total_usdt'
+            ),
+
+        'guardian_learning':
+            (
+                get_guardian_learning_summary(
+                    user_name=None
+                )
+                or {}
+            ),
+
+        'reviewtrader_general':
+            review_general
+    }
 
 # ============================================================================
 # MONITOR PROACTIVO FUTURES GUARDIAN
@@ -31969,6 +33655,114 @@ def monitor_guardian_telegram_loop():
 
                                 if recorded:
 
+                                    # ==========================================
+                                    # COMMIT 36R.3
+                                    # AI CRITIC DEL GUARDIAN
+                                    # ==========================================
+
+                                    try:
+
+                                        from ai_advisor import (
+                                            run_ai_advisor
+                                        )
+
+
+                                        ai_guardian_context = (
+                                            _build_ai_guardian_context(
+
+                                                user=user,
+
+                                                signal=sig,
+
+                                                advice=advice,
+
+                                                current_price=(
+                                                    current_price
+                                                ),
+
+                                                event_action=(
+                                                    event_action
+                                                ),
+
+                                                bucket=(
+                                                    bucket
+                                                )
+                                            )
+                                        )
+
+
+                                        ai_guardian_result = (
+                                            run_ai_advisor(
+
+                                                user_name=user,
+
+                                                usage_type='AUTO',
+
+                                                context_type='GUARDIAN',
+
+                                                event_type=(
+                                                    f'GUARDIAN_'
+                                                    f'{event_action}'
+                                                ),
+
+                                                market='FUTURES',
+
+                                                context=(
+                                                    ai_guardian_context
+                                                ),
+
+                                                symbol=symbol,
+
+                                                timeframe=timeframe,
+
+                                                related_saved_signal_id=(
+                                                    sig.get(
+                                                        'id'
+                                                    )
+                                                ),
+
+                                                source_signal_id=(
+                                                    sig.get(
+                                                        'source_signal_id'
+                                                    )
+                                                )
+                                            )
+                                        )
+
+
+                                        if (
+                                            ai_guardian_result.get(
+                                                'success'
+                                            )
+                                        ):
+
+                                            ai_data = (
+                                                ai_guardian_result.get(
+                                                    'data',
+                                                    {}
+                                                )
+                                                or {}
+                                            )
+
+
+                                            print(
+                                                "🤖 [36R.3] "
+                                                "Guardian AI: "
+                                                f"{event_action} → "
+                                                f"{ai_data.get('verdict')} "
+                                                f"{symbol} "
+                                                f"{timeframe}"
+                                            )
+
+
+                                    except Exception as ai_guardian_err:
+
+                                        # IA jamás rompe Guardian.
+                                        print(
+                                            "⚠️ [36R.3] "
+                                            "AI Guardian no disponible: "
+                                            f"{ai_guardian_err}"
+                                        )
                                     print(
                                         "🧠 [36Q.1] "
                                         "Guardian event: "
@@ -33017,7 +34811,75 @@ def ejecutar_review_diario():
         print(f"Missed opportunities: {results.get('missed', 0)}")
         print(f"Stats: {results.get('stats', {})}")
         print(f"{'#'*60}\n")
-        
+
+        # ==============================================================
+        # COMMIT 36R.4
+        # AI LEARNING ANALYST
+        # ==============================================================
+
+        try:
+
+            from ai_advisor import (
+                run_ai_advisor
+            )
+
+
+            learning_context = (
+                _build_ai_learning_context()
+            )
+
+
+            ai_learning_result = (
+                run_ai_advisor(
+
+                    user_name='SYSTEM',
+
+                    usage_type='LEARNING',
+
+                    context_type='LEARNING',
+
+                    event_type='DAILY_REVIEW',
+
+                    market='SYSTEM',
+
+                    context=(
+                        learning_context
+                    )
+                )
+            )
+
+
+            if (
+                ai_learning_result.get(
+                    'success'
+                )
+            ):
+
+                ai_learning_data = (
+                    ai_learning_result.get(
+                        'data',
+                        {}
+                    )
+                    or {}
+                )
+
+
+                print(
+                    "🤖🧠 [36R.4] "
+                    "AI Learning: "
+                    f"{ai_learning_data.get('verdict')} "
+                    f"- "
+                    f"{ai_learning_data.get('headline')}"
+                )
+
+
+        except Exception as ai_learning_err:
+
+            print(
+                "⚠️ [36R.4] "
+                "AI Learning no disponible: "
+                f"{ai_learning_err}"
+            )        
     except Exception as e:
         print(f"❌ Error en ejecutar_review_diario: {e}")
         import traceback
@@ -35432,7 +37294,427 @@ def _start_background_threads():
 # NOTA: la llamada real a _start_background_threads() se hace más abajo,
 # DESPUÉS de que verificar_y_ejecutar y monitor_entries_loop estén definidos.
 
+# ============================================================================
+# COMMIT 36R
+# ENDPOINTS AI ADVISOR / ASISTENTE PERSONAL
+# ============================================================================
 
+
+@app.route(
+    '/api/ai/status',
+    methods=['GET']
+)
+def api_ai_status():
+
+    user = _authenticated_user()
+
+
+    if not user:
+
+        return jsonify({
+            'success':
+                False,
+
+            'error':
+                'Debes iniciar sesión.'
+        }), 401
+
+
+    try:
+
+        from ai_advisor import (
+            get_ai_quota_status,
+            get_ai_performance_summary
+        )
+
+
+        return jsonify({
+
+            'success':
+                True,
+
+            'quota':
+                get_ai_quota_status(
+                    user
+                ),
+
+            'performance':
+                get_ai_performance_summary(
+                    user_name=user
+                )
+        })
+
+
+    except Exception as e:
+
+        # La IA es opcional.
+        # No generamos 500 al sistema principal.
+
+        return jsonify({
+
+            'success':
+                False,
+
+            'error':
+                str(
+                    e
+                )[:200]
+
+        }), 200
+
+
+@app.route(
+    '/api/ai/advice',
+    methods=['GET']
+)
+def api_ai_advice():
+
+    user = _authenticated_user()
+
+
+    if not user:
+
+        return jsonify({
+            'success':
+                False,
+
+            'error':
+                'Debes iniciar sesión.'
+        }), 401
+
+
+    market = str(
+        request.args.get(
+            'market',
+            'SPOT'
+        )
+        or 'SPOT'
+    ).upper()
+
+
+    if market not in (
+        'SPOT',
+        'FUTURES'
+    ):
+
+        market = 'SPOT'
+
+
+    symbol = request.args.get(
+        'symbol'
+    )
+
+
+    timeframe = request.args.get(
+        'timeframe'
+    )
+
+
+    try:
+
+        from ai_advisor import (
+            run_ai_advisor
+        )
+
+
+        context = (
+            _build_ai_advisor_context(
+
+                user=user,
+
+                market=market,
+
+                symbol=symbol,
+
+                timeframe=timeframe
+            )
+        )
+
+
+        selected = (
+            context.get(
+                'selected_signal',
+                {}
+            )
+            or {}
+        )
+
+
+        result = (
+            run_ai_advisor(
+
+                user_name=user,
+
+                usage_type='AUTO',
+
+                context_type='MARKET',
+
+                event_type=(
+                    context.get(
+                        'event_type',
+                        'SIGNAL_REVIEW'
+                    )
+                ),
+
+                market=market,
+
+                context=context,
+
+                symbol=symbol,
+
+                timeframe=timeframe,
+
+                source_signal_id=(
+                    selected.get(
+                        'source_signal_id'
+                    )
+                )
+            )
+        )
+
+
+        return jsonify(
+            result
+        ), 200
+
+
+    except Exception as e:
+
+        print(
+            "⚠️ [36R] "
+            f"/api/ai/advice: {e}"
+        )
+
+
+        return jsonify({
+
+            'success':
+                False,
+
+            'reason':
+                (
+                    'AI Advisor temporalmente '
+                    'no disponible.'
+                )
+
+        }), 200
+
+
+@app.route(
+    '/api/ai/ask',
+    methods=['POST']
+)
+def api_ai_ask():
+
+    user = _authenticated_user()
+
+
+    if not user:
+
+        return jsonify({
+            'success':
+                False,
+
+            'error':
+                'Debes iniciar sesión.'
+        }), 401
+
+
+    data = (
+        request.get_json(
+            silent=True
+        )
+        or {}
+    )
+
+
+    question = str(
+        data.get(
+            'question',
+            ''
+        )
+        or ''
+    ).strip()[:800]
+
+
+    market = str(
+        data.get(
+            'market',
+            'SPOT'
+        )
+        or 'SPOT'
+    ).upper()
+
+
+    if market not in (
+        'SPOT',
+        'FUTURES'
+    ):
+
+        market = 'SPOT'
+
+
+    if not question:
+
+        return jsonify({
+            'success':
+                False,
+
+            'reason':
+                'Escribe una pregunta.'
+        }), 200
+
+
+    symbol = data.get(
+        'symbol'
+    )
+
+
+    timeframe = data.get(
+        'timeframe'
+    )
+
+
+    try:
+
+        from ai_advisor import (
+            run_ai_advisor
+        )
+
+
+        context = (
+            _build_ai_advisor_context(
+
+                user=user,
+
+                market=market,
+
+                symbol=symbol,
+
+                timeframe=timeframe
+            )
+        )
+
+
+        selected = (
+            context.get(
+                'selected_signal',
+                {}
+            )
+            or {}
+        )
+
+
+        result = (
+            run_ai_advisor(
+
+                user_name=user,
+
+                usage_type='MANUAL',
+
+                context_type='MANUAL_CHAT',
+
+                event_type='USER_QUESTION',
+
+                market=market,
+
+                context=context,
+
+                symbol=symbol,
+
+                timeframe=timeframe,
+
+                source_signal_id=(
+                    selected.get(
+                        'source_signal_id'
+                    )
+                ),
+
+                question=question
+            )
+        )
+
+
+        return jsonify(
+            result
+        ), 200
+
+
+    except Exception as e:
+
+        print(
+            "⚠️ [36R] "
+            f"/api/ai/ask: {e}"
+        )
+
+
+        return jsonify({
+
+            'success':
+                False,
+
+            'reason':
+                (
+                    'Asistente IA temporalmente '
+                    'no disponible.'
+                )
+
+        }), 200
+
+
+@app.route(
+    '/api/ai/performance',
+    methods=['GET']
+)
+def api_ai_performance():
+
+    user = _authenticated_user()
+
+
+    if not user:
+
+        return jsonify({
+            'success':
+                False,
+
+            'error':
+                'Debes iniciar sesión.'
+        }), 401
+
+
+    try:
+
+        from ai_advisor import (
+            get_ai_performance_summary
+        )
+
+
+        return jsonify({
+
+            'success':
+                True,
+
+            'data':
+                get_ai_performance_summary(
+                    user_name=user
+                )
+
+        }), 200
+
+
+    except Exception as e:
+
+        return jsonify({
+
+            'success':
+                False,
+
+            'error':
+                str(
+                    e
+                )[:200]
+
+        }), 200
 # ============================================================================
 # ARRANQUE AUTOMÁTICO DE THREADS BACKGROUND AL IMPORTAR EL MÓDULO
 # ============================================================================
