@@ -186,6 +186,118 @@ GROQ_URL = (
     "https://api.groq.com/"
     "openai/v1/chat/completions"
 )
+def _resolve_ai_route(
+    usage_type,
+    context_type
+):
+    """
+    Router defensivo 36S.2C.
+
+    Chat / Consejo / Guardian / Decision Control:
+        siempre GROQ.
+
+    Learning:
+        GEMINI sólo si:
+        - existe GEMINI_API_KEY;
+        - está habilitado;
+        - la función _call_gemini_learning existe realmente.
+
+    Si algo falta, vuelve a Groq.
+
+    Esta función es deliberadamente fail-open para impedir que
+    una integración experimental de Gemini rompa la IA operativa.
+    """
+
+    usage_type = str(
+        usage_type
+        or ""
+    ).strip().upper()
+
+    context_type = str(
+        context_type
+        or ""
+    ).strip().upper()
+
+    # ================================================================
+    # RUNTIME OPERATIVO
+    # ================================================================
+    #
+    # Consejo, Chat, Guardian y Decision Control permanecen
+    # exclusivamente en Groq.
+    # ================================================================
+
+    if not (
+        usage_type == "LEARNING"
+        and context_type == "LEARNING"
+    ):
+        return (
+            "GROQ",
+            AI_MODEL
+        )
+
+    # ================================================================
+    # LEARNING
+    # ================================================================
+
+    gemini_key = (
+        os.getenv(
+            "GEMINI_API_KEY",
+            ""
+        )
+        .strip()
+    )
+
+    gemini_enabled = (
+        os.getenv(
+            "GEMINI_LEARNING_ENABLED",
+            "true"
+        )
+        .strip()
+        .lower()
+        in (
+            "1",
+            "true",
+            "yes",
+            "si",
+            "sí"
+        )
+    )
+
+    # La función puede estar declarada más abajo en el archivo.
+    # En tiempo de ejecución globals() ya podrá verla.
+    gemini_function_ready = callable(
+        globals().get(
+            "_call_gemini_learning"
+        )
+    )
+
+    if (
+        gemini_key
+        and gemini_enabled
+        and gemini_function_ready
+    ):
+        model = (
+            os.getenv(
+                "GEMINI_LEARNING_MODEL",
+                "gemini-3.7-flash"
+            )
+            .strip()
+            or "gemini-3.7-flash"
+        )
+
+        return (
+            "GEMINI",
+            model
+        )
+
+    # ================================================================
+    # FALLBACK
+    # ================================================================
+
+    return (
+        "GROQ",
+        AI_MODEL
+    )
 # ============================================================================
 # COMMIT 36S.2C
 # GEMINI — LEARNING SCIENTIST SHADOW
