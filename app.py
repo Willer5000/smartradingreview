@@ -33670,6 +33670,27 @@ def _build_ai_advisor_context(
                         None
                     ),
 
+                'current_price':
+                    _ai_number(
+                        item.get(
+                            'current_price'
+                        ),
+                        None
+                    ),
+
+                'candle_timestamp':
+                    item.get(
+                        'candle_timestamp'
+                    ),
+
+                'system_message':
+                    str(
+                        item.get(
+                            'message'
+                        )
+                        or ''
+                    )[:800],
+
                 'source_signal_id':
                     item.get(
                         'signal_id'
@@ -38433,6 +38454,17 @@ def api_ai_status():
     methods=['GET']
 )
 def api_ai_advice():
+    """
+    COMMIT 36R-UX4
+
+    Consejo IA automático de mercado.
+
+    - Uno nuevo por hora.
+    - Independiente para Spot / Futures.
+    - Usa contexto GLOBAL del mercado, no sólo el selector actual.
+    - Personalizado por usuario.
+    - No se genera si nadie tiene abierta la página.
+    """
 
     user = _authenticated_user()
 
@@ -38440,20 +38472,25 @@ def api_ai_advice():
     if not user:
 
         return jsonify({
+
             'success':
                 False,
 
             'error':
                 'Debes iniciar sesión.'
+
         }), 401
 
 
     market = str(
+
         request.args.get(
             'market',
             'SPOT'
         )
+
         or 'SPOT'
+
     ).upper()
 
 
@@ -38465,22 +38502,25 @@ def api_ai_advice():
         market = 'SPOT'
 
 
-    symbol = request.args.get(
-        'symbol'
-    )
-
-
-    timeframe = request.args.get(
-        'timeframe'
-    )
-
-
     try:
 
         from ai_advisor import (
             run_ai_advisor
         )
 
+
+        # ================================================================
+        # CONTEXTO DE MERCADO COMPLETO
+        # ================================================================
+        #
+        # No limitar el consejo al símbolo seleccionado por el navegador.
+        #
+        # Queremos que pueda decir, por ejemplo:
+        #
+        # "ADA 4h destaca más que BTC 1h"
+        #
+        # aunque el usuario esté mirando BTC.
+        # ================================================================
 
         context = (
             _build_ai_advisor_context(
@@ -38489,20 +38529,183 @@ def api_ai_advice():
 
                 market=market,
 
-                symbol=symbol,
+                symbol=None,
 
-                timeframe=timeframe
+                timeframe=None
             )
         )
 
 
-        selected = (
+        signals = (
+
             context.get(
-                'selected_signal',
-                {}
+                'signals',
+                []
             )
-            or {}
+
+            or []
         )
+
+
+        # Ya están ordenadas por confianza
+        # dentro del context builder.
+
+        focus_signal = (
+
+            signals[0]
+
+            if signals
+
+            else {}
+        )
+
+
+        # ================================================================
+        # UNA EVALUACIÓN NUEVA POR HORA
+        # ================================================================
+        #
+        # Este valor forma parte del fingerprint.
+        #
+        # Durante la misma hora:
+        #     misma evaluación → caché.
+        #
+        # Al cambiar de hora:
+        #     fingerprint nuevo → nueva llamada IA.
+        # ================================================================
+
+        now_utc = datetime.now(
+            pytz.UTC
+        )
+
+
+        hour_bucket = (
+            now_utc.strftime(
+                '%Y-%m-%dT%H'
+            )
+        )
+
+
+        context[
+            'hour_bucket'
+        ] = hour_bucket
+
+
+        context[
+            'hourly_advice_contract'
+        ] = {
+
+            'must_be_specific':
+                True,
+
+            'generic_advice_forbidden':
+                True,
+
+            'minimum_concrete_facts':
+                2,
+
+            'priority':
+                (
+                    'highest expected benefit or '
+                    'highest relevant protection'
+                ),
+
+            'evaluate_whole_market':
+                True,
+
+            'personalize_with_user_context':
+                True,
+
+            'market':
+                market,
+
+            'active_signal_count':
+                len(
+                    signals
+                ),
+
+            'open_saved_count':
+                context.get(
+                    'open_saved_count',
+                    0
+                ),
+
+            'event_type':
+                context.get(
+                    'event_type'
+                )
+        }
+
+
+        # ================================================================
+        # SNAPSHOT EXPLÍCITO
+        # ================================================================
+
+        context[
+            'hourly_market_snapshot'
+        ] = {
+
+            'market':
+                market,
+
+            'event_type':
+                context.get(
+                    'event_type'
+                ),
+
+            'active_signal_count':
+                len(
+                    signals
+                ),
+
+            'focus_signal':
+                focus_signal,
+
+            'open_saved_count':
+                context.get(
+                    'open_saved_count',
+                    0
+                ),
+
+            'saved_kpis':
+                context.get(
+                    'saved_kpis',
+                    {}
+                ),
+
+            'guardian_learning':
+                context.get(
+                    'guardian_learning',
+                    {}
+                )
+        }
+
+
+        if market == 'SPOT':
+
+            context[
+                'hourly_market_snapshot'
+            ][
+                'portfolio_percentages'
+            ] = (
+                context.get(
+                    'portfolio_percentages',
+                    {}
+                )
+            )
+
+
+        elif market == 'FUTURES':
+
+            context[
+                'hourly_market_snapshot'
+            ][
+                'personal_risk_profile'
+            ] = (
+                context.get(
+                    'personal_risk_profile',
+                    {}
+                )
+            )
 
 
         result = (
@@ -38512,12 +38715,13 @@ def api_ai_advice():
 
                 usage_type='AUTO',
 
-                context_type='MARKET',
+                context_type=
+                    'HOURLY_MARKET_ADVICE',
 
                 event_type=(
                     context.get(
                         'event_type',
-                        'SIGNAL_REVIEW'
+                        'MARKET_REVIEW'
                     )
                 ),
 
@@ -38525,12 +38729,20 @@ def api_ai_advice():
 
                 context=context,
 
-                symbol=symbol,
+                symbol=(
+                    focus_signal.get(
+                        'symbol'
+                    )
+                ),
 
-                timeframe=timeframe,
+                timeframe=(
+                    focus_signal.get(
+                        'timeframe'
+                    )
+                ),
 
                 source_signal_id=(
-                    selected.get(
+                    focus_signal.get(
                         'source_signal_id'
                     )
                 )
@@ -38545,11 +38757,31 @@ def api_ai_advice():
             'market':
                 market,
 
-            'symbol':
-                symbol,
+            'hour_bucket':
+                hour_bucket,
 
-            'timeframe':
-                timeframe,
+            'generated_at':
+                now_utc.isoformat(),
+
+            'event_type':
+                context.get(
+                    'event_type'
+                ),
+
+            'active_signal_count':
+                len(
+                    signals
+                ),
+
+            'focus_symbol':
+                focus_signal.get(
+                    'symbol'
+                ),
+
+            'focus_timeframe':
+                focus_signal.get(
+                    'timeframe'
+                )
         }
 
 
@@ -38561,8 +38793,8 @@ def api_ai_advice():
     except Exception as e:
 
         print(
-            "⚠️ [36R] "
-            f"/api/ai/advice: "
+            "⚠️ [36R-UX4] "
+            "Consejo IA horario: "
             f"{type(e).__name__}: {e}"
         )
 
@@ -38574,10 +38806,15 @@ def api_ai_advice():
 
             'reason':
                 (
-                    'AI Advisor no disponible: '
+                    'Consejo IA no disponible: '
                     f'{type(e).__name__}: '
                     f'{str(e)[:160]}'
-                )
+                ),
+
+            'resolved_context': {
+                'market':
+                    market
+            }
 
         }), 200
 
