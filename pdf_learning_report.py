@@ -1521,6 +1521,126 @@ def _calc_stats_by_trader(signals: List[Dict]) -> List[Dict]:
     ))
     return rows
 
+def _compact_signal_for_learning_report(row: Dict) -> Dict:
+    """
+    Conserva sólo la información que este PDF realmente utiliza.
+
+    Motivo:
+    `signals.context` puede contener snapshots grandes. Si se guardan completos
+    para miles de señales, el worker de Render puede quedarse sin memoria.
+
+    El informe sólo necesita:
+    - context.learning
+    - context.execution
+    - context.futures_publication
+    - estrategias de signal_indicators
+    - el resultado más reciente de signal_results
+
+    No modifica datos en Supabase. Sólo reduce la copia mantenida en RAM
+    mientras se genera el informe.
+    """
+    if not isinstance(row, dict):
+        return {}
+
+    compact = dict(row)
+
+    # --------------------------------------------------------------
+    # 1. CONTEXT
+    # --------------------------------------------------------------
+    # El context original puede ser muy grande. Para este PDF sólo
+    # necesitamos tres subbloques.
+    context = row.get('context') or {}
+
+    if isinstance(context, str):
+        try:
+            context = json.loads(context)
+        except Exception:
+            context = {}
+
+    compact_context = {}
+
+    if isinstance(context, dict):
+        for key in (
+            'learning',
+            'execution',
+            'futures_publication'
+        ):
+            value = context.get(key)
+
+            if isinstance(value, dict) and value:
+                compact_context[key] = value
+
+    compact['context'] = compact_context
+
+    # --------------------------------------------------------------
+    # 2. INDICADORES / ESTRATEGIAS
+    # --------------------------------------------------------------
+    indicators = row.get('signal_indicators') or []
+
+    if isinstance(indicators, dict):
+        indicators = [indicators]
+
+    if isinstance(indicators, list):
+        compact['signal_indicators'] = [
+            {
+                'strategy_name': item.get('strategy_name')
+            }
+            for item in indicators
+            if (
+                isinstance(item, dict)
+                and item.get('strategy_name')
+            )
+        ]
+    else:
+        compact['signal_indicators'] = []
+
+    # --------------------------------------------------------------
+    # 3. RESULTADO
+    # --------------------------------------------------------------
+    # El informe siempre usa _latest_signal_result(), por lo que no
+    # necesitamos mantener en RAM todo el historial de resultados.
+    results = row.get('signal_results') or []
+
+    if isinstance(results, dict):
+        results = [results]
+
+    latest = {}
+
+    if isinstance(results, list) and results:
+        latest = max(
+            (
+                item
+                for item in results
+                if isinstance(item, dict)
+            ),
+            key=lambda item: str(
+                item.get('created_at') or ''
+            ),
+            default={}
+        )
+
+    if latest:
+        latest_compact = {
+            'status': latest.get('status'),
+            'pnl_pct': latest.get('pnl_pct'),
+            'notes': latest.get('notes'),
+            'created_at': latest.get('created_at'),
+        }
+
+        # Compatibilidad futura:
+        # si signal_results incorpora net_pnl_pct, no lo perderemos.
+        if 'net_pnl_pct' in latest:
+            latest_compact['net_pnl_pct'] = (
+                latest.get('net_pnl_pct')
+            )
+
+        compact['signal_results'] = [
+            latest_compact
+        ]
+    else:
+        compact['signal_results'] = []
+
+    return compact
 
 # ============================================================================
 # HELPERS DE CÁLCULO DE STATS (funcionan directamente sobre signals de la BD)
@@ -1567,8 +1687,7 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
         'confidence, entry_price, stop_loss, take_profit, leverage, '
         'created_at, candle_timestamp, system_type, context, '
         'signal_indicators(strategy_name), '
-        'signal_results(status, pnl_pct, notes, exit_price, '
-        'exit_timestamp, created_at)'
+        'signal_results(status, pnl_pct, notes, created_at)'
     )
 
     diagnostics = {
@@ -1612,23 +1731,55 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
 
     def _append_unique(target, seen_ids, batch):
         added = 0
+
         for row in batch or []:
             if not isinstance(row, dict):
                 continue
-            row_id = str(row.get('id') or '').strip()
-            # Signals debería tener id. Si faltara por un problema de select,
-            # usamos una clave compuesta para no perder silenciosamente la fila.
+
+            compacted = _compact_signal_for_learning_report(
+                row
+            )
+
+            if not compacted:
+                continue
+
+            row_id = str(
+                compacted.get('id') or ''
+            ).strip()
+
+            # Signals debería tener id. Si faltara por un problema
+            # de select, usamos una clave compuesta para no perder
+            # silenciosamente la fila.
             dedupe_key = row_id or '|'.join([
-                str(row.get('created_at') or ''),
-                str(row.get('symbol') or ''),
-                str(row.get('timeframe') or ''),
-                str(row.get('action_normalized') or '')
+                str(
+                    compacted.get('created_at') or ''
+                ),
+                str(
+                    compacted.get('symbol') or ''
+                ),
+                str(
+                    compacted.get('timeframe') or ''
+                ),
+                str(
+                    compacted.get(
+                        'action_normalized'
+                    ) or ''
+                )
             ])
+
             if dedupe_key in seen_ids:
                 continue
-            seen_ids.add(dedupe_key)
-            target.append(row)
+
+            seen_ids.add(
+                dedupe_key
+            )
+
+            target.append(
+                compacted
+            )
+
             added += 1
+
         return added
 
     def _execute_page(start_iso, end_iso, offset, page_size):
@@ -1656,10 +1807,13 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
     # ------------------------------------------------------------------
     all_data = []
     seen_ids = set()
-    page_size = 500
+
+    # Menos filas simultáneas por respuesta = menor pico de RAM.
+    # Conservamos el mismo máximo teórico de 50k señales.
+    page_size = 250
     offset = 0
 
-    for _ in range(100):  # cap 50k filas
+    for _ in range(200):  # cap 50k filas
         response, error = _execute_page(
             cutoff,
             snapshot_end,
@@ -1735,7 +1889,7 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
             diagnostics['fallback_slices'] += 1
 
             slice_offset = 0
-            for _ in range(20):  # hasta 10k por slice, muy por encima de lo esperado
+            for _ in range(40):  # hasta 10k por slice con páginas de 250
                 response, error = _execute_page(
                     slice_start.isoformat(),
                     slice_end.isoformat(),
@@ -2418,14 +2572,92 @@ def generate_learning_pdf() -> bytes:
     )
     
     data = _fetch_learning_data()
-    signals_with_ind = data.get('signals_with_indicators', [])
-    
-    # Calcular stats en el momento
-    stats_general = _calc_stats_general(signals_with_ind) if signals_with_ind else []
-    stats_specific = _calc_stats_specific(signals_with_ind) if signals_with_ind else []
-    stats_by_symbol = _calc_stats_by_symbol(signals_with_ind) if signals_with_ind else []
-    stats_by_tf = _calc_stats_by_timeframe(signals_with_ind) if signals_with_ind else []
-    missed_analysis = _analyze_missed_opps(data.get('missed_details', []))
+    signals_with_ind = data.get(
+        'signals_with_indicators',
+        []
+    )
+
+    # ==============================================================
+    # CALCULAR TODO LO QUE NECESITA LAS SEÑALES CRUDAS PRIMERO
+    # ==============================================================
+    # Después podremos liberar esa cohorte antes de construir
+    # las tablas ReportLab, reduciendo significativamente el pico
+    # de memoria del worker de Render.
+    stats_general = (
+        _calc_stats_general(
+            signals_with_ind
+        )
+        if signals_with_ind
+        else []
+    )
+
+    stats_specific = (
+        _calc_stats_specific(
+            signals_with_ind
+        )
+        if signals_with_ind
+        else []
+    )
+
+    stats_by_symbol = (
+        _calc_stats_by_symbol(
+            signals_with_ind
+        )
+        if signals_with_ind
+        else []
+    )
+
+    stats_by_tf = (
+        _calc_stats_by_timeframe(
+            signals_with_ind
+        )
+        if signals_with_ind
+        else []
+    )
+
+    stats_by_trader = (
+        _calc_stats_by_trader(
+            signals_with_ind
+        )
+        if signals_with_ind
+        else []
+    )
+
+    missed_analysis = _analyze_missed_opps(
+        data.get(
+            'missed_details',
+            []
+        )
+    )
+
+    # ==============================================================
+    # LIBERACIÓN TEMPRANA DE MEMORIA
+    # ==============================================================
+    # Todos los cálculos que necesitaban estas señales ya terminaron.
+    # Las métricas Futures Shadow / Walk-Forward / Safety también
+    # fueron calculadas dentro de _fetch_learning_data().
+    #
+    # Vaciar estas listas NO modifica Supabase ni pierde aprendizaje:
+    # solamente libera la copia temporal utilizada para generar
+    # este PDF.
+    if isinstance(
+        signals_with_ind,
+        list
+    ):
+        signals_with_ind.clear()
+
+    data[
+        'signals_with_indicators'
+    ] = []
+
+    data[
+        'missed_details'
+    ] = []
+
+    # Ayuda a que Python libere objetos temporales antes de que
+    # ReportLab empiece a construir todas las páginas.
+    import gc
+    gc.collect()
     
     # ============ SETUP DEL PDF ============
     buf = io.BytesIO()
@@ -3662,7 +3894,8 @@ def generate_learning_pdf() -> bytes:
         style_body
     ))
     
-    stats_by_trader = _calc_stats_by_trader(signals_with_ind) if signals_with_ind else []
+    # stats_by_trader ya fue calculado al inicio para poder liberar
+    # signals_with_ind antes de que ReportLab construya el PDF.
     if stats_by_trader:
         rows = [['Mercado', 'Trader', '# Estr.', 'Señales', 'TP', 'SL', 'Expired', 'Win %']]
         for s in stats_by_trader:
