@@ -36444,9 +36444,20 @@ def learning_worker_loop():
             # saved_futures_lifecycle_loop()
             # ============================================================
             
-            # 2. Cada 4 horas (16 ciclos * 15 min): recalcular stats + recomendaciones
+            # ============================================================
+            # 2. RECALCULAR APRENDIZAJE AGREGADO CADA 4 HORAS
+            # ============================================================
+            #
+            # El learning worker actualmente corre cada 30 minutos.
+            #
+            #     8 ciclos × 30 min = 4 horas.
+            #
+            # Antes este contador permaneció en 16 después de cambiar
+            # el worker de 15 a 30 minutos, haciendo que las estadísticas
+            # se actualizaran realmente cada 8 horas.
             stats_counter += 1
-            if stats_counter >= 16:
+
+            if stats_counter >= 8:
                 stats_counter = 0
                 try:
                     result = review_trader.recalculate_stats()
@@ -38615,14 +38626,17 @@ def _start_background_threads():
     except Exception as e:
         print(f"⚠️ Error iniciando monitor_entries: {e}")
     
-    # 3. Learning worker: evalúa signals pendientes (TP/SL/Expired) cada 15 min
+    # 3. Learning worker: evalúa signals pendientes (TP/SL/Expired) cada 30 min
     #    Antes SOLO se ejecutaba una vez al día en run_full_review, dejando
     #    miles de signals en pending. Ahora las tablas de stats se llenan
     #    conforme llegan resultados de operaciones.
     try:
         t3 = threading.Thread(target=learning_worker_loop, name='learning-worker', daemon=True)
         t3.start()
-        print("✅ Thread learning_worker iniciado (evalúa pending cada 15 min)")
+        print(
+            "✅ Thread learning_worker iniciado "
+            "(evalúa pending cada 30 min)"
+        )
     except Exception as e:
         print(f"⚠️ Error iniciando learning_worker: {e}")
 
