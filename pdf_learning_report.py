@@ -3227,6 +3227,22 @@ def _fetch_learning_data() -> Dict:
         'missed opportunities omitidas.'
     )
 
+    # ================================================================
+    # IMPORTANTE
+    # ================================================================
+    #
+    # _fetch_learning_data() siempre debe devolver un diccionario.
+    #
+    # Durante la incorporación del SAFE SNAPSHOT v6 este return quedó
+    # omitido, provocando:
+    #
+    #     data = None
+    #     data.get(...) -> AttributeError
+    #
+    # Esto NO afecta al aprendizaje almacenado en Supabase.
+    # Sólo restaura el contrato del generador del informe.
+    return data
+
 
 # ============================================================================
 # GENERACIÓN DEL PDF
@@ -3255,6 +3271,87 @@ def generate_learning_pdf() -> bytes:
     )
     
     data = _fetch_learning_data()
+
+    # ================================================================
+    # FAIL-SAFE DEL INFORME
+    # ================================================================
+    #
+    # El contrato normal de _fetch_learning_data() es devolver dict.
+    #
+    # Si en una modificación futura volviera a devolver None u otro
+    # tipo inválido, NO permitimos que el PDF muera en data.get().
+    #
+    # El núcleo Spot/Futures no se modifica.
+    # El gate queda cerrado a NOT_READY.
+    if not isinstance(
+        data,
+        dict
+    ):
+        logger.error(
+            'Learning PDF: _fetch_learning_data() '
+            'no devolvió un diccionario válido.'
+        )
+
+        data = {
+            'supabase_connected': False,
+            'report_window_days': REPORT_DAYS_BACK,
+
+            'all_time_signals': None,
+            'total_signals': 0,
+            'evaluated_signals': 0,
+            'pending_signals': 0,
+            'tp_hit': 0,
+            'sl_hit': 0,
+            'expired': 0,
+            'missed_opp_from_signals': 0,
+            'missed_opportunities': None,
+
+            'signals_with_indicators': [],
+
+            'fetch_diagnostics': {
+                'complete': False,
+                'fetched_rows': 0,
+                'expected_rows': None,
+                'coverage_pct': None,
+                'errors': [
+                    'fetch_learning_data_invalid_return'
+                ],
+                'model_version':
+                    'report_fetch_safe_v6'
+            },
+
+            'metrics_by_market': {
+                'spot': {},
+                'futures': {}
+            },
+
+            'quarantine_counts': {},
+
+            'futures_shadow_analysis': {},
+
+            'futures_walk_forward_analysis': {
+                'promotion_ready': False,
+                'promotion_status':
+                    'NOT_READY',
+                'promotion_reasons': [
+                    (
+                        'El informe no pudo recuperar '
+                        'un snapshot de aprendizaje válido.'
+                    )
+                ]
+            },
+
+            'futures_safety_breakdown_analysis': {},
+
+            'missed_details': [],
+            'last_review_log': None,
+
+            'error': (
+                'Snapshot de aprendizaje inválido. '
+                'Commit 37 permanece bloqueado.'
+            )
+        }
+
     signals_with_ind = data.get(
         'signals_with_indicators',
         []
