@@ -163,6 +163,26 @@ console.log(
             );
 
 
+        // ================================================================
+        // COMMIT 36R UX
+        // La IA es una capa de apoyo.
+        //
+        // Debe verse claramente, pero NO competir visualmente con:
+        // - Recomendación del Sistema;
+        // - Guardian;
+        // - gráficos.
+        // ================================================================
+
+        card.style.fontSize =
+            '0.88rem';
+
+        card.style.borderWidth =
+            '1px';
+
+        card.style.opacity =
+            '0.96';
+
+
         card.innerHTML = `
 
             <div
@@ -171,12 +191,18 @@ console.log(
 
                 <div>
 
-                    <strong class="text-info">
+                    <strong
+                        class="text-info"
+                        style="font-size: 0.95rem;"
+                    >
                         🧠 Asistente IA
                     </strong>
 
-                    <div class="small text-muted">
-                        Trader experto · apoyo Shadow/Advisory
+                    <div
+                        class="text-muted"
+                        style="font-size: 0.76rem;"
+                    >
+                        Trader experto · apoyo al sistema
                     </div>
 
                 </div>
@@ -203,7 +229,10 @@ console.log(
             </div>
 
 
-            <div class="card-body p-3">
+            <div
+                class="card-body py-2 px-3"
+                style="font-size: 0.84rem;"
+            >
 
                 <div
                     id="ai-assistant-state"
@@ -216,7 +245,12 @@ console.log(
 
                 <div
                     id="ai-assistant-answer"
-                    class="border border-secondary rounded p-3 mb-3"
+                    class="border border-secondary rounded p-2 mb-2"
+                    style="
+                        font-size: 0.82rem;
+                        line-height: 1.35;
+                        background: rgba(255,255,255,0.015);
+                    "
                 >
 
                     <div class="text-muted small">
@@ -287,15 +321,38 @@ console.log(
         // UBICACIÓN
         // ================================================================
 
+        // ================================================================
+        // UBICACIÓN 36R UX
+        // ================================================================
+        //
+        // SPOT:
+        //     Recomendación
+        //     ↓
+        //     Guardian TGP
+        //     ↓
+        //     Asistente IA
+        //     ↓
+        //     gráficos
+        //
+        // FUTURES:
+        //     Recomendación
+        //     ↓
+        //     Asistente IA
+        //     ↓
+        //     resto del análisis
+        //
+        // El Asistente deja de vivir en la barra lateral.
+        // ================================================================
+
         const anchor =
             window.IS_FUTURES_PAGE
 
                 ? document.getElementById(
-                    'futures-risk-settings-card'
+                    'recommendation-card'
                 )
 
                 : document.getElementById(
-                    'portfolio-panel'
+                    'tgp-banner'
                 );
 
 
@@ -311,19 +368,31 @@ console.log(
 
         } else {
 
-            const sidebar =
+            // ============================================================
+            // FALLBACK
+            //
+            // Nunca volver al sidebar.
+            // La IA debe permanecer en contenido principal.
+            // ============================================================
+
+            const mainContent =
                 document.querySelector(
-                    '.col-lg-3'
+                    '.col-lg-7'
                 );
 
 
-            if (!sidebar) {
+            if (!mainContent) {
+
+                console.warn(
+                    '⚠️ Asistente IA: '
+                    + 'no se encontró el contenido principal.'
+                );
 
                 return false;
             }
 
 
-            sidebar.prepend(
+            mainContent.prepend(
                 card
             );
         }
@@ -475,26 +544,33 @@ console.log(
             ).toUpperCase();
 
 
-        const badge = {
+        // ================================================================
+        // Traducción visual.
+        //
+        // El valor interno permanece en inglés porque forma parte
+        // del contrato backend / estadísticas 36R-36S.
+        // ================================================================
+
+        const verdictLabel = {
 
             SUPPORT:
-                'success',
+                'APOYA',
 
             CAUTION:
-                'warning text-dark',
+                'PRECAUCIÓN',
 
             DISAGREE:
-                'danger',
+                'DISCREPA',
 
             NO_EDGE:
-                'secondary',
+                'SIN VENTAJA',
 
             INFO:
-                'info text-dark'
+                'INFORMACIÓN'
 
         }[
             verdict
-        ] || 'secondary';
+        ] || 'INFORMACIÓN';
 
 
         if (state) {
@@ -530,7 +606,7 @@ console.log(
 
                 <span class="badge bg-${badge}">
 
-                    ${esc(verdict)}
+                    ${esc(verdictLabel)}
 
                     ·
 
