@@ -118,6 +118,10 @@ console.log(
         const now =
             new Date();
 
+        const halfHour =
+            now.getMinutes() < 30
+                ? '00'
+                : '30';
 
         return [
 
@@ -144,7 +148,9 @@ console.log(
             ).padStart(
                 2,
                 '0'
-            )
+            ),
+
+            halfHour
 
         ].join(
             '|'
@@ -430,7 +436,7 @@ console.log(
 
                     <span class="text-muted">
                         El consejo se genera
-                        automáticamente cada hora.
+                        automáticamente cada 30 minutos.
                     </span>
 
                 </div>
@@ -497,7 +503,7 @@ console.log(
                         class="badge bg-secondary"
                         style="font-size: 0.62rem;"
                     >
-                        3/h
+                        10/h
                     </span>
 
                 </div>
@@ -895,7 +901,7 @@ console.log(
             (
                 `${hourly.remaining ?? '--'}`
                 + '/'
-                + `${hourly.limit ?? 3}`
+                + `${hourly.limit ?? 10}`
             );
 
 
@@ -1090,7 +1096,7 @@ console.log(
 
             state.textContent =
                 (
-                    'Evaluación horaria · '
+                    'Evaluación 30 min · '
                     + (
                         resolved.market
                         || market()
@@ -1098,7 +1104,7 @@ console.log(
                     + focus
                     + (
                         result.cached
-                            ? ' · caché horario'
+                            ? ' · caché 30 min'
                             : ''
                     )
                 );
@@ -1743,8 +1749,8 @@ console.log(
             );
 
 
-            // Revisa una vez por minuto si cambió la hora.
-            // NO llama Groq otra vez durante la misma hora.
+            // Revisa una vez por minuto si cambió el bloque de 30 min.
+            // NO llama a la IA otra vez dentro del mismo bloque.
 
             setInterval(
                 () => {
