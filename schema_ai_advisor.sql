@@ -217,3 +217,107 @@ ON public.ai_advisor_observations (
     ai_verdict,
     outcome_status
 );
+-- ============================================================================
+-- COMMIT 36S.1
+-- AI ACTIVE CONTROL LEDGER
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS public.ai_control_events (
+
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+
+    -- Una decisión 36S única por señal/evento.
+    dedup_key TEXT NOT NULL UNIQUE,
+
+    context_type TEXT NOT NULL,
+    -- SIGNAL / GUARDIAN
+
+    market TEXT NOT NULL,
+
+    symbol TEXT,
+
+    timeframe TEXT,
+
+    related_saved_signal_id UUID
+        REFERENCES public.saved_signals(id)
+        ON DELETE SET NULL,
+
+    source_signal_id TEXT,
+
+    source_candle_timestamp TEXT,
+
+    ai_observation_id UUID
+        REFERENCES public.ai_advisor_observations(id)
+        ON DELETE SET NULL,
+
+    -- Estado ORIGINAL del sistema
+    original_action TEXT,
+
+    original_publication_status TEXT,
+
+    -- Opinión IA
+    ai_verdict TEXT,
+
+    ai_confidence INTEGER,
+
+    minimum_confidence INTEGER,
+
+    -- Decisión determinista 36S
+    control_action TEXT NOT NULL DEFAULT 'NO_CHANGE',
+
+    final_action TEXT,
+
+    final_publication_status TEXT,
+
+    applied BOOLEAN NOT NULL DEFAULT FALSE,
+
+    reason TEXT,
+
+    -- Se utilizará en 36S.3 para medir
+    -- si las intervenciones realmente ayudaron.
+    outcome_status TEXT NOT NULL DEFAULT 'PENDING',
+
+    outcome_r NUMERIC(12, 6),
+
+    outcome_win BOOLEAN,
+
+    evaluated_at TIMESTAMPTZ,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+
+CREATE INDEX IF NOT EXISTS
+    idx_ai_control_context
+
+ON public.ai_control_events (
+    context_type,
+    created_at DESC
+);
+
+
+CREATE INDEX IF NOT EXISTS
+    idx_ai_control_applied
+
+ON public.ai_control_events (
+    applied,
+    created_at DESC
+);
+
+
+CREATE INDEX IF NOT EXISTS
+    idx_ai_control_signal
+
+ON public.ai_control_events (
+    source_signal_id
+);
+
+
+CREATE INDEX IF NOT EXISTS
+    idx_ai_control_saved_signal
+
+ON public.ai_control_events (
+    related_saved_signal_id
+);
