@@ -2,7 +2,7 @@
 /* COMMIT 36R UX4 — CONSEJO HORARIO + CHAT MINIMIZADO */
 
 console.log(
-    '🤖 AI Assistant JS 20260906-UX4 cargado'
+    '🤖 AI Assistant JS 20260906-UX5 cargado'
 );
 
 (function initAITradingAssistant() {
@@ -349,7 +349,15 @@ console.log(
         adviceCard.innerHTML = `
 
             <div
+                id="ai-advice-toggle"
                 class="card-header bg-info bg-opacity-10 d-flex justify-content-between align-items-center py-1 px-2"
+                role="button"
+                tabindex="0"
+                aria-expanded="false"
+                style="
+                    cursor: pointer;
+                    min-height: 0;
+                "
             >
 
                 <strong
@@ -364,7 +372,7 @@ console.log(
 
 
                 <div
-                    class="d-flex align-items-center gap-1"
+                    class="d-flex align-items-center gap-2"
                 >
 
                     <span
@@ -374,6 +382,7 @@ console.log(
                         ${market()}
                     </span>
 
+
                     <span
                         id="ai-advice-hour"
                         class="text-muted"
@@ -382,14 +391,23 @@ console.log(
                         --:--
                     </span>
 
+
+                    <i
+                        id="ai-advice-chevron"
+                        class="fas fa-chevron-down text-muted"
+                        style="font-size: 0.68rem;"
+                    ></i>
+
                 </div>
 
             </div>
 
 
             <div
+                id="ai-advice-body"
                 class="card-body py-2 px-2"
                 style="
+                    display: none;
                     font-size: 0.80rem;
                     line-height: 1.35;
                 "
@@ -411,15 +429,14 @@ console.log(
                 >
 
                     <span class="text-muted">
-                        El consejo aparecerá
-                        automáticamente.
+                        El consejo se genera
+                        automáticamente cada hora.
                     </span>
 
                 </div>
 
             </div>
         `;
-
 
         // ================================================================
         // CHAT IA
@@ -585,7 +602,34 @@ console.log(
             chatCard
         );
 
+        const adviceToggle =
+            document.getElementById(
+                'ai-advice-toggle'
+            );
 
+
+        adviceToggle?.addEventListener(
+            'click',
+            () => toggleAdvice()
+        );
+
+
+        adviceToggle?.addEventListener(
+            'keydown',
+            event => {
+
+                if (
+                    event.key === 'Enter'
+                    || event.key === ' '
+                ) {
+
+                    event.preventDefault();
+
+                    toggleAdvice();
+                }
+            }
+        );
+        
         const toggle =
             document.getElementById(
                 'ai-chat-toggle'
@@ -657,7 +701,84 @@ console.log(
     // ========================================================================
     // MINIMIZAR / ABRIR CHAT
     // ========================================================================
+    function toggleAdvice(
+        forceOpen = null
+    ) {
 
+        const body =
+            document.getElementById(
+                'ai-advice-body'
+            );
+
+
+        const toggle =
+            document.getElementById(
+                'ai-advice-toggle'
+            );
+
+
+        const chevron =
+            document.getElementById(
+                'ai-advice-chevron'
+            );
+
+
+        if (!body) {
+
+            return;
+        }
+
+
+        const currentlyOpen =
+            body.style.display
+            !== 'none';
+
+
+        const shouldOpen =
+            forceOpen === null
+
+                ? !currentlyOpen
+
+                : Boolean(
+                    forceOpen
+                );
+
+
+        body.style.display =
+            shouldOpen
+
+                ? 'block'
+
+                : 'none';
+
+
+        toggle?.setAttribute(
+            'aria-expanded',
+
+            shouldOpen
+                ? 'true'
+                : 'false'
+        );
+
+
+        if (chevron) {
+
+            chevron.className =
+
+                shouldOpen
+
+                    ? (
+                        'fas fa-chevron-up '
+                        + 'text-muted'
+                    )
+
+                    : (
+                        'fas fa-chevron-down '
+                        + 'text-muted'
+                    );
+        }
+    }
+    
     function toggleChat(
         forceOpen = null
     ) {
