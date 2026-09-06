@@ -42,6 +42,21 @@ GENERAL_SAMPLES_RIGOROUS = 25    # con >=25 muestras el resultado es "válido"
 GENERAL_SAMPLES_MIN = 5
 REPORT_DAYS_BACK = 90
 
+# ================================================================
+# PRESUPUESTO DE TIEMPO DEL INFORME
+# ================================================================
+#
+# El endpoint Flask/Gunicorn no debe dedicar todo su timeout a
+# consultar Supabase. Si la infraestructura está lenta, preferimos
+# generar un informe PARCIAL claramente marcado como NOT_READY
+# antes que perder el worker y devolver HTTP 500.
+#
+# Estos límites NO reducen la ventana estadística de 90 días.
+# Sólo detienen de forma segura una lectura que está tardando
+# demasiado.
+REPORT_FETCH_SOFT_BUDGET_SECONDS = 45.0
+REPORT_STRATEGY_SOFT_BUDGET_SECONDS = 60.0
+
 LEARNING_CONTRACT_VERSION = 'market_separated_v1'
 FUTURES_REAL_DATA_SOURCE = 'KUCOIN_FUTURES_PERPETUAL_REST'
 FUTURES_REAL_COHORT = 'FUTURES_PERPETUAL_REAL_CLOSED_V1'
@@ -1964,6 +1979,8 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
     from datetime import timedelta
     import time
 
+    started_at = time.monotonic()  
+  
     now = datetime.utcnow()
     cutoff_dt = now - timedelta(days=days_back)
     # Congela el límite superior para que el count y las páginas midan el
@@ -2010,9 +2027,12 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
         'strategy_rows': 0,
         'strategy_batches': 0,
         'strategy_hydration_complete': True,
+        'strategy_hydration_skipped': False,
+        'time_budget_exhausted': False,
+        'fetch_elapsed_seconds': 0.0,
         'result_mode': 'LEVEL_RECONSTRUCTED_NO_RESULT_JOIN',
         'errors': [],
-        'model_version': 'report_fetch_memory_v4'
+        'model_version': 'report_fetch_memory_v5'
     }
 
     # ------------------------------------------------------------------
@@ -2148,6 +2168,35 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
     offset = 0
 
     for _ in range(50):  # cap 50k filas
+        elapsed = (
+            time.monotonic()
+            - started_at
+        )
+
+        if (
+            elapsed
+            >= REPORT_FETCH_SOFT_BUDGET_SECONDS
+        ):
+            diagnostics[
+                'time_budget_exhausted'
+            ] = True
+
+            diagnostics[
+                'errors'
+            ].append(
+                'primary_soft_time_budget_exhausted'
+            )
+
+            logger.warning(
+                '⚠️ Learning PDF: presupuesto '
+                'de lectura principal agotado '
+                f'({elapsed:.1f}s). '
+                'Se genera informe parcial '
+                'y Commit 37 queda bloqueado.'
+            )
+
+            break
+
         response, error = _execute_page(
             cutoff,
             snapshot_end,
@@ -2305,7 +2354,29 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
 
         if row_id:
             strategy_ids.append(row_id)
+    # ================================================================
+    # FAIL-OPEN DE TABLAS AUXILIARES
+    # ================================================================
+    #
+    # Si la cohorte principal ya quedó incompleta, las estadísticas
+    # por estrategia tampoco serían completas.
+    #
+    # No tiene sentido gastar más segundos hidratando estrategias
+    # cuando el gate ya debe quedar NOT_READY.
+    if not diagnostics.get(
+        'complete',
+        False
+    ):
+        strategy_ids = []
 
+        diagnostics[
+            'strategy_hydration_complete'
+        ] = False
+
+        diagnostics[
+            'strategy_hydration_skipped'
+        ] = True
+  
     relation_batch_size = 300
 
     for start in range(
@@ -2313,7 +2384,43 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
         len(strategy_ids),
         relation_batch_size
     ):
-        id_batch = strategy_ids[
+        elapsed = (
+            time.monotonic()
+            - started_at
+        )
+
+        if (
+            elapsed
+            >= REPORT_STRATEGY_SOFT_BUDGET_SECONDS
+        ):
+            diagnostics[
+                'time_budget_exhausted'
+            ] = True
+
+            diagnostics[
+                'strategy_hydration_complete'
+            ] = False
+
+            diagnostics[
+                'strategy_hydration_skipped'
+            ] = True
+
+            diagnostics[
+                'errors'
+            ].append(
+                'strategy_soft_time_budget_exhausted'
+            )
+
+            logger.warning(
+                '⚠️ Learning PDF: presupuesto '
+                'de estrategias agotado '
+                f'({elapsed:.1f}s). '
+                'El PDF continúa sin completar '
+                'las tablas auxiliares.'
+            )
+
+            break
+      id_batch = strategy_ids[
             start:start + relation_batch_size
         ]
 
@@ -2410,7 +2517,13 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
             f"{diagnostics['fetched_rows']}/"
             f"{diagnostics.get('expected_rows')} filas."
         )
-
+    diagnostics[
+        'fetch_elapsed_seconds'
+    ] = round(
+        time.monotonic()
+        - started_at,
+        2
+    )
     return all_data, diagnostics
 
 
@@ -3032,11 +3145,38 @@ def _fetch_learning_data() -> Dict:
     except Exception as e:
         logger.warning(f'Error trayendo signals con indicadores: {e}')
     
-    # Missed opps detalladas para análisis
-    try:
-        data['missed_details'] = _fetch_missed_opp_indicators(db, limit=500)
-    except Exception:
-        pass
+    # ================================================================
+    # MISSED OPPORTUNITIES — AUXILIAR
+    # ================================================================
+    #
+    # No es parte del gate obligatorio del Commit 37.
+    # Si la lectura principal ya agotó su presupuesto de tiempo,
+    # omitimos este fetch para asegurar que ReportLab tenga tiempo
+    # de construir y devolver el PDF.
+    if not (
+        data.get(
+            'fetch_diagnostics',
+            {}
+        ).get(
+            'time_budget_exhausted',
+            False
+        )
+    ):
+        try:
+            data[
+                'missed_details'
+            ] = _fetch_missed_opp_indicators(
+                db,
+                limit=500
+            )
+        except Exception:
+            pass
+    else:
+        logger.warning(
+            '⚠️ Learning PDF: oportunidades '
+            'perdidas omitidas por presupuesto '
+            'de tiempo.'
+        )
     
     # Último ciclo review_log
     try:
