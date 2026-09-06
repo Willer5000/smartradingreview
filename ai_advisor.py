@@ -186,7 +186,179 @@ GROQ_URL = (
     "https://api.groq.com/"
     "openai/v1/chat/completions"
 )
+# ============================================================================
+# COMMIT 36S.2C
+# GEMINI — LEARNING / RESEARCH SHADOW
+# ============================================================================
 
+GEMINI_LEARNING_ENABLED = (
+    os.getenv(
+        "GEMINI_LEARNING_ENABLED",
+        "true"
+    )
+    .lower()
+    in (
+        "1",
+        "true",
+        "yes",
+        "si",
+        "sí"
+    )
+)
+
+
+GEMINI_LEARNING_MODEL = (
+    os.getenv(
+        "GEMINI_LEARNING_MODEL",
+        "gemini-3.7-flash"
+    )
+    .strip()
+)
+
+
+GEMINI_LEARNING_TIMEOUT = max(
+    5,
+    min(
+        45,
+        int(
+            os.getenv(
+                "GEMINI_LEARNING_TIMEOUT_SECONDS",
+                "20"
+            )
+        )
+    )
+)
+
+
+def _resolve_ai_route(
+    usage_type,
+    context_type
+):
+    """
+    Decide qué proveedor hace cada trabajo.
+
+    GROQ:
+        - Chat
+        - Consejo
+        - Futures Critic
+        - Guardian
+
+    GEMINI:
+        - Learning / Research agregado
+
+    Gemini nunca recibe autoridad operacional aquí.
+    """
+
+    usage_type = str(
+        usage_type
+        or ""
+    ).upper()
+
+    context_type = str(
+        context_type
+        or ""
+    ).upper()
+
+    if (
+        usage_type == "LEARNING"
+        and context_type == "LEARNING"
+        and GEMINI_LEARNING_ENABLED
+        and os.getenv(
+            "GEMINI_API_KEY",
+            ""
+        ).strip()
+    ):
+        return (
+            "GEMINI",
+            GEMINI_LEARNING_MODEL
+        )
+
+    return (
+        AI_PROVIDER,
+        AI_MODEL
+    )
+
+
+def _gemini_learning_safe_context(
+    context
+):
+    """
+    El Learning de Gemini recibe contexto del SISTEMA,
+    no información financiera personal innecesaria.
+
+    Elimina cantidades monetarias exactas si aparecieran
+    accidentalmente dentro del snapshot agregado.
+    """
+
+    sensitive_key_fragments = (
+        "equity",
+        "balance",
+        "amount",
+        "quantity",
+        "investment_usdt",
+        "margin_usdt",
+        "pnl_usdt",
+        "portfolio_value"
+    )
+
+    def _clean(
+        value
+    ):
+        if isinstance(
+            value,
+            dict
+        ):
+            cleaned = {}
+
+            for key, item in value.items():
+
+                key_text = str(
+                    key
+                )
+
+                lowered = (
+                    key_text
+                    .strip()
+                    .lower()
+                )
+
+                if any(
+                    fragment in lowered
+                    for fragment
+                    in sensitive_key_fragments
+                ):
+                    continue
+
+                cleaned[
+                    key_text
+                ] = _clean(
+                    item
+                )
+
+            return cleaned
+
+        if isinstance(
+            value,
+            list
+        ):
+            return [
+                _clean(
+                    item
+                )
+                for item
+                in value[:100]
+            ]
+
+        return value
+
+    return _clean(
+        context
+        if isinstance(
+            context,
+            dict
+        )
+        else {}
+    )
 
 # ============================================================================
 # DOMINIO PERMITIDO PARA EL CHAT
@@ -965,7 +1137,9 @@ def _record_usage(
     context_type,
     market,
     status,
-    usage=None
+    usage=None,
+    provider=None,
+    model=None
 ):
 
     db = _db()
@@ -1008,10 +1182,16 @@ def _record_usage(
             ).upper()[:20],
 
         "provider":
-            AI_PROVIDER,
+            str(
+                provider
+                or AI_PROVIDER
+            ).upper()[:40],
 
         "model":
-            AI_MODEL[:120],
+            str(
+                model
+                or AI_MODEL
+            )[:120],
 
         "status":
             str(
@@ -1738,7 +1918,7 @@ what_to_watch debe indicar qué condición observable podría
 cambiar la tesis.
 
 ============================================================
-APRENDIZAJE
+APRENDIZAJE Y DISEÑO DE ESTRATEGIAS
 ============================================================
 
 learning_hypotheses sólo debe contener hipótesis comprobables.
@@ -1754,13 +1934,67 @@ Ejemplo inválido:
 
 No afirmes que un patrón funciona si la muestra no lo demuestra.
 
+Cuando el contexto corresponda a LEARNING puedes además
+proponer nuevas estrategias de investigación.
+
+Una estrategia propuesta:
+
+- NO entra automáticamente en producción;
+- NO modifica Safety;
+- NO modifica Entry/SL/TP actuales;
+- NO modifica pesos;
+- NO modifica leverage;
+- debe comenzar como SHADOW_PROPOSAL.
+
+Una estrategia propuesta debe indicar:
+
+1. mercado: SPOT o FUTURES;
+2. tesis;
+3. régimen donde debería funcionar;
+4. setup técnico;
+5. condiciones de entrada observables;
+6. invalidación;
+7. lógica de target;
+8. métrica principal de éxito;
+9. cantidad mínima de muestras;
+10. por qué merece ser probada.
+
+Para FUTURES prioriza como fuentes de mejora:
+
+- calidad Entry SMC;
+- Liquidity -> Sweep -> MSS -> Displacement -> POI;
+- calidad del Stop Loss;
+- calidad/probabilidad del Take Profit;
+- régimen;
+- temporalidad;
+- expectancy R;
+- costes.
+
+Para SPOT prioriza:
+
+- acumulación BTC;
+- protección PAXG;
+- liquidez USDT;
+- edge de rotación;
+- coste de oportunidad;
+- crecimiento/protección del portafolio.
+
+Una nueva estrategia NO debe ser simplemente:
+
+"bajar Safety para tener más señales".
+
+Debe intentar generar setups de MAYOR CALIDAD que alcancen
+Safety por mérito propio.
+
+Si no existe evidencia suficiente para proponer una estrategia,
+strategy_proposals debe ser [].
+
 Distingue siempre:
 
 - observado;
 - estimado;
 - hipótesis;
 - desconocido.
-
 ============================================================
 GUARDRAILS
 ============================================================
@@ -1966,7 +2200,175 @@ def _ai_clean_list(
 
     return cleaned
 
+def _normalize_strategy_proposals(
+    value
+):
+    """
+    Convierte propuestas libres del LLM en hipótesis Shadow
+    auditables.
 
+    IMPORTANTE:
+    una propuesta NO es una estrategia productiva.
+    """
+
+    if not isinstance(
+        value,
+        list
+    ):
+        return []
+
+    proposals = []
+
+    for item in value[:3]:
+
+        if not isinstance(
+            item,
+            dict
+        ):
+            continue
+
+        market = str(
+            item.get(
+                "market",
+                "FUTURES"
+            )
+            or "FUTURES"
+        ).upper()
+
+        if market not in (
+            "SPOT",
+            "FUTURES",
+            "BOTH"
+        ):
+            market = "FUTURES"
+
+        try:
+            min_samples = int(
+                item.get(
+                    "min_samples",
+                    25
+                )
+                or 25
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+            min_samples = 25
+
+        min_samples = max(
+            10,
+            min(
+                500,
+                min_samples
+            )
+        )
+
+        proposal = {
+            "name":
+                _ai_clean_text(
+                    item.get(
+                        "name"
+                    ),
+                    "Propuesta IA",
+                    160
+                ),
+
+            "market":
+                market,
+
+            "thesis":
+                _ai_clean_text(
+                    item.get(
+                        "thesis"
+                    ),
+                    "",
+                    1200
+                ),
+
+            "setup":
+                _ai_clean_text(
+                    item.get(
+                        "setup"
+                    ),
+                    "",
+                    1600
+                ),
+
+            "entry_conditions":
+                _ai_clean_list(
+                    item.get(
+                        "entry_conditions"
+                    ),
+                    6
+                ),
+
+            "invalidation":
+                _ai_clean_text(
+                    item.get(
+                        "invalidation"
+                    ),
+                    "",
+                    800
+                ),
+
+            "target_logic":
+                _ai_clean_text(
+                    item.get(
+                        "target_logic"
+                    ),
+                    "",
+                    800
+                ),
+
+            "regime":
+                _ai_clean_text(
+                    item.get(
+                        "regime"
+                    ),
+                    "ANY",
+                    240
+                ),
+
+            "success_metric":
+                _ai_clean_text(
+                    item.get(
+                        "success_metric"
+                    ),
+                    "net_expectancy_R",
+                    240
+                ),
+
+            "min_samples":
+                min_samples,
+
+            "why_test":
+                _ai_clean_text(
+                    item.get(
+                        "why_test"
+                    ),
+                    "",
+                    1200
+                ),
+
+            "status":
+                "SHADOW_PROPOSAL"
+        }
+
+        if (
+            proposal[
+                "thesis"
+            ]
+            and proposal[
+                "entry_conditions"
+            ]
+        ):
+            proposals.append(
+                proposal
+            )
+
+    return proposals
 def _normalize_ai_advice(
     payload
 ):
@@ -2119,7 +2521,12 @@ def _normalize_ai_advice(
                 ),
                 5
             ),
-
+        "strategy_proposals":
+            _normalize_strategy_proposals(
+                payload.get(
+                    "strategy_proposals"
+                )
+            ),
         "system_alignment":
             _ai_clean_text(
                 payload.get(
@@ -2249,6 +2656,7 @@ Usa esta estructura:
   "risks": [],
   "what_to_watch": [],
   "learning_hypotheses": [],
+  "strategy_proposals": [],
   "system_alignment": "",
   "personal_risk_note": "",
   "portfolio_note": ""
@@ -2263,6 +2671,9 @@ confidence debe ser un número de 0 a 100.
 
 why, risks, what_to_watch y learning_hypotheses
 deben ser listas de textos.
+
+strategy_proposals debe ser [] salvo que el contexto
+corresponda específicamente a LEARNING.
 
 Todos los textos visibles deben estar en español.
 
@@ -2434,7 +2845,365 @@ en el contexto recibido.
         )
         or {}
     )
+def _call_gemini_learning(
+    context,
+    question=None
+):
+    """
+    Gemini actúa exclusivamente como Learning Scientist.
 
+    No publica señales.
+    No modifica trading.
+    No recibe autoridad 36S.
+    """
+
+    key = (
+        os.getenv(
+            "GEMINI_API_KEY",
+            ""
+        )
+        .strip()
+    )
+
+    if not key:
+        raise RuntimeError(
+            (
+                "GEMINI_API_KEY no está "
+                "configurada en Render."
+            )
+        )
+
+    safe_context = (
+        _gemini_learning_safe_context(
+            context
+        )
+    )
+
+    context_text = json.dumps(
+        safe_context,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str
+    )
+
+    if (
+        len(
+            context_text
+        )
+        > AI_MAX_CONTEXT
+    ):
+        context_text = (
+            context_text[
+                :AI_MAX_CONTEXT
+            ]
+            + "\n...[CONTEXTO RECORTADO]"
+        )
+
+    learning_instruction = """
+Actúas como AI Learning Scientist de SmartradingReview.
+
+Tu función es investigar cómo mejorar la CALIDAD,
+EXPECTANCY y RENTABILIDAD del sistema.
+
+NO modificas producción.
+
+Analiza críticamente:
+
+- ReviewTrader;
+- economía;
+- outcomes;
+- Guardian Learning;
+- Futures Shadow;
+- Safety;
+- Entry SMC;
+- Stop Loss;
+- Take Profit;
+- Risk/Reward;
+- regímenes;
+- temporalidades;
+- errores recurrentes;
+- oportunidades perdidas cuando existan.
+
+No intentes aumentar operaciones simplemente bajando filtros.
+
+Busca qué características hacen que una señal SEA MEJOR.
+
+Debes generar hipótesis falsables.
+
+Cuando la evidencia lo justifique puedes proponer como máximo
+3 estrategias nuevas SHADOW_PROPOSAL.
+
+Una propuesta NO significa que funciona.
+
+Debe pasar posteriormente por:
+
+SHADOW
+-> muestra suficiente
+-> expectancy
+-> costes
+-> walk-forward
+-> OOS
+-> promoción o descarte.
+
+Nunca inventes:
+
+- resultados;
+- fees;
+- slippage;
+- funding;
+- muestras;
+- métricas.
+
+Si los datos son insuficientes, dilo claramente.
+""".strip()
+
+    output_contract = """
+Responde EXCLUSIVAMENTE con un objeto JSON válido.
+
+No escribas markdown.
+No escribas texto antes ni después del JSON.
+
+Usa exactamente esta estructura:
+
+{
+  "verdict": "INFO",
+  "confidence": 0,
+  "headline": "",
+  "advice": "",
+  "why": [],
+  "risks": [],
+  "what_to_watch": [],
+  "learning_hypotheses": [],
+  "strategy_proposals": [
+    {
+      "name": "",
+      "market": "FUTURES",
+      "thesis": "",
+      "setup": "",
+      "entry_conditions": [],
+      "invalidation": "",
+      "target_logic": "",
+      "regime": "",
+      "success_metric": "net_expectancy_R",
+      "min_samples": 25,
+      "why_test": ""
+    }
+  ],
+  "system_alignment": "",
+  "personal_risk_note": "",
+  "portfolio_note": ""
+}
+
+REGLAS:
+
+strategy_proposals puede ser [].
+
+Máximo 3 propuestas.
+
+market sólo puede ser:
+
+SPOT
+FUTURES
+BOTH
+
+Cada estrategia debe ser comprobable.
+
+El criterio principal de éxito debe ser expectancy neta
+y preservación de capital, no Win Rate aislado.
+""".strip()
+
+    prompt = (
+        "CONTEXTO DE APRENDIZAJE:\n"
+        f"{context_text}"
+        "\n\n"
+        f"{output_contract}"
+    )
+
+    if question:
+        prompt += (
+            "\n\nPREGUNTA:\n"
+            + str(
+                question
+            ).strip()[:800]
+        )
+
+    url = (
+        "https://generativelanguage.googleapis.com/"
+        "v1beta/models/"
+        f"{GEMINI_LEARNING_MODEL}:generateContent"
+    )
+
+    response = requests.post(
+        url,
+        headers={
+            "x-goog-api-key":
+                key,
+
+            "Content-Type":
+                "application/json"
+        },
+        json={
+            "systemInstruction": {
+                "parts": [
+                    {
+                        "text":
+                            (
+                                _system_prompt()
+                                + "\n\n"
+                                + learning_instruction
+                            )
+                    }
+                ]
+            },
+
+            "contents": [
+                {
+                    "role":
+                        "user",
+
+                    "parts": [
+                        {
+                            "text":
+                                prompt
+                        }
+                    ]
+                }
+            ],
+
+            "generationConfig": {
+                "temperature":
+                    0.15,
+
+                "maxOutputTokens":
+                    1800,
+
+                "responseMimeType":
+                    "application/json"
+            }
+        },
+        timeout=
+            GEMINI_LEARNING_TIMEOUT
+    )
+
+    if (
+        response.status_code
+        != 200
+    ):
+        raise RuntimeError(
+            (
+                f"Gemini HTTP "
+                f"{response.status_code}: "
+                f"{response.text[:240]}"
+            )
+        )
+
+    raw = response.json()
+
+    candidates = (
+        raw.get(
+            "candidates"
+        )
+        or []
+    )
+
+    if not candidates:
+        raise RuntimeError(
+            "Gemini no devolvió candidatos."
+        )
+
+    parts = (
+        candidates[0]
+        .get(
+            "content",
+            {}
+        )
+        .get(
+            "parts",
+            []
+        )
+        or []
+    )
+
+    content = "".join(
+        str(
+            part.get(
+                "text",
+                ""
+            )
+            or ""
+        )
+        for part in parts
+        if isinstance(
+            part,
+            dict
+        )
+    ).strip()
+
+    if not content:
+        raise RuntimeError(
+            "Gemini no devolvió texto."
+        )
+
+    try:
+        generated = json.loads(
+            content
+        )
+
+    except Exception as json_error:
+        raise RuntimeError(
+            (
+                "Gemini devolvió JSON "
+                "no interpretable: "
+                f"{str(json_error)[:120]}"
+            )
+        )
+
+    advice = (
+        _normalize_ai_advice(
+            generated
+        )
+    )
+
+    usage_raw = (
+        raw.get(
+            "usageMetadata"
+        )
+        or {}
+    )
+
+    usage = {
+        "prompt_tokens":
+            int(
+                usage_raw.get(
+                    "promptTokenCount",
+                    0
+                )
+                or 0
+            ),
+
+        "completion_tokens":
+            int(
+                usage_raw.get(
+                    "candidatesTokenCount",
+                    0
+                )
+                or 0
+            ),
+
+        "total_tokens":
+            int(
+                usage_raw.get(
+                    "totalTokenCount",
+                    0
+                )
+                or 0
+            )
+    }
+
+    return (
+        advice,
+        usage
+    )
 # ============================================================================
 # PERSISTENCIA
 # ============================================================================
@@ -2452,7 +3221,9 @@ def _persist(
     timeframe=None,
     related_saved_signal_id=None,
     source_signal_id=None,
-    question=None
+    question=None,
+    provider=None,
+    model=None
 ):
 
     db = _db()
@@ -2563,10 +3334,16 @@ def _persist(
             fingerprint,
 
         "provider":
-            AI_PROVIDER,
+            str(
+                provider
+                or AI_PROVIDER
+            ).upper()[:40],
 
         "model":
-            AI_MODEL[:120],
+            str(
+                model
+                or AI_MODEL
+            )[:120],
 
         "system_action":
             (
@@ -2722,26 +3499,7 @@ def run_ai_advisor(
         }
 
 
-    if (
-        AI_PROVIDER
-        != "GROQ"
-    ):
 
-        return {
-            "success":
-                False,
-
-            "reason":
-                (
-                    "Proveedor no soportado: "
-                    f"{AI_PROVIDER}"
-                ),
-
-            "quota":
-                get_ai_quota_status(
-                    user_name
-                )
-        }
 
 
     usage_type = str(
@@ -2757,7 +3515,62 @@ def run_ai_advisor(
     market = str(
         market
     ).upper()
+    # ================================================================
+    # ROUTER MULTI-PROVIDER 36S.2C
+    # ================================================================
 
+    selected_provider, selected_model = (
+        _resolve_ai_route(
+            usage_type,
+            context_type
+        )
+    )
+
+    if selected_provider not in (
+        "GROQ",
+        "GEMINI"
+    ):
+        return {
+            "success":
+                False,
+
+            "reason":
+                (
+                    "Proveedor no soportado: "
+                    f"{selected_provider}"
+                ),
+
+            "quota":
+                get_ai_quota_status(
+                    user_name
+                )
+        }
+
+    # El proveedor/modelo forma parte de la identidad del
+    # aprendizaje para no reutilizar un caché antiguo de Groq
+    # cuando ahora corresponde Gemini.
+    fingerprint_context = context
+
+    if (
+        usage_type == "LEARNING"
+        and isinstance(
+            context,
+            dict
+        )
+    ):
+        fingerprint_context = dict(
+            context
+        )
+
+        fingerprint_context[
+            "_ai_route"
+        ] = {
+            "provider":
+                selected_provider,
+
+            "model":
+                selected_model
+        }
 
     # Preguntas ajenas a trading:
     # se rechazan SIN gastar llamada.
@@ -2791,7 +3604,7 @@ def run_ai_advisor(
 
 
     fingerprint = _fingerprint(
-        context,
+        fingerprint_context,
         context_type,
         event_type,
         market,
@@ -2859,12 +3672,24 @@ def run_ai_advisor(
 
     try:
 
-        advice, usage = (
-            _call_groq(
-                context,
-                question
+        if (
+            selected_provider
+            == "GEMINI"
+        ):
+            advice, usage = (
+                _call_gemini_learning(
+                    context,
+                    question
+                )
             )
-        )
+
+        else:
+            advice, usage = (
+                _call_groq(
+                    context,
+                    question
+                )
+            )
 
 
         _record_usage(
@@ -2873,7 +3698,11 @@ def run_ai_advisor(
             context_type,
             market,
             "SUCCESS",
-            usage
+            usage,
+            provider=
+                selected_provider,
+            model=
+                selected_model
         )
 
 
@@ -2893,7 +3722,11 @@ def run_ai_advisor(
             timeframe,
             related_saved_signal_id,
             source_signal_id,
-            question
+            question,
+            provider=
+                selected_provider,
+            model=
+                selected_model
         )
 
 
@@ -2929,7 +3762,11 @@ def run_ai_advisor(
             context_type,
             market,
             "ERROR",
-            {}
+            {},
+            provider=
+                selected_provider,
+            model=
+                selected_model
         )
 
 
