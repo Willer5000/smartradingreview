@@ -2462,3 +2462,694 @@ def get_ai_performance_summary(
 
 
         return empty
+# ============================================================================
+# COMMIT 36S.1 — AI CONTROL LAYER
+# ============================================================================
+
+AI_CONTROL_ENABLED = (
+    os.getenv(
+        "AI_CONTROL_ENABLED",
+        "false"
+    )
+    .strip()
+    .lower()
+    in (
+        "1",
+        "true",
+        "yes",
+        "si",
+        "sí"
+    )
+)
+
+
+AI_CONTROL_MIN_CONFIDENCE = max(
+    50,
+    min(
+        100,
+        int(
+            os.getenv(
+                "AI_CONTROL_MIN_CONFIDENCE",
+                "80"
+            )
+        )
+    )
+)
+
+
+AI_CONTROL_MODE = (
+    os.getenv(
+        "AI_CONTROL_MODE",
+        "CAUTIOUS_OVERLAY"
+    )
+    .strip()
+    .upper()
+)
+
+
+def evaluate_ai_control(
+    ai_result,
+    context_type,
+    original_action,
+    original_publication_status=None
+):
+    """
+    Autoridad 36S.1, deliberadamente limitada.
+
+    SIGNAL:
+        una IA con DISAGREE fuerte puede bloquear
+        una señal ya EXECUTABLE_SIGNAL.
+
+    GUARDIAN:
+        EXTEND -> HOLD
+        PROTECT_AND_EXTEND -> PROTECT
+
+    Nunca:
+        - promociona señales rechazadas;
+        - cancela PROTECT;
+        - cancela REDUCE;
+        - cancela EXIT.
+    """
+
+    context_type = str(
+        context_type
+        or ""
+    ).upper()
+
+    original_action = str(
+        original_action
+        or ""
+    ).upper()
+
+    publication = str(
+        original_publication_status
+        or ""
+    ).upper()
+
+
+    control = {
+
+        "enabled":
+            AI_CONTROL_ENABLED,
+
+        "mode":
+            AI_CONTROL_MODE,
+
+        "applied":
+            False,
+
+        "control_action":
+            "NO_CHANGE",
+
+        "original_action":
+            original_action,
+
+        "final_action":
+            original_action,
+
+        "original_publication_status":
+            publication
+            or None,
+
+        "final_publication_status":
+            publication
+            or None,
+
+        "ai_verdict":
+            None,
+
+        "ai_confidence":
+            None,
+
+        "minimum_confidence":
+            AI_CONTROL_MIN_CONFIDENCE,
+
+        "reason":
+            None,
+
+        "observation_id":
+            None,
+    }
+
+
+    if not AI_CONTROL_ENABLED:
+
+        control[
+            "reason"
+        ] = "AI_CONTROL_DISABLED"
+
+        return control
+
+
+    if (
+        not isinstance(
+            ai_result,
+            dict
+        )
+        or not ai_result.get(
+            "success"
+        )
+    ):
+
+        control[
+            "reason"
+        ] = (
+            "AI_UNAVAILABLE_OR_FAILED"
+        )
+
+        return control
+
+
+    data = (
+        ai_result.get(
+            "data"
+        )
+        or {}
+    )
+
+
+    verdict = str(
+        data.get(
+            "verdict"
+        )
+        or ""
+    ).upper()
+
+
+    try:
+
+        confidence = int(
+            float(
+                data.get(
+                    "confidence"
+                )
+                or 0
+            )
+        )
+
+    except (
+        TypeError,
+        ValueError
+    ):
+
+        confidence = 0
+
+
+    control[
+        "ai_verdict"
+    ] = verdict
+
+    control[
+        "ai_confidence"
+    ] = confidence
+
+    control[
+        "observation_id"
+    ] = data.get(
+        "observation_id"
+    )
+
+
+    control[
+        "reason"
+    ] = str(
+        data.get(
+            "headline"
+        )
+        or data.get(
+            "advice"
+        )
+        or ""
+    )[:500]
+
+
+    # ================================================================
+    # Sólo una discrepancia FUERTE recibe autoridad.
+    # ================================================================
+
+    if (
+        verdict
+        != "DISAGREE"
+
+        or confidence
+        < AI_CONTROL_MIN_CONFIDENCE
+    ):
+
+        return control
+
+
+    # ================================================================
+    # SEÑALES
+    # ================================================================
+
+    if (
+        context_type
+        == "SIGNAL"
+    ):
+
+        if (
+            original_action
+            in (
+                "LONG",
+                "SHORT",
+                "COMPRA_SPOT",
+                "VENTA_SPOT",
+            )
+
+            and publication
+            == "EXECUTABLE_SIGNAL"
+        ):
+
+            control.update({
+
+                "applied":
+                    True,
+
+                "control_action":
+                    "BLOCK_SIGNAL",
+
+                # La dirección se conserva para auditoría.
+                "final_action":
+                    original_action,
+
+                "final_publication_status":
+                    "AI_BLOCKED",
+            })
+
+
+        return control
+
+
+    # ================================================================
+    # GUARDIAN
+    # ================================================================
+
+    if (
+        context_type
+        == "GUARDIAN"
+    ):
+
+        # EXTEND aumenta exposición temporal.
+        # IA puede vetarlo.
+
+        if (
+            original_action
+            == "EXTEND"
+        ):
+
+            control.update({
+
+                "applied":
+                    True,
+
+                "control_action":
+                    "BLOCK_EXTEND",
+
+                "final_action":
+                    "HOLD",
+            })
+
+
+        # Conservamos la parte protectora,
+        # eliminamos solamente la extensión.
+
+        elif (
+            original_action
+            == "PROTECT_AND_EXTEND"
+        ):
+
+            control.update({
+
+                "applied":
+                    True,
+
+                "control_action":
+                    "STRIP_EXTEND",
+
+                "final_action":
+                    "PROTECT",
+            })
+
+
+    return control
+
+
+def record_ai_control_event(
+    *,
+    dedup_key,
+    context_type,
+    market,
+    symbol,
+    timeframe,
+    control,
+    related_saved_signal_id=None,
+    source_signal_id=None,
+    source_candle_timestamp=None
+):
+    """
+    Guarda la decisión 36S.
+
+    Un fallo aquí NO rompe producción.
+    """
+
+    if not isinstance(
+        control,
+        dict
+    ):
+
+        return False
+
+
+    db = _db()
+
+
+    if (
+        db is None
+
+        or not getattr(
+            db,
+            "enabled",
+            False
+        )
+    ):
+
+        return False
+
+
+    payload = {
+
+        "dedup_key":
+            str(
+                dedup_key
+            )[:240],
+
+        "context_type":
+            str(
+                context_type
+            ).upper()[:30],
+
+        "market":
+            str(
+                market
+            ).upper()[:20],
+
+        "symbol":
+            str(
+                symbol
+                or ""
+            )[:40]
+            or None,
+
+        "timeframe":
+            str(
+                timeframe
+                or ""
+            )[:20]
+            or None,
+
+        "related_saved_signal_id":
+            related_saved_signal_id
+            or None,
+
+        "source_signal_id":
+            str(
+                source_signal_id
+                or ""
+            )[:160]
+            or None,
+
+        "source_candle_timestamp":
+            str(
+                source_candle_timestamp
+                or ""
+            )[:80]
+            or None,
+
+        "ai_observation_id":
+            control.get(
+                "observation_id"
+            ),
+
+        "original_action":
+            control.get(
+                "original_action"
+            ),
+
+        "original_publication_status":
+            control.get(
+                "original_publication_status"
+            ),
+
+        "ai_verdict":
+            control.get(
+                "ai_verdict"
+            ),
+
+        "ai_confidence":
+            control.get(
+                "ai_confidence"
+            ),
+
+        "minimum_confidence":
+            control.get(
+                "minimum_confidence"
+            ),
+
+        "control_action":
+            control.get(
+                "control_action",
+                "NO_CHANGE"
+            ),
+
+        "final_action":
+            control.get(
+                "final_action"
+            ),
+
+        "final_publication_status":
+            control.get(
+                "final_publication_status"
+            ),
+
+        "applied":
+            bool(
+                control.get(
+                    "applied"
+                )
+            ),
+
+        "reason":
+            str(
+                control.get(
+                    "reason"
+                )
+                or ""
+            )[:1000],
+
+        "updated_at":
+            _now()
+            .isoformat(),
+    }
+
+
+    try:
+
+        db._with_retry(
+
+            lambda: (
+
+                db.client
+
+                .table(
+                    "ai_control_events"
+                )
+
+                .upsert(
+                    payload,
+                    on_conflict=
+                        "dedup_key"
+                )
+
+                .execute()
+            )
+        )
+
+
+        return True
+
+
+    except Exception as e:
+
+        logger.warning(
+            "AI control event: %s",
+            e
+        )
+
+
+        return False
+
+
+def get_ai_control_event(
+    dedup_key
+):
+    """
+    Recupera una decisión 36S ya tomada.
+
+    Esto es MUY importante:
+
+    una misma vela/evento NO puede recibir una decisión
+    diferente de la IA cinco minutos después.
+    """
+
+    db = _db()
+
+
+    if (
+        db is None
+
+        or not getattr(
+            db,
+            "enabled",
+            False
+        )
+    ):
+
+        return None
+
+
+    try:
+
+        result = db._with_retry(
+
+            lambda: (
+
+                db.client
+
+                .table(
+                    "ai_control_events"
+                )
+
+                .select(
+                    (
+                        "applied,"
+                        "control_action,"
+                        "original_action,"
+                        "final_action,"
+                        "original_publication_status,"
+                        "final_publication_status,"
+                        "ai_verdict,"
+                        "ai_confidence,"
+                        "minimum_confidence,"
+                        "reason,"
+                        "ai_observation_id"
+                    )
+                )
+
+                .eq(
+                    "dedup_key",
+                    str(
+                        dedup_key
+                    )
+                )
+
+                .limit(
+                    1
+                )
+
+                .execute()
+            )
+        )
+
+
+        if (
+            not result
+            or not result.data
+        ):
+
+            return None
+
+
+        row = dict(
+            result.data[0]
+        )
+
+
+        return {
+
+            "enabled":
+                True,
+
+            "mode":
+                AI_CONTROL_MODE,
+
+            "applied":
+                bool(
+                    row.get(
+                        "applied"
+                    )
+                ),
+
+            "control_action":
+                row.get(
+                    "control_action"
+                )
+                or "NO_CHANGE",
+
+            "original_action":
+                row.get(
+                    "original_action"
+                ),
+
+            "final_action":
+                row.get(
+                    "final_action"
+                ),
+
+            "original_publication_status":
+                row.get(
+                    "original_publication_status"
+                ),
+
+            "final_publication_status":
+                row.get(
+                    "final_publication_status"
+                ),
+
+            "ai_verdict":
+                row.get(
+                    "ai_verdict"
+                ),
+
+            "ai_confidence":
+                row.get(
+                    "ai_confidence"
+                ),
+
+            "minimum_confidence":
+                row.get(
+                    "minimum_confidence"
+                ),
+
+            "reason":
+                row.get(
+                    "reason"
+                ),
+
+            "observation_id":
+                row.get(
+                    "ai_observation_id"
+                ),
+
+            "reused_control":
+                True,
+        }
+
+
+    except Exception as e:
+
+        logger.warning(
+            "AI control read: %s",
+            e
+        )
+
+        return None
