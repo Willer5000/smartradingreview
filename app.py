@@ -32949,7 +32949,346 @@ def _ai_review_snapshot(
 
     return snapshot
 
+# ============================================================================
+# COMMIT 36R-FIX3
+# RESOLVER CONTEXTO DE UNA PREGUNTA MANUAL
+# ============================================================================
 
+def _resolve_ai_question_target(
+    question,
+    page_market='SPOT',
+    page_symbol=None,
+    page_timeframe=None
+):
+    """
+    Determina sobre qué mercado / activo / timeframe
+    está preguntando realmente el usuario.
+
+    Ejemplo:
+
+        Página actual:
+            SPOT / BTC-USDT / 1D
+
+        Pregunta:
+            "¿Conviene que entre a esta señal de ADA en 4h?"
+
+        Resultado:
+            FUTURES / ADA-USDT / 4h
+
+    No usa IA.
+    No gasta cuota.
+    """
+
+    import re
+
+
+    text = str(
+        question
+        or ''
+    ).strip().lower()
+
+
+    market = str(
+        page_market
+        or 'SPOT'
+    ).upper()
+
+
+    if market not in (
+        'SPOT',
+        'FUTURES'
+    ):
+
+        market = 'SPOT'
+
+
+    symbol = (
+        str(
+            page_symbol
+            or ''
+        ).upper()
+        or None
+    )
+
+
+    timeframe = (
+        str(
+            page_timeframe
+            or ''
+        )
+        or None
+    )
+
+
+    # ========================================================================
+    # ACTIVO
+    # ========================================================================
+
+    asset_rules = (
+
+        (
+            r'\bpaxg\s*[/\-]?\s*btc\b',
+            'PAXG-BTC',
+            'SPOT'
+        ),
+
+        (
+            r'\bpaxg\b',
+            'PAXG-USDT',
+            'SPOT'
+        ),
+
+        (
+            r'\bada\b',
+            'ADA-USDT',
+            'FUTURES'
+        ),
+
+        (
+            r'\bxrp\b',
+            'XRP-USDT',
+            'FUTURES'
+        ),
+
+        (
+            r'\bsol\b',
+            'SOL-USDT',
+            'FUTURES'
+        ),
+
+        (
+            r'\beth\b',
+            'ETH-USDT',
+            'FUTURES'
+        ),
+
+        (
+            r'\bbtc\b',
+            'BTC-USDT',
+            None
+        ),
+    )
+
+
+    for (
+        pattern,
+        resolved_symbol,
+        forced_market
+    ) in asset_rules:
+
+        if re.search(
+            pattern,
+            text,
+            flags=re.IGNORECASE
+        ):
+
+            symbol = (
+                resolved_symbol
+            )
+
+
+            if forced_market:
+
+                market = (
+                    forced_market
+                )
+
+
+            break
+
+
+    # ========================================================================
+    # PALABRAS QUE INDICAN FUTURES
+    # ========================================================================
+
+    if re.search(
+        (
+            r'\b('
+            r'futuros?|futures?|'
+            r'long|short|'
+            r'leverage|apalancamiento'
+            r')\b'
+        ),
+        text,
+        flags=re.IGNORECASE
+    ):
+
+        market = 'FUTURES'
+
+
+    # En TU sistema ETH/SOL/XRP/ADA pertenecen
+    # a este selector del Asistente como Futures.
+
+    if symbol in (
+        'ETH-USDT',
+        'SOL-USDT',
+        'XRP-USDT',
+        'ADA-USDT'
+    ):
+
+        market = 'FUTURES'
+
+
+    if symbol in (
+        'PAXG-USDT',
+        'PAXG-BTC'
+    ):
+
+        market = 'SPOT'
+
+
+    # ========================================================================
+    # TIMEFRAME
+    # ========================================================================
+
+    timeframe_rules = (
+
+        (
+            r'\b30\s*m(?:in(?:utos?)?)?\b',
+            '30m'
+        ),
+
+        (
+            r'\b15\s*m(?:in(?:utos?)?)?\b',
+            '15m'
+        ),
+
+        (
+            r'\b5\s*m(?:in(?:utos?)?)?\b',
+            '5m'
+        ),
+
+        (
+            r'\b12\s*h(?:oras?)?\b',
+            '12h'
+        ),
+
+        (
+            r'\b4\s*h(?:oras?)?\b',
+            '4h'
+        ),
+
+        (
+            r'\b2\s*h(?:oras?)?\b',
+            '2h'
+        ),
+
+        (
+            r'\b1\s*h(?:oras?)?\b',
+            '1h'
+        ),
+
+        (
+            r'\b1\s*d(?:ía|ia|day)?\b',
+            '1D'
+        ),
+
+        (
+            r'\b1\s*w(?:eek)?\b|\b1\s*semana\b',
+            '1W'
+        ),
+    )
+
+
+    for (
+        pattern,
+        resolved_timeframe
+    ) in timeframe_rules:
+
+        if re.search(
+            pattern,
+            text,
+            flags=re.IGNORECASE
+        ):
+
+            timeframe = (
+                resolved_timeframe
+            )
+
+            break
+
+
+    # ========================================================================
+    # NORMALIZAR SEGÚN LOS MERCADOS REALES DEL SISTEMA
+    # ========================================================================
+
+    if market == 'FUTURES':
+
+        allowed_symbols = (
+            'BTC-USDT',
+            'ETH-USDT',
+            'SOL-USDT',
+            'XRP-USDT',
+            'ADA-USDT'
+        )
+
+
+        allowed_timeframes = (
+            '5m',
+            '15m',
+            '30m',
+            '1h',
+            '2h',
+            '4h'
+        )
+
+
+        if symbol not in (
+            allowed_symbols
+        ):
+
+            symbol = 'BTC-USDT'
+
+
+        if timeframe not in (
+            allowed_timeframes
+        ):
+
+            timeframe = '1h'
+
+
+    else:
+
+        allowed_symbols = (
+            'BTC-USDT',
+            'PAXG-USDT',
+            'PAXG-BTC'
+        )
+
+
+        allowed_timeframes = (
+            '4h',
+            '12h',
+            '1D',
+            '1W'
+        )
+
+
+        if symbol not in (
+            allowed_symbols
+        ):
+
+            symbol = 'BTC-USDT'
+
+
+        if timeframe not in (
+            allowed_timeframes
+        ):
+
+            timeframe = '1D'
+
+
+    return {
+
+        'market':
+            market,
+
+        'symbol':
+            symbol,
+
+        'timeframe':
+            timeframe,
+    }
 def _build_ai_advisor_context(
     user,
     market,
@@ -38199,6 +38538,21 @@ def api_ai_advice():
         )
 
 
+        result[
+            'resolved_context'
+        ] = {
+
+            'market':
+                market,
+
+            'symbol':
+                symbol,
+
+            'timeframe':
+                timeframe,
+        }
+
+
         return jsonify(
             result
         ), 200
@@ -38208,7 +38562,8 @@ def api_ai_advice():
 
         print(
             "⚠️ [36R] "
-            f"/api/ai/advice: {e}"
+            f"/api/ai/advice: "
+            f"{type(e).__name__}: {e}"
         )
 
 
@@ -38219,8 +38574,9 @@ def api_ai_advice():
 
             'reason':
                 (
-                    'AI Advisor temporalmente '
-                    'no disponible.'
+                    'AI Advisor no disponible: '
+                    f'{type(e).__name__}: '
+                    f'{str(e)[:160]}'
                 )
 
         }), 200
@@ -38263,23 +38619,6 @@ def api_ai_ask():
     ).strip()[:800]
 
 
-    market = str(
-        data.get(
-            'market',
-            'SPOT'
-        )
-        or 'SPOT'
-    ).upper()
-
-
-    if market not in (
-        'SPOT',
-        'FUTURES'
-    ):
-
-        market = 'SPOT'
-
-
     if not question:
 
         return jsonify({
@@ -38291,13 +38630,84 @@ def api_ai_ask():
         }), 200
 
 
-    symbol = data.get(
-        'symbol'
+    # ========================================================================
+    # CONTEXTO DE LA PÁGINA
+    # ========================================================================
+
+    page_market = str(
+        data.get(
+            'market',
+            'SPOT'
+        )
+        or 'SPOT'
+    ).upper()
+
+
+    if page_market not in (
+        'SPOT',
+        'FUTURES'
+    ):
+
+        page_market = 'SPOT'
+
+
+    page_symbol = (
+        data.get(
+            'symbol'
+        )
     )
 
 
-    timeframe = data.get(
-        'timeframe'
+    page_timeframe = (
+        data.get(
+            'timeframe'
+        )
+    )
+
+
+    # ========================================================================
+    # COMMIT 36R-FIX3
+    # QUÉ ESTÁ PREGUNTANDO REALMENTE
+    # ========================================================================
+
+    target = (
+        _resolve_ai_question_target(
+
+            question=question,
+
+            page_market=(
+                page_market
+            ),
+
+            page_symbol=(
+                page_symbol
+            ),
+
+            page_timeframe=(
+                page_timeframe
+            )
+        )
+    )
+
+
+    target_market = (
+        target[
+            'market'
+        ]
+    )
+
+
+    target_symbol = (
+        target[
+            'symbol'
+        ]
+    )
+
+
+    target_timeframe = (
+        target[
+            'timeframe'
+        ]
     )
 
 
@@ -38308,18 +38718,53 @@ def api_ai_ask():
         )
 
 
+        # ====================================================================
+        # CONTEXTO DE LA SEÑAL REAL PREGUNTADA
+        # ====================================================================
+
         context = (
             _build_ai_advisor_context(
 
                 user=user,
 
-                market=market,
+                market=(
+                    target_market
+                ),
 
-                symbol=symbol,
+                symbol=(
+                    target_symbol
+                ),
 
-                timeframe=timeframe
+                timeframe=(
+                    target_timeframe
+                )
             )
         )
+
+
+        # La IA sabe además desde qué página
+        # realizó la pregunta el usuario.
+
+        context[
+            'manual_question_target'
+        ] = dict(
+            target
+        )
+
+
+        context[
+            'page_context'
+        ] = {
+
+            'market':
+                page_market,
+
+            'symbol':
+                page_symbol,
+
+            'timeframe':
+                page_timeframe,
+        }
 
 
         selected = (
@@ -38342,13 +38787,19 @@ def api_ai_ask():
 
                 event_type='USER_QUESTION',
 
-                market=market,
+                market=(
+                    target_market
+                ),
 
                 context=context,
 
-                symbol=symbol,
+                symbol=(
+                    target_symbol
+                ),
 
-                timeframe=timeframe,
+                timeframe=(
+                    target_timeframe
+                ),
 
                 source_signal_id=(
                     selected.get(
@@ -38361,6 +38812,13 @@ def api_ai_ask():
         )
 
 
+        result[
+            'resolved_context'
+        ] = dict(
+            target
+        )
+
+
         return jsonify(
             result
         ), 200
@@ -38370,7 +38828,8 @@ def api_ai_ask():
 
         print(
             "⚠️ [36R] "
-            f"/api/ai/ask: {e}"
+            f"/api/ai/ask: "
+            f"{type(e).__name__}: {e}"
         )
 
 
@@ -38381,12 +38840,15 @@ def api_ai_ask():
 
             'reason':
                 (
-                    'Asistente IA temporalmente '
-                    'no disponible.'
-                )
+                    'Asistente IA no disponible: '
+                    f'{type(e).__name__}: '
+                    f'{str(e)[:160]}'
+                ),
+
+            'resolved_context':
+                target
 
         }), 200
-
 
 @app.route(
     '/api/ai/performance',
