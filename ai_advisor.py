@@ -188,7 +188,7 @@ GROQ_URL = (
 )
 # ============================================================================
 # COMMIT 36S.2C
-# GEMINI — LEARNING / RESEARCH SHADOW
+# GEMINI — LEARNING SCIENTIST SHADOW
 # ============================================================================
 
 GEMINI_LEARNING_ENABLED = (
@@ -196,6 +196,7 @@ GEMINI_LEARNING_ENABLED = (
         "GEMINI_LEARNING_ENABLED",
         "true"
     )
+    .strip()
     .lower()
     in (
         "1",
@@ -230,75 +231,44 @@ GEMINI_LEARNING_TIMEOUT = max(
 )
 
 
-def _resolve_ai_route(
-    usage_type,
-    context_type
-):
+def _gemini_learning_available():
     """
-    Decide qué proveedor hace cada trabajo.
+    Gemini sólo se considera disponible cuando:
+    - Learning está habilitado;
+    - existe GEMINI_API_KEY.
 
-    GROQ:
-        - Chat
-        - Consejo
-        - Futures Critic
-        - Guardian
-
-    GEMINI:
-        - Learning / Research agregado
-
-    Gemini nunca recibe autoridad operacional aquí.
+    Nunca afecta al proveedor operativo Groq.
     """
-
-    usage_type = str(
-        usage_type
-        or ""
-    ).upper()
-
-    context_type = str(
-        context_type
-        or ""
-    ).upper()
-
-    if (
-        usage_type == "LEARNING"
-        and context_type == "LEARNING"
-        and GEMINI_LEARNING_ENABLED
+    return bool(
+        GEMINI_LEARNING_ENABLED
         and os.getenv(
             "GEMINI_API_KEY",
             ""
         ).strip()
-    ):
-        return (
-            "GEMINI",
-            GEMINI_LEARNING_MODEL
-        )
-
-    return (
-        AI_PROVIDER,
-        AI_MODEL
     )
 
 
-def _gemini_learning_safe_context(
+def _gemini_safe_learning_context(
     context
 ):
     """
-    El Learning de Gemini recibe contexto del SISTEMA,
-    no información financiera personal innecesaria.
+    Quita cantidades financieras personales exactas antes
+    de enviar un snapshot agregado a Gemini.
 
-    Elimina cantidades monetarias exactas si aparecieran
-    accidentalmente dentro del snapshot agregado.
+    El Learning Scientist necesita estadísticas y porcentajes,
+    no balances personales exactos.
     """
 
-    sensitive_key_fragments = (
+    blocked_fragments = (
         "equity",
         "balance",
         "amount",
         "quantity",
-        "investment_usdt",
         "margin_usdt",
+        "investment_usdt",
         "pnl_usdt",
-        "portfolio_value"
+        "portfolio_value",
+        "wallet"
     )
 
     def _clean(
@@ -311,7 +281,6 @@ def _gemini_learning_safe_context(
             cleaned = {}
 
             for key, item in value.items():
-
                 key_text = str(
                     key
                 )
@@ -325,7 +294,7 @@ def _gemini_learning_safe_context(
                 if any(
                     fragment in lowered
                     for fragment
-                    in sensitive_key_fragments
+                    in blocked_fragments
                 ):
                     continue
 
@@ -359,7 +328,6 @@ def _gemini_learning_safe_context(
         )
         else {}
     )
-
 # ============================================================================
 # DOMINIO PERMITIDO PARA EL CHAT
 # ============================================================================
@@ -2204,11 +2172,11 @@ def _normalize_strategy_proposals(
     value
 ):
     """
-    Convierte propuestas libres del LLM en hipótesis Shadow
-    auditables.
+    Convierte propuestas de la IA en hipótesis Shadow
+    estructuradas.
 
     IMPORTANTE:
-    una propuesta NO es una estrategia productiva.
+    SHADOW_PROPOSAL NO significa estrategia aprobada.
     """
 
     if not isinstance(
@@ -2220,7 +2188,6 @@ def _normalize_strategy_proposals(
     proposals = []
 
     for item in value[:3]:
-
         if not isinstance(
             item,
             dict
@@ -2229,11 +2196,10 @@ def _normalize_strategy_proposals(
 
         market = str(
             item.get(
-                "market",
-                "FUTURES"
+                "market"
             )
             or "FUTURES"
-        ).upper()
+        ).strip().upper()
 
         if market not in (
             "SPOT",
@@ -2245,8 +2211,7 @@ def _normalize_strategy_proposals(
         try:
             min_samples = int(
                 item.get(
-                    "min_samples",
-                    25
+                    "min_samples"
                 )
                 or 25
             )
@@ -2287,6 +2252,15 @@ def _normalize_strategy_proposals(
                     1200
                 ),
 
+            "regime":
+                _ai_clean_text(
+                    item.get(
+                        "regime"
+                    ),
+                    "ANY",
+                    240
+                ),
+
             "setup":
                 _ai_clean_text(
                     item.get(
@@ -2320,15 +2294,6 @@ def _normalize_strategy_proposals(
                     ),
                     "",
                     800
-                ),
-
-            "regime":
-                _ai_clean_text(
-                    item.get(
-                        "regime"
-                    ),
-                    "ANY",
-                    240
                 ),
 
             "success_metric":
@@ -2369,6 +2334,7 @@ def _normalize_strategy_proposals(
             )
 
     return proposals
+    
 def _normalize_ai_advice(
     payload
 ):
@@ -3676,12 +3642,40 @@ def run_ai_advisor(
             selected_provider
             == "GEMINI"
         ):
-            advice, usage = (
-                _call_gemini_learning(
-                    context,
-                    question
+            try:
+                logger.info(
+                    "AI Learning provider=GEMINI model=%s",
+                    selected_model
                 )
-            )
+
+                advice, usage = (
+                    _call_gemini_learning(
+                        context
+                    )
+                )
+
+            except Exception as gemini_error:
+                # ====================================================
+                # FAIL-OPEN
+                # ====================================================
+                # Gemini nunca puede impedir el aprendizaje existente.
+                logger.warning(
+                    (
+                        "Gemini Learning no disponible: %s. "
+                        "Fallback a Groq."
+                    ),
+                    gemini_error
+                )
+
+                selected_provider = "GROQ"
+                selected_model = AI_MODEL
+
+                advice, usage = (
+                    _call_groq(
+                        context,
+                        question
+                    )
+                )
 
         else:
             advice, usage = (
