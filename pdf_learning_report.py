@@ -2420,14 +2420,17 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
             )
 
             break
-      id_batch = strategy_ids[
+
+        id_batch = strategy_ids[
             start:start + relation_batch_size
         ]
 
         try:
             relation_response = (
                 db.client
-                .table('signal_indicators')
+                .table(
+                    'signal_indicators'
+                )
                 .select(
                     'signal_id, strategy_name'
                 )
@@ -2465,8 +2468,10 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
                     )
                 )
 
-                target = signal_by_id.get(
-                    signal_id
+                target = (
+                    signal_by_id.get(
+                        signal_id
+                    )
                 )
 
                 if (
@@ -2509,7 +2514,9 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
             )
 
             # Fail-open:
-            # el PDF principal y el gate continúan.
+            # las tablas auxiliares pueden quedar
+            # incompletas, pero el PDF principal
+            # y su gate deben continuar.
             continue
     if not diagnostics['complete']:
         logger.warning(
