@@ -5055,6 +5055,581 @@ def get_ai_adaptive_trust_summary(
                 )[:180]
         }
 # ============================================================================
+# COMMIT 36S.4
+# AI GOVERNANCE / AUTO-DEMOTION
+# ============================================================================
+
+AI_GOVERNANCE_ENABLED = (
+    os.getenv(
+        "AI_GOVERNANCE_ENABLED",
+        "true"
+    )
+    .strip()
+    .lower()
+    in (
+        "1",
+        "true",
+        "yes",
+        "si",
+        "sí"
+    )
+)
+
+
+AI_GOVERNANCE_MIN_ACTIONABLE_SAMPLE = max(
+    10,
+    int(
+        os.getenv(
+            "AI_GOVERNANCE_MIN_ACTIONABLE_SAMPLE",
+            "25"
+        )
+    )
+)
+
+
+def get_ai_governance_state(
+    market=None,
+    context_type=None,
+    provider=None,
+    model=None
+):
+    """
+    COMMIT 36S.4
+
+    Gobierno de autoridad de la IA basado en resultados.
+
+    PRINCIPIO ASIMÉTRICO:
+
+    - evidencia negativa suficiente:
+        puede DEMOTAR automáticamente;
+
+    - evidencia positiva:
+        NO promociona automáticamente;
+        sólo permite revisión humana/posterior.
+
+    Si 36S.3 no está disponible o falla:
+        NO cambia la autoridad existente.
+
+    Esta función no modifica señales, SL, TP, leverage,
+    Guardian ni pesos.
+    """
+
+    result = {
+        "enabled":
+            AI_GOVERNANCE_ENABLED,
+
+        "state":
+            "INSUFFICIENT_EVIDENCE",
+
+        "authority_action":
+            "KEEP_CURRENT",
+
+        "auto_demoted":
+            False,
+
+        "promotion_allowed":
+            False,
+
+        "promotion_review":
+            False,
+
+        "actionable_sample":
+            0,
+
+        "avg_decision_value_r":
+            None,
+
+        "provider":
+            str(
+                provider
+                or AI_PROVIDER
+            ).upper(),
+
+        "model":
+            str(
+                model
+                or AI_MODEL
+            ),
+
+        "market":
+            (
+                str(
+                    market
+                ).upper()
+                if market
+                else None
+            ),
+
+        "context_type":
+            (
+                str(
+                    context_type
+                ).upper()
+                if context_type
+                else None
+            ),
+
+        "reason":
+            None
+    }
+
+    if not AI_GOVERNANCE_ENABLED:
+        result[
+            "state"
+        ] = "GOVERNANCE_DISABLED"
+
+        result[
+            "reason"
+        ] = (
+            "AI_GOVERNANCE_ENABLED=false"
+        )
+
+        return result
+
+    # ================================================================
+    # 36S.3 ES LA ÚNICA FUENTE VÁLIDA PARA AUTO-DEMOTION
+    # ================================================================
+    #
+    # No usamos confidence del LLM.
+    # No usamos opiniones.
+    # No usamos Win Rate aislado.
+    #
+    # Si 36S.3 aún no existe, Governance queda neutral.
+    # ================================================================
+
+    adaptive_fn = globals().get(
+        "get_ai_adaptive_trust_summary"
+    )
+
+    if not callable(
+        adaptive_fn
+    ):
+        result[
+            "state"
+        ] = "WAITING_FOR_36S3"
+
+        result[
+            "reason"
+        ] = (
+            "Adaptive Trust 36S.3 "
+            "no está disponible."
+        )
+
+        return result
+
+    try:
+        try:
+            trust = adaptive_fn(
+                market=
+                    market,
+                context_type=
+                    context_type
+            )
+
+        except TypeError:
+            # Compatibilidad defensiva si la firma de 36S.3
+            # fuera distinta en una versión anterior.
+            trust = adaptive_fn()
+
+        if not isinstance(
+            trust,
+            dict
+        ):
+            result[
+                "state"
+            ] = "TRUST_DATA_INVALID"
+
+            result[
+                "reason"
+            ] = (
+                "Adaptive Trust devolvió "
+                "un resultado inválido."
+            )
+
+            return result
+
+        groups = (
+            trust.get(
+                "groups"
+            )
+            or {}
+        )
+
+        if not isinstance(
+            groups,
+            dict
+        ):
+            groups = {}
+
+        selected_provider = str(
+            provider
+            or AI_PROVIDER
+        ).upper()
+
+        selected_model = str(
+            model
+            or AI_MODEL
+        )
+
+        selected_market = (
+            str(
+                market
+            ).upper()
+            if market
+            else None
+        )
+
+        selected_context = (
+            str(
+                context_type
+            ).upper()
+            if context_type
+            else None
+        )
+
+        matched = []
+
+        # ============================================================
+        # NO MEZCLAR MODELOS / MERCADOS / FUNCIONES
+        # ============================================================
+        #
+        # Groq Futures SIGNAL no debe heredar resultados de:
+        #
+        # - Gemini Learning;
+        # - Spot;
+        # - Guardian;
+        # - otro modelo.
+        # ============================================================
+
+        for group in groups.values():
+            if not isinstance(
+                group,
+                dict
+            ):
+                continue
+
+            group_provider = str(
+                group.get(
+                    "provider"
+                )
+                or ""
+            ).upper()
+
+            group_model = str(
+                group.get(
+                    "model"
+                )
+                or ""
+            )
+
+            group_market = str(
+                group.get(
+                    "market"
+                )
+                or ""
+            ).upper()
+
+            group_context = str(
+                group.get(
+                    "context_type"
+                )
+                or ""
+            ).upper()
+
+            if (
+                group_provider
+                and group_provider
+                != selected_provider
+            ):
+                continue
+
+            if (
+                group_model
+                and selected_model
+                and group_model
+                != selected_model
+            ):
+                continue
+
+            if (
+                selected_market
+                and group_market
+                and group_market
+                != selected_market
+            ):
+                continue
+
+            if (
+                selected_context
+                and group_context
+                and group_context
+                != selected_context
+            ):
+                continue
+
+            try:
+                sample = int(
+                    group.get(
+                        "actionable_sample"
+                    )
+                    or 0
+                )
+
+            except (
+                TypeError,
+                ValueError
+            ):
+                sample = 0
+
+            try:
+                avg_value = (
+                    float(
+                        group.get(
+                            "avg_decision_value_r"
+                        )
+                    )
+                    if group.get(
+                        "avg_decision_value_r"
+                    )
+                    is not None
+                    else None
+                )
+
+            except (
+                TypeError,
+                ValueError
+            ):
+                avg_value = None
+
+            if (
+                sample <= 0
+                or avg_value is None
+            ):
+                continue
+
+            matched.append(
+                {
+                    "sample":
+                        sample,
+
+                    "avg_value_r":
+                        avg_value
+                }
+            )
+
+        if not matched:
+            result[
+                "state"
+            ] = "NO_MATCHING_OUTCOMES"
+
+            result[
+                "reason"
+            ] = (
+                "Todavía no existen outcomes "
+                "Adaptive Trust suficientes "
+                "para este proveedor/modelo/"
+                "mercado/contexto."
+            )
+
+            return result
+
+        total_sample = sum(
+            item[
+                "sample"
+            ]
+            for item
+            in matched
+        )
+
+        weighted_value_sum = sum(
+            (
+                item[
+                    "avg_value_r"
+                ]
+                * item[
+                    "sample"
+                ]
+            )
+            for item
+            in matched
+        )
+
+        avg_decision_value_r = (
+            weighted_value_sum
+            / total_sample
+            if total_sample
+            else None
+        )
+
+        result[
+            "actionable_sample"
+        ] = total_sample
+
+        result[
+            "avg_decision_value_r"
+        ] = (
+            round(
+                avg_decision_value_r,
+                4
+            )
+            if avg_decision_value_r
+            is not None
+            else None
+        )
+
+        # ============================================================
+        # MUESTRA INSUFICIENTE
+        # ================================================================
+
+        if (
+            total_sample
+            < AI_GOVERNANCE_MIN_ACTIONABLE_SAMPLE
+        ):
+            result[
+                "state"
+            ] = "INSUFFICIENT_EVIDENCE"
+
+            result[
+                "reason"
+            ] = (
+                "Muestra insuficiente: "
+                f"{total_sample}/"
+                f"{AI_GOVERNANCE_MIN_ACTIONABLE_SAMPLE}."
+            )
+
+            return result
+
+        # ============================================================
+        # AUTO-DEMOTION
+        # ================================================================
+        #
+        # Si con muestra suficiente la IA aporta valor R NEGATIVO,
+        # pierde autoridad de veto.
+        #
+        # IMPORTANTE:
+        #
+        # avg = 0 NO activa demotion.
+        #
+        # Sólo evidencia de degradación real:
+        #
+        #     avg_decision_value_r < 0
+        # ================================================================
+
+        if (
+            avg_decision_value_r
+            is not None
+            and avg_decision_value_r < 0
+        ):
+            result.update({
+                "state":
+                    "AUTO_DEMOTED",
+
+                "authority_action":
+                    "ADVISORY_ONLY",
+
+                "auto_demoted":
+                    True,
+
+                "promotion_allowed":
+                    False,
+
+                "promotion_review":
+                    False,
+
+                "reason":
+                    (
+                        "La IA presenta valor de decisión "
+                        "R negativo con muestra suficiente."
+                    )
+            })
+
+            return result
+
+        # ============================================================
+        # EVIDENCIA POSITIVA
+        # ================================================================
+        #
+        # Incluso si funciona bien:
+        #
+        # NO aumentamos automáticamente su autoridad.
+        #
+        # Sólo mantenemos la autoridad limitada existente y
+        # habilitamos revisión futura.
+        # ================================================================
+
+        if (
+            avg_decision_value_r
+            is not None
+            and avg_decision_value_r > 0
+        ):
+            result.update({
+                "state":
+                    "POSITIVE_EVIDENCE",
+
+                "authority_action":
+                    "KEEP_CURRENT_LIMITED",
+
+                "auto_demoted":
+                    False,
+
+                "promotion_allowed":
+                    False,
+
+                "promotion_review":
+                    True,
+
+                "reason":
+                    (
+                        "La IA aporta valor R positivo, "
+                        "pero la promoción requiere "
+                        "validación adicional/OOS."
+                    )
+            })
+
+            return result
+
+        # avg == 0
+        result[
+            "state"
+        ] = "NEUTRAL_EVIDENCE"
+
+        result[
+            "reason"
+        ] = (
+            "La IA no demuestra todavía "
+            "aporte ni degradación."
+        )
+
+        return result
+
+    except Exception as governance_error:
+        # ============================================================
+        # FAIL-OPEN
+        # ============================================================
+        #
+        # Un error en Governance no cambia el comportamiento actual
+        # del sistema.
+        # ============================================================
+
+        logger.warning(
+            "AI Governance: %s",
+            governance_error
+        )
+
+        result[
+            "state"
+        ] = "GOVERNANCE_ERROR"
+
+        result[
+            "reason"
+        ] = str(
+            governance_error
+        )[:180]
+
+        return result
+
+
+# ============================================================================
 # COMMIT 36S.1 — AI CONTROL LAYER
 # ============================================================================
 
@@ -5181,6 +5756,11 @@ def evaluate_ai_control(
 
         "observation_id":
             None,
+
+        # 36S.4
+        # Se completa antes de conceder autoridad.
+        "governance":
+            None,
     }
 
 
@@ -5210,7 +5790,97 @@ def evaluate_ai_control(
         )
 
         return control
+    # ================================================================
+    # COMMIT 36S.4
+    # GOVERNANCE ANTES DE CONCEDER AUTORIDAD
+    # ================================================================
 
+    governance_market = None
+
+    if original_action in (
+        "LONG",
+        "SHORT"
+    ):
+        governance_market = (
+            "FUTURES"
+        )
+
+    elif original_action in (
+        "COMPRA_SPOT",
+        "VENTA_SPOT"
+    ):
+        governance_market = (
+            "SPOT"
+        )
+
+    try:
+        governance = (
+            get_ai_governance_state(
+                market=
+                    governance_market,
+
+                context_type=
+                    context_type,
+
+                provider=
+                    AI_PROVIDER,
+
+                model=
+                    AI_MODEL
+            )
+        )
+
+    except Exception as governance_error:
+        # Fail-open.
+        governance = {
+            "state":
+                "GOVERNANCE_ERROR",
+
+            "auto_demoted":
+                False,
+
+            "authority_action":
+                "KEEP_CURRENT",
+
+            "reason":
+                str(
+                    governance_error
+                )[:180]
+        }
+
+    control[
+        "governance"
+    ] = governance
+
+    # ================================================================
+    # AUTO-DEMOTION
+    # ================================================================
+    #
+    # La IA sigue pudiendo:
+    #
+    # - explicar;
+    # - aconsejar;
+    # - aprender.
+    #
+    # Sólo pierde capacidad de MODIFICAR/BLOQUEAR decisiones.
+    # ================================================================
+
+    if governance.get(
+        "auto_demoted"
+    ):
+        control[
+            "reason"
+        ] = (
+            "AI_AUTHORITY_AUTO_DEMOTED: "
+            + str(
+                governance.get(
+                    "reason"
+                )
+                or ""
+            )[:380]
+        )
+
+        return control
 
     data = (
         ai_result.get(
