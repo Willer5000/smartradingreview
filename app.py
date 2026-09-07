@@ -29577,6 +29577,99 @@ def api_review_futures_quality_lab():
                     error
                 )[:220]
         }), 200
+
+# ============================================================================
+# COMMIT 36V
+# GATE DE READINESS PARA COMMIT 37
+# ============================================================================
+
+@app.route(
+    '/api/review/commit37-readiness',
+    methods=['GET']
+)
+def api_review_commit37_readiness():
+    """
+    Gate diagnóstico final de 36V.
+
+    READ-ONLY.
+
+    Puede devolver:
+
+        NOT_READY
+
+    o:
+
+        READY_FOR_COMMIT37_REVIEW
+
+    Nunca modifica producción.
+    """
+
+    user = (
+        _authenticated_user()
+    )
+
+    if not user:
+        return jsonify({
+            'success':
+                False,
+
+            'error':
+                'Debes iniciar sesión.'
+        }), 401
+
+    try:
+        review = (
+            _get_review_trader()
+        )
+
+        if review is None:
+            return jsonify({
+                'success':
+                    False,
+
+                'error':
+                    'ReviewTrader no disponible.'
+            }), 200
+
+        data = (
+            review
+            .get_commit37_readiness(
+                days_back=90
+            )
+        )
+
+        return jsonify({
+            'success':
+                True,
+
+            'data':
+                data,
+
+            'timestamp':
+                datetime.now(
+                    bolivia_tz
+                ).isoformat()
+        }), 200
+
+    except Exception as error:
+        # ============================================================
+        # FAIL-OPEN
+        # ============================================================
+        #
+        # Un gate estadístico jamás puede romper trading.
+        # ============================================================
+
+        return jsonify({
+            'success':
+                False,
+
+            'error':
+                str(
+                    error
+                )[:220]
+        }), 200
+
+
 # ============================================================================
 # ENDPOINT 6: Trigger manual del ciclo completo del ReviewTrader
 # ============================================================================
@@ -34640,7 +34733,43 @@ def _build_ai_learning_context():
                     quality_lab_error
                 )[:180]
         }
-        
+    # ================================================================
+    # COMMIT 36V
+    # READINESS DE COMMIT 37 → GEMINI LEARNING
+    # ================================================================
+    #
+    # Gemini puede estudiar el gate y proponer hipótesis,
+    # pero no promocionarlo.
+    # ================================================================
+
+    try:
+        commit37_readiness = (
+            review_trader
+            .get_commit37_readiness(
+                days_back=90
+            )
+            or {}
+        )
+
+    except Exception as readiness_error:
+        commit37_readiness = {
+            'mode':
+                'COMMIT37_READINESS_36V',
+
+            'status':
+                'UNAVAILABLE',
+
+            'ready_for_commit37_review':
+                False,
+
+            'ready_for_automatic_promotion':
+                False,
+
+            'reason':
+                str(
+                    readiness_error
+                )[:180]
+        }        
     return {
 
         'policy': {
@@ -34688,11 +34817,14 @@ def _build_ai_learning_context():
         'reviewtrader_general':
             review_general,
 
-        # 36U:
-        # Gemini puede estudiar qué componentes están asociados
-        # con mejor expectancy y proponer experimentos Shadow.
         'futures_quality_lab':
-            futures_quality_lab
+            futures_quality_lab,
+
+        # 36V
+        # Gemini conoce el estado del gate, pero continúa
+        # con autoridad SHADOW_ONLY.
+        'commit37_readiness':
+            commit37_readiness
     }
 
 # ============================================================================
