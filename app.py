@@ -29597,7 +29597,6 @@ def api_review_futures_quality_lab():
                     error
                 )[:220]
         }), 200
-
 # ============================================================================
 # COMMIT 36V
 # GATE DE READINESS PARA COMMIT 37
@@ -29609,19 +29608,17 @@ def api_review_futures_quality_lab():
 )
 def api_review_commit37_readiness():
     """
-    Gate diagnóstico final de 36V.
+    Gate diagnóstico 36V.
 
     READ-ONLY.
 
-    Puede devolver:
-
+    Puede informar:
         NOT_READY
 
     o:
-
         READY_FOR_COMMIT37_REVIEW
 
-    Nunca modifica producción.
+    Nunca modifica trading.
     """
 
     user = (
@@ -29651,11 +29648,45 @@ def api_review_commit37_readiness():
                     'ReviewTrader no disponible.'
             }), 200
 
+        readiness_fn = getattr(
+            review,
+            'get_commit37_readiness',
+            None
+        )
+
+        if not callable(
+            readiness_fn
+        ):
+            return jsonify({
+                'success':
+                    False,
+
+                'data': {
+                    'mode':
+                        'COMMIT37_READINESS_36V',
+
+                    'status':
+                        '36V_METHOD_NOT_AVAILABLE',
+
+                    'ready_for_commit37_review':
+                        False,
+
+                    'ready_for_automatic_promotion':
+                        False
+                },
+
+                'error':
+                    (
+                        'get_commit37_readiness no está '
+                        'disponible en ReviewTrader.'
+                    )
+            }), 200
+
         data = (
-            review
-            .get_commit37_readiness(
+            readiness_fn(
                 days_back=90
             )
+            or {}
         )
 
         return jsonify({
@@ -29676,19 +29707,33 @@ def api_review_commit37_readiness():
         # FAIL-OPEN
         # ============================================================
         #
-        # Un gate estadístico jamás puede romper trading.
+        # Un diagnóstico de aprendizaje jamás puede afectar
+        # Spot, Futures, Guardian ni publicación.
         # ============================================================
 
         return jsonify({
             'success':
                 False,
 
+            'data': {
+                'mode':
+                    'COMMIT37_READINESS_36V',
+
+                'status':
+                    'READINESS_ERROR',
+
+                'ready_for_commit37_review':
+                    False,
+
+                'ready_for_automatic_promotion':
+                    False
+            },
+
             'error':
                 str(
                     error
                 )[:220]
         }), 200
-
 
 # ============================================================================
 # ENDPOINT 6: Trigger manual del ciclo completo del ReviewTrader
