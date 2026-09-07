@@ -14283,7 +14283,8 @@ class TradingExpertSystem:
         previous_close,
         volatility,
         timeframe,
-        liquidation=None
+        liquidation=None,
+        market_type='spot'
     ):
         """
         Selección Smart Money del ENTRY.
@@ -14319,7 +14320,162 @@ class TradingExpertSystem:
         )
     
         candidates = []
-    
+        # ==========================================================
+        # QUALITY ENGINE Q1
+        # ENTRY REACHABILITY — SPOT + FUTURES
+        # ==========================================================
+        #
+        # Una zona puede ser técnicamente excelente y, sin embargo,
+        # estar demasiado lejos para ser un Entry razonablemente
+        # alcanzable durante la vida útil de la señal.
+        #
+        # Esta capa NO crea señales.
+        # NO baja Safety.
+        # NO modifica votos.
+        # NO inventa POIs.
+        #
+        # Sólo ayuda a seleccionar, entre los POIs ya detectados,
+        # aquel que combina:
+        #
+        #     calidad SMC
+        #     +
+        #     alcanzabilidad desde el precio actual.
+        #
+        # Futures necesita Entries más próximos porque sus TF son
+        # más cortos. Spot permite retrocesos algo más amplios.
+        # ==========================================================
+
+        normalized_market_type = str(
+            market_type
+            or 'spot'
+        ).strip().lower()
+
+        if normalized_market_type not in (
+            'spot',
+            'futures'
+        ):
+            normalized_market_type = 'spot'
+
+        timeframe_key = str(
+            timeframe
+            or ''
+        ).strip()
+
+        futures_reachability = {
+            '5m': {
+                'ideal_min_atr': 0.25,
+                'ideal_max_atr': 0.90,
+                'max_atr': 1.60
+            },
+            '15m': {
+                'ideal_min_atr': 0.30,
+                'ideal_max_atr': 1.00,
+                'max_atr': 1.75
+            },
+            '30m': {
+                'ideal_min_atr': 0.30,
+                'ideal_max_atr': 1.10,
+                'max_atr': 1.90
+            },
+            '1h': {
+                'ideal_min_atr': 0.35,
+                'ideal_max_atr': 1.25,
+                'max_atr': 2.10
+            },
+            '2h': {
+                'ideal_min_atr': 0.35,
+                'ideal_max_atr': 1.40,
+                'max_atr': 2.25
+            },
+            '4h': {
+                'ideal_min_atr': 0.40,
+                'ideal_max_atr': 1.60,
+                'max_atr': 2.50
+            }
+        }
+
+        spot_reachability = {
+            '5m': {
+                'ideal_min_atr': 0.30,
+                'ideal_max_atr': 1.00,
+                'max_atr': 1.75
+            },
+            '15m': {
+                'ideal_min_atr': 0.30,
+                'ideal_max_atr': 1.10,
+                'max_atr': 1.90
+            },
+            '30m': {
+                'ideal_min_atr': 0.35,
+                'ideal_max_atr': 1.20,
+                'max_atr': 2.00
+            },
+            '1h': {
+                'ideal_min_atr': 0.35,
+                'ideal_max_atr': 1.35,
+                'max_atr': 2.20
+            },
+            '2h': {
+                'ideal_min_atr': 0.40,
+                'ideal_max_atr': 1.50,
+                'max_atr': 2.40
+            },
+            '4h': {
+                'ideal_min_atr': 0.40,
+                'ideal_max_atr': 1.65,
+                'max_atr': 2.60
+            },
+            '12h': {
+                'ideal_min_atr': 0.45,
+                'ideal_max_atr': 1.80,
+                'max_atr': 2.80
+            },
+            '1D': {
+                'ideal_min_atr': 0.50,
+                'ideal_max_atr': 2.00,
+                'max_atr': 3.00
+            },
+            '1W': {
+                'ideal_min_atr': 0.50,
+                'ideal_max_atr': 2.25,
+                'max_atr': 3.20
+            }
+        }
+
+        reachability_table = (
+            futures_reachability
+            if normalized_market_type == 'futures'
+            else spot_reachability
+        )
+
+        reachability_profile = (
+            reachability_table.get(
+                timeframe_key
+            )
+            or {
+                'ideal_min_atr': 0.35,
+                'ideal_max_atr': 1.50,
+                'max_atr': 2.50
+            }
+        )
+
+        ideal_min_atr = float(
+            reachability_profile[
+                'ideal_min_atr'
+            ]
+        )
+
+        ideal_max_atr = float(
+            reachability_profile[
+                'ideal_max_atr'
+            ]
+        )
+
+        max_reach_atr = float(
+            reachability_profile[
+                'max_atr'
+            ]
+        )    
         # ==========================================================
         # CONTEXTO SMC
         # ==========================================================
@@ -14346,7 +14502,25 @@ class TradingExpertSystem:
             0.30 * atr_pct
         )
     
-        max_dist_pct = 5.0
+        # ==========================================================
+        # QUALITY ENGINE Q1
+        # DISTANCIA MÁXIMA DINÁMICA
+        # ==========================================================
+        #
+        # Antes todos los mercados podían aceptar hasta 5% de
+        # distancia, aunque ese 5% representara varios ATR.
+        #
+        # Ahora la distancia máxima depende de la volatilidad REAL
+        # y del timeframe.
+        # ==========================================================
+
+        max_dist_pct = min(
+            5.0,
+            max(
+                min_dist_pct * 1.50,
+                max_reach_atr * atr_pct
+            )
+        )
     
         if direction == 'long':
             ceiling = previous_close
@@ -14643,39 +14817,175 @@ class TradingExpertSystem:
             ):
                 continue
     
-            candidate['_dist_pct'] = dist_pct
-            candidate['_dist_atr'] = (
-                abs(previous_close - price)
+            current_dist_pct = (
+                abs(
+                    current_price
+                    - price
+                )
+                / current_price
+                * 100
+                if current_price > 0
+                else 999
+            )
+
+            current_dist_atr = (
+                abs(
+                    current_price
+                    - price
+                )
                 / atr
                 if atr > 0
                 else 999
             )
-    
-            valid.append(candidate)
+
+            # ======================================================
+            # QUALITY ENGINE Q1
+            # ======================================================
+            #
+            # Un POI demasiado lejano puede seguir siendo útil para
+            # análisis, pero no debe ganar como Entry operativo frente
+            # a otra zona estructural que sea razonablemente alcanzable.
+            # ======================================================
+
+            if current_dist_atr > max_reach_atr:
+                continue
+
+            candidate[
+                '_dist_pct'
+            ] = dist_pct
+
+            candidate[
+                '_dist_atr'
+            ] = (
+                abs(
+                    previous_close
+                    - price
+                )
+                / atr
+                if atr > 0
+                else 999
+            )
+
+            candidate[
+                '_current_dist_pct'
+            ] = current_dist_pct
+
+            candidate[
+                '_current_dist_atr'
+            ] = current_dist_atr
+
+            valid.append(
+                candidate
+            )
     
         # ==========================================================
         # FALLBACK SINTÉTICO
         # ==========================================================
         if not valid:
-    
+
+            # ======================================================
+            # QUALITY ENGINE Q1
+            # FALLBACK CONSERVADOR
+            # ======================================================
+            #
+            # Si no existe POI estructural razonablemente alcanzable,
+            # mantenemos un nivel diagnóstico cercano.
+            #
+            # IMPORTANTE:
+            # su score permanece BAJO porque no queremos fingir que
+            # un nivel sintético tiene la misma calidad que un OB/FVG/
+            # soporte/POC real.
+            # ======================================================
+
             if direction == 'long':
-    
-                synthetic_entry = (
+
+                synthetic_anchor = min(
+                    current_price,
                     previous_close
-                    * (1 - min_dist_pct / 100)
                 )
-    
+
+                synthetic_entry = (
+                    synthetic_anchor
+                    - max(
+                        0.35 * atr,
+                        synthetic_anchor
+                        * min_dist_pct
+                        / 100
+                    )
+                )
+
             else:
-    
-                synthetic_entry = (
+
+                synthetic_anchor = max(
+                    current_price,
                     previous_close
-                    * (1 + min_dist_pct / 100)
                 )
-    
+
+                synthetic_entry = (
+                    synthetic_anchor
+                    + max(
+                        0.35 * atr,
+                        synthetic_anchor
+                        * min_dist_pct
+                        / 100
+                    )
+                )
+
+            diagnostics = {
+                'version':
+                    'Q1_ENTRY_REACHABILITY_V1',
+
+                'market_type':
+                    normalized_market_type,
+
+                'timeframe':
+                    timeframe_key,
+
+                'candidate_type':
+                    'synthetic',
+
+                'smc_raw_score':
+                    35.0,
+
+                'reachability_score':
+                    70.0,
+
+                'entry_quality_score':
+                    35.0,
+
+                'distance_atr_current':
+                    round(
+                        abs(
+                            current_price
+                            - synthetic_entry
+                        )
+                        / atr,
+                        4
+                    )
+                    if atr > 0
+                    else None,
+
+                'ideal_min_atr':
+                    ideal_min_atr,
+
+                'ideal_max_atr':
+                    ideal_max_atr,
+
+                'max_reach_atr':
+                    max_reach_atr,
+
+                'label':
+                    'SINTETICO_DIAGNOSTICO'
+            }
+
             return (
                 synthetic_entry,
-                f'Retroceso {min_dist_pct:.2f}% ATR sintético',
-                40
+                (
+                    f'Retroceso ATR sintético '
+                    f'[Q1 no estructural]'
+                ),
+                35,
+                diagnostics
             )
     
         # ==========================================================
@@ -14773,7 +15083,117 @@ class TradingExpertSystem:
                 100,
                 max(0, score)
             )
-    
+            # ======================================================
+            # QUALITY ENGINE Q1
+            # ENTRY REACHABILITY SCORE
+            # ======================================================
+            #
+            # 100 significa:
+            # el Entry está dentro de una distancia ATR especialmente
+            # razonable para ese mercado/timeframe.
+            #
+            # NO significa 100% de probabilidad de tocar el Entry.
+            # ======================================================
+
+            current_d_atr = float(
+                candidate.get(
+                    '_current_dist_atr',
+                    999
+                )
+                or 999
+            )
+
+            if current_d_atr <= ideal_min_atr:
+
+                if ideal_min_atr > 0:
+                    reachability_score = (
+                        70.0
+                        + 30.0
+                        * (
+                            current_d_atr
+                            / ideal_min_atr
+                        )
+                    )
+                else:
+                    reachability_score = 85.0
+
+            elif current_d_atr <= ideal_max_atr:
+
+                reachability_score = 100.0
+
+            elif current_d_atr <= max_reach_atr:
+
+                available_range = max(
+                    0.01,
+                    max_reach_atr
+                    - ideal_max_atr
+                )
+
+                excess = (
+                    current_d_atr
+                    - ideal_max_atr
+                )
+
+                reachability_score = (
+                    100.0
+                    - 60.0
+                    * (
+                        excess
+                        / available_range
+                    )
+                )
+
+            else:
+
+                reachability_score = 0.0
+
+            reachability_score = max(
+                0.0,
+                min(
+                    100.0,
+                    reachability_score
+                )
+            )
+
+            # ======================================================
+            # ENTRY QUALITY FINAL
+            # ======================================================
+            #
+            # 85% = calidad SMC/POI existente.
+            # 15% = alcanzabilidad.
+            #
+            # Por tanto Reachability NO puede convertir por sí sola
+            # una mala zona en un Entry Premium.
+            # ======================================================
+
+            entry_quality_score = (
+                candidate[
+                    '_smc_score'
+                ]
+                * 0.85
+                + reachability_score
+                * 0.15
+            )
+
+            candidate[
+                '_reachability_score'
+            ] = round(
+                reachability_score,
+                2
+            )
+
+            candidate[
+                '_entry_quality_score'
+            ] = round(
+                max(
+                    0.0,
+                    min(
+                        100.0,
+                        entry_quality_score
+                    )
+                ),
+                2
+            )    
         # ==========================================================
         # CONFLUENCIA ENTRE POIs
         # ==========================================================
@@ -14810,8 +15230,15 @@ class TradingExpertSystem:
         # ==========================================================
         valid.sort(
             key=lambda c: (
-                -c['_smc_score'],
-                c['_dist_atr']
+                -c[
+                    '_entry_quality_score'
+                ],
+                -c[
+                    '_smc_score'
+                ],
+                c[
+                    '_current_dist_atr'
+                ]
             )
         )
     
@@ -14819,7 +15246,9 @@ class TradingExpertSystem:
     
         score = int(
             round(
-                best['_smc_score']
+                best[
+                    '_entry_quality_score'
+                ]
             )
         )
     
@@ -14847,10 +15276,123 @@ class TradingExpertSystem:
             f"[SMC {score}/100]"
         )
     
+        reachability_score = float(
+            best.get(
+                '_reachability_score',
+                0
+            )
+            or 0
+        )
+
+        if reachability_score >= 90:
+
+            reachability_label = (
+                'ALTA'
+            )
+
+        elif reachability_score >= 70:
+
+            reachability_label = (
+                'MEDIA'
+            )
+
+        else:
+
+            reachability_label = (
+                'BAJA'
+            )
+
+        diagnostics = {
+            'version':
+                'Q1_ENTRY_REACHABILITY_V1',
+
+            'market_type':
+                normalized_market_type,
+
+            'timeframe':
+                timeframe_key,
+
+            'candidate_type':
+                str(
+                    best.get(
+                        'type',
+                        ''
+                    )
+                    or ''
+                ),
+
+            'smc_raw_score':
+                round(
+                    float(
+                        best.get(
+                            '_smc_score',
+                            0
+                        )
+                        or 0
+                    ),
+                    2
+                ),
+
+            'reachability_score':
+                round(
+                    reachability_score,
+                    2
+                ),
+
+            'entry_quality_score':
+                round(
+                    float(
+                        best.get(
+                            '_entry_quality_score',
+                            score
+                        )
+                        or score
+                    ),
+                    2
+                ),
+
+            'distance_atr_current':
+                round(
+                    float(
+                        best.get(
+                            '_current_dist_atr',
+                            0
+                        )
+                        or 0
+                    ),
+                    4
+                ),
+
+            'distance_pct_current':
+                round(
+                    float(
+                        best.get(
+                            '_current_dist_pct',
+                            0
+                        )
+                        or 0
+                    ),
+                    4
+                ),
+
+            'ideal_min_atr':
+                ideal_min_atr,
+
+            'ideal_max_atr':
+                ideal_max_atr,
+
+            'max_reach_atr':
+                max_reach_atr,
+
+            'label':
+                reachability_label
+        }
+
         return (
             best['price'],
             source,
-            score
+            score,
+            diagnostics
         )
     
     def calculate_entry_levels(self, decision, trend, momentum, volatility, structure, symbol, timeframe, liquidation=None):
@@ -14898,14 +15440,24 @@ class TradingExpertSystem:
             previous_close = structure.get('previous_close', current_price) or current_price
             
             # ============ SELECCIONAR ENTRY ÓPTIMO (retroceso/rebote) ============
-            entry, entry_source, entry_score = self._select_optimal_entry(
+            (
+                entry,
+                entry_source,
+                entry_score,
+                entry_quality
+            ) = self._select_optimal_entry(
                 direction,
                 structure,
                 current_price,
                 previous_close,
                 volatility,
                 timeframe,
-                liquidation=liquidation
+                liquidation=liquidation,
+                market_type=(
+                    'futures'
+                    if is_futures
+                    else 'spot'
+                )
             )
             
             # ============ GARANTÍA DURA de la regla del usuario ============
@@ -14994,6 +15546,60 @@ class TradingExpertSystem:
                                 or 0
                             ),
                             1
+                        ),
+
+                    # ================================================
+                    # QUALITY ENGINE Q1
+                    # ================================================
+
+                    'entry_quality_version':
+                        str(
+                            entry_quality.get(
+                                'version',
+                                'Q1_ENTRY_REACHABILITY_V1'
+                            )
+                        ),
+
+                    'entry_smc_raw_score':
+                        round(
+                            float(
+                                entry_quality.get(
+                                    'smc_raw_score',
+                                    entry_score
+                                )
+                                or 0
+                            ),
+                            2
+                        ),
+
+                    'entry_reachability_score':
+                        round(
+                            float(
+                                entry_quality.get(
+                                    'reachability_score',
+                                    0
+                                )
+                                or 0
+                            ),
+                            2
+                        ),
+
+                    'entry_distance_atr':
+                        entry_quality.get(
+                            'distance_atr_current'
+                        ),
+
+                    'entry_distance_pct':
+                        entry_quality.get(
+                            'distance_pct_current'
+                        ),
+
+                    'entry_reachability_label':
+                        str(
+                            entry_quality.get(
+                                'label',
+                                'N/A'
+                            )
                         ),
 
                     'stop_loss':
@@ -15144,6 +15750,61 @@ class TradingExpertSystem:
                             or 0
                         ),
                         1
+                    ),
+
+                # ==================================================
+                # QUALITY ENGINE Q1
+                # ENTRY QUALITY SPOT + FUTURES
+                # ==================================================
+
+                'entry_quality_version':
+                    str(
+                        entry_quality.get(
+                            'version',
+                            'Q1_ENTRY_REACHABILITY_V1'
+                        )
+                    ),
+
+                'entry_smc_raw_score':
+                    round(
+                        float(
+                            entry_quality.get(
+                                'smc_raw_score',
+                                entry_score
+                            )
+                            or 0
+                        ),
+                        2
+                    ),
+
+                'entry_reachability_score':
+                    round(
+                        float(
+                            entry_quality.get(
+                                'reachability_score',
+                                0
+                            )
+                            or 0
+                        ),
+                        2
+                    ),
+
+                'entry_distance_atr':
+                    entry_quality.get(
+                        'distance_atr_current'
+                    ),
+
+                'entry_distance_pct':
+                    entry_quality.get(
+                        'distance_pct_current'
+                    ),
+
+                'entry_reachability_label':
+                    str(
+                        entry_quality.get(
+                            'label',
+                            'N/A'
+                        )
                     ),
 
                 'stop_loss':
