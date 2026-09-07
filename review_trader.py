@@ -14,6 +14,7 @@
 
 import logging
 import math
+import json
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
@@ -1357,12 +1358,70 @@ class ReviewTrader:
         }
 
     @staticmethod
+    def _get_signal_context(signal: Dict) -> Dict:
+        """
+        COMMIT 36W
+
+        Devuelve context como dict aunque Supabase lo entregue
+        como JSON serializado.
+
+        No modifica ninguna señal.
+        """
+        context = (
+            signal.get(
+                'context',
+                {}
+            )
+            or {}
+        )
+
+        if isinstance(
+            context,
+            str
+        ):
+            try:
+                context = json.loads(
+                    context
+                )
+
+            except Exception:
+                return {}
+
+        return (
+            context
+            if isinstance(
+                context,
+                dict
+            )
+            else {}
+        )
+
+
+    @staticmethod
     def _get_signal_learning(signal: Dict) -> Dict:
-        context = signal.get('context', {}) or {}
-        if not isinstance(context, dict):
-            return {}
-        learning = context.get('learning', {}) or {}
-        return learning if isinstance(learning, dict) else {}
+        context = (
+            ReviewTrader
+            ._get_signal_context(
+                signal
+            )
+        )
+
+        learning = (
+            context.get(
+                'learning',
+                {}
+            )
+            or {}
+        )
+
+        return (
+            learning
+            if isinstance(
+                learning,
+                dict
+            )
+            else {}
+        )
 
     def _is_clean_futures_signal(self, signal: Dict) -> bool:
         if self._normalize_system_type(
@@ -2079,6 +2138,21 @@ class ReviewTrader:
                     'tp_source',
                     ''
                 ) or ''
+            ),
+
+            # ==========================================================
+            # COMMIT 36W
+            # ==========================================================
+            # Permite separar scores históricos de los scores
+            # matemáticamente normalizados después de 36W.
+            # ==========================================================
+
+            'quality_score_version': str(
+                levels.get(
+                    'quality_score_version',
+                    'LEGACY'
+                )
+                or 'LEGACY'
             )
         }
         # ==============================================================
@@ -4045,6 +4119,9 @@ class ReviewTrader:
             'component_inventory':
                 {},
 
+            'quality_score_versions':
+                {},
+
             'quality_by_component':
                 {},
 
@@ -4175,17 +4252,11 @@ class ReviewTrader:
                 """
 
                 context = (
-                    signal.get(
-                        'context'
+                    self._get_signal_context(
+                        signal
                     )
                     or {}
                 )
-
-                if not isinstance(
-                    context,
-                    dict
-                ):
-                    context = {}
 
                 execution = (
                     context.get(
@@ -4332,6 +4403,14 @@ class ReviewTrader:
                 return {
                     'scores':
                         scores,
+
+                    'quality_score_version':
+                        str(
+                            execution.get(
+                                'quality_score_version'
+                            )
+                            or 'LEGACY'
+                        ),
 
                     'execution_safety':
                         _float_or_none(
@@ -4600,6 +4679,11 @@ class ReviewTrader:
                                 'scores'
                             ],
 
+                        'quality_score_version':
+                            quality[
+                                'quality_score_version'
+                            ],
+
                         'execution_safety':
                             quality[
                                 'execution_safety'
@@ -4627,6 +4711,34 @@ class ReviewTrader:
             ] = len(
                 candidates
             )
+
+            # ==========================================================
+            # COMMIT 36W
+            # DIFERENCIAR HISTÓRICO LEGACY DE SCORE REPARADO
+            # ==========================================================
+
+            for candidate in candidates:
+
+                version = str(
+                    candidate.get(
+                        'quality_score_version'
+                    )
+                    or 'LEGACY'
+                )
+
+                result[
+                    'quality_score_versions'
+                ][
+                    version
+                ] = (
+                    result[
+                        'quality_score_versions'
+                    ].get(
+                        version,
+                        0
+                    )
+                    + 1
+                )
 
             if not candidates:
                 result[
