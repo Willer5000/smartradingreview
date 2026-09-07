@@ -360,6 +360,43 @@ FUTURES_QUANT_CONFIG = {
         'max_pullback_atr': 2.00,
     },
 }
+# ============================================================================
+# QUALITY ENGINE Q2 — FUTURES EXECUTION SPECIALIST
+# ============================================================================
+#
+# Q1 decide un Entry de mayor calidad y alcanzabilidad.
+#
+# Q2 NO cambia ese Entry.
+#
+# Su trabajo es evaluar conjuntamente candidatos estructurales de:
+#
+#     SL + TP + RR
+#
+# y elegir una pareja superior cuando realmente existe.
+#
+# Guardrails:
+# - NO baja Safety.
+# - NO baja Premium.
+# - NO inventa SL/TP.
+# - NO aumenta leverage.
+# - NO usa IA para decidir niveles.
+# - NO llama APIs adicionales.
+# - NO sustituye una pareja existente por una mejora insignificante.
+# ============================================================================
+
+FUTURES_EXECUTION_SPECIALIST_VERSION = (
+    'Q2_FUTURES_EXECUTION_PAIR_V1'
+)
+
+# Máximo de candidatos considerados por señal.
+# Mantiene Q2 extremadamente ligero para Render Free.
+FUTURES_EXECUTION_MAX_SL_CANDIDATES = 6
+FUTURES_EXECUTION_MAX_TP_CANDIDATES = 20
+
+# Si la geometría original ya era Premium, una nueva pareja debe mejorar
+# como mínimo 4 puntos el score interno de comparación para reemplazarla.
+FUTURES_EXECUTION_MIN_PAIR_IMPROVEMENT = 4.0
+
 
 def _leverage_in_valid_range(
     leverage: int,
@@ -2329,6 +2366,1019 @@ class FuturesAnalysis(TradingExpertSystem):
                 4
             )
         }
+    @staticmethod
+    def _q2_rr_quality(rr):
+        """
+        Calidad geométrica del RR SIN cambiar los umbrales operativos.
+
+        Premium actual:
+            1.8 <= RR <= 3.5
+        """
+
+        try:
+            rr = float(
+                rr
+                or 0
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+            return 0.0
+
+        if 1.8 <= rr < 2.0:
+            return 80.0
+
+        if 2.0 <= rr <= 3.0:
+            return 100.0
+
+        if 3.0 < rr <= 3.5:
+            return 90.0
+
+        return 0.0
+
+
+    def _q2_execution_pair_score(
+        self,
+        sl_score,
+        tp_score,
+        rr
+    ):
+        """
+        Compara PARES SL + TP.
+
+        Dentro de Execution Safety estos tres componentes pesan:
+
+            SL = 20%
+            TP = 15%
+            RR = 15%
+
+        Normalizados únicamente dentro de Q2:
+
+            SL = 40%
+            TP = 30%
+            RR = 30%
+
+        IMPORTANTE:
+        este score NO se suma al Safety.
+
+        Sólo sirve para decidir cuál pareja estructural es mejor.
+        """
+
+        rr_quality = (
+            self._q2_rr_quality(
+                rr
+            )
+        )
+
+        return (
+            float(
+                sl_score
+                or 0
+            )
+            * 0.40
+
+            + float(
+                tp_score
+                or 0
+            )
+            * 0.30
+
+            + rr_quality
+            * 0.30
+        )
+
+
+    def _refine_futures_execution_levels(
+        self,
+        levels,
+        decision,
+        structure,
+        volatility,
+        timeframe,
+        symbol,
+        liquidation=None
+    ):
+        """
+        QUALITY ENGINE Q2 — FUTURES EXECUTION SPECIALIST.
+
+        Objetivo:
+        elegir conjuntamente SL + TP DESPUÉS de que Q1 haya elegido Entry.
+
+        Principios:
+        - no cambia Entry;
+        - no baja Safety;
+        - no cambia Premium;
+        - no inventa SL ni TP;
+        - sólo usa candidatos estructurales ya detectados;
+        - sólo adopta una nueva pareja que cumpla los umbrales actuales
+          de SL Quality, TP Quality y RR Premium;
+        - si la pareja original ya es igual o mejor, no la toca.
+        """
+
+        result = dict(
+            levels
+            or {}
+        )
+
+        structure = (
+            structure
+            if isinstance(
+                structure,
+                dict
+            )
+            else {}
+        )
+
+        volatility = (
+            volatility
+            if isinstance(
+                volatility,
+                dict
+            )
+            else {}
+        )
+
+        diagnostics = {
+            'version':
+                FUTURES_EXECUTION_SPECIALIST_VERSION,
+
+            'evaluated':
+                False,
+
+            'refined':
+                False,
+
+            'reason':
+                'NOT_EVALUATED',
+
+            'pairs_evaluated':
+                0,
+
+            'baseline_pair_score':
+                None,
+
+            'selected_pair_score':
+                None
+        }
+
+        result[
+            'futures_execution_specialist'
+        ] = diagnostics
+
+        result[
+            'futures_execution_specialist_version'
+        ] = (
+            FUTURES_EXECUTION_SPECIALIST_VERSION
+        )
+
+        result[
+            'futures_execution_refined'
+        ] = False
+
+        if decision not in (
+            'LONG',
+            'SHORT'
+        ):
+
+            diagnostics[
+                'reason'
+            ] = 'NOT_FUTURES_DIRECTION'
+
+            return result
+
+        direction = (
+            'long'
+            if decision == 'LONG'
+            else 'short'
+        )
+
+        try:
+            entry = float(
+                result.get(
+                    'entry',
+                    0
+                )
+                or 0
+            )
+
+            current_price = float(
+                structure.get(
+                    'current_price',
+                    entry
+                )
+                or entry
+            )
+
+            atr = float(
+                volatility.get(
+                    'atr',
+                    entry * 0.02
+                )
+                or (
+                    entry * 0.02
+                )
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+
+            diagnostics[
+                'reason'
+            ] = 'INVALID_NUMERIC_CONTEXT'
+
+            return result
+
+        if (
+            entry <= 0
+            or current_price <= 0
+            or atr <= 0
+            or not math.isfinite(
+                entry
+            )
+            or not math.isfinite(
+                current_price
+            )
+            or not math.isfinite(
+                atr
+            )
+        ):
+
+            diagnostics[
+                'reason'
+            ] = 'MISSING_ENTRY_PRICE_OR_ATR'
+
+            return result
+
+        diagnostics[
+            'evaluated'
+        ] = True
+
+        diagnostics[
+            'original_stop_loss'
+        ] = result.get(
+            'stop_loss'
+        )
+
+        diagnostics[
+            'original_take_profit'
+        ] = result.get(
+            'take_profit'
+        )
+
+        diagnostics[
+            'original_rr'
+        ] = result.get(
+            'risk_reward'
+        )
+
+        max_sl_distance = (
+            self
+            ._calculate_max_sl_distance_pct(
+                timeframe
+            )
+        )
+
+        try:
+            # ========================================================
+            # CANDIDATOS SL ESTRUCTURALES
+            # ========================================================
+
+            sl_candidates = (
+                self
+                ._collect_sl_candidates(
+                    direction,
+                    structure,
+                    entry,
+                    volatility,
+                    timeframe
+                )
+                or []
+            )
+
+            # ========================================================
+            # CANDIDATOS TP ESTRUCTURALES
+            # ========================================================
+
+            tp_candidates = (
+                self
+                ._collect_tp_candidates(
+                    direction,
+                    structure,
+                    current_price,
+                    volatility,
+                    timeframe,
+                    liquidation=liquidation
+                )
+                or []
+            )
+
+        except Exception as exc:
+
+            diagnostics[
+                'reason'
+            ] = (
+                'CANDIDATE_COLLECTION_ERROR: '
+                + str(
+                    exc
+                )
+            )
+
+            return result
+
+        # ============================================================
+        # PUNTUAR CANDIDATOS SL
+        # ============================================================
+
+        scored_sl = []
+
+        for candidate in sl_candidates:
+
+            if not isinstance(
+                candidate,
+                dict
+            ):
+                continue
+
+            try:
+                price = float(
+                    candidate.get(
+                        'price',
+                        0
+                    )
+                    or 0
+                )
+
+            except (
+                TypeError,
+                ValueError
+            ):
+                continue
+
+            if not math.isfinite(
+                price
+            ):
+                continue
+
+            valid_geometry = (
+                (
+                    direction == 'long'
+                    and 0 < price < entry
+                )
+                or (
+                    direction == 'short'
+                    and price > entry
+                )
+            )
+
+            if not valid_geometry:
+                continue
+
+            try:
+                score = float(
+                    self
+                    ._score_sl_candidate(
+                        candidate,
+                        entry,
+                        direction,
+                        timeframe,
+                        max_sl_distance,
+                        atr
+                    )
+                    or 0
+                )
+
+            except Exception:
+                continue
+
+            score = max(
+                0.0,
+                min(
+                    100.0,
+                    score
+                )
+            )
+
+            if score <= 0:
+                continue
+
+            scored_sl.append(
+                (
+                    candidate,
+                    score
+                )
+            )
+
+        scored_sl.sort(
+            key=lambda item:
+                -item[1]
+        )
+
+        scored_sl = scored_sl[
+            :FUTURES_EXECUTION_MAX_SL_CANDIDATES
+        ]
+
+        if not scored_sl:
+
+            diagnostics[
+                'reason'
+            ] = 'NO_VALID_STRUCTURAL_SL'
+
+            return result
+
+        # ============================================================
+        # LIMITAR TP PARA MANTENER Q2 LIVIANO
+        # ============================================================
+
+        tp_candidates = [
+            candidate
+            for candidate
+            in tp_candidates
+            if isinstance(
+                candidate,
+                dict
+            )
+        ][
+            :FUTURES_EXECUTION_MAX_TP_CANDIDATES
+        ]
+
+        if not tp_candidates:
+
+            diagnostics[
+                'reason'
+            ] = 'NO_VALID_STRUCTURAL_TP'
+
+            return result
+
+        # ============================================================
+        # CONSERVAR LOS UMBRALES ACTUALES
+        # ============================================================
+
+        minimum_sl_quality = float(
+            FUTURES_RISK_CONFIG[
+                'minimum_publication_sl_avoidance_quality'
+            ]
+        )
+
+        minimum_tp_quality = float(
+            FUTURES_RISK_CONFIG[
+                'minimum_publication_tp_quality'
+            ]
+        )
+
+        pair_candidates = []
+
+        # ============================================================
+        # EVALUAR SL + TP COMO PAREJA
+        # ============================================================
+
+        for (
+            sl_candidate,
+            sl_score
+        ) in scored_sl:
+
+            # Q2 NO baja el filtro SL actual.
+            if (
+                sl_score
+                < minimum_sl_quality
+            ):
+                continue
+
+            sl_price = float(
+                sl_candidate[
+                    'price'
+                ]
+            )
+
+            risk = abs(
+                entry
+                - sl_price
+            )
+
+            if risk <= 0:
+                continue
+
+            sl_distance_pct = (
+                risk
+                / entry
+                * 100
+            )
+
+            minimum_tp_distance = max(
+                1.8
+                * sl_distance_pct,
+                0.4
+            )
+
+            for tp_candidate in tp_candidates:
+
+                try:
+                    tp_price = float(
+                        tp_candidate.get(
+                            'price',
+                            0
+                        )
+                        or 0
+                    )
+
+                except (
+                    TypeError,
+                    ValueError
+                ):
+                    continue
+
+                if not math.isfinite(
+                    tp_price
+                ):
+                    continue
+
+                valid_geometry = (
+                    (
+                        direction == 'long'
+                        and tp_price > entry
+                    )
+                    or (
+                        direction == 'short'
+                        and 0 < tp_price < entry
+                    )
+                )
+
+                if not valid_geometry:
+                    continue
+
+                reward = abs(
+                    tp_price
+                    - entry
+                )
+
+                rr = (
+                    reward
+                    / risk
+                    if risk > 0
+                    else 0
+                )
+
+                # ====================================================
+                # MISMA BANDA PREMIUM ACTUAL
+                # ====================================================
+
+                if not (
+                    1.8
+                    <= rr
+                    <= 3.5
+                ):
+                    continue
+
+                try:
+                    tp_score = float(
+                        self
+                        ._score_tp_candidate(
+                            tp_candidate,
+                            entry,
+                            direction,
+                            tp_candidates,
+                            minimum_tp_distance,
+                            sl_distance_pct=(
+                                sl_distance_pct
+                            )
+                        )
+                        or 0
+                    )
+
+                except Exception:
+                    continue
+
+                tp_score = max(
+                    0.0,
+                    min(
+                        100.0,
+                        tp_score
+                    )
+                )
+
+                # Q2 tampoco baja TP Quality.
+                if (
+                    tp_score
+                    < minimum_tp_quality
+                ):
+                    continue
+
+                pair_score = (
+                    self
+                    ._q2_execution_pair_score(
+                        sl_score,
+                        tp_score,
+                        rr
+                    )
+                )
+
+                pair_candidates.append({
+                    'sl_candidate':
+                        sl_candidate,
+
+                    'tp_candidate':
+                        tp_candidate,
+
+                    'sl_score':
+                        sl_score,
+
+                    'tp_score':
+                        tp_score,
+
+                    'rr':
+                        rr,
+
+                    'pair_score':
+                        pair_score
+                })
+
+        diagnostics[
+            'pairs_evaluated'
+        ] = len(
+            pair_candidates
+        )
+
+        if not pair_candidates:
+
+            diagnostics[
+                'reason'
+            ] = (
+                'NO_PAIR_MEETS_CURRENT_PREMIUM_GEOMETRY'
+            )
+
+            return result
+
+        # ============================================================
+        # MEJOR PAREJA
+        # ============================================================
+
+        pair_candidates.sort(
+            key=lambda pair: (
+                -pair[
+                    'pair_score'
+                ],
+                -pair[
+                    'sl_score'
+                ],
+                -pair[
+                    'tp_score'
+                ]
+            )
+        )
+
+        best = pair_candidates[
+            0
+        ]
+
+        # ============================================================
+        # CALIDAD DE LA PAREJA ORIGINAL
+        # ============================================================
+
+        try:
+            base_sl_raw = float(
+                result.get(
+                    'sl_reliability',
+                    0
+                )
+                or 0
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+            base_sl_raw = 0.0
+
+        base_sl_score = (
+            base_sl_raw
+            * 100
+            if base_sl_raw <= 1
+            else base_sl_raw
+        )
+
+        try:
+            base_tp_score = float(
+                result.get(
+                    'tp_quality_score',
+                    0
+                )
+                or 0
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+            base_tp_score = 0.0
+
+        try:
+            base_rr = float(
+                result.get(
+                    'risk_reward',
+                    0
+                )
+                or 0
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+            base_rr = 0.0
+
+        base_pair_score = (
+            self
+            ._q2_execution_pair_score(
+                base_sl_score,
+                base_tp_score,
+                base_rr
+            )
+            if (
+                base_sl_score
+                >= minimum_sl_quality
+                and base_tp_score
+                >= minimum_tp_quality
+                and 1.8
+                <= base_rr
+                <= 3.5
+            )
+            else 0.0
+        )
+
+        diagnostics[
+            'baseline_pair_score'
+        ] = round(
+            base_pair_score,
+            2
+        )
+
+        diagnostics[
+            'selected_pair_score'
+        ] = round(
+            float(
+                best[
+                    'pair_score'
+                ]
+            ),
+            2
+        )
+
+        diagnostics[
+            'selected_rr'
+        ] = round(
+            float(
+                best[
+                    'rr'
+                ]
+            ),
+            3
+        )
+
+        # ============================================================
+        # NO CAMBIAR POR CAMBIAR
+        # ============================================================
+
+        should_refine = (
+            base_pair_score <= 0
+            or (
+                best[
+                    'pair_score'
+                ]
+                >= (
+                    base_pair_score
+                    + FUTURES_EXECUTION_MIN_PAIR_IMPROVEMENT
+                )
+            )
+        )
+
+        if not should_refine:
+
+            diagnostics[
+                'reason'
+            ] = (
+                'BASE_PAIR_ALREADY_EQUAL_OR_BETTER'
+            )
+
+            return result
+
+        # ============================================================
+        # ADOPTAR PAREJA SUPERIOR
+        # ============================================================
+
+        selected_sl = best[
+            'sl_candidate'
+        ]
+
+        selected_tp = best[
+            'tp_candidate'
+        ]
+
+        sl_price = float(
+            selected_sl[
+                'price'
+            ]
+        )
+
+        tp_price = float(
+            selected_tp[
+                'price'
+            ]
+        )
+
+        sl_score = float(
+            best[
+                'sl_score'
+            ]
+        )
+
+        tp_score = float(
+            best[
+                'tp_score'
+            ]
+        )
+
+        rr = float(
+            best[
+                'rr'
+            ]
+        )
+
+        result[
+            'stop_loss'
+        ] = self._round_price(
+            sl_price,
+            symbol
+        )
+
+        result[
+            'take_profit'
+        ] = self._round_price(
+            tp_price,
+            symbol
+        )
+
+        result[
+            'sl_source'
+        ] = (
+            str(
+                selected_sl.get(
+                    'source',
+                    'SL estructural'
+                )
+            )
+            + ' [Q2 pair]'
+        )
+
+        result[
+            'tp_source'
+        ] = (
+            str(
+                selected_tp.get(
+                    'source',
+                    'TP estructural'
+                )
+            )
+            + ' [Q2 pair]'
+        )
+
+        result[
+            'sl_reliability'
+        ] = round(
+            sl_score
+            / 100.0,
+            2
+        )
+
+        result[
+            'tp_quality_score'
+        ] = round(
+            tp_score,
+            1
+        )
+
+        result[
+            'tp_probability'
+        ] = round(
+            tp_score
+            / 100.0,
+            2
+        )
+
+        result[
+            'tp_quality_label'
+        ] = (
+            'PREMIUM'
+            if tp_score >= 80
+            else 'ALTA'
+            if tp_score >= 70
+            else 'MEDIA'
+            if tp_score >= 55
+            else 'BAJA'
+        )
+
+        result[
+            'risk_reward'
+        ] = round(
+            rr,
+            2
+        )
+
+        # Mantener coherente el sizing técnico base.
+        if (
+            tp_score >= 80
+            and sl_score >= 70
+        ):
+
+            result[
+                'suggested_size'
+            ] = 1.0
+
+        elif (
+            tp_score >= 60
+            and sl_score >= 60
+        ):
+
+            result[
+                'suggested_size'
+            ] = 0.75
+
+        else:
+
+            result[
+                'suggested_size'
+            ] = 0.5
+
+        # ============================================================
+        # IMPORTANTE
+        # ============================================================
+        #
+        # Aquí sólo se reparó la geometría.
+        #
+        # Execution Safety y Publication Gate se ejecutan DESPUÉS
+        # y pueden seguir rechazando la operación.
+        # ============================================================
+
+        result[
+            'rejected_reason'
+        ] = None
+
+        result[
+            'is_rejected'
+        ] = False
+
+        result[
+            'is_executable'
+        ] = True
+
+        result[
+            'publication_status'
+        ] = 'EXECUTABLE_SIGNAL'
+
+        result[
+            'futures_execution_refined'
+        ] = True
+
+        diagnostics[
+            'refined'
+        ] = True
+
+        diagnostics[
+            'reason'
+        ] = (
+            'BETTER_STRUCTURAL_SL_TP_PAIR'
+        )
+
+        diagnostics[
+            'selected_sl_score'
+        ] = round(
+            sl_score,
+            2
+        )
+
+        diagnostics[
+            'selected_tp_score'
+        ] = round(
+            tp_score,
+            2
+        )
+
+        diagnostics[
+            'selected_sl_source'
+        ] = result[
+            'sl_source'
+        ]
+
+        diagnostics[
+            'selected_tp_source'
+        ] = result[
+            'tp_source'
+        ]
+
+        return result
+
     
     # ========================================================================
     # OVERRIDE: CALCULATE_ENTRY_LEVELS (para futuros)
@@ -2355,13 +3405,78 @@ class FuturesAnalysis(TradingExpertSystem):
         if decision not in ('LONG', 'SHORT'):
             return self._get_default_levels(structure.get('current_price', 0), symbol)
         
-        # Llamar al método padre para obtener niveles base
+        # ==============================================================
+        # Q1 / MOTOR PADRE
+        # ==============================================================
+        #
+        # El motor padre ya entrega:
+        #
+        # Entry Q1
+        # SL estructural
+        # TP estructural
+        # RR
+        #
+        # Q2 trabaja DESPUÉS de esto y ANTES de Execution Safety.
+        # ==============================================================
+
         levels = super().calculate_entry_levels(
-            decision, trend, momentum, volatility, structure, symbol, timeframe, liquidation
+            decision,
+            trend,
+            momentum,
+            volatility,
+            structure,
+            symbol,
+            timeframe,
+            liquidation
         )
-        
-        # Si la señal fue rechazada por el padre, propagar
-        # y conservar en qué etapa ocurrió.
+
+        # ==============================================================
+        # QUALITY ENGINE Q2
+        # FUTURES EXECUTION SPECIALIST
+        # ==============================================================
+        #
+        # Puede reparar una geometría SL/TP subóptima utilizando
+        # exclusivamente niveles estructurales ya detectados.
+        #
+        # NO toca Entry.
+        # NO toca Safety.
+        # NO toca Premium.
+        # ==============================================================
+
+        levels = (
+            self
+            ._refine_futures_execution_levels(
+                levels=levels,
+                decision=decision,
+                structure=structure,
+                volatility=volatility,
+                timeframe=timeframe,
+                symbol=symbol,
+                liquidation=liquidation
+            )
+        )
+
+        if levels.get(
+            'futures_execution_refined'
+        ):
+
+            q2_info = (
+                levels.get(
+                    'futures_execution_specialist',
+                    {}
+                )
+                or {}
+            )
+
+            print(
+                "   🎯 [Q2] Pareja SL/TP refinada "
+                f"| RR {levels.get('risk_reward', 0)} "
+                f"| SL {q2_info.get('selected_sl_score', 0):.1f} "
+                f"| TP {q2_info.get('selected_tp_score', 0):.1f}"
+            )
+
+        # Si la señal sigue rechazada después de Q2,
+        # propagar el rechazo y conservar en qué etapa ocurrió.
         if levels.get('rejected_reason'):
 
             return (
