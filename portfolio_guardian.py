@@ -85,7 +85,29 @@ class PortfolioGuardian:
     # El edge normal sigue siendo 18.
     # Para una reversión exigimos una ventaja claramente mayor.
     REVERSAL_EDGE_THRESHOLD = 28.0
+    # ========================================================================
+    # COMMIT 36X
+    # QUALITY GATE DE ROTACIONES BTC ↔ PAXG
+    # ========================================================================
+    #
+    # ROTATION_EDGE_THRESHOLD = 18
+    #
+    # sigue detectando una posible ventaja.
+    #
+    # Pero para mover capital entre BTC y PAXG exigimos:
+    #
+    #     >= 3/4 TF
+    #
+    # o:
+    #
+    #     edge fuerte >= 28
+    #
+    # Esto NO afecta compras con USDT.
+    # ========================================================================
 
+    ROTATION_QUALITY_MIN_TIMEFRAMES = 3
+
+    ROTATION_QUALITY_STRONG_EDGE = 28.0
     # Después de 24 horas la memoria se considera vieja y se
     # permite que el análisis multitemporal vuelva a decidir desde cero.
     ROTATION_MEMORY_MAX_MINUTES = 1440
@@ -1737,7 +1759,196 @@ class PortfolioGuardian:
                 ] = 'RAM+SUPABASE'
 
         return True   
+    def _apply_spot_rotation_quality_guard(
+        self,
+        action,
+        reason,
+        confidence,
+        btc_count,
+        paxg_count,
+        best_tf_data
+    ):
+        """
+        COMMIT 36X.
 
+        Filtra rotaciones BTC ↔ PAXG con respaldo demasiado débil.
+
+        No afecta:
+        - BUY_BTC con USDT;
+        - BUY_PAXG con USDT;
+        - HOLD;
+        - Futures.
+
+        Sólo puede:
+            SWAP -> HOLD
+        """
+
+        result = {
+            'active':
+                False,
+
+            'allowed':
+                True,
+
+            'action':
+                action,
+
+            'confidence':
+                float(
+                    confidence
+                    or 0
+                ),
+
+            'timeframe_count':
+                0,
+
+            'best_edge':
+                0.0,
+
+            'reason':
+                reason
+        }
+
+        action_text = str(
+            action
+            or ''
+        ).upper()
+
+        # ================================================================
+        # SÓLO ROTACIONES BTC ↔ PAXG
+        # ================================================================
+
+        if action_text not in (
+            'SWAP_PAXG_TO_BTC',
+            'SWAP_BTC_TO_PAXG'
+        ):
+
+            return result
+
+        result[
+            'active'
+        ] = True
+
+        # ================================================================
+        # CUÁNTAS TEMPORALIDADES APOYAN LA ROTACIÓN
+        # ================================================================
+
+        tf_count = (
+            int(
+                btc_count
+                or 0
+            )
+
+            if action_text
+            == 'SWAP_PAXG_TO_BTC'
+
+            else int(
+                paxg_count
+                or 0
+            )
+        )
+
+        try:
+
+            best_edge = abs(
+                float(
+                    (
+                        best_tf_data
+                        or {}
+                    ).get(
+                        'relative_edge',
+                        0
+                    )
+                    or 0
+                )
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+
+            best_edge = 0.0
+
+        result[
+            'timeframe_count'
+        ] = tf_count
+
+        result[
+            'best_edge'
+        ] = round(
+            best_edge,
+            2
+        )
+
+        # ================================================================
+        # CALIDAD SUFICIENTE
+        # ================================================================
+        #
+        # Dos formas de aprobar:
+        #
+        # A)
+        #     3 o 4 TF confirman.
+        #
+        # B)
+        #     sólo 2 TF,
+        #     pero uno muestra edge realmente fuerte >=28.
+        #
+        # Esto evita bloquear un movimiento muy contundente.
+        # ================================================================
+
+        quality_ok = bool(
+            tf_count
+            >= self.ROTATION_QUALITY_MIN_TIMEFRAMES
+
+            or best_edge
+            >= self.ROTATION_QUALITY_STRONG_EDGE
+        )
+
+        if quality_ok:
+
+            return result
+
+        # ================================================================
+        # ROTACIÓN DÉBIL
+        # ================================================================
+
+        result.update({
+            'allowed':
+                False,
+
+            'action':
+                'HOLD',
+
+            'confidence':
+                max(
+                    60.0,
+                    min(
+                        80.0,
+                        float(
+                            confidence
+                            or 0
+                        )
+                    )
+                ),
+
+            'reason':
+                (
+                    '36X calidad de rotación: '
+                    'existe dirección estratégica, '
+                    f'pero sólo {tf_count}/4 TF la apoyan '
+                    f'y el edge máximo es {best_edge:.1f}. '
+                    'Para mover BTC↔PAXG se exige '
+                    f'{self.ROTATION_QUALITY_MIN_TIMEFRAMES}/4 TF '
+                    'o edge >= '
+                    f'{self.ROTATION_QUALITY_STRONG_EDGE:.1f}. '
+                    'Se mantiene HOLD para evitar una '
+                    'rotación débil.'
+                )
+        })
+
+        return result
+        
     def _apply_rotation_anti_whipsaw(
         self,
         user,
@@ -3779,7 +3990,75 @@ class PortfolioGuardian:
             #
             # cuando detecta riesgo de giro repetitivo.
             # ==============================================================
+            # ==========================================================
+            # COMMIT 36X
+            # QUALITY GATE DE ROTACIÓN
+            # ==========================================================
+            #
+            # Primero preguntamos:
+            #
+            #     ¿la rotación tiene calidad suficiente?
+            #
+            # Después 7F.1 pregunta:
+            #
+            #     ¿estamos haciendo whipsaw?
+            # ==========================================================
 
+            rotation_quality_guard = (
+                self._apply_spot_rotation_quality_guard(
+                    action=
+                        action,
+
+                    reason=
+                        reason,
+
+                    confidence=
+                        confidence,
+
+                    btc_count=
+                        btc_count,
+
+                    paxg_count=
+                        paxg_count,
+
+                    best_tf_data=
+                        best_tf_data
+                )
+            )
+
+            if not rotation_quality_guard.get(
+                'allowed',
+                True
+            ):
+
+                action = 'HOLD'
+
+                reason = str(
+                    rotation_quality_guard.get(
+                        'reason'
+                    )
+                    or reason
+                )
+
+                confidence = float(
+                    rotation_quality_guard.get(
+                        'confidence',
+                        confidence
+                    )
+                    or confidence
+                )
+
+                # HOLD nunca debe contener una operación simulada.
+
+                trade_size = 0
+
+                amount_crypto = 0
+
+                amount_usd = 0
+
+                source_asset = None
+
+                target_asset = None
             rotation_guard = (
                 self._apply_rotation_anti_whipsaw(
                     user=user,
@@ -4007,10 +4286,60 @@ class PortfolioGuardian:
                 valuation=valuation
             )
 
-             # ==============================================================
+            # ==============================================================
             # FASE 7F.1
             # ==============================================================
+            # ==============================================================
+            # COMMIT 36X
+            # DIAGNÓSTICO DE CALIDAD DE ROTACIÓN
+            # ==============================================================
 
+            rec[
+                'rotation_quality_guard'
+            ] = {
+
+                'active':
+                    bool(
+                        rotation_quality_guard.get(
+                            'active',
+                            False
+                        )
+                    ),
+
+                'allowed':
+                    bool(
+                        rotation_quality_guard.get(
+                            'allowed',
+                            True
+                        )
+                    ),
+
+                'timeframe_count':
+                    int(
+                        rotation_quality_guard.get(
+                            'timeframe_count',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'best_edge':
+                    float(
+                        rotation_quality_guard.get(
+                            'best_edge',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'reason':
+                    str(
+                        rotation_quality_guard.get(
+                            'reason'
+                        )
+                        or ''
+                    )
+            }
             rec[
                 'rotation_guard'
             ] = {
