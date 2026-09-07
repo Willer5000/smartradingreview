@@ -1334,7 +1334,714 @@ def _record_usage(
             e
         )
 
+# ============================================================================
+# COMMIT 36Y
+# GEMINI ACTIVITY / WORK REPORT — ZERO EXTRA LLM CALLS
+# ============================================================================
 
+def get_gemini_activity_status():
+    """
+    Estado observable del Learning Scientist Gemini.
+
+    READ-ONLY.
+
+    Esta función NO llama a Gemini.
+    Sólo lee ai_usage_events y ai_advisor_observations ya persistidos.
+
+    El cintillo del frontend puede consultarla muchas veces sin gastar
+    cuota de Gemini.
+    """
+
+    configured = bool(
+        os.getenv(
+            "GEMINI_API_KEY",
+            ""
+        ).strip()
+    )
+
+    result = {
+        "mode":
+            "WORK_REPORT",
+
+        "configured":
+            configured,
+
+        "enabled":
+            bool(
+                GEMINI_LEARNING_ENABLED
+            ),
+
+        "model":
+            GEMINI_LEARNING_MODEL,
+
+        "state":
+            "WAITING_FIRST_RUN",
+
+        "working":
+            False,
+
+        "fallback_active":
+            False,
+
+        "extra_gemini_calls_for_ticker":
+            0,
+
+        # En 36Y Free Tier usamos Opción B:
+        # reporte del trabajo real de Gemini.
+        "macro_news_enabled":
+            False,
+
+        # No existe noticia externa verificable,
+        # por lo que TraderMacro permanece intacto.
+        "trader_macro_influence":
+            False,
+
+        "last_run":
+            None,
+
+        "ticker_items":
+            [],
+
+        "reason":
+            None
+    }
+
+    if not configured:
+        result[
+            "state"
+        ] = "NOT_CONFIGURED"
+
+        result[
+            "reason"
+        ] = "GEMINI_API_KEY no está configurada."
+
+        result[
+            "ticker_items"
+        ] = [
+            "🧠 Gemini Learning · API key no configurada."
+        ]
+
+        return result
+
+    if not GEMINI_LEARNING_ENABLED:
+        result[
+            "state"
+        ] = "DISABLED"
+
+        result[
+            "reason"
+        ] = "GEMINI_LEARNING_ENABLED=false"
+
+        result[
+            "ticker_items"
+        ] = [
+            "🧠 Gemini Learning · deshabilitado por configuración."
+        ]
+
+        return result
+
+    db = _db()
+
+    if (
+        db is None
+        or not getattr(
+            db,
+            "enabled",
+            False
+        )
+    ):
+        result[
+            "state"
+        ] = "DB_UNAVAILABLE"
+
+        result[
+            "reason"
+        ] = (
+            "Supabase no disponible "
+            "para consultar actividad IA."
+        )
+
+        result[
+            "ticker_items"
+        ] = [
+            (
+                "🧠 Gemini Learning configurado · "
+                "estado histórico no disponible."
+            )
+        ]
+
+        return result
+
+    def _short_text(
+        value,
+        limit=180
+    ):
+        text = " ".join(
+            str(
+                value
+                or ""
+            ).split()
+        )
+
+        if len(
+            text
+        ) <= limit:
+            return text
+
+        return (
+            text[
+                :max(
+                    0,
+                    limit - 1
+                )
+            ].rstrip()
+            + "…"
+        )
+
+    def _as_dict(
+        value
+    ):
+        if isinstance(
+            value,
+            dict
+        ):
+            return value
+
+        if isinstance(
+            value,
+            str
+        ):
+            try:
+                parsed = json.loads(
+                    value
+                )
+
+                if isinstance(
+                    parsed,
+                    dict
+                ):
+                    return parsed
+
+            except Exception:
+                pass
+
+        return {}
+
+    try:
+
+        # ================================================================
+        # ÚLTIMO INTENTO GEMINI LEARNING
+        # ================================================================
+
+        gemini_usage_response = db._with_retry(
+            lambda: (
+                db.client
+                .table(
+                    "ai_usage_events"
+                )
+                .select(
+                    (
+                        "provider,model,status,"
+                        "usage_type,context_type,"
+                        "input_tokens,output_tokens,"
+                        "total_tokens,created_at"
+                    )
+                )
+                .eq(
+                    "provider",
+                    "GEMINI"
+                )
+                .eq(
+                    "usage_type",
+                    "LEARNING"
+                )
+                .order(
+                    "created_at",
+                    desc=True
+                )
+                .limit(
+                    1
+                )
+                .execute()
+            )
+        )
+
+        gemini_usage = (
+            dict(
+                gemini_usage_response.data[0]
+            )
+            if (
+                gemini_usage_response
+                and gemini_usage_response.data
+            )
+            else None
+        )
+
+        # ================================================================
+        # ÚLTIMO LEARNING DE CUALQUIER PROVEEDOR
+        # ================================================================
+        #
+        # Permite saber si Gemini falló y Groq terminó atendiendo
+        # el ciclo mediante el fallback.
+        # ================================================================
+
+        latest_learning_response = db._with_retry(
+            lambda: (
+                db.client
+                .table(
+                    "ai_usage_events"
+                )
+                .select(
+                    (
+                        "provider,model,status,"
+                        "total_tokens,created_at"
+                    )
+                )
+                .eq(
+                    "usage_type",
+                    "LEARNING"
+                )
+                .order(
+                    "created_at",
+                    desc=True
+                )
+                .limit(
+                    1
+                )
+                .execute()
+            )
+        )
+
+        latest_learning_usage = (
+            dict(
+                latest_learning_response.data[0]
+            )
+            if (
+                latest_learning_response
+                and latest_learning_response.data
+            )
+            else None
+        )
+
+        # ================================================================
+        # ÚLTIMO TRABAJO REAL PRODUCIDO POR GEMINI
+        # ================================================================
+
+        observation_response = db._with_retry(
+            lambda: (
+                db.client
+                .table(
+                    "ai_advisor_observations"
+                )
+                .select(
+                    (
+                        "provider,model,event_type,"
+                        "response_json,created_at"
+                    )
+                )
+                .eq(
+                    "provider",
+                    "GEMINI"
+                )
+                .eq(
+                    "context_type",
+                    "LEARNING"
+                )
+                .order(
+                    "created_at",
+                    desc=True
+                )
+                .limit(
+                    1
+                )
+                .execute()
+            )
+        )
+
+        observation = (
+            dict(
+                observation_response.data[0]
+            )
+            if (
+                observation_response
+                and observation_response.data
+            )
+            else None
+        )
+
+        # ================================================================
+        # GEMINI CONFIGURADO PERO TODAVÍA SIN EJECUCIÓN
+        # ================================================================
+
+        if not gemini_usage:
+            result[
+                "state"
+            ] = "WAITING_FIRST_RUN"
+
+            result[
+                "reason"
+            ] = (
+                "Gemini está configurado pero aún no existe "
+                "un evento LEARNING persistido."
+            )
+
+            if (
+                latest_learning_usage
+                and str(
+                    latest_learning_usage.get(
+                        "provider"
+                    )
+                    or ""
+                ).upper()
+                == "GROQ"
+            ):
+                result[
+                    "fallback_active"
+                ] = True
+
+                result[
+                    "ticker_items"
+                ] = [
+                    (
+                        "🧠 Gemini configurado · "
+                        "el último Learning registrado "
+                        "fue atendido por Groq."
+                    )
+                ]
+
+            else:
+                result[
+                    "ticker_items"
+                ] = [
+                    (
+                        "🧠 Gemini configurado · "
+                        "esperando el próximo ciclo "
+                        "diario de aprendizaje."
+                    )
+                ]
+
+            return result
+
+        usage_status = str(
+            gemini_usage.get(
+                "status"
+            )
+            or "UNKNOWN"
+        ).upper()
+
+        total_tokens = int(
+            gemini_usage.get(
+                "total_tokens"
+            )
+            or 0
+        )
+
+        result[
+            "last_run"
+        ] = {
+            "provider":
+                "GEMINI",
+
+            "model":
+                str(
+                    gemini_usage.get(
+                        "model"
+                    )
+                    or GEMINI_LEARNING_MODEL
+                ),
+
+            "status":
+                usage_status,
+
+            "created_at":
+                gemini_usage.get(
+                    "created_at"
+                ),
+
+            "input_tokens":
+                int(
+                    gemini_usage.get(
+                        "input_tokens"
+                    )
+                    or 0
+                ),
+
+            "output_tokens":
+                int(
+                    gemini_usage.get(
+                        "output_tokens"
+                    )
+                    or 0
+                ),
+
+            "total_tokens":
+                total_tokens
+        }
+
+        # ================================================================
+        # GEMINI INTENTADO PERO FALLÓ
+        # ================================================================
+
+        if usage_status != "SUCCESS":
+            result[
+                "state"
+            ] = "ERROR_FALLBACK"
+
+            result[
+                "fallback_active"
+            ] = bool(
+                latest_learning_usage
+                and str(
+                    latest_learning_usage.get(
+                        "provider"
+                    )
+                    or ""
+                ).upper()
+                == "GROQ"
+            )
+
+            result[
+                "reason"
+            ] = (
+                "El último intento Gemini Learning no terminó "
+                "correctamente; el sistema puede usar fallback a Groq."
+            )
+
+            result[
+                "ticker_items"
+            ] = [
+                (
+                    "⚠️ Gemini Learning · último intento con error; "
+                    "el trading continúa sin depender de Gemini."
+                )
+            ]
+
+            return result
+
+        # ================================================================
+        # GEMINI FUNCIONANDO
+        # ================================================================
+
+        result[
+            "state"
+        ] = "WORKING"
+
+        result[
+            "working"
+        ] = True
+
+        response_json = _as_dict(
+            (
+                observation
+                or {}
+            ).get(
+                "response_json"
+            )
+        )
+
+        ticker_items = []
+
+        # ================================================================
+        # 1. TITULAR DEL TRABAJO
+        # ================================================================
+
+        headline = _short_text(
+            response_json.get(
+                "headline"
+            ),
+            170
+        )
+
+        if headline:
+            ticker_items.append(
+                "🧠 Gemini Learning · "
+                + headline
+            )
+
+        # ================================================================
+        # 2. HIPÓTESIS QUE ESTÁ INVESTIGANDO
+        # ================================================================
+
+        hypotheses = response_json.get(
+            "learning_hypotheses"
+        )
+
+        if isinstance(
+            hypotheses,
+            list
+        ):
+            first_hypothesis = next(
+                (
+                    _short_text(
+                        item,
+                        175
+                    )
+                    for item
+                    in hypotheses
+                    if _short_text(
+                        item,
+                        175
+                    )
+                ),
+                ""
+            )
+
+            if first_hypothesis:
+                ticker_items.append(
+                    "🔬 Investigación · "
+                    + first_hypothesis
+                )
+
+        # ================================================================
+        # 3. PROPUESTA SHADOW
+        # ================================================================
+
+        proposals = response_json.get(
+            "strategy_proposals"
+        )
+
+        if isinstance(
+            proposals,
+            list
+        ):
+            first_proposal = next(
+                (
+                    item
+                    for item
+                    in proposals
+                    if isinstance(
+                        item,
+                        dict
+                    )
+                ),
+                None
+            )
+
+            if first_proposal:
+                proposal_name = _short_text(
+                    first_proposal.get(
+                        "name"
+                    ),
+                    70
+                )
+
+                proposal_thesis = _short_text(
+                    first_proposal.get(
+                        "thesis"
+                    ),
+                    120
+                )
+
+                proposal_text = " · ".join(
+                    part
+                    for part
+                    in (
+                        proposal_name,
+                        proposal_thesis
+                    )
+                    if part
+                )
+
+                if proposal_text:
+                    ticker_items.append(
+                        "🧪 Shadow proposal · "
+                        + proposal_text
+                    )
+
+        # ================================================================
+        # 4. CONSEJO DE MEJORA
+        # ================================================================
+
+        advice_text = _short_text(
+            response_json.get(
+                "advice"
+            ),
+            175
+        )
+
+        if (
+            advice_text
+            and len(
+                ticker_items
+            ) < 3
+        ):
+            ticker_items.append(
+                "📈 Mejora del sistema · "
+                + advice_text
+            )
+
+        # ================================================================
+        # 5. PRUEBA OBJETIVA DE QUE SE EJECUTÓ
+        # ================================================================
+
+        created_at = str(
+            gemini_usage.get(
+                "created_at"
+            )
+            or ""
+        )
+
+        activity_summary = (
+            "✅ Gemini activo"
+            + (
+                f" · {total_tokens} tokens"
+                if total_tokens > 0
+                else ""
+            )
+            + (
+                (
+                    " · "
+                    f"{created_at[:16].replace('T', ' ')} UTC"
+                )
+                if created_at
+                else ""
+            )
+        )
+
+        ticker_items.append(
+            activity_summary
+        )
+
+        result[
+            "ticker_items"
+        ] = ticker_items[:4]
+
+        result[
+            "reason"
+        ] = (
+            "El cintillo reutiliza la última respuesta Learning "
+            "persistida; no realiza llamadas adicionales a Gemini."
+        )
+
+        return result
+
+    except Exception as error:
+
+        logger.warning(
+            "Gemini activity status: %s",
+            error
+        )
+
+        result[
+            "state"
+        ] = "STATUS_ERROR"
+
+        result[
+            "reason"
+        ] = str(
+            error
+        )[:180]
+
+        result[
+            "ticker_items"
+        ] = [
+            (
+                "🧠 Gemini Learning configurado · "
+                "no se pudo leer su actividad histórica."
+            )
+        ]
+
+        return result
 # ============================================================================
 # RESTRICCIÓN DEL CHAT
 # ============================================================================
@@ -3777,6 +4484,30 @@ def run_ai_advisor(
                         "Fallback a Groq."
                     ),
                     gemini_error
+                )
+
+                # ====================================================
+                # COMMIT 36Y
+                # REGISTRAR EL INTENTO GEMINI FALLIDO
+                # ====================================================
+                #
+                # Esto sirve únicamente para observabilidad.
+                #
+                # ERROR no cuenta como SUCCESS para las cuotas.
+                # Después continúa el fallback normal a Groq.
+                # ====================================================
+
+                _record_usage(
+                    user_name,
+                    usage_type,
+                    context_type,
+                    market,
+                    "ERROR",
+                    {},
+                    provider=
+                        "GEMINI",
+                    model=
+                        selected_model
                 )
 
                 selected_provider = "GROQ"
