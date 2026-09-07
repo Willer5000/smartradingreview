@@ -6415,3 +6415,1073 @@ def get_ai_control_event(
         )
 
         return None
+# ============================================================================
+# COMMIT 36T.1
+# SPOT / TGP SHADOW EVIDENCE
+# ============================================================================
+
+def get_spot_tgp_shadow_evidence(
+    user_name,
+    limit=1000
+):
+    """
+    COMMIT 36T.1
+
+    Mide qué habría pasado si la IA hubiera bloqueado
+    determinadas señales Spot.
+
+    READ-ONLY.
+
+    NO:
+    - modifica señales;
+    - modifica TGP;
+    - modifica Guardian;
+    - modifica el portfolio;
+    - cambia autoridad IA;
+    - escribe en Supabase.
+
+    Esta fase utiliza el PnL bruto de la señal únicamente como
+    PROXY diagnóstico.
+
+    36S.2B.2 permanece bloqueado hasta añadir posteriormente:
+    - contrafactual real del portfolio;
+    - costes de rotación;
+    - comparación contra HOLD.
+    """
+
+    result = {
+        "mode":
+            "SPOT_TGP_SHADOW_EVIDENCE",
+
+        "authority_changed":
+            False,
+
+        "ready_for_36S2B2_review":
+            False,
+
+        "economic_status":
+            "GROSS_SIGNAL_PROXY_ONLY",
+
+        "minimums": {
+            "resolved_total":
+                25,
+
+            "would_block_resolved":
+                10,
+
+            "validation_resolved":
+                10,
+
+            "validation_would_block":
+                3
+        },
+
+        "observations":
+            0,
+
+        "unique_linked_signals":
+            0,
+
+        "resolved_total":
+            0,
+
+        "unresolved_total":
+            0,
+
+        "invalid_source_ids":
+            0,
+
+        "ambiguous_market":
+            0,
+
+        "would_block": {
+            "resolved":
+                0,
+
+            "losses_avoided":
+                0,
+
+            "winners_blocked":
+                0,
+
+            "neutral":
+                0,
+
+            "gross_value_pct_sum":
+                0.0,
+
+            "gross_value_pct_avg":
+                None
+        },
+
+        "calibration_70":
+            {},
+
+        "validation_30":
+            {},
+
+        "gate": {
+            "sample_ok":
+                False,
+
+            "block_sample_ok":
+                False,
+
+            "validation_ok":
+                False,
+
+            "validation_block_sample_ok":
+                False,
+
+            "gross_value_positive":
+                False,
+
+            "validation_gross_value_positive":
+                False,
+
+            "portfolio_counterfactual_verified":
+                False,
+
+            "costs_verified":
+                False
+        },
+
+        "reason":
+            None
+    }
+
+    db = _db()
+
+    if (
+        db is None
+        or not getattr(
+            db,
+            "enabled",
+            False
+        )
+    ):
+        result[
+            "reason"
+        ] = "SUPABASE_UNAVAILABLE"
+
+        return result
+
+    user_name = str(
+        user_name
+        or ""
+    ).strip()
+
+    if not user_name:
+        result[
+            "reason"
+        ] = "USER_REQUIRED"
+
+        return result
+
+    try:
+        import uuid as _uuid
+
+        safe_limit = max(
+            50,
+            min(
+                int(
+                    limit
+                    or 1000
+                ),
+                2000
+            )
+        )
+
+        # ================================================================
+        # 1. OBSERVACIONES IA SPOT
+        # ================================================================
+
+        observations_response = (
+            db._with_retry(
+                lambda: (
+                    db.client
+                    .table(
+                        "ai_advisor_observations"
+                    )
+                    .select(
+                        (
+                            "id,"
+                            "source_signal_id,"
+                            "ai_verdict,"
+                            "ai_confidence,"
+                            "created_at,"
+                            "symbol,"
+                            "timeframe"
+                        )
+                    )
+                    .eq(
+                        "user_name",
+                        user_name
+                    )
+                    .eq(
+                        "market",
+                        "SPOT"
+                    )
+                    .eq(
+                        "context_type",
+                        "HOURLY_MARKET_ADVICE"
+                    )
+                    .order(
+                        "created_at",
+                        desc=False
+                    )
+                    .limit(
+                        safe_limit
+                    )
+                    .execute()
+                )
+            )
+        )
+
+        observations = (
+            observations_response.data
+            if (
+                observations_response
+                and observations_response.data
+            )
+            else []
+        )
+
+        result[
+            "observations"
+        ] = len(
+            observations
+        )
+
+        # ================================================================
+        # UNA SEÑAL = UNA OBSERVACIÓN
+        # ================================================================
+        #
+        # Conservamos la PRIMERA opinión.
+        #
+        # Si la IA analiza la misma señal varias veces posteriormente,
+        # no puede elegir retroactivamente la opinión que mejor quedó.
+        # ================================================================
+
+        first_by_signal = {}
+
+        for row in observations:
+
+            if not isinstance(
+                row,
+                dict
+            ):
+                continue
+
+            raw_id = str(
+                row.get(
+                    "source_signal_id"
+                )
+                or ""
+            ).strip()
+
+            if not raw_id:
+                continue
+
+            try:
+                canonical_id = str(
+                    _uuid.UUID(
+                        raw_id
+                    )
+                )
+
+            except Exception:
+
+                result[
+                    "invalid_source_ids"
+                ] += 1
+
+                continue
+
+            if (
+                canonical_id
+                not in first_by_signal
+            ):
+                first_by_signal[
+                    canonical_id
+                ] = row
+
+        source_ids = list(
+            first_by_signal.keys()
+        )
+
+        result[
+            "unique_linked_signals"
+        ] = len(
+            source_ids
+        )
+
+        if not source_ids:
+
+            result[
+                "reason"
+            ] = (
+                "NO_LINKED_SPOT_AI_OBSERVATIONS"
+            )
+
+            return result
+
+        # ================================================================
+        # HELPER DE BATCHES
+        # ================================================================
+
+        def _chunks(
+            values,
+            size=100
+        ):
+
+            for start in range(
+                0,
+                len(values),
+                size
+            ):
+
+                yield values[
+                    start:
+                    start + size
+                ]
+
+        # ================================================================
+        # 2. SEÑALES ORIGINALES
+        # ================================================================
+
+        signals_by_id = {}
+
+        for batch in _chunks(
+            source_ids
+        ):
+
+            response = db._with_retry(
+                lambda batch=batch: (
+                    db.client
+                    .table(
+                        "signals"
+                    )
+                    .select(
+                        (
+                            "id,"
+                            "symbol,"
+                            "timeframe,"
+                            "system_type,"
+                            "action_original,"
+                            "status,"
+                            "created_at"
+                        )
+                    )
+                    .in_(
+                        "id",
+                        batch
+                    )
+                    .execute()
+                )
+            )
+
+            for row in (
+                response.data
+                if (
+                    response
+                    and response.data
+                )
+                else []
+            ):
+
+                if isinstance(
+                    row,
+                    dict
+                ):
+
+                    signals_by_id[
+                        str(
+                            row.get(
+                                "id"
+                            )
+                        )
+                    ] = row
+
+        # ================================================================
+        # EXCLUSIVAMENTE SPOT VERIFICADO
+        # ================================================================
+
+        result_ids = [
+
+            signal_id
+
+            for (
+                signal_id,
+                signal
+            )
+            in signals_by_id.items()
+
+            if str(
+                signal.get(
+                    "system_type"
+                )
+                or ""
+            ).lower()
+            == "spot"
+        ]
+
+        # ================================================================
+        # 3. RESULTADOS REALES DE REVIEWTRADER
+        # ================================================================
+
+        results_by_signal = {}
+
+        for batch in _chunks(
+            result_ids
+        ):
+
+            response = db._with_retry(
+                lambda batch=batch: (
+                    db.client
+                    .table(
+                        "signal_results"
+                    )
+                    .select(
+                        (
+                            "signal_id,"
+                            "status,"
+                            "pnl_pct,"
+                            "created_at"
+                        )
+                    )
+                    .in_(
+                        "signal_id",
+                        batch
+                    )
+                    .order(
+                        "created_at",
+                        desc=False
+                    )
+                    .execute()
+                )
+            )
+
+            for row in (
+                response.data
+                if (
+                    response
+                    and response.data
+                )
+                else []
+            ):
+
+                if not isinstance(
+                    row,
+                    dict
+                ):
+                    continue
+
+                sid = str(
+                    row.get(
+                        "signal_id"
+                    )
+                    or ""
+                )
+
+                if sid:
+                    results_by_signal[
+                        sid
+                    ] = row
+
+        # ================================================================
+        # 4. CRUZAR IA VS RESULTADO REAL
+        # ================================================================
+
+        evaluated_rows = []
+
+        for (
+            signal_id,
+            observation
+        ) in first_by_signal.items():
+
+            signal = (
+                signals_by_id.get(
+                    signal_id
+                )
+            )
+
+            if not signal:
+
+                result[
+                    "unresolved_total"
+                ] += 1
+
+                continue
+
+            system_type = str(
+                signal.get(
+                    "system_type"
+                )
+                or ""
+            ).lower()
+
+            # No reinterpretamos filas ambiguas.
+            if system_type != "spot":
+
+                result[
+                    "ambiguous_market"
+                ] += 1
+
+                continue
+
+            action = str(
+                signal.get(
+                    "action_original"
+                )
+                or ""
+            ).upper()
+
+            if action not in (
+                "COMPRA_SPOT",
+                "VENTA_SPOT"
+            ):
+                continue
+
+            signal_result = (
+                results_by_signal.get(
+                    signal_id
+                )
+            )
+
+            if not signal_result:
+
+                result[
+                    "unresolved_total"
+                ] += 1
+
+                continue
+
+            status = str(
+                signal_result.get(
+                    "status"
+                )
+                or ""
+            ).lower()
+
+            if status not in (
+                "tp_hit",
+                "sl_hit",
+                "expired"
+            ):
+
+                result[
+                    "unresolved_total"
+                ] += 1
+
+                continue
+
+            try:
+                pnl_pct = float(
+                    signal_result.get(
+                        "pnl_pct"
+                    )
+                    or 0
+                )
+
+            except (
+                TypeError,
+                ValueError
+            ):
+
+                result[
+                    "unresolved_total"
+                ] += 1
+
+                continue
+
+            verdict = str(
+                observation.get(
+                    "ai_verdict"
+                )
+                or ""
+            ).upper()
+
+            try:
+                confidence = int(
+                    float(
+                        observation.get(
+                            "ai_confidence"
+                        )
+                        or 0
+                    )
+                )
+
+            except (
+                TypeError,
+                ValueError
+            ):
+                confidence = 0
+
+            # ============================================================
+            # RECONSTRUCCIÓN DETERMINISTA DEL WOULD_BLOCK
+            # ============================================================
+            #
+            # Es exactamente la regla Shadow:
+            #
+            # DISAGREE >= 80
+            # ============================================================
+
+            would_block = bool(
+                verdict == "DISAGREE"
+                and confidence >= 80
+            )
+
+            # ============================================================
+            # VALOR DEL BLOQUEO
+            # ============================================================
+            #
+            # Ejemplo:
+            #
+            # La operación habría perdido -2%
+            # IA habría bloqueado:
+            #
+            #     valor IA = +2%
+            #
+            # La operación habría ganado +3%
+            # IA habría bloqueado:
+            #
+            #     valor IA = -3%
+            #
+            # ============================================================
+
+            block_value_pct = (
+                -pnl_pct
+                if would_block
+                else None
+            )
+
+            evaluated_rows.append({
+
+                "signal_id":
+                    signal_id,
+
+                "created_at":
+                    str(
+                        signal.get(
+                            "created_at"
+                        )
+                        or ""
+                    ),
+
+                "symbol":
+                    signal.get(
+                        "symbol"
+                    ),
+
+                "timeframe":
+                    signal.get(
+                        "timeframe"
+                    ),
+
+                "action":
+                    action,
+
+                "status":
+                    status,
+
+                "system_pnl_pct":
+                    pnl_pct,
+
+                "ai_verdict":
+                    verdict,
+
+                "ai_confidence":
+                    confidence,
+
+                "would_block":
+                    would_block,
+
+                "block_value_pct":
+                    block_value_pct
+            })
+
+        evaluated_rows.sort(
+            key=lambda row:
+                row[
+                    "created_at"
+                ]
+        )
+
+        result[
+            "resolved_total"
+        ] = len(
+            evaluated_rows
+        )
+
+        # ================================================================
+        # RESUMEN
+        # ================================================================
+
+        def _summarize(
+            rows
+        ):
+
+            blocks = [
+
+                row
+                for row in rows
+
+                if row.get(
+                    "would_block"
+                )
+            ]
+
+            values = [
+
+                float(
+                    row[
+                        "block_value_pct"
+                    ]
+                )
+
+                for row in blocks
+
+                if row.get(
+                    "block_value_pct"
+                )
+                is not None
+            ]
+
+            return {
+
+                "resolved":
+                    len(
+                        rows
+                    ),
+
+                "would_block_resolved":
+                    len(
+                        blocks
+                    ),
+
+                "losses_avoided":
+                    sum(
+                        1
+                        for row in blocks
+
+                        if float(
+                            row[
+                                "system_pnl_pct"
+                            ]
+                        ) < 0
+                    ),
+
+                "winners_blocked":
+                    sum(
+                        1
+                        for row in blocks
+
+                        if float(
+                            row[
+                                "system_pnl_pct"
+                            ]
+                        ) > 0
+                    ),
+
+                "neutral":
+                    sum(
+                        1
+                        for row in blocks
+
+                        if float(
+                            row[
+                                "system_pnl_pct"
+                            ]
+                        ) == 0
+                    ),
+
+                "gross_value_pct_sum":
+                    round(
+                        sum(
+                            values
+                        ),
+                        4
+                    ),
+
+                "gross_value_pct_avg":
+                    (
+                        round(
+                            sum(
+                                values
+                            )
+                            / len(
+                                values
+                            ),
+                            4
+                        )
+
+                        if values
+                        else None
+                    )
+            }
+
+        total_summary = (
+            _summarize(
+                evaluated_rows
+            )
+        )
+
+        result[
+            "would_block"
+        ] = {
+
+            "resolved":
+                total_summary[
+                    "would_block_resolved"
+                ],
+
+            "losses_avoided":
+                total_summary[
+                    "losses_avoided"
+                ],
+
+            "winners_blocked":
+                total_summary[
+                    "winners_blocked"
+                ],
+
+            "neutral":
+                total_summary[
+                    "neutral"
+                ],
+
+            "gross_value_pct_sum":
+                total_summary[
+                    "gross_value_pct_sum"
+                ],
+
+            "gross_value_pct_avg":
+                total_summary[
+                    "gross_value_pct_avg"
+                ]
+        }
+
+        # ================================================================
+        # 70 / 30 WALK-FORWARD SIMPLE
+        # ================================================================
+        #
+        # Primer 70%:
+        # calibración / observación.
+        #
+        # Último 30%:
+        # validación posterior.
+        # ================================================================
+
+        split_index = int(
+            len(
+                evaluated_rows
+            )
+            * 0.70
+        )
+
+        calibration_rows = (
+            evaluated_rows[
+                :split_index
+            ]
+        )
+
+        validation_rows = (
+            evaluated_rows[
+                split_index:
+            ]
+        )
+
+        calibration = (
+            _summarize(
+                calibration_rows
+            )
+        )
+
+        validation = (
+            _summarize(
+                validation_rows
+            )
+        )
+
+        result[
+            "calibration_70"
+        ] = calibration
+
+        result[
+            "validation_30"
+        ] = validation
+
+        # ================================================================
+        # 5. GATE DIAGNÓSTICO
+        # ================================================================
+
+        minimums = (
+            result[
+                "minimums"
+            ]
+        )
+
+        gate = (
+            result[
+                "gate"
+            ]
+        )
+
+        gate[
+            "sample_ok"
+        ] = bool(
+            result[
+                "resolved_total"
+            ]
+            >= minimums[
+                "resolved_total"
+            ]
+        )
+
+        gate[
+            "block_sample_ok"
+        ] = bool(
+            total_summary[
+                "would_block_resolved"
+            ]
+            >= minimums[
+                "would_block_resolved"
+            ]
+        )
+
+        gate[
+            "validation_ok"
+        ] = bool(
+            validation[
+                "resolved"
+            ]
+            >= minimums[
+                "validation_resolved"
+            ]
+        )
+
+        gate[
+            "validation_block_sample_ok"
+        ] = bool(
+            validation[
+                "would_block_resolved"
+            ]
+            >= minimums[
+                "validation_would_block"
+            ]
+        )
+
+        gate[
+            "gross_value_positive"
+        ] = bool(
+            total_summary[
+                "would_block_resolved"
+            ] > 0
+            and total_summary[
+                "gross_value_pct_sum"
+            ] > 0
+        )
+
+        gate[
+            "validation_gross_value_positive"
+        ] = bool(
+            validation[
+                "would_block_resolved"
+            ] > 0
+            and validation[
+                "gross_value_pct_sum"
+            ] > 0
+        )
+
+        diagnostic_ready = all((
+
+            gate[
+                "sample_ok"
+            ],
+
+            gate[
+                "block_sample_ok"
+            ],
+
+            gate[
+                "validation_ok"
+            ],
+
+            gate[
+                "validation_block_sample_ok"
+            ],
+
+            gate[
+                "gross_value_positive"
+            ],
+
+            gate[
+                "validation_gross_value_positive"
+            ]
+        ))
+
+        # ================================================================
+        # IMPORTANTE
+        # ================================================================
+        #
+        # Incluso aunque todos los gates anteriores sean positivos,
+        # 36S.2B.2 NO se activa.
+        #
+        # Esto es solamente la primera evidencia.
+        #
+        # Falta 36T.2:
+        #
+        # - portfolio real;
+        # - BTC/PAXG/USDT;
+        # - comparación contra HOLD;
+        # - costes de rotación.
+        # ================================================================
+
+        result[
+            "ready_for_36S2B2_review"
+        ] = False
+
+        if not diagnostic_ready:
+
+            result[
+                "reason"
+            ] = (
+                "COLLECTING_SPOT_SHADOW_OUTCOMES"
+            )
+
+        else:
+
+            result[
+                "reason"
+            ] = (
+                "SIGNAL_PROXY_POSITIVE_"
+                "WAITING_FOR_36T2_PORTFOLIO_NET"
+            )
+
+        return result
+
+    except Exception as error:
+
+        # ================================================================
+        # FAIL-OPEN
+        # ================================================================
+        #
+        # Un fallo de estadísticas nunca afecta Spot.
+        # ================================================================
+
+        logger.warning(
+            "Spot TGP shadow evidence: %s",
+            error
+        )
+
+        result[
+            "reason"
+        ] = (
+            "EVIDENCE_ERROR: "
+            + str(
+                error
+            )[:180]
+        )
+
+        return result
