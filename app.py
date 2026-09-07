@@ -41261,6 +41261,107 @@ def api_ai_performance():
                 )[:200]
 
         }), 200
+
+
+# ============================================================================
+# COMMIT 36Y
+# GEMINI LEARNING ACTIVITY — READ ONLY / ZERO EXTRA LLM CALLS
+# ============================================================================
+
+@app.route(
+    '/api/ai/gemini-activity',
+    methods=['GET']
+)
+def api_ai_gemini_activity():
+    """
+    Estado visible del Learning Scientist Gemini.
+
+    IMPORTANTE:
+
+    - NO llama a Gemini;
+    - NO consume cuota LLM;
+    - NO modifica TraderMacro;
+    - NO modifica Spot/Futures;
+    - sólo lee actividad ya persistida.
+    """
+
+    user = (
+        _authenticated_user()
+    )
+
+    if not user:
+        return jsonify({
+            'success':
+                False,
+
+            'error':
+                'Debes iniciar sesión.'
+        }), 401
+
+    try:
+        from ai_advisor import (
+            get_gemini_activity_status
+        )
+
+        data = (
+            get_gemini_activity_status()
+            or {}
+        )
+
+        return jsonify({
+            'success':
+                True,
+
+            'data':
+                data
+        }), 200
+
+    except Exception as error:
+
+        # ================================================================
+        # FAIL-OPEN
+        # ================================================================
+        #
+        # Un indicador visual de Gemini jamás puede afectar trading.
+        # ================================================================
+
+        return jsonify({
+            'success':
+                False,
+
+            'data': {
+                'mode':
+                    'WORK_REPORT',
+
+                'state':
+                    'STATUS_ERROR',
+
+                'working':
+                    False,
+
+                'extra_gemini_calls_for_ticker':
+                    0,
+
+                'macro_news_enabled':
+                    False,
+
+                'trader_macro_influence':
+                    False,
+
+                'ticker_items': [
+                    (
+                        '🧠 Gemini Learning · '
+                        'estado temporalmente no disponible.'
+                    )
+                ]
+            },
+
+            'error':
+                str(
+                    error
+                )[:180]
+
+        }), 200
 # ============================================================================
 # COMMIT 36T.1
 # SPOT / TGP AI SHADOW EVIDENCE
