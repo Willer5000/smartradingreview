@@ -15475,7 +15475,367 @@ class TradingExpertSystem:
             'is_rejected': True
         }
     # === FIN calculate_entry_levels (FASE 3) ===
-    
+    # ========================================================================
+    # COMMIT 36X
+    # SPOT ENTRY FRESHNESS / ANTI-FOMO
+    # ========================================================================
+
+    def _apply_spot_entry_freshness_guard(
+        self,
+        system_type,
+        action,
+        confidence,
+        levels,
+        current_price
+    ):
+        """
+        Evita perseguir una señal Spot cuando el precio ya recorrió
+        una parte material del camino Entry -> TP.
+
+        PRINCIPIOS:
+
+        - sólo actúa sobre SPOT;
+        - nunca crea COMPRA_SPOT o VENTA_SPOT;
+        - nunca cambia Entry / SL / TP;
+        - únicamente puede convertir una señal tardía en ESPERAR;
+        - Futures queda completamente fuera de esta función.
+        """
+
+        result = {
+            'mode':
+                '36X_SPOT_ENTRY_FRESHNESS',
+
+            'evaluated':
+                False,
+
+            'applied':
+                False,
+
+            'original_action':
+                str(
+                    action
+                    or 'NO_OPERAR'
+                ).upper(),
+
+            'final_action':
+                str(
+                    action
+                    or 'NO_OPERAR'
+                ).upper(),
+
+            'original_confidence':
+                float(
+                    confidence
+                    or 0
+                ),
+
+            'final_confidence':
+                float(
+                    confidence
+                    or 0
+                ),
+
+            'progress_to_tp_pct':
+                None,
+
+            'remaining_rr':
+                None,
+
+            'reason':
+                'NOT_APPLICABLE'
+        }
+
+        # ================================================================
+        # FUTURES NO SE TOCA
+        # ================================================================
+
+        if str(
+            system_type
+            or ''
+        ).lower() != 'spot':
+
+            return result
+
+        action_text = str(
+            action
+            or ''
+        ).upper()
+
+        if action_text not in (
+            'COMPRA_SPOT',
+            'VENTA_SPOT'
+        ):
+            return result
+
+        levels = (
+            levels
+            if isinstance(
+                levels,
+                dict
+            )
+            else {}
+        )
+
+        try:
+            entry = float(
+                levels.get(
+                    'entry'
+                )
+                or 0
+            )
+
+            stop_loss = float(
+                levels.get(
+                    'stop_loss'
+                )
+                or 0
+            )
+
+            take_profit = float(
+                levels.get(
+                    'take_profit'
+                )
+                or 0
+            )
+
+            price = float(
+                current_price
+                or 0
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+            result[
+                'reason'
+            ] = 'INVALID_NUMERIC_DATA'
+
+            return result
+
+        # Si falta información, FAIL-OPEN.
+        # No inventamos una razón para bloquear.
+        if min(
+            entry,
+            stop_loss,
+            take_profit,
+            price
+        ) <= 0:
+
+            result[
+                'reason'
+            ] = 'MISSING_LEVELS'
+
+            return result
+
+        is_buy = (
+            action_text
+            == 'COMPRA_SPOT'
+        )
+
+        # ================================================================
+        # GEOMETRÍA DE LA OPERACIÓN
+        # ================================================================
+
+        if is_buy:
+
+            valid_geometry = (
+                stop_loss
+                < entry
+                < take_profit
+            )
+
+            planned_reward = (
+                take_profit
+                - entry
+            )
+
+            original_risk = (
+                entry
+                - stop_loss
+            )
+
+            # Positivo si el precio avanzó desde Entry hacia TP.
+            progress = (
+                price
+                - entry
+            )
+
+            remaining_reward = (
+                take_profit
+                - price
+            )
+
+        else:
+
+            valid_geometry = (
+                take_profit
+                < entry
+                < stop_loss
+            )
+
+            planned_reward = (
+                entry
+                - take_profit
+            )
+
+            original_risk = (
+                stop_loss
+                - entry
+            )
+
+            progress = (
+                entry
+                - price
+            )
+
+            remaining_reward = (
+                price
+                - take_profit
+            )
+
+        if (
+            not valid_geometry
+            or planned_reward <= 0
+            or original_risk <= 0
+        ):
+
+            result[
+                'reason'
+            ] = 'INVALID_GEOMETRY'
+
+            return result
+
+        # ================================================================
+        # CUÁNTO DEL CAMINO ENTRY -> TP YA SE CONSUMIÓ
+        # ================================================================
+
+        progress_ratio = (
+            progress
+            / planned_reward
+        )
+
+        remaining_rr = (
+            remaining_reward
+            / original_risk
+        )
+
+        result[
+            'evaluated'
+        ] = True
+
+        result[
+            'progress_to_tp_pct'
+        ] = round(
+            progress_ratio
+            * 100.0,
+            2
+        )
+
+        result[
+            'remaining_rr'
+        ] = round(
+            remaining_rr,
+            3
+        )
+
+        # ================================================================
+        # EL PRECIO TODAVÍA NO HA PERSEGUIDO EL ENTRY
+        # ================================================================
+
+        if progress_ratio <= 0:
+
+            result[
+                'reason'
+            ] = 'ENTRY_NOT_CHASED'
+
+            return result
+
+        # ================================================================
+        # TP YA ALCANZADO
+        # ================================================================
+
+        target_already_reached = (
+            remaining_reward <= 0
+            or progress_ratio >= 1.0
+        )
+
+        # ================================================================
+        # ENTRY MATERIALMENTE PERDIDO
+        # ================================================================
+        #
+        # No bloqueamos simplemente porque el precio esté un poco por
+        # encima/abajo del Entry.
+        #
+        # Deben cumplirse DOS cosas:
+        #
+        # 1. ya consumió >=50% del recorrido previsto Entry -> TP;
+        # 2. el beneficio que queda representa menos de 1.20R.
+        #
+        # Esto evita convertir el sistema en excesivamente tímido.
+        # ================================================================
+
+        materially_late = (
+            progress_ratio >= 0.50
+            and remaining_rr < 1.20
+        )
+
+        if not (
+            target_already_reached
+            or materially_late
+        ):
+
+            result[
+                'reason'
+            ] = 'ENTRY_STILL_ACCEPTABLE'
+
+            return result
+
+        # ================================================================
+        # BLOQUEO DEFENSIVO
+        # ================================================================
+
+        result[
+            'applied'
+        ] = True
+
+        result[
+            'final_action'
+        ] = 'ESPERAR'
+
+        result[
+            'final_confidence'
+        ] = max(
+            55.0,
+            min(
+                80.0,
+                float(
+                    confidence
+                    or 0
+                )
+            )
+        )
+
+        if target_already_reached:
+
+            result[
+                'reason'
+            ] = (
+                'TARGET_ALREADY_REACHED_OR_PASSED'
+            )
+
+        else:
+
+            result[
+                'reason'
+            ] = (
+                'ENTRY_MISSED: price already consumed '
+                f'{progress_ratio * 100.0:.1f}% '
+                'of Entry->TP and remaining RR is only '
+                f'{remaining_rr:.2f}.'
+            )
+
+        return result    
     # ========================================================================
     # GENERADOR DE MENSAJES CONCATENADOS (TRADER EXPERTO)
     # ========================================================================
@@ -17189,6 +17549,125 @@ class TradingExpertSystem:
                     levels = self._get_default_levels(structure.get('current_price', 0), symbol)
             else:
                 levels = self._get_default_levels(structure.get('current_price', 0), symbol)
+
+            # ==========================================================
+            # COMMIT 36X
+            # SPOT ENTRY FRESHNESS / ANTI-FOMO
+            # ==========================================================
+            #
+            # Los traders ya votaron.
+            # Entry / SL / TP ya fueron calculados.
+            #
+            # 36X NO vuelve a votar.
+            #
+            # Sólo pregunta:
+            #
+            # ¿la oportunidad original sigue siendo operable al
+            # precio actual?
+            # ==========================================================
+
+            spot_execution_quality = (
+                self._apply_spot_entry_freshness_guard(
+                    system_type=
+                        analysis_system_type,
+
+                    action=
+                        accion_consenso,
+
+                    confidence=
+                        confianza_consenso,
+
+                    levels=
+                        levels,
+
+                    current_price=
+                        structure.get(
+                            'current_price',
+                            0
+                        )
+                )
+            )
+
+            if spot_execution_quality.get(
+                'applied',
+                False
+            ):
+
+                original_action_36x = str(
+                    accion_consenso
+                )
+
+                accion_consenso = str(
+                    spot_execution_quality.get(
+                        'final_action'
+                    )
+                    or 'ESPERAR'
+                )
+
+                confianza_consenso = float(
+                    spot_execution_quality.get(
+                        'final_confidence',
+                        confianza_consenso
+                    )
+                    or 0
+                )
+
+                # ======================================================
+                # EXPLICARLO AL USUARIO
+                # ======================================================
+
+                if not isinstance(
+                    razones_consenso,
+                    list
+                ):
+                    razones_consenso = list(
+                        razones_consenso
+                        or []
+                    )
+
+                razones_consenso.append(
+                    (
+                        '36X anti-FOMO: se conserva el setup técnico de '
+                        f'{original_action_36x}, '
+                        'pero no se persigue el precio. '
+                        + str(
+                            spot_execution_quality.get(
+                                'reason'
+                            )
+                            or ''
+                        )
+                    )
+                )
+
+                # ======================================================
+                # LOS NIVELES SE CONSERVAN PARA AUDITORÍA
+                # ======================================================
+                #
+                # No borramos Entry/SL/TP.
+                #
+                # Simplemente ya NO son ejecutables al precio actual.
+                # ======================================================
+
+                levels[
+                    'is_executable'
+                ] = False
+
+                levels[
+                    'publication_status'
+                ] = 'ANALYSIS_ONLY'
+
+                levels[
+                    'suggested_size'
+                ] = 0
+
+                levels[
+                    'rejected_reason'
+                ] = str(
+                    spot_execution_quality.get(
+                        'reason'
+                    )
+                    or 'ENTRY_MISSED'
+                )
             
             # ============ CALCULAR CONVICCIÓN ============
             print(f"📈 Calculando convicción...")
@@ -17617,6 +18096,10 @@ class TradingExpertSystem:
                     'conviction': conviction
                 },
                 'levels': {k: float(v) if isinstance(v, (int, float)) else v for k, v in levels.items()},
+                'spot_execution_quality':
+                    self._make_serializable(
+                        spot_execution_quality
+                    ),
                 'message': str(message),
                 'trend': self._make_serializable(trend),
                 'momentum': self._make_serializable(momentum),
