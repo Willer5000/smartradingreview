@@ -6803,6 +6803,1209 @@ def _build_saved_economics_kpis(
 
         return empty
 # ============================================================================
+# COMMIT 36V
+# FUTURES — VALIDACIÓN ECONÓMICA PARA REVISIÓN DE COMMIT 37
+# ============================================================================
+
+def get_commit37_economic_validation(
+    days_back: int = 90,
+    max_rows: int = 2000
+) -> Dict:
+    """
+    COMMIT 36V
+
+    Valida la economía de Futures para REVISAR Commit 37.
+
+    Usa exclusivamente Saved Futures trazables que:
+
+    - fueron EXECUTABLE_SIGNAL;
+    - fueron SYSTEM_EXECUTABLE;
+    - pertenecen a clase PREMIUM;
+    - tocaron Entry;
+    - terminaron por TP o SL;
+    - conservan Entry/SL/TP/leverage originales;
+    - tienen source_signal_id;
+    - no son overrides manuales.
+
+    READ-ONLY.
+
+    IMPORTANTE:
+    fee + slippage siguen siendo MODELO CONFIGURADO.
+    Funding sí puede provenir de tasas públicas observadas.
+
+    Por eso:
+
+        READY_FOR_COMMIT37_REVIEW
+
+    NO significa:
+
+        BENEFICIO NETO REALIZADO VERIFICADO
+    """
+
+    from datetime import timedelta as _timedelta
+    import math as _math
+
+    result = {
+        'mode':
+            'COMMIT37_ECONOMIC_VALIDATION_36V',
+
+        'days_back':
+            int(
+                days_back
+            ),
+
+        'production_changed':
+            False,
+
+        # Saved Futures es una muestra seleccionada por usuarios.
+        # Por eso nunca se convierte por sí sola en la estadística
+        # oficial completa del Commit 37.
+        'official_for_commit37':
+            False,
+
+        'selection_bias_warning':
+            (
+                'Saved Futures depende de qué señales fueron '
+                'guardadas. Se usa sólo como corroboración '
+                'económica, nunca como muestra oficial única.'
+            ),
+
+        'ready_for_commit37_economic_review':
+            False,
+
+        'ready_for_realized_profit_claim':
+            False,
+
+        'provenance_schema_available':
+            True,
+
+        'economic_quality':
+            (
+                'MODELED_FEE_SLIPPAGE'
+                '+OBSERVED_PUBLIC_FUNDING_WHEN_AVAILABLE'
+            ),
+
+        'inventory': {
+            'rows_read':
+                0,
+
+            'closed_tp_sl':
+                0,
+
+            'clean_system_rows':
+                0,
+
+            'duplicates_ignored':
+                0,
+
+            'modified_or_manual_excluded':
+                0,
+
+            'missing_provenance_excluded':
+                0,
+
+            'net_usable_rows':
+                0
+        },
+
+        'total':
+            {},
+
+        'calibration_70':
+            {},
+
+        'validation_30':
+            {},
+
+        'gate': {
+            'sample_ok':
+                False,
+
+            'validation_sample_ok':
+                False,
+
+            'net_coverage_ok':
+                False,
+
+            'validation_net_coverage_ok':
+                False,
+
+            'net_expectancy_positive':
+                False,
+
+            'validation_net_expectancy_positive':
+                False,
+
+            'net_pnl_positive':
+                False,
+
+            'validation_net_pnl_positive':
+                False,
+
+            'provenance_ok':
+                False,
+
+            'realized_costs_verified':
+                False
+        },
+
+        'status':
+            'COLLECTING_EVIDENCE',
+
+        'reason':
+            None
+    }
+
+    db = _get_db()
+
+    if db is None:
+        result[
+            'status'
+        ] = 'SUPABASE_UNAVAILABLE'
+
+        result[
+            'reason'
+        ] = 'Supabase no disponible.'
+
+        return result
+
+    # ================================================================
+    # HELPERS
+    # ================================================================
+
+    def _float_or_none(
+        value
+    ):
+        try:
+            if value is None:
+                return None
+
+            number = float(
+                value
+            )
+
+            if _math.isfinite(
+                number
+            ):
+                return number
+
+        except (
+            TypeError,
+            ValueError
+        ):
+            pass
+
+        return None
+
+
+    def _same_number(
+        a,
+        b,
+        tolerance=1e-8
+    ):
+        a_num = _float_or_none(
+            a
+        )
+
+        b_num = _float_or_none(
+            b
+        )
+
+        if (
+            a_num is None
+            or b_num is None
+        ):
+            return False
+
+        scale = max(
+            1.0,
+            abs(
+                a_num
+            ),
+            abs(
+                b_num
+            )
+        )
+
+        return bool(
+            abs(
+                a_num
+                - b_num
+            )
+            <= tolerance
+            * scale
+        )
+
+
+    def _max_drawdown_r(
+        values
+    ):
+        """
+        Drawdown secuencial en unidades R.
+
+        No es dinero real.
+        """
+        equity = 0.0
+        peak = 0.0
+        max_dd = 0.0
+
+        for value in values:
+            equity += float(
+                value
+            )
+
+            peak = max(
+                peak,
+                equity
+            )
+
+            max_dd = max(
+                max_dd,
+                peak - equity
+            )
+
+        return max_dd
+
+    try:
+        safe_days = max(
+            7,
+            min(
+                int(
+                    days_back
+                    or 90
+                ),
+                180
+            )
+        )
+
+        safe_max_rows = max(
+            100,
+            min(
+                int(
+                    max_rows
+                    or 2000
+                ),
+                5000
+            )
+        )
+
+        cutoff = (
+            datetime.utcnow()
+            - _timedelta(
+                days=safe_days
+            )
+        ).isoformat()
+
+        # ============================================================
+        # CONSULTA COMPLETA CON TRAZABILIDAD
+        # ============================================================
+
+        full_fields = (
+            'id,'
+            'user_name,'
+            'symbol,'
+            'timeframe,'
+            'action,'
+            'status,'
+            'entry_touched,'
+            'entry,'
+            'stop_loss,'
+            'take_profit,'
+            'leverage,'
+            'original_entry,'
+            'original_stop_loss,'
+            'original_take_profit,'
+            'original_leverage,'
+            'execution_origin,'
+            'risk_class,'
+            'system_executable,'
+            'engine_publication_status,'
+            'execution_safety_at_save,'
+            'execution_safety_minimum_at_save,'
+            'original_risk_reward,'
+            'source_signal_id,'
+            'source_context,'
+            'manual_override_ack,'
+            'gross_pnl_pct,'
+            'gross_pnl_usdt,'
+            'gross_r,'
+            'fee_slippage_cost_source,'
+            'funding_calculation_status,'
+            'estimated_total_cost_usdt,'
+            'estimated_net_pnl_pct,'
+            'estimated_net_pnl_usdt,'
+            'estimated_net_r,'
+            'economics_cost_components_complete,'
+            'created_at,'
+            'closed_at'
+        )
+
+        # ============================================================
+        # FALLBACK
+        # ============================================================
+        #
+        # Si Render/Supabase todavía no tuviese alguna columna de
+        # procedencia, NO rompemos el endpoint.
+        #
+        # Pero tampoco permitimos READY.
+        # ============================================================
+
+        fallback_fields = (
+            'id,'
+            'user_name,'
+            'symbol,'
+            'timeframe,'
+            'action,'
+            'status,'
+            'entry_touched,'
+            'entry,'
+            'stop_loss,'
+            'take_profit,'
+            'leverage,'
+            'original_entry,'
+            'original_stop_loss,'
+            'original_take_profit,'
+            'original_leverage,'
+            'gross_pnl_pct,'
+            'gross_pnl_usdt,'
+            'gross_r,'
+            'fee_slippage_cost_source,'
+            'funding_calculation_status,'
+            'estimated_total_cost_usdt,'
+            'estimated_net_pnl_pct,'
+            'estimated_net_pnl_usdt,'
+            'estimated_net_r,'
+            'economics_cost_components_complete,'
+            'created_at,'
+            'closed_at'
+        )
+
+
+        def _read_rows(
+            fields
+        ):
+            response = (
+                db.client
+                .table(
+                    'saved_signals'
+                )
+                .select(
+                    fields
+                )
+                .in_(
+                    'status',
+                    [
+                        'tp_hit',
+                        'sl_hit'
+                    ]
+                )
+                .eq(
+                    'entry_touched',
+                    True
+                )
+                .gte(
+                    'created_at',
+                    cutoff
+                )
+                .order(
+                    'created_at',
+                    desc=False
+                )
+                .limit(
+                    safe_max_rows
+                )
+                .execute()
+            )
+
+            return (
+                response.data
+                or []
+            )
+
+
+        try:
+            rows = db._with_retry(
+                lambda:
+                    _read_rows(
+                        full_fields
+                    )
+            )
+
+        except Exception as provenance_error:
+            logger.warning(
+                (
+                    '36V: columnas de procedencia '
+                    'no disponibles: %s'
+                ),
+                provenance_error
+            )
+
+            result[
+                'provenance_schema_available'
+            ] = False
+
+            rows = db._with_retry(
+                lambda:
+                    _read_rows(
+                        fallback_fields
+                    )
+            )
+
+        result[
+            'inventory'
+        ][
+            'rows_read'
+        ] = len(
+            rows
+        )
+
+        result[
+            'inventory'
+        ][
+            'closed_tp_sl'
+        ] = len(
+            rows
+        )
+
+        # ============================================================
+        # COHORTE LIMPIA
+        # ============================================================
+
+        clean_by_source = {}
+
+        for row in rows:
+            if not isinstance(
+                row,
+                dict
+            ):
+                continue
+
+            # Sin columnas de procedencia NO podemos certificar
+            # que sea una señal real publicada por el sistema.
+            if not result[
+                'provenance_schema_available'
+            ]:
+                result[
+                    'inventory'
+                ][
+                    'missing_provenance_excluded'
+                ] += 1
+
+                continue
+
+            source_signal_id = str(
+                row.get(
+                    'source_signal_id'
+                )
+                or ''
+            ).strip()
+
+            safety_at_save = (
+                _float_or_none(
+                    row.get(
+                        'execution_safety_at_save'
+                    )
+                )
+            )
+
+            safety_minimum = (
+                _float_or_none(
+                    row.get(
+                        'execution_safety_minimum_at_save'
+                    )
+                )
+            )
+
+            provenance_ok = bool(
+                source_signal_id
+
+                and str(
+                    row.get(
+                        'execution_origin'
+                    )
+                    or ''
+                ).upper()
+                == 'SYSTEM_EXECUTABLE'
+
+                and str(
+                    row.get(
+                        'risk_class'
+                    )
+                    or ''
+                ).upper()
+                == 'PREMIUM'
+
+                and row.get(
+                    'system_executable'
+                ) is True
+
+                and str(
+                    row.get(
+                        'engine_publication_status'
+                    )
+                    or ''
+                ).upper()
+                == 'EXECUTABLE_SIGNAL'
+
+                and safety_at_save
+                is not None
+
+                and safety_minimum
+                is not None
+
+                and safety_at_save
+                >= safety_minimum
+
+                and str(
+                    row.get(
+                        'source_context'
+                    )
+                    or ''
+                ).upper()
+                == 'PREVIOUS_CONFIRMED'
+
+                and row.get(
+                    'manual_override_ack'
+                ) is not True
+            )
+
+            if not provenance_ok:
+                result[
+                    'inventory'
+                ][
+                    'missing_provenance_excluded'
+                ] += 1
+
+                continue
+
+            # ========================================================
+            # EVITAR SEÑALES ALTERADAS POR EL USUARIO
+            # ========================================================
+
+            levels_unchanged = all((
+                _same_number(
+                    row.get(
+                        'entry'
+                    ),
+                    row.get(
+                        'original_entry'
+                    )
+                ),
+
+                _same_number(
+                    row.get(
+                        'stop_loss'
+                    ),
+                    row.get(
+                        'original_stop_loss'
+                    )
+                ),
+
+                _same_number(
+                    row.get(
+                        'take_profit'
+                    ),
+                    row.get(
+                        'original_take_profit'
+                    )
+                ),
+
+                _same_number(
+                    row.get(
+                        'leverage'
+                    ),
+                    row.get(
+                        'original_leverage'
+                    )
+                )
+            ))
+
+            if not levels_unchanged:
+                result[
+                    'inventory'
+                ][
+                    'modified_or_manual_excluded'
+                ] += 1
+
+                continue
+
+            # ========================================================
+            # UNA SEÑAL FUENTE = UNA MUESTRA
+            # ========================================================
+            #
+            # Willer y Danilo podrían guardar la misma señal.
+            #
+            # Eso NO puede convertirse artificialmente en N=2.
+            # ========================================================
+
+            if (
+                source_signal_id
+                in clean_by_source
+            ):
+                result[
+                    'inventory'
+                ][
+                    'duplicates_ignored'
+                ] += 1
+
+                continue
+
+            clean_by_source[
+                source_signal_id
+            ] = row
+
+        clean_rows = list(
+            clean_by_source.values()
+        )
+
+        clean_rows.sort(
+            key=lambda row: str(
+                row.get(
+                    'created_at'
+                )
+                or ''
+            )
+        )
+
+        result[
+            'inventory'
+        ][
+            'clean_system_rows'
+        ] = len(
+            clean_rows
+        )
+
+        # ============================================================
+        # ECONOMÍA UTILIZABLE
+        # ============================================================
+
+        def _net_usable(
+            row
+        ):
+            funding_status = str(
+                row.get(
+                    'funding_calculation_status'
+                )
+                or ''
+            ).upper()
+
+            fee_source = str(
+                row.get(
+                    'fee_slippage_cost_source'
+                )
+                or ''
+            ).upper()
+
+            return bool(
+                fee_source
+                == 'ESTIMATED_CONFIG_COMBINED'
+
+                and funding_status
+                in (
+                    'OBSERVED_RATES',
+                    'NO_SETTLEMENTS_IN_WINDOW'
+                )
+
+                and _float_or_none(
+                    row.get(
+                        'estimated_net_r'
+                    )
+                )
+                is not None
+
+                and _float_or_none(
+                    row.get(
+                        'estimated_net_pnl_pct'
+                    )
+                )
+                is not None
+            )
+
+        result[
+            'inventory'
+        ][
+            'net_usable_rows'
+        ] = sum(
+            1
+            for row
+            in clean_rows
+            if _net_usable(
+                row
+            )
+        )
+
+        # ============================================================
+        # RESUMEN
+        # ============================================================
+
+        def _summary(
+            subset
+        ):
+            total = len(
+                subset
+            )
+
+            net_rows = [
+                row
+                for row
+                in subset
+                if _net_usable(
+                    row
+                )
+            ]
+
+            net_r_values = [
+                float(
+                    row[
+                        'estimated_net_r'
+                    ]
+                )
+                for row
+                in net_rows
+            ]
+
+            net_pct_values = [
+                float(
+                    row[
+                        'estimated_net_pnl_pct'
+                    ]
+                )
+                for row
+                in net_rows
+            ]
+
+            gross_r_values = [
+                value
+                for value
+                in (
+                    _float_or_none(
+                        row.get(
+                            'gross_r'
+                        )
+                    )
+                    for row
+                    in net_rows
+                )
+                if value
+                is not None
+            ]
+
+            costs = [
+                value
+                for value
+                in (
+                    _float_or_none(
+                        row.get(
+                            'estimated_total_cost_usdt'
+                        )
+                    )
+                    for row
+                    in net_rows
+                )
+                if value
+                is not None
+            ]
+
+            wins = sum(
+                1
+                for value
+                in net_r_values
+                if value > 0
+            )
+
+            return {
+                'total_rows':
+                    total,
+
+                'net_rows':
+                    len(
+                        net_rows
+                    ),
+
+                'net_coverage_pct':
+                    (
+                        round(
+                            (
+                                len(
+                                    net_rows
+                                )
+                                / total
+                                * 100.0
+                            ),
+                            2
+                        )
+                        if total
+                        else 0.0
+                    ),
+
+                'net_win_rate_pct':
+                    (
+                        round(
+                            (
+                                wins
+                                / len(
+                                    net_rows
+                                )
+                                * 100.0
+                            ),
+                            2
+                        )
+                        if net_rows
+                        else None
+                    ),
+
+                'gross_expectancy_r_same_sample':
+                    (
+                        round(
+                            (
+                                sum(
+                                    gross_r_values
+                                )
+                                / len(
+                                    gross_r_values
+                                )
+                            ),
+                            4
+                        )
+                        if gross_r_values
+                        else None
+                    ),
+
+                'modeled_net_expectancy_r':
+                    (
+                        round(
+                            (
+                                sum(
+                                    net_r_values
+                                )
+                                / len(
+                                    net_r_values
+                                )
+                            ),
+                            4
+                        )
+                        if net_r_values
+                        else None
+                    ),
+
+                'modeled_net_pnl_pct_sum':
+                    round(
+                        sum(
+                            net_pct_values
+                        ),
+                        4
+                    ),
+
+                'estimated_total_cost_usdt_sum':
+                    round(
+                        sum(
+                            costs
+                        ),
+                        4
+                    ),
+
+                'max_drawdown_r':
+                    (
+                        round(
+                            _max_drawdown_r(
+                                net_r_values
+                            ),
+                            4
+                        )
+                        if net_r_values
+                        else None
+                    ),
+
+                'realized_cost_rows':
+                    sum(
+                        1
+                        for row
+                        in net_rows
+                        if row.get(
+                            'economics_cost_components_complete'
+                        )
+                        is True
+                    )
+            }
+
+        # ============================================================
+        # WALK-FORWARD 70 / 30
+        # ============================================================
+
+        split_index = int(
+            len(
+                clean_rows
+            )
+            * 0.70
+        )
+
+        calibration_rows = (
+            clean_rows[
+                :split_index
+            ]
+        )
+
+        validation_rows = (
+            clean_rows[
+                split_index:
+            ]
+        )
+
+        total_summary = _summary(
+            clean_rows
+        )
+
+        calibration_summary = _summary(
+            calibration_rows
+        )
+
+        validation_summary = _summary(
+            validation_rows
+        )
+
+        result[
+            'total'
+        ] = total_summary
+
+        result[
+            'calibration_70'
+        ] = calibration_summary
+
+        result[
+            'validation_30'
+        ] = validation_summary
+
+        # ============================================================
+        # GATE ECONÓMICO
+        # ============================================================
+
+        gate = result[
+            'gate'
+        ]
+
+        gate[
+            'sample_ok'
+        ] = bool(
+            total_summary[
+                'net_rows'
+            ]
+            >= 25
+        )
+
+        gate[
+            'validation_sample_ok'
+        ] = bool(
+            validation_summary[
+                'net_rows'
+            ]
+            >= 10
+        )
+
+        gate[
+            'net_coverage_ok'
+        ] = bool(
+            total_summary[
+                'net_coverage_pct'
+            ]
+            >= 80.0
+        )
+
+        gate[
+            'validation_net_coverage_ok'
+        ] = bool(
+            validation_summary[
+                'net_coverage_pct'
+            ]
+            >= 80.0
+        )
+
+        total_net_exp = (
+            total_summary.get(
+                'modeled_net_expectancy_r'
+            )
+        )
+
+        validation_net_exp = (
+            validation_summary.get(
+                'modeled_net_expectancy_r'
+            )
+        )
+
+        gate[
+            'net_expectancy_positive'
+        ] = bool(
+            total_net_exp
+            is not None
+            and total_net_exp > 0
+        )
+
+        gate[
+            'validation_net_expectancy_positive'
+        ] = bool(
+            validation_net_exp
+            is not None
+            and validation_net_exp > 0
+        )
+
+        gate[
+            'net_pnl_positive'
+        ] = bool(
+            total_summary[
+                'modeled_net_pnl_pct_sum'
+            ]
+            > 0
+        )
+
+        gate[
+            'validation_net_pnl_positive'
+        ] = bool(
+            validation_summary[
+                'modeled_net_pnl_pct_sum'
+            ]
+            > 0
+        )
+
+        gate[
+            'provenance_ok'
+        ] = bool(
+            result[
+                'provenance_schema_available'
+            ]
+            and total_summary[
+                'net_rows'
+            ] > 0
+        )
+
+        # ============================================================
+        # COSTES REALIZADOS
+        # ============================================================
+        #
+        # Actualmente esperamos que siga FALSE porque fee/slippage
+        # son modelados.
+        #
+        # No lo falsificamos.
+        # ============================================================
+
+        gate[
+            'realized_costs_verified'
+        ] = bool(
+            total_summary[
+                'realized_cost_rows'
+            ]
+            >= 25
+
+            and validation_summary[
+                'realized_cost_rows'
+            ]
+            >= 10
+        )
+
+        modeled_review_ready = all((
+            gate[
+                'sample_ok'
+            ],
+
+            gate[
+                'validation_sample_ok'
+            ],
+
+            gate[
+                'net_coverage_ok'
+            ],
+
+            gate[
+                'validation_net_coverage_ok'
+            ],
+
+            gate[
+                'net_expectancy_positive'
+            ],
+
+            gate[
+                'validation_net_expectancy_positive'
+            ],
+
+            gate[
+                'net_pnl_positive'
+            ],
+
+            gate[
+                'validation_net_pnl_positive'
+            ],
+
+            gate[
+                'provenance_ok'
+            ]
+        ))
+
+        result[
+            'ready_for_commit37_economic_review'
+        ] = bool(
+            modeled_review_ready
+        )
+
+        result[
+            'ready_for_realized_profit_claim'
+        ] = bool(
+            modeled_review_ready
+            and gate[
+                'realized_costs_verified'
+            ]
+        )
+
+        if modeled_review_ready:
+            result[
+                'status'
+            ] = (
+                'MODELED_NET_READY_FOR_REVIEW'
+            )
+
+            result[
+                'reason'
+            ] = (
+                'La muestra limpia demuestra expectancy '
+                'neta modelada positiva total y OOS. '
+                'Fee+slippage siguen siendo estimados: '
+                'esto habilita revisión, no promoción automática.'
+            )
+
+        else:
+            result[
+                'status'
+            ] = 'COLLECTING_EVIDENCE'
+
+            result[
+                'reason'
+            ] = (
+                'Aún faltan muestra, cobertura, '
+                'expectancy neta positiva OOS '
+                'o trazabilidad suficiente.'
+            )
+
+        return result
+
+    except Exception as error:
+        # ============================================================
+        # FAIL-OPEN ABSOLUTO
+        # ============================================================
+
+        logger.warning(
+            '36V economic validation: %s',
+            error
+        )
+
+        result[
+            'status'
+        ] = 'ECONOMIC_VALIDATION_ERROR'
+
+        result[
+            'reason'
+        ] = str(
+            error
+        )[:220]
+
+        return result
+# ============================================================================
 # ESTADÍSTICAS (KPIs propios de la pestaña de señales guardadas)
 # ============================================================================
 def get_saved_signals_kpis(
