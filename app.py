@@ -29491,7 +29491,92 @@ def api_review_general_stats():
         traceback.print_exc()
         return jsonify({'success': False, 'error': f'Error interno: {str(e)}'}), 500
 
+# ============================================================================
+# COMMIT 36U
+# FUTURES QUALITY LAB — READ ONLY
+# ============================================================================
 
+@app.route(
+    '/api/review/futures-quality-lab',
+    methods=['GET']
+)
+def api_review_futures_quality_lab():
+    """
+    Diagnóstico 36U.
+
+    READ-ONLY.
+
+    No modifica:
+    - Futures;
+    - Safety;
+    - Entry;
+    - SL;
+    - TP;
+    - leverage;
+    - pesos;
+    - publication gate.
+    """
+
+    user = (
+        _authenticated_user()
+    )
+
+    if not user:
+        return jsonify({
+            'success':
+                False,
+
+            'error':
+                'Debes iniciar sesión.'
+        }), 401
+
+    try:
+        review = (
+            _get_review_trader()
+        )
+
+        if review is None:
+            return jsonify({
+                'success':
+                    False,
+
+                'error':
+                    'ReviewTrader no disponible.'
+            }), 200
+
+        data = (
+            review
+            .get_futures_quality_lab(
+                days_back=90,
+                max_rows=1000
+            )
+        )
+
+        return jsonify({
+            'success':
+                True,
+
+            'data':
+                data,
+
+            'timestamp':
+                datetime.now(
+                    bolivia_tz
+                ).isoformat()
+        }), 200
+
+    except Exception as error:
+        # Fail-open:
+        # un endpoint diagnóstico jamás afecta trading.
+        return jsonify({
+            'success':
+                False,
+
+            'error':
+                str(
+                    error
+                )[:220]
+        }), 200
 # ============================================================================
 # ENDPOINT 6: Trigger manual del ciclo completo del ReviewTrader
 # ============================================================================
@@ -34518,7 +34603,44 @@ def _build_ai_learning_context():
 
         review_general = []
 
+    # ================================================================
+    # COMMIT 36U
+    # FUTURES QUALITY LAB → GEMINI LEARNING
+    # ================================================================
+    #
+    # Gemini recibe únicamente el RESUMEN diagnóstico.
+    #
+    # Puede formular hipótesis/SHADOW_PROPOSAL,
+    # pero no cambiar producción.
+    # ================================================================
 
+    try:
+        futures_quality_lab = (
+            review_trader
+            .get_futures_quality_lab(
+                days_back=90,
+                max_rows=1000
+            )
+            or {}
+        )
+
+    except Exception as quality_lab_error:
+        futures_quality_lab = {
+            'mode':
+                'FUTURES_QUALITY_LAB_SHADOW',
+
+            'status':
+                'UNAVAILABLE',
+
+            'ready_for_production_change':
+                False,
+
+            'reason':
+                str(
+                    quality_lab_error
+                )[:180]
+        }
+        
     return {
 
         'policy': {
@@ -34564,7 +34686,13 @@ def _build_ai_learning_context():
             ),
 
         'reviewtrader_general':
-            review_general
+            review_general,
+
+        # 36U:
+        # Gemini puede estudiar qué componentes están asociados
+        # con mejor expectancy y proponer experimentos Shadow.
+        'futures_quality_lab':
+            futures_quality_lab
     }
 
 # ============================================================================
