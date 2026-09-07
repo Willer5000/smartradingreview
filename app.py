@@ -17535,15 +17535,73 @@ class TradingExpertSystem:
             # === FASE 7: Registrar señal en Supabase (best-effort, no bloqueante) ===
             # Si el subsistema de futuros nos invocó, saltar registro spot
             # (FuturesAnalysis lo registrará después con system_type='futures')
-            if not getattr(self, '_skip_supabase_register', False):
+            if not getattr(
+                self,
+                '_skip_supabase_register',
+                False
+            ):
                 try:
-                    from review_trader import review_trader
+                    from review_trader import (
+                        review_trader
+                    )
+
                     if review_trader.db.enabled:
-                        review_trader.register_signal(resultado_final, system_type='spot')
+                        registered_signal_id = (
+                            review_trader.register_signal(
+                                resultado_final,
+                                system_type='spot'
+                            )
+                        )
+
+                        # ================================================
+                        # 36T-FIX
+                        # VINCULAR ANÁLISIS EN MEMORIA ↔ SUPABASE
+                        # ================================================
+                        #
+                        # ReviewTrader ya devuelve el UUID real de la
+                        # señal registrada.
+                        #
+                        # Antes se ignoraba ese valor, de modo que el
+                        # Consejo IA podía analizar correctamente la
+                        # señal pero sin saber qué fila de Supabase era.
+                        #
+                        # No modifica ninguna decisión ni nivel.
+                        # ================================================
+
+                        if registered_signal_id:
+                            resultado_final[
+                                'signal_id'
+                            ] = (
+                                registered_signal_id
+                            )
+
+                            levels_for_signal_id = (
+                                resultado_final.get(
+                                    'levels'
+                                )
+                                or {}
+                            )
+
+                            if isinstance(
+                                levels_for_signal_id,
+                                dict
+                            ):
+                                levels_for_signal_id[
+                                    'signal_id'
+                                ] = (
+                                    registered_signal_id
+                                )
+
                 except Exception as _register_error:
-                    # Nunca bloquear el análisis por un error de registro
-                    print(f"⚠️ No se pudo registrar señal en ReviewTrader: {_register_error}")
-            
+                    # Fail-open:
+                    # el registro/aprendizaje jamás debe bloquear
+                    # el análisis Spot.
+                    print(
+                        "⚠️ No se pudo registrar señal "
+                        "en ReviewTrader: "
+                        f"{_register_error}"
+                    )
+
             # Guardar en caché de análisis (solo si es la variante "estándar")
             if _cache_key is not None:
                 try:
@@ -39599,6 +39657,9 @@ def api_ai_advice():
                 source_signal_id=(
                     focus_signal.get(
                         'source_signal_id'
+                    )
+                    or focus_signal.get(
+                        'signal_id'
                     )
                 )
             )
