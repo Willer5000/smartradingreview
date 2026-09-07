@@ -2766,8 +2766,26 @@
     -->
     <!-- ============================================================= -->
 
+    <!-- ============================================================= -->
+    <!-- IA OPERATIVA — CONSEJO + CHAT -->
+    <!-- ============================================================= -->
+    <!--
+        Este archivo NO contiene Gemini ticker.
+        Debe permanecer aislado y estable.
+    -->
     <script
-        src="{{ url_for('static', filename='ai_assistant.js') }}?v=20260907-36Y"
+        src="{{ url_for('static', filename='ai_assistant.js') }}?v=20260907-AI-RECOVERY1"
+    ></script>
+    
+    
+    <!-- ============================================================= -->
+    <!-- GEMINI TICKER — AISLADO -->
+    <!-- ============================================================= -->
+    <!--
+        Si falla, NO afecta Consejo IA ni Chat IA.
+    -->
+    <script
+        src="{{ url_for('static', filename='gemini_ticker.js') }}?v=20260907-36Y2"
     ></script>
 
 
