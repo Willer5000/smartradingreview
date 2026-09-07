@@ -40322,11 +40322,11 @@ def api_ai_spot_shadow_evidence():
     try:
 
         from ai_advisor import (
-            get_spot_tgp_shadow_evidence
+            get_spot_tgp_portfolio_evidence
         )
 
         evidence = (
-            get_spot_tgp_shadow_evidence(
+            get_spot_tgp_portfolio_evidence(
                 user_name=user
             )
         )
