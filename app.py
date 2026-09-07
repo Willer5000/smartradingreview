@@ -13321,10 +13321,27 @@ class TradingExpertSystem:
                 or 1
             )
     
-            strength_score = min(
-                30,
-                (strength / 3)
-                * 30
+            # ==========================================================
+            # COMMIT 36W
+            # NORMALIZACIÓN 0-100
+            # ==========================================================
+            #
+            # El peso se aplica DESPUÉS.
+            #
+            # Antes:
+            # strength máximo = 30
+            # y después × 0.15.
+            #
+            # Eso aplicaba dos veces una reducción.
+            # ==========================================================
+
+            strength_score = max(
+                0,
+                min(
+                    100,
+                    (strength / 3)
+                    * 100
+                )
             )
     
             # ==========================================================
@@ -13338,12 +13355,28 @@ class TradingExpertSystem:
                 or 1.0
             )
     
-            volume_score = min(
-                15,
-                max(
-                    0,
-                    (volume_ratio - 1)
-                    * 10
+            # ==========================================================
+            # COMMIT 36W
+            # VOLUMEN NORMALIZADO 0-100
+            # ==========================================================
+            #
+            # 0.0x -> 0
+            # 1.0x -> 50
+            # 2.0x -> 100
+            #
+            # Después se aplica el peso real del 10%.
+            # ==========================================================
+
+            volume_score = max(
+                0,
+                min(
+                    100,
+                    50
+                    + (
+                        volume_ratio
+                        - 1.0
+                    )
+                    * 50
                 )
             )
     
@@ -13388,9 +13421,22 @@ class TradingExpertSystem:
                 if distance_between <= 0.35:
                     confluence += 1
     
+            # ==========================================================
+            # COMMIT 36W
+            # CONFLUENCIA NORMALIZADA 0-100
+            # ==========================================================
+            #
+            # 1 nivel cercano = 25
+            # 2 = 50
+            # 3 = 75
+            # 4+ = 100
+            #
+            # Después se aplica su peso de 20%.
+            # ==========================================================
+
             confluence_score = min(
-                20,
-                confluence * 5
+                100,
+                confluence * 25
             )
     
             # ==========================================================
@@ -13411,16 +13457,28 @@ class TradingExpertSystem:
                 )
     
                 # El peso es relativo al resto de bins.
+                # ======================================================
+                # COMMIT 36W
+                # LIQUIDITY SCORE NORMALIZADO 0-100
+                # ======================================================
+                #
+                # Después se aplica el peso del 25%.
+                # ======================================================
+
                 if weight > 100_000_000:
-                    liquidity_bonus = 25
+                    liquidity_bonus = 100
+
                 elif weight > 50_000_000:
-                    liquidity_bonus = 20
+                    liquidity_bonus = 80
+
                 elif weight > 10_000_000:
-                    liquidity_bonus = 15
+                    liquidity_bonus = 60
+
                 elif weight > 1_000_000:
-                    liquidity_bonus = 10
+                    liquidity_bonus = 40
+
                 else:
-                    liquidity_bonus = 5
+                    liquidity_bonus = 20
     
             # ==========================================================
             # TP DEMASIADO CERCA DE ENTRY
@@ -13559,8 +13617,48 @@ class TradingExpertSystem:
             # Dentro de la banda esperada → bonus
             band_penalty = 1.10
         
-        total_score = ((proteccion_score * 0.4) + (baja_prob_score * 0.6)) * band_penalty
-        return total_score
+        total_score = (
+            (
+                (
+                    proteccion_score
+                    * 0.4
+                )
+                +
+                (
+                    baja_prob_score
+                    * 0.6
+                )
+            )
+            * band_penalty
+        )
+
+        # ==============================================================
+        # COMMIT 36W
+        # NORMALIZAR SL A 0-100
+        # ==============================================================
+        #
+        # calculate_entry_levels() guarda:
+        #
+        #     sl_reliability = sl_score / 100
+        #
+        # Por eso sl_score nunca debe superar 100.
+        #
+        # Ejemplo antiguo:
+        #
+        # score = 116
+        # sl_reliability = 1.16
+        #
+        # Futures veía 1.16 (>1) y podía interpretarlo como
+        # aproximadamente 1.16/100 en lugar de 100/100.
+        # ==============================================================
+
+        return max(
+            0,
+            min(
+                100,
+                total_score
+            )
+        )
     
   
     def _select_optimal_tp(
@@ -15077,6 +15175,16 @@ class TradingExpertSystem:
 
                 'sl_source':
                     sl_source,
+
+                # ======================================================
+                # COMMIT 36W
+                # ======================================================
+                # Permite que ReviewTrader no confunda silenciosamente
+                # los scores históricos con los reparados.
+                # ======================================================
+
+                'quality_score_version':
+                    '36W_V2_NORMALIZED',
 
                 'tp_probability':
                     round(
