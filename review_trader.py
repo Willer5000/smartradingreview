@@ -5517,6 +5517,472 @@ class ReviewTrader:
             )[:180]
 
             return result    
+
+    # ========================================================================
+    # COMMIT 36V
+    # GATE COMBINADO PARA REVISIÓN DE COMMIT 37
+    # ========================================================================
+
+    def get_commit37_readiness(
+        self,
+        days_back: int = 90
+    ) -> Dict:
+        """
+        COMMIT 36V
+
+        Une:
+
+        A) 36U:
+           calidad técnica Shadow + OOS.
+
+        B) 36V:
+           economía neta MODELADA de Futures trazables.
+
+        La salida máxima es:
+
+            READY_FOR_COMMIT37_REVIEW
+
+        Nunca:
+
+        - cambia producción;
+        - baja Safety;
+        - cambia Entry;
+        - cambia SL;
+        - cambia TP;
+        - cambia leverage;
+        - promociona una regla automáticamente.
+        """
+
+        result = {
+            'mode':
+                'COMMIT37_READINESS_36V',
+
+            'days_back':
+                int(
+                    days_back
+                ),
+
+            'production_changed':
+                False,
+
+            'ready_for_commit37_review':
+                False,
+
+            'ready_for_automatic_promotion':
+                False,
+
+            'realized_profit_claim_allowed':
+                False,
+
+            'quality':
+                {},
+
+            'economics':
+                {},
+
+            'gate': {
+                'quality_available':
+                    False,
+
+                'quality_sample_ok':
+                    False,
+
+                'quality_validation_ok':
+                    False,
+
+                'quality_candidate_found':
+                    False,
+
+                'quality_oos_positive':
+                    False,
+
+                'economics_available':
+                    False,
+
+                'economic_review_ready':
+                    False,
+
+                'realized_costs_verified':
+                    False
+            },
+
+            'status':
+                'NOT_READY',
+
+            'reasons':
+                []
+        }
+
+        # ============================================================
+        # 1. 36U — QUALITY LAB
+        # ============================================================
+
+        quality_fn = getattr(
+            self,
+            'get_futures_quality_lab',
+            None
+        )
+
+        if not callable(
+            quality_fn
+        ):
+            result[
+                'reasons'
+            ].append(
+                (
+                    '36U Futures Quality Lab '
+                    'no está disponible.'
+                )
+            )
+
+            return result
+
+        try:
+            quality = (
+                quality_fn(
+                    days_back=days_back,
+                    max_rows=1000
+                )
+                or {}
+            )
+
+        except Exception as quality_error:
+            result[
+                'reasons'
+            ].append(
+                (
+                    '36U no pudo generar evidencia: '
+                    f'{str(quality_error)[:160]}'
+                )
+            )
+
+            return result
+
+        # No devolvemos todo el JSON pesado.
+        result[
+            'quality'
+        ] = {
+            'mode':
+                quality.get(
+                    'mode'
+                ),
+
+            'status':
+                quality.get(
+                    'status'
+                ),
+
+            'inventory':
+                quality.get(
+                    'inventory',
+                    {}
+                ),
+
+            'quality_proposals':
+                quality.get(
+                    'quality_proposals',
+                    {}
+                ),
+
+            'validation_30':
+                quality.get(
+                    'validation_30',
+                    {}
+                ),
+
+            'gate':
+                quality.get(
+                    'gate',
+                    {}
+                )
+        }
+
+        quality_gate = (
+            quality.get(
+                'gate'
+            )
+            or {}
+        )
+
+        result[
+            'gate'
+        ][
+            'quality_available'
+        ] = bool(
+            quality
+            and quality.get(
+                'status'
+            )
+            not in (
+                'QUALITY_LAB_ERROR',
+                'SUPABASE_UNAVAILABLE'
+            )
+        )
+
+        result[
+            'gate'
+        ][
+            'quality_sample_ok'
+        ] = bool(
+            quality_gate.get(
+                'resolved_sample_ok'
+            )
+        )
+
+        result[
+            'gate'
+        ][
+            'quality_validation_ok'
+        ] = bool(
+            quality_gate.get(
+                'validation_sample_ok'
+            )
+        )
+
+        result[
+            'gate'
+        ][
+            'quality_candidate_found'
+        ] = bool(
+            quality_gate.get(
+                'has_promising_component'
+            )
+        )
+
+        result[
+            'gate'
+        ][
+            'quality_oos_positive'
+        ] = bool(
+            quality_gate.get(
+                'oos_positive'
+            )
+        )
+
+        # ============================================================
+        # 2. 36V — ECONOMÍA
+        # ============================================================
+
+        try:
+            from saved_signals import (
+                get_commit37_economic_validation
+            )
+
+            economics = (
+                get_commit37_economic_validation(
+                    days_back=days_back,
+                    max_rows=2000
+                )
+                or {}
+            )
+
+        except Exception as economics_error:
+            result[
+                'reasons'
+            ].append(
+                (
+                    '36V economía no disponible: '
+                    f'{str(economics_error)[:160]}'
+                )
+            )
+
+            return result
+
+        result[
+            'economics'
+        ] = economics
+
+        result[
+            'gate'
+        ][
+            'economics_available'
+        ] = bool(
+            economics
+
+            and economics.get(
+                'status'
+            )
+            != 'ECONOMIC_VALIDATION_ERROR'
+        )
+
+        result[
+            'gate'
+        ][
+            'economic_review_ready'
+        ] = bool(
+            economics.get(
+                'ready_for_commit37_economic_review'
+            )
+        )
+
+        result[
+            'gate'
+        ][
+            'realized_costs_verified'
+        ] = bool(
+            economics.get(
+                'ready_for_realized_profit_claim'
+            )
+        )
+
+        # ============================================================
+        # 3. GATE COMBINADO
+        # ============================================================
+
+        required = (
+            'quality_available',
+            'quality_sample_ok',
+            'quality_validation_ok',
+            'quality_candidate_found',
+            'quality_oos_positive',
+            'economics_available',
+            'economic_review_ready'
+        )
+
+        combined_ready = all(
+            result[
+                'gate'
+            ].get(
+                key
+            )
+            is True
+            for key
+            in required
+        )
+
+        result[
+            'ready_for_commit37_review'
+        ] = bool(
+            combined_ready
+        )
+
+        # ============================================================
+        # NUNCA PROMOCIÓN AUTOMÁTICA
+        # ============================================================
+
+        result[
+            'ready_for_automatic_promotion'
+        ] = False
+
+        result[
+            'realized_profit_claim_allowed'
+        ] = bool(
+            result[
+                'gate'
+            ][
+                'realized_costs_verified'
+            ]
+        )
+
+        # ============================================================
+        # RESULTADO
+        # ============================================================
+
+        if combined_ready:
+            result[
+                'status'
+            ] = (
+                'READY_FOR_COMMIT37_REVIEW'
+            )
+
+            result[
+                'reasons'
+            ].append(
+                (
+                    '36U encontró una hipótesis '
+                    'de mayor calidad con validación OOS.'
+                )
+            )
+
+            result[
+                'reasons'
+            ].append(
+                (
+                    '36V encontró expectancy neta '
+                    'MODELADA positiva total y OOS '
+                    'en Futures trazables.'
+                )
+            )
+
+            if not result[
+                'realized_profit_claim_allowed'
+            ]:
+                result[
+                    'reasons'
+                ].append(
+                    (
+                        'Fee+slippage aún son modelados: '
+                        'se permite revisar Commit 37, '
+                        'no afirmar beneficio neto realizado.'
+                    )
+                )
+
+        else:
+            result[
+                'status'
+            ] = 'NOT_READY'
+
+            checks = (
+                (
+                    'quality_sample_ok',
+                    (
+                        'Faltan >=25 outcomes '
+                        'técnicos resueltos.'
+                    )
+                ),
+
+                (
+                    'quality_validation_ok',
+                    (
+                        'Faltan >=10 outcomes '
+                        'técnicos OOS.'
+                    )
+                ),
+
+                (
+                    'quality_candidate_found',
+                    (
+                        'Todavía no existe un componente '
+                        'de mayor calidad con edge demostrado.'
+                    )
+                ),
+
+                (
+                    'quality_oos_positive',
+                    (
+                        'La mejora técnica todavía no '
+                        'mantiene expectancy positiva OOS.'
+                    )
+                ),
+
+                (
+                    'economic_review_ready',
+                    (
+                        'La economía neta modelada aún no '
+                        'supera muestra, cobertura y '
+                        'expectancy OOS.'
+                    )
+                )
+            )
+
+            for (
+                key,
+                message
+            ) in checks:
+
+                if not result[
+                    'gate'
+                ].get(
+                    key
+                ):
+                    result[
+                        'reasons'
+                    ].append(
+                        message
+                    )
+
+        return result
+    
     # ========================================================================
     # 3. DETECTAR OPORTUNIDADES PERDIDAS
     # ========================================================================
