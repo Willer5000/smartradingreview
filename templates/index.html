@@ -6,7 +6,10 @@
     <title>CRYPTO TRADER ANALYST PRO - Sistema Experto de Análisis y Recomendaciones</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='style.css') }}?v=20260907-36Y"
+    >
     <style>
         /* ============ ESTILOS DE PATRONES ============ */
         .pattern-card {
@@ -264,7 +267,48 @@
             </div>
         </div>
     </nav>
+    </nav>
 
+    <!-- ================================================================ -->
+    <!-- COMMIT 36Y — GEMINI ACTIVITY TICKER -->
+    <!-- ================================================================ -->
+    <!--
+        Cintillo discreto de actividad IA.
+
+        NO llama a Gemini.
+
+        ai_assistant.js sólo consulta un endpoint READ-ONLY
+        que reutiliza la última ejecución Learning ya persistida.
+    -->
+
+    <div
+        id="gemini-activity-ticker"
+        class="gemini-activity-ticker d-none"
+        aria-live="polite"
+        aria-label="Actividad de Gemini Learning"
+    >
+        <div class="container gemini-activity-ticker-inner">
+
+            <span class="gemini-activity-ticker-label">
+                🧠 Gemini
+            </span>
+
+            <span
+                id="gemini-activity-message"
+                class="gemini-activity-ticker-message"
+            >
+                Comprobando actividad de aprendizaje…
+            </span>
+
+            <span
+                id="gemini-activity-meta"
+                class="gemini-activity-ticker-meta"
+            ></span>
+
+        </div>
+    </div>
+
+    <div class="container-fluid mt-4">
     <div class="container-fluid mt-4">
         <div class="row">
             <!-- ============ PANEL DE CONTROL IZQUIERDO ============ -->
@@ -2722,7 +2766,9 @@
     -->
     <!-- ============================================================= -->
 
-    <script src="{{ url_for('static', filename='ai_assistant.js') }}?v=20260906-AI-UX5"></script>
+    <script
+        src="{{ url_for('static', filename='ai_assistant.js') }}?v=20260907-36Y"
+    ></script>
 
 
     <script>
