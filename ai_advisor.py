@@ -7485,3 +7485,1375 @@ def get_spot_tgp_shadow_evidence(
         )
 
         return result
+# ============================================================================
+# COMMIT 36T
+# SPOT / TGP — PORTFOLIO-AWARE SHADOW EVIDENCE
+# ============================================================================
+
+def get_spot_tgp_portfolio_evidence(
+    user_name,
+    limit=1000
+):
+    """
+    COMMIT 36T — EVIDENCIA SPOT/TGP COMPLETA (SHADOW).
+
+    Combina:
+
+    1. resultado direccional de la señal Spot;
+    2. primera opinión de la IA;
+    3. composición del portfolio que la IA vio;
+    4. pisos/techos reales del Guardian TGP;
+    5. corte temporal 70/30.
+
+    READ-ONLY.
+
+    Nunca:
+    - modifica señales;
+    - modifica portfolio;
+    - modifica TGP;
+    - modifica Guardian;
+    - cambia autoridad IA.
+    """
+
+    result = {
+        "mode":
+            "SPOT_TGP_36T_COMPLETE",
+
+        "authority_changed":
+            False,
+
+        "ready_for_36S2B2_review":
+            False,
+
+        "signal_evidence":
+            {},
+
+        "portfolio_policy": {
+            "thresholds_pct":
+                {},
+
+            "resolved_with_context":
+                0,
+
+            "would_block_with_context":
+                0,
+
+            "context_coverage_pct":
+                None,
+
+            "would_block_context_coverage_pct":
+                None,
+
+            "reserve_stress_resolved":
+                0,
+
+            "concentration_resolved":
+                0,
+
+            "would_block_under_reserve_stress":
+                0,
+
+            "would_block_under_concentration":
+                0
+        },
+
+        "calibration_70":
+            {},
+
+        "validation_30":
+            {},
+
+        "gate": {
+            "signal_sample_ok":
+                False,
+
+            "block_sample_ok":
+                False,
+
+            "validation_ok":
+                False,
+
+            "validation_block_sample_ok":
+                False,
+
+            "gross_value_positive":
+                False,
+
+            "validation_gross_value_positive":
+                False,
+
+            "portfolio_context_coverage_ok":
+                False,
+
+            "validation_portfolio_context_ok":
+                False,
+
+            "portfolio_counterfactual_verified":
+                False,
+
+            "costs_verified":
+                False
+        },
+
+        "status":
+            "COLLECTING_EVIDENCE",
+
+        "reason":
+            None
+    }
+
+    # ================================================================
+    # REUTILIZAR 36T.1
+    # ================================================================
+
+    base_fn = globals().get(
+        "get_spot_tgp_shadow_evidence"
+    )
+
+    if not callable(
+        base_fn
+    ):
+        result[
+            "status"
+        ] = "WAITING_FOR_36T1"
+
+        result[
+            "reason"
+        ] = (
+            "get_spot_tgp_shadow_evidence "
+            "no está disponible."
+        )
+
+        return result
+
+    try:
+        base = base_fn(
+            user_name=user_name,
+            limit=limit
+        )
+
+    except Exception as base_error:
+        result[
+            "status"
+        ] = "BASE_EVIDENCE_ERROR"
+
+        result[
+            "reason"
+        ] = str(
+            base_error
+        )[:180]
+
+        return result
+
+    if not isinstance(
+        base,
+        dict
+    ):
+        result[
+            "status"
+        ] = "BASE_EVIDENCE_INVALID"
+
+        result[
+            "reason"
+        ] = (
+            "36T.1 devolvió evidencia inválida."
+        )
+
+        return result
+
+    result[
+        "signal_evidence"
+    ] = base
+
+    db = _db()
+
+    if (
+        db is None
+        or not getattr(
+            db,
+            "enabled",
+            False
+        )
+    ):
+        result[
+            "status"
+        ] = "SUPABASE_UNAVAILABLE"
+
+        result[
+            "reason"
+        ] = "Supabase no disponible."
+
+        return result
+
+    user_name = str(
+        user_name
+        or ""
+    ).strip()
+
+    if not user_name:
+        result[
+            "status"
+        ] = "USER_REQUIRED"
+
+        result[
+            "reason"
+        ] = "Usuario requerido."
+
+        return result
+
+    try:
+        import uuid as _uuid
+
+        # ================================================================
+        # POLÍTICA REAL DEL GUARDIAN
+        # ================================================================
+        #
+        # Valores fallback:
+        #
+        # BTC  >= 10%
+        # PAXG >= 10%
+        # USDT >= 5%
+        # concentración <= 75%
+        #
+        # Pero primero intentamos leer los valores REALES del Guardian.
+        # ================================================================
+
+        reserve_btc = 10.0
+        reserve_paxg = 10.0
+        reserve_usdt = 5.0
+        max_concentration = 75.0
+
+        try:
+            from portfolio_guardian import (
+                portfolio_guardian as _pg
+            )
+
+            reserves = getattr(
+                _pg,
+                "MIN_RESERVE_PCTS",
+                {}
+            ) or {}
+
+            reserve_btc = float(
+                reserves.get(
+                    "BTC",
+                    0.10
+                )
+            ) * 100.0
+
+            reserve_paxg = float(
+                reserves.get(
+                    "PAXG",
+                    0.10
+                )
+            ) * 100.0
+
+            reserve_usdt = float(
+                reserves.get(
+                    "USDT",
+                    0.05
+                )
+            ) * 100.0
+
+            max_concentration = float(
+                getattr(
+                    _pg,
+                    "MAX_CONCENTRATION_PCT",
+                    0.75
+                )
+            ) * 100.0
+
+        except Exception:
+            # Fail-open diagnóstico.
+            #
+            # Estos valores nunca toman decisiones.
+            pass
+
+        thresholds = {
+            "BTC_min":
+                round(
+                    reserve_btc,
+                    2
+                ),
+
+            "PAXG_min":
+                round(
+                    reserve_paxg,
+                    2
+                ),
+
+            "USDT_min":
+                round(
+                    reserve_usdt,
+                    2
+                ),
+
+            "max_concentration":
+                round(
+                    max_concentration,
+                    2
+                )
+        }
+
+        result[
+            "portfolio_policy"
+        ][
+            "thresholds_pct"
+        ] = thresholds
+
+        safe_limit = max(
+            50,
+            min(
+                int(
+                    limit
+                    or 1000
+                ),
+                2000
+            )
+        )
+
+        # ================================================================
+        # OBSERVACIONES SPOT DE LA IA
+        # ================================================================
+
+        response = db._with_retry(
+            lambda: (
+                db.client
+                .table(
+                    "ai_advisor_observations"
+                )
+                .select(
+                    (
+                        "id,"
+                        "source_signal_id,"
+                        "system_action,"
+                        "ai_verdict,"
+                        "ai_confidence,"
+                        "context_snapshot,"
+                        "created_at,"
+                        "symbol,"
+                        "timeframe"
+                    )
+                )
+                .eq(
+                    "user_name",
+                    user_name
+                )
+                .eq(
+                    "market",
+                    "SPOT"
+                )
+                .eq(
+                    "context_type",
+                    "HOURLY_MARKET_ADVICE"
+                )
+                .order(
+                    "created_at",
+                    desc=False
+                )
+                .limit(
+                    safe_limit
+                )
+                .execute()
+            )
+        )
+
+        observations = (
+            response.data
+            if (
+                response
+                and response.data
+            )
+            else []
+        )
+
+        # ================================================================
+        # UNA SEÑAL = PRIMERA OPINIÓN IA
+        # ================================================================
+        #
+        # La IA no puede cambiar de opinión después y elegir
+        # retrospectivamente la respuesta que quedó mejor.
+        # ================================================================
+
+        first_by_signal = {}
+
+        for row in observations:
+
+            if not isinstance(
+                row,
+                dict
+            ):
+                continue
+
+            raw_id = str(
+                row.get(
+                    "source_signal_id"
+                )
+                or ""
+            ).strip()
+
+            if not raw_id:
+                continue
+
+            try:
+                signal_id = str(
+                    _uuid.UUID(
+                        raw_id
+                    )
+                )
+
+            except Exception:
+                continue
+
+            if (
+                signal_id
+                not in first_by_signal
+            ):
+                first_by_signal[
+                    signal_id
+                ] = row
+
+        source_ids = list(
+            first_by_signal.keys()
+        )
+
+        if not source_ids:
+            result[
+                "status"
+            ] = "COLLECTING_EVIDENCE"
+
+            result[
+                "reason"
+            ] = (
+                "Todavía no existen observaciones "
+                "Spot IA vinculadas a señales."
+            )
+
+            return result
+
+        # ================================================================
+        # BATCHES
+        # ================================================================
+
+        def _chunks(
+            values,
+            size=100
+        ):
+
+            for start in range(
+                0,
+                len(values),
+                size
+            ):
+
+                yield values[
+                    start:
+                    start + size
+                ]
+
+        # ================================================================
+        # RESULTADOS REALES DE REVIEWTRADER
+        # ================================================================
+
+        results_by_signal = {}
+
+        for batch in _chunks(
+            source_ids
+        ):
+
+            response = db._with_retry(
+                lambda batch=batch: (
+                    db.client
+                    .table(
+                        "signal_results"
+                    )
+                    .select(
+                        (
+                            "signal_id,"
+                            "status,"
+                            "pnl_pct,"
+                            "created_at"
+                        )
+                    )
+                    .in_(
+                        "signal_id",
+                        batch
+                    )
+                    .order(
+                        "created_at",
+                        desc=False
+                    )
+                    .execute()
+                )
+            )
+
+            for row in (
+                response.data
+                if (
+                    response
+                    and response.data
+                )
+                else []
+            ):
+
+                if not isinstance(
+                    row,
+                    dict
+                ):
+                    continue
+
+                sid = str(
+                    row.get(
+                        "signal_id"
+                    )
+                    or ""
+                )
+
+                if sid:
+                    results_by_signal[
+                        sid
+                    ] = row
+
+        # ================================================================
+        # HELPERS
+        # ================================================================
+
+        def _number(
+            value
+        ):
+            try:
+                if value is None:
+                    return None
+
+                return float(
+                    value
+                )
+
+            except (
+                TypeError,
+                ValueError
+            ):
+                return None
+
+
+        def _portfolio_from_context(
+            observation
+        ):
+            """
+            Recupera exactamente el portfolio porcentual
+            que la IA vio en ese momento.
+            """
+
+            context = (
+                observation.get(
+                    "context_snapshot"
+                )
+                or {}
+            )
+
+            if not isinstance(
+                context,
+                dict
+            ):
+                return {}
+
+            portfolio = (
+                context.get(
+                    "portfolio_percentages"
+                )
+                or {}
+            )
+
+            if not portfolio:
+
+                hourly = (
+                    context.get(
+                        "hourly_market_snapshot"
+                    )
+                    or {}
+                )
+
+                if isinstance(
+                    hourly,
+                    dict
+                ):
+                    portfolio = (
+                        hourly.get(
+                            "portfolio_percentages"
+                        )
+                        or {}
+                    )
+
+            return (
+                portfolio
+                if isinstance(
+                    portfolio,
+                    dict
+                )
+                else {}
+            )
+
+
+        def _normalize_pct(
+            value
+        ):
+            """
+            Normaliza 0..100.
+
+            Tolera también 0..1 por seguridad.
+            """
+
+            number = _number(
+                value
+            )
+
+            if number is None:
+                return None
+
+            if (
+                0.0
+                <= number
+                <= 1.0
+            ):
+                number *= 100.0
+
+            if not (
+                0.0
+                <= number
+                <= 100.0
+            ):
+                return None
+
+            return number
+
+        # ================================================================
+        # CRUCE:
+        #
+        # IA
+        # +
+        # RESULTADO REAL
+        # +
+        # PORTFOLIO DEL MOMENTO
+        # ================================================================
+
+        rows = []
+
+        for (
+            signal_id,
+            observation
+        ) in first_by_signal.items():
+
+            signal_result = (
+                results_by_signal.get(
+                    signal_id
+                )
+            )
+
+            if not signal_result:
+                continue
+
+            status = str(
+                signal_result.get(
+                    "status"
+                )
+                or ""
+            ).lower()
+
+            if status not in (
+                "tp_hit",
+                "sl_hit",
+                "expired"
+            ):
+                continue
+
+            try:
+                pnl_pct = float(
+                    signal_result.get(
+                        "pnl_pct"
+                    )
+                    or 0
+                )
+
+            except (
+                TypeError,
+                ValueError
+            ):
+                continue
+
+            verdict = str(
+                observation.get(
+                    "ai_verdict"
+                )
+                or ""
+            ).upper()
+
+            try:
+                confidence = int(
+                    float(
+                        observation.get(
+                            "ai_confidence"
+                        )
+                        or 0
+                    )
+                )
+
+            except (
+                TypeError,
+                ValueError
+            ):
+                confidence = 0
+
+            # ============================================================
+            # MISMA REGLA 36S.2B.1
+            # ============================================================
+
+            would_block = bool(
+                verdict == "DISAGREE"
+                and confidence >= 80
+            )
+
+            portfolio = (
+                _portfolio_from_context(
+                    observation
+                )
+            )
+
+            btc_pct = _normalize_pct(
+                portfolio.get(
+                    "BTC_pct"
+                )
+            )
+
+            paxg_pct = _normalize_pct(
+                portfolio.get(
+                    "PAXG_pct"
+                )
+            )
+
+            usdt_pct = _normalize_pct(
+                portfolio.get(
+                    "USDT_pct"
+                )
+            )
+
+            context_available = all(
+                value is not None
+                for value in (
+                    btc_pct,
+                    paxg_pct,
+                    usdt_pct
+                )
+            )
+
+            reserve_stress = False
+            concentrated = False
+
+            if context_available:
+
+                reserve_stress = bool(
+                    btc_pct
+                    < reserve_btc
+
+                    or paxg_pct
+                    < reserve_paxg
+
+                    or usdt_pct
+                    < reserve_usdt
+                )
+
+                concentrated = bool(
+                    max(
+                        btc_pct,
+                        paxg_pct,
+                        usdt_pct
+                    )
+                    >= max_concentration
+                )
+
+            rows.append({
+
+                "signal_id":
+                    signal_id,
+
+                "created_at":
+                    str(
+                        observation.get(
+                            "created_at"
+                        )
+                        or ""
+                    ),
+
+                "system_action":
+                    str(
+                        observation.get(
+                            "system_action"
+                        )
+                        or ""
+                    ).upper(),
+
+                "ai_verdict":
+                    verdict,
+
+                "ai_confidence":
+                    confidence,
+
+                "would_block":
+                    would_block,
+
+                "status":
+                    status,
+
+                "system_pnl_pct":
+                    pnl_pct,
+
+                # ========================================================
+                # CONTRAFACTUAL DIRECCIONAL
+                # ========================================================
+                #
+                # Si la señal perdió -2% y la IA la habría bloqueado:
+                #
+                # valor del bloqueo = +2%
+                #
+                # Si ganó +3%:
+                #
+                # valor del bloqueo = -3%
+                # ========================================================
+
+                "block_value_pct":
+                    (
+                        -pnl_pct
+                        if would_block
+                        else None
+                    ),
+
+                "portfolio_context_available":
+                    context_available,
+
+                "BTC_pct":
+                    (
+                        round(
+                            btc_pct,
+                            2
+                        )
+                        if btc_pct is not None
+                        else None
+                    ),
+
+                "PAXG_pct":
+                    (
+                        round(
+                            paxg_pct,
+                            2
+                        )
+                        if paxg_pct is not None
+                        else None
+                    ),
+
+                "USDT_pct":
+                    (
+                        round(
+                            usdt_pct,
+                            2
+                        )
+                        if usdt_pct is not None
+                        else None
+                    ),
+
+                "reserve_stress":
+                    reserve_stress,
+
+                "concentrated":
+                    concentrated
+            })
+
+        rows.sort(
+            key=lambda item:
+                item[
+                    "created_at"
+                ]
+        )
+
+        # ================================================================
+        # RESUMEN
+        # ================================================================
+
+        def _summary(
+            subset
+        ):
+
+            resolved = len(
+                subset
+            )
+
+            with_context = [
+
+                row
+                for row in subset
+
+                if row[
+                    "portfolio_context_available"
+                ]
+            ]
+
+            blocks = [
+
+                row
+                for row in subset
+
+                if row[
+                    "would_block"
+                ]
+            ]
+
+            blocks_with_context = [
+
+                row
+                for row in blocks
+
+                if row[
+                    "portfolio_context_available"
+                ]
+            ]
+
+            block_values = [
+
+                float(
+                    row[
+                        "block_value_pct"
+                    ]
+                )
+
+                for row in blocks
+
+                if row[
+                    "block_value_pct"
+                ]
+                is not None
+            ]
+
+            return {
+                "resolved":
+                    resolved,
+
+                "resolved_with_context":
+                    len(
+                        with_context
+                    ),
+
+                "context_coverage_pct":
+                    (
+                        round(
+                            (
+                                len(
+                                    with_context
+                                )
+                                / resolved
+                                * 100.0
+                            ),
+                            2
+                        )
+
+                        if resolved
+                        else None
+                    ),
+
+                "would_block_resolved":
+                    len(
+                        blocks
+                    ),
+
+                "would_block_with_context":
+                    len(
+                        blocks_with_context
+                    ),
+
+                "would_block_context_coverage_pct":
+                    (
+                        round(
+                            (
+                                len(
+                                    blocks_with_context
+                                )
+                                / len(
+                                    blocks
+                                )
+                                * 100.0
+                            ),
+                            2
+                        )
+
+                        if blocks
+                        else None
+                    ),
+
+                "gross_block_value_pct_sum":
+                    round(
+                        sum(
+                            block_values
+                        ),
+                        4
+                    ),
+
+                "reserve_stress_resolved":
+                    sum(
+                        1
+                        for row
+                        in with_context
+
+                        if row[
+                            "reserve_stress"
+                        ]
+                    ),
+
+                "concentration_resolved":
+                    sum(
+                        1
+                        for row
+                        in with_context
+
+                        if row[
+                            "concentrated"
+                        ]
+                    ),
+
+                "would_block_under_reserve_stress":
+                    sum(
+                        1
+                        for row
+                        in blocks_with_context
+
+                        if row[
+                            "reserve_stress"
+                        ]
+                    ),
+
+                "would_block_under_concentration":
+                    sum(
+                        1
+                        for row
+                        in blocks_with_context
+
+                        if row[
+                            "concentrated"
+                        ]
+                    )
+            }
+
+        total = _summary(
+            rows
+        )
+
+        # ================================================================
+        # WALK-FORWARD 70 / 30
+        # ================================================================
+
+        split_index = int(
+            len(
+                rows
+            )
+            * 0.70
+        )
+
+        calibration_rows = (
+            rows[
+                :split_index
+            ]
+        )
+
+        validation_rows = (
+            rows[
+                split_index:
+            ]
+        )
+
+        calibration = _summary(
+            calibration_rows
+        )
+
+        validation = _summary(
+            validation_rows
+        )
+
+        result[
+            "portfolio_policy"
+        ].update({
+
+            "resolved_with_context":
+                total[
+                    "resolved_with_context"
+                ],
+
+            "would_block_with_context":
+                total[
+                    "would_block_with_context"
+                ],
+
+            "context_coverage_pct":
+                total[
+                    "context_coverage_pct"
+                ],
+
+            "would_block_context_coverage_pct":
+                total[
+                    "would_block_context_coverage_pct"
+                ],
+
+            "reserve_stress_resolved":
+                total[
+                    "reserve_stress_resolved"
+                ],
+
+            "concentration_resolved":
+                total[
+                    "concentration_resolved"
+                ],
+
+            "would_block_under_reserve_stress":
+                total[
+                    "would_block_under_reserve_stress"
+                ],
+
+            "would_block_under_concentration":
+                total[
+                    "would_block_under_concentration"
+                ]
+        })
+
+        result[
+            "calibration_70"
+        ] = calibration
+
+        result[
+            "validation_30"
+        ] = validation
+
+        # ================================================================
+        # GATE FINAL 36T
+        # ================================================================
+
+        base_gate = (
+            base.get(
+                "gate"
+            )
+            or {}
+        )
+
+        gate = (
+            result[
+                "gate"
+            ]
+        )
+
+        gate[
+            "signal_sample_ok"
+        ] = bool(
+            base_gate.get(
+                "sample_ok"
+            )
+        )
+
+        gate[
+            "block_sample_ok"
+        ] = bool(
+            base_gate.get(
+                "block_sample_ok"
+            )
+        )
+
+        gate[
+            "validation_ok"
+        ] = bool(
+            base_gate.get(
+                "validation_ok"
+            )
+        )
+
+        gate[
+            "validation_block_sample_ok"
+        ] = bool(
+            base_gate.get(
+                "validation_block_sample_ok"
+            )
+        )
+
+        gate[
+            "gross_value_positive"
+        ] = bool(
+            base_gate.get(
+                "gross_value_positive"
+            )
+        )
+
+        gate[
+            "validation_gross_value_positive"
+        ] = bool(
+            base_gate.get(
+                "validation_gross_value_positive"
+            )
+        )
+
+        total_coverage = (
+            total.get(
+                "context_coverage_pct"
+            )
+        )
+
+        validation_coverage = (
+            validation.get(
+                "context_coverage_pct"
+            )
+        )
+
+        # Exigimos que al menos 80% de las observaciones
+        # resueltas tengan portfolio conocido.
+
+        gate[
+            "portfolio_context_coverage_ok"
+        ] = bool(
+            total_coverage is not None
+            and total_coverage >= 80.0
+        )
+
+        gate[
+            "validation_portfolio_context_ok"
+        ] = bool(
+            validation_coverage is not None
+            and validation_coverage >= 80.0
+        )
+
+        # ================================================================
+        # NO INVENTAR CONTRAFACTUAL NI COSTES
+        # ================================================================
+        #
+        # Ya podemos demostrar:
+        #
+        # - outcome Spot;
+        # - valor bruto de WOULD_BLOCK;
+        # - composición BTC/PAXG/USDT;
+        # - reservas;
+        # - concentración;
+        # - validación 70/30.
+        #
+        # Todavía NO sabemos una ejecución TGP real completa ni:
+        #
+        # - comisión;
+        # - spread;
+        # - slippage;
+        # - coste de rotación.
+        #
+        # Por eso estos dos gates siguen FALSE.
+        # ================================================================
+
+        gate[
+            "portfolio_counterfactual_verified"
+        ] = False
+
+        gate[
+            "costs_verified"
+        ] = False
+
+        diagnostic_ready = all((
+
+            gate[
+                "signal_sample_ok"
+            ],
+
+            gate[
+                "block_sample_ok"
+            ],
+
+            gate[
+                "validation_ok"
+            ],
+
+            gate[
+                "validation_block_sample_ok"
+            ],
+
+            gate[
+                "gross_value_positive"
+            ],
+
+            gate[
+                "validation_gross_value_positive"
+            ],
+
+            gate[
+                "portfolio_context_coverage_ok"
+            ],
+
+            gate[
+                "validation_portfolio_context_ok"
+            ]
+        ))
+
+        # ================================================================
+        # ESTADO
+        # ================================================================
+
+        if not diagnostic_ready:
+
+            result[
+                "status"
+            ] = "COLLECTING_EVIDENCE"
+
+            result[
+                "reason"
+            ] = (
+                "36T continúa acumulando outcomes "
+                "Spot y contexto de portfolio."
+            )
+
+        else:
+
+            result[
+                "status"
+            ] = (
+                "DIAGNOSTIC_READY_"
+                "WAITING_NET_COUNTERFACTUAL"
+            )
+
+            result[
+                "reason"
+            ] = (
+                "La evidencia direccional y de portfolio "
+                "es suficiente para revisión diagnóstica, "
+                "pero todavía faltan contrafactual de "
+                "ejecución TGP y costes verificables."
+            )
+
+        # ================================================================
+        # 36S.2B.2 SIGUE BLOQUEADO
+        # ================================================================
+
+        result[
+            "ready_for_36S2B2_review"
+        ] = False
+
+        return result
+
+    except Exception as error:
+
+        # ================================================================
+        # FAIL-OPEN ABSOLUTO
+        # ================================================================
+
+        logger.warning(
+            "36T portfolio evidence: %s",
+            error
+        )
+
+        result[
+            "status"
+        ] = "EVIDENCE_ERROR"
+
+        result[
+            "reason"
+        ] = (
+            "36T_ERROR: "
+            + str(
+                error
+            )[:180]
+        )
+
+        return result
