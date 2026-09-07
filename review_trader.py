@@ -131,7 +131,20 @@ SPOT_LEARNING_COHORT = 'SPOT_ACCUMULATION_V1'
 CAUTIOUS_SHADOW_MODEL_VERSION = 'cautious_shadow_v1'
 CAUTIOUS_SHADOW_NEAR_MISS_RATIO = 0.80
 CAUTIOUS_SHADOW_RISK_MULTIPLIER = 0.50
-
+# ============================================================================
+# COMMIT 37 — POLÍTICA CAUTIOUS GATE-LOCKED
+# ============================================================================
+#
+# Commit 37 NO baja umbrales operativos y NO publica señales nuevas.
+# Formaliza qué evidencia puede usarse para revisar una futura capa CAUTIOUS.
+#
+# Regla crítica post-36W:
+# nunca mezclar scores LEGACY con los scores matemáticamente normalizados V2
+# al decidir si existe edge suficiente para una revisión humana.
+# ============================================================================
+COMMIT37_POLICY_VERSION = 'commit37_gate_locked_v1'
+COMMIT37_REQUIRED_QUALITY_SCORE_VERSION = '36W_V2_NORMALIZED'
+COMMIT37_OBSERVATIONAL_REGIME = 'TRANSITION'
 # ============================================================================
 # CLASE PRINCIPAL: REVIEW TRADER
 # ============================================================================
@@ -4078,6 +4091,61 @@ class ReviewTrader:
             'policy':
                 'IMPROVE_QUALITY_DO_NOT_LOWER_SAFETY',
 
+            # ============================================================
+            # COMMIT 37 — CONTRATO DE CALIBRACIÓN
+            # ============================================================
+            #
+            # La evidencia LEGACY sigue visible como inventario histórico,
+            # pero sólo 36W_V2_NORMALIZED puede alimentar la calibración
+            # que eventualmente habilite una REVISIÓN HUMANA del Commit 37.
+            # Nunca existe promoción automática.
+            # ============================================================
+
+            'commit37_policy': {
+                'version':
+                    COMMIT37_POLICY_VERSION,
+
+                'mode':
+                    'GATE_LOCKED_SHADOW',
+
+                'required_quality_score_version':
+                    COMMIT37_REQUIRED_QUALITY_SCORE_VERSION,
+
+                'premium_unchanged':
+                    True,
+
+                'production_changed':
+                    False,
+
+                'automatic_promotion':
+                    False,
+
+                'human_review_required':
+                    True,
+
+                'operational_authority':
+                    'NONE',
+
+                'observational_focus': {
+                    'safety_65_69':
+                        'PROMISING_SHADOW_ONLY',
+
+                    'safety_70_74':
+                        'COLLECT_MORE_EVIDENCE',
+
+                    'below_65':
+                        'DO_NOT_RELAX_HARD_SAFETY',
+
+                    'regime':
+                        COMMIT37_OBSERVATIONAL_REGIME,
+
+                    'allowed_near_miss_blocks': [
+                        'SAFETY',
+                        'TP_QUALITY'
+                    ]
+                }
+            },
+
             'inventory': {
                 'futures_rows_scanned':
                     0,
@@ -4113,6 +4181,12 @@ class ReviewTrader:
                     0,
 
                 'resolved_tp_sl':
+                    0,
+
+                'commit37_v2_directional_shadow':
+                    0,
+
+                'excluded_non_v2_from_commit37':
                     0
             },
 
@@ -4750,6 +4824,66 @@ class ReviewTrader:
                 return result
 
             # ============================================================
+            # COMMIT 37
+            # COHORTE DE CALIBRACIÓN EXCLUSIVAMENTE 36W V2
+            # ============================================================
+            #
+            # El inventario histórico completo continúa disponible arriba,
+            # pero las métricas que podrían alimentar readiness de Commit 37
+            # NO pueden mezclar LEGACY con 36W_V2_NORMALIZED.
+            # ============================================================
+
+            commit37_candidates = [
+                candidate
+                for candidate
+                in candidates
+                if str(
+                    candidate.get(
+                        'quality_score_version'
+                    )
+                    or 'LEGACY'
+                )
+                == COMMIT37_REQUIRED_QUALITY_SCORE_VERSION
+            ]
+
+            result[
+                'inventory'
+            ][
+                'commit37_v2_directional_shadow'
+            ] = len(
+                commit37_candidates
+            )
+
+            result[
+                'inventory'
+            ][
+                'excluded_non_v2_from_commit37'
+            ] = max(
+                0,
+                len(
+                    candidates
+                )
+                - len(
+                    commit37_candidates
+                )
+            )
+
+            if not commit37_candidates:
+                result[
+                    'status'
+                ] = 'COLLECTING_36W_V2_EVIDENCE'
+
+                result[
+                    'reason'
+                ] = (
+                    'Hay Futures Shadow limpios, pero todavía no existen '
+                    'candidatos 36W_V2_NORMALIZED suficientes para calibrar '
+                    'Commit 37 sin mezclar scores LEGACY.'
+                )
+
+                return result
+
+            # ============================================================
             # 2. RESULTADOS
             # ============================================================
 
@@ -4758,7 +4892,7 @@ class ReviewTrader:
                     'id'
                 ]
                 for row
-                in candidates
+                in commit37_candidates
                 if row.get(
                     'id'
                 )
@@ -4848,7 +4982,7 @@ class ReviewTrader:
                 in components
             }
 
-            for candidate in candidates:
+            for candidate in commit37_candidates:
                 for name in components:
                     score = (
                         candidate[
@@ -4904,7 +5038,7 @@ class ReviewTrader:
 
             resolved_rows = []
 
-            for candidate in candidates:
+            for candidate in commit37_candidates:
                 outcome = (
                     results_by_signal.get(
                         candidate[
@@ -5686,6 +5820,44 @@ class ReviewTrader:
             'realized_profit_claim_allowed':
                 False,
 
+            # ============================================================
+            # COMMIT 37 — ESTADO DE AUTORIDAD
+            # ============================================================
+            #
+            # Incluso si 36V llega a READY_FOR_COMMIT37_REVIEW, este método
+            # sólo habilita REVISIÓN HUMANA. No existe activación automática
+            # ni una ruta que cambie Futures desde este gate.
+            # ============================================================
+
+            'commit37_policy': {
+                'version':
+                    COMMIT37_POLICY_VERSION,
+
+                'mode':
+                    'GATE_LOCKED_SHADOW',
+
+                'required_quality_score_version':
+                    COMMIT37_REQUIRED_QUALITY_SCORE_VERSION,
+
+                'premium_unchanged':
+                    True,
+
+                'production_changed':
+                    False,
+
+                'automatic_promotion':
+                    False,
+
+                'human_review_required':
+                    True,
+
+                'authority':
+                    'SHADOW_ONLY',
+
+                'activation_status':
+                    'LOCKED_NOT_READY'
+            },
+
             'quality':
                 {},
 
@@ -5790,6 +5962,18 @@ class ReviewTrader:
                     {}
                 ),
 
+            'quality_score_versions':
+                quality.get(
+                    'quality_score_versions',
+                    {}
+                ),
+
+            'commit37_policy':
+                quality.get(
+                    'commit37_policy',
+                    {}
+                ),
+
             'quality_proposals':
                 quality.get(
                     'quality_proposals',
@@ -5808,6 +5992,25 @@ class ReviewTrader:
                     {}
                 )
         }
+
+        quality_policy = (
+            quality.get(
+                'commit37_policy'
+            )
+            or {}
+        )
+
+        if quality_policy:
+            result[
+                'commit37_policy'
+            ][
+                'required_quality_score_version'
+            ] = str(
+                quality_policy.get(
+                    'required_quality_score_version'
+                )
+                or COMMIT37_REQUIRED_QUALITY_SCORE_VERSION
+            )
 
         quality_gate = (
             quality.get(
@@ -5996,6 +6199,18 @@ class ReviewTrader:
             ] = (
                 'READY_FOR_COMMIT37_REVIEW'
             )
+
+            result[
+                'commit37_policy'
+            ][
+                'authority'
+            ] = 'REVIEW_ONLY'
+
+            result[
+                'commit37_policy'
+            ][
+                'activation_status'
+            ] = 'READY_FOR_HUMAN_REVIEW'
 
             result[
                 'reasons'
