@@ -575,6 +575,50 @@ def _compact_tgp_analysis(result):
             else 0
         )
 
+    # ========================================================================
+    # QUALITY ENGINE Q4A
+    # NUMÉRICOS OPCIONALES DEL ENTRY SPOT
+    # ========================================================================
+    #
+    # Un dato desconocido debe seguir siendo None.
+    #
+    # NO debemos convertir:
+    #
+    #     distancia desconocida
+    #
+    # en:
+    #
+    #     distancia = 0
+    #
+    # porque posteriormente Q4B podría interpretarlo erróneamente
+    # como un Entry perfecto y extremadamente cercano.
+    # ========================================================================
+
+    def _optional_float(value):
+
+        try:
+
+            if value is None:
+                return None
+
+            number = float(
+                value
+            )
+
+            if not math.isfinite(
+                number
+            ):
+                return None
+
+            return number
+
+        except (
+            TypeError,
+            ValueError
+        ):
+
+            return None
+
     return {
         'success': True,
 
@@ -600,12 +644,43 @@ def _compact_tgp_analysis(result):
         },
 
         'levels': {
+            # ==============================================================
+            # SCORE GENERAL
+            # ==============================================================
+
             'execution_safety': float(
                 levels.get(
                     'execution_safety',
                     0
                 )
                 or 0
+            ),
+
+            'quality_score_version': str(
+                levels.get(
+                    'quality_score_version',
+                    'LEGACY'
+                )
+                or 'LEGACY'
+            ),
+
+            # ==============================================================
+            # QUALITY ENGINE Q1 / Q4A
+            # ENTRY SPOT
+            # ==============================================================
+
+            'entry': _optional_float(
+                levels.get(
+                    'entry'
+                )
+            ),
+
+            'entry_source': str(
+                levels.get(
+                    'entry_source',
+                    ''
+                )
+                or ''
             ),
 
             'entry_score': float(
@@ -616,12 +691,62 @@ def _compact_tgp_analysis(result):
                 or 0
             ),
 
-            'tp_quality_score': float(
+            'entry_quality_version': str(
                 levels.get(
-                    'tp_quality_score',
-                    0
+                    'entry_quality_version',
+                    'LEGACY_ENTRY'
                 )
-                or 0
+                or 'LEGACY_ENTRY'
+            ),
+
+            'entry_smc_raw_score': _optional_float(
+                levels.get(
+                    'entry_smc_raw_score'
+                )
+            ),
+
+            'entry_reachability_score': _optional_float(
+                levels.get(
+                    'entry_reachability_score'
+                )
+            ),
+
+            'entry_distance_atr': _optional_float(
+                levels.get(
+                    'entry_distance_atr'
+                )
+            ),
+
+            'entry_distance_pct': _optional_float(
+                levels.get(
+                    'entry_distance_pct'
+                )
+            ),
+
+            'entry_reachability_label': str(
+                levels.get(
+                    'entry_reachability_label',
+                    'N/A'
+                )
+                or 'N/A'
+            ),
+
+            # ==============================================================
+            # STOP LOSS
+            # ==============================================================
+
+            'stop_loss': _optional_float(
+                levels.get(
+                    'stop_loss'
+                )
+            ),
+
+            'sl_source': str(
+                levels.get(
+                    'sl_source',
+                    ''
+                )
+                or ''
             ),
 
             'sl_reliability': float(
@@ -632,12 +757,65 @@ def _compact_tgp_analysis(result):
                 or 0
             ),
 
+            # ==============================================================
+            # TAKE PROFIT
+            # ==============================================================
+
+            'take_profit': _optional_float(
+                levels.get(
+                    'take_profit'
+                )
+            ),
+
+            'tp_source': str(
+                levels.get(
+                    'tp_source',
+                    ''
+                )
+                or ''
+            ),
+
+            'tp_quality_score': float(
+                levels.get(
+                    'tp_quality_score',
+                    0
+                )
+                or 0
+            ),
+
+            'tp_quality_label': str(
+                levels.get(
+                    'tp_quality_label',
+                    ''
+                )
+                or ''
+            ),
+
+            # ==============================================================
+            # GEOMETRÍA
+            # ==============================================================
+
             'risk_reward': float(
                 levels.get(
                     'risk_reward',
                     0
                 )
                 or 0
+            ),
+
+            'is_executable': bool(
+                levels.get(
+                    'is_executable',
+                    False
+                )
+            ),
+
+            'publication_status': str(
+                levels.get(
+                    'publication_status',
+                    ''
+                )
+                or ''
             )
         },
 
@@ -702,12 +880,15 @@ def _compact_tgp_analysis(result):
             )
         },
 
-        'current_price': float(
+        # ==============================================================
+        # QUALITY ENGINE Q4A
+        # PRECIO ACTUAL PARA MEDIR FRESHNESS / OPORTUNIDAD RESTANTE
+        # ==============================================================
+
+        'current_price': _optional_float(
             result.get(
-                'current_price',
-                0
+                'current_price'
             )
-            or 0
         ),
 
         'timestamp': str(
