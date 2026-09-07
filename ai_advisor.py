@@ -4486,6 +4486,575 @@ def get_ai_performance_summary(
 
         return empty
 # ============================================================================
+# COMMIT 36S.3
+# ADAPTIVE AI TRUST — RESULTADOS REALES
+# ============================================================================
+
+AI_TRUST_PRELIMINARY_SAMPLE = max(
+    5,
+    int(
+        os.getenv(
+            'AI_TRUST_PRELIMINARY_SAMPLE',
+            '10'
+        )
+    )
+)
+
+
+AI_TRUST_RELIABLE_SAMPLE = max(
+    AI_TRUST_PRELIMINARY_SAMPLE,
+    int(
+        os.getenv(
+            'AI_TRUST_RELIABLE_SAMPLE',
+            '25'
+        )
+    )
+)
+
+
+def get_ai_adaptive_trust_summary(
+    user_name=None,
+    market=None,
+    context_type=None
+):
+    """
+    COMMIT 36S.3
+
+    Mide si cada proveedor/modelo de IA está aportando valor
+    según outcomes REALES ya liquidados.
+
+    NO usa la confidence declarada por el modelo como medida
+    de confianza.
+
+    NO modifica autoridad.
+    NO modifica trading.
+
+    Interpretación:
+
+    SUPPORT:
+        si la señal original gana, la IA tuvo razón.
+
+    DISAGREE:
+        si la señal original pierde, la IA tuvo razón
+        al cuestionarla.
+
+    CAUTION / INFO / NO_EDGE:
+        se observan, pero no se utilizan para conceder
+        autoridad operativa en esta fase.
+    """
+
+    empty = {
+        'mode':
+            'ADAPTIVE_TRUST_SHADOW',
+
+        'authority_changed':
+            False,
+
+        'preliminary_sample':
+            AI_TRUST_PRELIMINARY_SAMPLE,
+
+        'reliable_sample':
+            AI_TRUST_RELIABLE_SAMPLE,
+
+        'settled_total':
+            0,
+
+        'actionable_total':
+            0,
+
+        'groups':
+            {}
+    }
+
+    db = _db()
+
+    if (
+        db is None
+        or not getattr(
+            db,
+            'enabled',
+            False
+        )
+    ):
+        return empty
+
+    try:
+        def _op():
+            query = (
+                db.client
+                .table(
+                    'ai_advisor_observations'
+                )
+                .select(
+                    (
+                        'provider,'
+                        'model,'
+                        'context_type,'
+                        'market,'
+                        'ai_verdict,'
+                        'outcome_r,'
+                        'outcome_win,'
+                        'outcome_source'
+                    )
+                )
+                .eq(
+                    'outcome_status',
+                    'SETTLED'
+                )
+                .limit(
+                    2000
+                )
+            )
+
+            if user_name:
+                query = query.eq(
+                    'user_name',
+                    str(
+                        user_name
+                    )
+                )
+
+            if market:
+                query = query.eq(
+                    'market',
+                    str(
+                        market
+                    ).upper()
+                )
+
+            if context_type:
+                query = query.eq(
+                    'context_type',
+                    str(
+                        context_type
+                    ).upper()
+                )
+
+            return query.execute()
+
+        response = db._with_retry(
+            _op
+        )
+
+        rows = (
+            response.data
+            if (
+                response
+                and response.data
+            )
+            else []
+        )
+
+        groups = {}
+
+        settled_total = 0
+        actionable_total = 0
+
+        for row in rows:
+            try:
+                outcome_r = float(
+                    row.get(
+                        'outcome_r'
+                    )
+                )
+
+            except (
+                TypeError,
+                ValueError
+            ):
+                continue
+
+            settled_total += 1
+
+            provider = str(
+                row.get(
+                    'provider'
+                )
+                or 'UNKNOWN'
+            ).upper()
+
+            model = str(
+                row.get(
+                    'model'
+                )
+                or 'UNKNOWN'
+            )
+
+            row_context = str(
+                row.get(
+                    'context_type'
+                )
+                or 'UNKNOWN'
+            ).upper()
+
+            row_market = str(
+                row.get(
+                    'market'
+                )
+                or 'UNKNOWN'
+            ).upper()
+
+            verdict = str(
+                row.get(
+                    'ai_verdict'
+                )
+                or 'INFO'
+            ).upper()
+
+            group_key = (
+                f'{provider}|'
+                f'{model}|'
+                f'{row_market}|'
+                f'{row_context}'
+            )
+
+            bucket = groups.setdefault(
+                group_key,
+                {
+                    'provider':
+                        provider,
+
+                    'model':
+                        model,
+
+                    'market':
+                        row_market,
+
+                    'context_type':
+                        row_context,
+
+                    'settled':
+                        0,
+
+                    'actionable':
+                        0,
+
+                    'correct_judgements':
+                        0,
+
+                    'decision_value_r_sum':
+                        0.0,
+
+                    'support_n':
+                        0,
+
+                    'support_system_r_sum':
+                        0.0,
+
+                    'disagree_n':
+                        0,
+
+                    'disagree_system_r_sum':
+                        0.0,
+
+                    'outcome_sources':
+                        {}
+                }
+            )
+
+            bucket[
+                'settled'
+            ] += 1
+
+            source = str(
+                row.get(
+                    'outcome_source'
+                )
+                or 'UNKNOWN'
+            )
+
+            bucket[
+                'outcome_sources'
+            ][
+                source
+            ] = (
+                bucket[
+                    'outcome_sources'
+                ].get(
+                    source,
+                    0
+                )
+                + 1
+            )
+
+            # ========================================================
+            # VALOR DE LA DECISIÓN DE LA IA
+            # ========================================================
+            #
+            # SUPPORT:
+            #     resultado positivo = IA acertó.
+            #
+            # DISAGREE:
+            #     resultado negativo = IA acertó al objetar.
+            # ========================================================
+
+            decision_value_r = None
+
+            if verdict == 'SUPPORT':
+                decision_value_r = (
+                    outcome_r
+                )
+
+                bucket[
+                    'support_n'
+                ] += 1
+
+                bucket[
+                    'support_system_r_sum'
+                ] += outcome_r
+
+            elif verdict == 'DISAGREE':
+                decision_value_r = (
+                    -outcome_r
+                )
+
+                bucket[
+                    'disagree_n'
+                ] += 1
+
+                bucket[
+                    'disagree_system_r_sum'
+                ] += outcome_r
+
+            if decision_value_r is None:
+                continue
+
+            actionable_total += 1
+
+            bucket[
+                'actionable'
+            ] += 1
+
+            bucket[
+                'decision_value_r_sum'
+            ] += decision_value_r
+
+            if decision_value_r > 0:
+                bucket[
+                    'correct_judgements'
+                ] += 1
+
+        final = {}
+
+        for (
+            group_key,
+            bucket
+        ) in groups.items():
+
+            sample = int(
+                bucket[
+                    'actionable'
+                ]
+            )
+
+            avg_value_r = (
+                (
+                    bucket[
+                        'decision_value_r_sum'
+                    ]
+                    / sample
+                )
+                if sample
+                else None
+            )
+
+            judgement_rate = (
+                (
+                    bucket[
+                        'correct_judgements'
+                    ]
+                    / sample
+                    * 100
+                )
+                if sample
+                else None
+            )
+
+            # ========================================================
+            # ESTADO DE CONFIANZA
+            # ========================================================
+            #
+            # Importante:
+            # esto NO cambia autoridad.
+            #
+            # Sólo entrega un diagnóstico para 36S.4.
+            # ========================================================
+
+            if sample < AI_TRUST_PRELIMINARY_SAMPLE:
+                trust_state = (
+                    'INSUFFICIENT_EVIDENCE'
+                )
+
+            elif (
+                avg_value_r is None
+                or avg_value_r <= 0
+            ):
+                trust_state = (
+                    'DEGRADE_CANDIDATE'
+                )
+
+            elif sample < AI_TRUST_RELIABLE_SAMPLE:
+                trust_state = (
+                    'PROMISING_SHADOW'
+                )
+
+            else:
+                trust_state = (
+                    'LIMITED_AUTHORITY_REVIEW'
+                )
+
+            support_n = int(
+                bucket[
+                    'support_n'
+                ]
+            )
+
+            disagree_n = int(
+                bucket[
+                    'disagree_n'
+                ]
+            )
+
+            final[
+                group_key
+            ] = {
+                'provider':
+                    bucket[
+                        'provider'
+                    ],
+
+                'model':
+                    bucket[
+                        'model'
+                    ],
+
+                'market':
+                    bucket[
+                        'market'
+                    ],
+
+                'context_type':
+                    bucket[
+                        'context_type'
+                    ],
+
+                'settled':
+                    bucket[
+                        'settled'
+                    ],
+
+                'actionable_sample':
+                    sample,
+
+                'judgement_accuracy_pct':
+                    (
+                        round(
+                            judgement_rate,
+                            2
+                        )
+                        if judgement_rate
+                        is not None
+                        else None
+                    ),
+
+                'avg_decision_value_r':
+                    (
+                        round(
+                            avg_value_r,
+                            4
+                        )
+                        if avg_value_r
+                        is not None
+                        else None
+                    ),
+
+                # SUPPORT positivo significa:
+                # las operaciones que apoyó tendieron a funcionar.
+                'support_sample':
+                    support_n,
+
+                'support_avg_system_r':
+                    (
+                        round(
+                            (
+                                bucket[
+                                    'support_system_r_sum'
+                                ]
+                                / support_n
+                            ),
+                            4
+                        )
+                        if support_n
+                        else None
+                    ),
+
+                # DISAGREE negativo en system_r es BUENO:
+                # significa que cuestionó operaciones perdedoras.
+                'disagree_sample':
+                    disagree_n,
+
+                'disagree_avg_system_r':
+                    (
+                        round(
+                            (
+                                bucket[
+                                    'disagree_system_r_sum'
+                                ]
+                                / disagree_n
+                            ),
+                            4
+                        )
+                        if disagree_n
+                        else None
+                    ),
+
+                'trust_state':
+                    trust_state,
+
+                'authority_changed':
+                    False,
+
+                'outcome_sources':
+                    bucket[
+                        'outcome_sources'
+                    ]
+            }
+
+        return {
+            **empty,
+
+            'settled_total':
+                settled_total,
+
+            'actionable_total':
+                actionable_total,
+
+            'groups':
+                final
+        }
+
+    except Exception as e:
+        # ============================================================
+        # FAIL-OPEN
+        # ============================================================
+        #
+        # Adaptive Trust jamás puede romper la IA ni el trading.
+        # ============================================================
+
+        logger.warning(
+            'Adaptive AI Trust: %s',
+            e
+        )
+
+        return {
+            **empty,
+
+            'error':
+                str(
+                    e
+                )[:180]
+        }
+# ============================================================================
 # COMMIT 36S.1 — AI CONTROL LAYER
 # ============================================================================
 
