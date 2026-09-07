@@ -20,6 +20,23 @@ console.log(
         false;
 
 
+    // ========================================================================
+    // COMMIT 36Y — GEMINI ACTIVITY TICKER
+    // ========================================================================
+
+    let geminiActivityLoading =
+        false;
+
+    let geminiTickerItems =
+        [];
+
+    let geminiTickerIndex =
+        0;
+
+    let geminiTickerTimer =
+        null;
+
+
     function esc(value) {
 
         return String(
@@ -1727,7 +1744,371 @@ console.log(
         }
     }
 
+    // ========================================================================
+    // COMMIT 36Y — GEMINI ACTIVITY TICKER
+    // ========================================================================
 
+    function setGeminiTickerVisible(
+        visible
+    ) {
+
+        const ticker =
+            document.getElementById(
+                'gemini-activity-ticker'
+            );
+
+
+        if (!ticker) {
+
+            return;
+        }
+
+
+        ticker.classList.toggle(
+            'd-none',
+            !visible
+        );
+    }
+
+
+    function renderGeminiTickerItem() {
+
+        const messageEl =
+            document.getElementById(
+                'gemini-activity-message'
+            );
+
+
+        if (
+            !messageEl
+            ||
+            !geminiTickerItems.length
+        ) {
+
+            return;
+        }
+
+
+        const text =
+            String(
+                geminiTickerItems[
+                    geminiTickerIndex
+                    %
+                    geminiTickerItems.length
+                ]
+                || ''
+            ).trim();
+
+
+        if (!text) {
+
+            return;
+        }
+
+
+        messageEl.classList.add(
+            'is-changing'
+        );
+
+
+        setTimeout(
+            () => {
+
+                messageEl.textContent =
+                    text;
+
+
+                messageEl.classList.remove(
+                    'is-changing'
+                );
+            },
+            160
+        );
+    }
+
+
+    function startGeminiTickerRotation() {
+
+        if (geminiTickerTimer) {
+
+            clearInterval(
+                geminiTickerTimer
+            );
+
+            geminiTickerTimer =
+                null;
+        }
+
+
+        geminiTickerIndex =
+            0;
+
+
+        renderGeminiTickerItem();
+
+
+        if (
+            geminiTickerItems.length
+            <= 1
+        ) {
+
+            return;
+        }
+
+
+        geminiTickerTimer =
+            setInterval(
+                () => {
+
+                    geminiTickerIndex = (
+                        geminiTickerIndex
+                        + 1
+                    )
+                    %
+                    geminiTickerItems.length;
+
+
+                    renderGeminiTickerItem();
+                },
+                9000
+            );
+    }
+
+
+    function geminiStateLabel(
+        stateRaw
+    ) {
+
+        const state =
+            String(
+                stateRaw
+                || ''
+            ).toUpperCase();
+
+
+        const labels = {
+
+            WORKING:
+                'activo',
+
+            WAITING_FIRST_RUN:
+                'esperando ciclo',
+
+            ERROR_FALLBACK:
+                'fallback',
+
+            NOT_CONFIGURED:
+                'sin configurar',
+
+            DISABLED:
+                'deshabilitado',
+
+            DB_UNAVAILABLE:
+                'sin historial',
+
+            STATUS_ERROR:
+                'estado no disponible'
+        };
+
+
+        return (
+            labels[
+                state
+            ]
+            ||
+            state.toLowerCase()
+            ||
+            'estado desconocido'
+        );
+    }
+
+
+    async function loadGeminiActivity() {
+
+        if (
+            geminiActivityLoading
+            ||
+            !loggedIn()
+        ) {
+
+            if (!loggedIn()) {
+
+                setGeminiTickerVisible(
+                    false
+                );
+            }
+
+
+            return;
+        }
+
+
+        geminiActivityLoading =
+            true;
+
+
+        try {
+
+            const response =
+                await fetch(
+
+                    '/api/ai/gemini-activity',
+
+                    {
+                        method:
+                            'GET',
+
+                        cache:
+                            'no-store',
+
+                        credentials:
+                            'same-origin'
+                    }
+                );
+
+
+            if (
+                response.status
+                === 401
+            ) {
+
+                setGeminiTickerVisible(
+                    false
+                );
+
+                return;
+            }
+
+
+            const payload =
+                await response.json();
+
+
+            const data = (
+                payload
+                &&
+                payload.data
+                &&
+                typeof payload.data
+                === 'object'
+            )
+                ? payload.data
+                : {};
+
+
+            const items =
+                Array.isArray(
+                    data.ticker_items
+                )
+
+                ? data.ticker_items
+                    .map(
+                        item =>
+                            String(
+                                item
+                                || ''
+                            ).trim()
+                    )
+                    .filter(
+                        Boolean
+                    )
+                    .slice(
+                        0,
+                        4
+                    )
+
+                : [];
+
+
+            geminiTickerItems =
+                items.length
+
+                ? items
+
+                : [
+                    (
+                        '🧠 Gemini Learning · '
+                        'sin actividad registrada todavía.'
+                    )
+                ];
+
+
+            const metaEl =
+                document.getElementById(
+                    'gemini-activity-meta'
+                );
+
+
+            if (metaEl) {
+
+                const model =
+                    String(
+                        data.model
+                        ||
+                        data.last_run?.model
+                        ||
+                        'Gemini'
+                    );
+
+
+                metaEl.textContent =
+                    [
+
+                        model,
+
+                        geminiStateLabel(
+                            data.state
+                        )
+
+                    ]
+                    .filter(
+                        Boolean
+                    )
+                    .join(
+                        ' · '
+                    );
+            }
+
+
+            setGeminiTickerVisible(
+                true
+            );
+
+
+            startGeminiTickerRotation();
+
+        }
+
+        catch (error) {
+
+            // ============================================================
+            // FAIL-SILENT VISUAL
+            // ============================================================
+            //
+            // Un fallo del cintillo jamás afecta:
+            //
+            // - Consejo IA;
+            // - Asistente;
+            // - Spot;
+            // - Futures.
+            // ============================================================
+
+            console.debug(
+                'Gemini ticker no disponible:',
+                error
+            );
+
+        }
+
+        finally {
+
+            geminiActivityLoading =
+                false;
+        }
+    }
+
+
+    
     // ========================================================================
     // INICIO
     // ========================================================================
@@ -1744,9 +2125,58 @@ console.log(
 
                         loadHourlyAdvice();
                     }
+
+
+                    // ====================================================
+                    // COMMIT 36Y
+                    // ====================================================
+                    //
+                    // Sólo lee actividad persistida.
+                    // NO genera una llamada nueva a Gemini.
+                    // ====================================================
+
+                    loadGeminiActivity();
+
                 },
                 7000
             );
+
+
+            // Segundo intento corto por si el login terminó
+            // unos segundos después del primer montaje.
+            //
+            // Sigue siendo únicamente un GET local.
+
+            setTimeout(
+                loadGeminiActivity,
+                20000
+            );
+
+
+            // ============================================================
+            // REFRESCAR ESTADO GEMINI CADA 5 MINUTOS
+            // ============================================================
+            //
+            // Esto consulta:
+            //
+            // navegador
+            //    ↓
+            // Flask
+            //    ↓
+            // Supabase
+            //
+            // NO:
+            //
+            // navegador → Gemini
+            // ============================================================
+
+            setInterval(
+                loadGeminiActivity,
+                5 * 60 * 1000
+            );
+
+
+            // Revisa una vez por minuto si cambió el bloque de 30 min.
 
 
             // Revisa una vez por minuto si cambió el bloque de 30 min.
