@@ -89,6 +89,29 @@ AI_MAX_CONTEXT = max(
     )
 )
 
+# ============================================================================
+# AI QUOTA GUARD — CONTEXTO GROQ COMPACTO
+# ============================================================================
+#
+# Gemini Learning conserva AI_MAX_CONTEXT porque su trabajo es investigar.
+#
+# Groq Runtime (Chat / Consejo / Guardian / Decision Control) usa un contexto
+# más compacto para proteger el Free Tier sin modificar ninguna decisión del
+# sistema de trading.
+# ============================================================================
+
+GROQ_MAX_CONTEXT = max(
+    4000,
+    min(
+        12000,
+        int(
+            os.getenv(
+                "AI_GROQ_MAX_CONTEXT_CHARS",
+                "8000"
+            )
+        )
+    )
+)
 
 LIMIT_MANUAL_HOUR = max(
     1,
@@ -186,6 +209,132 @@ GROQ_URL = (
     "https://api.groq.com/"
     "openai/v1/chat/completions"
 )
+# ============================================================================
+# AI QUOTA GUARD — BACKOFF GROQ
+# ============================================================================
+#
+# Si Groq responde 429, respetamos Retry-After y dejamos de enviar nuevas
+# llamadas externas durante ese intervalo.
+#
+# IMPORTANTE:
+# - no cambia trading;
+# - no cambia Safety;
+# - no cambia señales;
+# - no cambia Entry / SL / TP;
+# - evita una tormenta de reintentos cuando se agota la cuota gratuita.
+# ============================================================================
+
+_GROQ_BACKOFF_UNTIL = None
+_GROQ_BACKOFF_REASON = ""
+
+
+def _groq_backoff_remaining_seconds():
+    global _GROQ_BACKOFF_UNTIL
+
+    if _GROQ_BACKOFF_UNTIL is None:
+        return 0
+
+    now = datetime.now(
+        timezone.utc
+    )
+
+    if now >= _GROQ_BACKOFF_UNTIL:
+        _GROQ_BACKOFF_UNTIL = None
+        return 0
+
+    return max(
+        1,
+        int(
+            (
+                _GROQ_BACKOFF_UNTIL
+                - now
+            ).total_seconds()
+        )
+    )
+
+
+def _activate_groq_backoff(
+    response
+):
+    global _GROQ_BACKOFF_UNTIL
+    global _GROQ_BACKOFF_REASON
+
+    # Si Groq no entrega Retry-After, esperamos 5 minutos
+    # como fallback conservador.
+    retry_seconds = 300
+
+    try:
+        retry_after = (
+            response.headers.get(
+                "retry-after"
+            )
+        )
+
+        if retry_after:
+            retry_seconds = int(
+                float(
+                    retry_after
+                )
+            )
+
+    except (
+        TypeError,
+        ValueError
+    ):
+        retry_seconds = 300
+
+    response_text = str(
+        getattr(
+            response,
+            "text",
+            ""
+        )
+        or ""
+    )
+
+    is_daily_token_limit = (
+        "tokens per day"
+        in response_text.lower()
+        or "tpd"
+        in response_text.lower()
+    )
+
+    if is_daily_token_limit:
+        # Si por algún motivo Retry-After no llegó,
+        # no golpeamos la API cada minuto.
+        retry_seconds = max(
+            retry_seconds,
+            15 * 60
+        )
+
+        _GROQ_BACKOFF_REASON = (
+            "TPD_DAILY_TOKEN_LIMIT"
+        )
+
+    else:
+        _GROQ_BACKOFF_REASON = (
+            "RATE_LIMIT"
+        )
+
+    retry_seconds = max(
+        60,
+        min(
+            6 * 60 * 60,
+            retry_seconds + 5
+        )
+    )
+
+    _GROQ_BACKOFF_UNTIL = (
+        datetime.now(
+            timezone.utc
+        )
+        + timedelta(
+            seconds=retry_seconds
+        )
+    )
+
+    return retry_seconds
+    
 def _resolve_ai_route(
     usage_type,
     context_type
@@ -2119,12 +2268,36 @@ def _fingerprint(
             dict
         ):
 
-            hour_bucket = str(
-                context.get(
-                    "hour_bucket"
-                )
-                or ""
-            ).strip()
+        hour_bucket = str(
+            context.get(
+                "hour_bucket"
+            )
+            or ""
+        ).strip()
+
+        # ============================================================
+        # AI QUOTA GUARD
+        # ============================================================
+        #
+        # app.py puede seguir enviando:
+        #
+        #   2026-09-07T10:00
+        #   2026-09-07T10:30
+        #
+        # pero para el caché IA ambos pertenecen a la MISMA hora:
+        #
+        #   2026-09-07T10
+        #
+        # Resultado:
+        # máximo una generación Groq por usuario + mercado + hora.
+        # ============================================================
+
+        if len(
+            hour_bucket
+        ) >= 13:
+            hour_bucket = (
+                hour_bucket[:13]
+            )
 
 
         raw = json.dumps(
@@ -2314,7 +2487,48 @@ def _cache_get(
 # ============================================================================
 # MENTALIDAD DEL AI TRADER
 # ============================================================================
+def _groq_runtime_system_prompt():
+    """
+    Prompt compacto para Groq Runtime.
 
+    Conserva la política y los guardrails importantes,
+    pero evita reenviar un prompt enorme en cada Consejo,
+    Chat, Guardian o Decision Control.
+
+    Gemini Learning conserva el prompt/contexto amplio.
+    """
+
+    return """
+Eres el AI Trader Analyst de SmartradingReview.
+Responde siempre en español y analiza de forma independiente:
+no justifiques una decisión sólo porque el sistema la emitió.
+
+POLÍTICA:
+ASERTIVO PERO CAUTO. PRECAVIDO PERO NO TÍMIDO. RENTABLE.
+Prioriza expectancy neta positiva, preservación de capital,
+calidad riesgo/retorno, drawdown y costes antes que cantidad
+de operaciones o Win Rate aislado.
+
+FUTURES:
+respeta Liquidity -> Sweep -> MSS -> Displacement -> POI -> Entry.
+Comprueba Entry, invalidación, SL, TP, RR, Safety, estructura,
+régimen, multitemporalidad, leverage y riesgo monetario.
+No inventes Entry/SL/TP, no aumentes leverage y no conviertas
+NO_OPERAR en LONG/SHORT.
+
+SPOT/TGP:
+Spot no es Futures. Considera BTC, PAXG y USDT, reservas,
+concentración, oportunidad frente a HOLD, coste de rotación,
+anti-whipsaw y calidad/frescura del Entry. No recomiendes perseguir
+una entrada cuyo recorrido útil ya se consumió.
+
+PERSONALIZACIÓN Y SEGURIDAD:
+usa sólo datos presentes en el contexto. Si falta un dato, dilo.
+El perfil personal puede reducir riesgo, nunca aumentarlo por encima
+del límite técnico. Tu salida es ADVISORY_ONLY y no puede modificar
+Safety, niveles, leverage, pesos ni producción.
+""".strip()
+    
 def _system_prompt():
 
     return """
@@ -3367,7 +3581,8 @@ def _normalize_ai_advice(
 
 def _call_groq(
     context,
-    question=None
+    question=None,
+    context_type=None
 ):
 
     key = (
@@ -3387,7 +3602,20 @@ def _call_groq(
                 "configurada en Render."
             )
         )
+    backoff_remaining = (
+        _groq_backoff_remaining_seconds()
+    )
 
+    if backoff_remaining > 0:
+        raise RuntimeError(
+            (
+                "Groq está temporalmente en pausa "
+                "por límite de cuota. "
+                f"Reintento disponible en aproximadamente "
+                f"{max(1, backoff_remaining // 60)} min. "
+                "No se realizó una nueva llamada externa."
+            )
+        )
 
     context_text = json.dumps(
         context,
@@ -3401,7 +3629,7 @@ def _call_groq(
         len(
             context_text
         )
-        > AI_MAX_CONTEXT
+        > GROQ_MAX_CONTEXT
     ):
 
         context_text = (
@@ -3510,7 +3738,15 @@ en el contexto recibido.
                         "system",
 
                     "content":
-                        _system_prompt()
+                        (
+                            _system_prompt()
+                            if str(
+                                context_type
+                                or ""
+                            ).strip().upper()
+                            == "LEARNING"
+                            else _groq_runtime_system_prompt()
+                        )
                 },
 
                 {
@@ -3553,10 +3789,24 @@ en el contexto recibido.
 
     if (
         response.status_code
-        != 200
+        == 429
     ):
+        retry_seconds = (
+            _activate_groq_backoff(
+                response
+            )
+        )
 
         raise RuntimeError(
+            (
+                "Groq alcanzó temporalmente su "
+                "límite de cuota. "
+                "El sistema activó una pausa automática "
+                f"de aproximadamente "
+                f"{max(1, retry_seconds // 60)} min "
+                "para evitar reintentos innecesarios."
+            )
+        )
             (
                 f"Groq HTTP "
                 f"{response.status_code}: "
@@ -4453,7 +4703,48 @@ def run_ai_advisor(
             "quota":
                 quota
         }
+    # ====================================================================
+    # AI QUOTA GUARD
+    # ====================================================================
+    #
+    # Si ya sabemos que Groq pidió esperar, ni siquiera intentamos
+    # otra llamada externa ni persistimos cientos de errores repetidos.
+    # ====================================================================
 
+    if (
+        selected_provider
+        == "GROQ"
+    ):
+        backoff_remaining = (
+            _groq_backoff_remaining_seconds()
+        )
+
+        if backoff_remaining > 0:
+            return {
+                "success":
+                    False,
+
+                "provider_limited":
+                    True,
+
+                "retry_after_seconds":
+                    backoff_remaining,
+
+                "reason":
+                    (
+                        "Groq alcanzó su cuota temporal. "
+                        "El sistema está esperando automáticamente "
+                        f"aproximadamente "
+                        f"{max(1, backoff_remaining // 60)} min "
+                        "antes de volver a consultar al proveedor."
+                    ),
+
+                "quota":
+                    quota
+            }
+
+
+    try:
 
     try:
 
@@ -4516,7 +4807,9 @@ def run_ai_advisor(
                 advice, usage = (
                     _call_groq(
                         context,
-                        question
+                        question,
+                        context_type=
+                            context_type
                     )
                 )
 
@@ -4524,7 +4817,9 @@ def run_ai_advisor(
             advice, usage = (
                 _call_groq(
                     context,
-                    question
+                    question,
+                    context_type=
+                        context_type
                 )
             )
 
