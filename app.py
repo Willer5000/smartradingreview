@@ -40285,6 +40285,83 @@ def api_ai_performance():
 
         }), 200
 # ============================================================================
+# COMMIT 36T.1
+# SPOT / TGP AI SHADOW EVIDENCE
+# ============================================================================
+
+@app.route(
+    '/api/ai/spot-shadow-evidence',
+    methods=['GET']
+)
+def api_ai_spot_shadow_evidence():
+    """
+    Evidencia READ-ONLY para estudiar 36S.2B.2.
+
+    NO modifica:
+    - señales;
+    - portfolio;
+    - TGP;
+    - Guardian;
+    - autoridad IA.
+    """
+
+    user = (
+        _authenticated_user()
+    )
+
+    if not user:
+
+        return jsonify({
+            'success':
+                False,
+
+            'error':
+                'Debes iniciar sesión.'
+        }), 401
+
+    try:
+
+        from ai_advisor import (
+            get_spot_tgp_shadow_evidence
+        )
+
+        evidence = (
+            get_spot_tgp_shadow_evidence(
+                user_name=user
+            )
+        )
+
+        return jsonify({
+
+            'success':
+                True,
+
+            'data':
+                evidence
+
+        }), 200
+
+    except Exception as error:
+
+        # ================================================================
+        # FAIL-OPEN
+        # ================================================================
+        #
+        # Un problema del informe estadístico no puede afectar Spot.
+        # ================================================================
+
+        return jsonify({
+
+            'success':
+                False,
+
+            'error':
+                str(
+                    error
+                )[:180]
+
+        }), 200
+# ============================================================================
 # ARRANQUE AUTOMÁTICO DE THREADS BACKGROUND AL IMPORTAR EL MÓDULO
 # ============================================================================
 # Ahora que verificar_y_ejecutar y monitor_entries_loop están definidos,
