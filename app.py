@@ -24436,6 +24436,26 @@ def _compute_previous_signals():
                     'timeframe': str(timeframe),
                     'action': action,
                     'confidence': confidence,
+                    # ====================================================
+                    # 36T-LINK
+                    # Mantener identidad ReviewTrader en el caché liviano.
+                    # ====================================================
+                    #
+                    # El Consejo IA Spot consume spot_active_signals_cache.
+                    # Si eliminamos aquí el UUID, ai_advisor_observations
+                    # no puede vincularse posteriormente con signal_results.
+                    #
+                    # No modifica la señal ni su decisión.
+                    # ====================================================
+
+                    'signal_id': (
+                        current_analysis.get(
+                            'signal_id'
+                        )
+                        or levels_data.get(
+                            'signal_id'
+                        )
+                    ),
                     'entry': levels_data.get('entry'),
                     'stop_loss': levels_data.get('stop_loss'),
                     'take_profit': levels_data.get('take_profit'),
