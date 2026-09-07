@@ -118,17 +118,17 @@ LIMIT_MANUAL_HOUR = max(
     int(
         os.getenv(
             "AI_MANUAL_HOURLY_LIMIT",
-            "10"
+            "3"
         )
     )
 )
 
-
 # Límite diario por usuario.
 #
-# 10/h es el techo horario, pero mantenemos un
-# presupuesto diario razonable para proteger
-# el servicio gratuito y evitar abuso accidental.
+# El Chat IA conserva un máximo de 3 preguntas
+# por hora para proteger la cuota gratuita.
+#
+# El límite diario se controla por separado.
 LIMIT_MANUAL_DAY = max(
     1,
     int(
@@ -2235,25 +2235,27 @@ def _fingerprint(
         or ""
     ).strip().upper()
 
+    normalized_market = str(
+        market
+        or ""
+    ).strip().upper()
 
     # ================================================================
-    # CONSEJO HORARIO
+    # CONSEJO IA — CADENCIA INTELIGENTE
     # ================================================================
     #
-    # Para HOURLY_MARKET_ADVICE el contrato real es:
+    # SPOT:
+    #     máximo una generación nueva cada 2 horas.
     #
-    #     1 usuario
-    #     + 1 mercado
-    #     + 1 hora
-    #     = máximo 1 llamada real a Groq.
+    # FUTURES:
+    #     si existe una oportunidad/señal activa:
+    #         máximo una generación nueva cada 15 minutos.
     #
-    # _cache_get() ya filtra por usuario y context_type.
+    #     si no existe oportunidad activa:
+    #         máximo una generación nueva cada 60 minutos.
     #
-    # Por eso aquí NO incluimos el contexto dinámico en el hash.
-    # Si cambian señales/KPIs durante la misma hora, una recarga
-    # del navegador reutiliza el consejo ya generado.
-    #
-    # Al cambiar hour_bucket, se genera automáticamente uno nuevo.
+    # Esto protege la cuota gratuita de Groq sin reducir
+    # la frecuencia cuando realmente puede existir una operación.
     # ================================================================
 
     if (
@@ -2261,86 +2263,164 @@ def _fingerprint(
         == "HOURLY_MARKET_ADVICE"
     ):
 
-        hour_bucket = ""
+        safe_context = (
+            context
+            if isinstance(
+                context,
+                dict
+            )
+            else {}
+        )
 
-        if isinstance(
-            context,
+        snapshot = (
+            safe_context.get(
+                "hourly_market_snapshot"
+            )
+            or {}
+        )
+
+        if not isinstance(
+            snapshot,
             dict
         ):
+            snapshot = {}
 
-        hour_bucket = str(
-            context.get(
-                "hour_bucket"
+        focus_signal = (
+            snapshot.get(
+                "focus_signal"
+            )
+            or {}
+        )
+
+        if not isinstance(
+            focus_signal,
+            dict
+        ):
+            focus_signal = {}
+
+        focus_action = str(
+            focus_signal.get(
+                "action"
             )
             or ""
-        ).strip()
+        ).strip().upper()
 
-        # ============================================================
-        # AI QUOTA GUARD
-        # ============================================================
-        #
-        # app.py puede seguir enviando:
-        #
-        #   2026-09-07T10:00
-        #   2026-09-07T10:30
-        #
-        # pero para el caché IA ambos pertenecen a la MISMA hora:
-        #
-        #   2026-09-07T10
-        #
-        # Resultado:
-        # máximo una generación Groq por usuario + mercado + hora.
-        # ============================================================
-
-        if len(
-            hour_bucket
-        ) >= 13:
-            hour_bucket = (
-                hour_bucket[:13]
+        try:
+            active_signal_count = int(
+                snapshot.get(
+                    "active_signal_count"
+                )
+                or 0
             )
 
+        except (
+            TypeError,
+            ValueError
+        ):
+            active_signal_count = 0
+
+        futures_actionable = (
+            focus_action
+            in (
+                "LONG",
+                "SHORT"
+            )
+            or active_signal_count > 0
+        )
+
+        if normalized_market == "SPOT":
+
+            interval_minutes = 120
+
+        elif normalized_market == "FUTURES":
+
+            interval_minutes = (
+                15
+                if futures_actionable
+                else 60
+            )
+
+        else:
+
+            interval_minutes = 60
+
+        now = _now()
+
+        day_start = now.replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0
+        )
+
+        minutes_today = (
+            now.hour * 60
+            + now.minute
+        )
+
+        bucket_minutes = (
+            (
+                minutes_today
+                // interval_minutes
+            )
+            * interval_minutes
+        )
+
+        bucket_time = (
+            day_start
+            + timedelta(
+                minutes=bucket_minutes
+            )
+        )
+
+        advice_bucket = (
+            bucket_time.strftime(
+                "%Y-%m-%dT%H:%MZ"
+            )
+        )
 
         raw = json.dumps(
-
             {
                 "context_type":
                     normalized_context_type,
 
                 "market":
-                    str(
-                        market
-                        or ""
-                    ).strip().upper(),
+                    normalized_market,
 
-                "hour_bucket":
-                    hour_bucket
+                "advice_bucket":
+                    advice_bucket,
+
+                "interval_minutes":
+                    interval_minutes,
+
+                "futures_actionable":
+                    (
+                        futures_actionable
+                        if normalized_market
+                        == "FUTURES"
+                        else False
+                    )
             },
-
             ensure_ascii=False,
-
             sort_keys=True,
-
             separators=(
                 ",",
                 ":"
             ),
-
             default=str
         )
-
 
     # ================================================================
     # RESTO DE FUNCIONES IA
     # ================================================================
     #
-    # Para señales, Guardian, Learning y chat seguimos usando
-    # fingerprint contextual.
+    # Chat, Guardian, Decision Control y Learning continúan usando
+    # fingerprint contextual normal.
     # ================================================================
 
     else:
 
         raw = json.dumps(
-
             {
                 "context":
                     context,
@@ -2360,26 +2440,20 @@ def _fingerprint(
                         or ""
                     ).strip()
             },
-
             ensure_ascii=False,
-
             sort_keys=True,
-
             separators=(
                 ",",
                 ":"
             ),
-
             default=str
         )
-
 
     return hashlib.sha256(
         raw.encode(
             "utf-8"
         )
     ).hexdigest()
-
 
 def _cache_get(
     user_name,
@@ -3634,7 +3708,7 @@ def _call_groq(
 
         context_text = (
             context_text[
-                :AI_MAX_CONTEXT
+                :GROQ_MAX_CONTEXT
             ]
             + "\n...[CONTEXTO RECORTADO]"
         )
@@ -3791,6 +3865,7 @@ en el contexto recibido.
         response.status_code
         == 429
     ):
+
         retry_seconds = (
             _activate_groq_backoff(
                 response
@@ -3807,13 +3882,19 @@ en el contexto recibido.
                 "para evitar reintentos innecesarios."
             )
         )
+
+    if (
+        response.status_code
+        != 200
+    ):
+
+        raise RuntimeError(
             (
                 f"Groq HTTP "
                 f"{response.status_code}: "
                 f"{response.text[:200]}"
             )
         )
-
 
     raw = response.json()
 
@@ -4106,9 +4187,6 @@ y preservación de capital, no Win Rate aislado.
             ],
 
             "generationConfig": {
-                "temperature":
-                    0.15,
-
                 "maxOutputTokens":
                     1800,
 
@@ -4743,8 +4821,6 @@ def run_ai_advisor(
                     quota
             }
 
-
-    try:
 
     try:
 
