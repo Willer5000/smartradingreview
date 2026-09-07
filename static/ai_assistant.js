@@ -20,7 +20,6 @@ console.log(
         false;
 
 
-
     function esc(value) {
 
         return String(
@@ -1749,6 +1748,7 @@ console.log(
                 7000
             );
 
+
             // Revisa una vez por minuto si cambió el bloque de 30 min.
             // NO llama a la IA otra vez dentro del mismo bloque.
 
@@ -1765,6 +1765,7 @@ console.log(
                 },
                 60 * 1000
             );
+
 
             // Si el equipo estuvo suspendido,
             // comprobar al volver a la pestaña.
@@ -1787,5 +1788,4 @@ console.log(
         }
     );
 
-})();
 })();
