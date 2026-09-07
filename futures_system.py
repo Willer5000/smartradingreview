@@ -108,6 +108,64 @@ _futures_fetch_inflight_lock = threading.Lock()
 _futures_http_session = None
 _futures_http_session_lock = threading.Lock()
 
+# ============================================================================
+# QUALITY ENGINE Q3A — FUTURES MICROSTRUCTURE SHADOW
+# ============================================================================
+#
+# Fuente:
+# KuCoin Futures / KuCoin UTA — endpoints PUBLIC gratuitos.
+#
+# Q3 observa:
+#
+#   1. Order Book parcial (20 niveles)
+#   2. Últimos 100 trades
+#   3. Funding actual
+#   4. Open Interest reciente
+#
+# IMPORTANTE:
+#
+# Q3A NO:
+# - cambia Entry;
+# - cambia SL;
+# - cambia TP;
+# - cambia Safety;
+# - cambia leverage;
+# - cambia publicación;
+# - convierte NO_OPERAR en LONG/SHORT.
+#
+# Primero acumularemos evidencia prospectiva.
+# ============================================================================
+
+FUTURES_MICROSTRUCTURE_VERSION = (
+    'Q3_KUCOIN_PUBLIC_MICROSTRUCTURE_V1'
+)
+
+FUTURES_MICROSTRUCTURE_TTL_SECONDS = 90
+
+KUCOIN_FUTURES_ORDERBOOK_URL = (
+    'https://api-futures.kucoin.com/'
+    'api/v1/level2/depth20'
+)
+
+KUCOIN_FUTURES_TRADES_URL = (
+    'https://api-futures.kucoin.com/'
+    'api/v1/trade/history'
+)
+
+KUCOIN_FUTURES_FUNDING_URL = (
+    'https://api-futures.kucoin.com/'
+    'api/v1/funding-rate/{symbol}/current'
+)
+
+KUCOIN_FUTURES_OPEN_INTEREST_URL = (
+    'https://api.kucoin.com/'
+    'api/ua/v2/market/open-interest'
+)
+
+_futures_microstructure_cache = {}
+_futures_microstructure_cache_lock = (
+    threading.Lock()
+)
 
 def _get_futures_http_session() -> requests.Session:
     """Crea una sesión HTTP reutilizable exclusivamente para Futures."""
@@ -158,7 +216,982 @@ def _store_futures_data(symbol: str, interval: str, df) -> None:
             'df': df.copy(deep=True),
             'stored_at': time.monotonic(),
         }
+def _get_cached_futures_microstructure(
+    symbol: str
+):
+    """
+    Devuelve el snapshot Q3 mientras siga fresco.
 
+    La caché es por símbolo, no por timeframe, porque
+    order book, trades y funding describen el mismo
+    mercado Futures en ese instante.
+    """
+
+    with _futures_microstructure_cache_lock:
+
+        cached = (
+            _futures_microstructure_cache.get(
+                symbol
+            )
+        )
+
+        if not cached:
+            return None
+
+        age = (
+            time.monotonic()
+            - cached[
+                'stored_at'
+            ]
+        )
+
+        if (
+            age
+            >= FUTURES_MICROSTRUCTURE_TTL_SECONDS
+        ):
+
+            _futures_microstructure_cache.pop(
+                symbol,
+                None
+            )
+
+            return None
+
+        return dict(
+            cached[
+                'data'
+            ]
+        )
+
+
+def _store_futures_microstructure(
+    symbol: str,
+    data: Dict
+) -> None:
+
+    with _futures_microstructure_cache_lock:
+
+        _futures_microstructure_cache[
+            symbol
+        ] = {
+            'stored_at':
+                time.monotonic(),
+
+            'data':
+                dict(
+                    data
+                    or {}
+                )
+        }
+
+
+def _safe_micro_float(
+    value,
+    default=None
+):
+    try:
+        number = float(
+            value
+        )
+
+        if not math.isfinite(
+            number
+        ):
+            return default
+
+        return number
+
+    except (
+        TypeError,
+        ValueError
+    ):
+        return default
+
+
+def _fetch_public_futures_microstructure(
+    symbol: str
+) -> Dict:
+    """
+    Q3A — descarga un snapshot PEQUEÑO de microestructura.
+
+    Todo procede de endpoints públicos y gratuitos de KuCoin.
+
+    Fail-open diagnóstico:
+    si una fuente falla, no se rompe Futures y las otras
+    fuentes pueden seguir utilizándose como observación.
+    """
+
+    cached = (
+        _get_cached_futures_microstructure(
+            symbol
+        )
+    )
+
+    if cached is not None:
+
+        cached[
+            'cache_hit'
+        ] = True
+
+        return cached
+
+    contract_symbol = (
+        FUTURES_CONTRACT_SYMBOLS.get(
+            symbol
+        )
+    )
+
+    base = {
+        'available':
+            False,
+
+        'model_version':
+            FUTURES_MICROSTRUCTURE_VERSION,
+
+        'mode':
+            'SHADOW_OBSERVATION',
+
+        'calibrated':
+            False,
+
+        'affects_entry':
+            False,
+
+        'affects_safety':
+            False,
+
+        'affects_publication':
+            False,
+
+        'affects_leverage':
+            False,
+
+        'data_scope':
+            'KUCOIN_PUBLIC_FUTURES_REST',
+
+        'symbol':
+            symbol,
+
+        'contract_symbol':
+            contract_symbol,
+
+        'cache_hit':
+            False,
+
+        'sources_available':
+            [],
+
+        'source_errors':
+            []
+    }
+
+    if not contract_symbol:
+
+        base[
+            'status'
+        ] = 'CONTRACT_NOT_MAPPED'
+
+        return base
+
+    session = (
+        _get_futures_http_session()
+    )
+
+    # ====================================================================
+    # 1. ORDER BOOK — 20 NIVELES
+    # ====================================================================
+
+    try:
+
+        response = session.get(
+            KUCOIN_FUTURES_ORDERBOOK_URL,
+            params={
+                'symbol':
+                    contract_symbol
+            },
+            timeout=4
+        )
+
+        response.raise_for_status()
+
+        payload = response.json()
+
+        if str(
+            payload.get(
+                'code'
+            )
+        ) != '200000':
+
+            raise ValueError(
+                'KuCoin order book code '
+                + str(
+                    payload.get(
+                        'code'
+                    )
+                )
+            )
+
+        orderbook = (
+            payload.get(
+                'data'
+            )
+            or {}
+        )
+
+        bids = (
+            orderbook.get(
+                'bids'
+            )
+            or []
+        )
+
+        asks = (
+            orderbook.get(
+                'asks'
+            )
+            or []
+        )
+
+        bid_size = 0.0
+        ask_size = 0.0
+
+        for row in bids[:20]:
+
+            if (
+                isinstance(
+                    row,
+                    (list, tuple)
+                )
+                and len(row) >= 2
+            ):
+
+                quantity = (
+                    _safe_micro_float(
+                        row[1],
+                        0.0
+                    )
+                    or 0.0
+                )
+
+                if quantity > 0:
+                    bid_size += quantity
+
+        for row in asks[:20]:
+
+            if (
+                isinstance(
+                    row,
+                    (list, tuple)
+                )
+                and len(row) >= 2
+            ):
+
+                quantity = (
+                    _safe_micro_float(
+                        row[1],
+                        0.0
+                    )
+                    or 0.0
+                )
+
+                if quantity > 0:
+                    ask_size += quantity
+
+        best_bid = (
+            _safe_micro_float(
+                bids[0][0]
+            )
+            if bids
+            and isinstance(
+                bids[0],
+                (list, tuple)
+            )
+            and len(
+                bids[0]
+            ) >= 2
+            else None
+        )
+
+        best_ask = (
+            _safe_micro_float(
+                asks[0][0]
+            )
+            if asks
+            and isinstance(
+                asks[0],
+                (list, tuple)
+            )
+            and len(
+                asks[0]
+            ) >= 2
+            else None
+        )
+
+        total_depth = (
+            bid_size
+            + ask_size
+        )
+
+        if total_depth > 0:
+
+            book_imbalance = (
+                (
+                    bid_size
+                    - ask_size
+                )
+                / total_depth
+            )
+
+        else:
+
+            book_imbalance = None
+
+        if ask_size > 0:
+
+            bid_ask_depth_ratio = (
+                bid_size
+                / ask_size
+            )
+
+        else:
+
+            bid_ask_depth_ratio = None
+
+        spread_pct = None
+
+        if (
+            best_bid
+            and best_ask
+            and best_bid > 0
+            and best_ask > best_bid
+        ):
+
+            midpoint = (
+                (
+                    best_bid
+                    + best_ask
+                )
+                / 2.0
+            )
+
+            if midpoint > 0:
+
+                spread_pct = (
+                    (
+                        best_ask
+                        - best_bid
+                    )
+                    / midpoint
+                    * 100.0
+                )
+
+        base[
+            'orderbook'
+        ] = {
+            'levels':
+                min(
+                    20,
+                    len(
+                        bids
+                    ),
+                    len(
+                        asks
+                    )
+                ),
+
+            'bid_size':
+                round(
+                    bid_size,
+                    6
+                ),
+
+            'ask_size':
+                round(
+                    ask_size,
+                    6
+                ),
+
+            'bid_ask_depth_ratio':
+                (
+                    round(
+                        bid_ask_depth_ratio,
+                        4
+                    )
+                    if bid_ask_depth_ratio
+                    is not None
+                    else None
+                ),
+
+            'imbalance':
+                (
+                    round(
+                        book_imbalance,
+                        4
+                    )
+                    if book_imbalance
+                    is not None
+                    else None
+                ),
+
+            'best_bid':
+                best_bid,
+
+            'best_ask':
+                best_ask,
+
+            'spread_pct':
+                (
+                    round(
+                        spread_pct,
+                        5
+                    )
+                    if spread_pct
+                    is not None
+                    else None
+                )
+        }
+
+        base[
+            'sources_available'
+        ].append(
+            'ORDERBOOK_20'
+        )
+
+    except Exception as exc:
+
+        base[
+            'source_errors'
+        ].append(
+            (
+                'ORDERBOOK: '
+                + str(
+                    exc
+                )[:160]
+            )
+        )
+
+    # ====================================================================
+    # 2. ÚLTIMOS 100 TRADES
+    # ====================================================================
+
+    try:
+
+        response = session.get(
+            KUCOIN_FUTURES_TRADES_URL,
+            params={
+                'symbol':
+                    contract_symbol
+            },
+            timeout=4
+        )
+
+        response.raise_for_status()
+
+        payload = response.json()
+
+        if str(
+            payload.get(
+                'code'
+            )
+        ) != '200000':
+
+            raise ValueError(
+                'KuCoin trades code '
+                + str(
+                    payload.get(
+                        'code'
+                    )
+                )
+            )
+
+        trades = (
+            payload.get(
+                'data'
+            )
+            or []
+        )
+
+        buy_size = 0.0
+        sell_size = 0.0
+        valid_trades = 0
+
+        for trade in trades[:100]:
+
+            if not isinstance(
+                trade,
+                dict
+            ):
+                continue
+
+            size = (
+                _safe_micro_float(
+                    trade.get(
+                        'size'
+                    ),
+                    0.0
+                )
+                or 0.0
+            )
+
+            if size <= 0:
+                continue
+
+            side = str(
+                trade.get(
+                    'side'
+                )
+                or ''
+            ).strip().lower()
+
+            if side == 'buy':
+
+                buy_size += size
+                valid_trades += 1
+
+            elif side == 'sell':
+
+                sell_size += size
+                valid_trades += 1
+
+        total_trade_size = (
+            buy_size
+            + sell_size
+        )
+
+        if total_trade_size > 0:
+
+            buy_share = (
+                buy_size
+                / total_trade_size
+            )
+
+        else:
+
+            buy_share = None
+
+        if sell_size > 0:
+
+            buy_sell_ratio = (
+                buy_size
+                / sell_size
+            )
+
+        else:
+
+            buy_sell_ratio = None
+
+        base[
+            'recent_trades'
+        ] = {
+            'sample_size':
+                valid_trades,
+
+            'buy_size':
+                round(
+                    buy_size,
+                    6
+                ),
+
+            'sell_size':
+                round(
+                    sell_size,
+                    6
+                ),
+
+            'buy_share':
+                (
+                    round(
+                        buy_share,
+                        4
+                    )
+                    if buy_share
+                    is not None
+                    else None
+                ),
+
+            'buy_sell_ratio':
+                (
+                    round(
+                        buy_sell_ratio,
+                        4
+                    )
+                    if buy_sell_ratio
+                    is not None
+                    else None
+                )
+        }
+
+        base[
+            'sources_available'
+        ].append(
+            'RECENT_TRADES_100'
+        )
+
+    except Exception as exc:
+
+        base[
+            'source_errors'
+        ].append(
+            (
+                'TRADES: '
+                + str(
+                    exc
+                )[:160]
+            )
+        )
+
+    # ====================================================================
+    # 3. FUNDING ACTUAL
+    # ====================================================================
+
+    try:
+
+        funding_url = (
+            KUCOIN_FUTURES_FUNDING_URL.format(
+                symbol=contract_symbol
+            )
+        )
+
+        response = session.get(
+            funding_url,
+            timeout=4
+        )
+
+        response.raise_for_status()
+
+        payload = response.json()
+
+        if str(
+            payload.get(
+                'code'
+            )
+        ) != '200000':
+
+            raise ValueError(
+                'KuCoin funding code '
+                + str(
+                    payload.get(
+                        'code'
+                    )
+                )
+            )
+
+        funding = (
+            payload.get(
+                'data'
+            )
+            or {}
+        )
+
+        funding_rate = (
+            _safe_micro_float(
+                funding.get(
+                    'value'
+                )
+            )
+        )
+
+        predicted_funding = (
+            _safe_micro_float(
+                funding.get(
+                    'predictedValue'
+                )
+            )
+        )
+
+        base[
+            'funding'
+        ] = {
+            'current_rate':
+                funding_rate,
+
+            'predicted_rate':
+                predicted_funding,
+
+            'funding_time':
+                funding.get(
+                    'fundingTime'
+                ),
+
+            'granularity_ms':
+                funding.get(
+                    'granularity'
+                )
+        }
+
+        base[
+            'sources_available'
+        ].append(
+            'CURRENT_FUNDING'
+        )
+
+    except Exception as exc:
+
+        base[
+            'source_errors'
+        ].append(
+            (
+                'FUNDING: '
+                + str(
+                    exc
+                )[:160]
+            )
+        )
+
+    # ====================================================================
+    # 4. OPEN INTEREST RECIENTE
+    # ====================================================================
+    #
+    # Usamos siempre 5 minutos porque Q3 estudia TIMING de ejecución,
+    # incluso cuando la estructura principal sea 1h/2h/4h.
+    # ====================================================================
+
+    try:
+
+        response = session.get(
+            KUCOIN_FUTURES_OPEN_INTEREST_URL,
+            params={
+                'symbol':
+                    contract_symbol,
+
+                'interval':
+                    '5min',
+
+                'pageSize':
+                    6
+            },
+            timeout=4
+        )
+
+        response.raise_for_status()
+
+        payload = response.json()
+
+        if str(
+            payload.get(
+                'code'
+            )
+        ) != '200000':
+
+            raise ValueError(
+                'KuCoin OI code '
+                + str(
+                    payload.get(
+                        'code'
+                    )
+                )
+            )
+
+        oi_data = (
+            payload.get(
+                'data'
+            )
+            or []
+        )
+
+        if isinstance(
+            oi_data,
+            dict
+        ):
+
+            oi_rows = (
+                oi_data.get(
+                    'items'
+                )
+                or oi_data.get(
+                    'list'
+                )
+                or oi_data.get(
+                    'dataList'
+                )
+                or []
+            )
+
+        elif isinstance(
+            oi_data,
+            list
+        ):
+
+            oi_rows = oi_data
+
+        else:
+
+            oi_rows = []
+
+        normalized_oi = []
+
+        for row in oi_rows:
+
+            if not isinstance(
+                row,
+                dict
+            ):
+                continue
+
+            oi_value = (
+                _safe_micro_float(
+                    row.get(
+                        'openInterest'
+                    )
+                )
+            )
+
+            timestamp = (
+                _safe_micro_float(
+                    row.get(
+                        'ts'
+                    )
+                )
+            )
+
+            if (
+                oi_value is None
+                or timestamp is None
+                or oi_value <= 0
+            ):
+                continue
+
+            normalized_oi.append(
+                (
+                    timestamp,
+                    oi_value
+                )
+            )
+
+        normalized_oi.sort(
+            key=lambda item:
+                item[0]
+        )
+
+        oi_change_pct = None
+
+        if len(
+            normalized_oi
+        ) >= 2:
+
+            oldest_oi = (
+                normalized_oi[
+                    0
+                ][1]
+            )
+
+            newest_oi = (
+                normalized_oi[
+                    -1
+                ][1]
+            )
+
+            if oldest_oi > 0:
+
+                oi_change_pct = (
+                    (
+                        newest_oi
+                        / oldest_oi
+                    )
+                    - 1.0
+                ) * 100.0
+
+        else:
+
+            oldest_oi = None
+            newest_oi = (
+                normalized_oi[
+                    -1
+                ][1]
+                if normalized_oi
+                else None
+            )
+
+        base[
+            'open_interest'
+        ] = {
+            'interval':
+                '5min',
+
+            'samples':
+                len(
+                    normalized_oi
+                ),
+
+            'oldest':
+                oldest_oi,
+
+            'latest':
+                newest_oi,
+
+            'change_pct':
+                (
+                    round(
+                        oi_change_pct,
+                        4
+                    )
+                    if oi_change_pct
+                    is not None
+                    else None
+                )
+        }
+
+        base[
+            'sources_available'
+        ].append(
+            'OPEN_INTEREST_5M'
+        )
+
+    except Exception as exc:
+
+        base[
+            'source_errors'
+        ].append(
+            (
+                'OPEN_INTEREST: '
+                + str(
+                    exc
+                )[:160]
+            )
+        )
+
+    base[
+        'available'
+    ] = bool(
+        base[
+            'sources_available'
+        ]
+    )
+
+    base[
+        'source_count'
+    ] = len(
+        base[
+            'sources_available'
+        ]
+    )
+
+    base[
+        'fetched_at'
+    ] = (
+        datetime.utcnow()
+        .isoformat()
+        + 'Z'
+    )
+
+    base[
+        'status'
+    ] = (
+        'OBSERVED_NOT_ENFORCED'
+        if base[
+            'available'
+        ]
+        else 'NO_PUBLIC_SOURCE_AVAILABLE'
+    )
+
+    _store_futures_microstructure(
+        symbol,
+        base
+    )
+
+    return dict(
+        base
+    )
 # Extender el mapeo de intervalos KuCoin
 FUTURES_KUCOIN_INTERVALS = {
     '5m': '5min',
@@ -1099,7 +2132,587 @@ class FuturesAnalysis(TradingExpertSystem):
                 'reason': str(exc),
                 'shadow_verdict': 'UNAVAILABLE',
             }
-            
+    def _analyze_futures_microstructure(
+        self,
+        symbol: str,
+        action: str
+    ) -> Dict:
+        """
+        QUALITY ENGINE Q3A.
+
+        Combina información pública real de Futures:
+
+        - order book;
+        - últimos trades;
+        - funding;
+        - open interest.
+
+        El resultado es una HIPÓTESIS SHADOW.
+
+        No altera la operación.
+        """
+
+        normalized_action = str(
+            action
+            or ''
+        ).strip().upper()
+
+        base = {
+            'available':
+                False,
+
+            'model_version':
+                FUTURES_MICROSTRUCTURE_VERSION,
+
+            'mode':
+                'SHADOW_OBSERVATION',
+
+            'calibrated':
+                False,
+
+            'affects_entry':
+                False,
+
+            'affects_safety':
+                False,
+
+            'affects_publication':
+                False,
+
+            'affects_leverage':
+                False,
+
+            'quality_score_status':
+                (
+                    'UNVALIDATED_MICROSTRUCTURE_PROXY'
+                ),
+
+            'action_evaluated':
+                normalized_action,
+
+            'alignment_score':
+                50.0,
+
+            'alignment':
+                'NOT_APPLICABLE',
+
+            'shadow_verdict':
+                'UNAVAILABLE',
+
+            'reasons':
+                []
+        }
+
+        # ================================================================
+        # NO GASTAR REQUESTS EN NO_OPERAR
+        # ================================================================
+
+        if normalized_action not in (
+            'LONG',
+            'SHORT'
+        ):
+
+            return {
+                **base,
+
+                'status':
+                    'NO_DIRECTIONAL_SETUP',
+
+                'shadow_verdict':
+                    'NO_DIRECTIONAL_SETUP'
+            }
+
+        snapshot = (
+            _fetch_public_futures_microstructure(
+                symbol
+            )
+        )
+
+        if not snapshot.get(
+            'available'
+        ):
+
+            return {
+                **base,
+
+                'status':
+                    snapshot.get(
+                        'status',
+                        'UNAVAILABLE'
+                    ),
+
+                'raw_snapshot':
+                    snapshot
+            }
+
+        score = 50.0
+        reasons = []
+
+        long_setup = (
+            normalized_action
+            == 'LONG'
+        )
+
+        # ================================================================
+        # 1. ORDER BOOK
+        # ================================================================
+
+        orderbook = (
+            snapshot.get(
+                'orderbook'
+            )
+            or {}
+        )
+
+        imbalance = (
+            _safe_micro_float(
+                orderbook.get(
+                    'imbalance'
+                )
+            )
+        )
+
+        spread_pct = (
+            _safe_micro_float(
+                orderbook.get(
+                    'spread_pct'
+                )
+            )
+        )
+
+        if imbalance is not None:
+
+            if imbalance >= 0.10:
+
+                if long_setup:
+
+                    score += 15.0
+
+                    reasons.append(
+                        'Order book favorece bids'
+                    )
+
+                else:
+
+                    score -= 15.0
+
+                    reasons.append(
+                        'Order book contradice SHORT'
+                    )
+
+            elif imbalance <= -0.10:
+
+                if long_setup:
+
+                    score -= 15.0
+
+                    reasons.append(
+                        'Order book contradice LONG'
+                    )
+
+                else:
+
+                    score += 15.0
+
+                    reasons.append(
+                        'Order book favorece asks'
+                    )
+
+            else:
+
+                reasons.append(
+                    'Order book equilibrado'
+                )
+
+        # Spread no define dirección.
+        # Sólo mide calidad inmediata de ejecución.
+
+        if spread_pct is not None:
+
+            if spread_pct <= 0.03:
+
+                score += 5.0
+
+                reasons.append(
+                    'Spread estrecho'
+                )
+
+            elif spread_pct >= 0.10:
+
+                score -= 10.0
+
+                reasons.append(
+                    'Spread amplio'
+                )
+
+        # ================================================================
+        # 2. FLUJO DE TRADES RECIENTE
+        # ================================================================
+
+        recent_trades = (
+            snapshot.get(
+                'recent_trades'
+            )
+            or {}
+        )
+
+        buy_share = (
+            _safe_micro_float(
+                recent_trades.get(
+                    'buy_share'
+                )
+            )
+        )
+
+        trade_flow_direction = (
+            'NEUTRAL'
+        )
+
+        if buy_share is not None:
+
+            if buy_share >= 0.55:
+
+                trade_flow_direction = (
+                    'BUY'
+                )
+
+                if long_setup:
+
+                    score += 15.0
+
+                    reasons.append(
+                        'Trades recientes favorecen compras'
+                    )
+
+                else:
+
+                    score -= 15.0
+
+                    reasons.append(
+                        'Trades recientes contradicen SHORT'
+                    )
+
+            elif buy_share <= 0.45:
+
+                trade_flow_direction = (
+                    'SELL'
+                )
+
+                if long_setup:
+
+                    score -= 15.0
+
+                    reasons.append(
+                        'Trades recientes contradicen LONG'
+                    )
+
+                else:
+
+                    score += 15.0
+
+                    reasons.append(
+                        'Trades recientes favorecen ventas'
+                    )
+
+            else:
+
+                reasons.append(
+                    'Flujo reciente equilibrado'
+                )
+
+        # ================================================================
+        # 3. OPEN INTEREST
+        # ================================================================
+
+        open_interest = (
+            snapshot.get(
+                'open_interest'
+            )
+            or {}
+        )
+
+        oi_change_pct = (
+            _safe_micro_float(
+                open_interest.get(
+                    'change_pct'
+                )
+            )
+        )
+
+        if oi_change_pct is not None:
+
+            # Aumentar OI por sí solo NO dice LONG ni SHORT.
+            #
+            # Sólo lo premiamos cuando al mismo tiempo el flujo
+            # reciente apunta hacia la dirección del setup.
+
+            if oi_change_pct >= 0.50:
+
+                flow_supports_setup = (
+                    (
+                        long_setup
+                        and trade_flow_direction
+                        == 'BUY'
+                    )
+                    or (
+                        not long_setup
+                        and trade_flow_direction
+                        == 'SELL'
+                    )
+                )
+
+                flow_conflicts_setup = (
+                    (
+                        long_setup
+                        and trade_flow_direction
+                        == 'SELL'
+                    )
+                    or (
+                        not long_setup
+                        and trade_flow_direction
+                        == 'BUY'
+                    )
+                )
+
+                if flow_supports_setup:
+
+                    score += 10.0
+
+                    reasons.append(
+                        'OI crece junto al flujo favorable'
+                    )
+
+                elif flow_conflicts_setup:
+
+                    score -= 10.0
+
+                    reasons.append(
+                        'OI crece con flujo contrario'
+                    )
+
+                else:
+
+                    reasons.append(
+                        'OI crece sin dirección confirmada'
+                    )
+
+            elif oi_change_pct <= -0.50:
+
+                score -= 3.0
+
+                reasons.append(
+                    'OI cae: posible desapalancamiento'
+                )
+
+        # ================================================================
+        # 4. FUNDING / CROWDING
+        # ================================================================
+
+        funding = (
+            snapshot.get(
+                'funding'
+            )
+            or {}
+        )
+
+        predicted_funding = (
+            _safe_micro_float(
+                funding.get(
+                    'predicted_rate'
+                )
+            )
+        )
+
+        current_funding = (
+            _safe_micro_float(
+                funding.get(
+                    'current_rate'
+                )
+            )
+        )
+
+        funding_rate = (
+            predicted_funding
+            if predicted_funding
+            is not None
+            else current_funding
+        )
+
+        if funding_rate is not None:
+
+            # 0.0005 = 0.05%.
+            #
+            # Funding extremo NO significa reversión segura.
+            # Sólo marca crowding y recibe poco peso.
+
+            if funding_rate >= 0.0005:
+
+                if long_setup:
+
+                    score -= 5.0
+
+                    reasons.append(
+                        'Funding positivo elevado: longs cargados'
+                    )
+
+                else:
+
+                    score += 5.0
+
+                    reasons.append(
+                        'Funding positivo elevado contra SHORT'
+                    )
+
+            elif funding_rate <= -0.0005:
+
+                if long_setup:
+
+                    score += 5.0
+
+                    reasons.append(
+                        'Funding negativo elevado contra LONG'
+                    )
+
+                else:
+
+                    score -= 5.0
+
+                    reasons.append(
+                        'Funding negativo elevado: shorts cargados'
+                    )
+
+        score = max(
+            0.0,
+            min(
+                100.0,
+                score
+            )
+        )
+
+        # ================================================================
+        # VEREDICTO SHADOW
+        # ================================================================
+
+        if score >= 65.0:
+
+            alignment = (
+                'ALIGNED'
+            )
+
+            shadow_verdict = (
+                'FAVORABLE_CANDIDATE'
+            )
+
+        elif score <= 35.0:
+
+            alignment = (
+                'CONFLICT'
+            )
+
+            shadow_verdict = (
+                'REJECT_CANDIDATE'
+            )
+
+        else:
+
+            alignment = (
+                'NEUTRAL'
+            )
+
+            shadow_verdict = (
+                'CAUTION_CANDIDATE'
+            )
+
+        return {
+            **base,
+
+            'available':
+                True,
+
+            'status':
+                'OBSERVED_NOT_ENFORCED',
+
+            'alignment_score':
+                round(
+                    score,
+                    2
+                ),
+
+            'alignment':
+                alignment,
+
+            'shadow_verdict':
+                shadow_verdict,
+
+            'reasons':
+                reasons[:8],
+
+            'metrics': {
+                'orderbook_imbalance':
+                    imbalance,
+
+                'spread_pct':
+                    spread_pct,
+
+                'recent_buy_share':
+                    buy_share,
+
+                'recent_buy_sell_ratio':
+                    _safe_micro_float(
+                        recent_trades.get(
+                            'buy_sell_ratio'
+                        )
+                    ),
+
+                'oi_change_pct':
+                    oi_change_pct,
+
+                'funding_rate':
+                    funding_rate,
+
+                'source_count':
+                    int(
+                        snapshot.get(
+                            'source_count',
+                            0
+                        )
+                        or 0
+                    )
+            },
+
+            'source_status': {
+                'sources_available':
+                    list(
+                        snapshot.get(
+                            'sources_available',
+                            []
+                        )
+                        or []
+                    ),
+
+                'source_errors':
+                    list(
+                        snapshot.get(
+                            'source_errors',
+                            []
+                        )
+                        or []
+                    ),
+
+                'cache_hit':
+                    bool(
+                        snapshot.get(
+                            'cache_hit',
+                            False
+                        )
+                    ),
+
+                'fetched_at':
+                    snapshot.get(
+                        'fetched_at'
+                    )
+            }
+        }            
     def _calculate_execution_safety(
         self,
         levels: Dict,
@@ -4935,7 +6548,137 @@ class FuturesAnalysis(TradingExpertSystem):
             'affects_publication': False,
         }
         result['decision'] = decision
-        
+        # ==============================================================
+        # QUALITY ENGINE Q3A
+        # MICROESTRUCTURA FUTURES PÚBLICA — SHADOW
+        # ==============================================================
+        #
+        # Se ejecuta DESPUÉS de haber calculado la operación.
+        #
+        # Por diseño no puede modificar retroactivamente:
+        #
+        # Entry / SL / TP / Safety / leverage / publication.
+        #
+        # Sólo deja evidencia para aprendizaje prospectivo.
+        # ==============================================================
+
+        microstructure_context = (
+            self
+            ._analyze_futures_microstructure(
+                symbol=symbol,
+                action=translated_action
+            )
+        )
+
+        result[
+            'futures_microstructure_context'
+        ] = (
+            microstructure_context
+        )
+
+        levels_for_micro = dict(
+            result.get(
+                'levels'
+            )
+            or {}
+        )
+
+        levels_for_micro[
+            'microstructure_model_version'
+        ] = (
+            microstructure_context.get(
+                'model_version'
+            )
+        )
+
+        levels_for_micro[
+            'microstructure_alignment'
+        ] = (
+            microstructure_context.get(
+                'alignment',
+                'NOT_APPLICABLE'
+            )
+        )
+
+        levels_for_micro[
+            'microstructure_alignment_score'
+        ] = float(
+            microstructure_context.get(
+                'alignment_score',
+                0.0
+            )
+            or 0.0
+        )
+
+        levels_for_micro[
+            'microstructure_shadow_verdict'
+        ] = (
+            microstructure_context.get(
+                'shadow_verdict',
+                'UNAVAILABLE'
+            )
+        )
+
+        levels_for_micro[
+            'microstructure_affects_safety'
+        ] = False
+
+        levels_for_micro[
+            'microstructure_affects_publication'
+        ] = False
+
+        result[
+            'levels'
+        ] = levels_for_micro
+
+        decision[
+            'microstructure_observation'
+        ] = {
+            'alignment':
+                microstructure_context.get(
+                    'alignment',
+                    'NOT_APPLICABLE'
+                ),
+
+            'shadow_verdict':
+                microstructure_context.get(
+                    'shadow_verdict',
+                    'UNAVAILABLE'
+                ),
+
+            'alignment_score':
+                float(
+                    microstructure_context.get(
+                        'alignment_score',
+                        0.0
+                    )
+                    or 0.0
+                ),
+
+            'affects_safety':
+                False,
+
+            'affects_publication':
+                False
+        }
+
+        result[
+            'decision'
+        ] = decision
+
+        if microstructure_context.get(
+            'available'
+        ):
+
+            print(
+                "   🔬 [Q3 SHADOW] "
+                f"{symbol} "
+                f"{translated_action} "
+                f"| micro="
+                f"{microstructure_context.get('alignment_score', 0):.1f} "
+                f"| "
+                f"{microstructure_context.get('alignment', 'NEUTRAL')}"
+            )        
         # ============ ADAPTAR JUSTIFICACIÓN AL CONTEXTO DE FUTUROS ============
         # El mensaje se generó con la acción original (COMPRA_SPOT / VENTA_SPOT)
         # usando las plantillas spot. Para futuros necesitamos:
