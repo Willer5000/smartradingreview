@@ -3942,7 +3942,1581 @@ class ReviewTrader:
             return datetime.fromisoformat(ts_str).replace(tzinfo=None)
         except Exception:
             return None
-    
+    # ========================================================================
+    # COMMIT 36U
+    # FUTURES QUALITY LAB — SHADOW ONLY
+    # ========================================================================
+
+    def get_futures_quality_lab(
+        self,
+        days_back: int = 90,
+        max_rows: int = 1000
+    ) -> Dict:
+        """
+        COMMIT 36U
+
+        Estudia cómo la calidad de:
+
+        - Entry SMC
+        - Stop Loss
+        - Take Profit
+        - RR
+        - Estructura
+        - Tendencia
+        - Temporalidad
+
+        se relaciona con outcomes reales de los Futures Shadow.
+
+        REGLAS ABSOLUTAS:
+
+        - READ-ONLY;
+        - no modifica Safety;
+        - no modifica Entry;
+        - no modifica SL;
+        - no modifica TP;
+        - no modifica leverage;
+        - no modifica publication gate;
+        - no crea un segundo evaluador;
+        - no publica señales.
+
+        Su único producto son hipótesis SHADOW para mejorar
+        la calidad de las señales.
+        """
+
+        result = {
+            'mode':
+                'FUTURES_QUALITY_LAB_SHADOW',
+
+            'days_back':
+                int(
+                    days_back
+                ),
+
+            'authority_changed':
+                False,
+
+            'production_changed':
+                False,
+
+            'ready_for_production_change':
+                False,
+
+            'policy':
+                'IMPROVE_QUALITY_DO_NOT_LOWER_SAFETY',
+
+            'inventory': {
+                'futures_rows_scanned':
+                    0,
+
+                'clean_directional_shadow':
+                    0,
+
+                'invalid_geometry':
+                    0,
+
+                'pending':
+                    0,
+
+                'tp_hit':
+                    0,
+
+                'sl_hit':
+                    0,
+
+                'expired_no_entry':
+                    0,
+
+                'expired_after_entry':
+                    0,
+
+                'ambiguous':
+                    0,
+
+                'invalid_setup':
+                    0,
+
+                'other_outcome':
+                    0,
+
+                'resolved_tp_sl':
+                    0
+            },
+
+            'component_inventory':
+                {},
+
+            'quality_by_component':
+                {},
+
+            'validation_30':
+                {},
+
+            'quality_proposals':
+                {},
+
+            'gate': {
+                'resolved_sample_ok':
+                    False,
+
+                'validation_sample_ok':
+                    False,
+
+                'has_promising_component':
+                    False,
+
+                'net_outcomes_verified':
+                    False,
+
+                'oos_positive':
+                    False
+            },
+
+            'status':
+                'COLLECTING_EVIDENCE',
+
+            'reason':
+                None
+        }
+
+        if not self.db.enabled:
+            result[
+                'status'
+            ] = 'SUPABASE_UNAVAILABLE'
+
+            result[
+                'reason'
+            ] = (
+                'ReviewTrader no tiene Supabase activo.'
+            )
+
+            return result
+
+        try:
+            safe_days = max(
+                7,
+                min(
+                    int(
+                        days_back
+                        or 90
+                    ),
+                    180
+                )
+            )
+
+            safe_max_rows = max(
+                100,
+                min(
+                    int(
+                        max_rows
+                        or 1000
+                    ),
+                    1500
+                )
+            )
+
+            cutoff = (
+                datetime.utcnow()
+                - timedelta(
+                    days=safe_days
+                )
+            ).isoformat()
+
+            # ============================================================
+            # HELPERS
+            # ============================================================
+
+            def _float_or_none(
+                value
+            ):
+                try:
+                    number = float(
+                        value
+                    )
+
+                    if math.isfinite(
+                        number
+                    ):
+                        return number
+
+                except (
+                    TypeError,
+                    ValueError
+                ):
+                    pass
+
+                return None
+
+
+            def _quality_score(
+                value
+            ):
+                number = _float_or_none(
+                    value
+                )
+
+                if number is None:
+                    return None
+
+                return max(
+                    0.0,
+                    min(
+                        100.0,
+                        number
+                    )
+                )
+
+
+            def _extract_quality(
+                signal
+            ):
+                """
+                Devuelve únicamente scores ya persistidos.
+                No recalcula Safety.
+                """
+
+                context = (
+                    signal.get(
+                        'context'
+                    )
+                    or {}
+                )
+
+                if not isinstance(
+                    context,
+                    dict
+                ):
+                    context = {}
+
+                execution = (
+                    context.get(
+                        'execution'
+                    )
+                    or {}
+                )
+
+                if not isinstance(
+                    execution,
+                    dict
+                ):
+                    execution = {}
+
+                breakdown = (
+                    execution.get(
+                        'safety_breakdown'
+                    )
+                    or {}
+                )
+
+                if not isinstance(
+                    breakdown,
+                    dict
+                ):
+                    breakdown = {}
+
+                components = (
+                    breakdown.get(
+                        'components'
+                    )
+                    or {}
+                )
+
+                if not isinstance(
+                    components,
+                    dict
+                ):
+                    components = {}
+
+                def _component(
+                    name,
+                    fallback=None
+                ):
+                    if name in components:
+                        return _quality_score(
+                            components.get(
+                                name
+                            )
+                        )
+
+                    value = _float_or_none(
+                        fallback
+                    )
+
+                    if (
+                        value is None
+                        or value <= 0
+                    ):
+                        return None
+
+                    return _quality_score(
+                        value
+                    )
+
+
+                # sl_reliability histórico puede ser 0..1.
+                sl_fallback = _float_or_none(
+                    execution.get(
+                        'sl_reliability'
+                    )
+                )
+
+                if (
+                    sl_fallback is not None
+                    and 0 < sl_fallback <= 1
+                ):
+                    sl_fallback *= 100.0
+
+                scores = {
+                    'entry_smc':
+                        _component(
+                            'entry_smc',
+                            execution.get(
+                                'entry_score'
+                            )
+                        ),
+
+                    'sl':
+                        _component(
+                            'sl',
+                            sl_fallback
+                        ),
+
+                    'tp':
+                        _component(
+                            'tp',
+                            execution.get(
+                                'tp_quality_score'
+                            )
+                        ),
+
+                    'rr':
+                        _component(
+                            'rr'
+                        ),
+
+                    'structure':
+                        _component(
+                            'structure'
+                        ),
+
+                    'trend':
+                        _component(
+                            'trend'
+                        ),
+
+                    'timeframe':
+                        _component(
+                            'timeframe'
+                        )
+                }
+
+                learning = (
+                    self._get_signal_learning(
+                        signal
+                    )
+                    or {}
+                )
+
+                quant = (
+                    learning.get(
+                        'quantitative_shadow'
+                    )
+                    or {}
+                )
+
+                if not isinstance(
+                    quant,
+                    dict
+                ):
+                    quant = {}
+
+                return {
+                    'scores':
+                        scores,
+
+                    'execution_safety':
+                        _float_or_none(
+                            execution.get(
+                                'execution_safety'
+                            )
+                        ),
+
+                    'regime':
+                        str(
+                            quant.get(
+                                'regime'
+                            )
+                            or 'UNAVAILABLE'
+                        )
+                }
+
+
+            def _valid_geometry(
+                action,
+                entry,
+                sl,
+                tp
+            ):
+                if not all(
+                    value is not None
+                    and value > 0
+                    for value in (
+                        entry,
+                        sl,
+                        tp
+                    )
+                ):
+                    return False
+
+                if action == 'LONG':
+                    return (
+                        sl
+                        < entry
+                        < tp
+                    )
+
+                if action == 'SHORT':
+                    return (
+                        tp
+                        < entry
+                        < sl
+                    )
+
+                return False
+
+
+            # ============================================================
+            # 1. LEER FUTURES EN PÁGINAS PEQUEÑAS
+            # ============================================================
+            #
+            # Compactamos inmediatamente cada fila.
+            # No mantenemos 1000 context JSON pesados en memoria.
+            # ============================================================
+
+            candidates = []
+
+            offset = 0
+            page_size = 200
+
+            while (
+                offset < safe_max_rows
+            ):
+                current_size = min(
+                    page_size,
+                    safe_max_rows
+                    - offset
+                )
+
+                response = (
+                    self.db.client
+                    .table(
+                        'signals'
+                    )
+                    .select(
+                        (
+                            'id,'
+                            'symbol,'
+                            'timeframe,'
+                            'system_type,'
+                            'action_original,'
+                            'action_normalized,'
+                            'status,'
+                            'entry_price,'
+                            'stop_loss,'
+                            'take_profit,'
+                            'leverage,'
+                            'context,'
+                            'created_at'
+                        )
+                    )
+                    .eq(
+                        'system_type',
+                        'futures'
+                    )
+                    .gte(
+                        'created_at',
+                        cutoff
+                    )
+                    .order(
+                        'created_at',
+                        desc=False
+                    )
+                    .range(
+                        offset,
+                        offset
+                        + current_size
+                        - 1
+                    )
+                    .execute()
+                )
+
+                batch = (
+                    response.data
+                    or []
+                )
+
+                if not batch:
+                    break
+
+                result[
+                    'inventory'
+                ][
+                    'futures_rows_scanned'
+                ] += len(
+                    batch
+                )
+
+                for signal in batch:
+                    if not isinstance(
+                        signal,
+                        dict
+                    ):
+                        continue
+
+                    learning = (
+                        self._get_signal_learning(
+                            signal
+                        )
+                        or {}
+                    )
+
+                    if (
+                        learning.get(
+                            'cohort'
+                        )
+                        != FUTURES_REAL_COHORT
+                    ):
+                        continue
+
+                    if (
+                        learning.get(
+                            'evaluation_role'
+                        )
+                        != 'SHADOW_ANALYSIS'
+                    ):
+                        continue
+
+                    action = str(
+                        signal.get(
+                            'action_normalized'
+                        )
+                        or signal.get(
+                            'action_original'
+                        )
+                        or ''
+                    ).upper()
+
+                    if action not in (
+                        'LONG',
+                        'SHORT'
+                    ):
+                        continue
+
+                    entry = _float_or_none(
+                        signal.get(
+                            'entry_price'
+                        )
+                    )
+
+                    sl = _float_or_none(
+                        signal.get(
+                            'stop_loss'
+                        )
+                    )
+
+                    tp = _float_or_none(
+                        signal.get(
+                            'take_profit'
+                        )
+                    )
+
+                    if not _valid_geometry(
+                        action,
+                        entry,
+                        sl,
+                        tp
+                    ):
+                        result[
+                            'inventory'
+                        ][
+                            'invalid_geometry'
+                        ] += 1
+
+                        continue
+
+                    quality = (
+                        _extract_quality(
+                            signal
+                        )
+                    )
+
+                    candidates.append({
+                        'id':
+                            str(
+                                signal.get(
+                                    'id'
+                                )
+                                or ''
+                            ),
+
+                        'symbol':
+                            signal.get(
+                                'symbol'
+                            ),
+
+                        'timeframe':
+                            signal.get(
+                                'timeframe'
+                            ),
+
+                        'action':
+                            action,
+
+                        'entry':
+                            entry,
+
+                        'sl':
+                            sl,
+
+                        'tp':
+                            tp,
+
+                        'leverage':
+                            _float_or_none(
+                                signal.get(
+                                    'leverage'
+                                )
+                            ),
+
+                        'created_at':
+                            str(
+                                signal.get(
+                                    'created_at'
+                                )
+                                or ''
+                            ),
+
+                        'scores':
+                            quality[
+                                'scores'
+                            ],
+
+                        'execution_safety':
+                            quality[
+                                'execution_safety'
+                            ],
+
+                        'regime':
+                            quality[
+                                'regime'
+                            ]
+                    })
+
+                if len(
+                    batch
+                ) < current_size:
+                    break
+
+                offset += len(
+                    batch
+                )
+
+            result[
+                'inventory'
+            ][
+                'clean_directional_shadow'
+            ] = len(
+                candidates
+            )
+
+            if not candidates:
+                result[
+                    'reason'
+                ] = (
+                    'NO_CLEAN_DIRECTIONAL_FUTURES_SHADOW'
+                )
+
+                return result
+
+            # ============================================================
+            # 2. RESULTADOS
+            # ============================================================
+
+            signal_ids = [
+                row[
+                    'id'
+                ]
+                for row
+                in candidates
+                if row.get(
+                    'id'
+                )
+            ]
+
+            results_by_signal = {}
+
+            for start in range(
+                0,
+                len(
+                    signal_ids
+                ),
+                100
+            ):
+                id_batch = signal_ids[
+                    start:
+                    start + 100
+                ]
+
+                response = (
+                    self.db.client
+                    .table(
+                        'signal_results'
+                    )
+                    .select(
+                        (
+                            'signal_id,'
+                            'status,'
+                            'pnl_pct,'
+                            'notes,'
+                            'created_at'
+                        )
+                    )
+                    .in_(
+                        'signal_id',
+                        id_batch
+                    )
+                    .order(
+                        'created_at',
+                        desc=False
+                    )
+                    .execute()
+                )
+
+                for row in (
+                    response.data
+                    or []
+                ):
+                    if not isinstance(
+                        row,
+                        dict
+                    ):
+                        continue
+
+                    signal_id = str(
+                        row.get(
+                            'signal_id'
+                        )
+                        or ''
+                    )
+
+                    if signal_id:
+                        # Si existiese más de un resultado legado,
+                        # conservar el último cronológicamente.
+                        results_by_signal[
+                            signal_id
+                        ] = row
+
+            # ============================================================
+            # 3. INVENTARIO DE CALIDAD
+            # ============================================================
+
+            components = (
+                'entry_smc',
+                'sl',
+                'tp',
+                'rr',
+                'structure',
+                'trend',
+                'timeframe'
+            )
+
+            component_values = {
+                name:
+                    []
+                for name
+                in components
+            }
+
+            for candidate in candidates:
+                for name in components:
+                    score = (
+                        candidate[
+                            'scores'
+                        ].get(
+                            name
+                        )
+                    )
+
+                    if score is not None:
+                        component_values[
+                            name
+                        ].append(
+                            score
+                        )
+
+            for name in components:
+                values = (
+                    component_values[
+                        name
+                    ]
+                )
+
+                result[
+                    'component_inventory'
+                ][
+                    name
+                ] = {
+                    'n':
+                        len(
+                            values
+                        ),
+
+                    'mean':
+                        (
+                            round(
+                                sum(
+                                    values
+                                )
+                                / len(
+                                    values
+                                ),
+                                2
+                            )
+                            if values
+                            else None
+                        )
+                }
+
+            # ============================================================
+            # 4. OUTCOMES
+            # ============================================================
+
+            resolved_rows = []
+
+            for candidate in candidates:
+                outcome = (
+                    results_by_signal.get(
+                        candidate[
+                            'id'
+                        ]
+                    )
+                )
+
+                if not outcome:
+                    result[
+                        'inventory'
+                    ][
+                        'pending'
+                    ] += 1
+
+                    continue
+
+                status = str(
+                    outcome.get(
+                        'status'
+                    )
+                    or ''
+                ).lower()
+
+                if status == 'tp_hit':
+                    result[
+                        'inventory'
+                    ][
+                        'tp_hit'
+                    ] += 1
+
+                elif status == 'sl_hit':
+                    result[
+                        'inventory'
+                    ][
+                        'sl_hit'
+                    ] += 1
+
+                elif status == 'expired':
+                    notes = str(
+                        outcome.get(
+                            'notes'
+                        )
+                        or ''
+                    ).lower()
+
+                    if (
+                        'expired_after_entry'
+                        in notes
+                        or 'entry_touched=true'
+                        in notes
+                    ):
+                        result[
+                            'inventory'
+                        ][
+                            'expired_after_entry'
+                        ] += 1
+
+                    else:
+                        result[
+                            'inventory'
+                        ][
+                            'expired_no_entry'
+                        ] += 1
+
+                    continue
+
+                elif status == 'ambiguous':
+                    result[
+                        'inventory'
+                    ][
+                        'ambiguous'
+                    ] += 1
+
+                    continue
+
+                elif status == 'invalid_setup':
+                    result[
+                        'inventory'
+                    ][
+                        'invalid_setup'
+                    ] += 1
+
+                    continue
+
+                else:
+                    result[
+                        'inventory'
+                    ][
+                        'other_outcome'
+                    ] += 1
+
+                    continue
+
+                # Sólo TP y SL son resultados R estadísticamente
+                # resueltos para este Quality Lab.
+
+                risk = abs(
+                    candidate[
+                        'entry'
+                    ]
+                    - candidate[
+                        'sl'
+                    ]
+                )
+
+                reward = abs(
+                    candidate[
+                        'tp'
+                    ]
+                    - candidate[
+                        'entry'
+                    ]
+                )
+
+                if risk <= 0:
+                    continue
+
+                planned_rr = (
+                    reward
+                    / risk
+                )
+
+                realized_r = (
+                    planned_rr
+                    if status
+                    == 'tp_hit'
+                    else -1.0
+                )
+
+                resolved_rows.append({
+                    **candidate,
+
+                    'outcome':
+                        status,
+
+                    'realized_r':
+                        realized_r
+                })
+
+            result[
+                'inventory'
+            ][
+                'resolved_tp_sl'
+            ] = len(
+                resolved_rows
+            )
+
+            resolved_rows.sort(
+                key=lambda row:
+                    row[
+                        'created_at'
+                    ]
+            )
+
+            # ============================================================
+            # 5. BANDAS DE CALIDAD
+            # ============================================================
+
+            def _score_band(
+                score
+            ):
+                if score < 40:
+                    return '<40'
+
+                if score < 55:
+                    return '40-54'
+
+                if score < 65:
+                    return '55-64'
+
+                if score < 75:
+                    return '65-74'
+
+                return '75+'
+
+
+            def _summarize_component(
+                rows,
+                component
+            ):
+                buckets = {}
+
+                for row in rows:
+                    score = (
+                        row[
+                            'scores'
+                        ].get(
+                            component
+                        )
+                    )
+
+                    if score is None:
+                        continue
+
+                    band = (
+                        _score_band(
+                            score
+                        )
+                    )
+
+                    bucket = (
+                        buckets.setdefault(
+                            band,
+                            {
+                                'n':
+                                    0,
+
+                                'tp':
+                                    0,
+
+                                'sl':
+                                    0,
+
+                                'sum_r':
+                                    0.0
+                            }
+                        )
+                    )
+
+                    bucket[
+                        'n'
+                    ] += 1
+
+                    bucket[
+                        'sum_r'
+                    ] += float(
+                        row[
+                            'realized_r'
+                        ]
+                    )
+
+                    if (
+                        row[
+                            'outcome'
+                        ]
+                        == 'tp_hit'
+                    ):
+                        bucket[
+                            'tp'
+                        ] += 1
+
+                    else:
+                        bucket[
+                            'sl'
+                        ] += 1
+
+                output = {}
+
+                for (
+                    band,
+                    bucket
+                ) in buckets.items():
+                    n = (
+                        bucket[
+                            'n'
+                        ]
+                    )
+
+                    output[
+                        band
+                    ] = {
+                        'n':
+                            n,
+
+                        'tp':
+                            bucket[
+                                'tp'
+                            ],
+
+                        'sl':
+                            bucket[
+                                'sl'
+                            ],
+
+                        'win_rate_pct':
+                            round(
+                                (
+                                    bucket[
+                                        'tp'
+                                    ]
+                                    / n
+                                    * 100.0
+                                ),
+                                2
+                            )
+                            if n
+                            else None,
+
+                        'expectancy_r':
+                            round(
+                                (
+                                    bucket[
+                                        'sum_r'
+                                    ]
+                                    / n
+                                ),
+                                4
+                            )
+                            if n
+                            else None
+                    }
+
+                return output
+
+
+            for component in components:
+                result[
+                    'quality_by_component'
+                ][
+                    component
+                ] = (
+                    _summarize_component(
+                        resolved_rows,
+                        component
+                    )
+                )
+
+            # ============================================================
+            # 6. WALK-FORWARD 70 / 30
+            # ============================================================
+
+            split_index = int(
+                len(
+                    resolved_rows
+                )
+                * 0.70
+            )
+
+            validation_rows = (
+                resolved_rows[
+                    split_index:
+                ]
+            )
+
+            for component in components:
+                result[
+                    'validation_30'
+                ][
+                    component
+                ] = (
+                    _summarize_component(
+                        validation_rows,
+                        component
+                    )
+                )
+
+            # ============================================================
+            # 7. BUSCAR UMBRALES DE MAYOR CALIDAD — SHADOW
+            # ============================================================
+            #
+            # Esto NO propone bajar Safety.
+            #
+            # Pregunta exactamente lo contrario:
+            #
+            # "¿Existe evidencia de que exigir MAYOR calidad en un
+            # componente produce mejor expectancy?"
+            # ============================================================
+
+            def _average_r(
+                rows
+            ):
+                if not rows:
+                    return None
+
+                return (
+                    sum(
+                        float(
+                            row[
+                                'realized_r'
+                            ]
+                        )
+                        for row
+                        in rows
+                    )
+                    / len(
+                        rows
+                    )
+                )
+
+
+            promising_count = 0
+
+            for component in components:
+                proposal = {
+                    'status':
+                        'COLLECTING_EVIDENCE',
+
+                    'candidate_min_score_shadow':
+                        None,
+
+                    'sample':
+                        0,
+
+                    'validation_sample':
+                        0,
+
+                    'reason':
+                        (
+                            'Muestra insuficiente o '
+                            'sin edge OOS demostrado.'
+                        ),
+
+                    'affects_production':
+                        False
+                }
+
+                component_rows = [
+                    row
+                    for row
+                    in resolved_rows
+                    if (
+                        row[
+                            'scores'
+                        ].get(
+                            component
+                        )
+                        is not None
+                    )
+                ]
+
+                component_validation = [
+                    row
+                    for row
+                    in validation_rows
+                    if (
+                        row[
+                            'scores'
+                        ].get(
+                            component
+                        )
+                        is not None
+                    )
+                ]
+
+                proposal[
+                    'sample'
+                ] = len(
+                    component_rows
+                )
+
+                proposal[
+                    'validation_sample'
+                ] = len(
+                    component_validation
+                )
+
+                # Sólo examinamos umbrales que EXIGEN calidad.
+                for threshold in (
+                    55.0,
+                    65.0,
+                    75.0
+                ):
+                    above = [
+                        row
+                        for row
+                        in component_rows
+                        if (
+                            row[
+                                'scores'
+                            ][
+                                component
+                            ]
+                            >= threshold
+                        )
+                    ]
+
+                    below = [
+                        row
+                        for row
+                        in component_rows
+                        if (
+                            row[
+                                'scores'
+                            ][
+                                component
+                            ]
+                            < threshold
+                        )
+                    ]
+
+                    validation_above = [
+                        row
+                        for row
+                        in component_validation
+                        if (
+                            row[
+                                'scores'
+                            ][
+                                component
+                            ]
+                            >= threshold
+                        )
+                    ]
+
+                    if (
+                        len(
+                            above
+                        ) < 5
+                        or len(
+                            below
+                        ) < 5
+                        or len(
+                            validation_above
+                        ) < 3
+                    ):
+                        continue
+
+                    above_r = (
+                        _average_r(
+                            above
+                        )
+                    )
+
+                    below_r = (
+                        _average_r(
+                            below
+                        )
+                    )
+
+                    validation_r = (
+                        _average_r(
+                            validation_above
+                        )
+                    )
+
+                    if (
+                        above_r is not None
+                        and below_r is not None
+                        and validation_r is not None
+                        and above_r > 0
+                        and validation_r > 0
+                        and above_r
+                        >= below_r
+                        + 0.10
+                    ):
+                        proposal.update({
+                            'status':
+                                'PROMISING_SHADOW',
+
+                            'candidate_min_score_shadow':
+                                threshold,
+
+                            'above_sample':
+                                len(
+                                    above
+                                ),
+
+                            'below_sample':
+                                len(
+                                    below
+                                ),
+
+                            'validation_above_sample':
+                                len(
+                                    validation_above
+                                ),
+
+                            'above_expectancy_r':
+                                round(
+                                    above_r,
+                                    4
+                                ),
+
+                            'below_expectancy_r':
+                                round(
+                                    below_r,
+                                    4
+                                ),
+
+                            'validation_expectancy_r':
+                                round(
+                                    validation_r,
+                                    4
+                                ),
+
+                            'reason':
+                                (
+                                    'Mayor calidad mostró '
+                                    'mejor expectancy y '
+                                    'continuó positiva OOS.'
+                                )
+                        })
+
+                        promising_count += 1
+
+                        # Elegir el primer umbral prudente que
+                        # demuestra edge; no buscar uno más agresivo.
+                        break
+
+                result[
+                    'quality_proposals'
+                ][
+                    component
+                ] = proposal
+
+            # ============================================================
+            # 8. GATE 36U
+            # ============================================================
+
+            result[
+                'gate'
+            ][
+                'resolved_sample_ok'
+            ] = bool(
+                len(
+                    resolved_rows
+                )
+                >= 25
+            )
+
+            result[
+                'gate'
+            ][
+                'validation_sample_ok'
+            ] = bool(
+                len(
+                    validation_rows
+                )
+                >= 10
+            )
+
+            result[
+                'gate'
+            ][
+                'has_promising_component'
+            ] = bool(
+                promising_count > 0
+            )
+
+            # No inventamos costes realizados.
+            result[
+                'gate'
+            ][
+                'net_outcomes_verified'
+            ] = False
+
+            # En esta fase OOS sólo se considera una señal
+            # diagnóstica, nunca permiso de producción.
+            result[
+                'gate'
+            ][
+                'oos_positive'
+            ] = bool(
+                promising_count > 0
+            )
+
+            if (
+                result[
+                    'gate'
+                ][
+                    'resolved_sample_ok'
+                ]
+                and result[
+                    'gate'
+                ][
+                    'validation_sample_ok'
+                ]
+                and result[
+                    'gate'
+                ][
+                    'has_promising_component'
+                ]
+            ):
+                result[
+                    'status'
+                ] = (
+                    'DIAGNOSTIC_READY_'
+                    'WAITING_NET_VALIDATION'
+                )
+
+                result[
+                    'reason'
+                ] = (
+                    'Existe una hipótesis de mayor calidad '
+                    'con evidencia OOS, pero no puede '
+                    'modificar producción sin outcomes netos.'
+                )
+
+            else:
+                result[
+                    'status'
+                ] = (
+                    'COLLECTING_EVIDENCE'
+                )
+
+                result[
+                    'reason'
+                ] = (
+                    'Aún faltan outcomes Futures resueltos '
+                    'para relacionar calidad con expectancy.'
+                )
+
+            # Regla absoluta de 36U.
+            result[
+                'ready_for_production_change'
+            ] = False
+
+            return result
+
+        except Exception as error:
+            # ============================================================
+            # FAIL-OPEN
+            # ============================================================
+            #
+            # Un fallo del laboratorio jamás toca Futures.
+            # ============================================================
+
+            logger.warning(
+                "36U Futures Quality Lab: %s",
+                error
+            )
+
+            result[
+                'status'
+            ] = 'QUALITY_LAB_ERROR'
+
+            result[
+                'reason'
+            ] = str(
+                error
+            )[:180]
+
+            return result    
     # ========================================================================
     # 3. DETECTAR OPORTUNIDADES PERDIDAS
     # ========================================================================
