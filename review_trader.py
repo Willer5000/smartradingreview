@@ -146,6 +146,29 @@ COMMIT37_POLICY_VERSION = 'commit37_gate_locked_v1'
 COMMIT37_REQUIRED_QUALITY_SCORE_VERSION = '36W_V2_NORMALIZED'
 COMMIT37_OBSERVATIONAL_REGIME = 'TRANSITION'
 # ============================================================================
+# QUALITY ENGINE Q3B — LEARNING BRIDGE
+# ============================================================================
+#
+# Q3A observa microestructura pública gratuita de KuCoin Futures.
+#
+# Q3B NO consulta nuevamente ninguna API.
+# Sólo persiste una fotografía compacta de:
+#
+# - Q1 Entry Quality / Reachability
+# - Q2 Futures Execution Specialist
+# - Q3 Microstructure Shadow
+#
+# para poder relacionarla posteriormente con:
+#
+# Entry tocado / TP / SL / Expired / Expectancy / PnL.
+#
+# Ninguno de estos datos adquiere autoridad operativa por ser persistido.
+# ============================================================================
+
+Q3B_LEARNING_SNAPSHOT_VERSION = (
+    'Q3B_MICROSTRUCTURE_LEARNING_V1'
+)
+# ============================================================================
 # CLASE PRINCIPAL: REVIEW TRADER
 # ============================================================================
 
@@ -1911,6 +1934,400 @@ class ReviewTrader:
                             )
                         }
                     }            
+            # ==============================================================
+            # QUALITY ENGINE Q3B
+            # MICROESTRUCTURA FUTURES → APRENDIZAJE PROSPECTIVO
+            # ==============================================================
+            #
+            # Q3A ya consultó los endpoints públicos de KuCoin.
+            #
+            # Q3B:
+            #
+            # - NO hace otra llamada HTTP;
+            # - NO recalcula order book;
+            # - NO modifica la decisión;
+            # - NO modifica Entry;
+            # - NO modifica SL;
+            # - NO modifica TP;
+            # - NO modifica leverage;
+            # - NO modifica Safety;
+            # - NO modifica publication_status;
+            # - NO modifica pesos del comité.
+            #
+            # Sólo guarda una fotografía compacta para que, cuando esta
+            # misma señal termine en TP / SL / Expired, podamos medir si
+            # ALIGNED / NEUTRAL / CONFLICT tenía realmente valor predictivo.
+            # ==============================================================
+
+            if (
+                self._normalize_system_type(
+                    system_type
+                )
+                == 'futures'
+            ):
+
+                raw_micro = (
+                    analysis_result.get(
+                        'futures_microstructure_context'
+                    )
+                    or {}
+                )
+
+                if isinstance(
+                    raw_micro,
+                    dict
+                ) and raw_micro:
+
+                    raw_micro_metrics = (
+                        raw_micro.get(
+                            'metrics'
+                        )
+                        or {}
+                    )
+
+                    if not isinstance(
+                        raw_micro_metrics,
+                        dict
+                    ):
+
+                        raw_micro_metrics = {}
+
+                    raw_micro_reasons = (
+                        raw_micro.get(
+                            'reasons'
+                        )
+                        or []
+                    )
+
+                    if not isinstance(
+                        raw_micro_reasons,
+                        (list, tuple)
+                    ):
+
+                        raw_micro_reasons = [
+                            raw_micro_reasons
+                        ]
+
+                    raw_source_status = (
+                        raw_micro.get(
+                            'source_status'
+                        )
+                        or {}
+                    )
+
+                    if not isinstance(
+                        raw_source_status,
+                        dict
+                    ):
+
+                        raw_source_status = {}
+
+                    raw_sources = (
+                        raw_source_status.get(
+                            'sources_available'
+                        )
+                        or []
+                    )
+
+                    if not isinstance(
+                        raw_sources,
+                        (list, tuple)
+                    ):
+
+                        raw_sources = [
+                            raw_sources
+                        ]
+
+                    raw_source_errors = (
+                        raw_source_status.get(
+                            'source_errors'
+                        )
+                        or []
+                    )
+
+                    if not isinstance(
+                        raw_source_errors,
+                        (list, tuple)
+                    ):
+
+                        raw_source_errors = [
+                            raw_source_errors
+                        ]
+
+                    def _micro_optional_float(
+                        value
+                    ):
+                        try:
+                            number = float(
+                                value
+                            )
+
+                            return (
+                                number
+                                if math.isfinite(
+                                    number
+                                )
+                                else None
+                            )
+
+                        except (
+                            TypeError,
+                            ValueError
+                        ):
+                            return None
+
+                    context[
+                        'learning'
+                    ][
+                        'microstructure_shadow'
+                    ] = {
+                        # ==============================================
+                        # VERSIONADO
+                        # ==============================================
+
+                        'snapshot_version':
+                            Q3B_LEARNING_SNAPSHOT_VERSION,
+
+                        'model_version':
+                            str(
+                                raw_micro.get(
+                                    'model_version',
+                                    ''
+                                )
+                                or ''
+                            ),
+
+                        # ==============================================
+                        # ESTADO
+                        # ==============================================
+
+                        'available':
+                            self._as_bool(
+                                raw_micro.get(
+                                    'available',
+                                    False
+                                )
+                            ),
+
+                        'status':
+                            str(
+                                raw_micro.get(
+                                    'status',
+                                    'UNAVAILABLE'
+                                )
+                                or 'UNAVAILABLE'
+                            ),
+
+                        'mode':
+                            str(
+                                raw_micro.get(
+                                    'mode',
+                                    'SHADOW_OBSERVATION'
+                                )
+                                or 'SHADOW_OBSERVATION'
+                            ),
+
+                        'calibrated':
+                            self._as_bool(
+                                raw_micro.get(
+                                    'calibrated',
+                                    False
+                                )
+                            ),
+
+                        'quality_score_status':
+                            str(
+                                raw_micro.get(
+                                    'quality_score_status',
+                                    'UNVALIDATED'
+                                )
+                                or 'UNVALIDATED'
+                            ),
+
+                        # ==============================================
+                        # ACCIÓN + VEREDICTO
+                        # ==============================================
+
+                        'action_evaluated':
+                            str(
+                                raw_micro.get(
+                                    'action_evaluated',
+                                    ''
+                                )
+                                or ''
+                            ).upper(),
+
+                        'alignment':
+                            str(
+                                raw_micro.get(
+                                    'alignment',
+                                    'NOT_APPLICABLE'
+                                )
+                                or 'NOT_APPLICABLE'
+                            ).upper(),
+
+                        'alignment_score':
+                            _micro_optional_float(
+                                raw_micro.get(
+                                    'alignment_score'
+                                )
+                            ),
+
+                        'shadow_verdict':
+                            str(
+                                raw_micro.get(
+                                    'shadow_verdict',
+                                    'UNAVAILABLE'
+                                )
+                                or 'UNAVAILABLE'
+                            ).upper(),
+
+                        # ==============================================
+                        # GUARDRAILS
+                        # ==============================================
+                        #
+                        # Estos False son IMPORTANTES.
+                        #
+                        # Incluso aunque la microestructura diga ALIGNED,
+                        # Q3B no adquiere autoridad operativa.
+                        # ==============================================
+
+                        'affects_entry':
+                            False,
+
+                        'affects_safety':
+                            False,
+
+                        'affects_publication':
+                            False,
+
+                        'affects_leverage':
+                            False,
+
+                        # ==============================================
+                        # RAZONES COMPACTAS
+                        # ==============================================
+
+                        'reasons': [
+                            str(
+                                reason
+                            )[:140]
+
+                            for reason
+                            in raw_micro_reasons[:6]
+
+                            if str(
+                                reason
+                                or ''
+                            ).strip()
+                        ],
+
+                        # ==============================================
+                        # MÉTRICAS Q3
+                        # ==============================================
+
+                        'metrics': {
+                            'orderbook_imbalance':
+                                _micro_optional_float(
+                                    raw_micro_metrics.get(
+                                        'orderbook_imbalance'
+                                    )
+                                ),
+
+                            'spread_pct':
+                                _micro_optional_float(
+                                    raw_micro_metrics.get(
+                                        'spread_pct'
+                                    )
+                                ),
+
+                            'recent_buy_share':
+                                _micro_optional_float(
+                                    raw_micro_metrics.get(
+                                        'recent_buy_share'
+                                    )
+                                ),
+
+                            'recent_buy_sell_ratio':
+                                _micro_optional_float(
+                                    raw_micro_metrics.get(
+                                        'recent_buy_sell_ratio'
+                                    )
+                                ),
+
+                            'oi_change_pct':
+                                _micro_optional_float(
+                                    raw_micro_metrics.get(
+                                        'oi_change_pct'
+                                    )
+                                ),
+
+                            'funding_rate':
+                                _micro_optional_float(
+                                    raw_micro_metrics.get(
+                                        'funding_rate'
+                                    )
+                                ),
+
+                            'source_count':
+                                _micro_optional_float(
+                                    raw_micro_metrics.get(
+                                        'source_count'
+                                    )
+                                )
+                        },
+
+                        # ==============================================
+                        # AUDITORÍA DE FUENTE
+                        # ==============================================
+
+                        'source_status': {
+                            'sources_available': [
+                                str(
+                                    source
+                                )[:80]
+
+                                for source
+                                in raw_sources[:6]
+
+                                if str(
+                                    source
+                                    or ''
+                                ).strip()
+                            ],
+
+                            'source_errors': [
+                                str(
+                                    error
+                                )[:160]
+
+                                for error
+                                in raw_source_errors[:4]
+
+                                if str(
+                                    error
+                                    or ''
+                                ).strip()
+                            ],
+
+                            'cache_hit':
+                                self._as_bool(
+                                    raw_source_status.get(
+                                        'cache_hit',
+                                        False
+                                    )
+                                ),
+
+                            'fetched_at':
+                                str(
+                                    raw_source_status.get(
+                                        'fetched_at',
+                                        ''
+                                    )
+                                    or ''
+                                )
+                        }
+                    }
             # Datos de la señal
             decision = analysis_result.get('decision', {})
             levels = analysis_result.get('levels', {})
@@ -1936,9 +2353,40 @@ class ReviewTrader:
             signal_id = self.db.insert_signal(signal_data)
             
             if signal_id:
-                print(f"📝 [REVIEW] Señal registrada: {signal_data['symbol']} {signal_data['timeframe']} "
-                      f"→ {signal_data['action']} (conf {signal_data['confidence']:.0f}%) - ID {signal_id[:8]}...")
-            
+
+                print(
+                    f"📝 [REVIEW] Señal registrada: "
+                    f"{signal_data['symbol']} "
+                    f"{signal_data['timeframe']} "
+                    f"→ {signal_data['action']} "
+                    f"(conf {signal_data['confidence']:.0f}%) "
+                    f"- ID {signal_id[:8]}..."
+                )
+
+                micro_learning = (
+                    context.get(
+                        'learning',
+                        {}
+                    )
+                    or {}
+                ).get(
+                    'microstructure_shadow',
+                    {}
+                ) or {}
+
+                if micro_learning:
+
+                    print(
+                        "   🧠 [Q3B] Microestructura guardada "
+                        f"| {signal_data['symbol']} "
+                        f"{signal_data['timeframe']} "
+                        f"| "
+                        f"{micro_learning.get('alignment', 'N/A')} "
+                        f"{micro_learning.get('alignment_score', 'N/A')} "
+                        f"| fuentes="
+                        f"{micro_learning.get('metrics', {}).get('source_count', 0)}"
+                    )
+
             return signal_id
             
         except Exception as e:
@@ -2166,6 +2614,194 @@ class ReviewTrader:
                     'LEGACY'
                 )
                 or 'LEGACY'
+            ),
+
+            # ==========================================================
+            # QUALITY ENGINE Q1
+            # ENTRY QUALITY / REACHABILITY
+            # ==========================================================
+            #
+            # Importante para SPOT y FUTURES.
+            #
+            # Estos campos permiten comprobar posteriormente si:
+            #
+            # Entry más alcanzable
+            #     ↓
+            # más Entries realmente tocados
+            #     ↓
+            # mejor WR / Expectancy / PnL.
+            # ==========================================================
+
+            'entry_quality_version': str(
+                levels.get(
+                    'entry_quality_version',
+                    'LEGACY_ENTRY'
+                )
+                or 'LEGACY_ENTRY'
+            ),
+
+            'entry_smc_raw_score': _safe_float(
+                levels.get(
+                    'entry_smc_raw_score',
+                    levels.get(
+                        'entry_score',
+                        0
+                    )
+                ),
+                0.0
+            ),
+
+            'entry_reachability_score': _safe_float(
+                levels.get(
+                    'entry_reachability_score',
+                    0
+                ),
+                0.0
+            ),
+
+            'entry_distance_atr': _safe_float(
+                levels.get(
+                    'entry_distance_atr'
+                ),
+                None
+            ),
+
+            'entry_distance_pct': _safe_float(
+                levels.get(
+                    'entry_distance_pct'
+                ),
+                None
+            ),
+
+            'entry_reachability_label': str(
+                levels.get(
+                    'entry_reachability_label',
+                    'N/A'
+                )
+                or 'N/A'
+            ),
+
+            # ==========================================================
+            # QUALITY ENGINE Q2
+            # FUTURES EXECUTION SPECIALIST
+            # ==========================================================
+            #
+            # Para Spot normalmente quedará vacío/False.
+            # Para Futures permite saber qué señales realmente fueron
+            # refinadas por Q2.
+            # ==========================================================
+
+            'futures_execution_specialist_version': str(
+                levels.get(
+                    'futures_execution_specialist_version',
+                    ''
+                )
+                or ''
+            ),
+
+            'futures_execution_refined': self._as_bool(
+                levels.get(
+                    'futures_execution_refined',
+                    False
+                )
+            )
+        }
+            'quality_score_version': str(
+                levels.get(
+                    'quality_score_version',
+                    'LEGACY'
+                )
+                or 'LEGACY'
+            ),
+
+            # ==========================================================
+            # QUALITY ENGINE Q1
+            # ENTRY QUALITY / REACHABILITY
+            # ==========================================================
+            #
+            # Importante para SPOT y FUTURES.
+            #
+            # Estos campos permiten comprobar posteriormente si:
+            #
+            # Entry más alcanzable
+            #     ↓
+            # más Entries realmente tocados
+            #     ↓
+            # mejor WR / Expectancy / PnL.
+            # ==========================================================
+
+            'entry_quality_version': str(
+                levels.get(
+                    'entry_quality_version',
+                    'LEGACY_ENTRY'
+                )
+                or 'LEGACY_ENTRY'
+            ),
+
+            'entry_smc_raw_score': _safe_float(
+                levels.get(
+                    'entry_smc_raw_score',
+                    levels.get(
+                        'entry_score',
+                        0
+                    )
+                ),
+                0.0
+            ),
+
+            'entry_reachability_score': _safe_float(
+                levels.get(
+                    'entry_reachability_score',
+                    0
+                ),
+                0.0
+            ),
+
+            'entry_distance_atr': _safe_float(
+                levels.get(
+                    'entry_distance_atr'
+                ),
+                None
+            ),
+
+            'entry_distance_pct': _safe_float(
+                levels.get(
+                    'entry_distance_pct'
+                ),
+                None
+            ),
+
+            'entry_reachability_label': str(
+                levels.get(
+                    'entry_reachability_label',
+                    'N/A'
+                )
+                or 'N/A'
+            ),
+
+            # ==========================================================
+            # QUALITY ENGINE Q2
+            # FUTURES EXECUTION SPECIALIST
+            # ==========================================================
+            #
+            # Para Spot normalmente quedará vacío/False.
+            # Para Futures permite saber qué señales realmente fueron
+            # refinadas por Q2.
+            # ==========================================================
+
+            'futures_execution_specialist_version': str(
+                levels.get(
+                    'futures_execution_specialist_version',
+                    ''
+                )
+                or ''
+            ),
+
+            'futures_execution_refined': self._as_bool(
+                levels.get(
+                    'futures_execution_refined',
+                    False
+                )
             )
         }
         # ==============================================================
