@@ -39659,20 +39659,220 @@ def api_ai_advice():
 
         if market == 'SPOT':
             try:
-                result[
-                    'spot_tgp_shadow_control'
-                ] = (
+                # ========================================================
+                # 36S.2B.1
+                # EVALUACIÓN SHADOW
+                # ========================================================
+
+                spot_shadow = (
                     _evaluate_36s_spot_tgp_shadow(
                         ai_result=result,
                         context=context
                     )
                 )
 
-            except Exception as shadow_error:
-                # Fail-open absoluto.
+                result[
+                    'spot_tgp_shadow_control'
+                ] = spot_shadow
+
+                # ========================================================
+                # 36S.2B.1b
+                # PERSISTENCIA SHADOW
+                # ========================================================
                 #
-                # Incluso un bug dentro del módulo Shadow no puede
-                # impedir que el Consejo IA ni Spot respondan.
+                # La observación ya no vive solamente durante este
+                # request.
+                #
+                # Se guarda para poder medir posteriormente:
+                #
+                # - cuándo la IA habría bloqueado;
+                # - cuándo habría dejado pasar;
+                # - símbolo / TF;
+                # - confidence;
+                # - resultado posterior.
+                #
+                # IMPORTANTE:
+                # applied siempre permanece False.
+                # ========================================================
+
+                try:
+                    from ai_advisor import (
+                        record_ai_control_event
+                    )
+
+                    shadow_symbol = (
+                        spot_shadow.get(
+                            'focus_symbol'
+                        )
+                        or focus_signal.get(
+                            'symbol'
+                        )
+                    )
+
+                    shadow_timeframe = (
+                        spot_shadow.get(
+                            'focus_timeframe'
+                        )
+                        or focus_signal.get(
+                            'timeframe'
+                        )
+                    )
+
+                    shadow_action = (
+                        spot_shadow.get(
+                            'focus_action'
+                        )
+                        or focus_signal.get(
+                            'action'
+                        )
+                    )
+
+                    shadow_control = {
+                        'observation_id':
+                            (
+                                (
+                                    result.get(
+                                        'data'
+                                    )
+                                    or {}
+                                ).get(
+                                    'observation_id'
+                                )
+                            ),
+
+                        'original_action':
+                            shadow_action,
+
+                        'original_publication_status':
+                            'SPOT_TGP_SHADOW',
+
+                        'ai_verdict':
+                            spot_shadow.get(
+                                'ai_verdict'
+                            ),
+
+                        'ai_confidence':
+                            spot_shadow.get(
+                                'ai_confidence',
+                                0
+                            ),
+
+                        'minimum_confidence':
+                            80,
+
+                        'control_action':
+                            (
+                                'WOULD_BLOCK'
+                                if spot_shadow.get(
+                                    'would_block'
+                                )
+                                else 'NO_CHANGE'
+                            ),
+
+                        # SHADOW:
+                        # la acción real permanece intacta.
+                        'final_action':
+                            shadow_action,
+
+                        'final_publication_status':
+                            'SHADOW_ONLY',
+
+                        'applied':
+                            False,
+
+                        'reason':
+                            spot_shadow.get(
+                                'reason'
+                            )
+                    }
+
+                    shadow_key = (
+                        'SPOT_TGP_SHADOW|'
+                        f'{user}|'
+                        f'{hour_bucket}|'
+                        f'{shadow_symbol or "NONE"}|'
+                        f'{shadow_timeframe or "NONE"}|'
+                        f'{shadow_action or "NONE"}'
+                    )
+
+                    shadow_persisted = (
+                        record_ai_control_event(
+                            dedup_key=
+                                shadow_key,
+
+                            context_type=
+                                'SPOT_TGP_SHADOW',
+
+                            market=
+                                'SPOT',
+
+                            symbol=
+                                shadow_symbol,
+
+                            timeframe=
+                                shadow_timeframe,
+
+                            control=
+                                shadow_control,
+
+                            source_signal_id=
+                                (
+                                    focus_signal.get(
+                                        'source_signal_id'
+                                    )
+                                    or focus_signal.get(
+                                        'signal_id'
+                                    )
+                                ),
+
+                            source_candle_timestamp=
+                                (
+                                    focus_signal.get(
+                                        'source_candle_timestamp'
+                                    )
+                                    or focus_signal.get(
+                                        'candle_timestamp'
+                                    )
+                                )
+                        )
+                    )
+
+                    result[
+                        'spot_tgp_shadow_control'
+                    ][
+                        'persisted'
+                    ] = bool(
+                        shadow_persisted
+                    )
+
+                except Exception as persist_error:
+                    # ================================================
+                    # FAIL-OPEN
+                    # ================================================
+                    #
+                    # Un problema guardando aprendizaje jamás debe
+                    # romper Spot ni el Consejo.
+                    # ================================================
+
+                    result[
+                        'spot_tgp_shadow_control'
+                    ][
+                        'persisted'
+                    ] = False
+
+                    result[
+                        'spot_tgp_shadow_control'
+                    ][
+                        'persistence_error'
+                    ] = str(
+                        persist_error
+                    )[:120]
+
+            except Exception as shadow_error:
+                # ========================================================
+                # FAIL-OPEN ABSOLUTO
+                # ========================================================
+
                 result[
                     'spot_tgp_shadow_control'
                 ] = {
@@ -39683,6 +39883,9 @@ def api_ai_advice():
                         False,
 
                     'would_block':
+                        False,
+
+                    'persisted':
                         False,
 
                     'reason':
