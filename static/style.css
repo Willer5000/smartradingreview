@@ -309,3 +309,69 @@ body {
     padding: 1.5rem 0;
     margin-top: 2rem;
 }
+/* ==========================================================================
+   COMMIT 36Y — GEMINI ACTIVITY TICKER
+   ========================================================================== */
+
+.gemini-activity-ticker {
+    min-height: 30px;
+    background: rgba(20, 23, 28, 0.96);
+    border-bottom: 1px solid var(--border-color);
+    overflow: hidden;
+}
+
+.gemini-activity-ticker-inner {
+    min-height: 30px;
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+.gemini-activity-ticker-label {
+    flex: 0 0 auto;
+    color: var(--accent-purple);
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+
+.gemini-activity-ticker-message {
+    min-width: 0;
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    opacity: 1;
+    transition: opacity 0.18s ease;
+}
+
+.gemini-activity-ticker-message.is-changing {
+    opacity: 0.35;
+}
+
+.gemini-activity-ticker-meta {
+    flex: 0 0 auto;
+    color: var(--text-secondary);
+    font-size: 0.68rem;
+    opacity: 0.72;
+}
+
+@media (max-width: 768px) {
+
+    .gemini-activity-ticker-inner {
+        gap: 0.4rem;
+        padding-left: 0.65rem;
+        padding-right: 0.65rem;
+    }
+
+    .gemini-activity-ticker-meta {
+        display: none;
+    }
+
+    .gemini-activity-ticker-message {
+        font-size: 0.72rem;
+    }
+}
