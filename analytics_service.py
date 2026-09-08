@@ -3,6 +3,8 @@
 # Consume Supabase y devuelve datos listos para gráficos Plotly
 # Fase B - Backend de la pestaña /analytics
 
+import json
+import math
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
@@ -11,7 +13,26 @@ from collections import defaultdict
 from supabase_client import supabase_db
 
 logger = logging.getLogger('ANALYTICS')
+# ============================================================================
+# QUALITY ENGINE Q5 — ANALYTICS V2
+# ============================================================================
+#
+# Q5 mide exclusivamente la cohorte matemática actual.
+#
+# LEGACY:
+#     se conserva como histórico, pero NO contamina estos KPIs.
+#
+# FUTURES SHADOW:
+#     se muestra por separado, pero NO entra en WR/PnL oficial.
+#
+# ============================================================================
+Q5_CURRENT_QUALITY_SCORE_VERSION = (
+    '36W_V2_NORMALIZED'
+)
 
+Q5_ANALYTICS_VERSION = (
+    'Q5_ANALYTICS_V2_V1'
+)
 
 def _cap_confidence(v):
     """
@@ -69,7 +90,1204 @@ class AnalyticsService:
         except Exception as e:
             logger.error(f"Error fetching signals: {e}")
             return []
-    
+    # ========================================================================
+    # QUALITY ENGINE Q5 — HELPERS V2
+    # ========================================================================
+
+    @staticmethod
+    def _q5_float(
+        value,
+        default=None
+    ):
+        try:
+
+            if value is None:
+                return default
+
+            number = float(
+                value
+            )
+
+            return (
+                number
+                if math.isfinite(
+                    number
+                )
+                else default
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+            return default
+
+
+    @staticmethod
+    def _q5_bool(
+        value
+    ):
+        if isinstance(
+            value,
+            bool
+        ):
+            return value
+
+        if isinstance(
+            value,
+            str
+        ):
+            return (
+                value
+                .strip()
+                .lower()
+                in (
+                    '1',
+                    'true',
+                    'yes',
+                    'si',
+                    'sí'
+                )
+            )
+
+        return bool(
+            value
+        )
+
+
+    @staticmethod
+    def _q5_context(
+        signal
+    ):
+        raw = (
+            (
+                signal
+                or {}
+            ).get(
+                'context',
+                {}
+            )
+            or {}
+        )
+
+        if isinstance(
+            raw,
+            str
+        ):
+
+            try:
+                raw = json.loads(
+                    raw
+                )
+
+            except Exception:
+                return {}
+
+        return (
+            raw
+            if isinstance(
+                raw,
+                dict
+            )
+            else {}
+        )
+
+
+    @classmethod
+    def _q5_execution(
+        cls,
+        signal
+    ):
+        context = (
+            cls._q5_context(
+                signal
+            )
+        )
+
+        execution = (
+            context.get(
+                'execution',
+                {}
+            )
+            or {}
+        )
+
+        return (
+            execution
+            if isinstance(
+                execution,
+                dict
+            )
+            else {}
+        )
+
+
+    @classmethod
+    def _q5_learning(
+        cls,
+        signal
+    ):
+        context = (
+            cls._q5_context(
+                signal
+            )
+        )
+
+        learning = (
+            context.get(
+                'learning',
+                {}
+            )
+            or {}
+        )
+
+        return (
+            learning
+            if isinstance(
+                learning,
+                dict
+            )
+            else {}
+        )
+
+
+    @staticmethod
+    def _q5_result(
+        signal
+    ):
+        results = (
+            (
+                signal
+                or {}
+            ).get(
+                'signal_results',
+                []
+            )
+            or []
+        )
+
+        if isinstance(
+            results,
+            list
+        ):
+
+            if (
+                results
+                and isinstance(
+                    results[0],
+                    dict
+                )
+            ):
+                return results[0]
+
+            return {}
+
+        return (
+            results
+            if isinstance(
+                results,
+                dict
+            )
+            else {}
+        )
+
+
+    @classmethod
+    def _q5_status(
+        cls,
+        signal
+    ):
+        status = str(
+            (
+                signal
+                or {}
+            ).get(
+                'status',
+                ''
+            )
+            or ''
+        ).strip().lower()
+
+        if status:
+            return status
+
+        result = (
+            cls._q5_result(
+                signal
+            )
+        )
+
+        return str(
+            result.get(
+                'status',
+                ''
+            )
+            or ''
+        ).strip().lower()
+
+
+    @classmethod
+    def _q5_is_v2(
+        cls,
+        signal
+    ):
+        execution = (
+            cls._q5_execution(
+                signal
+            )
+        )
+
+        return (
+            str(
+                execution.get(
+                    'quality_score_version',
+                    ''
+                )
+                or ''
+            )
+            .strip()
+            .upper()
+            ==
+            Q5_CURRENT_QUALITY_SCORE_VERSION
+        )
+
+
+    @staticmethod
+    def _q5_is_directional(
+        signal
+    ):
+        action = str(
+            (
+                signal
+                or {}
+            ).get(
+                'action_normalized'
+            )
+            or (
+                signal
+                or {}
+            ).get(
+                'action'
+            )
+            or ''
+        ).strip().upper()
+
+        return action in (
+            'LONG',
+            'SHORT',
+            'COMPRA_SPOT',
+            'VENTA_SPOT'
+        )
+
+
+    @staticmethod
+    def _q5_safety_band(
+        safety
+    ):
+        if safety is None:
+            return 'SIN_DATO'
+
+        if safety < 65:
+            return '<65'
+
+        if safety < 70:
+            return '65-69'
+
+        if safety < 75:
+            return '70-74'
+
+        return '>=75'
+
+
+    # ========================================================================
+    # Q5 — AGREGADOR ECONÓMICO
+    # ========================================================================
+
+    @classmethod
+    def _q5_aggregate(
+        cls,
+        signals,
+        include_bands=True
+    ):
+        signals = list(
+            signals
+            or []
+        )
+
+        tp_count = 0
+        sl_count = 0
+        expired_count = 0
+        pending_count = 0
+        ambiguous_count = 0
+
+        pnl_values = []
+        realized_r_values = []
+
+        safety_values = []
+        entry_values = []
+        sl_quality_values = []
+        tp_quality_values = []
+
+        q2_refined = 0
+
+        q3_counts = {
+            'ALIGNED':
+                0,
+
+            'NEUTRAL':
+                0,
+
+            'CONFLICT':
+                0,
+
+            'OTHER':
+                0
+        }
+
+        band_rows = defaultdict(
+            list
+        )
+
+        for signal in signals:
+
+            status = (
+                cls._q5_status(
+                    signal
+                )
+            )
+
+            if status == 'tp_hit':
+                tp_count += 1
+
+            elif status == 'sl_hit':
+                sl_count += 1
+
+            elif status == 'expired':
+                expired_count += 1
+
+            elif status in (
+                'ambiguous',
+                'ambiguous_result'
+            ):
+                ambiguous_count += 1
+
+            elif status == 'pending':
+                pending_count += 1
+
+            execution = (
+                cls._q5_execution(
+                    signal
+                )
+            )
+
+            learning = (
+                cls._q5_learning(
+                    signal
+                )
+            )
+
+            # ==============================================================
+            # SAFETY
+            # ==============================================================
+
+            safety = (
+                cls._q5_float(
+                    execution.get(
+                        'execution_safety'
+                    )
+                )
+            )
+
+            if safety is not None:
+
+                safety_values.append(
+                    safety
+                )
+
+            band_rows[
+                cls._q5_safety_band(
+                    safety
+                )
+            ].append(
+                signal
+            )
+
+            # ==============================================================
+            # ENTRY QUALITY
+            # ==============================================================
+
+            entry_quality = (
+                cls._q5_float(
+                    execution.get(
+                        'entry_score'
+                    )
+                )
+            )
+
+            if entry_quality is not None:
+
+                entry_values.append(
+                    entry_quality
+                )
+
+            # ==============================================================
+            # SL QUALITY
+            # ==============================================================
+
+            sl_quality = (
+                cls._q5_float(
+                    execution.get(
+                        'sl_reliability'
+                    )
+                )
+            )
+
+            if sl_quality is not None:
+
+                # Históricamente sl_reliability puede venir 0–1.
+                if (
+                    0
+                    <= sl_quality
+                    <= 1
+                ):
+
+                    sl_quality *= 100.0
+
+                sl_quality_values.append(
+                    sl_quality
+                )
+
+            # ==============================================================
+            # TP QUALITY
+            # ==============================================================
+
+            tp_quality = (
+                cls._q5_float(
+                    execution.get(
+                        'tp_quality_score'
+                    )
+                )
+            )
+
+            if tp_quality is not None:
+
+                tp_quality_values.append(
+                    tp_quality
+                )
+
+            # ==============================================================
+            # Q2
+            # ==============================================================
+
+            if cls._q5_bool(
+                execution.get(
+                    'futures_execution_refined',
+                    False
+                )
+            ):
+
+                q2_refined += 1
+
+            # ==============================================================
+            # Q3
+            # ==============================================================
+
+            micro = (
+                learning.get(
+                    'microstructure_shadow',
+                    {}
+                )
+                or {}
+            )
+
+            if (
+                isinstance(
+                    micro,
+                    dict
+                )
+                and micro
+            ):
+
+                alignment = str(
+                    micro.get(
+                        'alignment',
+                        ''
+                    )
+                    or ''
+                ).strip().upper()
+
+                if alignment in q3_counts:
+
+                    q3_counts[
+                        alignment
+                    ] += 1
+
+                else:
+
+                    q3_counts[
+                        'OTHER'
+                    ] += 1
+
+            # ==============================================================
+            # PnL Y EXPECTANCY R
+            # ==============================================================
+
+            if status not in (
+                'tp_hit',
+                'sl_hit'
+            ):
+                continue
+
+            result = (
+                cls._q5_result(
+                    signal
+                )
+            )
+
+            pnl = (
+                cls._q5_float(
+                    result.get(
+                        'pnl_pct'
+                    )
+                )
+            )
+
+            if pnl is None:
+                continue
+
+            pnl_values.append(
+                pnl
+            )
+
+            entry = (
+                cls._q5_float(
+                    signal.get(
+                        'entry_price'
+                    )
+                )
+            )
+
+            stop_loss = (
+                cls._q5_float(
+                    signal.get(
+                        'stop_loss'
+                    )
+                )
+            )
+
+            if (
+                entry is not None
+                and stop_loss is not None
+                and entry > 0
+            ):
+
+                risk_pct = (
+                    abs(
+                        entry
+                        - stop_loss
+                    )
+                    / entry
+                    * 100.0
+                )
+
+                if risk_pct > 0:
+
+                    realized_r_values.append(
+                        pnl
+                        / risk_pct
+                    )
+
+        resolved = (
+            tp_count
+            + sl_count
+        )
+
+        win_rate = (
+            tp_count
+            / resolved
+            * 100.0
+            if resolved
+            else 0.0
+        )
+
+        wins = [
+            pnl
+            for pnl
+            in pnl_values
+            if pnl > 0
+        ]
+
+        losses = [
+            pnl
+            for pnl
+            in pnl_values
+            if pnl < 0
+        ]
+
+        total_wins = sum(
+            wins
+        )
+
+        total_losses = abs(
+            sum(
+                losses
+            )
+        )
+
+        profit_factor = (
+            total_wins
+            / total_losses
+            if total_losses > 0
+            else (
+                total_wins
+                if total_wins > 0
+                else 0.0
+            )
+        )
+
+        data = {
+            'total_directional':
+                len(
+                    signals
+                ),
+
+            'pending':
+                pending_count,
+
+            'resolved':
+                resolved,
+
+            'tp_hit':
+                tp_count,
+
+            'sl_hit':
+                sl_count,
+
+            'expired':
+                expired_count,
+
+            'ambiguous':
+                ambiguous_count,
+
+            'win_rate':
+                round(
+                    win_rate,
+                    2
+                ),
+
+            'pnl_total_pct':
+                round(
+                    sum(
+                        pnl_values
+                    ),
+                    3
+                ),
+
+            'avg_pnl_pct':
+                round(
+                    (
+                        sum(
+                            pnl_values
+                        )
+                        / len(
+                            pnl_values
+                        )
+                    )
+                    if pnl_values
+                    else 0.0,
+                    4
+                ),
+
+            'profit_factor':
+                round(
+                    profit_factor,
+                    3
+                ),
+
+            # ==========================================================
+            # EXPECTANCY R REAL
+            # ==========================================================
+            #
+            # No presupone que cada TP vale +2R.
+            #
+            # Cada operación utiliza:
+            #
+            # PnL realizado
+            # ----------------
+            # riesgo Entry-SL
+            #
+            # ==========================================================
+
+            'expectancy_r':
+                round(
+                    (
+                        sum(
+                            realized_r_values
+                        )
+                        / len(
+                            realized_r_values
+                        )
+                    )
+                    if realized_r_values
+                    else 0.0,
+                    4
+                ),
+
+            'expectancy_r_samples':
+                len(
+                    realized_r_values
+                ),
+
+            'avg_safety':
+                (
+                    round(
+                        sum(
+                            safety_values
+                        )
+                        / len(
+                            safety_values
+                        ),
+                        2
+                    )
+                    if safety_values
+                    else None
+                ),
+
+            'avg_entry_quality':
+                (
+                    round(
+                        sum(
+                            entry_values
+                        )
+                        / len(
+                            entry_values
+                        ),
+                        2
+                    )
+                    if entry_values
+                    else None
+                ),
+
+            'avg_sl_quality':
+                (
+                    round(
+                        sum(
+                            sl_quality_values
+                        )
+                        / len(
+                            sl_quality_values
+                        ),
+                        2
+                    )
+                    if sl_quality_values
+                    else None
+                ),
+
+            'avg_tp_quality':
+                (
+                    round(
+                        sum(
+                            tp_quality_values
+                        )
+                        / len(
+                            tp_quality_values
+                        ),
+                        2
+                    )
+                    if tp_quality_values
+                    else None
+                ),
+
+            'q2_refined':
+                q2_refined,
+
+            'q3_alignment':
+                q3_counts
+        }
+
+        if include_bands:
+
+            data[
+                'safety_bands'
+            ] = {
+                label:
+                    cls._q5_aggregate(
+                        band_rows.get(
+                            label,
+                            []
+                        ),
+                        include_bands=False
+                    )
+
+                for label
+                in (
+                    '<65',
+                    '65-69',
+                    '70-74',
+                    '>=75',
+                    'SIN_DATO'
+                )
+            }
+
+        return data
+
+
+    # ========================================================================
+    # Q5 — LEER COHORTE V2
+    # ========================================================================
+
+    def _fetch_q5_v2_signals(
+        self,
+        symbol=None,
+        timeframe=None,
+        system_type=None,
+        action=None,
+        days_back=90
+    ):
+        """
+        Lee únicamente lo necesario para Analytics V2.
+
+        La paginación evita el límite rígido de 2000 del Analytics
+        histórico, pero mantiene un guardrail de memoria de 4000 filas.
+        """
+
+        if not self.db.enabled:
+            return []
+
+        try:
+
+            cutoff = (
+                datetime.utcnow()
+                - timedelta(
+                    days=days_back
+                )
+            ).isoformat()
+
+            page_size = 500
+            max_rows = 4000
+            offset = 0
+
+            collected = []
+
+            while offset < max_rows:
+
+                query = (
+                    self.db.client
+                    .table(
+                        'signals'
+                    )
+                    .select(
+                        'id,symbol,timeframe,system_type,'
+                        'action,action_normalized,status,created_at,'
+                        'entry_price,stop_loss,take_profit,risk_reward,'
+                        'context,'
+                        'signal_results('
+                        'status,pnl_pct,exit_price,exit_timestamp'
+                        ')'
+                    )
+                    .gte(
+                        'created_at',
+                        cutoff
+                    )
+                    .order(
+                        'created_at',
+                        desc=True
+                    )
+                    .range(
+                        offset,
+                        min(
+                            offset
+                            + page_size
+                            - 1,
+                            max_rows
+                            - 1
+                        )
+                    )
+                )
+
+                if symbol:
+
+                    query = query.eq(
+                        'symbol',
+                        symbol
+                    )
+
+                if timeframe:
+
+                    query = query.eq(
+                        'timeframe',
+                        timeframe
+                    )
+
+                if (
+                    system_type
+                    and system_type
+                    != 'both'
+                ):
+
+                    query = query.eq(
+                        'system_type',
+                        system_type
+                    )
+
+                if (
+                    action
+                    and action
+                    != 'ALL'
+                ):
+
+                    query = query.eq(
+                        'action_normalized',
+                        action
+                    )
+
+                response = (
+                    query.execute()
+                )
+
+                rows = (
+                    response.data
+                    or []
+                )
+
+                collected.extend(
+                    rows
+                )
+
+                if len(
+                    rows
+                ) < page_size:
+
+                    break
+
+                offset += page_size
+
+            return [
+                signal
+
+                for signal
+                in collected
+
+                if self._q5_is_directional(
+                    signal
+                )
+
+                and self._q5_is_v2(
+                    signal
+                )
+            ]
+
+        except Exception as exc:
+
+            logger.error(
+                'Q5 V2 fetch error: %s',
+                exc
+            )
+
+            return []
+
+
+    # ========================================================================
+    # Q5 — RESUMEN V2 POR MERCADO
+    # ========================================================================
+
+    def get_quality_v2_summary(
+        self,
+        symbol=None,
+        timeframe=None,
+        system_type=None,
+        action=None,
+        days_back=90
+    ):
+        """
+        Cohorte actual post-36W.
+
+        LEGACY queda fuera.
+
+        SPOT:
+            señales direccionales V2.
+
+        FUTURES OFICIAL:
+            V2 + statistically_eligible +
+            EXECUTABLE_SIGNAL.
+
+        FUTURES SHADOW:
+            diagnóstico separado.
+            Nunca contamina WR/PnL oficial.
+        """
+
+        signals = (
+            self._fetch_q5_v2_signals(
+                symbol=symbol,
+                timeframe=timeframe,
+                system_type=system_type,
+                action=action,
+                days_back=days_back
+            )
+        )
+
+        spot = []
+
+        futures_official = []
+
+        futures_shadow = []
+
+        futures_other = []
+
+        for signal in signals:
+
+            market = str(
+                signal.get(
+                    'system_type',
+                    ''
+                )
+                or ''
+            ).strip().lower()
+
+            if market == 'spot':
+
+                spot.append(
+                    signal
+                )
+
+                continue
+
+            if market != 'futures':
+                continue
+
+            learning = (
+                self._q5_learning(
+                    signal
+                )
+            )
+
+            evaluation_role = str(
+                learning.get(
+                    'evaluation_role',
+                    ''
+                )
+                or ''
+            ).strip().upper()
+
+            statistically_eligible = (
+                self._q5_bool(
+                    learning.get(
+                        'statistically_eligible',
+                        False
+                    )
+                )
+            )
+
+            if (
+                statistically_eligible
+                and evaluation_role
+                == 'EXECUTABLE_SIGNAL'
+            ):
+
+                futures_official.append(
+                    signal
+                )
+
+            elif (
+                evaluation_role
+                == 'SHADOW_ANALYSIS'
+            ):
+
+                futures_shadow.append(
+                    signal
+                )
+
+            else:
+
+                futures_other.append(
+                    signal
+                )
+
+        official_combined = (
+            spot
+            + futures_official
+        )
+
+        return {
+            'version':
+                Q5_ANALYTICS_VERSION,
+
+            'quality_score_version':
+                Q5_CURRENT_QUALITY_SCORE_VERSION,
+
+            'cohort_mode':
+                'CURRENT_V2_ONLY',
+
+            'legacy_included':
+                False,
+
+            'official_combined':
+                self._q5_aggregate(
+                    official_combined
+                ),
+
+            'spot':
+                self._q5_aggregate(
+                    spot
+                ),
+
+            'futures':
+                self._q5_aggregate(
+                    futures_official
+                ),
+
+            'futures_shadow':
+                self._q5_aggregate(
+                    futures_shadow
+                ),
+
+            'coverage': {
+                'v2_directional_total':
+                    len(
+                        signals
+                    ),
+
+                'spot_v2':
+                    len(
+                        spot
+                    ),
+
+                'futures_official_v2':
+                    len(
+                        futures_official
+                    ),
+
+                'futures_shadow_v2':
+                    len(
+                        futures_shadow
+                    ),
+
+                'futures_other_v2':
+                    len(
+                        futures_other
+                    ),
+
+                'max_rows_guard':
+                    4000
+            },
+
+            'days_back':
+                days_back,
+
+            'filters': {
+                'symbol':
+                    symbol,
+
+                'timeframe':
+                    timeframe,
+
+                'system_type':
+                    system_type,
+
+                'action':
+                    action
+            }
+        }    
     # ========================================================================
     # 1. RESUMEN (KPIs globales)
     # ========================================================================
