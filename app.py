@@ -151,10 +151,43 @@ except ImportError:
 # Configuración de zona horaria Bolivia
 bolivia_tz = pytz.timezone('America/La_Paz')
 
-# Credenciales Telegram
-TELEGRAM_BOT_TOKEN = "7248129884:AAE2vctRH82wosRTrqs-PxdTgQLLG_nYYjU"
-TELEGRAM_CHAT_ID = "-5079948404"
+# ============================================================================
+# Q6 — CREDENCIALES TELEGRAM DESDE ENVIRONMENT
+# ============================================================================
+#
+# Nunca almacenar secretos reales en GitHub.
+#
+# Render debe contener:
+#
+# TELEGRAM_BOT_TOKEN
+# TELEGRAM_CHAT_ID
+#
+# Si alguna variable falta, Telegram queda deshabilitado de forma segura
+# sin impedir que SmartradingReview arranque.
+# ============================================================================
 
+TELEGRAM_BOT_TOKEN = os.getenv(
+    'TELEGRAM_BOT_TOKEN',
+    ''
+).strip()
+
+TELEGRAM_CHAT_ID = os.getenv(
+    'TELEGRAM_CHAT_ID',
+    ''
+).strip()
+
+if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+
+    print(
+        "✅ Telegram configurado mediante Environment"
+    )
+
+else:
+
+    print(
+        "⚠️ Telegram no configurado: "
+        "faltan TELEGRAM_BOT_TOKEN y/o TELEGRAM_CHAT_ID"
+    )
 # Configuración de pares
 SYMBOLS = {
     'BTC-USDT': {'name': 'BTC/USDT', 'type': 'crypto', 'decimals': 2},
