@@ -1067,60 +1067,164 @@ class SupabaseClient:
     def _check_rotation(self, table_name: str):
         """
         Verifica si la tabla superó el límite y borra las filas más antiguas.
-        
-        OPTIMIZACIÓN v15: probabilístico (10% de las llamadas) para reducir carga.
-        Antes se ejecutaba en CADA insert (15+ requests por warm-up). Ahora se
-        ejecuta en promedio 1 de cada 10 inserts, lo que es suficiente porque
-        el límite tiene margen (LIMITS son valores grandes ~20000).
+
+        PRE38-A:
+        - conserva exactamente los límites FIFO existentes;
+        - conserva el chequeo probabilístico del 10%;
+        - conserva la protección de señales con TP exitoso;
+        - evita enviar cientos o miles de UUIDs en una sola llamada .in_();
+        - elimina en lotes pequeños para evitar 400 de Cloudflare/PostgREST.
+
+        Esta función NO cambia señales de trading, Safety, aprendizaje ni
+        criterios de ReviewTrader. Sólo hace más segura la limpieza FIFO.
         """
         if not self.enabled:
             return
-        
-        # Chequeo probabilístico: solo 10% de las veces
+
+        # Chequeo probabilístico: solo 10% de las veces.
         import random
         if random.random() > 0.1:
             return
-        
+
+        # Mantener cada filtro .in_() en un tamaño razonable.
+        delete_batch_size = 100
+
+        def _delete_ids_in_batches(ids):
+            """
+            Borra IDs de una tabla en lotes pequeños.
+
+            Devuelve cuántos IDs fueron enviados correctamente a Supabase.
+            Si un lote falla, la excepción sube al manejo general de
+            _check_rotation para conservar el comportamiento tolerante a fallos.
+            """
+            deleted = 0
+
+            for start in range(
+                0,
+                len(ids),
+                delete_batch_size
+            ):
+                batch = ids[
+                    start:start + delete_batch_size
+                ]
+
+                if not batch:
+                    continue
+
+                (
+                    self.client
+                    .table(table_name)
+                    .delete()
+                    .in_(
+                        'id',
+                        batch
+                    )
+                    .execute()
+                )
+
+                deleted += len(
+                    batch
+                )
+
+            return deleted
+
         try:
-            limit = LIMITS.get(table_name, 10000)
-            
-            # Contar filas actuales
-            count_response = self.client.table(table_name).select('id', count='exact').limit(1).execute()
-            current_count = count_response.count or 0
-            
-            if current_count > limit:
-                # Excede el límite: borrar el 5% más antiguo
-                to_delete = int(limit * 0.05)
-                
-                if table_name == 'signals':
-                    # Preservar señales con TP exitoso (son valiosas)
-                    old_signals = (self.client.table('signals')
-                                   .select('id')
-                                   .neq('status', 'tp_hit')
-                                   .order('created_at')
-                                   .limit(to_delete)
-                                   .execute())
-                    if old_signals.data:
-                        ids_to_delete = [s['id'] for s in old_signals.data]
-                        self.client.table('signals').delete().in_('id', ids_to_delete).execute()
-                        logger.info(f"Rotación FIFO en {table_name}: eliminadas {len(ids_to_delete)} filas")
-                else:
-                    # Para otras tablas: borrar simplemente las más antiguas
-                    old_rows = (self.client.table(table_name)
-                                .select('id')
-                                .order('created_at')
-                                .limit(to_delete)
-                                .execute())
-                    if old_rows.data:
-                        ids_to_delete = [r['id'] for r in old_rows.data]
-                        self.client.table(table_name).delete().in_('id', ids_to_delete).execute()
-                        logger.info(f"Rotación FIFO en {table_name}: eliminadas {len(ids_to_delete)} filas")
+            limit = LIMITS.get(
+                table_name,
+                10000
+            )
+
+            # Contar filas actuales.
+            count_response = (
+                self.client
+                .table(table_name)
+                .select(
+                    'id',
+                    count='exact'
+                )
+                .limit(1)
+                .execute()
+            )
+
+            current_count = (
+                count_response.count
+                or 0
+            )
+
+            if current_count <= limit:
+                return
+
+            # Excede el límite: mantener la política actual de borrar
+            # aproximadamente el 5% del límite configurado.
+            to_delete = max(
+                1,
+                int(
+                    limit
+                    * 0.05
+                )
+            )
+
+            if table_name == 'signals':
+                # Preservar señales con TP exitoso.
+                old_rows = (
+                    self.client
+                    .table('signals')
+                    .select('id')
+                    .neq(
+                        'status',
+                        'tp_hit'
+                    )
+                    .order('created_at')
+                    .limit(to_delete)
+                    .execute()
+                )
+
+            else:
+                # Para otras tablas: borrar las filas más antiguas.
+                old_rows = (
+                    self.client
+                    .table(table_name)
+                    .select('id')
+                    .order('created_at')
+                    .limit(to_delete)
+                    .execute()
+                )
+
+            ids_to_delete = [
+                row.get('id')
+                for row in (
+                    old_rows.data
+                    or []
+                )
+                if row.get('id')
+            ]
+
+            if not ids_to_delete:
+                return
+
+            deleted = (
+                _delete_ids_in_batches(
+                    ids_to_delete
+                )
+            )
+
+            logger.info(
+                f"Rotación FIFO en {table_name}: "
+                f"eliminadas {deleted} filas "
+                f"en lotes de máximo {delete_batch_size}"
+            )
+
         except Exception as e:
             if self._is_connection_error(e):
-                # Sistema saturado — no ensucies logs, la rotación FIFO no es crítica
-                logger.debug(f"Rotación FIFO {table_name}: sistema temporalmente saturado")
+                # La rotación FIFO no es crítica para la decisión de trading.
+                logger.debug(
+                    f"Rotación FIFO {table_name}: "
+                    "sistema temporalmente saturado"
+                )
             else:
-                logger.error(f"Error en rotación FIFO de {table_name}: {e}")
+                logger.error(
+                    f"Error en rotación FIFO de {table_name}: {e}"
+                )
     
     # ========================================================================
     # HEALTH CHECK
