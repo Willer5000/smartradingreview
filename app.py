@@ -6388,6 +6388,17 @@ class TradingExpertSystem:
                 'type': 'recomendacion',
                 'order': 32
             },
+            'recomendacion_long_futures': {
+                'template': 'Se recomienda LONG FUTURES de {par}. ',
+                'type': 'recomendacion',
+                'order': 32
+            },
+            
+            'recomendacion_short_futures': {
+                'template': 'Se recomienda SHORT FUTURES de {par}. ',
+                'type': 'recomendacion',
+                'order': 32
+            },            
             'recomendacion_compra_spot_paxg_usdt': {
                 'template': 'Se aconseja COMPRA SPOT de PAXG. ',
                 'type': 'recomendacion',
@@ -7296,21 +7307,72 @@ class TradingExpertSystem:
             
             # ============ 7. RECOMENDACIÓN ============
             # Determinar clave de recomendación según decisión y símbolo
-            if decision in ['COMPRA_SPOT', 'LONG']:
-                if 'BTC' in symbol and 'PAXG' not in symbol:
-                    rec_key = 'recomendacion_compra_spot_btc_usdt'
-                elif 'PAXG' in symbol and 'BTC' not in symbol:
-                    rec_key = 'recomendacion_compra_spot_paxg_usdt'
+            if decision == 'LONG':
+            
+                rec_key = (
+                    'recomendacion_long_futures'
+                )
+            
+            
+            elif decision == 'SHORT':
+            
+                rec_key = (
+                    'recomendacion_short_futures'
+                )
+            
+            
+            elif decision == 'COMPRA_SPOT':
+            
+                if (
+                    'BTC' in symbol
+                    and 'PAXG' not in symbol
+                ):
+            
+                    rec_key = (
+                        'recomendacion_compra_spot_btc_usdt'
+                    )
+            
+                elif (
+                    'PAXG' in symbol
+                    and 'BTC' not in symbol
+                ):
+            
+                    rec_key = (
+                        'recomendacion_compra_spot_paxg_usdt'
+                    )
+            
                 else:
-                    rec_key = 'recomendacion_compra_spot_paxg_btc'
-                    
-            elif decision in ['VENTA_SPOT', 'SHORT']:
-                if 'BTC' in symbol and 'PAXG' not in symbol:
-                    rec_key = 'recomendacion_venta_spot_btc_usdt'
-                elif 'PAXG' in symbol and 'BTC' not in symbol:
-                    rec_key = 'recomendacion_venta_spot_paxg_usdt'
+            
+                    rec_key = (
+                        'recomendacion_compra_spot_paxg_btc'
+                    )
+            
+            
+            elif decision == 'VENTA_SPOT':
+            
+                if (
+                    'BTC' in symbol
+                    and 'PAXG' not in symbol
+                ):
+            
+                    rec_key = (
+                        'recomendacion_venta_spot_btc_usdt'
+                    )
+            
+                elif (
+                    'PAXG' in symbol
+                    and 'BTC' not in symbol
+                ):
+            
+                    rec_key = (
+                        'recomendacion_venta_spot_paxg_usdt'
+                    )
+            
                 else:
-                    rec_key = 'recomendacion_venta_spot_paxg_btc'
+            
+                    rec_key = (
+                        'recomendacion_venta_spot_paxg_btc'
+                    )
                     
             elif decision == 'NO_OPERAR':
                 rec_key = 'recomendacion_no_operar'
