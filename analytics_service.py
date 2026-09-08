@@ -490,13 +490,34 @@ class AnalyticsService:
             # SAFETY
             # ==============================================================
 
-            safety = (
-                cls._q5_float(
-                    execution.get(
-                        'execution_safety'
+            system_type = str(
+                signal.get(
+                    'system_type',
+                    ''
+                )
+                or ''
+            ).strip().lower()
+
+            # PRE38-B:
+            # Execution Safety es una métrica operativa de Futures.
+            # Spot no dispone actualmente de un Execution Safety comparable.
+            #
+            # Por eso, en Spot:
+            # - NO convertir ausencia de Safety en 0;
+            # - NO clasificarla falsamente dentro de <65;
+            # - mostrarla como dato no disponible;
+            # - enviarla a la banda SIN_DATO.
+            if system_type == 'spot':
+                safety = None
+
+            else:
+                safety = (
+                    cls._q5_float(
+                        execution.get(
+                            'execution_safety'
+                        )
                     )
                 )
-            )
 
             if safety is not None:
 
