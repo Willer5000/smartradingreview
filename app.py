@@ -31440,7 +31440,141 @@ def api_analytics_summary():
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
+# ============================================================================
+# QUALITY ENGINE Q5B — ANALYTICS V2 API
+# ============================================================================
+#
+# Endpoint de SOLO LECTURA.
+#
+# Expone la cohorte actual 36W_V2_NORMALIZED calculada por
+# AnalyticsService.
+#
+# IMPORTANTE:
+#
+# - NO modifica señales.
+# - NO modifica ReviewTrader.
+# - NO modifica Safety.
+# - NO recalibra pesos.
+# - NO mezcla LEGACY con V2.
+# - Futures Shadow permanece separado de Futures oficial.
+# ============================================================================
 
+@app.route('/api/analytics/quality-v2')
+def api_analytics_quality_v2():
+    """
+    Analytics limpio de la generación actual.
+
+    Devuelve por separado:
+
+        SPOT V2
+        FUTURES V2 OFICIAL
+        FUTURES SHADOW
+
+    junto con:
+
+        WR
+        PnL
+        Expectancy R
+        Profit Factor
+        Safety
+        Entry Quality
+        SL Quality
+        TP Quality
+        bandas de Safety.
+    """
+
+    try:
+
+        svc = (
+            _get_analytics_service()
+        )
+
+        if svc is None:
+
+            return jsonify({
+                'success':
+                    False,
+
+                'error':
+                    'AnalyticsService no disponible'
+            }), 503
+
+        filters = (
+            _parse_analytics_filters()
+        )
+
+        # ================================================================
+        # GUARDRAIL DE LECTURA
+        # ================================================================
+        #
+        # La interfaz actual permite como máximo 365 días.
+        #
+        # No aceptamos por URL una ventana arbitrariamente enorme porque
+        # Q5 necesita leer context JSON y Render dispone de memoria limitada.
+        # ================================================================
+
+        try:
+
+            requested_days = int(
+                filters.get(
+                    'days_back',
+                    90
+                )
+                or 90
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+
+            requested_days = 90
+
+        filters[
+            'days_back'
+        ] = max(
+            1,
+            min(
+                365,
+                requested_days
+            )
+        )
+
+        data = (
+            svc.get_quality_v2_summary(
+                **filters
+            )
+        )
+
+        return jsonify({
+            'success':
+                True,
+
+            'data':
+                data,
+
+            'timestamp':
+                datetime.now(
+                    bolivia_tz
+                ).isoformat()
+        })
+
+    except Exception as e:
+
+        import traceback
+
+        traceback.print_exc()
+
+        return jsonify({
+            'success':
+                False,
+
+            'error':
+                str(
+                    e
+                )
+        }), 500
+        
 @app.route('/api/analytics/strategies')
 def api_analytics_strategies():
     """Ranking de estrategias por win rate"""
