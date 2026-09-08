@@ -8,6 +8,7 @@
 # OBJETIVO: Acumular satoshis, USDT y PAXG como bola de nieve.
 
 import logging
+import math
 import threading
 import time
 
@@ -108,6 +109,67 @@ class PortfolioGuardian:
     ROTATION_QUALITY_MIN_TIMEFRAMES = 3
 
     ROTATION_QUALITY_STRONG_EDGE = 28.0
+    # ========================================================================
+    # QUALITY ENGINE Q4B
+    # SPOT ENTRY & ALLOCATION SPECIALIST
+    # ========================================================================
+    #
+    # El motor multitemporal ya decide:
+    #
+    #     BTC
+    #     PAXG
+    #     HOLD
+    #
+    # Q4B NO vuelve a decidir la dirección.
+    #
+    # Su trabajo es comprobar si mover capital HACIA el activo elegido
+    # tiene sentido al precio actual.
+    #
+    # IMPORTANTE:
+    #
+    # - no crea BUY_BTC;
+    # - no crea BUY_PAXG;
+    # - no crea SWAP;
+    # - no reduce reservas;
+    # - no relaja 36X;
+    # - no elimina anti-whipsaw;
+    # - no cambia Safety;
+    # - no utiliza APIs adicionales.
+    #
+    # Sólo puede:
+    #
+    #     OPERACIÓN TGP -> OPERACIÓN TGP
+    #
+    # o:
+    #
+    #     OPERACIÓN TGP -> HOLD
+    #
+    # cuando el Entry Q1 es claramente pobre, tardío o invalidado.
+    # ========================================================================
+
+    SPOT_ENTRY_SPECIALIST_VERSION = (
+        'Q4B_SPOT_ENTRY_ALLOCATION_V1'
+    )
+
+    # Buena oportunidad de ejecución.
+    SPOT_ENTRY_GOOD_QUALITY = 60.0
+
+    # Zona todavía operable. No exigimos 70/80 porque eso convertiría
+    # el Guardian en excesivamente tímido antes de tener validación.
+    SPOT_ENTRY_MIN_ACCEPTABLE_QUALITY = 50.0
+
+    # Alcanzabilidad mínima del Entry.
+    SPOT_ENTRY_GOOD_REACHABILITY = 60.0
+
+    SPOT_ENTRY_MIN_ACCEPTABLE_REACHABILITY = 45.0
+
+    # Mismas ideas de protección utilizadas por 36X:
+    #
+    # si ya consumió >=50% Entry->TP Y queda <1.20R,
+    # es preferible HOLD que perseguir el precio.
+    SPOT_ENTRY_MAX_CHASE_PROGRESS = 0.50
+
+    SPOT_ENTRY_MIN_REMAINING_RR = 1.20
     # Después de 24 horas la memoria se considera vieja y se
     # permite que el análisis multitemporal vuelva a decidir desde cero.
     ROTATION_MEMORY_MAX_MINUTES = 1440
@@ -3127,6 +3189,1040 @@ class PortfolioGuardian:
                 score
             )
         )
+
+    @staticmethod
+    def _q4b_optional_float(
+        value
+    ):
+        """
+        Conversión numérica segura para Q4B.
+
+        None continúa siendo None.
+        Nunca interpretamos un dato ausente como cero.
+        """
+
+        try:
+
+            if value is None:
+                return None
+
+            number = float(
+                value
+            )
+
+            if not math.isfinite(
+                number
+            ):
+                return None
+
+            return number
+
+        except (
+            TypeError,
+            ValueError
+        ):
+
+            return None
+
+
+    def _evaluate_spot_entry_opportunity(
+        self,
+        target_asset,
+        market_snapshots,
+        timeframe_results
+    ):
+        """
+        QUALITY ENGINE Q4B.
+
+        Evalúa únicamente la CALIDAD DE EJECUCIÓN para el activo
+        que el TGP YA decidió favorecer.
+
+        target_asset:
+            BTC
+            PAXG
+
+        No decide dirección.
+        No genera compras.
+        No modifica niveles.
+
+        Usa exclusivamente los snapshots Q1 ya calculados.
+        """
+
+        target_asset = str(
+            target_asset
+            or ''
+        ).upper()
+
+        result = {
+            'version':
+                self.SPOT_ENTRY_SPECIALIST_VERSION,
+
+            'available':
+                False,
+
+            'target_asset':
+                target_asset,
+
+            'status':
+                'NO_Q1_EVIDENCE',
+
+            'quality_label':
+                'UNKNOWN',
+
+            'best_timeframe':
+                None,
+
+            'best_quality_score':
+                None,
+
+            'best_smc_score':
+                None,
+
+            'best_reachability_score':
+                None,
+
+            'best_entry':
+                None,
+
+            'best_current_price':
+                None,
+
+            'best_distance_atr':
+                None,
+
+            'progress_to_tp_pct':
+                None,
+
+            'remaining_rr':
+                None,
+
+            'evidence_count':
+                0,
+
+            'usable_count':
+                0,
+
+            'late_count':
+                0,
+
+            'invalidated_count':
+                0,
+
+            'reason':
+                'No existe evidencia Q1 utilizable.'
+        }
+
+        if target_asset == 'BTC':
+
+            target_symbol = (
+                'BTC-USDT'
+            )
+
+        elif target_asset == 'PAXG':
+
+            target_symbol = (
+                'PAXG-USDT'
+            )
+
+        else:
+
+            result[
+                'status'
+            ] = 'INVALID_TARGET'
+
+            result[
+                'reason'
+            ] = (
+                'Q4B sólo evalúa BTC o PAXG.'
+            )
+
+            return result
+
+        market_snapshots = (
+            market_snapshots
+            if isinstance(
+                market_snapshots,
+                dict
+            )
+            else {}
+        )
+
+        timeframe_results = (
+            timeframe_results
+            if isinstance(
+                timeframe_results,
+                dict
+            )
+            else {}
+        )
+
+        observations = []
+
+        for tf in (
+            '4h',
+            '12h',
+            '1D',
+            '1W'
+        ):
+
+            # ============================================================
+            # Q4B NO contradice la dirección multitemporal.
+            # ============================================================
+            #
+            # Sólo utilizamos un Entry Q1 de un TF que ya favorece
+            # al activo objetivo.
+            # ============================================================
+
+            tf_preference = str(
+                (
+                    timeframe_results.get(
+                        tf,
+                        {}
+                    )
+                    or {}
+                ).get(
+                    'preference',
+                    'NEUTRAL'
+                )
+                or 'NEUTRAL'
+            ).upper()
+
+            if (
+                tf_preference
+                != target_asset
+            ):
+
+                continue
+
+            tf_snapshot = (
+                market_snapshots.get(
+                    tf,
+                    {}
+                )
+                or {}
+            )
+
+            analysis = (
+                tf_snapshot.get(
+                    target_symbol
+                )
+            )
+
+            if not isinstance(
+                analysis,
+                dict
+            ):
+
+                continue
+
+            levels = (
+                analysis.get(
+                    'levels',
+                    {}
+                )
+                or {}
+            )
+
+            if not isinstance(
+                levels,
+                dict
+            ):
+
+                continue
+
+            entry_version = str(
+                levels.get(
+                    'entry_quality_version',
+                    ''
+                )
+                or ''
+            ).upper()
+
+            # ============================================================
+            # SOLAMENTE Q1
+            # ============================================================
+            #
+            # El histórico antiguo no debe fingir que contiene
+            # información de Reachability.
+            # ============================================================
+
+            if not entry_version.startswith(
+                'Q1_'
+            ):
+
+                continue
+
+            smc_score = (
+                self._q4b_optional_float(
+                    levels.get(
+                        'entry_smc_raw_score'
+                    )
+                )
+            )
+
+            entry_score = (
+                self._q4b_optional_float(
+                    levels.get(
+                        'entry_score'
+                    )
+                )
+            )
+
+            reachability_score = (
+                self._q4b_optional_float(
+                    levels.get(
+                        'entry_reachability_score'
+                    )
+                )
+            )
+
+            # Q1 debería contener SMC + Reachability.
+            #
+            # Si por algún motivo falta uno, NO bloqueamos el sistema
+            # basándonos en datos incompletos.
+            if (
+                reachability_score is None
+                or (
+                    smc_score is None
+                    and entry_score is None
+                )
+            ):
+
+                continue
+
+            if smc_score is None:
+
+                smc_score = (
+                    entry_score
+                )
+
+            smc_score = max(
+                0.0,
+                min(
+                    100.0,
+                    float(
+                        smc_score
+                        or 0
+                    )
+                )
+            )
+
+            reachability_score = max(
+                0.0,
+                min(
+                    100.0,
+                    float(
+                        reachability_score
+                        or 0
+                    )
+                )
+            )
+
+            # ============================================================
+            # Q4B ENTRY QUALITY
+            # ============================================================
+            #
+            # 70%:
+            #     calidad estructural original.
+            #
+            # 30%:
+            #     alcanzabilidad Q1.
+            #
+            # Reachability ayuda a elegir el MOMENTO,
+            # pero jamás puede convertir una mala estructura
+            # en una excelente entrada.
+            # ============================================================
+
+            quality_score = (
+                smc_score
+                * 0.70
+                +
+                reachability_score
+                * 0.30
+            )
+
+            entry = (
+                self._q4b_optional_float(
+                    levels.get(
+                        'entry'
+                    )
+                )
+            )
+
+            stop_loss = (
+                self._q4b_optional_float(
+                    levels.get(
+                        'stop_loss'
+                    )
+                )
+            )
+
+            take_profit = (
+                self._q4b_optional_float(
+                    levels.get(
+                        'take_profit'
+                    )
+                )
+            )
+
+            current_price = (
+                self._q4b_optional_float(
+                    analysis.get(
+                        'current_price'
+                    )
+                )
+            )
+
+            distance_atr = (
+                self._q4b_optional_float(
+                    levels.get(
+                        'entry_distance_atr'
+                    )
+                )
+            )
+
+            late = False
+            invalidated = False
+            progress_ratio = None
+            remaining_rr = None
+
+            # ============================================================
+            # FRESHNESS
+            # ============================================================
+            #
+            # Para asignar capital hacia BTC/PAXG estamos estudiando
+            # una ENTRADA COMPRADORA al activo objetivo.
+            #
+            # Sólo calculamos freshness si tenemos geometría completa.
+            # ============================================================
+
+            valid_geometry = bool(
+                entry is not None
+                and stop_loss is not None
+                and take_profit is not None
+                and current_price is not None
+                and stop_loss > 0
+                and entry > 0
+                and take_profit > 0
+                and current_price > 0
+                and stop_loss < entry < take_profit
+            )
+
+            if valid_geometry:
+
+                planned_reward = (
+                    take_profit
+                    - entry
+                )
+
+                original_risk = (
+                    entry
+                    - stop_loss
+                )
+
+                if (
+                    planned_reward > 0
+                    and original_risk > 0
+                ):
+
+                    progress_ratio = (
+                        (
+                            current_price
+                            - entry
+                        )
+                        / planned_reward
+                    )
+
+                    remaining_rr = (
+                        (
+                            take_profit
+                            - current_price
+                        )
+                        / original_risk
+                    )
+
+                    # La tesis ya cruzó la invalidación.
+                    if (
+                        current_price
+                        <= stop_loss
+                    ):
+
+                        invalidated = True
+
+                    # TP ya alcanzado.
+                    if (
+                        current_price
+                        >= take_profit
+                    ):
+
+                        late = True
+
+                    # Misma filosofía de 36X:
+                    #
+                    # no bloqueamos por un pequeño avance.
+                    #
+                    # Sólo cuando:
+                    #
+                    # >= 50% recorrido consumido
+                    #
+                    # Y
+                    #
+                    # RR restante < 1.20.
+                    if (
+                        progress_ratio
+                        >= self.SPOT_ENTRY_MAX_CHASE_PROGRESS
+                        and remaining_rr
+                        < self.SPOT_ENTRY_MIN_REMAINING_RR
+                    ):
+
+                        late = True
+
+            observations.append({
+                'timeframe':
+                    tf,
+
+                'quality_score':
+                    round(
+                        quality_score,
+                        2
+                    ),
+
+                'smc_score':
+                    round(
+                        smc_score,
+                        2
+                    ),
+
+                'reachability_score':
+                    round(
+                        reachability_score,
+                        2
+                    ),
+
+                'entry':
+                    entry,
+
+                'current_price':
+                    current_price,
+
+                'distance_atr':
+                    distance_atr,
+
+                'progress_ratio':
+                    progress_ratio,
+
+                'remaining_rr':
+                    remaining_rr,
+
+                'late':
+                    bool(
+                        late
+                    ),
+
+                'invalidated':
+                    bool(
+                        invalidated
+                    )
+            })
+
+        result[
+            'evidence_count'
+        ] = len(
+            observations
+        )
+
+        if not observations:
+
+            return result
+
+        result[
+            'available'
+        ] = True
+
+        result[
+            'late_count'
+        ] = sum(
+            1
+            for item
+            in observations
+            if item.get(
+                'late'
+            )
+        )
+
+        result[
+            'invalidated_count'
+        ] = sum(
+            1
+            for item
+            in observations
+            if item.get(
+                'invalidated'
+            )
+        )
+
+        usable = [
+            item
+            for item
+            in observations
+            if not item.get(
+                'late'
+            )
+            and not item.get(
+                'invalidated'
+            )
+        ]
+
+        result[
+            'usable_count'
+        ] = len(
+            usable
+        )
+
+        # ================================================================
+        # TODAS LAS ENTRADAS DISPONIBLES SON TARDÍAS/INVALIDADAS
+        # ================================================================
+
+        if not usable:
+
+            result[
+                'status'
+            ] = 'WAIT_HOLD'
+
+            result[
+                'quality_label'
+            ] = 'LATE_OR_INVALIDATED'
+
+            result[
+                'reason'
+            ] = (
+                'El activo tiene dirección favorable, '
+                'pero todos los Entries Q1 disponibles '
+                'están tardíos o técnicamente invalidados. '
+                'HOLD es superior a perseguir el precio.'
+            )
+
+            return result
+
+        # ================================================================
+        # ELEGIR EL MEJOR TF DE EJECUCIÓN
+        # ================================================================
+        #
+        # No exigimos que 3/4 Entries sean perfectos.
+        #
+        # La DIRECCIÓN ya fue confirmada por el motor multi-TF.
+        #
+        # Aquí buscamos la mejor ventana disponible para ejecutar.
+        # ================================================================
+
+        best = max(
+            usable,
+            key=lambda item: (
+                float(
+                    item.get(
+                        'quality_score',
+                        0
+                    )
+                    or 0
+                ),
+                float(
+                    item.get(
+                        'reachability_score',
+                        0
+                    )
+                    or 0
+                )
+            )
+        )
+
+        best_quality = float(
+            best.get(
+                'quality_score',
+                0
+            )
+            or 0
+        )
+
+        best_reachability = float(
+            best.get(
+                'reachability_score',
+                0
+            )
+            or 0
+        )
+
+        result[
+            'best_timeframe'
+        ] = best.get(
+            'timeframe'
+        )
+
+        result[
+            'best_quality_score'
+        ] = round(
+            best_quality,
+            2
+        )
+
+        result[
+            'best_smc_score'
+        ] = best.get(
+            'smc_score'
+        )
+
+        result[
+            'best_reachability_score'
+        ] = round(
+            best_reachability,
+            2
+        )
+
+        result[
+            'best_entry'
+        ] = best.get(
+            'entry'
+        )
+
+        result[
+            'best_current_price'
+        ] = best.get(
+            'current_price'
+        )
+
+        result[
+            'best_distance_atr'
+        ] = best.get(
+            'distance_atr'
+        )
+
+        progress_ratio = (
+            best.get(
+                'progress_ratio'
+            )
+        )
+
+        remaining_rr = (
+            best.get(
+                'remaining_rr'
+            )
+        )
+
+        if progress_ratio is not None:
+
+            result[
+                'progress_to_tp_pct'
+            ] = round(
+                float(
+                    progress_ratio
+                )
+                * 100.0,
+                2
+            )
+
+        if remaining_rr is not None:
+
+            result[
+                'remaining_rr'
+            ] = round(
+                float(
+                    remaining_rr
+                ),
+                3
+            )
+
+        # ================================================================
+        # ENTRY BUENO
+        # ================================================================
+
+        if (
+            best_quality
+            >= self.SPOT_ENTRY_GOOD_QUALITY
+            and
+            best_reachability
+            >= self.SPOT_ENTRY_GOOD_REACHABILITY
+        ):
+
+            result[
+                'status'
+            ] = 'EXECUTE'
+
+            result[
+                'quality_label'
+            ] = 'GOOD'
+
+            result[
+                'reason'
+            ] = (
+                f'Q4B encuentra Entry Spot de buena calidad '
+                f'en {best.get("timeframe")}: '
+                f'quality={best_quality:.1f}, '
+                f'reachability={best_reachability:.1f}. '
+                'El activo y el momento de entrada están alineados.'
+            )
+
+            return result
+
+        # ================================================================
+        # ENTRY ACEPTABLE
+        # ================================================================
+        #
+        # No bloqueamos una entrada razonable sólo porque no sea
+        # perfecta. Esto evita convertir el TGP en tímido.
+        # ================================================================
+
+        if (
+            best_quality
+            >= self.SPOT_ENTRY_MIN_ACCEPTABLE_QUALITY
+            and
+            best_reachability
+            >= self.SPOT_ENTRY_MIN_ACCEPTABLE_REACHABILITY
+        ):
+
+            result[
+                'status'
+            ] = 'EXECUTE_CAUTION'
+
+            result[
+                'quality_label'
+            ] = 'ACCEPTABLE'
+
+            result[
+                'reason'
+            ] = (
+                f'Q4B encuentra Entry Spot aceptable '
+                f'en {best.get("timeframe")}: '
+                f'quality={best_quality:.1f}, '
+                f'reachability={best_reachability:.1f}. '
+                'No es una entrada Premium, pero tampoco existe '
+                'evidencia suficiente para bloquear la asignación.'
+            )
+
+            return result
+
+        # ================================================================
+        # DIRECCIÓN BUENA + PRECIO MALO
+        # ================================================================
+
+        result[
+            'status'
+        ] = 'WAIT_HOLD'
+
+        result[
+            'quality_label'
+        ] = 'POOR_ENTRY'
+
+        result[
+            'reason'
+        ] = (
+            f'Q4B confirma que {target_asset} puede seguir siendo '
+            f'el activo favorecido, pero el mejor Entry disponible '
+            f'({best.get("timeframe")}) no tiene calidad suficiente: '
+            f'quality={best_quality:.1f}, '
+            f'reachability={best_reachability:.1f}. '
+            'Se prefiere HOLD y esperar mejor precio.'
+        )
+
+        return result
+
+
+    def _apply_spot_entry_quality_guard(
+        self,
+        action,
+        reason,
+        confidence,
+        market_snapshots,
+        timeframe_results
+    ):
+        """
+        Convierte la evaluación Q4B en un guardrail de asignación.
+
+        IMPORTANTE:
+        sólo puede mantener la operación existente o convertirla en HOLD.
+        """
+
+        action_text = str(
+            action
+            or 'HOLD'
+        ).upper()
+
+        result = {
+            'version':
+                self.SPOT_ENTRY_SPECIALIST_VERSION,
+
+            'active':
+                False,
+
+            'allowed':
+                True,
+
+            'original_action':
+                action_text,
+
+            'final_action':
+                action_text,
+
+            'confidence':
+                float(
+                    confidence
+                    or 0
+                ),
+
+            'target_asset':
+                None,
+
+            'entry_evaluation':
+                None,
+
+            'reason':
+                str(
+                    reason
+                    or ''
+                )
+        }
+
+        # ================================================================
+        # QUÉ ACCIONES SIGNIFICAN ENTRAR A BTC/PAXG
+        # ================================================================
+
+        if action_text in (
+            'BUY_BTC',
+            'SWAP_PAXG_TO_BTC'
+        ):
+
+            target_asset = 'BTC'
+
+        elif action_text in (
+            'BUY_PAXG',
+            'SWAP_BTC_TO_PAXG'
+        ):
+
+            target_asset = 'PAXG'
+
+        else:
+
+            return result
+
+        result[
+            'active'
+        ] = True
+
+        result[
+            'target_asset'
+        ] = target_asset
+
+        evaluation = (
+            self._evaluate_spot_entry_opportunity(
+                target_asset=
+                    target_asset,
+
+                market_snapshots=
+                    market_snapshots,
+
+                timeframe_results=
+                    timeframe_results
+            )
+        )
+
+        result[
+            'entry_evaluation'
+        ] = evaluation
+
+        # ================================================================
+        # FAIL-OPEN
+        # ================================================================
+        #
+        # Si Q1 todavía no llegó al snapshot, Q4B NO rompe el comportamiento
+        # existente.
+        # ================================================================
+
+        if not evaluation.get(
+            'available',
+            False
+        ):
+
+            result[
+                'reason'
+            ] = (
+                f'{reason} '
+                'Q4B: todavía no existe evidencia Q1 suficiente; '
+                'se conserva la decisión previa del TGP.'
+            )
+
+            return result
+
+        status = str(
+            evaluation.get(
+                'status',
+                ''
+            )
+            or ''
+        ).upper()
+
+        # ================================================================
+        # ENTRY BUENO / ACEPTABLE
+        # ================================================================
+
+        if status in (
+            'EXECUTE',
+            'EXECUTE_CAUTION'
+        ):
+
+            result[
+                'reason'
+            ] = (
+                f'{reason} '
+                + str(
+                    evaluation.get(
+                        'reason'
+                    )
+                    or ''
+                )
+            )
+
+            return result
+
+        # ================================================================
+        # HOLD ES MEJOR QUE EJECUTAR AHORA
+        # ================================================================
+
+        result[
+            'allowed'
+        ] = False
+
+        result[
+            'final_action'
+        ] = 'HOLD'
+
+        result[
+            'confidence'
+        ] = max(
+            60.0,
+            min(
+                85.0,
+                float(
+                    confidence
+                    or 0
+                )
+            )
+        )
+
+        result[
+            'reason'
+        ] = (
+            f'{reason} '
+            + str(
+                evaluation.get(
+                    'reason'
+                )
+                or (
+                    'Q4B prefiere HOLD frente a '
+                    'una entrada de baja calidad.'
+                )
+            )
+        )
+
+        return result    
+    
     def _score_ratio_for_assets(
         self,
         analysis
@@ -4003,7 +5099,81 @@ class PortfolioGuardian:
             #
             #     ¿estamos haciendo whipsaw?
             # ==========================================================
+            # ==========================================================
+            # QUALITY ENGINE Q4B
+            # SPOT ENTRY & ALLOCATION SPECIALIST
+            # ==========================================================
+            #
+            # En este punto el TGP YA decidió:
+            #
+            #     BUY_BTC
+            #     BUY_PAXG
+            #     SWAP_PAXG_TO_BTC
+            #     SWAP_BTC_TO_PAXG
+            #
+            # Q4B no cambia la dirección.
+            #
+            # Sólo responde:
+            #
+            # ¿es mejor ejecutar AHORA o mantener HOLD
+            # hasta disponer de un Entry superior?
+            # ==========================================================
 
+            spot_entry_quality_guard = (
+                self._apply_spot_entry_quality_guard(
+                    action=
+                        action,
+
+                    reason=
+                        reason,
+
+                    confidence=
+                        confidence,
+
+                    market_snapshots=
+                        market_snapshots,
+
+                    timeframe_results=
+                        timeframe_results
+                )
+            )
+
+            reason = str(
+                spot_entry_quality_guard.get(
+                    'reason'
+                )
+                or reason
+            )
+
+            if not spot_entry_quality_guard.get(
+                'allowed',
+                True
+            ):
+
+                action = 'HOLD'
+
+                confidence = float(
+                    spot_entry_quality_guard.get(
+                        'confidence',
+                        confidence
+                    )
+                    or confidence
+                )
+
+                # ======================================================
+                # HOLD JAMÁS DEBE CONTENER UNA OPERACIÓN SIMULADA
+                # ======================================================
+
+                trade_size = 0
+
+                amount_crypto = 0
+
+                amount_usd = 0
+
+                source_asset = None
+
+                target_asset = None
+                
             rotation_quality_guard = (
                 self._apply_spot_rotation_quality_guard(
                     action=
@@ -4293,7 +5463,169 @@ class PortfolioGuardian:
             # COMMIT 36X
             # DIAGNÓSTICO DE CALIDAD DE ROTACIÓN
             # ==============================================================
+            # ==============================================================
+            # QUALITY ENGINE Q4B
+            # DIAGNÓSTICO SPOT ENTRY / HOLD
+            # ==============================================================
 
+            q4b_entry_evaluation = (
+                spot_entry_quality_guard.get(
+                    'entry_evaluation'
+                )
+                or {}
+            )
+
+            rec[
+                'spot_entry_quality_guard'
+            ] = {
+                'version':
+                    str(
+                        spot_entry_quality_guard.get(
+                            'version',
+                            self.SPOT_ENTRY_SPECIALIST_VERSION
+                        )
+                    ),
+
+                'active':
+                    bool(
+                        spot_entry_quality_guard.get(
+                            'active',
+                            False
+                        )
+                    ),
+
+                'allowed':
+                    bool(
+                        spot_entry_quality_guard.get(
+                            'allowed',
+                            True
+                        )
+                    ),
+
+                'original_action':
+                    str(
+                        spot_entry_quality_guard.get(
+                            'original_action',
+                            'HOLD'
+                        )
+                    ),
+
+                'final_action':
+                    str(
+                        action
+                    ),
+
+                'target_asset':
+                    spot_entry_quality_guard.get(
+                        'target_asset'
+                    ),
+
+                'status':
+                    str(
+                        q4b_entry_evaluation.get(
+                            'status',
+                            'NOT_APPLICABLE'
+                        )
+                    ),
+
+                'quality_label':
+                    str(
+                        q4b_entry_evaluation.get(
+                            'quality_label',
+                            'UNKNOWN'
+                        )
+                    ),
+
+                'best_timeframe':
+                    q4b_entry_evaluation.get(
+                        'best_timeframe'
+                    ),
+
+                'best_quality_score':
+                    q4b_entry_evaluation.get(
+                        'best_quality_score'
+                    ),
+
+                'best_smc_score':
+                    q4b_entry_evaluation.get(
+                        'best_smc_score'
+                    ),
+
+                'best_reachability_score':
+                    q4b_entry_evaluation.get(
+                        'best_reachability_score'
+                    ),
+
+                'best_entry':
+                    q4b_entry_evaluation.get(
+                        'best_entry'
+                    ),
+
+                'best_current_price':
+                    q4b_entry_evaluation.get(
+                        'best_current_price'
+                    ),
+
+                'best_distance_atr':
+                    q4b_entry_evaluation.get(
+                        'best_distance_atr'
+                    ),
+
+                'progress_to_tp_pct':
+                    q4b_entry_evaluation.get(
+                        'progress_to_tp_pct'
+                    ),
+
+                'remaining_rr':
+                    q4b_entry_evaluation.get(
+                        'remaining_rr'
+                    ),
+
+                'evidence_count':
+                    int(
+                        q4b_entry_evaluation.get(
+                            'evidence_count',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'usable_count':
+                    int(
+                        q4b_entry_evaluation.get(
+                            'usable_count',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'late_count':
+                    int(
+                        q4b_entry_evaluation.get(
+                            'late_count',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'invalidated_count':
+                    int(
+                        q4b_entry_evaluation.get(
+                            'invalidated_count',
+                            0
+                        )
+                        or 0
+                    ),
+
+                'reason':
+                    str(
+                        q4b_entry_evaluation.get(
+                            'reason',
+                            ''
+                        )
+                        or ''
+                    )
+            }
             rec[
                 'rotation_quality_guard'
             ] = {
