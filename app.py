@@ -5723,7 +5723,108 @@ class TradingExpertSystem:
                 'order': 15,
                 'condition': 'divergencia_oculta_bajista'
             },
-            
+
+            # ============================================================
+            # Q7 — JUSTIFICACIONES RESERVADAS
+            # ADAPTIVE INTRADAY STRATEGY LAB
+            # ============================================================
+            #
+            # Estas plantillas quedan PREPARADAS pero INACTIVAS.
+            #
+            # Q7 sigue siendo SHADOW ONLY y todavía NO añade ninguna de
+            # estas condiciones a _mapear_condiciones_activas().
+            #
+            # Por tanto:
+            # - NO aparecen en mensajes actuales;
+            # - NO cambian decisiones;
+            # - NO cambian confianza;
+            # - NO cambian Safety;
+            # - NO afectan Publication Gate.
+            #
+            # Sólo podrán usarse después de validación de ReviewTrader,
+            # walk-forward/OOS y promoción humana explícita.
+            # ============================================================
+
+            'q7_fast_rsi_long': {
+                'template': 'El perfil RSI rápido muestra recuperación coordinada del momentum de corto plazo y respalda el timing alcista de la entrada. ',
+                'type': 'momentum_clasico',
+                'order': 8,
+                'condition': 'q7_fast_rsi_long'
+            },
+            'q7_fast_rsi_short': {
+                'template': 'El perfil RSI rápido muestra deterioro coordinado del momentum de corto plazo y respalda el timing bajista de la entrada. ',
+                'type': 'momentum_clasico',
+                'order': 8,
+                'condition': 'q7_fast_rsi_short'
+            },
+            'q7_balanced_rsi_long': {
+                'template': 'El perfil RSI balanceado indica recuperación del pullback y alineación progresiva del momentum con una continuación alcista. ',
+                'type': 'momentum_clasico',
+                'order': 8,
+                'condition': 'q7_balanced_rsi_long'
+            },
+            'q7_balanced_rsi_short': {
+                'template': 'El perfil RSI balanceado indica agotamiento del rebote y alineación progresiva del momentum con una continuación bajista. ',
+                'type': 'momentum_clasico',
+                'order': 8,
+                'condition': 'q7_balanced_rsi_short'
+            },
+            'q7_structural_rsi_long': {
+                'template': 'El RSI estructural mantiene momentum por encima de su zona media y pendiente favorable al contexto alcista. ',
+                'type': 'momentum_clasico',
+                'order': 8,
+                'condition': 'q7_structural_rsi_long'
+            },
+            'q7_structural_rsi_short': {
+                'template': 'El RSI estructural mantiene momentum por debajo de su zona media y pendiente favorable al contexto bajista. ',
+                'type': 'momentum_clasico',
+                'order': 8,
+                'condition': 'q7_structural_rsi_short'
+            },
+            'q7_rsi_conflict_long': {
+                'template': 'El perfil RSI adaptativo contradice el timing del LONG; la estructura puede seguir siendo válida, pero la entrada requiere mayor confirmación. ',
+                'type': 'precaucion',
+                'order': 29,
+                'condition': 'q7_rsi_conflict_long'
+            },
+            'q7_rsi_conflict_short': {
+                'template': 'El perfil RSI adaptativo contradice el timing del SHORT; la estructura puede seguir siendo válida, pero la entrada requiere mayor confirmación. ',
+                'type': 'precaucion',
+                'order': 29,
+                'condition': 'q7_rsi_conflict_short'
+            },
+            'q7_vwap_range_long': {
+                'template': 'En régimen lateral, el precio se encuentra extendido por debajo del VWAP real y muestra rechazo desde una zona de valor o soporte, favoreciendo una reversión hacia precio justo. ',
+                'type': 'perfil_volumen',
+                'order': 20,
+                'condition': 'q7_vwap_range_long'
+            },
+            'q7_vwap_range_short': {
+                'template': 'En régimen lateral, el precio se encuentra extendido por encima del VWAP real y muestra rechazo desde una zona de valor o resistencia, favoreciendo una reversión hacia precio justo. ',
+                'type': 'perfil_volumen',
+                'order': 20,
+                'condition': 'q7_vwap_range_short'
+            },
+            'q7_breakout_retest_long': {
+                'template': 'La ruptura fue seguida por un retest aceptado del nivel superado, que ahora actúa como soporte y mejora la calidad estructural del LONG. ',
+                'type': 'estructura',
+                'order': 6,
+                'condition': 'q7_breakout_retest_long'
+            },
+            'q7_breakout_retest_short': {
+                'template': 'La ruptura bajista fue seguida por un retest aceptado del nivel perdido, que ahora actúa como resistencia y mejora la calidad estructural del SHORT. ',
+                'type': 'estructura',
+                'order': 6,
+                'condition': 'q7_breakout_retest_short'
+            },
+            'q7_breakout_pending_retest': {
+                'template': 'La ruptura está confirmada, pero todavía falta un retest válido del nivel; conviene evitar perseguir el precio y esperar aceptación estructural. ',
+                'type': 'confirmacion',
+                'order': 24,
+                'condition': 'q7_breakout_pending_retest'
+            },
+
+
             # ============ CATEGORÍA 16: FLUJO DE DINERO (MFI) ============
             'mfi_compra': {
                 'template': 'MFI supera 60 ({mfi}) con volumen creciente, confirmando entrada de capital institucional. ',
@@ -18468,7 +18569,147 @@ class TradingExpertSystem:
                 estrategias_consenso = []
                 razones_consenso = ['Error en sistema de traders']
                 registro_votacion = {}
-            
+            # ==========================================================
+            # Q7 — ADAPTIVE INTRADAY STRATEGY LAB
+            # ==========================================================
+            #
+            # SHADOW ONLY.
+            #
+            # MUY IMPORTANTE:
+            #
+            # El comité de traders YA votó antes de llegar aquí.
+            #
+            # Por tanto Q7:
+            #
+            # - NO cambia votos;
+            # - NO cambia consenso;
+            # - NO cambia Safety;
+            # - NO cambia Entry;
+            # - NO cambia SL;
+            # - NO cambia TP;
+            # - NO cambia leverage;
+            # - NO cambia Publication Gate.
+            #
+            # Sólo genera evidencia para aprendizaje posterior.
+            # ==========================================================
+
+            try:
+
+                from q7_strategy_lab import (
+                    analyze_q7_strategy_lab
+                )
+
+                strategy_lab = (
+                    analyze_q7_strategy_lab(
+                        df=df,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        system_type=
+                            analysis_system_type,
+                        market_regime=
+                            market_regime,
+                        momentum=
+                            momentum,
+                        volatility=
+                            volatility,
+                        volume=
+                            volume,
+                        structure=
+                            structure,
+                        confirmation=
+                            confirmation,
+                        final_action=
+                            accion_consenso,
+                        rsi_calculator=
+                            self.calculate_rsi
+                    )
+                )
+
+                if strategy_lab.get(
+                    'eligible',
+                    False
+                ):
+
+                    rsi_shadow = (
+                        strategy_lab
+                        .get(
+                            'strategies',
+                            {}
+                        )
+                        .get(
+                            'rsi_profile',
+                            {}
+                        )
+                    )
+
+                    print(
+                        "🧪 [Q7 SHADOW] "
+                        f"{strategy_lab.get('active_profile')} · "
+                        f"RSI "
+                        f"{rsi_shadow.get('direction', 'NEUTRAL')} · "
+                        f"{rsi_shadow.get('alignment_with_system', 'NEUTRAL')}"
+                    )
+
+            except Exception as q7_error:
+
+                # ======================================================
+                # FAIL-OPEN
+                # ======================================================
+                #
+                # Q7 es un laboratorio.
+                #
+                # Un error aquí NUNCA debe bloquear el trading
+                # principal.
+                # ======================================================
+
+                strategy_lab = {
+                    'version':
+                        'Q7_STRATEGY_LAB_SHADOW_V1',
+
+                    'shadow_only':
+                        True,
+
+                    'affects_vote':
+                        False,
+
+                    'affects_safety':
+                        False,
+
+                    'affects_entry':
+                        False,
+
+                    'affects_levels':
+                        False,
+
+                    'affects_publication':
+                        False,
+
+                    'affects_leverage':
+                        False,
+
+                    'eligible':
+                        False,
+
+                    'reason':
+                        (
+                            'Q7_IMPORT_OR_RUNTIME_ERROR:'
+                            f'{type(q7_error).__name__}'
+                        ),
+
+                    'error':
+                        str(
+                            q7_error
+                        )[:180],
+
+                    'strategies':
+                        {}
+                }
+
+                print(
+                    "⚠️ [Q7 SHADOW] "
+                    "Laboratorio no disponible: "
+                    f"{q7_error}"
+                )            
             # ============ NIVELES ============
             levels = {}
             if accion_consenso in ['COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT']:
@@ -19070,6 +19311,7 @@ class TradingExpertSystem:
                 'sentiment': self._make_serializable(sentiment),
                 'liquidation': self._make_serializable(liquidation_data),
                 'market_regime': self._make_serializable(market_regime),   # nueva capa
+                'strategy_lab': self._make_serializable(strategy_lab),
                 'zones': self._make_serializable({
                     'active_zones': zonas_data,
                     'price_status': price_status,
@@ -34790,6 +35032,199 @@ def _ai_compact_technical_context(
 
     return technical
 
+def _ai_compact_q7_strategy_lab(
+    result
+):
+    """
+    Contexto Q7 mínimo para IA.
+
+    Q7 continúa siendo SHADOW_ONLY.
+    La IA puede interpretarlo, pero no otorgarle autoridad.
+    """
+    result = (
+        result
+        if isinstance(
+            result,
+            dict
+        )
+        else {}
+    )
+
+    raw = (
+        result.get(
+            'strategy_lab'
+        )
+        or {}
+    )
+
+    if (
+        not isinstance(
+            raw,
+            dict
+        )
+        or not raw.get(
+            'shadow_only',
+            False
+        )
+    ):
+        return {}
+
+    strategies = (
+        raw.get(
+            'strategies',
+            {}
+        )
+        or {}
+    )
+
+    if not isinstance(
+        strategies,
+        dict
+    ):
+        strategies = {}
+
+    rsi = (
+        strategies.get(
+            'rsi_profile',
+            {}
+        )
+        or {}
+    )
+
+    vwap = (
+        strategies.get(
+            'vwap_reversion',
+            {}
+        )
+        or {}
+    )
+
+    retest = (
+        strategies.get(
+            'breakout_retest',
+            {}
+        )
+        or {}
+    )
+
+    def _pick(
+        source,
+        keys
+    ):
+        if not isinstance(
+            source,
+            dict
+        ):
+            return {}
+
+        return {
+            key:
+                source.get(
+                    key
+                )
+
+            for key
+            in keys
+
+            if source.get(
+                key
+            ) is not None
+        }
+
+    return {
+        'version':
+            str(
+                raw.get(
+                    'version'
+                )
+                or ''
+            ),
+
+        'mode':
+            'SHADOW_ONLY',
+
+        'eligible':
+            bool(
+                raw.get(
+                    'eligible',
+                    False
+                )
+            ),
+
+        'active_profile':
+            raw.get(
+                'active_profile'
+            ),
+
+        'final_action_normalized':
+            raw.get(
+                'final_action_normalized'
+            ),
+
+        # ==============================================================
+        # GUARDRAILS
+        # ==============================================================
+
+        'affects_vote':
+            False,
+
+        'affects_safety':
+            False,
+
+        'affects_entry':
+            False,
+
+        'affects_levels':
+            False,
+
+        'affects_publication':
+            False,
+
+        'affects_leverage':
+            False,
+
+        'rsi_profile':
+            _pick(
+                rsi,
+                (
+                    'profile',
+                    'direction',
+                    'state',
+                    'alignment_with_system',
+                    'evidence_hits',
+                    'max_evidence_hits',
+                    'fast_medium_cross',
+                    'values'
+                )
+            ),
+
+        'vwap_reversion':
+            _pick(
+                vwap,
+                (
+                    'direction',
+                    'state',
+                    'alignment_with_system',
+                    'deviation_pct',
+                    'distance_atr',
+                    'coverage_pct'
+                )
+            ),
+
+        'breakout_retest':
+            _pick(
+                retest,
+                (
+                    'direction',
+                    'state',
+                    'alignment_with_system',
+                    'level_type',
+                    'tolerance_pct'
+                )
+            )
+    }
+
+
 def _ai_compact_analysis(
     result,
     symbol=None,
@@ -35066,6 +35501,13 @@ def _ai_compact_analysis(
         # una tesis independiente antes de comparar con el Comité.
         'technical_context':
             _ai_compact_technical_context(
+                result
+            ),
+        # Q7D — evidencia experimental de timing.
+        # Nunca es una orden para la IA.
+
+        'q7_strategy_lab':
+            _ai_compact_q7_strategy_lab(
                 result
             ),
 
@@ -36562,6 +37004,65 @@ def _build_ai_learning_context():
                     readiness_error
                 )[:180]
         }        
+    # ================================================================
+    # Q7D — STRATEGY LAB → GEMINI LEARNING SCIENTIST
+    # ================================================================
+    #
+    # Gemini recibe únicamente estadísticas agregadas de Q7.
+    #
+    # NO recibe autoridad para modificar producción.
+    # ==============================================================
+
+    try:
+
+        analytics_service = (
+            _get_analytics_service()
+        )
+
+        if analytics_service is None:
+
+            raise RuntimeError(
+                'AnalyticsService no disponible'
+            )
+
+        quality_v2 = (
+            analytics_service
+            .get_quality_v2_summary(
+                system_type='futures',
+                days_back=90
+            )
+            or {}
+        )
+
+        q7_strategy_lab_learning = (
+            quality_v2.get(
+                'q7_strategy_lab',
+                {}
+            )
+            or {}
+        )
+
+    except Exception as q7_learning_error:
+
+        q7_strategy_lab_learning = {
+            'version':
+                'Q7_STRATEGY_LAB_ANALYTICS_V1',
+
+            'mode':
+                'SHADOW_ONLY',
+
+            'status':
+                'UNAVAILABLE',
+
+            'ready_for_automatic_promotion':
+                False,
+
+            'reason':
+                str(
+                    q7_learning_error
+                )[:180]
+        }
+
     return {
 
         'policy': {
@@ -36616,7 +37117,14 @@ def _build_ai_learning_context():
         # Gemini conoce el estado del gate, pero continúa
         # con autoridad SHADOW_ONLY.
         'commit37_readiness':
-            commit37_readiness
+            commit37_readiness,
+
+        # Q7D:
+        # evidencia agregada del laboratorio,
+        # exclusivamente para Learning.
+
+        'q7_strategy_lab':
+            q7_strategy_lab_learning
     }
 
 # ============================================================================

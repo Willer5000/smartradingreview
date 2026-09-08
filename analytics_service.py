@@ -965,6 +965,707 @@ class AnalyticsService:
 
         return data
 
+    # ========================================================================
+    # Q7C — ADAPTIVE INTRADAY STRATEGY LAB / ANALYTICS SHADOW
+    # ========================================================================
+
+    @classmethod
+    def _q7_entry_activated(
+        cls,
+        signal
+    ):
+        """
+        Detecta si el Entry llegó a activarse.
+
+        No inventa Entry Hit cuando el resultado no permite demostrarlo.
+        """
+        status = cls._q5_status(
+            signal
+        )
+
+        if status in (
+            'tp_hit',
+            'sl_hit'
+        ):
+            return True
+
+        result = cls._q5_result(
+            signal
+        )
+
+        notes = str(
+            result.get(
+                'notes',
+                ''
+            )
+            or ''
+        ).lower()
+
+        if 'entry_touched=true' in notes:
+            return True
+
+        if 'entry_touched=false' in notes:
+            return False
+
+        return None
+
+
+    @classmethod
+    def _q7_group_metrics(
+        cls,
+        rows
+    ):
+        """
+        Métricas económicas de un grupo Q7.
+
+        Reutiliza el agregador económico Q5 para mantener exactamente
+        la misma definición de WR, PnL, Expectancy y Profit Factor.
+        """
+        rows = list(
+            rows
+            or []
+        )
+
+        base = cls._q5_aggregate(
+            rows,
+            include_bands=False
+        )
+
+        activated = 0
+        known_activation = 0
+
+        for row in rows:
+
+            value = cls._q7_entry_activated(
+                row
+            )
+
+            if value is None:
+                continue
+
+            known_activation += 1
+
+            if value:
+                activated += 1
+
+        base[
+            'entry_activated'
+        ] = activated
+
+        base[
+            'entry_activation_known'
+        ] = known_activation
+
+        base[
+            'entry_activation_rate'
+        ] = (
+            round(
+                activated
+                / known_activation
+                * 100.0,
+                2
+            )
+            if known_activation
+            else None
+        )
+
+        resolved = int(
+            base.get(
+                'resolved',
+                0
+            )
+            or 0
+        )
+
+        # ==============================================================
+        # POLÍTICA DE EVIDENCIA
+        # ==============================================================
+        #
+        # <10 resueltas:
+        #     insuficiente.
+        #
+        # 10–24:
+        #     evidencia preliminar.
+        #
+        # >=25:
+        #     puede ser revisada por humano,
+        #     pero NUNCA promocionada automáticamente.
+        # ==============================================================
+
+        if resolved < 10:
+
+            evidence_status = (
+                'INSUFFICIENT_EVIDENCE'
+            )
+
+        elif resolved < 25:
+
+            evidence_status = (
+                'PRELIMINARY'
+            )
+
+        else:
+
+            evidence_status = (
+                'ELIGIBLE_FOR_HUMAN_REVIEW'
+            )
+
+        base[
+            'evidence_status'
+        ] = evidence_status
+
+        base[
+            'ready_for_automatic_promotion'
+        ] = False
+
+        base[
+            'authority'
+        ] = 'SHADOW_ONLY'
+
+        return base
+
+
+    @classmethod
+    def _q7_build_cohort_summary(
+        cls,
+        rows
+    ):
+        """
+        Construye las comparaciones internas de una cohorte Q7.
+
+        IMPORTANTE:
+        esta función recibe Oficial o Shadow por separado.
+        Nunca mezcla ambas cohortes.
+        """
+        rows = list(
+            rows
+            or []
+        )
+
+        groups = {
+            'profiles':
+                defaultdict(
+                    list
+                ),
+
+            'rsi_alignment':
+                defaultdict(
+                    list
+                ),
+
+            'profile_alignment':
+                defaultdict(
+                    list
+                ),
+
+            'vwap_states':
+                defaultdict(
+                    list
+                ),
+
+            'vwap_alignment':
+                defaultdict(
+                    list
+                ),
+
+            'breakout_retest_states':
+                defaultdict(
+                    list
+                ),
+
+            'breakout_retest_alignment':
+                defaultdict(
+                    list
+                )
+        }
+
+        valid_rows = []
+
+        for signal, q7 in rows:
+
+            valid_rows.append(
+                signal
+            )
+
+            profile = str(
+                q7.get(
+                    'active_profile',
+                    'UNKNOWN'
+                )
+                or 'UNKNOWN'
+            ).upper()
+
+            groups[
+                'profiles'
+            ][
+                profile
+            ].append(
+                signal
+            )
+
+            # ==========================================================
+            # RSI ADAPTATIVO
+            # ==========================================================
+
+            rsi = (
+                q7.get(
+                    'rsi_profile',
+                    {}
+                )
+                or {}
+            )
+
+            if isinstance(
+                rsi,
+                dict
+            ):
+
+                rsi_alignment = str(
+                    rsi.get(
+                        'alignment_with_system',
+                        'NEUTRAL'
+                    )
+                    or 'NEUTRAL'
+                ).upper()
+
+                groups[
+                    'rsi_alignment'
+                ][
+                    rsi_alignment
+                ].append(
+                    signal
+                )
+
+                groups[
+                    'profile_alignment'
+                ][
+                    f'{profile}|{rsi_alignment}'
+                ].append(
+                    signal
+                )
+
+            # ==========================================================
+            # VWAP
+            # ==========================================================
+
+            vwap = (
+                q7.get(
+                    'vwap_reversion',
+                    {}
+                )
+                or {}
+            )
+
+            if isinstance(
+                vwap,
+                dict
+            ):
+
+                vwap_state = str(
+                    vwap.get(
+                        'state',
+                        'UNKNOWN'
+                    )
+                    or 'UNKNOWN'
+                ).upper()
+
+                vwap_alignment = str(
+                    vwap.get(
+                        'alignment_with_system',
+                        'NEUTRAL'
+                    )
+                    or 'NEUTRAL'
+                ).upper()
+
+                groups[
+                    'vwap_states'
+                ][
+                    vwap_state
+                ].append(
+                    signal
+                )
+
+                groups[
+                    'vwap_alignment'
+                ][
+                    vwap_alignment
+                ].append(
+                    signal
+                )
+
+            # ==========================================================
+            # BREAKOUT + RETEST
+            # ==========================================================
+
+            retest = (
+                q7.get(
+                    'breakout_retest',
+                    {}
+                )
+                or {}
+            )
+
+            if isinstance(
+                retest,
+                dict
+            ):
+
+                retest_state = str(
+                    retest.get(
+                        'state',
+                        'UNKNOWN'
+                    )
+                    or 'UNKNOWN'
+                ).upper()
+
+                retest_alignment = str(
+                    retest.get(
+                        'alignment_with_system',
+                        'NEUTRAL'
+                    )
+                    or 'NEUTRAL'
+                ).upper()
+
+                groups[
+                    'breakout_retest_states'
+                ][
+                    retest_state
+                ].append(
+                    signal
+                )
+
+                groups[
+                    'breakout_retest_alignment'
+                ][
+                    retest_alignment
+                ].append(
+                    signal
+                )
+
+        return {
+            'observations':
+                len(
+                    valid_rows
+                ),
+
+            # ==========================================================
+            # CONTROL
+            # ==========================================================
+            #
+            # Ésta será nuestra referencia.
+            #
+            # No basta con que una estrategia gane.
+            # Debe mejorar respecto al conjunto comparable.
+            # ==========================================================
+
+            'control':
+                cls._q7_group_metrics(
+                    valid_rows
+                ),
+
+            'profiles': {
+                key:
+                    cls._q7_group_metrics(
+                        value
+                    )
+
+                for key, value
+                in sorted(
+                    groups[
+                        'profiles'
+                    ].items()
+                )
+            },
+
+            'rsi_alignment': {
+                key:
+                    cls._q7_group_metrics(
+                        value
+                    )
+
+                for key, value
+                in sorted(
+                    groups[
+                        'rsi_alignment'
+                    ].items()
+                )
+            },
+
+            'profile_alignment': {
+                key:
+                    cls._q7_group_metrics(
+                        value
+                    )
+
+                for key, value
+                in sorted(
+                    groups[
+                        'profile_alignment'
+                    ].items()
+                )
+            },
+
+            'vwap_states': {
+                key:
+                    cls._q7_group_metrics(
+                        value
+                    )
+
+                for key, value
+                in sorted(
+                    groups[
+                        'vwap_states'
+                    ].items()
+                )
+            },
+
+            'vwap_alignment': {
+                key:
+                    cls._q7_group_metrics(
+                        value
+                    )
+
+                for key, value
+                in sorted(
+                    groups[
+                        'vwap_alignment'
+                    ].items()
+                )
+            },
+
+            'breakout_retest_states': {
+                key:
+                    cls._q7_group_metrics(
+                        value
+                    )
+
+                for key, value
+                in sorted(
+                    groups[
+                        'breakout_retest_states'
+                    ].items()
+                )
+            },
+
+            'breakout_retest_alignment': {
+                key:
+                    cls._q7_group_metrics(
+                        value
+                    )
+
+                for key, value
+                in sorted(
+                    groups[
+                        'breakout_retest_alignment'
+                    ].items()
+                )
+            }
+        }
+
+
+    @classmethod
+    def _q7_strategy_summary(
+        cls,
+        signals
+    ):
+        """
+        Separa Q7 oficial y Q7 Shadow.
+
+        La separación es obligatoria para impedir que resultados
+        hipotéticos mejoren artificialmente los KPIs oficiales.
+        """
+        official_rows = []
+        shadow_rows = []
+        excluded = 0
+
+        for signal in list(
+            signals
+            or []
+        ):
+
+            if str(
+                signal.get(
+                    'system_type',
+                    ''
+                )
+                or ''
+            ).strip().lower() != 'futures':
+
+                continue
+
+            learning = (
+                cls._q5_learning(
+                    signal
+                )
+            )
+
+            q7 = (
+                learning.get(
+                    'q7_strategy_lab_shadow',
+                    {}
+                )
+                or {}
+            )
+
+            if not isinstance(
+                q7,
+                dict
+            ):
+                continue
+
+            if not q7.get(
+                'shadow_only',
+                False
+            ):
+
+                excluded += 1
+                continue
+
+            if str(
+                q7.get(
+                    'lab_version',
+                    ''
+                )
+                or ''
+            ) != 'Q7_STRATEGY_LAB_SHADOW_V1':
+
+                excluded += 1
+                continue
+
+            if not cls._q5_bool(
+                q7.get(
+                    'eligible',
+                    False
+                )
+            ):
+
+                continue
+
+            # ==========================================================
+            # MISMO CONTRATO DE PROCEDENCIA FUTURES QUE Q5
+            # ==========================================================
+
+            clean_futures = (
+                learning.get(
+                    'cohort'
+                )
+                == 'FUTURES_PERPETUAL_REAL_CLOSED_V1'
+
+                and learning.get(
+                    'market_data_source'
+                )
+                == 'KUCOIN_FUTURES_PERPETUAL_REST'
+
+                and not cls._q5_bool(
+                    learning.get(
+                        'market_data_is_synthetic',
+                        True
+                    )
+                )
+
+                and cls._q5_bool(
+                    learning.get(
+                        'source_candle_closed',
+                        False
+                    )
+                )
+            )
+
+            if not clean_futures:
+
+                excluded += 1
+                continue
+
+            evaluation_role = str(
+                learning.get(
+                    'evaluation_role',
+                    ''
+                )
+                or ''
+            ).strip().upper()
+
+            statistically_eligible = (
+                cls._q5_bool(
+                    learning.get(
+                        'statistically_eligible',
+                        False
+                    )
+                )
+            )
+
+            pair = (
+                signal,
+                q7
+            )
+
+            # ==========================================================
+            # OFICIAL
+            # ==========================================================
+
+            if (
+                statistically_eligible
+                and evaluation_role
+                == 'EXECUTABLE_SIGNAL'
+            ):
+
+                official_rows.append(
+                    pair
+                )
+
+            # ==========================================================
+            # SHADOW
+            # ==========================================================
+
+            elif (
+                evaluation_role
+                == 'SHADOW_ANALYSIS'
+            ):
+
+                shadow_rows.append(
+                    pair
+                )
+
+            else:
+
+                excluded += 1
+
+        return {
+            'version':
+                'Q7_STRATEGY_LAB_ANALYTICS_V1',
+
+            'lab_version':
+                'Q7_STRATEGY_LAB_SHADOW_V1',
+
+            'mode':
+                'SHADOW_ONLY',
+
+            'authority_changed':
+                False,
+
+            'ready_for_automatic_promotion':
+                False,
+
+            'policy':
+                'IMPROVE_QUALITY_DO_NOT_LOWER_SAFETY',
+
+            # ==========================================================
+            # NUNCA MEZCLAR RENTABILIDAD OFICIAL CON SHADOW
+            # ==========================================================
+
+            'official':
+                cls._q7_build_cohort_summary(
+                    official_rows
+                ),
+
+            'shadow':
+                cls._q7_build_cohort_summary(
+                    shadow_rows
+                ),
+
+            'excluded':
+                excluded
+        }
+
 
     # ========================================================================
     # Q5 — LEER COHORTE V2
@@ -982,7 +1683,7 @@ class AnalyticsService:
                  .select('id,symbol,timeframe,system_type,action_normalized,status,created_at,'
                          'entry_price,stop_loss,take_profit,risk_reward,'
                          'q6_learning:context->learning,q6_execution:context->execution,'
-                         'signal_results(status,pnl_pct,exit_price,exit_timestamp,created_at)')
+                         'signal_results(status,pnl_pct,exit_price,exit_timestamp,notes,created_at)')
                  .gte('created_at', cutoff).lt('created_at', end.isoformat())
                  .eq('context->execution->>quality_score_version', Q5_CURRENT_QUALITY_SCORE_VERSION)
                  .in_('action_normalized', ['LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT'])
@@ -1157,6 +1858,18 @@ class AnalyticsService:
             'futures_shadow':
                 self._q5_aggregate(
                     futures_shadow
+                ),
+            # ==========================================================
+            # Q7C — ADAPTIVE INTRADAY STRATEGY LAB
+            # ==========================================================
+            #
+            # Oficial y Shadow permanecen completamente separados.
+            # Q7 continúa sin autoridad operativa.
+            # ==========================================================
+
+            'q7_strategy_lab':
+                self._q7_strategy_summary(
+                    signals
                 ),
 
             'coverage': {

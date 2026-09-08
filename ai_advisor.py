@@ -2993,6 +2993,40 @@ what_to_watch debe indicar qué condición observable podría
 cambiar la tesis.
 
 ============================================================
+Q7 STRATEGY LAB — SHADOW ONLY
+============================================================
+
+Si el contexto contiene q7_strategy_lab:
+
+- trátalo como evidencia experimental de TIMING;
+- ALIGNED no significa que la estrategia esté validada;
+- CONFLICT puede señalar riesgo de timing, pero no invalida
+  por sí solo la estructura principal;
+- nunca uses Q7 para bajar Safety;
+- nunca conviertas Q7 en un voto adicional del comité;
+- nunca cambies Entry, SL, TP, leverage o publication por Q7;
+- distingue observaciones de resultados resueltos;
+- no declares edge con una muestra insuficiente.
+
+Q7 puede contener:
+
+- RSI adaptativo por timeframe;
+- VWAP real de reversión en rango;
+- Breakout + Retest Acceptance.
+
+Una futura promoción Q7 requiere:
+
+muestra suficiente
+→ Expectancy favorable
+→ costes
+→ walk-forward
+→ OOS
+→ revisión humana.
+
+Q7 nunca tiene promoción automática positiva.
+
+
+============================================================
 APRENDIZAJE Y DISEÑO DE ESTRATEGIAS
 ============================================================
 
@@ -3990,7 +4024,7 @@ def _call_gemini_learning(
         )
 
     safe_context = (
-        _gemini_learning_safe_context(
+        _gemini_safe_learning_context(
             context
         )
     )
@@ -4041,6 +4075,21 @@ Analiza críticamente:
 - oportunidades perdidas cuando existan.
 
 No intentes aumentar operaciones simplemente bajando filtros.
+
+
+Si existe q7_strategy_lab en el contexto:
+
+- estudia RSI adaptativo, VWAP de reversión y Breakout-Retest
+  exclusivamente como experimentos SHADOW;
+- compara Oficial y Shadow por separado;
+- compara ALIGNED, NEUTRAL y CONFLICT contra el CONTROL;
+- compara perfiles FAST, BALANCED y STRUCTURAL por timeframe;
+- prioriza Entry Activation, Expectancy R, Profit Factor y PnL;
+- no uses Win Rate aislado como criterio de promoción;
+- no declares edge con muestra insuficiente;
+- no propongas bajar Safety para favorecer Q7;
+- una evidencia positiva sólo puede generar revisión humana;
+- nunca promociones automáticamente una estrategia Q7.
 
 Busca qué características hacen que una señal SEA MEJOR.
 

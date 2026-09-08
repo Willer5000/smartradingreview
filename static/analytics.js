@@ -565,6 +565,432 @@ function q5RenderSafetyTable(
     tbody.innerHTML = html;
 }
 
+// ============================================================================
+// Q7E — ADAPTIVE INTRADAY STRATEGY LAB / UI SHADOW
+// ============================================================================
+//
+// Visualización únicamente.
+//
+// No recalcula estrategias y no modifica trading.
+// Recibe Q7 desde el mismo /api/analytics/quality-v2.
+// ============================================================================
+
+function q7EvidenceText(value) {
+
+    const status = String(
+        value
+        || 'INSUFFICIENT_EVIDENCE'
+    ).toUpperCase();
+
+    const labels = {
+        INSUFFICIENT_EVIDENCE:
+            'Muestra insuficiente',
+
+        PRELIMINARY:
+            'Preliminar',
+
+        ELIGIBLE_FOR_HUMAN_REVIEW:
+            'Muestra ≥25 · revisar'
+    };
+
+    return (
+        labels[status]
+        || status
+    );
+}
+
+
+function q7EntryText(row) {
+
+    const known = Number(
+        row.entry_activation_known
+        || 0
+    );
+
+    if (known <= 0) {
+        return '--';
+    }
+
+    const activated = Number(
+        row.entry_activated
+        || 0
+    );
+
+    const rate = q5FiniteNumber(
+        row.entry_activation_rate
+    );
+
+    return (
+        `${activated}/${known}`
+        + (
+            rate === null
+                ? ''
+                : ` (${rate.toFixed(1)}%)`
+        )
+    );
+}
+
+
+function q7PushMetricRows(
+    output,
+    category,
+    source,
+    predicate = null
+) {
+
+    if (
+        !source
+        || typeof source !== 'object'
+    ) {
+        return;
+    }
+
+    Object.entries(
+        source
+    ).forEach(
+        ([name, row]) => {
+
+            if (
+                !row
+                || typeof row !== 'object'
+            ) {
+                return;
+            }
+
+            const total = Number(
+                row.total_directional
+                || 0
+            );
+
+            if (total <= 0) {
+                return;
+            }
+
+            if (
+                typeof predicate === 'function'
+                && !predicate(
+                    name,
+                    row
+                )
+            ) {
+                return;
+            }
+
+            output.push({
+                category,
+                name,
+                row
+            });
+        }
+    );
+}
+
+
+function q7BuildRows(cohort) {
+
+    const source = (
+        cohort
+        && typeof cohort === 'object'
+    )
+        ? cohort
+        : {};
+
+    const rows = [];
+
+    const control = (
+        source.control
+        && typeof source.control === 'object'
+    )
+        ? source.control
+        : {};
+
+    if (
+        Number(
+            control.total_directional
+            || 0
+        ) > 0
+    ) {
+
+        rows.push({
+            category:
+                'CONTROL',
+
+            name:
+                'Todas las observaciones Q7',
+
+            row:
+                control
+        });
+    }
+
+    // RSI: perfil × alineación con la señal del sistema.
+    q7PushMetricRows(
+        rows,
+        'RSI',
+        source.profile_alignment
+    );
+
+    // VWAP: mostrar sólo hipótesis reales de reversión.
+    q7PushMetricRows(
+        rows,
+        'VWAP',
+        source.vwap_states,
+        name => String(
+            name
+        ).includes(
+            'VWAP_RANGE_REVERSION'
+        )
+    );
+
+    // Breakout/Retest: aceptación o ruptura pendiente de retest.
+    q7PushMetricRows(
+        rows,
+        'RETEST',
+        source.breakout_retest_states,
+        name => {
+
+            const state = String(
+                name
+            ).toUpperCase();
+
+            return (
+                state.includes(
+                    'ACCEPTED_'
+                )
+                || state.includes(
+                    'PENDING_RETEST'
+                )
+            );
+        }
+    );
+
+    return rows;
+}
+
+
+function q7RenderTable(
+    tbodyId,
+    cohort
+) {
+
+    const tbody = document.getElementById(
+        tbodyId
+    );
+
+    if (!tbody) {
+        return;
+    }
+
+    const rows = q7BuildRows(
+        cohort
+    );
+
+    if (!rows.length) {
+
+        tbody.innerHTML = `
+            <tr>
+                <td colspan="10" class="text-center text-muted py-3">
+                    Sin observaciones Q7 en esta cohorte.
+                </td>
+            </tr>
+        `;
+
+        return;
+    }
+
+    let html = '';
+
+    rows.forEach(
+        item => {
+
+            const row = item.row;
+
+            const total = Number(
+                row.total_directional
+                || 0
+            );
+
+            const resolved = Number(
+                row.resolved
+                || 0
+            );
+
+            const wr = (
+                resolved > 0
+            )
+                ? q5FormatUnsignedPct(
+                    row.win_rate,
+                    1
+                )
+                : '--';
+
+            const pnl = (
+                resolved > 0
+            )
+                ? q5FormatSignedPct(
+                    row.pnl_total_pct,
+                    2
+                )
+                : '--';
+
+            const expectancy = (
+                resolved > 0
+            )
+                ? q5FormatSignedR(
+                    row.expectancy_r,
+                    3
+                )
+                : '--';
+
+            const pf = (
+                resolved > 0
+            )
+                ? q5FormatNumber(
+                    row.profit_factor,
+                    2
+                )
+                : '--';
+
+            const expectancyNumber = q5FiniteNumber(
+                row.expectancy_r
+            );
+
+            let performanceClass = '';
+
+            if (
+                resolved > 0
+                && expectancyNumber !== null
+            ) {
+
+                if (expectancyNumber > 0) {
+                    performanceClass = 'text-success';
+                } else if (expectancyNumber < 0) {
+                    performanceClass = 'text-danger';
+                } else {
+                    performanceClass = 'text-warning';
+                }
+            }
+
+            html += `
+                <tr>
+                    <td class="text-nowrap">${item.category}</td>
+                    <td><strong>${item.name}</strong></td>
+                    <td>${total}</td>
+                    <td>${q7EntryText(row)}</td>
+                    <td class="text-success">${Number(row.tp_hit || 0)}</td>
+                    <td class="text-danger">${Number(row.sl_hit || 0)}</td>
+                    <td>${wr}</td>
+                    <td>${pnl}</td>
+                    <td class="${performanceClass}">${expectancy}</td>
+                    <td>
+                        ${pf}
+                        <div class="small text-muted">
+                            ${q7EvidenceText(row.evidence_status)}
+                        </div>
+                    </td>
+                </tr>
+            `;
+        }
+    );
+
+    tbody.innerHTML = html;
+}
+
+
+function q7RenderStrategyLab(q7) {
+
+    const data = (
+        q7
+        && typeof q7 === 'object'
+    )
+        ? q7
+        : {};
+
+    const official = (
+        data.official
+        && typeof data.official === 'object'
+    )
+        ? data.official
+        : {};
+
+    const shadow = (
+        data.shadow
+        && typeof data.shadow === 'object'
+    )
+        ? data.shadow
+        : {};
+
+    const officialObservations = Number(
+        official.observations
+        || 0
+    );
+
+    const shadowObservations = Number(
+        shadow.observations
+        || 0
+    );
+
+    const excluded = Number(
+        data.excluded
+        || 0
+    );
+
+    q5SetText(
+        'q7-mode',
+        data.mode
+        || 'SHADOW_ONLY'
+    );
+
+    q5SetText(
+        'q7-summary',
+        (
+            `Oficial: ${officialObservations.toLocaleString()} observaciones · `
+            + `Shadow: ${shadowObservations.toLocaleString()} · `
+            + `Excluidas por integridad: ${excluded.toLocaleString()}`
+        )
+    );
+
+    q7RenderTable(
+        'q7-official-body',
+        official
+    );
+
+    q7RenderTable(
+        'q7-shadow-body',
+        shadow
+    );
+
+    const statusEl = document.getElementById(
+        'q7-status'
+    );
+
+    if (!statusEl) {
+        return;
+    }
+
+    statusEl.className = (
+        'small text-warning mb-3'
+    );
+
+    if (
+        officialObservations === 0
+        && shadowObservations === 0
+    ) {
+
+        statusEl.textContent = (
+            '⏳ Q7 está activo en Shadow, pero todavía no existen '
+            + 'observaciones persistidas de esta versión.'
+        );
+
+        return;
+    }
+
+    statusEl.textContent = (
+        '🧪 Q7 continúa SHADOW ONLY. '
+        + 'Las tablas sirven para comparar timing y outcomes; '
+        + 'ningún resultado cambia Safety, Entry, SL, TP, votos o publicación.'
+    );
+}
 
 async function loadQualityV2() {
 
@@ -651,6 +1077,11 @@ async function loadQualityV2() {
             || {}
         );
 
+        const q7 = (
+            data.q7_strategy_lab
+            || {}
+        );
+        
         // ============================================================
         // VERSIONADO
         // ============================================================
@@ -747,6 +1178,15 @@ async function loadQualityV2() {
             ).toLocaleString()
         );
 
+        // ============================================================
+        // Q7 STRATEGY LAB
+        // ============================================================
+
+        q7RenderStrategyLab(
+            q7
+        );
+
+        
         // ============================================================
         // COBERTURA
         // ============================================================
@@ -854,6 +1294,33 @@ async function loadQualityV2() {
                 </tr>
             `;
         }
+        const q7OfficialBody = document.getElementById(
+            'q7-official-body'
+        );
+
+        const q7ShadowBody = document.getElementById(
+            'q7-shadow-body'
+        );
+
+        [
+            q7OfficialBody,
+            q7ShadowBody
+        ].forEach(
+            body => {
+
+                if (!body) {
+                    return;
+                }
+
+                body.innerHTML = `
+                    <tr>
+                        <td colspan="10" class="text-center text-danger">
+                            Q7 Analytics no disponible
+                        </td>
+                    </tr>
+                `;
+            }
+        );
     }
 }
 

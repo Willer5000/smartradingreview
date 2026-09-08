@@ -777,7 +777,212 @@
                 </div>
 
             </div>
+            <!-- ============================================================
+                 Q7E — ADAPTIVE INTRADAY STRATEGY LAB
+                 ============================================================ -->
 
+            <div
+                class="card bg-dark border-info mb-3"
+                id="q7-strategy-lab-section"
+            >
+
+                <div
+                    class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2"
+                >
+
+                    <div>
+
+                        <strong>
+                            🧪 Q7 · Adaptive Intraday Strategy Lab
+                        </strong>
+
+                        <div class="small text-muted">
+                            RSI adaptativo · VWAP real · Breakout + Retest
+                        </div>
+
+                    </div>
+
+                    <span
+                        class="badge bg-warning text-dark"
+                        id="q7-mode"
+                    >
+                        SHADOW_ONLY
+                    </span>
+
+                </div>
+
+                <div class="card-body">
+
+                    <div
+                        class="alert alert-warning py-2 px-3 small mb-2"
+                        style="
+                            background: rgba(255, 193, 7, 0.07);
+                            border-color: rgba(255, 193, 7, 0.25);
+                        "
+                    >
+
+                        <strong>Laboratorio sin autoridad operativa.</strong>
+
+                        Q7 observa si distintas estrategias mejoran el timing.
+                        No modifica votos, Safety, Entry, SL, TP, leverage ni
+                        Publication Gate. Una muestra ≥25 sólo habilita revisión
+                        humana; nunca promoción automática.
+
+                    </div>
+
+                    <div
+                        id="q7-status"
+                        class="small text-muted mb-2"
+                    >
+                        Cargando Q7...
+                    </div>
+
+                    <div
+                        id="q7-summary"
+                        class="small text-muted mb-3"
+                    >
+                        Q7: --
+                    </div>
+
+                    <div class="row g-3">
+
+                        <!-- ================= Q7 OFICIAL ================= -->
+
+                        <div class="col-xl-6">
+
+                            <div class="card bg-dark border-primary h-100">
+
+                                <div class="card-header">
+
+                                    <strong>
+                                        🔵 Q7 · FUTURES OFICIAL
+                                    </strong>
+
+                                    <div class="small text-muted">
+                                        Sólo señales ejecutables elegibles.
+                                    </div>
+
+                                </div>
+
+                                <div class="card-body p-2">
+
+                                    <div class="table-responsive">
+
+                                        <table
+                                            class="table table-dark table-hover table-sm align-middle mb-0"
+                                        >
+
+                                            <thead>
+
+                                                <tr>
+                                                    <th>Tipo</th>
+                                                    <th>Grupo</th>
+                                                    <th>N</th>
+                                                    <th>Entry</th>
+                                                    <th>TP</th>
+                                                    <th>SL</th>
+                                                    <th>WR</th>
+                                                    <th>PnL</th>
+                                                    <th>Exp.R</th>
+                                                    <th>PF / Evidencia</th>
+                                                </tr>
+
+                                            </thead>
+
+                                            <tbody id="q7-official-body">
+
+                                                <tr>
+                                                    <td
+                                                        colspan="10"
+                                                        class="text-center text-muted py-3"
+                                                    >
+                                                        Cargando...
+                                                    </td>
+                                                </tr>
+
+                                            </tbody>
+
+                                        </table>
+
+                                    </div>
+
+                                </div>
+
+                            </div>
+
+                        </div>
+
+                        <!-- ================= Q7 SHADOW ================= -->
+
+                        <div class="col-xl-6">
+
+                            <div class="card bg-dark border-warning h-100">
+
+                                <div class="card-header">
+
+                                    <strong>
+                                        🟡 Q7 · FUTURES SHADOW
+                                    </strong>
+
+                                    <div class="small text-muted">
+                                        Diagnóstico hipotético separado del rendimiento oficial.
+                                    </div>
+
+                                </div>
+
+                                <div class="card-body p-2">
+
+                                    <div class="table-responsive">
+
+                                        <table
+                                            class="table table-dark table-hover table-sm align-middle mb-0"
+                                        >
+
+                                            <thead>
+
+                                                <tr>
+                                                    <th>Tipo</th>
+                                                    <th>Grupo</th>
+                                                    <th>N</th>
+                                                    <th>Entry</th>
+                                                    <th>TP</th>
+                                                    <th>SL</th>
+                                                    <th>WR</th>
+                                                    <th>PnL</th>
+                                                    <th>Exp.R</th>
+                                                    <th>PF / Evidencia</th>
+                                                </tr>
+
+                                            </thead>
+
+                                            <tbody id="q7-shadow-body">
+
+                                                <tr>
+                                                    <td
+                                                        colspan="10"
+                                                        class="text-center text-muted py-3"
+                                                    >
+                                                        Cargando...
+                                                    </td>
+                                                </tr>
+
+                                            </tbody>
+
+                                        </table>
+
+                                    </div>
+
+                                </div>
+
+                            </div>
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+            </div>
 
             <!-- ===================== COBERTURA ===================== -->
 
@@ -1010,6 +1215,6 @@
     <!-- Scripts -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
-    <script src="{{ url_for('static', filename='analytics.js') }}?v=20260908-Q6-INTEGRITY"></script>
+    <script src="{{ url_for('static', filename='analytics.js') }}?v=20260908-Q7-STRATEGY-LAB"></script>
 </body>
 </html>

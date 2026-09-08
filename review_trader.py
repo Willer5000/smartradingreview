@@ -2344,6 +2344,189 @@ class ReviewTrader:
                                 )
                         }
                     }
+            # ==============================================================
+            # Q7B — STRATEGY LAB SHADOW → APRENDIZAJE PROSPECTIVO
+            # ==============================================================
+            #
+            # Persiste únicamente el snapshot compacto que app.py ya calculó.
+            # Q7B NO recalcula mercado y NO modifica ninguna regla operativa.
+            # ==============================================================
+
+            if (
+                self._normalize_system_type(
+                    system_type
+                )
+                == 'futures'
+            ):
+
+                raw_q7 = (
+                    analysis_result.get(
+                        'strategy_lab'
+                    )
+                    or {}
+                )
+
+                if (
+                    isinstance(
+                        raw_q7,
+                        dict
+                    )
+                    and raw_q7.get(
+                        'shadow_only',
+                        False
+                    )
+                ):
+
+                    raw_q7_strategies = (
+                        raw_q7.get(
+                            'strategies',
+                            {}
+                        )
+                        or {}
+                    )
+
+                    if not isinstance(
+                        raw_q7_strategies,
+                        dict
+                    ):
+                        raw_q7_strategies = {}
+
+                    q7_rsi = (
+                        raw_q7_strategies.get(
+                            'rsi_profile',
+                            {}
+                        )
+                        or {}
+                    )
+
+                    q7_vwap = (
+                        raw_q7_strategies.get(
+                            'vwap_reversion',
+                            {}
+                        )
+                        or {}
+                    )
+
+                    q7_retest = (
+                        raw_q7_strategies.get(
+                            'breakout_retest',
+                            {}
+                        )
+                        or {}
+                    )
+
+                    context[
+                        'learning'
+                    ][
+                        'q7_strategy_lab_shadow'
+                    ] = {
+                        'snapshot_version':
+                            'Q7_STRATEGY_LAB_LEARNING_V1',
+
+                        'lab_version':
+                            str(
+                                raw_q7.get(
+                                    'version',
+                                    ''
+                                )
+                                or ''
+                            )[:80],
+
+                        'shadow_only':
+                            True,
+
+                        'eligible':
+                            bool(
+                                raw_q7.get(
+                                    'eligible',
+                                    False
+                                )
+                            ),
+
+                        'system_type':
+                            'futures',
+
+                        'active_profile':
+                            str(
+                                raw_q7.get(
+                                    'active_profile',
+                                    ''
+                                )
+                                or ''
+                            )[:40],
+
+                        'final_action_observed':
+                            str(
+                                raw_q7.get(
+                                    'final_action_observed',
+                                    ''
+                                )
+                                or ''
+                            ).upper()[:40],
+
+                        'final_action_normalized':
+                            str(
+                                raw_q7.get(
+                                    'final_action_normalized',
+                                    ''
+                                )
+                                or ''
+                            ).upper()[:40],
+
+                        'reason':
+                            str(
+                                raw_q7.get(
+                                    'reason',
+                                    ''
+                                )
+                                or ''
+                            )[:120],
+
+                        # ----------------------------------------------
+                        # Guardrails forzados: Q7 sigue sin autoridad.
+                        # ----------------------------------------------
+                        'affects_vote':
+                            False,
+
+                        'affects_safety':
+                            False,
+
+                        'affects_entry':
+                            False,
+
+                        'affects_levels':
+                            False,
+
+                        'affects_publication':
+                            False,
+
+                        'affects_leverage':
+                            False,
+
+                        'rsi_profile':
+                            dict(q7_rsi)
+                            if isinstance(
+                                q7_rsi,
+                                dict
+                            )
+                            else {},
+
+                        'vwap_reversion':
+                            dict(q7_vwap)
+                            if isinstance(
+                                q7_vwap,
+                                dict
+                            )
+                            else {},
+
+                        'breakout_retest':
+                            dict(q7_retest)
+                            if isinstance(
+                                q7_retest,
+                                dict
+                            )
+                            else {}
+                    }
             # Datos de la señal
             decision = analysis_result.get('decision', {})
             levels = analysis_result.get('levels', {})
@@ -2402,7 +2585,37 @@ class ReviewTrader:
                         f"| fuentes="
                         f"{micro_learning.get('metrics', {}).get('source_count', 0)}"
                     )
+                q7_learning = (
+                    context.get(
+                        'learning',
+                        {}
+                    )
+                    or {}
+                ).get(
+                    'q7_strategy_lab_shadow',
+                    {}
+                ) or {}
 
+                if q7_learning:
+
+                    q7_rsi_learning = (
+                        q7_learning.get(
+                            'rsi_profile',
+                            {}
+                        )
+                        or {}
+                    )
+
+                    print(
+                        "   🧪 [Q7B] Strategy Lab guardado "
+                        f"| {signal_data['symbol']} "
+                        f"{signal_data['timeframe']} "
+                        f"| perfil="
+                        f"{q7_learning.get('active_profile', 'N/A')} "
+                        f"| RSI="
+                        f"{q7_rsi_learning.get('direction', 'NEUTRAL')} "
+                        f"{q7_rsi_learning.get('alignment_with_system', 'NEUTRAL')}"
+                    )
             return signal_id
             
         except Exception as e:
