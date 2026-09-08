@@ -503,7 +503,7 @@ console.log(
                         class="badge bg-secondary"
                         style="font-size: 0.62rem;"
                     >
-                        10/h
+                        3/h
                     </span>
 
                 </div>

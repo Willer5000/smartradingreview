@@ -127,7 +127,8 @@ FUTURES_REAL_DATA_SOURCE = 'KUCOIN_FUTURES_PERPETUAL_REST'
 FUTURES_REAL_ANALYSIS_VERSION = 'closed_v1'
 FUTURES_REAL_COHORT = 'FUTURES_PERPETUAL_REAL_CLOSED_V1'
 FUTURES_LEGACY_COHORT = 'FUTURES_LEGACY_UNVERIFIED'
-SPOT_LEARNING_COHORT = 'SPOT_ACCUMULATION_V1'
+from q6_integrity import SPOT_COHORT, SPOT_LEGACY, clean_spot_learning, verified_spot
+SPOT_LEARNING_COHORT = SPOT_COHORT
 CAUTIOUS_SHADOW_MODEL_VERSION = 'cautious_shadow_v1'
 CAUTIOUS_SHADOW_NEAR_MISS_RATIO = 0.80
 CAUTIOUS_SHADOW_RISK_MULTIPLIER = 0.50
@@ -316,9 +317,18 @@ class ReviewTrader:
                 and evaluation_role == 'EXECUTABLE_SIGNAL'
             )
         else:
-            cohort = SPOT_LEARNING_COHORT
-            evaluation_role = 'SPOT_ACCUMULATION'
-            statistically_eligible = True
+            spot_provenance = {
+                'cohort': SPOT_LEARNING_COHORT, 'market_data_source': data_source,
+                'market_data_is_synthetic': is_synthetic, 'analysis_version': analysis_version,
+                'source_candle_closed': source_closed,
+                'source_candle_timestamp': source_timestamp,
+                'source_candle_close_timestamp': analysis.get('source_candle_close_timestamp'),
+            }
+            clean_spot = clean_spot_learning(spot_provenance)
+            cohort = SPOT_LEARNING_COHORT if clean_spot else SPOT_LEGACY
+            replay = analysis.get('analysis_mode') == 'PREVIOUS_CLOSED_CANDLE'
+            evaluation_role = 'SPOT_PREVIOUS_REPLAY' if replay else 'SPOT_ACCUMULATION'
+            statistically_eligible = bool(clean_spot and not replay)
 
         return {
             'contract_version': LEARNING_CONTRACT_VERSION,
@@ -1482,9 +1492,7 @@ class ReviewTrader:
     def _is_signal_eligible_for_profit_stats(self, signal: Dict) -> bool:
         market = self._normalize_system_type(signal.get('system_type'))
         if market == 'spot':
-            # Conserva el aprendizaje Spot histórico. Sus registros siempre
-            # provinieron del motor Spot y sirven al objetivo de acumulación.
-            return True
+            return verified_spot(signal)
 
         if not self._is_clean_futures_signal(signal):
             return False
@@ -1532,7 +1540,15 @@ class ReviewTrader:
         market = self._normalize_system_type(signal.get('system_type'))
 
         if market == 'spot':
-            return price_fetcher(symbol, timeframe), 'SPOT_PROVIDER'
+            if not verified_spot(signal):
+                return None, 'SPOT_LEGACY_QUARANTINED'
+            try:
+                from q6_integrity import prepare_spot_frame, SPOT_SOURCE
+                df = prepare_spot_frame(price_fetcher(symbol, timeframe),
+                                        timeframe, check_fresh=False)
+                return df, SPOT_SOURCE
+            except Exception:
+                return None, 'SPOT_SOURCE_REJECTED'
 
         if not self._is_clean_futures_signal(signal):
             return None, 'FUTURES_LEGACY_QUARANTINED'
@@ -3621,9 +3637,22 @@ class ReviewTrader:
         # Margen adicional para que una indisponibilidad temporal del proveedor
         # no haga desaparecer una señal justo al vencer la ventana más larga.
         oldest_pending_hours = max(SIGNAL_EXPIRATION.values()) + (14 * 24)
-        pending = self.db.get_pending_signals(
-            hours_old_max=oldest_pending_hours
+        pending = self.db.iter_pending_signals(
+            hours_old_max=oldest_pending_hours, directional=True
         )
+        # Q6-E: local to this run. Never retains full candle sets across workers.
+        from collections import OrderedDict
+        market_frames = OrderedDict()
+        def cached_market_data(signal):
+            key = (signal.get('system_type'), signal.get('symbol'), signal.get('timeframe'))
+            if key in market_frames:
+                market_frames.move_to_end(key)
+                return market_frames[key]
+            value = self._fetch_market_data_for_signal(signal, price_fetcher)
+            market_frames[key] = value
+            if len(market_frames) > 12:
+                market_frames.popitem(last=False)
+            return value
         
         stats = {
             'processed': 0,
@@ -3643,7 +3672,7 @@ class ReviewTrader:
         }
         
         print(f"\n{'='*60}")
-        print(f"🔍 [REVIEW] Evaluando {len(pending)} señales pendientes")
+        print("🔍 [REVIEW] Evaluando señales pendientes en lotes de hasta 200")
         print(f"{'='*60}")
         
         for signal in pending:
@@ -3671,11 +3700,12 @@ class ReviewTrader:
                     stats['legacy_futures_quarantined'] += 1
                     continue
                 
-                # Obtener velas del mercado correcto desde el timestamp.
-                df, data_source = self._fetch_market_data_for_signal(
-                    signal,
-                    price_fetcher
-                )
+                if system_type == 'spot' and not verified_spot(signal):
+                    stats.setdefault('legacy_spot_quarantined', 0)
+                    stats['legacy_spot_quarantined'] += 1
+                    continue
+                # Obtain once per market/pair/timeframe, with bounded local cache.
+                df, data_source = cached_market_data(signal)
                 if df is None or len(df) == 0:
                     if data_source in (
                         'FUTURES_SOURCE_REJECTED',
@@ -3716,7 +3746,10 @@ class ReviewTrader:
                     'ambiguous',
                     'invalid_setup'
                 ):
-                    self.db.update_signal_result(signal['id'], result)
+                    if not self.db.update_signal_result(signal['id'], result):
+                        stats.setdefault('write_errors', 0)
+                        stats['write_errors'] += 1
+                        continue
                     stats['processed'] += 1
                     if result['status'] == 'tp_hit':
                         stats['tp_hit'] += 1
@@ -3750,6 +3783,10 @@ class ReviewTrader:
                         result,
                         evaluation_end
                     )
+                    if not expiry_result.get('persisted'):
+                        stats.setdefault('write_errors', 0)
+                        stats['write_errors'] += 1
+                        continue
                     stats['expired'] += 1
                     stats['processed'] += 1
                     if expiry_result.get('entry_touched'):
@@ -4141,6 +4178,21 @@ class ReviewTrader:
                         continue
 
                     entry_touched = True
+                    # Q6-B: TP can have occurred BEFORE the first limit fill.
+                    # OHLC cannot prove the sequence when opening outside Entry.
+                    opening = float(row.get('open', float('nan')))
+                    filled_at_open = (opening <= entry if action == 'LONG' else opening >= entry)
+                    target_touched = (high >= tp if action == 'LONG' else low <= tp)
+                    if target_touched and not filled_at_open:
+                        return {
+                            'status': 'ambiguous', 'exit_price': 0,
+                            'exit_timestamp': str(candle_ts), 'pnl_pct': 0,
+                            'candles_to_result': candle_number,
+                            'notes': ('outcome_reason=entry_tp_same_candle_order_unknown; '
+                                      'entry_touched=true; statistically_resolved=false; '
+                                      'requires_lower_timeframe=true'),
+                            **_excursion_payload()
+                        }
 
                 # ======================================================
                 # LONG
@@ -4552,7 +4604,7 @@ class ReviewTrader:
             'candles_to_mfe': observation.get('candles_to_mfe', 0),
             'candles_to_mae': observation.get('candles_to_mae', 0)
         }
-        self.db.update_signal_result(signal['id'], result)
+        result['persisted'] = self.db.update_signal_result(signal['id'], result)
         return result
     
     def _parse_ts(self, ts_str) -> Optional[datetime]:
@@ -6868,10 +6920,8 @@ class ReviewTrader:
         
         try:
             # Obtener señales NO_OPERAR recientes (últimos 7 días, aún pendientes de análisis)
-            pending = self.db.get_pending_signals(hours_old_max=168)
-            no_op_signals = [s for s in pending if s.get('action_normalized') == 'NO_OPERAR']
-            
-            print(f"\n🔍 [REVIEW] Buscando oportunidades perdidas en {len(no_op_signals)} señales NO_OPERAR")
+            no_op_signals = self.db.iter_pending_signals(hours_old_max=168, directional=False)
+            print("\n🔍 [REVIEW] Buscando oportunidades perdidas por lotes")
             
             missed = 0
             

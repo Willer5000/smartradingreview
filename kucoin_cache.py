@@ -578,6 +578,16 @@ def fetch_kucoin_candles(
                 )
             )
 
+            # Q6-A: provenance travels with every copy; live rows remain
+            # available for charts. Decisions select closed candles separately.
+            df.attrs.update({
+                'market_data_source': 'KUCOIN_SPOT_REST',
+                'market_data_is_synthetic': False,
+                'market_symbol': symbol,
+                'market_timeframe': interval,
+                'fetched_at_utc': pd.Timestamp.now(tz='UTC').isoformat(),
+            })
+
             # ==========================================================
             # 6. CACHEAR
             # ==========================================================

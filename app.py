@@ -269,6 +269,11 @@ _ANALYSIS_CACHE_LOCK = _threading_analysis_cache.Lock()
 _ANALYSIS_CACHE_STATS = {'hits': 0, 'misses': 0}
 
 
+def _analysis_ttl_for(timeframe):
+    """Use the existing TTL table; the purge previously called a missing helper."""
+    return _ANALYSIS_CACHE_TTL.get(timeframe, 60)
+
+
 def _analysis_cache_purge_expired_locked(
     now_ts=None
 ):
@@ -403,9 +408,14 @@ def _analysis_cache_get(key):
             'hits'
         ] += 1
 
-        return entry[
-            'data'
-        ]
+        # Q6-G: callers can enrich responses without mutating another signal.
+        from copy import deepcopy
+        data = entry['data']
+        if isinstance(data, dict) and data.get('system_type') == 'spot':
+            valid_until = data.get('source_valid_until')
+            if not valid_until or pd.Timestamp.now(tz='UTC') >= pd.Timestamp(valid_until):
+                return None
+        return deepcopy(data)
 
 
 def _analysis_cache_put(key, data):
@@ -434,7 +444,7 @@ def _analysis_cache_put(key, data):
             key
         ] = {
             'data':
-                data,
+                __import__('copy').deepcopy(data),
 
             'ts':
                 now_ts
@@ -8541,17 +8551,17 @@ class TradingExpertSystem:
           - Cachea el DataFrame por (symbol, interval) con TTL corto según TF
           - Retorna DataFrame idéntico al que producía el código anterior
         
-        Si el fetch falla (None), aquí caemos al fallback sintético como antes.
+        Si el fetch falla, devuelve None y el análisis informa indisponibilidad.
         """
         try:
             from kucoin_cache import fetch_kucoin_candles
             df = fetch_kucoin_candles(symbol, interval, timeout=15)
             if df is None or df.empty:
-                return self._generate_fallback_data(symbol, interval)
+                return None  # Q6-A: unavailable is never synthetic market data.
             return df
         except Exception as e:
             print(f"Excepción inesperada en KuCoin: {e}")
-            return self._generate_fallback_data(symbol, interval)
+            return None
     
     def _generate_fallback_data(self, symbol, interval):
         """Generar datos sintéticos cuando falla KuCoin"""
@@ -18145,6 +18155,16 @@ class TradingExpertSystem:
             else:
                 df = self.get_kucoin_data(symbol, timeframe)
             
+            # Q6-A: Futures supplies its own verified closed-frame contract.
+            # Spot selects closed candles here, not in the shared raw fetcher.
+            if not getattr(self, '_skip_supabase_register', False):
+                try:
+                    from q6_integrity import prepare_spot_frame
+                    df = prepare_spot_frame(df, timeframe)
+                except (ValueError, KeyError, TypeError) as data_error:
+                    return {'success': False, 'symbol': symbol, 'timeframe': timeframe,
+                            'error': str(data_error), 'data_status': 'UNAVAILABLE',
+                            'publication_eligible': False}
             if df is None:
                 print(f"❌ ERROR: get_kucoin_data devolvió None")
                 return {
@@ -18998,6 +19018,25 @@ class TradingExpertSystem:
                 'timestamp': datetime.now(self.bolivia_tz).isoformat()
             }
             
+            # Q6-A: explicit provenance precedes persistence and cache.
+            if analysis_system_type == 'spot':
+                provenance = dict(getattr(df, 'attrs', {}) or {})
+                for field in ('market_data_source', 'market_data_is_synthetic',
+                              'analysis_version', 'analysis_mode', 'source_candle_closed',
+                              'source_candle_timestamp', 'source_candle_close_timestamp',
+                              'source_valid_until'):
+                    resultado_final[field] = provenance.get(field)
+                resultado_final['analysis_price'] = resultado_final['current_price']
+                resultado_final['live_price'] = provenance.get('live_price')
+                if provenance.get('live_price') is not None:
+                    resultado_final['current_price'] = float(provenance['live_price'])
+                resultado_final['levels'].update({
+                    field: resultado_final[field] for field in (
+                        'market_data_source', 'market_data_is_synthetic',
+                        'source_candle_closed', 'source_candle_timestamp',
+                        'source_candle_close_timestamp', 'analysis_version', 'analysis_mode')
+                })
+
             # === FASE 7: Registrar señal en Supabase (best-effort, no bloqueante) ===
             # Si el subsistema de futuros nos invocó, saltar registro spot
             # (FuturesAnalysis lo registrará después con system_type='futures')
@@ -25935,8 +25974,11 @@ def _compute_previous_signals():
                     f"{symbol}-{timeframe}: {e}"
                 )
 
+    # Q6-A: historical context must not reuse ACTIVE correlation analyses.
+    previous_correlations = {}
     # ============ PROCESAR SEÑALES DE VELA ANTERIOR ============
     for timeframe in temporalidades:
+        previous_correlations = {timeframe: {}}
         print(f"\n📊 Procesando {timeframe}...")
         for symbol in pares:
             try:
@@ -25948,20 +25990,25 @@ def _compute_previous_signals():
                     print(f"   ⚠️ {symbol} {timeframe}: menos de 2 velas")
                     continue
                 
-                precio_cierre_anterior = float(df['close'].iloc[-2])
+                from q6_integrity import prepare_spot_frame
                 precio_actual = float(df['close'].iloc[-1])
+                df_anterior = prepare_spot_frame(df, timeframe, previous=True)
+                precio_cierre_anterior = float(df_anterior['close'].iloc[-1])
                 
-                if len(df) >= 101:
-                    df_anterior = df.iloc[-101:-1].copy()
-                else:
-                    df_anterior = df.iloc[:-1].copy()
-                df_anterior = df_anterior.reset_index(drop=True)
+                historical = previous_correlations.setdefault(timeframe, {})
+                btc_analysis = historical.get('BTC-USDT')
+                paxg_analysis = historical.get('PAXG-USDT')
+                paxg_btc_analysis = historical.get('PAXG-BTC')
                 
-                btc_analysis = analisis_correlacion[timeframe].get('BTC-USDT')
-                paxg_analysis = analisis_correlacion[timeframe].get('PAXG-USDT')
-                paxg_btc_analysis = analisis_correlacion[timeframe].get('PAXG-BTC')
-                
-                analisis = expert_system.analyze_full_market(
+                # Q6-A: isolated mutable state for replay; no reuse of ACTIVE
+                # heatmaps/zones (which may contain the following candle).
+                from copy import copy
+                historical_system = copy(expert_system)
+                historical_system.liquidation_heatmaps = {}
+                historical_system.dynamic_zones = {}
+                historical_system.last_analysis = {}
+                historical_system.voting_history = {}
+                analisis = historical_system.analyze_full_market(
                     symbol, timeframe,
                     btc_analysis=btc_analysis,
                     paxg_analysis=paxg_analysis,
@@ -25972,6 +26019,7 @@ def _compute_previous_signals():
                     print(f"   ⚠️ {symbol} {timeframe}: análisis falló")
                     continue
                 
+                previous_correlations[timeframe][symbol] = analisis
                 decision = analisis['decision']['action']
                 confianza = float(analisis['decision']['confidence'])
                 if decision not in ['COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT']:
@@ -26072,12 +26120,8 @@ def _compute_previous_signals():
                             )
                         )
 
-                    valid_until = (
-                        current_candle_open
-                        +
-                        pd.Timedelta(
-                            seconds=tiempo_vida
-                        )
+                    valid_until = pd.Timestamp(
+                        analisis['source_valid_until']
                     )
 
                     now_utc = (
@@ -26117,7 +26161,7 @@ def _compute_previous_signals():
                     mensaje_corto = mensaje_corto[:500] + '...'
                 
                 try:
-                    candle_ts = str(df['time'].iloc[-2])
+                    candle_ts = analisis['source_candle_timestamp']
                 except Exception:
                     candle_ts = str(tiempo_actual.isoformat())
                 
@@ -27657,9 +27701,8 @@ def api_saved_signals_chart_data(signal_id):
 @app.route('/api/kpis/frontend_signals')
 def api_kpis_frontend_signals():
     """
-    v22.1: KPIs del HEADER — refleja EXACTAMENTE lo que el usuario ve en el
-    frontend (spot + futuros unificados). No hay base de datos separada; la
-    fuente son los cachés en memoria.
+    Q6-F: KPIs del mercado solicitado, sobre el conjunto de señales del caché.
+    No son el rendimiento histórico completo ni el PnL de la cuenta del usuario.
     
     Estadísticas: cruza cada señal (symbol, timeframe, candle_ts) contra
     Supabase para obtener su outcome (tp_hit / sl_hit + pnl_pct). Todo lo que
@@ -27672,7 +27715,11 @@ def api_kpis_frontend_signals():
     Sistema' que consume /api/analytics/summary.
     """
     try:
-        signals = _collect_frontend_signals()
+        market_filter = str(request.args.get('system_type', 'spot')).lower()
+        if market_filter not in ('spot', 'futures'):
+            return jsonify({'success': False, 'error': 'Mercado inválido'}), 400
+        signals = [s for s in _collect_frontend_signals()
+                   if s.get('system') == market_filter]
         total = len(signals)
         
         if total == 0:
@@ -27712,21 +27759,19 @@ def api_kpis_frontend_signals():
                 tf = sig['timeframe']
                 system_type = sig['system']  # 'spot' o 'futures'
                 
-                # v22.2 BUGFIX: 
-                # (1) .order('timestamp') no existía - la columna es 'created_at'.
-                #     Esto hacía que la query fallara silenciosamente y todo diera
-                #     pending. Cambiado a 'created_at'.
-                # (2) Sin filtro por system_type se cruzaban señales spot y futuros
-                #     del mismo símbolo (BTC-USDT existe en ambos). Ahora filtro.
-                # 
-                # No filtramos por candle_timestamp porque puede haber pequeñas
-                # diferencias de formato. La señal más reciente resuelta para ese
-                # (symbol, tf, system_type) es lo más honesto.
+                candle_identity = sig.get('candle_timestamp')
+                if not candle_identity:
+                    pending += 1
+                    continue
+                # Q6-F: the outcome must belong to THIS candle and direction.
+                # A prior trade on the same pair is not this signal's result.
                 r = (db.client.table('signals')
                      .select('id, status')
                      .eq('symbol', symbol)
                      .eq('timeframe', tf)
                      .eq('system_type', system_type)
+                     .eq('candle_timestamp', pd.Timestamp(candle_identity).isoformat())
+                     .eq('action_normalized', db.normalize_action(sig.get('action')))
                      .in_('status', ['tp_hit', 'sl_hit'])
                      .order('created_at', desc=True)
                      .limit(1)
@@ -27740,6 +27785,7 @@ def api_kpis_frontend_signals():
                 rr = (db.client.table('signal_results')
                       .select('status, pnl_pct')
                       .eq('signal_id', sig_id)
+                      .order('created_at', desc=True)
                       .limit(1)
                       .execute())
                 res_rows = rr.data if rr and rr.data else []
@@ -27780,7 +27826,8 @@ def api_kpis_frontend_signals():
                 'active': active,
                 'win_rate': round(win_rate, 2),
                 'pnl_total_pct': round(pnl_sum, 3),
-                'source': 'frontend_signals_spot+futures'
+                'source': 'frontend_exact_candle_q6',
+                'system_type': market_filter
             }
         })
     except Exception as e:
@@ -32993,6 +33040,25 @@ def saved_futures_lifecycle_loop():
             _SAVED_FUTURES_LIFECYCLE_INTERVAL
         )
 
+_Q6_DAILY_LOCK = threading.Lock()
+
+
+def _q6_run_daily_review():
+    if not _Q6_DAILY_LOCK.acquire(blocking=False):
+        return
+    try:
+        from review_trader import review_trader
+        from q6_integrity import daily_slot, claim_daily_job, finish_daily_job
+        slot = daily_slot(datetime.now(bolivia_tz))
+        if claim_daily_job(review_trader.db, 'REVIEW', slot, retry=True):
+            success = ejecutar_review_diario(q6_slot=slot)
+            finish_daily_job(review_trader.db, 'REVIEW', slot, success)
+    except Exception as exc:
+        print(f"Q6 ciclo diario pendiente: {type(exc).__name__}")
+    finally:
+        _Q6_DAILY_LOCK.release()
+
+
 def verificar_y_ejecutar():
     """
     Bucle principal que verifica horarios CADA MINUTO
@@ -33071,12 +33137,11 @@ def verificar_y_ejecutar():
             # ============ FASE 7: EJECUTAR REVIEWTRADER DIARIAMENTE ============
             # Cierre a las 20:00 Bolivia (después de todos los análisis del día)
             # Ejecuta: evaluar pendientes + detectar oportunidades perdidas + recalcular stats
-            if hora == 20 and minuto == 0:
-                # Evitar ejecutar más de una vez por día
-                if 'REVIEW' not in ultima_ejecucion or (ahora - ultima_ejecucion.get('REVIEW', datetime.min.replace(tzinfo=bolivia_tz))).total_seconds() > 3600:
-                    print(f"\n🎓 EJECUTANDO CICLO DIARIO DEL REVIEWTRADER - {hora:02d}:{minuto:02d}")
-                    ultima_ejecucion['REVIEW'] = ahora
-                    threading.Thread(target=ejecutar_review_diario, daemon=True).start()
+            # Q6-D: recover the most recent daily slot after sleep/restart.
+            # DB primary key prevents duplicate jobs across process restarts.
+            if minuto % 5 == 0:
+                threading.Thread(target=_q6_run_daily_review,
+                                 daemon=True, name='q6-daily-review').start()
             
             # Heartbeat cada 5 minutos
             if minuto % 5 == 0 and ahora.second < 10:
@@ -38186,7 +38251,7 @@ def _run_proactive_spot_guardian(
 # FASE 7: FUNCIÓN DEL CICLO DIARIO DEL REVIEWTRADER
 # ============================================================================
 
-def ejecutar_review_diario():
+def ejecutar_review_diario(q6_slot=None):
     """
     Ejecuta el ciclo completo del ReviewTrader una vez al día.
     - Evalúa señales pendientes (TP/SL/expired)
@@ -38204,7 +38269,7 @@ def ejecutar_review_diario():
             from review_trader import review_trader
         except Exception as e:
             print(f"❌ ReviewTrader no disponible: {e}")
-            return
+            return False
         
         if not review_trader.db.enabled:
             print("⚠️ Supabase no configurado - saltando ciclo diario de review")
@@ -38215,6 +38280,9 @@ def ejecutar_review_diario():
             return expert_system.get_kucoin_data(symbol, timeframe)
         
         results = review_trader.run_full_review(price_fetcher, trigger_source='scheduler')
+        review_success = results.get('status') == 'success'
+        if (results.get('evaluated') or {}).get('write_errors', 0):
+            review_success = False
         
         print(f"\n{'#'*60}")
         print(f"# ✅ REVIEWTRADER DIARIO COMPLETADO")
@@ -38236,6 +38304,10 @@ def ejecutar_review_diario():
             )
 
 
+            from q6_integrity import claim_daily_job, finish_daily_job, daily_slot
+            q6_slot = q6_slot or daily_slot(datetime.now(bolivia_tz))
+            if not claim_daily_job(review_trader.db, 'AI_LEARNING', q6_slot):
+                return review_success
             learning_context = (
                 _build_ai_learning_context()
             )
@@ -38261,6 +38333,8 @@ def ejecutar_review_diario():
             )
 
 
+            finish_daily_job(review_trader.db, 'AI_LEARNING', q6_slot,
+                             bool(ai_learning_result.get('success')))
             if (
                 ai_learning_result.get(
                     'success'
@@ -38291,11 +38365,13 @@ def ejecutar_review_diario():
                 "⚠️ [36R.4] "
                 "AI Learning no disponible: "
                 f"{ai_learning_err}"
-            )        
+            )
+        return review_success
     except Exception as e:
         print(f"❌ Error en ejecutar_review_diario: {e}")
         import traceback
         traceback.print_exc()
+        return False
 
 
 # ============================================================================
@@ -40719,228 +40795,7 @@ def _start_background_threads():
 
 # NOTA: la llamada real a _start_background_threads() se hace más abajo,
 # DESPUÉS de que verificar_y_ejecutar y monitor_entries_loop estén definidos.
-def _evaluate_36s_spot_tgp_shadow(
-    ai_result,
-    context
-):
-    """
-    36S.2B.1 — SPOT/TGP SHADOW CONTROL.
-
-    Observa qué habría hecho la capa IA sobre una señal Spot,
-    pero NO modifica:
-
-    - recomendación;
-    - portfolio;
-    - Entry;
-    - SL;
-    - TP;
-    - Guardian;
-    - pesos;
-    - ejecución.
-
-    Su única finalidad es acumular evidencia antes de conceder
-    autoridad activa sobre TGP.
-    """
-
-    shadow = {
-        "mode":
-            "SHADOW_ONLY",
-
-        "applied":
-            False,
-
-        "would_block":
-            False,
-
-        "reason":
-            None,
-
-        "ai_verdict":
-            None,
-
-        "ai_confidence":
-            0,
-
-        "focus_action":
-            None,
-
-        "focus_symbol":
-            None,
-
-        "focus_timeframe":
-            None,
-
-        "portfolio_percentages":
-            {}
-    }
-
-    # ================================================================
-    # IA NO DISPONIBLE
-    # ================================================================
-
-    if (
-        not isinstance(
-            ai_result,
-            dict
-        )
-        or not ai_result.get(
-            "success"
-        )
-    ):
-        shadow[
-            "reason"
-        ] = "AI_UNAVAILABLE_OR_FAILED"
-
-        return shadow
-
-    data = (
-        ai_result.get(
-            "data"
-        )
-        or {}
-    )
-
-    verdict = str(
-        data.get(
-            "verdict"
-        )
-        or ""
-    ).upper()
-
-    try:
-        confidence = int(
-            float(
-                data.get(
-                    "confidence"
-                )
-                or 0
-            )
-        )
-
-    except (
-        TypeError,
-        ValueError
-    ):
-        confidence = 0
-
-    context = (
-        context
-        if isinstance(
-            context,
-            dict
-        )
-        else {}
-    )
-
-    snapshot = (
-        context.get(
-            "hourly_market_snapshot"
-        )
-        or {}
-    )
-
-    focus = (
-        snapshot.get(
-            "focus_signal"
-        )
-        or {}
-    )
-
-    portfolio = (
-        snapshot.get(
-            "portfolio_percentages"
-        )
-        or context.get(
-            "portfolio_percentages"
-        )
-        or {}
-    )
-
-    action = str(
-        focus.get(
-            "action"
-        )
-        or ""
-    ).upper()
-
-    shadow.update({
-        "ai_verdict":
-            verdict,
-
-        "ai_confidence":
-            confidence,
-
-        "focus_action":
-            action
-            or None,
-
-        "focus_symbol":
-            focus.get(
-                "symbol"
-            ),
-
-        "focus_timeframe":
-            focus.get(
-                "timeframe"
-            ),
-
-        "portfolio_percentages":
-            (
-                portfolio
-                if isinstance(
-                    portfolio,
-                    dict
-                )
-                else {}
-            )
-    })
-
-    # ================================================================
-    # SÓLO DECISIONES DIRECCIONALES SPOT
-    # ================================================================
-
-    if action not in (
-        "COMPRA_SPOT",
-        "VENTA_SPOT"
-    ):
-        shadow[
-            "reason"
-        ] = "NO_DIRECTIONAL_SPOT_SIGNAL"
-
-        return shadow
-
-    # ================================================================
-    # HIPÓTESIS SHADOW
-    # ================================================================
-    #
-    # Mismo criterio prudente inicial que Futures:
-    #
-    # DISAGREE >= 80
-    #
-    # PERO todavía NO se aplica.
-    # ================================================================
-
-    if (
-        verdict == "DISAGREE"
-        and confidence >= 80
-    ):
-        shadow[
-            "would_block"
-        ] = True
-
-        shadow[
-            "reason"
-        ] = (
-            "AI_STRONG_DISAGREE_SHADOW"
-        )
-
-        return shadow
-
-    shadow[
-        "reason"
-    ] = "NO_SHADOW_BLOCK"
-
-    return shadow
+# Q6-G: duplicate definition removed; the canonical implementation follows.
 def _evaluate_36s_spot_tgp_shadow(
     ai_result,
     context
@@ -41591,47 +41446,7 @@ def api_ai_advice():
         )
 
         # ================================================================
-        # COMMIT 36S.2B.1
-        # SPOT TGP SHADOW CONTROL
-        # ================================================================
-        #
-        # Reutiliza la evaluación IA ya realizada.
-        # NO genera una llamada adicional.
-        # NO modifica la recomendación Spot.
-        # ================================================================
-
-        if market == 'SPOT':
-            try:
-                result[
-                    'spot_tgp_shadow_control'
-                ] = (
-                    _evaluate_36s_spot_tgp_shadow(
-                        ai_result=result,
-                        context=context
-                    )
-                )
-
-            except Exception as shadow_error:
-                # Fail-open absoluto.
-                result[
-                    'spot_tgp_shadow_control'
-                ] = {
-                    'mode':
-                        'SHADOW_ONLY',
-
-                    'applied':
-                        False,
-
-                    'would_block':
-                        False,
-
-                    'reason':
-                        (
-                            'SHADOW_ERROR: '
-                            f'{str(shadow_error)[:120]}'
-                        )
-                }        
-        # ================================================================
+        # Q6-G: one shadow evaluation and one persistence path per advice.
         # COMMIT 36S.2B.1
         # SPOT / TGP AI SHADOW CONTROL
         # ================================================================

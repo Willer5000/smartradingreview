@@ -905,6 +905,19 @@ class AnalyticsService:
                 q3_counts
         }
 
+        # Q6-F: absence of observations is not zero performance.
+        data['pnl_basis'] = 'OBSERVED_GROSS_BEFORE_COSTS'
+        data['resolved_pnl_samples'] = len(pnl_values)
+        if not resolved:
+            data['win_rate'] = None
+        if not pnl_values:
+            data['pnl_total_pct'] = None
+            data['avg_pnl_pct'] = None
+        if not realized_r_values:
+            data['expectancy_r'] = None
+        if total_losses == 0:
+            data['profit_factor'] = None
+            data['profit_factor_status'] = 'NO_LOSSES' if total_wins else 'NO_RESULTS'
         if include_bands:
 
             data[
@@ -936,155 +949,37 @@ class AnalyticsService:
     # Q5 — LEER COHORTE V2
     # ========================================================================
 
-    def _fetch_q5_v2_signals(
-        self,
-        symbol=None,
-        timeframe=None,
-        system_type=None,
-        action=None,
-        days_back=90
-    ):
-        """
-        Lee únicamente lo necesario para Analytics V2.
-
-        La paginación evita el límite rígido de 2000 del Analytics
-        histórico, pero mantiene un guardrail de memoria de 4000 filas.
-        """
-
+    def _fetch_q5_v2_signals(self, symbol=None, timeframe=None, system_type=None,
+                             action=None, days_back=90):
+        from q6_integrity import ReadRows, read_pages
         if not self.db.enabled:
-            return []
-
-        try:
-
-            cutoff = (
-                datetime.utcnow()
-                - timedelta(
-                    days=days_back
-                )
-            ).isoformat()
-
-            page_size = 500
-            max_rows = 4000
-            offset = 0
-
-            collected = []
-
-            while offset < max_rows:
-
-                query = (
-                    self.db.client
-                    .table(
-                        'signals'
-                    )
-                    .select(
-                        'id,symbol,timeframe,system_type,'
-                        'action,action_normalized,status,created_at,'
-                        'entry_price,stop_loss,take_profit,risk_reward,'
-                        'context,'
-                        'signal_results('
-                        'status,pnl_pct,exit_price,exit_timestamp'
-                        ')'
-                    )
-                    .gte(
-                        'created_at',
-                        cutoff
-                    )
-                    .order(
-                        'created_at',
-                        desc=True
-                    )
-                    .range(
-                        offset,
-                        min(
-                            offset
-                            + page_size
-                            - 1,
-                            max_rows
-                            - 1
-                        )
-                    )
-                )
-
-                if symbol:
-
-                    query = query.eq(
-                        'symbol',
-                        symbol
-                    )
-
-                if timeframe:
-
-                    query = query.eq(
-                        'timeframe',
-                        timeframe
-                    )
-
-                if (
-                    system_type
-                    and system_type
-                    != 'both'
-                ):
-
-                    query = query.eq(
-                        'system_type',
-                        system_type
-                    )
-
-                if (
-                    action
-                    and action
-                    != 'ALL'
-                ):
-
-                    query = query.eq(
-                        'action_normalized',
-                        action
-                    )
-
-                response = (
-                    query.execute()
-                )
-
-                rows = (
-                    response.data
-                    or []
-                )
-
-                collected.extend(
-                    rows
-                )
-
-                if len(
-                    rows
-                ) < page_size:
-
-                    break
-
-                offset += page_size
-
-            return [
-                signal
-
-                for signal
-                in collected
-
-                if self._q5_is_directional(
-                    signal
-                )
-
-                and self._q5_is_v2(
-                    signal
-                )
-            ]
-
-        except Exception as exc:
-
-            logger.error(
-                'Q5 V2 fetch error: %s',
-                exc
-            )
-
-            return []
+            return ReadRows(coverage={'complete': False, 'errors': ['DB_UNAVAILABLE']})
+        end = datetime.utcnow()
+        cutoff = (end - timedelta(days=max(1, min(int(days_back), 365)))).isoformat()
+        def query():
+            q = (self.db.client.table('signals')
+                 .select('id,symbol,timeframe,system_type,action_normalized,status,created_at,'
+                         'entry_price,stop_loss,take_profit,risk_reward,'
+                         'q6_learning:context->learning,q6_execution:context->execution,'
+                         'signal_results(status,pnl_pct,exit_price,exit_timestamp,created_at)')
+                 .gte('created_at', cutoff).lt('created_at', end.isoformat())
+                 .eq('context->execution->>quality_score_version', Q5_CURRENT_QUALITY_SCORE_VERSION)
+                 .in_('action_normalized', ['LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT'])
+                 .order('created_at', desc=True).order('id', desc=True))
+            if symbol:
+                q = q.eq('symbol', symbol)
+            if timeframe:
+                q = q.eq('timeframe', timeframe)
+            if system_type and system_type != 'both':
+                q = q.eq('system_type', system_type)
+            if action and action != 'ALL':
+                q = q.eq('action_normalized', action)
+            return q
+        rows = read_pages(query)
+        for row in rows:
+            row['context'] = {'learning': row.pop('q6_learning', {}) or {},
+                              'execution': row.pop('q6_execution', {}) or {}}
+        return rows
 
 
     # ========================================================================
@@ -1145,11 +1040,9 @@ class AnalyticsService:
             ).strip().lower()
 
             if market == 'spot':
-
-                spot.append(
-                    signal
-                )
-
+                from q6_integrity import verified_spot
+                if verified_spot(signal):
+                    spot.append(signal)
                 continue
 
             if market != 'futures':
@@ -1178,10 +1071,15 @@ class AnalyticsService:
                 )
             )
 
+            clean_futures = (
+                learning.get('cohort') == 'FUTURES_PERPETUAL_REAL_CLOSED_V1'
+                and learning.get('market_data_source') == 'KUCOIN_FUTURES_PERPETUAL_REST'
+                and not self._q5_bool(learning.get('market_data_is_synthetic', True))
+                and self._q5_bool(learning.get('source_candle_closed', False))
+            )
             if (
-                statistically_eligible
-                and evaluation_role
-                == 'EXECUTABLE_SIGNAL'
+                clean_futures and statistically_eligible
+                and evaluation_role == 'EXECUTABLE_SIGNAL'
             ):
 
                 futures_official.append(
@@ -1189,8 +1087,7 @@ class AnalyticsService:
                 )
 
             elif (
-                evaluation_role
-                == 'SHADOW_ANALYSIS'
+                clean_futures and evaluation_role == 'SHADOW_ANALYSIS'
             ):
 
                 futures_shadow.append(
@@ -1242,6 +1139,10 @@ class AnalyticsService:
                 ),
 
             'coverage': {
+                **getattr(signals, 'coverage', {'complete': False}),
+                'spot_unverified_excluded': sum(
+                    1 for s in signals if s.get('system_type') == 'spot'
+                    and s not in spot),
                 'v2_directional_total':
                     len(
                         signals

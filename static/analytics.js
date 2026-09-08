@@ -793,13 +793,16 @@ async function loadQualityV2() {
 
         if (statusEl) {
 
-            statusEl.className = (
-                'small text-success mb-3'
-            );
+            statusEl.className = coverage.complete === true
+                ? 'small text-success mb-3'
+                : 'small text-warning mb-3';
 
             statusEl.textContent = (
-                '✅ Cohorte V2 cargada. '
-                + 'Legacy excluido de estas métricas.'
+                (coverage.complete === true
+                    ? '✅ Lectura V2 completa. '
+                    : '⚠️ Lectura parcial: no calibrar con esta muestra. ')
+                + 'PnL bruto observado; costes no descontados. '
+                + 'Spot sin procedencia y Legacy excluidos.'
             );
         }
 

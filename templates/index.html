@@ -2774,7 +2774,7 @@
         Debe permanecer aislado y estable.
     -->
     <script
-        src="{{ url_for('static', filename='ai_assistant.js') }}?v=20260907-AI-RECOVERY-R1"
+        src="{{ url_for('static', filename='ai_assistant.js') }}?v=20260908-Q6-INTEGRITY"
     ></script>
     
     
@@ -3735,7 +3735,7 @@
         //   AMARILLO → borderline o pocas resueltas
         //   ROJO   → perdedoras
         window.updateSystemKPIs = function() {
-            fetch('/api/kpis/frontend_signals')
+            fetch('/api/kpis/frontend_signals?system_type={{ "futures" if is_futures else "spot" }}')
                 .then(r => {
                     if (!r.ok) throw new Error('HTTP ' + r.status);
                     return r.json();
@@ -3756,7 +3756,7 @@
                     // Con <5 resueltas, mostrar en gris para no engañar al usuario.
                     const wrEl = document.getElementById('header-kpi-winrate');
                     if (wrEl) {
-                        wrEl.innerHTML = `Win Rate: <b>${winRate.toFixed(1)}%</b>`;
+                        wrEl.innerHTML = resolved ? `Win Rate: <b>${winRate.toFixed(1)}%</b>` : "Win Rate: <b>--</b>";
                         let cls = 'bg-secondary';  // <5 muestras: sin color
                         if (resolved >= 5) {
                             cls = winRate >= 55 ? 'bg-success' :
@@ -3772,7 +3772,7 @@
                     const pnlEl = document.getElementById('header-kpi-pnl');
                     if (pnlEl) {
                         const sign = pnlPct >= 0 ? '+' : '';
-                        pnlEl.innerHTML = `PnL: <b>${sign}${pnlPct.toFixed(2)}%</b>`;
+                        pnlEl.innerHTML = resolved ? `PnL bruto: <b>${sign}${pnlPct.toFixed(2)}%</b>` : "PnL bruto: <b>--</b>";
                         let cls = 'bg-secondary';
                         if (resolved >= 5) {
                             cls = pnlPct >= 5 ? 'bg-success' :

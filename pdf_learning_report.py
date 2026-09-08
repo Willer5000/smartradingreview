@@ -70,11 +70,12 @@ REPORT_STRATEGY_SOFT_BUDGET_SECONDS = 20.0
 # Esto NO redefine la cohorte oficial ni reduce el requisito de
 # validación. Sólo garantiza una ruta de diagnóstico liviana.
 REPORT_SAFE_PAGE_SIZE = 250
-REPORT_SAFE_MAX_ROWS = 1000
+REPORT_SAFE_MAX_ROWS = 4000  # Q6-F: compact projection, same bounded time budget.
 
 LEARNING_CONTRACT_VERSION = 'market_separated_v1'
 FUTURES_REAL_DATA_SOURCE = 'KUCOIN_FUTURES_PERPETUAL_REST'
 FUTURES_REAL_COHORT = 'FUTURES_PERPETUAL_REAL_CLOSED_V1'
+from q6_integrity import verified_spot
 
 # ============================================================================
 # v26: BANDAS DE DIAGNÓSTICO SHADOW FUTURES
@@ -187,13 +188,7 @@ def _outcome_values(signal: Dict) -> Tuple[Optional[float], Optional[float]]:
 
     action = str(signal.get('action_normalized') or '').upper()
     if pnl_pct is None:
-        exit_price = tp if status == 'tp_hit' else sl
-        if action == 'LONG':
-            pnl_pct = (exit_price - entry) / entry * 100
-        elif action == 'SHORT':
-            pnl_pct = (entry - exit_price) / entry * 100
-        else:
-            return None, None
+        return None, None  # Q6-F: never reconstruct an observed PnL from targets.
 
     risk_pct = abs(entry - sl) / entry * 100
     r_multiple = pnl_pct / risk_pct if risk_pct > 0 else None
@@ -248,6 +243,7 @@ def _market_metrics(signals: List[Dict]) -> Dict:
 def _split_learning_cohorts(signals: List[Dict]) -> Dict[str, List[Dict]]:
     cohorts = {
         'spot': [],
+        'spot_legacy': [],
         'futures_verified': [],
         'futures_shadow': [],
         'futures_legacy': [],
@@ -256,7 +252,10 @@ def _split_learning_cohorts(signals: List[Dict]) -> Dict[str, List[Dict]]:
     for signal in signals:
         market = _normalize_market(signal)
         if market == 'spot':
-            cohorts['spot'].append(signal)
+            if verified_spot(signal):
+                cohorts['spot'].append(signal)
+            else:
+                cohorts['spot_legacy'].append(signal)
         elif market == 'futures':
             if _is_verified_futures_trade(signal):
                 cohorts['futures_verified'].append(signal)
@@ -1658,6 +1657,9 @@ def _compact_signal_for_learning_report(row: Dict) -> Dict:
     )
 
     learning_scalar_fields = (
+        ('analysis_version', 'learning_analysis_version'),
+        ('source_candle_timestamp', 'learning_source_candle_timestamp'),
+        ('source_candle_close_timestamp', 'learning_source_candle_close_timestamp'),
         (
             'contract_version',
             'learning_contract_version'
@@ -2009,6 +2011,10 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
         'id, symbol, timeframe, action_normalized, status, '
         'confidence, entry_price, stop_loss, take_profit, leverage, '
         'created_at, candle_timestamp, system_type, '
+        'signal_results(status,pnl_pct,notes,created_at), '
+        'learning_analysis_version:context->learning->>analysis_version, '
+        'learning_source_candle_timestamp:context->learning->>source_candle_timestamp, '
+        'learning_source_candle_close_timestamp:context->learning->>source_candle_close_timestamp, '
         'learning_contract_version:context->learning->>contract_version, '
         'learning_cohort:context->learning->>cohort, '
         'learning_market_data_source:context->learning->>market_data_source, '
@@ -2052,7 +2058,7 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
         'reached_window_end': False,
         'count_skipped': True,
 
-        'result_mode': 'LEVEL_RECONSTRUCTED_NO_RESULT_JOIN',
+        'result_mode': 'PERSISTED_RESULTS_JOIN_Q6',
         'errors': [],
         'model_version': 'report_fetch_safe_v6'
     }
@@ -2152,6 +2158,7 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
                     .gte('created_at', start_iso)
                     .lt('created_at', end_iso)
                     .order('created_at', desc=True)
+                    .order('id', desc=True)
                     .range(
                         offset,
                         offset + page_size - 1
@@ -2202,7 +2209,7 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
             - 1
         )
         // page_size
-    )
+    ) + 1  # one final probe distinguishes exact cap from truncation
 
     reached_window_end = False
 
@@ -2239,7 +2246,7 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
             cutoff,
             snapshot_end,
             offset,
-            page_size
+            min(page_size, max(1, REPORT_SAFE_MAX_ROWS - len(all_data)))
         )
 
         if error is not None:
@@ -2272,6 +2279,8 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
             reached_window_end = True
             break
 
+        if len(all_data) >= REPORT_SAFE_MAX_ROWS:
+            break  # non-empty probe: the 90-day window is truncated
         added = _append_unique(
             all_data,
             seen_ids,
@@ -2299,15 +2308,10 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
 
         # Si el servidor devolvió menos filas que las pedidas,
         # llegamos al final real de la ventana.
-        if len(batch) < page_size:
-            reached_window_end = True
-            break
+        # Q6-F: a server cap can return a short page before the real end.
+        # Offset advanced by actual rows; continue until an empty page.
 
-        if (
-            len(all_data)
-            >= REPORT_SAFE_MAX_ROWS
-        ):
-            break
+        # Q6-F: allow a final one-row probe at the cap.
 
     # Orden temporal determinista.
     all_data.sort(
@@ -3000,6 +3004,8 @@ def _build_human_summary(metrics: Dict, top_general: List[Dict],
 
     quarantine = metrics.get('quarantine_counts') or {}
     lines.append(
+        f"<br/><br/>Spot sin elegibilidad Q6: {int(quarantine.get('spot_legacy') or 0)} "
+        f"registros conservados fuera de las métricas verificadas."
         f"<br/><br/>Cuarentena informativa: "
         f"{int(quarantine.get('futures_legacy') or 0)} Futuros antiguos/no "
         f"verificables, {int(quarantine.get('futures_shadow') or 0)} análisis "
@@ -3123,6 +3129,7 @@ def _fetch_learning_data() -> Dict:
         }
         data['quarantine_counts'] = {
             'futures_legacy': len(cohorts['futures_legacy']),
+            'spot_legacy': len(cohorts['spot_legacy']),
             'futures_shadow': len(cohorts['futures_shadow']),
             'unscoped': len(cohorts['unscoped'])
         }
@@ -3574,6 +3581,7 @@ def generate_learning_pdf() -> bytes:
             f"{futures_metrics.get('ambiguous', 0)}"
         )],
         ['Futuros antiguos/no verificables en cuarentena', str(quarantine.get('futures_legacy', 0))],
+        ['Spot antiguo/replay sin elegibilidad Q6 (conservado)', str(quarantine.get('spot_legacy', 0))],
         ['Análisis Futures shadow (no publicados)', str(quarantine.get('futures_shadow', 0))],
         ['Registros sin mercado en cuarentena', str(quarantine.get('unscoped', 0))],
         [
@@ -4894,7 +4902,7 @@ def generate_learning_pdf() -> bytes:
         f"Entry–SL de esa misma señal; no se supone RR fijo 2:1."
         f"<br/><br/>"
         f"<b>Cómo se aprende:</b>"
-        f"<br/>• El learning worker corre cada 15 minutos: evalúa señales pendientes y "
+        f"<br/>• El learning worker corre cada 30 minutos: evalúa señales pendientes y "
         f"marca TP, SL, expiración, ambigüedad o setup inválido."
         f"<br/>• TP y SL en la misma vela no cuentan como win ni loss hasta resolver "
         f"su orden con datos más finos."

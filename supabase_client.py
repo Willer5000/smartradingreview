@@ -384,8 +384,8 @@ class SupabaseClient:
                 'status': result.get('status'),
                 'closed_at': datetime.utcnow().isoformat()
             }
-            self.client.table('signals').update(update_signal).eq('id', signal_id).execute()
-            
+            # Q6-B: persist the result FIRST. A failed result write must leave
+            # the source pending so the next worker can retry safely.
             # Insert en signal_results
             payload = {
                 'signal_id':
@@ -514,7 +514,11 @@ class SupabaseClient:
                     datetime.utcnow().isoformat()
             }
             
-            self.client.table('signal_results').insert(payload).execute()
+            from uuid import uuid5, NAMESPACE_URL
+            payload['id'] = str(uuid5(NAMESPACE_URL,
+                f"q6:{signal_id}:{payload['status']}:{payload['exit_timestamp']}"))
+            self.client.table('signal_results').upsert(payload, on_conflict='id').execute()
+            self.client.table('signals').update(update_signal).eq('id', signal_id).execute()
             self._check_rotation('signal_results')
             return True
             
@@ -564,25 +568,63 @@ class SupabaseClient:
     # CONSULTAS ESTADÍSTICAS
     # ========================================================================
     
-    def get_pending_signals(self, hours_old_max: int = 168) -> List[Dict]:
-        """
-        Retorna las señales pendientes de evaluar (status='pending') 
-        que no sean más antiguas de N horas (default 7 días).
+    def iter_pending_signals(self, hours_old_max=168, directional=None,
+                             page_size=200, max_rows=4000, budget_seconds=60):
+        """Q6-E: keyset scan, stable while the evaluator changes pending status.
+
+        The cursor rotates between runs so old unavailable/quarantined rows
+        cannot permanently starve recent signals. No schema migration.
         """
         if not self.enabled:
-            return []
-        
-        try:
-            cutoff = (datetime.utcnow() - timedelta(hours=hours_old_max)).isoformat()
-            response = (self.client.table('signals')
-                        .select('*')
-                        .eq('status', 'pending')
-                        .gte('created_at', cutoff)
-                        .execute())
-            return response.data or []
-        except Exception as e:
-            logger.error(f"Error obteniendo señales pendientes: {e}")
-            return []
+            return
+        import time
+        start = time.monotonic()
+        cutoff = (datetime.utcnow() - timedelta(hours=hours_old_max)).isoformat()
+        snapshot_end = datetime.utcnow().isoformat()
+        cursors = getattr(self, '_q6_pending_cursors', {})
+        self._q6_pending_cursors = cursors
+        cursor = cursors.get(directional)
+        processed = 0
+        while processed < max_rows and time.monotonic() - start < budget_seconds:
+            try:
+                query = (self.client.table('signals')
+                         .select('id,symbol,timeframe,system_type,action_normalized,'
+                                 'status,created_at,candle_timestamp,current_price,'
+                                 'entry_price,stop_loss,take_profit,confidence,indicators_snapshot,'
+                                 'leverage,q6_learning:context->learning,'
+                                 'q6_execution:context->execution,'
+                                 'q6_publication:context->futures_publication')
+                         .eq('status', 'pending').gte('created_at', cutoff)
+                         .lt('created_at', snapshot_end).order('id')
+                         .limit(min(page_size, max_rows - processed)))
+                if directional is True:
+                    query = query.in_('action_normalized', ['LONG', 'SHORT'])
+                elif directional is False:
+                    query = query.eq('action_normalized', 'NO_OPERAR')
+                if cursor:
+                    query = query.gt('id', cursor)
+                rows = query.execute().data or []
+                if not rows:
+                    cursors[directional] = None
+                    return
+                for row in rows:
+                    row['context'] = {
+                        'learning': row.pop('q6_learning', {}) or {},
+                        'execution': row.pop('q6_execution', {}) or {},
+                        'futures_publication': row.pop('q6_publication', {}) or {},
+                    }
+                    cursor = row['id']
+                    cursors[directional] = cursor
+                    processed += 1
+                    yield row
+            except Exception as exc:
+                logger.error('Q6 pending batch failed: %s', type(exc).__name__)
+                return
+
+    def get_pending_signals(self, hours_old_max=168):
+        """Compatibility API; evaluation workers consume the iterator directly."""
+        return list(self.iter_pending_signals(hours_old_max=hours_old_max))
+
     
     def get_strategy_stats(self, symbol: str = None, timeframe: str = None, 
                           action: str = None, strategy: str = None) -> List[Dict]:
@@ -2494,6 +2536,3 @@ if supabase_db.enabled:
         print(
             f"   {status} {table}"
         )
-
-
-

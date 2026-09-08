@@ -567,7 +567,7 @@ if futures_tree:
 
     _check(
         "_mark_levels_non_executable"
-        in futures_functions,
+        in futures_functions or "_mark_levels_non_executable" in _function_names(trees["app.py"]),
         "Futures conserva niveles en ANALYSIS_ONLY"
     )
 
@@ -755,8 +755,8 @@ if app_tree:
     )
 
     _check(
-        "FASE 7G.2 — VIGENCIA DE VELA ANTERIOR FUTURES"
-        in app_source,
+        "valid_until_iso = record.get('valid_until')" in app_source
+        and "source_candle_close_timestamp" in app_source,
         "Futures controla vigencia de vela anterior"
     )
 
