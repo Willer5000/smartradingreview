@@ -77,6 +77,782 @@ function formatDate(iso) {
     } catch(e) { return iso; }
 }
 
+// ============================================================================
+// QUALITY ENGINE Q5D — ANALYTICS V2
+// ============================================================================
+//
+// Presenta:
+//
+//     SPOT V2
+//     FUTURES OFICIAL V2
+//     FUTURES SHADOW
+//
+// y relaciona:
+//
+//     Safety -> WR / PnL / Expectancy R.
+//
+// Este código es exclusivamente de visualización.
+// NO modifica trading.
+// ============================================================================
+
+
+function q5SetText(id, value) {
+
+    const el = document.getElementById(id);
+
+    if (!el) {
+        return;
+    }
+
+    el.textContent = (
+        value === null
+        || value === undefined
+        || value === ''
+    )
+        ? '--'
+        : String(value);
+}
+
+
+function q5FiniteNumber(value) {
+
+    if (
+        value === null
+        || value === undefined
+        || value === ''
+    ) {
+        return null;
+    }
+
+    const number = Number(value);
+
+    return Number.isFinite(number)
+        ? number
+        : null;
+}
+
+
+function q5FormatUnsignedPct(
+    value,
+    decimals = 1
+) {
+
+    const number = q5FiniteNumber(
+        value
+    );
+
+    if (number === null) {
+        return '--';
+    }
+
+    return (
+        number.toFixed(decimals)
+        + '%'
+    );
+}
+
+
+function q5FormatSignedPct(
+    value,
+    decimals = 2
+) {
+
+    const number = q5FiniteNumber(
+        value
+    );
+
+    if (number === null) {
+        return '--';
+    }
+
+    const sign = (
+        number > 0
+        ? '+'
+        : ''
+    );
+
+    return (
+        sign
+        + number.toFixed(decimals)
+        + '%'
+    );
+}
+
+
+function q5FormatSignedR(
+    value,
+    decimals = 3
+) {
+
+    const number = q5FiniteNumber(
+        value
+    );
+
+    if (number === null) {
+        return '--';
+    }
+
+    const sign = (
+        number > 0
+        ? '+'
+        : ''
+    );
+
+    return (
+        sign
+        + number.toFixed(decimals)
+        + 'R'
+    );
+}
+
+
+function q5FormatNumber(
+    value,
+    decimals = 2
+) {
+
+    const number = q5FiniteNumber(
+        value
+    );
+
+    if (number === null) {
+        return '--';
+    }
+
+    return number.toFixed(
+        decimals
+    );
+}
+
+
+function q5SetPerformanceColor(
+    id,
+    value
+) {
+
+    const el = document.getElementById(id);
+
+    if (!el) {
+        return;
+    }
+
+    const number = q5FiniteNumber(
+        value
+    );
+
+    el.classList.remove(
+        'text-success',
+        'text-danger',
+        'text-warning'
+    );
+
+    if (number === null) {
+        return;
+    }
+
+    if (number > 0) {
+
+        el.classList.add(
+            'text-success'
+        );
+
+    } else if (number < 0) {
+
+        el.classList.add(
+            'text-danger'
+        );
+
+    } else {
+
+        el.classList.add(
+            'text-warning'
+        );
+    }
+}
+
+
+function q5RenderCohort(
+    prefix,
+    data,
+    options = {}
+) {
+
+    const d = (
+        data
+        && typeof data === 'object'
+    )
+        ? data
+        : {};
+
+    const resolved = Number(
+        d.resolved
+        || 0
+    );
+
+    const total = Number(
+        d.total_directional
+        || 0
+    );
+
+    q5SetText(
+        `q5-${prefix}-n`,
+        `N ${total.toLocaleString()}`
+    );
+
+    q5SetText(
+        `q5-${prefix}-resolved`,
+        resolved.toLocaleString()
+    );
+
+    // ================================================================
+    // ECONOMÍA
+    // ================================================================
+    //
+    // Con cero resultados resueltos NO mostramos "0%".
+    //
+    // 0% podría interpretarse incorrectamente como una medición real.
+    // ================================================================
+
+    if (resolved > 0) {
+
+        q5SetText(
+            `q5-${prefix}-wr`,
+            q5FormatUnsignedPct(
+                d.win_rate,
+                1
+            )
+        );
+
+        q5SetText(
+            `q5-${prefix}-pnl`,
+            q5FormatSignedPct(
+                d.pnl_total_pct,
+                2
+            )
+        );
+
+        q5SetText(
+            `q5-${prefix}-exp`,
+            q5FormatSignedR(
+                d.expectancy_r,
+                3
+            )
+        );
+
+        q5SetText(
+            `q5-${prefix}-pf`,
+            q5FormatNumber(
+                d.profit_factor,
+                2
+            )
+        );
+
+        q5SetPerformanceColor(
+            `q5-${prefix}-pnl`,
+            d.pnl_total_pct
+        );
+
+        q5SetPerformanceColor(
+            `q5-${prefix}-exp`,
+            d.expectancy_r
+        );
+
+    } else {
+
+        q5SetText(
+            `q5-${prefix}-wr`,
+            '--'
+        );
+
+        q5SetText(
+            `q5-${prefix}-pnl`,
+            '--'
+        );
+
+        q5SetText(
+            `q5-${prefix}-exp`,
+            '--'
+        );
+
+        q5SetText(
+            `q5-${prefix}-pf`,
+            '--'
+        );
+    }
+
+    // ================================================================
+    // CALIDAD
+    // ================================================================
+    //
+    // Estas medias sí pueden existir aunque aún no haya TP/SL.
+    // ================================================================
+
+    q5SetText(
+        `q5-${prefix}-safety`,
+        q5FormatNumber(
+            d.avg_safety,
+            1
+        )
+    );
+
+    q5SetText(
+        `q5-${prefix}-entry`,
+        q5FormatNumber(
+            d.avg_entry_quality,
+            1
+        )
+    );
+
+    q5SetText(
+        `q5-${prefix}-sl`,
+        q5FormatNumber(
+            d.avg_sl_quality,
+            1
+        )
+    );
+
+    q5SetText(
+        `q5-${prefix}-tp`,
+        q5FormatNumber(
+            d.avg_tp_quality,
+            1
+        )
+    );
+
+    if (options.shadow) {
+
+        q5SetText(
+            'q5-q2-shadow',
+            Number(
+                d.q2_refined
+                || 0
+            ).toLocaleString()
+        );
+    }
+}
+
+
+function q5RenderSafetyTable(
+    tbodyId,
+    bands
+) {
+
+    const tbody = document.getElementById(
+        tbodyId
+    );
+
+    if (!tbody) {
+        return;
+    }
+
+    const safeBands = (
+        bands
+        && typeof bands === 'object'
+    )
+        ? bands
+        : {};
+
+    const order = [
+        '<65',
+        '65-69',
+        '70-74',
+        '>=75',
+        'SIN_DATO'
+    ];
+
+    let html = '';
+
+    order.forEach(
+        label => {
+
+            const row = (
+                safeBands[label]
+                || {}
+            );
+
+            const total = Number(
+                row.total_directional
+                || 0
+            );
+
+            const resolved = Number(
+                row.resolved
+                || 0
+            );
+
+            const wr = (
+                resolved > 0
+            )
+                ? q5FormatUnsignedPct(
+                    row.win_rate,
+                    1
+                )
+                : '--';
+
+            const pnl = (
+                resolved > 0
+            )
+                ? q5FormatSignedPct(
+                    row.pnl_total_pct,
+                    2
+                )
+                : '--';
+
+            const expectancy = (
+                resolved > 0
+            )
+                ? q5FormatSignedR(
+                    row.expectancy_r,
+                    3
+                )
+                : '--';
+
+            const pf = (
+                resolved > 0
+            )
+                ? q5FormatNumber(
+                    row.profit_factor,
+                    2
+                )
+                : '--';
+
+            const pnlNumber = q5FiniteNumber(
+                row.pnl_total_pct
+            );
+
+            let performanceClass = '';
+
+            if (
+                resolved > 0
+                && pnlNumber !== null
+            ) {
+
+                if (pnlNumber > 0) {
+
+                    performanceClass = (
+                        'text-success'
+                    );
+
+                } else if (pnlNumber < 0) {
+
+                    performanceClass = (
+                        'text-danger'
+                    );
+
+                } else {
+
+                    performanceClass = (
+                        'text-warning'
+                    );
+                }
+            }
+
+            html += `
+                <tr>
+                    <td><strong>${label}</strong></td>
+                    <td>${total}</td>
+                    <td class="text-success">${Number(row.tp_hit || 0)}</td>
+                    <td class="text-danger">${Number(row.sl_hit || 0)}</td>
+                    <td>${wr}</td>
+                    <td class="${performanceClass}">${pnl}</td>
+                    <td>${expectancy}</td>
+                    <td>${pf}</td>
+                </tr>
+            `;
+        }
+    );
+
+    tbody.innerHTML = html;
+}
+
+
+async function loadQualityV2() {
+
+    const statusEl = document.getElementById(
+        'q5-v2-status'
+    );
+
+    if (statusEl) {
+
+        statusEl.className = (
+            'small text-muted mb-3'
+        );
+
+        statusEl.textContent = (
+            'Cargando cohorte V2...'
+        );
+    }
+
+    try {
+
+        const qs = buildQueryString(
+            getFilters()
+        );
+
+        const response = await fetch(
+            '/api/analytics/quality-v2?'
+            + qs
+        );
+
+        // ============================================================
+        // PARSEO ROBUSTO
+        // ============================================================
+        //
+        // Si Render devuelve HTML 502/504 no dejamos caer todo
+        // analytics.js con "Unexpected token <".
+        // ============================================================
+
+        const rawText = await response.text();
+
+        let json;
+
+        try {
+
+            json = JSON.parse(
+                rawText
+            );
+
+        } catch (parseError) {
+
+            throw new Error(
+                `Respuesta no JSON de Q5 V2 `
+                + `(HTTP ${response.status})`
+            );
+        }
+
+        if (
+            !response.ok
+            || !json.success
+        ) {
+
+            throw new Error(
+                json.error
+                || `HTTP ${response.status}`
+            );
+        }
+
+        const data = (
+            json.data
+            || {}
+        );
+
+        const spot = (
+            data.spot
+            || {}
+        );
+
+        const futures = (
+            data.futures
+            || {}
+        );
+
+        const shadow = (
+            data.futures_shadow
+            || {}
+        );
+
+        // ============================================================
+        // VERSIONADO
+        // ============================================================
+
+        q5SetText(
+            'q5-v2-version',
+            data.quality_score_version
+            || data.version
+            || 'V2'
+        );
+
+        // ============================================================
+        // TRES COHORTES
+        // ============================================================
+
+        q5RenderCohort(
+            'spot',
+            spot
+        );
+
+        q5RenderCohort(
+            'futures',
+            futures
+        );
+
+        q5RenderCohort(
+            'shadow',
+            shadow,
+            {
+                shadow:
+                    true
+            }
+        );
+
+        // ============================================================
+        // SAFETY -> PERFORMANCE
+        // ============================================================
+
+        q5RenderSafetyTable(
+            'q5-safety-spot',
+            spot.safety_bands
+        );
+
+        q5RenderSafetyTable(
+            'q5-safety-futures',
+            futures.safety_bands
+        );
+
+        // ============================================================
+        // Q2
+        // ============================================================
+
+        q5SetText(
+            'q5-q2-official',
+            Number(
+                futures.q2_refined
+                || 0
+            ).toLocaleString()
+        );
+
+        // ============================================================
+        // Q3 MICROESTRUCTURA SHADOW
+        // ============================================================
+
+        const q3 = (
+            shadow.q3_alignment
+            && typeof shadow.q3_alignment
+            === 'object'
+        )
+            ? shadow.q3_alignment
+            : {};
+
+        q5SetText(
+            'q5-q3-aligned',
+            Number(
+                q3.ALIGNED
+                || 0
+            ).toLocaleString()
+        );
+
+        q5SetText(
+            'q5-q3-neutral',
+            Number(
+                q3.NEUTRAL
+                || 0
+            ).toLocaleString()
+        );
+
+        q5SetText(
+            'q5-q3-conflict',
+            Number(
+                q3.CONFLICT
+                || 0
+            ).toLocaleString()
+        );
+
+        // ============================================================
+        // COBERTURA
+        // ============================================================
+
+        const coverage = (
+            data.coverage
+            || {}
+        );
+
+        q5SetText(
+            'q5-coverage',
+            (
+                'Cobertura V2 · '
+                + `Total direccionales: ${
+                    Number(
+                        coverage.v2_directional_total
+                        || 0
+                    ).toLocaleString()
+                } · `
+                + `Spot: ${
+                    Number(
+                        coverage.spot_v2
+                        || 0
+                    ).toLocaleString()
+                } · `
+                + `Futures oficial: ${
+                    Number(
+                        coverage.futures_official_v2
+                        || 0
+                    ).toLocaleString()
+                } · `
+                + `Futures Shadow: ${
+                    Number(
+                        coverage.futures_shadow_v2
+                        || 0
+                    ).toLocaleString()
+                }`
+            )
+        );
+
+        // ============================================================
+        // ESTADO
+        // ============================================================
+
+        if (statusEl) {
+
+            statusEl.className = (
+                'small text-success mb-3'
+            );
+
+            statusEl.textContent = (
+                '✅ Cohorte V2 cargada. '
+                + 'Legacy excluido de estas métricas.'
+            );
+        }
+
+    } catch (error) {
+
+        console.error(
+            'Error Q5 Analytics V2:',
+            error
+        );
+
+        if (statusEl) {
+
+            statusEl.className = (
+                'small text-danger mb-3'
+            );
+
+            statusEl.textContent = (
+                '❌ No se pudo cargar Analytics V2: '
+                + error.message
+            );
+        }
+
+        const spotBody = document.getElementById(
+            'q5-safety-spot'
+        );
+
+        const futuresBody = document.getElementById(
+            'q5-safety-futures'
+        );
+
+        if (spotBody) {
+
+            spotBody.innerHTML = `
+                <tr>
+                    <td colspan="8" class="text-center text-danger">
+                        Analytics V2 no disponible
+                    </td>
+                </tr>
+            `;
+        }
+
+        if (futuresBody) {
+
+            futuresBody.innerHTML = `
+                <tr>
+                    <td colspan="8" class="text-center text-danger">
+                        Analytics V2 no disponible
+                    </td>
+                </tr>
+            `;
+        }
+    }
+}
 
 // ============================================================================
 // 1. KPIs GLOBALES
@@ -699,9 +1475,14 @@ window.runReviewManually = async function() {
 // ============================================================================
 
 window.loadAllAnalytics = async function() {
-    showToast('🔄 Actualizando estadísticas...', 'info');
-    
+
+    showToast(
+        '🔄 Actualizando estadísticas...',
+        'info'
+    );
+
     await Promise.all([
+        loadQualityV2(),
         loadSummary(),
         loadStrategiesRanking(),
         loadHeatmap(),
@@ -710,10 +1491,12 @@ window.loadAllAnalytics = async function() {
         loadTopOperations('best'),
         loadTopOperations('worst')
     ]);
-    
-    showToast('✅ Estadísticas actualizadas', 'success');
-};
 
+    showToast(
+        '✅ Estadísticas actualizadas',
+        'success'
+    );
+};
 
 // ============================================================================
 // INICIALIZACIÓN
@@ -726,9 +1509,44 @@ document.addEventListener('DOMContentLoaded', function() {
     window.loadAllAnalytics();
     window.loadLogs();
     
-    // Auto-refresh de KPIs y logs cada 5 min
-    setInterval(() => {
-        loadSummary();
-        window.loadLogs();
-    }, 300000);
+    // ================================================================
+    // AUTO-REFRESH LEGACY
+    // ================================================================
+    //
+    // Mantiene exactamente la frecuencia existente.
+    // ================================================================
+
+    setInterval(
+        () => {
+
+            loadSummary();
+
+            window.loadLogs();
+
+        },
+        300000
+    );
+
+
+    // ================================================================
+    // QUALITY ENGINE Q5
+    // ================================================================
+    //
+    // Q5 lee context JSON de la cohorte nueva.
+    //
+    // No tiene sentido ejecutarlo cada minuto ni cada 5 minutos.
+    //
+    // El learning worker ya trabaja en ciclos de aproximadamente
+    // 15 minutos y este intervalo protege los 512 MB de Render.
+    // ================================================================
+
+    setInterval(
+        () => {
+
+            loadQualityV2();
+
+        },
+        900000
+    );
+
 });
