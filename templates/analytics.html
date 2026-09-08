@@ -135,7 +135,693 @@
                 </div>
             </div>
         </div>
-        
+        <!-- ================================================================
+             QUALITY ENGINE Q5C — ANALYTICS V2
+             ================================================================
+             
+             Cohorte actual limpia:
+             
+                 36W_V2_NORMALIZED
+             
+             LEGACY permanece visible más abajo sólo como referencia.
+             
+             Futures Shadow se muestra por separado y nunca se mezcla
+             con el rendimiento oficial.
+             ================================================================ -->
+
+        <div
+            class="chart-container mb-4"
+            id="q5-v2-section"
+            style="border-color: rgba(23, 162, 184, 0.55);"
+        >
+
+            <!-- ===================== CABECERA ===================== -->
+
+            <div
+                class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2"
+            >
+
+                <div>
+
+                    <h4 class="mb-1">
+
+                        <i class="fas fa-microscope me-2 text-info"></i>
+
+                        Producción Actual · Quality Engine V2
+
+                    </h4>
+
+                    <div class="small text-muted">
+
+                        Sólo señales de la generación matemática actual.
+                        Legacy no participa en estos KPIs.
+
+                    </div>
+
+                </div>
+
+                <span
+                    class="badge bg-info text-dark"
+                    id="q5-v2-version"
+                >
+                    Cargando V2...
+                </span>
+
+            </div>
+
+
+            <!-- ===================== POLÍTICA ===================== -->
+
+            <div
+                class="alert alert-info py-2 px-3 small mb-3"
+                style="
+                    background: rgba(23, 162, 184, 0.08);
+                    border-color: rgba(23, 162, 184, 0.25);
+                "
+            >
+
+                <strong>Cómo leer esta sección:</strong>
+
+                Spot y Futures oficiales muestran rendimiento real de la
+                cohorte nueva.
+
+                <strong>Futures Shadow es diagnóstico hipotético</strong>
+                y nunca mejora artificialmente el WR/PnL oficial.
+
+                El objetivo es comprobar si mayor calidad y mayor Safety
+                producen realmente mejor Expectancy y rentabilidad.
+
+            </div>
+
+
+            <div
+                id="q5-v2-status"
+                class="small text-muted mb-3"
+            >
+                Cargando cohorte V2...
+            </div>
+
+
+            <!-- ============================================================
+                 TRES COHORTES
+                 ============================================================ -->
+
+            <div class="row g-3 mb-4">
+
+
+                <!-- ==================== SPOT V2 ==================== -->
+
+                <div class="col-xl-4">
+
+                    <div
+                        class="card bg-dark border-success h-100"
+                    >
+
+                        <div
+                            class="card-header d-flex justify-content-between align-items-center"
+                        >
+
+                            <strong>
+                                🟢 SPOT V2 ACTUAL
+                            </strong>
+
+                            <span
+                                class="badge bg-success"
+                                id="q5-spot-n"
+                            >
+                                N --
+                            </span>
+
+                        </div>
+
+                        <div class="card-body">
+
+                            <div class="row g-3 text-center">
+
+                                <div class="col-6">
+
+                                    <div class="text-muted small">
+                                        Win Rate
+                                    </div>
+
+                                    <div
+                                        class="h4 mb-0"
+                                        id="q5-spot-wr"
+                                    >
+                                        --
+                                    </div>
+
+                                </div>
+
+                                <div class="col-6">
+
+                                    <div class="text-muted small">
+                                        PnL acumulado
+                                    </div>
+
+                                    <div
+                                        class="h4 mb-0"
+                                        id="q5-spot-pnl"
+                                    >
+                                        --
+                                    </div>
+
+                                </div>
+
+                                <div class="col-6">
+
+                                    <div class="text-muted small">
+                                        Expectancy
+                                    </div>
+
+                                    <strong id="q5-spot-exp">
+                                        --
+                                    </strong>
+
+                                </div>
+
+                                <div class="col-6">
+
+                                    <div class="text-muted small">
+                                        Profit Factor
+                                    </div>
+
+                                    <strong id="q5-spot-pf">
+                                        --
+                                    </strong>
+
+                                </div>
+
+                            </div>
+
+                            <hr>
+
+                            <div class="small">
+
+                                <div class="d-flex justify-content-between">
+                                    <span>Resueltas</span>
+                                    <strong id="q5-spot-resolved">--</strong>
+                                </div>
+
+                                <div class="d-flex justify-content-between">
+                                    <span>Safety medio</span>
+                                    <strong id="q5-spot-safety">--</strong>
+                                </div>
+
+                                <div class="d-flex justify-content-between">
+                                    <span>Entry Quality</span>
+                                    <strong id="q5-spot-entry">--</strong>
+                                </div>
+
+                                <div class="d-flex justify-content-between">
+                                    <span>SL Quality</span>
+                                    <strong id="q5-spot-sl">--</strong>
+                                </div>
+
+                                <div class="d-flex justify-content-between">
+                                    <span>TP Quality</span>
+                                    <strong id="q5-spot-tp">--</strong>
+                                </div>
+
+                            </div>
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+
+                <!-- ================= FUTURES OFICIAL ================= -->
+
+                <div class="col-xl-4">
+
+                    <div
+                        class="card bg-dark border-primary h-100"
+                    >
+
+                        <div
+                            class="card-header d-flex justify-content-between align-items-center"
+                        >
+
+                            <strong>
+                                🔵 FUTURES V2 OFICIAL
+                            </strong>
+
+                            <span
+                                class="badge bg-primary"
+                                id="q5-futures-n"
+                            >
+                                N --
+                            </span>
+
+                        </div>
+
+                        <div class="card-body">
+
+                            <div class="row g-3 text-center">
+
+                                <div class="col-6">
+
+                                    <div class="text-muted small">
+                                        Win Rate
+                                    </div>
+
+                                    <div
+                                        class="h4 mb-0"
+                                        id="q5-futures-wr"
+                                    >
+                                        --
+                                    </div>
+
+                                </div>
+
+                                <div class="col-6">
+
+                                    <div class="text-muted small">
+                                        PnL acumulado
+                                    </div>
+
+                                    <div
+                                        class="h4 mb-0"
+                                        id="q5-futures-pnl"
+                                    >
+                                        --
+                                    </div>
+
+                                </div>
+
+                                <div class="col-6">
+
+                                    <div class="text-muted small">
+                                        Expectancy R
+                                    </div>
+
+                                    <strong id="q5-futures-exp">
+                                        --
+                                    </strong>
+
+                                </div>
+
+                                <div class="col-6">
+
+                                    <div class="text-muted small">
+                                        Profit Factor
+                                    </div>
+
+                                    <strong id="q5-futures-pf">
+                                        --
+                                    </strong>
+
+                                </div>
+
+                            </div>
+
+                            <hr>
+
+                            <div class="small">
+
+                                <div class="d-flex justify-content-between">
+                                    <span>Resueltas</span>
+                                    <strong id="q5-futures-resolved">--</strong>
+                                </div>
+
+                                <div class="d-flex justify-content-between">
+                                    <span>Safety medio</span>
+                                    <strong id="q5-futures-safety">--</strong>
+                                </div>
+
+                                <div class="d-flex justify-content-between">
+                                    <span>Entry Quality</span>
+                                    <strong id="q5-futures-entry">--</strong>
+                                </div>
+
+                                <div class="d-flex justify-content-between">
+                                    <span>SL Quality</span>
+                                    <strong id="q5-futures-sl">--</strong>
+                                </div>
+
+                                <div class="d-flex justify-content-between">
+                                    <span>TP Quality</span>
+                                    <strong id="q5-futures-tp">--</strong>
+                                </div>
+
+                            </div>
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+
+                <!-- ================= FUTURES SHADOW ================= -->
+
+                <div class="col-xl-4">
+
+                    <div
+                        class="card bg-dark border-warning h-100"
+                    >
+
+                        <div
+                            class="card-header d-flex justify-content-between align-items-center"
+                        >
+
+                            <strong>
+                                🟡 FUTURES SHADOW
+                            </strong>
+
+                            <span
+                                class="badge bg-warning text-dark"
+                                id="q5-shadow-n"
+                            >
+                                N --
+                            </span>
+
+                        </div>
+
+                        <div class="card-body">
+
+                            <div
+                                class="small text-warning mb-3"
+                            >
+                                Diagnóstico solamente · NO forma parte
+                                del rendimiento oficial.
+                            </div>
+
+                            <div class="row g-3 text-center">
+
+                                <div class="col-6">
+
+                                    <div class="text-muted small">
+                                        WR hipotético
+                                    </div>
+
+                                    <div
+                                        class="h4 mb-0"
+                                        id="q5-shadow-wr"
+                                    >
+                                        --
+                                    </div>
+
+                                </div>
+
+                                <div class="col-6">
+
+                                    <div class="text-muted small">
+                                        PnL hipotético
+                                    </div>
+
+                                    <div
+                                        class="h4 mb-0"
+                                        id="q5-shadow-pnl"
+                                    >
+                                        --
+                                    </div>
+
+                                </div>
+
+                                <div class="col-6">
+
+                                    <div class="text-muted small">
+                                        Expectancy R
+                                    </div>
+
+                                    <strong id="q5-shadow-exp">
+                                        --
+                                    </strong>
+
+                                </div>
+
+                                <div class="col-6">
+
+                                    <div class="text-muted small">
+                                        Safety medio
+                                    </div>
+
+                                    <strong id="q5-shadow-safety">
+                                        --
+                                    </strong>
+
+                                </div>
+
+                            </div>
+
+                            <hr>
+
+                            <div class="small">
+
+                                <div class="d-flex justify-content-between">
+                                    <span>Resueltas</span>
+                                    <strong id="q5-shadow-resolved">--</strong>
+                                </div>
+
+                                <div class="d-flex justify-content-between">
+                                    <span>Q2 refinadas</span>
+                                    <strong id="q5-q2-shadow">--</strong>
+                                </div>
+
+                            </div>
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+            </div>
+
+
+            <!-- ============================================================
+                 SAFETY → RESULTADOS
+                 ============================================================ -->
+
+            <div class="row g-3 mb-4">
+
+                <!-- SPOT -->
+
+                <div class="col-xl-6">
+
+                    <h6 class="mb-2">
+                        🟢 Spot V2 · Safety → Resultado
+                    </h6>
+
+                    <div class="table-responsive">
+
+                        <table
+                            class="table table-dark table-sm table-hover align-middle"
+                        >
+
+                            <thead>
+
+                                <tr>
+                                    <th>Safety</th>
+                                    <th>N</th>
+                                    <th>TP</th>
+                                    <th>SL</th>
+                                    <th>WR</th>
+                                    <th>PnL</th>
+                                    <th>Exp.R</th>
+                                    <th>PF</th>
+                                </tr>
+
+                            </thead>
+
+                            <tbody id="q5-safety-spot">
+
+                                <tr>
+                                    <td colspan="8" class="text-center text-muted">
+                                        Cargando...
+                                    </td>
+                                </tr>
+
+                            </tbody>
+
+                        </table>
+
+                    </div>
+
+                </div>
+
+
+                <!-- FUTURES -->
+
+                <div class="col-xl-6">
+
+                    <h6 class="mb-2">
+                        🔵 Futures oficial · Safety → Resultado
+                    </h6>
+
+                    <div class="table-responsive">
+
+                        <table
+                            class="table table-dark table-sm table-hover align-middle"
+                        >
+
+                            <thead>
+
+                                <tr>
+                                    <th>Safety</th>
+                                    <th>N</th>
+                                    <th>TP</th>
+                                    <th>SL</th>
+                                    <th>WR</th>
+                                    <th>PnL</th>
+                                    <th>Exp.R</th>
+                                    <th>PF</th>
+                                </tr>
+
+                            </thead>
+
+                            <tbody id="q5-safety-futures">
+
+                                <tr>
+                                    <td colspan="8" class="text-center text-muted">
+                                        Cargando...
+                                    </td>
+                                </tr>
+
+                            </tbody>
+
+                        </table>
+
+                    </div>
+
+                </div>
+
+            </div>
+
+
+            <!-- ============================================================
+                 Q2 / Q3 — EVIDENCIA PROSPECTIVA
+                 ============================================================ -->
+
+            <div
+                class="card bg-dark border-secondary mb-3"
+            >
+
+                <div class="card-header">
+
+                    <strong>
+                        🧪 Evidencia de los nuevos Quality Engines
+                    </strong>
+
+                </div>
+
+                <div class="card-body">
+
+                    <div class="row g-3 text-center">
+
+                        <div class="col-md-3">
+
+                            <div class="text-muted small">
+                                Q2 refinadas oficiales
+                            </div>
+
+                            <strong
+                                class="h5"
+                                id="q5-q2-official"
+                            >
+                                --
+                            </strong>
+
+                        </div>
+
+                        <div class="col-md-3">
+
+                            <div class="text-muted small">
+                                Q3 Shadow ALIGNED
+                            </div>
+
+                            <strong
+                                class="h5 text-success"
+                                id="q5-q3-aligned"
+                            >
+                                --
+                            </strong>
+
+                        </div>
+
+                        <div class="col-md-3">
+
+                            <div class="text-muted small">
+                                Q3 Shadow NEUTRAL
+                            </div>
+
+                            <strong
+                                class="h5 text-warning"
+                                id="q5-q3-neutral"
+                            >
+                                --
+                            </strong>
+
+                        </div>
+
+                        <div class="col-md-3">
+
+                            <div class="text-muted small">
+                                Q3 Shadow CONFLICT
+                            </div>
+
+                            <strong
+                                class="h5 text-danger"
+                                id="q5-q3-conflict"
+                            >
+                                --
+                            </strong>
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+            </div>
+
+
+            <!-- ===================== COBERTURA ===================== -->
+
+            <div
+                class="small text-muted"
+                id="q5-coverage"
+            >
+                Cobertura V2: --
+            </div>
+
+        </div>
+
+
+        <!-- ================================================================
+             ANALYTICS HISTÓRICO / LEGACY
+             ================================================================ -->
+
+        <div
+            class="d-flex flex-wrap justify-content-between align-items-center mb-2"
+        >
+
+            <h5 class="mb-0">
+
+                <i class="fas fa-history me-2 text-secondary"></i>
+
+                Histórico / Analytics Legacy
+
+            </h5>
+
+            <span class="badge bg-secondary">
+
+                Referencia histórica · no calibra V2
+
+            </span>
+
+        </div>
+
+        <div class="small text-muted mb-3">
+
+            Esta sección conserva el comportamiento histórico de Analytics.
+            Puede incluir datos anteriores a 36W y no debe utilizarse para
+            juzgar de forma aislada la calidad de la generación V2 actual.
+
+        </div>        
         <!-- ============ KPIs GLOBALES (fila 1: básicos) ============ -->
         <div class="row g-3 mb-3" id="kpi-row">
             <div class="col-md-3">
