@@ -18661,11 +18661,19 @@ class TradingExpertSystem:
                 # are observational in both Spot and Futures.
                 strategy_lab['trendlines'] = trendline_lab
                 try:
-                    from strategy_registry import default_registry_snapshot
-                    strategy_lab['registry'] = default_registry_snapshot()
+                    from strategy_registry import get_registry_snapshot
+                    strategy_lab['registry'] = get_registry_snapshot(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        market_regime=str(
+                            market_regime.get('regime', '*')
+                            if isinstance(market_regime, dict)
+                            else '*'
+                        )
+                    )
                 except Exception:
                     strategy_lab['registry'] = {
-                        'version': 'C3_STRATEGY_REGISTRY_V1',
+                        'version': 'C4_STRATEGY_REGISTRY_V2',
                         'production_authority': False,
                         'strategies': {},
                     }
@@ -18755,6 +18763,19 @@ class TradingExpertSystem:
                     "Laboratorio no disponible: "
                     f"{q7_error}"
                 )            
+            # ==========================================================
+            # COMMIT 4 — PASS GOVERNED STRATEGY LAB TO FUTURES EXECUTION
+            # ==========================================================
+            # Hidden per-analysis keys avoid shared mutable state between parallel
+            # Futures analyses. They are removed immediately after levels.
+            if analysis_system_type == 'futures' and isinstance(structure, dict):
+                structure['_adaptive_strategy_lab'] = strategy_lab
+                structure['_adaptive_market_regime'] = str(
+                    market_regime.get('regime', '*')
+                    if isinstance(market_regime, dict)
+                    else '*'
+                )
+
             # ============ NIVELES ============
             levels = {}
             if accion_consenso in ['COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT']:
@@ -18792,6 +18813,10 @@ class TradingExpertSystem:
                     levels = self._get_default_levels(structure.get('current_price', 0), symbol)
             else:
                 levels = self._get_default_levels(structure.get('current_price', 0), symbol)
+
+            if isinstance(structure, dict):
+                structure.pop('_adaptive_strategy_lab', None)
+                structure.pop('_adaptive_market_regime', None)
 
             # ==========================================================
             # COMMIT 36X
@@ -25685,6 +25710,19 @@ def api_strategy_lab_research():
         result = run_historical_strategy_research(
             df=df, symbol=symbol, timeframe=timeframe, max_observations=120
         )
+        try:
+            from adaptive_autopilot import persist_research_run
+            from supabase_client import supabase_db
+            persist_research_run(
+                supabase_db,
+                result,
+                user_id=user
+            )
+        except Exception as persist_error:
+            print(
+                '⚠️ [C4 AUTOPILOT] Research persistence skipped: '
+                f'{persist_error}'
+            )
         return jsonify({'success': True, 'research': result})
     except Exception as exc:
         return jsonify({'success': False, 'error': str(exc)[:200]}), 500
@@ -32001,6 +32039,29 @@ def api_review_run_now():
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': f'Error interno: {str(e)}'}), 500
+
+
+# ============================================================================
+# COMMIT 4 — AUTOPILOT STATUS (READ ONLY)
+# ============================================================================
+@app.route('/api/review/autopilot/status', methods=['GET'])
+def api_review_autopilot_status():
+    user = _require_auth()
+    if not isinstance(user, str):
+        return user
+    try:
+        from adaptive_autopilot import get_autopilot_status
+        from supabase_client import supabase_db
+        return jsonify({
+            'success': True,
+            'autopilot': get_autopilot_status(supabase_db),
+            'timestamp': datetime.now(bolivia_tz).isoformat()
+        })
+    except Exception as exc:
+        return jsonify({
+            'success': False,
+            'error': str(exc)[:200]
+        }), 500
 
 
 # ============================================================================
@@ -39718,8 +39779,20 @@ def learning_worker_loop():
                     print(f"🧠 [LEARN] Stats recalculadas: "
                           f"{result.get('specific', 0)} específicas, "
                           f"{result.get('general', 0)} generales")
+
+                    # Commit 4: Autopilot runs only after the 4h aggregate refresh.
+                    # It uses bounded DB reads and fails open to the static engine.
+                    adaptive = review_trader.run_adaptive_autopilot(
+                        price_fetcher=_price_fetcher
+                    )
+                    if adaptive.get('success'):
+                        print(
+                            "🧠 [C4 AUTOPILOT] "
+                            f"profiles={adaptive.get('profiles_updated', 0)} "
+                            f"transitions={len(adaptive.get('strategy_transitions', []) or [])}"
+                        )
                 except Exception as rc_err:
-                    print(f"⚠️ learning_worker.recalculate_stats: {rc_err}")
+                    print(f"⚠️ learning_worker.recalculate_stats/autopilot: {rc_err}")
         
         except Exception as loop_err:
             print(f"❌ learning_worker: excepción en loop: {loop_err}")

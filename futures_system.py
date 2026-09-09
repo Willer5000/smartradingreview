@@ -3087,7 +3087,8 @@ class FuturesAnalysis(TradingExpertSystem):
         sl_distance_pct,
         atr_pct,
         execution_safety,
-        timeframe
+        timeframe,
+        adaptive_profile=None
     ):
         """
         Elige el MENOR leverage entero que hace viable la operación.
@@ -3184,9 +3185,49 @@ class FuturesAnalysis(TradingExpertSystem):
                     'absolute_max_leverage'
                 ]
             )
-            max_leverage_by_policy = min(
+
+            # ==========================================================
+            # COMMIT 4 — LEVERAGE V2 AUTOPILOT (BOUNDED)
+            # ==========================================================
+            # ReviewTrader may shrink the policy ceiling after robust negative
+            # evidence. Positive evidence may choose a slightly higher leverage
+            # *inside* all existing hard ceilings. The TF/absolute caps are not
+            # removed in Commit 4 because the exchange contract leverage limit is
+            # not yet consumed as a verified runtime constraint.
+            adaptive_profile = (
+                adaptive_profile
+                if isinstance(adaptive_profile, dict)
+                else {}
+            )
+            adaptive_config = adaptive_profile.get('config', {}) or {}
+            adaptive_authority = bool(
+                adaptive_profile.get('production_authority', False)
+            )
+            try:
+                leverage_cap_factor = float(
+                    adaptive_config.get('leverage_cap_factor', 1.0)
+                    if adaptive_authority
+                    else 1.0
+                )
+            except Exception:
+                leverage_cap_factor = 1.0
+            leverage_cap_factor = max(0.75, min(1.0, leverage_cap_factor))
+
+            max_leverage_by_policy_static = min(
                 float(tf_max),
                 absolute_max
+            )
+            max_leverage_by_policy = max(
+                1.0,
+                max_leverage_by_policy_static * leverage_cap_factor
+            )
+
+            # Diagnostic only: how far risk/ATR geometry would allow before TF
+            # policy. This is NOT a recommendation and does not override exchange
+            # limits or the absolute production cap.
+            risk_based_max_without_timeframe_cap = min(
+                max_leverage_by_risk,
+                max_leverage_by_atr_stress,
             )
 
             # Techo 4: una mejor puntuación permite utilizar una parte mayor
@@ -3233,9 +3274,30 @@ class FuturesAnalysis(TradingExpertSystem):
                 )
                 return None
 
-            # No premiamos una señal con más riesgo. Se recomienda el menor
-            # entero que supera rentabilidad y ROI sin romper ningún techo.
+            # Static behavior remains MINIMUM_SAFE_VIABLE. Only a robust ACTIVE
+            # adaptive profile may select a modestly higher leverage, and still
+            # never beyond SL/ATR/security/policy ceilings.
             leverage = minimum_required_integer
+            leverage_target_factor = 1.0
+            allow_leverage_growth = False
+            if adaptive_authority:
+                allow_leverage_growth = bool(
+                    adaptive_config.get('allow_leverage_growth', False)
+                )
+                try:
+                    leverage_target_factor = float(
+                        adaptive_config.get('leverage_target_factor', 1.0)
+                        or 1.0
+                    )
+                except Exception:
+                    leverage_target_factor = 1.0
+                leverage_target_factor = max(1.0, min(1.20, leverage_target_factor))
+
+            if allow_leverage_growth and leverage_target_factor > 1.0:
+                adaptive_target = int(math.ceil(
+                    minimum_required_integer * leverage_target_factor
+                ))
+                leverage = min(maximum_safe_integer, max(minimum_required_integer, adaptive_target))
 
             return {
                 'leverage': leverage,
@@ -3263,6 +3325,25 @@ class FuturesAnalysis(TradingExpertSystem):
                     final_max_leverage,
                     2
                 ),
+                'risk_based_max_without_timeframe_cap': round(
+                    risk_based_max_without_timeframe_cap,
+                    2
+                ),
+                'adaptive_profile_state': str(
+                    adaptive_profile.get('state', 'OBSERVE')
+                ),
+                'adaptive_profile_authority': adaptive_authority,
+                'adaptive_leverage_cap_factor': round(
+                    leverage_cap_factor,
+                    3
+                ),
+                'adaptive_leverage_target_factor': round(
+                    leverage_target_factor,
+                    3
+                ),
+                'adaptive_leverage_growth': bool(
+                    allow_leverage_growth
+                ),
                 'min_by_timeframe': int(
                     min_leverage_tf
                 ),
@@ -3285,7 +3366,11 @@ class FuturesAnalysis(TradingExpertSystem):
                     security_factor,
                     3
                 ),
-                'selection_policy': 'MINIMUM_SAFE_VIABLE',
+                'selection_policy': (
+                    'ADAPTIVE_EDGE_BOUNDED'
+                    if allow_leverage_growth and leverage > minimum_required_integer
+                    else 'MINIMUM_SAFE_VIABLE'
+                ),
                 'economically_viable': True
             }
 
@@ -4016,50 +4101,41 @@ class FuturesAnalysis(TradingExpertSystem):
         self,
         sl_score,
         tp_score,
-        rr
+        rr,
+        weights=None
     ):
         """
         Compara PARES SL + TP.
 
-        Dentro de Execution Safety estos tres componentes pesan:
-
-            SL = 20%
-            TP = 15%
-            RR = 15%
-
-        Normalizados únicamente dentro de Q2:
-
-            SL = 40%
-            TP = 30%
-            RR = 30%
-
-        IMPORTANTE:
-        este score NO se suma al Safety.
-
-        Sólo sirve para decidir cuál pareja estructural es mejor.
+        Commit 4 permite que ReviewTrader cambie *sólo* la ponderación entre
+        candidatos estructurales ya válidos. Nunca crea SL/TP artificiales.
+        Sin evidencia robusta, conserva exactamente 40/30/30.
         """
 
-        rr_quality = (
-            self._q2_rr_quality(
-                rr
-            )
-        )
+        rr_quality = self._q2_rr_quality(rr)
+
+        safe_weights = {
+            'sl': 0.40,
+            'tp': 0.30,
+            'rr': 0.30,
+        }
+        if isinstance(weights, dict):
+            try:
+                candidate = {
+                    'sl': max(0.0, float(weights.get('sl', 0.40) or 0.40)),
+                    'tp': max(0.0, float(weights.get('tp', 0.30) or 0.30)),
+                    'rr': max(0.0, float(weights.get('rr', 0.30) or 0.30)),
+                }
+                total = sum(candidate.values())
+                if total > 0:
+                    safe_weights = {k: v / total for k, v in candidate.items()}
+            except Exception:
+                pass
 
         return (
-            float(
-                sl_score
-                or 0
-            )
-            * 0.40
-
-            + float(
-                tp_score
-                or 0
-            )
-            * 0.30
-
-            + rr_quality
-            * 0.30
+            float(sl_score or 0) * safe_weights['sl']
+            + float(tp_score or 0) * safe_weights['tp']
+            + rr_quality * safe_weights['rr']
         )
 
 
@@ -4071,7 +4147,8 @@ class FuturesAnalysis(TradingExpertSystem):
         volatility,
         timeframe,
         symbol,
-        liquidation=None
+        liquidation=None,
+        adaptive_profile=None
     ):
         """
         QUALITY ENGINE Q2 — FUTURES EXECUTION SPECIALIST.
@@ -4113,6 +4190,44 @@ class FuturesAnalysis(TradingExpertSystem):
             else {}
         )
 
+        # ============================================================
+        # COMMIT 4 — ADAPTIVE Q2 POLICY
+        # ============================================================
+        # Only a persisted PROTECT/ACTIVE execution profile may alter the
+        # ranking of already-valid structural SL/TP candidates. With no robust
+        # evidence this resolves to the original 40/30/30 + 4pt policy.
+        adaptive_profile = (
+            adaptive_profile
+            if isinstance(adaptive_profile, dict)
+            else {}
+        )
+        adaptive_config = (
+            adaptive_profile.get('config', {})
+            if isinstance(adaptive_profile, dict)
+            else {}
+        ) or {}
+        adaptive_authority = bool(
+            isinstance(adaptive_profile, dict)
+            and adaptive_profile.get('production_authority', False)
+        )
+        q2_weights = (
+            adaptive_config.get('q2_weights')
+            if adaptive_authority
+            else None
+        )
+        try:
+            q2_min_improvement = float(
+                adaptive_config.get(
+                    'q2_min_pair_improvement',
+                    FUTURES_EXECUTION_MIN_PAIR_IMPROVEMENT
+                )
+                if adaptive_authority
+                else FUTURES_EXECUTION_MIN_PAIR_IMPROVEMENT
+            )
+        except Exception:
+            q2_min_improvement = FUTURES_EXECUTION_MIN_PAIR_IMPROVEMENT
+        q2_min_improvement = max(2.0, min(8.0, q2_min_improvement))
+
         diagnostics = {
             'version':
                 FUTURES_EXECUTION_SPECIALIST_VERSION,
@@ -4133,7 +4248,16 @@ class FuturesAnalysis(TradingExpertSystem):
                 None,
 
             'selected_pair_score':
-                None
+                None,
+
+            'adaptive_policy_active':
+                adaptive_authority,
+
+            'adaptive_q2_weights':
+                q2_weights,
+
+            'adaptive_min_pair_improvement':
+                round(q2_min_improvement, 3)
         }
 
         result[
@@ -4584,7 +4708,8 @@ class FuturesAnalysis(TradingExpertSystem):
                     ._q2_execution_pair_score(
                         sl_score,
                         tp_score,
-                        rr
+                        rr,
+                        weights=q2_weights
                     )
                 )
 
@@ -4707,7 +4832,8 @@ class FuturesAnalysis(TradingExpertSystem):
             ._q2_execution_pair_score(
                 base_sl_score,
                 base_tp_score,
-                base_rr
+                base_rr,
+                weights=q2_weights
             )
             if (
                 base_sl_score
@@ -4762,7 +4888,7 @@ class FuturesAnalysis(TradingExpertSystem):
                 ]
                 >= (
                     base_pair_score
-                    + FUTURES_EXECUTION_MIN_PAIR_IMPROVEMENT
+                    + q2_min_improvement
                 )
             )
         )
@@ -4994,6 +5120,92 @@ class FuturesAnalysis(TradingExpertSystem):
 
     
     # ========================================================================
+    # COMMIT 4 — ADAPTIVE EXECUTION GUARDRAILS
+    # ========================================================================
+
+    @staticmethod
+    def _adaptive_entry_defensibility_score(levels):
+        """Quality diagnostic, not a probability of TP.
+
+        Combines the structural Q1 score with reachability and the structural
+        SL quality that already exists. It never moves Entry by itself.
+        """
+        levels = levels if isinstance(levels, dict) else {}
+        try:
+            smc = float(levels.get('entry_smc_raw_score', levels.get('entry_score', 0)) or 0)
+        except Exception:
+            smc = 0.0
+        try:
+            reach = float(levels.get('entry_reachability_score', 0) or 0)
+        except Exception:
+            reach = 0.0
+        try:
+            sl_raw = float(levels.get('sl_reliability', 0) or 0)
+        except Exception:
+            sl_raw = 0.0
+        sl_quality = sl_raw * 100.0 if sl_raw <= 1.0 else sl_raw
+        smc = max(0.0, min(100.0, smc))
+        reach = max(0.0, min(100.0, reach))
+        sl_quality = max(0.0, min(100.0, sl_quality))
+        return round(smc * 0.55 + reach * 0.15 + sl_quality * 0.30, 2)
+
+    @staticmethod
+    def _active_strategy_registry_diagnostic(decision, structure):
+        """ACTIVE experimental strategies may veto a conflict, never create/boost a trade."""
+        result = {
+            'active': False,
+            'conflicts': [],
+            'aligned': [],
+            'reason': 'NO_ACTIVE_STRATEGY_AUTHORITY',
+        }
+        if decision not in ('LONG', 'SHORT') or not isinstance(structure, dict):
+            return result
+        lab = structure.get('_adaptive_strategy_lab') or {}
+        if not isinstance(lab, dict):
+            return result
+        registry = lab.get('registry') or {}
+        strategies_registry = registry.get('strategies') or {} if isinstance(registry, dict) else {}
+        if not isinstance(strategies_registry, dict):
+            return result
+
+        observations = []
+        q7 = lab.get('strategies') or {}
+        if isinstance(q7, dict):
+            observations.extend(v for v in q7.values() if isinstance(v, dict))
+        trendlines = lab.get('trendlines') or {}
+        if isinstance(trendlines, dict):
+            tl_strategies = trendlines.get('strategies') or {}
+            if isinstance(tl_strategies, dict):
+                observations.extend(v for v in tl_strategies.values() if isinstance(v, dict))
+
+        for observation in observations:
+            strategy_key = str(observation.get('name') or '')
+            if not strategy_key:
+                continue
+            reg = strategies_registry.get(strategy_key) or {}
+            if not isinstance(reg, dict) or str(reg.get('state') or '').upper() != 'ACTIVE':
+                continue
+            direction = str(observation.get('direction') or 'NEUTRAL').upper()
+            if direction not in ('LONG', 'SHORT'):
+                continue
+            result['active'] = True
+            item = {
+                'strategy': strategy_key,
+                'direction': direction,
+                'state': observation.get('state'),
+            }
+            if direction == decision:
+                result['aligned'].append(item)
+            else:
+                result['conflicts'].append(item)
+
+        if result['conflicts']:
+            result['reason'] = 'ACTIVE_STRATEGY_CONFLICT_VETO'
+        elif result['active']:
+            result['reason'] = 'ACTIVE_STRATEGIES_ALIGNED_OR_NEUTRAL'
+        return result
+
+    # ========================================================================
     # OVERRIDE: CALCULATE_ENTRY_LEVELS (para futuros)
     # ========================================================================
     
@@ -5017,6 +5229,32 @@ class FuturesAnalysis(TradingExpertSystem):
         # Solo procesar acciones de futuros
         if decision not in ('LONG', 'SHORT'):
             return self._get_default_levels(structure.get('current_price', 0), symbol)
+
+        # ==============================================================
+        # COMMIT 4 — REVIEWTRADER ADAPTIVE EXECUTION PROFILE
+        # ==============================================================
+        # Fails open to OBSERVE. No profile means the exact static behavior.
+        try:
+            from adaptive_autopilot import get_execution_profile
+            _adaptive_market_regime = str(
+                structure.get('_adaptive_market_regime', '*')
+                if isinstance(structure, dict)
+                else '*'
+            )
+            adaptive_profile = get_execution_profile(
+                symbol=symbol,
+                timeframe=timeframe,
+                market_regime=_adaptive_market_regime,
+                system_type='futures'
+            )
+        except Exception:
+            adaptive_profile = {
+                'version': 'STATIC_FALLBACK',
+                'state': 'OBSERVE',
+                'production_authority': False,
+                'config': {},
+                'evidence': {},
+            }
         
         # ==============================================================
         # Q1 / MOTOR PADRE
@@ -5065,7 +5303,8 @@ class FuturesAnalysis(TradingExpertSystem):
                 volatility=volatility,
                 timeframe=timeframe,
                 symbol=symbol,
-                liquidation=liquidation
+                liquidation=liquidation,
+                adaptive_profile=adaptive_profile
             )
         )
 
@@ -5087,6 +5326,70 @@ class FuturesAnalysis(TradingExpertSystem):
                 f"| SL {q2_info.get('selected_sl_score', 0):.1f} "
                 f"| TP {q2_info.get('selected_tp_score', 0):.1f}"
             )
+
+        # ==============================================================
+        # COMMIT 4 — ENTRY DEFENSIBILITY + ACTIVE STRATEGY VETO
+        # ==============================================================
+        # These are quality controls over an already-computed setup. They never
+        # turn NO_OPERAR into LONG/SHORT and never raise Safety.
+        entry_defensibility = self._adaptive_entry_defensibility_score(levels)
+        levels['entry_defensibility_score'] = entry_defensibility
+        levels['entry_defensibility_version'] = 'C4_ENTRY_DEFENSIBILITY_V1'
+        levels['adaptive_execution_profile'] = {
+            'version': adaptive_profile.get('version'),
+            'state': adaptive_profile.get('state', 'OBSERVE'),
+            'production_authority': bool(adaptive_profile.get('production_authority', False)),
+            'evidence': adaptive_profile.get('evidence', {}),
+        }
+
+        adaptive_config = adaptive_profile.get('config', {}) if isinstance(adaptive_profile, dict) else {}
+        try:
+            entry_min_defensibility = float(
+                adaptive_config.get('entry_min_defensibility', 0)
+                if adaptive_profile.get('production_authority', False)
+                else 0
+            )
+        except Exception:
+            entry_min_defensibility = 0.0
+        entry_min_defensibility = max(0.0, min(90.0, entry_min_defensibility))
+        levels['entry_defensibility_operational_min'] = round(entry_min_defensibility, 2)
+
+        strategy_registry_diag = self._active_strategy_registry_diagnostic(
+            decision,
+            structure
+        )
+        levels['active_strategy_registry'] = strategy_registry_diag
+
+        if (
+            adaptive_profile.get('production_authority', False)
+            and entry_min_defensibility > 0
+            and entry_defensibility < entry_min_defensibility
+        ):
+            reason = (
+                f"Entry defendibility {entry_defensibility:.1f} < "
+                f"learned minimum {entry_min_defensibility:.1f}"
+            )
+            traced = self._stamp_futures_filter_trace(
+                levels,
+                stage='PRE_GATE',
+                reason_codes=['ADAPTIVE_ENTRY_DEFENSIBILITY'],
+                reason=reason,
+                reached_publication_gate=False,
+                outcome='ANALYSIS_ONLY'
+            )
+            return self._mark_levels_non_executable(traced, reason)
+
+        if strategy_registry_diag.get('conflicts'):
+            reason = 'Active validated strategy conflicts with committee direction'
+            traced = self._stamp_futures_filter_trace(
+                levels,
+                stage='PRE_GATE',
+                reason_codes=['ACTIVE_STRATEGY_CONFLICT'],
+                reason=reason,
+                reached_publication_gate=False,
+                outcome='ANALYSIS_ONLY'
+            )
+            return self._mark_levels_non_executable(traced, reason)
 
         # Si la señal sigue rechazada después de Q2,
         # propagar el rechazo y conservar en qué etapa ocurrió.
@@ -5760,6 +6063,7 @@ class FuturesAnalysis(TradingExpertSystem):
             atr_pct=atr_pct,
             execution_safety=leverage_safety_score,
             timeframe=timeframe,
+            adaptive_profile=adaptive_profile,
         )
 
         optimal_leverage = int(

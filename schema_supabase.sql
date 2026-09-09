@@ -326,3 +326,55 @@ CREATE TABLE IF NOT EXISTS public.strategy_research_runs (
     result JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- ==========================================================================
+-- COMMIT 4 — REVIEWTRADER ADAPTIVE AUTOPILOT
+-- ==========================================================================
+ALTER TABLE IF EXISTS public.strategy_research_runs
+    ADD COLUMN IF NOT EXISTS data_fingerprint TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_research_fingerprint
+ON public.strategy_research_runs(data_fingerprint)
+WHERE data_fingerprint IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS public.adaptive_execution_profiles (
+    system_type TEXT NOT NULL DEFAULT 'futures',
+    symbol TEXT NOT NULL DEFAULT '*',
+    timeframe TEXT NOT NULL DEFAULT '*',
+    market_regime TEXT NOT NULL DEFAULT '*',
+    state TEXT NOT NULL DEFAULT 'OBSERVE'
+        CHECK (state IN ('OBSERVE','PROTECT','ACTIVE','DEGRADED')),
+    config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+    version TEXT NOT NULL DEFAULT 'C4_ADAPTIVE_EXECUTION_PROFILE_V1',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (system_type, symbol, timeframe, market_regime)
+);
+
+CREATE TABLE IF NOT EXISTS public.adaptive_execution_profile_history (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    system_type TEXT NOT NULL DEFAULT 'futures',
+    symbol TEXT NOT NULL DEFAULT '*',
+    timeframe TEXT NOT NULL DEFAULT '*',
+    market_regime TEXT NOT NULL DEFAULT '*',
+    state TEXT NOT NULL,
+    config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+    version TEXT NOT NULL,
+    archived_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_adaptive_profile_history_lookup
+ON public.adaptive_execution_profile_history(system_type, symbol, timeframe, archived_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.adaptive_autopilot_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    event_type TEXT NOT NULL,
+    component TEXT NOT NULL,
+    old_state TEXT,
+    new_state TEXT,
+    reason TEXT,
+    evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+    version TEXT NOT NULL DEFAULT 'C4_REVIEWTRADER_AUTOPILOT_V1',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

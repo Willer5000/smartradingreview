@@ -71,8 +71,19 @@ def _evaluate_forward(df, idx: int, direction: str, atr: float, horizon: int = 1
 
 def run_historical_strategy_research(df, symbol: str, timeframe: str, max_observations: int = 120) -> Dict[str, Any]:
     result = {"version": RESEARCH_VERSION, "cohort": "HISTORICAL_RESEARCH", "production_authority": False,
-              "symbol": symbol, "timeframe": timeframe, "observations": 0, "resolved": 0, "strategies": {}, "split": {}}
+              "symbol": symbol, "timeframe": timeframe, "observations": 0, "resolved": 0, "strategies": {}, "split": {},
+              "data_start": None, "data_end": None}
     if df is None or len(df) < 80: return result
+
+    # Commit 4: persist the exact research window so the same candles cannot be
+    # counted repeatedly as independent evidence by the Autopilot.
+    try:
+        idx = getattr(df, "index", None)
+        if idx is not None and len(idx):
+            result["data_start"] = str(idx[max(0, len(df) - max_observations - 12)])
+            result["data_end"] = str(idx[-1])
+    except Exception:
+        pass
     start = max(50, len(df) - max_observations - 12)
     rows: List[Dict[str, Any]] = []
     close_all = np.asarray(df["close"].values, dtype=float)

@@ -12761,6 +12761,43 @@ class ReviewTrader:
         return results
     
     # ========================================================================
+    # COMMIT 4 — REVIEWTRADER ADAPTIVE AUTOPILOT
+    # ========================================================================
+
+    def run_adaptive_autopilot(self, price_fetcher=None) -> Dict:
+        """
+        Convierte evidencia acumulada en perfiles versionados y reversibles.
+
+        Importante:
+        - con muestra insuficiente retorna OBSERVE y no cambia producción;
+        - evidencia negativa robusta sólo puede PROTEGER/reducir riesgo;
+        - crecimiento de leverage exige evidencia positiva mucho más fuerte;
+        - Gemini/Groq no tienen autoridad para promover configuraciones;
+        - toda transición queda auditada en Supabase.
+        """
+        try:
+            from adaptive_autopilot import run_autopilot_cycle
+            result = run_autopilot_cycle(
+                self.db,
+                price_fetcher=price_fetcher
+            )
+            if result.get('success'):
+                logger.info(
+                    'C4 Autopilot: %s profiles, %s transitions',
+                    result.get('profiles_updated', 0),
+                    len(result.get('strategy_transitions', []) or [])
+                )
+            return result
+        except Exception as exc:
+            logger.error('C4 Autopilot fallback: %s', exc)
+            return {
+                'version': 'C4_REVIEWTRADER_AUTOPILOT_V1',
+                'success': False,
+                'reason': f'FAIL_OPEN:{type(exc).__name__}',
+                'error': str(exc)[:180],
+            }
+
+    # ========================================================================
     # 7. MÉTODO PRINCIPAL (para ser llamado por el scheduler)
     # ========================================================================
     
@@ -12791,6 +12828,7 @@ class ReviewTrader:
             'evaluated': {},
             'missed': 0,
             'stats': {},
+            'adaptive_autopilot': {},
             'optimization': {}
         }
         errors = []
@@ -12820,7 +12858,17 @@ class ReviewTrader:
             logger.error(err_msg)
             errors.append(err_msg)
         
-        # 4. Optimizaciones de almacenamiento
+        # 4. Autopilot gobernado — fail-open, bounded, auditable
+        try:
+            results['adaptive_autopilot'] = self.run_adaptive_autopilot(
+                price_fetcher=price_fetcher
+            )
+        except Exception as e:
+            err_msg = f"run_adaptive_autopilot: {str(e)[:200]}"
+            logger.error(err_msg)
+            warnings.append(err_msg)
+
+        # 5. Optimizaciones de almacenamiento
         try:
             results['optimization'] = self.apply_optimization_cleanup()
         except Exception as e:
@@ -12831,7 +12879,7 @@ class ReviewTrader:
         run_finished = datetime.utcnow()
         duration = (run_finished - run_started).total_seconds()
         
-        # 5. Registrar log completo en Supabase
+        # 6. Registrar log completo en Supabase
         try:
             evaluated = results.get('evaluated', {})
             stats = results.get('stats', {})
