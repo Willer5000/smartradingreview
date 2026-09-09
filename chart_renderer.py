@@ -41,18 +41,21 @@ plt.style.use('dark_background')
 # CONFIGURACIÓN DE COLORES (consistente con el resto del sistema)
 # ============================================================================
 COLORS = {
-    # v22: alineados con el frontend (script.js paper_bgcolor='#0A0C10')
-    'bg': '#0A0C10',
-    'grid': 'rgba(255,255,255,0.1)',
-    'green': '#00C076',
-    'red': '#FF5B5B',
-    'yellow': '#FFD700',
-    'blue': '#3A8BFF',
-    'purple': '#8A63D2',
-    'orange': '#FF8C00',
-    'pink': '#FF69B4',
-    'white': '#FFFFFF',
-    'gray': '#666666',
+    # Commit 6: paleta alineada con el workspace oscuro del frontend.
+    'bg': '#050505',
+    'panel': '#0B0B0B',
+    'grid': '#242424',
+    'border': '#2A2A2A',
+    'green': '#089981',
+    'red': '#F23645',
+    'yellow': '#F2C94C',
+    'blue': '#2962FF',
+    'purple': '#A970FF',
+    'orange': '#FF9800',
+    'pink': '#D66EAF',
+    'white': '#E8E8E8',
+    'gray': '#8C8C8C',
+    'muted': '#A5A5A5',
 }
 
 
@@ -105,6 +108,96 @@ def _prepare_df(analysis: dict, min_candles: int = 30,
     return None
 
 
+def _apply_frontend_axis_style(ax, *, grid=True):
+    """Estilo común de los anexos PDF, visualmente cercano al frontend."""
+    ax.set_facecolor(COLORS['panel'])
+    ax.tick_params(colors=COLORS['muted'], labelsize=8)
+    for spine in ax.spines.values():
+        spine.set_color(COLORS['border'])
+        spine.set_linewidth(0.8)
+    if grid:
+        ax.grid(True, color=COLORS['grid'], alpha=0.75, linewidth=0.55, linestyle='-')
+    else:
+        ax.grid(False)
+
+
+def _apply_frontend_legend(ax, *, loc='upper left', ncol=1):
+    handles, labels = ax.get_legend_handles_labels()
+    if not handles:
+        return
+    legend = ax.legend(
+        handles, labels, loc=loc, ncol=max(1, int(ncol)), fontsize=7.5,
+        frameon=True, framealpha=0.92, borderpad=0.45, labelspacing=0.35,
+        handlelength=1.8
+    )
+    legend.get_frame().set_facecolor(COLORS['panel'])
+    legend.get_frame().set_edgecolor(COLORS['border'])
+    for text in legend.get_texts():
+        text.set_color(COLORS['white'])
+
+
+def _draw_frontend_zones_and_trendlines(ax, df: pd.DataFrame, analysis: dict, projection_bars: int = 10):
+    """Dibuja zonas y trendlines sólo como contexto visual del informe.
+
+    No recalcula ni altera ninguna decisión. Usa exactamente la geometría ya
+    producida por el Strategy Lab y la proyecta como hace el frontend.
+    """
+    n = len(df)
+    if n <= 0:
+        return 0
+
+    max_x = n - 1 + max(0, int(projection_bars))
+    zones = ((analysis or {}).get('zones') or {}).get('active_zones') or {}
+    zone_colors = {
+        'COMPRA': COLORS['green'], 'LONG': COLORS['green'],
+        'VENTA': COLORS['red'], 'SHORT': COLORS['red'],
+    }
+    for key in ('COMPRA', 'VENTA', 'LONG', 'SHORT'):
+        zone = zones.get(key) if isinstance(zones, dict) else None
+        if not isinstance(zone, dict):
+            continue
+        low = _safe_chart_number(zone.get('price_min'))
+        high = _safe_chart_number(zone.get('price_max'))
+        if low is None or high is None or low <= 0 or high <= 0:
+            continue
+        low, high = min(low, high), max(low, high)
+        ax.fill_between(
+            [-0.5, max_x + 0.5], [low, low], [high, high],
+            color=zone_colors[key], alpha=0.055, linewidth=0, zorder=0
+        )
+
+    geometry = (((analysis or {}).get('strategy_lab') or {}).get('trendlines') or {}).get('geometry') or {}
+    full_df = (analysis or {}).get('df') or {}
+    total_bars = len(full_df.get('time') or []) if isinstance(full_df, dict) else n
+    visible_offset = max(0, total_bars - n)
+    plotted = 0
+    for kind, label in (('support', 'Soporte dinámico'), ('resistance', 'Resistencia dinámica')):
+        line = geometry.get(kind) if isinstance(geometry, dict) else None
+        if not isinstance(line, dict):
+            continue
+        original_start = int(_safe_chart_number(line.get('start_index')) or 0)
+        original_price = _safe_chart_number(line.get('start_price'))
+        slope = _safe_chart_number(line.get('slope_per_candle'))
+        if original_price is None or slope is None or original_price <= 0:
+            continue
+        start_global = max(original_start, visible_offset)
+        start_local = max(0, start_global - visible_offset)
+        if start_local > n - 1:
+            continue
+        start_price = original_price + slope * (start_global - original_start)
+        projected_global = (total_bars - 1) + projection_bars
+        projected_price = original_price + slope * (projected_global - original_start)
+        if start_price <= 0 or projected_price <= 0:
+            continue
+        ax.plot(
+            [start_local, max_x], [start_price, projected_price],
+            color=COLORS['white'], linewidth=1.0, alpha=0.90,
+            solid_capstyle='round', label=label, zorder=5
+        )
+        plotted += 1
+    return projection_bars if plotted else 0
+
+
 def _fig_to_png_bytes(fig: Figure, dpi: int = 100) -> Optional[bytes]:
     """
     Convierte una figura matplotlib a bytes PNG.
@@ -131,103 +224,111 @@ def _fig_to_png_bytes(fig: Figure, dpi: int = 100) -> Optional[bytes]:
 def render_main_chart(symbol: str, timeframe: str, analysis: dict,
                       width: int = 12, height: int = 8) -> Optional[bytes]:
     """
-    Genera el gráfico principal del análisis:
-    - Panel superior (70%): velas + EMA9/21/50/200 + soportes/resistencias
-    - Panel inferior (30%): volumen
+    Gráfico principal del informe de análisis.
+
+    Commit 6 lo alinea visualmente con el frontend: fondo negro, velas,
+    niveles operativos, zonas dinámicas, trendlines proyectadas y volumen.
+    Todo es representación; no modifica cálculo ni decisión.
     """
     df = _prepare_df(analysis, min_candles=30, symbol=symbol, timeframe=timeframe)
     if df is None:
         logger.warning(f'render_main_chart: sin df para {symbol} {timeframe}')
         return None
-    
+
     try:
         fig, (ax1, ax2) = plt.subplots(
             2, 1,
             figsize=(width, height),
-            gridspec_kw={'height_ratios': [3, 1], 'hspace': 0.05},
+            gridspec_kw={'height_ratios': [3.2, 1], 'hspace': 0.06},
             facecolor=COLORS['bg']
         )
-        
-        # ============ PANEL SUPERIOR: VELAS ============
+        _apply_frontend_axis_style(ax1)
+        _apply_frontend_axis_style(ax2)
+
+        # Panel superior: velas + estructura visual.
         _draw_candles(ax1, df)
-        
-        # EMAs
+        projection_bars = _draw_frontend_zones_and_trendlines(ax1, df, analysis, projection_bars=10)
+
         closes = df['close'].values
         for period, color in [(9, COLORS['blue']), (21, COLORS['yellow']),
-                              (50, COLORS['orange']), (200, COLORS['pink'])]:
+                              (50, COLORS['orange']), (200, COLORS['purple'])]:
             if len(closes) >= period:
                 ema = _calc_ema(closes, period)
-                ax1.plot(df.index, ema, color=color, linewidth=1,
-                         label=f'EMA {period}', alpha=0.9)
-        
-        # Soportes y resistencias
+                ax1.plot(df.index, ema, color=color, linewidth=0.95,
+                         label=f'EMA {period}', alpha=0.92, zorder=4)
+
         structure = analysis.get('structure', {}) or {}
-        for s in (structure.get('supports') or [])[:3]:
-            if s and s > 0:
-                ax1.axhline(y=s, color=COLORS['green'], linestyle='--',
-                            linewidth=0.8, alpha=0.6)
-                ax1.text(len(df) - 1, s, f' S {s:.2f}',
-                         color=COLORS['green'], fontsize=8, va='center')
-        for r in (structure.get('resistances') or [])[:3]:
-            if r and r > 0:
-                ax1.axhline(y=r, color=COLORS['red'], linestyle='--',
-                            linewidth=0.8, alpha=0.6)
-                ax1.text(len(df) - 1, r, f' R {r:.2f}',
-                         color=COLORS['red'], fontsize=8, va='center')
-        
-        # Niveles de entry/SL/TP si están disponibles
+        for s_level in (structure.get('supports') or [])[:2]:
+            if s_level and s_level > 0:
+                ax1.axhline(y=s_level, color=COLORS['green'], linestyle=':',
+                            linewidth=0.75, alpha=0.55, zorder=1)
+        for r_level in (structure.get('resistances') or [])[:2]:
+            if r_level and r_level > 0:
+                ax1.axhline(y=r_level, color=COLORS['red'], linestyle=':',
+                            linewidth=0.75, alpha=0.55, zorder=1)
+
         levels = analysis.get('levels', {}) or {}
-        entry = levels.get('entry')
-        sl = levels.get('stop_loss')
-        tp = levels.get('take_profit')
-        if entry and entry > 0:
-            ax1.axhline(y=entry, color=COLORS['blue'], linestyle='-',
-                        linewidth=1.5, alpha=0.8, label=f'Entry ${entry:.2f}')
-        if sl and sl > 0:
-            ax1.axhline(y=sl, color=COLORS['red'], linestyle='-',
-                        linewidth=1.5, alpha=0.8, label=f'SL ${sl:.2f}')
-        if tp and tp > 0:
-            ax1.axhline(y=tp, color=COLORS['green'], linestyle='-',
-                        linewidth=1.5, alpha=0.8, label=f'TP ${tp:.2f}')
-        
-        # Título
+        level_specs = [
+            ('entry', 'Entrada', COLORS['blue']),
+            ('stop_loss', 'Stop', COLORS['red']),
+            ('take_profit', 'Objetivo', COLORS['green']),
+        ]
+        max_x = len(df) - 1 + projection_bars
+        for key, label, color in level_specs:
+            value = _safe_chart_number(levels.get(key))
+            if value is None or value <= 0:
+                continue
+            ax1.axhline(y=value, color=color, linestyle='-', linewidth=1.15, alpha=0.90, zorder=3)
+            ax1.text(
+                max_x + 0.15, value, f'{label}  {_format_chart_price(value)}',
+                color=color, fontsize=7.5, va='center', ha='left', clip_on=False,
+                bbox=dict(boxstyle='round,pad=0.18', facecolor=COLORS['panel'],
+                          edgecolor=color, alpha=0.92, linewidth=0.6)
+            )
+
         decision = analysis.get('decision', {}) or {}
-        action = decision.get('action', 'NO_OPERAR')
-        conf = decision.get('confidence', 0)
-        try:
-            conf = max(0, min(100, float(conf)))
-        except Exception:
-            conf = 0
-        
-        title_color = COLORS['green'] if action in ('LONG', 'COMPRA_SPOT') else \
-                      COLORS['red'] if action in ('SHORT', 'VENTA_SPOT') else \
-                      COLORS['yellow']
-        
-        ax1.set_title(f'{symbol} · {timeframe} · {action} ({conf:.0f}%)',
-                      color=title_color, fontsize=13, fontweight='bold', pad=10)
-        ax1.set_ylabel('Precio (USD)', color='white', fontsize=10)
-        ax1.legend(loc='upper left', fontsize=8, framealpha=0.7)
-        ax1.grid(True, alpha=0.2, linestyle=':')
-        ax1.tick_params(colors='white', labelsize=8)
-        ax1.set_facecolor(COLORS['bg'])
-        
-        # ============ PANEL INFERIOR: VOLUMEN ============
+        action = str(decision.get('action') or 'NO_OPERAR')
+        conf = _safe_chart_number(decision.get('confidence')) or 0.0
+        conf = max(0.0, min(100.0, conf))
+        action_label = {
+            'COMPRA_SPOT': 'COMPRA', 'VENTA_SPOT': 'VENTA',
+            'LONG': 'LONG', 'SHORT': 'SHORT', 'NO_OPERAR': 'NO OPERAR'
+        }.get(action, action.replace('_', ' '))
+        action_color = COLORS['green'] if action in ('LONG', 'COMPRA_SPOT') else (
+            COLORS['red'] if action in ('SHORT', 'VENTA_SPOT') else COLORS['yellow']
+        )
+
+        ax1.set_title(f'{symbol} · {timeframe}', loc='left', color=COLORS['white'],
+                      fontsize=12, fontweight='semibold', pad=10)
+        ax1.text(
+            1.0, 1.025, f'{action_label} · {conf:.0f}%', transform=ax1.transAxes,
+            color=action_color, fontsize=9, fontweight='bold', va='bottom', ha='right'
+        )
+        ax1.set_ylabel('Precio', color=COLORS['muted'], fontsize=9)
+        ax1.set_xlim(-1, max_x + 2.2)
+        _apply_frontend_legend(ax1, loc='upper left', ncol=3)
+
+        # Panel inferior: volumen.
         colors_vol = [COLORS['green'] if c >= o else COLORS['red']
                       for c, o in zip(df['close'], df['open'])]
-        ax2.bar(df.index, df['volume'], color=colors_vol, alpha=0.7, width=0.8)
-        ax2.set_ylabel('Volumen', color='white', fontsize=9)
-        ax2.tick_params(colors='white', labelsize=8)
-        ax2.grid(True, alpha=0.2, linestyle=':')
-        ax2.set_facecolor(COLORS['bg'])
-        # X-axis: mostrar solo cada N ticks
+        ax2.bar(df.index, df['volume'], color=colors_vol, alpha=0.62, width=0.72)
+        vol_mean = float(np.mean(df['volume'].values)) if len(df) else 0.0
+        if vol_mean > 0:
+            ax2.axhline(vol_mean, color=COLORS['muted'], linewidth=0.7, alpha=0.55, linestyle=':')
+        ax2.set_ylabel('Volumen', color=COLORS['muted'], fontsize=8)
+        ax2.set_xlim(-1, max_x + 2.2)
         n = len(df)
-        step = max(1, n // 8)
-        ax2.set_xticks(range(0, n, step))
-        ax2.set_xticklabels([df['time'].iloc[i].strftime('%m-%d %H:%M')
-                              for i in range(0, n, step)], rotation=30, ha='right')
-        
-        plt.tight_layout()
-        return _fig_to_png_bytes(fig, dpi=90)
+        step = max(1, n // 7)
+        ticks = list(range(0, n, step))
+        ax2.set_xticks(ticks)
+        ax2.set_xticklabels(
+            [df['time'].iloc[i].strftime('%m-%d %H:%M') for i in ticks],
+            rotation=25, ha='right', color=COLORS['muted'], fontsize=7
+        )
+
+        fig.patch.set_facecolor(COLORS['bg'])
+        fig.subplots_adjust(left=0.07, right=0.93, bottom=0.12, top=0.93, hspace=0.06)
+        return _fig_to_png_bytes(fig, dpi=105)
     except Exception as e:
         logger.error(f'render_main_chart error: {e}')
         try:
@@ -326,7 +427,7 @@ def render_indicator_chart(df: pd.DataFrame, indicator: str,
     
     try:
         fig, ax = plt.subplots(figsize=(width, height), facecolor=COLORS['bg'])
-        ax.set_facecolor(COLORS['bg'])
+        _apply_frontend_axis_style(ax)
         
         closes = df['close'].values
         highs = df['high'].values
@@ -346,6 +447,7 @@ def render_indicator_chart(df: pd.DataFrame, indicator: str,
             'psar': 'Parabolic SAR', 'squeeze': 'Squeeze Momentum',
             'ftm': 'Fuerza Tendencia (FTM)', 'whale': 'Detección Ballenas',
             'ichimoku': 'Ichimoku Cloud', 'fvg': 'Fair Value Gaps',
+            'vwap': 'Precio medio ponderado por volumen (VWAP)',
         }
         title = title_map.get(indicator, indicator.upper())
         
@@ -373,12 +475,37 @@ def render_indicator_chart(df: pd.DataFrame, indicator: str,
         
         elif indicator == 'bollinger':
             upper, sma, lower = _calc_bollinger(closes, 20, 2)
-            ax.plot(range(n), closes, color=COLORS['white'], linewidth=1.2, label='Precio')
-            ax.plot(range(n), upper, color=COLORS['red'], linewidth=0.8, linestyle='--', label='Upper')
-            ax.plot(range(n), sma, color=COLORS['yellow'], linewidth=0.8, label='SMA 20')
-            ax.plot(range(n), lower, color=COLORS['green'], linewidth=0.8, linestyle='--', label='Lower')
-            ax.fill_between(range(n), lower, upper, color=COLORS['blue'], alpha=0.1)
-            ax.legend(loc='upper left', fontsize=8)
+            _draw_candles(ax, df)
+            ax.plot(range(n), upper, color=COLORS['muted'], linewidth=0.85, label='Banda superior')
+            ax.plot(range(n), sma, color=COLORS['yellow'], linewidth=0.9, label='Media 20')
+            ax.plot(range(n), lower, color=COLORS['muted'], linewidth=0.85, label='Banda inferior')
+            ax.fill_between(range(n), lower, upper, color=COLORS['blue'], alpha=0.055)
+            _apply_frontend_legend(ax, loc='upper left', ncol=3)
+
+        elif indicator == 'ema':
+            _draw_candles(ax, df)
+            for period, color in ((9, COLORS['blue']), (21, COLORS['yellow']),
+                                  (50, COLORS['orange']), (200, COLORS['purple'])):
+                if n >= period:
+                    ax.plot(range(n), _calc_ema(closes, period), color=color,
+                            linewidth=0.95, label=f'EMA {period}')
+            _apply_frontend_legend(ax, loc='upper left', ncol=4)
+
+        elif indicator == 'vwap':
+            _draw_candles(ax, df)
+            volumes = np.asarray(df['volume'].values, dtype=float)
+            typical = (highs + lows + closes) / 3.0
+            cumulative_volume = np.cumsum(volumes)
+            vwap = np.divide(
+                np.cumsum(typical * volumes), cumulative_volume,
+                out=np.asarray(closes, dtype=float).copy(),
+                where=cumulative_volume > 0
+            )
+            deviation = pd.Series(typical - vwap).rolling(20, min_periods=5).std().fillna(0).to_numpy()
+            ax.plot(range(n), vwap, color=COLORS['blue'], linewidth=1.15, label='VWAP')
+            ax.plot(range(n), vwap + deviation, color=COLORS['muted'], linewidth=0.75, label='Banda superior')
+            ax.plot(range(n), vwap - deviation, color=COLORS['muted'], linewidth=0.75, label='Banda inferior')
+            _apply_frontend_legend(ax, loc='upper left', ncol=3)
         
         elif indicator == 'volume':
             volumes = df['volume'].values
@@ -478,18 +605,22 @@ def render_indicator_chart(df: pd.DataFrame, indicator: str,
                 ax.plot(range(n), ema21, color=COLORS['yellow'], linewidth=1, label='EMA 21')
             ax.legend(loc='upper left', fontsize=8)
         
-        # Formato común
-        ax.set_title(title, color='white', fontsize=11, fontweight='bold', pad=8)
-        ax.tick_params(colors='white', labelsize=8)
-        ax.grid(True, alpha=0.15, linestyle=':')
-        # X ticks: solo cada N para no saturar
+        # Formato común alineado al frontend.
+        ax.set_title(title, loc='left', color=COLORS['white'], fontsize=10.5, fontweight='semibold', pad=8)
+        _apply_frontend_axis_style(ax)
+        # Si una rama usó legend() nativo, normalizarla al final.
+        if ax.get_legend_handles_labels()[0]:
+            _apply_frontend_legend(ax, loc='upper left', ncol=min(4, len(ax.get_legend_handles_labels()[0])))
         step = max(1, n // 6)
-        ax.set_xticks(range(0, n, step))
-        ax.set_xticklabels([pd.Timestamp(times[i]).strftime('%m-%d %H:%M')
-                              for i in range(0, n, step)], rotation=25, ha='right', fontsize=7)
-        
-        plt.tight_layout()
-        return _fig_to_png_bytes(fig, dpi=90)
+        ticks = list(range(0, n, step))
+        ax.set_xticks(ticks)
+        ax.set_xticklabels(
+            [pd.Timestamp(times[i]).strftime('%m-%d %H:%M') for i in ticks],
+            rotation=25, ha='right', fontsize=7, color=COLORS['muted']
+        )
+        fig.patch.set_facecolor(COLORS['bg'])
+        plt.tight_layout(pad=0.7)
+        return _fig_to_png_bytes(fig, dpi=105)
     except Exception as e:
         logger.error(f'render_indicator_chart error ({indicator}): {e}')
         try:
@@ -1249,6 +1380,7 @@ def render_supporting_indicators_bundle(symbol: str, timeframe: str,
         'atr': 'ATR', 'obv': 'OBV', 'supertrend': 'SuperTrend',
         'squeeze': 'Squeeze', 'ftm': 'Fuerza Tendencia',
         'whale': 'Detección Ballenas', 'ichimoku': 'Ichimoku',
+        'vwap': 'Precio medio ponderado por volumen (VWAP)',
     }
     
     results = []

@@ -1711,7 +1711,13 @@ class AnalyticsService:
 
     @classmethod
     def _execution_forensics_summary(cls, rows):
-        """Agrega diagnósticos retrospectivos sin cambiar producción."""
+        """
+        Agrega diagnóstico de ejecución sin cambiar producción.
+
+        Commit 6 añade métricas orientadas a la pregunta que hoy importa:
+        no sólo si el Entry fue alcanzado, sino si fue defendible después de
+        ser tocado. Todo sigue siendo observacional.
+        """
         diagnoses = defaultdict(int)
         mfe_values = []
         mae_values = []
@@ -1720,6 +1726,7 @@ class AnalyticsService:
         post_stop_tp = 0
         post_stop_reclaims = 0
         resolved = 0
+        sl_resolved = 0
         with_forensics = 0
 
         for signal in rows or []:
@@ -1732,7 +1739,7 @@ class AnalyticsService:
                 continue
 
             with_forensics += 1
-            diagnosis = str(forensics.get('diagnosis') or 'UNKNOWN')
+            diagnosis = str(forensics.get('diagnosis') or 'UNKNOWN').upper()
             diagnoses[diagnosis] += 1
 
             if cls._q5_bool(forensics.get('entry_reached', False)):
@@ -1741,9 +1748,15 @@ class AnalyticsService:
             status = str(result.get('status') or signal.get('status') or '').lower()
             if status in ('tp_hit', 'sl_hit'):
                 resolved += 1
+            if status == 'sl_hit':
+                sl_resolved += 1
 
             mfe = cls._q5_float(forensics.get('mfe_r'), None)
             mae = cls._q5_float(forensics.get('mae_r'), None)
+            if mfe is None:
+                mfe = cls._q5_float(result.get('mfe_r'), None)
+            if mae is None:
+                mae = cls._q5_float(result.get('mae_r'), None)
             if mfe is not None:
                 mfe_values.append(mfe)
             if mae is not None:
@@ -1759,30 +1772,89 @@ class AnalyticsService:
                 if cls._q5_bool(recovery.get('reclaimed_entry', False)):
                     post_stop_reclaims += 1
 
+        def _median(values):
+            if not values:
+                return None
+            ordered = sorted(float(value) for value in values)
+            midpoint = len(ordered) // 2
+            if len(ordered) % 2:
+                return ordered[midpoint]
+            return (ordered[midpoint - 1] + ordered[midpoint]) / 2.0
+
+        direct_stops = int(diagnoses.get('STOPPED_WITHOUT_PROGRESS', 0))
+        weak_progress = int(diagnoses.get('STOPPED_AFTER_WEAK_PROGRESS', 0))
+        meaningful_progress = int(diagnoses.get('STOPPED_AFTER_MEANINGFUL_PROGRESS', 0))
+        avg_mfe = (sum(mfe_values) / len(mfe_values)) if mfe_values else None
+        avg_mae = (sum(mae_values) / len(mae_values)) if mae_values else None
+        efficiency = None
+        if avg_mfe is not None and avg_mae is not None and avg_mae > 0:
+            efficiency = avg_mfe / avg_mae
+
+        # Proxy descriptivo, NO probabilidad: entre Entries alcanzados, cuántos
+        # no terminaron clasificados como stop prácticamente inmediato.
+        defended_proxy = max(0, entry_reached - direct_stops)
+
         return {
-            'version': 'COMMIT2_EXECUTION_LEARNING_V2',
+            'version': 'COMMIT6_EXECUTION_OBSERVATORY_V1',
             'diagnostic_only': True,
             'n_with_forensics': with_forensics,
             'resolved': resolved,
+            'sl_resolved': sl_resolved,
             'entry_reached': entry_reached,
             'entry_reach_rate_pct': (
                 round(entry_reached / with_forensics * 100.0, 2)
                 if with_forensics
                 else None
             ),
-            'avg_mfe_r': (
-                round(sum(mfe_values) / len(mfe_values), 4)
-                if mfe_values
+            'entry_defensibility_proxy_pct': (
+                round(defended_proxy / entry_reached * 100.0, 2)
+                if entry_reached
                 else None
             ),
-            'avg_mae_r': (
-                round(sum(mae_values) / len(mae_values), 4)
-                if mae_values
+            'direct_stop_rate_pct': (
+                round(direct_stops / sl_resolved * 100.0, 2)
+                if sl_resolved
                 else None
+            ),
+            'weak_progress_stop_rate_pct': (
+                round(weak_progress / sl_resolved * 100.0, 2)
+                if sl_resolved
+                else None
+            ),
+            'meaningful_progress_stop_rate_pct': (
+                round(meaningful_progress / sl_resolved * 100.0, 2)
+                if sl_resolved
+                else None
+            ),
+            'avg_mfe_r': round(avg_mfe, 4) if avg_mfe is not None else None,
+            'avg_mae_r': round(avg_mae, 4) if avg_mae is not None else None,
+            'median_mfe_r': (
+                round(_median(mfe_values), 4) if mfe_values else None
+            ),
+            'median_mae_r': (
+                round(_median(mae_values), 4) if mae_values else None
+            ),
+            'mfe_mae_efficiency': (
+                round(efficiency, 4) if efficiency is not None else None
             ),
             'stop_tight_suspects': stop_tight_suspects,
+            'stop_tight_suspect_rate_pct': (
+                round(stop_tight_suspects / sl_resolved * 100.0, 2)
+                if sl_resolved
+                else None
+            ),
             'post_stop_tp_reached': post_stop_tp,
+            'post_stop_tp_rate_pct': (
+                round(post_stop_tp / sl_resolved * 100.0, 2)
+                if sl_resolved
+                else None
+            ),
             'post_stop_entry_reclaimed': post_stop_reclaims,
+            'post_stop_reclaim_rate_pct': (
+                round(post_stop_reclaims / sl_resolved * 100.0, 2)
+                if sl_resolved
+                else None
+            ),
             'diagnoses': dict(
                 sorted(
                     diagnoses.items(),
@@ -2030,6 +2102,34 @@ class AnalyticsService:
             + futures_official
         )
 
+        # Commit 6 — calcular una sola vez las capas de observabilidad.
+        forensics_spot = self._execution_forensics_summary(spot)
+        forensics_futures = self._execution_forensics_summary(futures_official)
+        forensics_shadow = self._execution_forensics_summary(futures_shadow)
+        attribution_spot = self._strategy_attribution_summary(spot)
+        attribution_futures = self._strategy_attribution_summary(futures_official)
+        attribution_shadow = self._strategy_attribution_summary(futures_shadow)
+        coverage = getattr(signals, 'coverage', {'complete': False}) or {'complete': False}
+
+        resolved_futures = sum(
+            1 for signal in futures_official
+            if str(signal.get('status') or '').lower() in ('tp_hit', 'sl_hit')
+        )
+        resolved_spot = sum(
+            1 for signal in spot
+            if str(signal.get('status') or '').lower() in ('tp_hit', 'sl_hit')
+        )
+        observatory_reasons = []
+        if not bool(coverage.get('complete', False)):
+            observatory_reasons.append('COHORTE_INCOMPLETA')
+        if resolved_futures < 25:
+            observatory_reasons.append(f'FUTURES_{resolved_futures}_DE_25_RESUELTAS')
+        if resolved_spot < 25:
+            observatory_reasons.append(f'SPOT_{resolved_spot}_DE_25_RESUELTAS')
+        # Costes realizados todavía no están disponibles de forma uniforme
+        # en signal_results; no inventamos comisión/slippage/funding.
+        observatory_reasons.append('PNL_NETO_REALIZADO_AUN_NO_VERIFICABLE')
+
         return {
             'version':
                 Q5_ANALYTICS_VERSION,
@@ -2071,21 +2171,46 @@ class AnalyticsService:
             # pueden utilizarlos como evidencia SHADOW/observacional.
             # ==========================================================
             'execution_forensics_v2': {
-                'spot':
-                    self._execution_forensics_summary(spot),
-                'futures_official':
-                    self._execution_forensics_summary(futures_official),
-                'futures_shadow':
-                    self._execution_forensics_summary(futures_shadow)
+                'spot': forensics_spot,
+                'futures_official': forensics_futures,
+                'futures_shadow': forensics_shadow
             },
 
             'strategy_attribution_v2': {
-                'spot':
-                    self._strategy_attribution_summary(spot),
-                'futures_official':
-                    self._strategy_attribution_summary(futures_official),
-                'futures_shadow':
-                    self._strategy_attribution_summary(futures_shadow)
+                'spot': attribution_spot,
+                'futures_official': attribution_futures,
+                'futures_shadow': attribution_shadow
+            },
+
+            # ==========================================================
+            # COMMIT 6 — LEARNING OBSERVATORY
+            # ==========================================================
+            # Sólo resume evidencia ya persistida. No recalibra ni modifica
+            # ninguna decisión. La promoción permanece bloqueada mientras
+            # la cohorte/costes no sean verificables.
+            'learning_observatory_v1': {
+                'version': 'COMMIT6_LEARNING_OBSERVATORY_V1',
+                'diagnostic_only': True,
+                'calibration_allowed': False,
+                'promotion_allowed': False,
+                'leverage_growth_allowed': False,
+                'block_reasons': observatory_reasons,
+                'coverage_complete': bool(coverage.get('complete', False)),
+                'coverage': dict(coverage),
+                'resolved': {
+                    'spot': resolved_spot,
+                    'futures_official': resolved_futures
+                },
+                'execution_forensics': {
+                    'spot': forensics_spot,
+                    'futures_official': forensics_futures,
+                    'futures_shadow': forensics_shadow
+                },
+                'strategy_attribution': {
+                    'spot': attribution_spot,
+                    'futures_official': attribution_futures,
+                    'futures_shadow': attribution_shadow
+                }
             },
 
             # ==========================================================

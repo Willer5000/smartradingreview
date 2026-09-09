@@ -8100,7 +8100,7 @@ function updateTradingZones(data) {
             type: 'scatter',
             mode: 'lines',
             name: sideText,
-            line: {color: '#f2f2f2', width: 2.2, dash: 'solid'},
+            line: {color: '#f2f2f2', width: 1.1, dash: 'solid'},
             opacity: 0.95,
             hovertemplate:
                 `${sideText}<br>` +
@@ -8240,7 +8240,8 @@ function updateZoneStatusCard(activeZones, priceStatus, currentPrice, decision, 
         else if (priceStatus.dentro_short) summary = 'En zona SHORT';
         else if (priceStatus.dentro_compra) summary = 'En zona de compra';
         else if (priceStatus.dentro_venta) summary = 'En zona de venta';
-        else if (priceStatus.estado) summary = String(priceStatus.estado).replace(/^Dentro de /i, 'En ').replace(/^En el medio/i, 'Entre zonas');
+        // El detalle largo (p.ej. "sin dirección definida") permanece en
+        // el cuerpo expandible. El encabezado usa sólo el estado compacto.
         zoneSummary.textContent = summary;
     }
     

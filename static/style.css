@@ -777,8 +777,13 @@ body.analytics-app .navbar .nav-link:hover {
     font-size: .70rem;
     font-weight: 650;
     white-space: nowrap;
+    max-width: min(52%, 13rem);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 0 1 auto;
 }
-#zone-status-card .card-header { min-height: 40px; }
+#zone-status-card .card-header { min-height: 40px; min-width: 0; }
+#zone-status-card .card-header > div { min-width: 0; }
 #zone-status-card .card-body { padding-top: .75rem; }
 
 /* Correlation: useful secondary context, not a dominant panel. */

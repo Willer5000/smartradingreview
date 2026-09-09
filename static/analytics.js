@@ -1031,6 +1031,145 @@ function q7RenderStrategyLab(q7) {
     );
 }
 
+
+// ============================================================================
+// COMMIT 6 — OBSERVATORIO DE APRENDIZAJE
+// ============================================================================
+
+function loPct(value, decimals = 1) {
+    const n = q5FiniteNumber(value);
+    return n === null ? '--' : `${n.toFixed(decimals)}%`;
+}
+
+function loR(value, decimals = 2) {
+    const n = q5FiniteNumber(value);
+    return n === null ? '--' : `${n.toFixed(decimals)}R`;
+}
+
+function loHumanReason(value) {
+    const raw = String(value || '');
+    if (!raw) return 'Sin detalle adicional.';
+    if (raw === 'COHORTE_INCOMPLETA') return 'La lectura completa de la cohorte todavía no está demostrada.';
+    if (raw === 'PNL_NETO_REALIZADO_AUN_NO_VERIFICABLE') return 'Comisión, slippage y funding realizados todavía no están atribuidos de forma uniforme.';
+    if (/^FUTURES_\d+_DE_25_RESUELTAS$/.test(raw)) {
+        const n = raw.match(/^FUTURES_(\d+)_/)[1];
+        return `Futures oficial: ${n}/25 resultados mínimos para calibración.`;
+    }
+    if (/^SPOT_\d+_DE_25_RESUELTAS$/.test(raw)) {
+        const n = raw.match(/^SPOT_(\d+)_/)[1];
+        return `Spot: ${n}/25 resultados mínimos para calibración.`;
+    }
+    if (/^INSUFFICIENT_EVIDENCE_/i.test(raw)) return 'Muestra insuficiente para cambiar producción.';
+    if (raw === 'ROBUST_NEGATIVE_EXECUTION_EVIDENCE') return 'La evidencia disponible sólo autoriza protección, no mayor riesgo.';
+    if (raw === 'ROBUST_POSITIVE_EXECUTION_EVIDENCE') return 'Existe evidencia positiva preliminar bajo guardrails.';
+    if (raw === 'BLOCKED_PENDING_COMPLETE_NET_EVIDENCE' || raw === 'POSITIVE_AUTHORITY_BLOCKED_PENDING_COMPLETE_NET_EVIDENCE') return 'La promoción positiva y el aumento de leverage siguen bloqueados hasta completar cohorte y costes netos.';
+    return uiHumanLabel(raw);
+}
+
+function renderLearningObservatory(data) {
+    const observatory = data?.learning_observatory_v1 || {};
+    const forensics = observatory?.execution_forensics?.futures_official
+        || data?.execution_forensics_v2?.futures_official
+        || {};
+    const attribution = observatory?.strategy_attribution?.futures_official
+        || data?.strategy_attribution_v2?.futures_official
+        || {};
+
+    q5SetText('lo-forensics-n', Number(forensics.n_with_forensics || 0).toLocaleString());
+    q5SetText('lo-entry-reach', loPct(forensics.entry_reach_rate_pct));
+    q5SetText('lo-defensibility', loPct(forensics.entry_defensibility_proxy_pct));
+    q5SetText('lo-direct-stop', loPct(forensics.direct_stop_rate_pct));
+    q5SetText('lo-mfe', loR(forensics.avg_mfe_r));
+    q5SetText('lo-mae', loR(forensics.avg_mae_r));
+    q5SetText('lo-tight-stop', loPct(forensics.stop_tight_suspect_rate_pct));
+    q5SetText('lo-post-stop-tp', loPct(forensics.post_stop_tp_rate_pct));
+
+    const gate = document.getElementById('learning-observatory-gate');
+    if (gate) {
+        const ready = Boolean(observatory.calibration_allowed);
+        gate.className = `badge ${ready ? 'bg-success' : 'bg-secondary'}`;
+        gate.textContent = ready ? 'Calibración habilitada' : 'Recopilando evidencia';
+    }
+
+    const reasons = Array.isArray(observatory.block_reasons) ? observatory.block_reasons : [];
+    q5SetText(
+        'lo-block-reasons',
+        reasons.length
+            ? reasons.map(loHumanReason).join(' · ')
+            : 'Sin bloqueos de observabilidad reportados.'
+    );
+
+    const body = document.getElementById('lo-attribution-body');
+    if (body) {
+        const rows = Array.isArray(attribution.rows) ? attribution.rows.slice(0, 8) : [];
+        if (!rows.length) {
+            body.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-2">Aún no hay suficiente atribución oficial.</td></tr>';
+        } else {
+            body.innerHTML = rows.map(row => {
+                const relation = String(row.relation_to_final || '').toUpperCase();
+                const relationText = relation === 'SUPPORT' ? 'Apoya' : relation === 'OPPOSE' ? 'Contradice' : 'Neutral';
+                const wr = row.win_rate_pct === null || row.win_rate_pct === undefined ? '--' : loPct(row.win_rate_pct);
+                const exp = row.expectancy_r === null || row.expectancy_r === undefined ? '--' : loR(row.expectancy_r, 3);
+                return `<tr>
+                    <td>${uiHumanLabel(row.trader || '--')}</td>
+                    <td>${uiHumanLabel(row.strategy || '--')}</td>
+                    <td>${relationText}</td>
+                    <td>${Number(row.n || 0).toLocaleString()}</td>
+                    <td>${Number(row.resolved || 0).toLocaleString()}</td>
+                    <td>${wr}</td>
+                    <td>${exp}</td>
+                </tr>`;
+            }).join('');
+        }
+    }
+}
+
+async function loadLearningGovernanceStatus() {
+    const requests = [
+        fetch('/api/review/autopilot/status').then(async response => ({ kind: 'autopilot', response, json: await response.json() })),
+        fetch('/api/ai/gemini-activity').then(async response => ({ kind: 'gemini', response, json: await response.json() }))
+    ];
+
+    const results = await Promise.allSettled(requests);
+    results.forEach(item => {
+        if (item.status !== 'fulfilled') return;
+        const { kind, response, json } = item.value;
+        if (!response.ok || !json) return;
+
+        if (kind === 'autopilot' && json.success) {
+            const status = json.autopilot || {};
+            const profiles = Array.isArray(status.profiles) ? status.profiles : [];
+            const profile = profiles.find(row => row.symbol === '*' && row.timeframe === '*') || profiles[0] || {};
+            const state = String(profile.state || 'OBSERVE').toUpperCase();
+            const config = profile.config || {};
+            const evidence = profile.evidence || {};
+            const positiveAuthority = Boolean(status.positive_authority_enabled);
+            const productionAuthority = state === 'PROTECT' || (state === 'ACTIVE' && positiveAuthority);
+            const growthAllowed = positiveAuthority && Boolean(config.allow_leverage_growth);
+            q5SetText('lo-autopilot-state', state === 'PROTECT' ? 'Protección' : state === 'ACTIVE' ? 'Activo en evaluación' : 'Observación');
+            q5SetText('lo-autopilot-authority', productionAuthority ? 'Limitada y gobernada' : 'No');
+            q5SetText('lo-leverage-growth', growthAllowed ? 'Permitido por evidencia' : 'Bloqueado');
+            const governanceReason = (!positiveAuthority && state === 'ACTIVE')
+                ? (status.positive_authority_reason || 'BLOCKED_PENDING_COMPLETE_NET_EVIDENCE')
+                : (evidence.reason || 'INSUFFICIENT_EVIDENCE');
+            q5SetText('lo-autopilot-reason', loHumanReason(governanceReason));
+        }
+
+        if (kind === 'gemini' && json.success) {
+            const data = json.data || {};
+            const state = String(data.state || 'WAITING_FIRST_RUN');
+            q5SetText('lo-gemini-state', state === 'SUCCESS' || state === 'READY' ? 'Activo' : uiHumanLabel(state));
+            const last = data.last_run;
+            const lastText = last && typeof last === 'object'
+                ? (last.created_at || last.timestamp || last.at || '--')
+                : (last || '--');
+            q5SetText('lo-gemini-last', lastText === '--' ? '--' : formatDate(lastText));
+            q5SetText('lo-gemini-fallback', data.fallback_active ? 'Sí' : 'No');
+            q5SetText('lo-gemini-reason', data.reason ? uiHumanLabel(data.reason) : 'Actividad leída sin realizar llamadas adicionales.');
+        }
+    });
+}
+
 async function loadQualityV2() {
 
     const statusEl = document.getElementById(
@@ -1222,6 +1361,9 @@ async function loadQualityV2() {
         q7RenderStrategyLab(
             q7
         );
+
+        // Commit 6 — exponer Forensics/Attribution que ya venían en el API.
+        renderLearningObservatory(data);
 
         
         // ============================================================
@@ -1996,7 +2138,8 @@ window.loadAllAnalytics = async function() {
         loadTimeline(),
         loadPnLDistribution(),
         loadTopOperations('best'),
-        loadTopOperations('worst')
+        loadTopOperations('worst'),
+        loadLearningGovernanceStatus()
     ]);
 
     showToast(

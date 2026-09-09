@@ -433,7 +433,7 @@ def generate_analysis_pdf(analysis: Dict,
         ))
         try:
             img_buf = io.BytesIO(chart_image_bytes)
-            img = Image(img_buf, width=17 * cm, height=18 * cm, kind='proportional')
+            img = Image(img_buf, width=17 * cm, height=11.8 * cm, kind='proportional')
             story.append(img)
         except Exception as e:
             logger.warning(f"No se pudo embeber gráfico principal: {e}")
@@ -460,7 +460,7 @@ def generate_analysis_pdf(analysis: Dict,
                     style_h2
                 ))
                 img_buf = io.BytesIO(chart['image'])
-                img = Image(img_buf, width=17 * cm, height=5.5 * cm, kind='proportional')
+                img = Image(img_buf, width=17 * cm, height=6.2 * cm, kind='proportional')
                 story.append(img)
                 story.append(Spacer(1, 0.2 * cm))
             except Exception as e:

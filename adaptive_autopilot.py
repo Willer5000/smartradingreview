@@ -20,6 +20,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import hashlib
 import json
 import math
+import os
 import threading
 import time
 
@@ -66,6 +67,20 @@ AUTO_RESEARCH_UNIVERSE = [
 _cache_lock = threading.Lock()
 _profile_cache: Dict[Tuple[str, str, str, str], Tuple[float, Dict[str, Any]]] = {}
 _profile_cache_ttl = 180.0
+
+
+def _positive_authority_enabled() -> bool:
+    """
+    Commit 6 fail-closed gate.
+
+    Mientras la cohorte y el PnL neto realizado no sean verificables,
+    ReviewTrader puede OBSERVAR/PROTEGER y mover estrategias hasta CANARY,
+    pero no aumentar riesgo ni conceder autoridad ACTIVE. Commit 8 reemplazará
+    este gate por evidencia automática completa.
+    """
+    return str(os.getenv('AUTOPILOT_POSITIVE_AUTHORITY_ENABLED', 'false')).strip().lower() in {
+        '1', 'true', 'yes', 'si', 'sí'
+    }
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -402,6 +417,18 @@ def get_execution_profile(
             profile = fallback
     except Exception:
         profile = fallback
+
+    # Commit 6: los perfiles positivos siguen visibles para investigación,
+    # pero no obtienen autoridad productiva hasta cerrar cobertura + costes.
+    if str(profile.get('state') or '').upper() == 'ACTIVE' and not _positive_authority_enabled():
+        profile['production_authority'] = False
+        config = dict(profile.get('config') or {})
+        config['allow_leverage_growth'] = False
+        config['leverage_target_factor'] = min(1.0, _safe_float(config.get('leverage_target_factor'), 1.0))
+        profile['config'] = config
+        evidence = dict(profile.get('evidence') or {})
+        evidence['positive_authority_gate'] = 'BLOCKED_PENDING_COMPLETE_NET_EVIDENCE'
+        profile['evidence'] = evidence
 
     with _cache_lock:
         _profile_cache[key] = (now, profile)
@@ -778,8 +805,12 @@ def _transition_strategy_registry(db, research: Dict[str, Dict[str, Any]], live:
             new_state = "CANARY"
             reason = "REPEATED_OUT_OF_TIME_RESEARCH_POSITIVE"
         elif current == "CANARY" and research_positive and live_positive:
-            new_state = "ACTIVE"
-            reason = "RESEARCH_AND_LIVE_SHADOW_EDGE_CONFIRMED"
+            if _positive_authority_enabled():
+                new_state = "ACTIVE"
+                reason = "RESEARCH_AND_LIVE_SHADOW_EDGE_CONFIRMED"
+            else:
+                new_state = "CANARY"
+                reason = "POSITIVE_AUTHORITY_BLOCKED_PENDING_COMPLETE_NET_EVIDENCE"
         elif current == "ACTIVE" and live_degraded:
             new_state = "DEGRADED"
             reason = "LIVE_EDGE_DEGRADED"
@@ -908,6 +939,12 @@ def get_autopilot_status(db=None) -> Dict[str, Any]:
     status = {
         "version": AUTOPILOT_VERSION,
         "enabled": bool(db is not None and getattr(db, "enabled", False)),
+        "positive_authority_enabled": _positive_authority_enabled(),
+        "positive_authority_reason": (
+            "ENABLED_BY_EXPLICIT_GATE"
+            if _positive_authority_enabled()
+            else "BLOCKED_PENDING_COMPLETE_NET_EVIDENCE"
+        ),
         "profiles": [],
         "strategies": [],
         "recent_events": [],

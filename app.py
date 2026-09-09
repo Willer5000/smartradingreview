@@ -22318,6 +22318,7 @@ class TradingExpertSystem:
                 'mfi': 'MFI',
                 'force': 'Force Index',
                 'fvg': 'Fair Value Gaps',
+                'vwap': 'Precio medio ponderado por volumen (VWAP)',
             }
             
             results = []
