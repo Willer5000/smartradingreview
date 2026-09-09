@@ -20,6 +20,10 @@ from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 
 from supabase_client import supabase_db
+from execution_learning import (
+    build_execution_forensics,
+    build_strategy_attribution_v2,
+)
 
 logger = logging.getLogger('REVIEW_TRADER')
 logger.setLevel(logging.INFO)
@@ -1671,6 +1675,27 @@ class ReviewTrader:
             context[
                 'learning'
             ] = learning
+
+            # ==========================================================
+            # COMMIT 2 — STRATEGY ATTRIBUTION V2
+            # ==========================================================
+            # Preserva qué trader emitió cada estrategia, en qué
+            # dirección votó y si apoyó o contradijo la decisión final.
+            # Es diagnóstico puro: no modifica votos ni confianza.
+            # ==========================================================
+            try:
+                strategy_attribution = build_strategy_attribution_v2(
+                    analysis_result,
+                    system_type
+                )
+                context['learning']['strategy_attribution_v2'] = (
+                    strategy_attribution
+                )
+            except Exception as attribution_error:
+                logger.warning(
+                    'Strategy Attribution V2 no disponible: %s',
+                    attribution_error
+                )
 
             if (
                 self._normalize_system_type(
@@ -3833,6 +3858,180 @@ class ReviewTrader:
             and first_timestamp <= evaluation_start
             and last_timestamp >= last_required_open
         )
+
+    # ====================================================================
+    # COMMIT 2 — EXECUTION FORENSICS V2
+    # ====================================================================
+
+    def _build_execution_forensics_payload(
+        self,
+        signal: Dict,
+        result: Dict,
+        df,
+        evaluation_start: Optional[datetime],
+        evaluation_end: Optional[datetime]
+    ) -> Dict:
+        """
+        Diagnóstico retrospectivo usando las MISMAS velas ya descargadas.
+
+        No realiza nuevas llamadas HTTP y no cambia el outcome.
+        Permite distinguir:
+        - Entry no alcanzado;
+        - SL casi inmediato;
+        - progreso favorable antes del SL;
+        - recuperación posterior al SL dentro de la vigencia original.
+        """
+        try:
+            import pandas as pd
+
+            action = str(
+                signal.get('action_normalized', '') or ''
+            ).upper()
+            if action in ('COMPRA_SPOT', 'BUY'):
+                action = 'LONG'
+            elif action in ('VENTA_SPOT', 'SELL'):
+                action = 'SHORT'
+
+            entry = float(signal.get('entry_price', 0) or 0)
+            sl = float(signal.get('stop_loss', 0) or 0)
+            tp = float(signal.get('take_profit', 0) or 0)
+            risk_abs = abs(entry - sl)
+
+            if (
+                action not in ('LONG', 'SHORT')
+                or entry <= 0
+                or sl <= 0
+                or tp <= 0
+                or risk_abs <= 0
+            ):
+                return build_execution_forensics(signal, result)
+
+            if 'time' in df.columns:
+                df_time = pd.to_datetime(df['time'], utc=True)
+
+                start_timestamp = pd.Timestamp(evaluation_start)
+                if start_timestamp.tzinfo is None:
+                    start_timestamp = start_timestamp.tz_localize('UTC')
+                else:
+                    start_timestamp = start_timestamp.tz_convert('UTC')
+
+                valid_mask = df_time >= start_timestamp
+
+                if evaluation_end is not None:
+                    end_timestamp = pd.Timestamp(evaluation_end)
+                    if end_timestamp.tzinfo is None:
+                        end_timestamp = end_timestamp.tz_localize('UTC')
+                    else:
+                        end_timestamp = end_timestamp.tz_convert('UTC')
+                    valid_mask = valid_mask & (df_time < end_timestamp)
+
+                df_after = df[valid_mask]
+            else:
+                df_after = df
+
+            entry_touched = False
+            entry_timestamp = None
+            candles_to_entry = 0
+
+            for candle_number, (_, row) in enumerate(
+                df_after.iterrows(), start=1
+            ):
+                high = float(row['high'])
+                low = float(row['low'])
+                touched_now = (
+                    low <= entry
+                    if action == 'LONG'
+                    else high >= entry
+                )
+                if touched_now:
+                    entry_touched = True
+                    candles_to_entry = candle_number
+                    entry_timestamp = str(
+                        row.get('time', '') or ''
+                    ) or None
+                    break
+
+            post_stop_recovery = {}
+            if str(result.get('status', '')).lower() == 'sl_hit':
+                sl_candle = int(
+                    result.get('candles_to_result', 0) or 0
+                )
+                remaining = (
+                    df_after.iloc[sl_candle:]
+                    if sl_candle >= 0
+                    else df_after.iloc[0:0]
+                )
+
+                reclaimed_entry = False
+                tp_reached_after_stop = False
+                candles_to_reclaim = 0
+                candles_to_tp = 0
+                best_favorable_r = 0.0
+                worst_adverse_r = 1.0
+
+                for offset, (_, row) in enumerate(
+                    remaining.iterrows(), start=1
+                ):
+                    high = float(row['high'])
+                    low = float(row['low'])
+
+                    if action == 'LONG':
+                        favorable_r = max(0.0, (high - entry) / risk_abs)
+                        adverse_r = max(0.0, (entry - low) / risk_abs)
+                        reclaimed_now = high >= entry
+                        target_now = high >= tp
+                    else:
+                        favorable_r = max(0.0, (entry - low) / risk_abs)
+                        adverse_r = max(0.0, (high - entry) / risk_abs)
+                        reclaimed_now = low <= entry
+                        target_now = low <= tp
+
+                    best_favorable_r = max(
+                        best_favorable_r, favorable_r
+                    )
+                    worst_adverse_r = max(
+                        worst_adverse_r, adverse_r
+                    )
+
+                    if reclaimed_now and not reclaimed_entry:
+                        reclaimed_entry = True
+                        candles_to_reclaim = offset
+
+                    if target_now:
+                        tp_reached_after_stop = True
+                        candles_to_tp = offset
+                        break
+
+                post_stop_recovery = {
+                    'observed': True,
+                    'reclaimed_entry': reclaimed_entry,
+                    'tp_reached_after_stop': tp_reached_after_stop,
+                    'candles_to_reclaim_entry': int(candles_to_reclaim),
+                    'candles_to_tp_after_stop': int(candles_to_tp),
+                    'best_favorable_r_after_stop': round(
+                        best_favorable_r, 4
+                    ),
+                    'worst_adverse_r_after_stop': round(
+                        worst_adverse_r, 4
+                    )
+                }
+
+            return build_execution_forensics(
+                signal,
+                result,
+                entry_touched=entry_touched,
+                entry_timestamp=entry_timestamp,
+                candles_to_entry=candles_to_entry,
+                post_stop_recovery=post_stop_recovery
+            )
+
+        except Exception as forensic_error:
+            logger.warning(
+                'Execution Forensics V2 no disponible para %s: %s',
+                signal.get('id'),
+                forensic_error
+            )
+            return build_execution_forensics(signal, result)
     
     def evaluate_pending_signals(self, price_fetcher) -> Dict:
         """
@@ -3959,6 +4158,15 @@ class ReviewTrader:
                     'ambiguous',
                     'invalid_setup'
                 ):
+                    result['execution_forensics'] = (
+                        self._build_execution_forensics_payload(
+                            signal,
+                            result,
+                            df,
+                            evaluation_start,
+                            evaluation_end
+                        )
+                    )
                     if not self.db.update_signal_result(signal['id'], result):
                         stats.setdefault('write_errors', 0)
                         stats['write_errors'] += 1
@@ -3982,6 +4190,15 @@ class ReviewTrader:
                           f"{symbol} {timeframe} {action_norm}: {result['status']} "
                           f"({result['pnl_pct']:+.2f}%)")
                 elif result and is_expired:
+                    result['execution_forensics'] = (
+                        self._build_execution_forensics_payload(
+                            signal,
+                            result,
+                            df,
+                            evaluation_start,
+                            evaluation_end
+                        )
+                    )
                     if not self._has_complete_expiration_coverage(
                         signal,
                         result,
@@ -4815,7 +5032,11 @@ class ReviewTrader:
             'mfe_r': observation.get('mfe_r', 0),
             'mae_r': observation.get('mae_r', 0),
             'candles_to_mfe': observation.get('candles_to_mfe', 0),
-            'candles_to_mae': observation.get('candles_to_mae', 0)
+            'candles_to_mae': observation.get('candles_to_mae', 0),
+            'execution_forensics': observation.get(
+                'execution_forensics',
+                {}
+            )
         }
         result['persisted'] = self.db.update_signal_result(signal['id'], result)
         return result

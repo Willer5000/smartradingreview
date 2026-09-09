@@ -37531,6 +37531,22 @@ def _build_ai_learning_context():
             or {}
         )
 
+        execution_forensics_learning = (
+            quality_v2.get(
+                'execution_forensics_v2',
+                {}
+            )
+            or {}
+        )
+
+        strategy_attribution_learning = (
+            quality_v2.get(
+                'strategy_attribution_v2',
+                {}
+            )
+            or {}
+        )
+
     except Exception as q7_learning_error:
 
         q7_strategy_lab_learning = {
@@ -37550,6 +37566,20 @@ def _build_ai_learning_context():
                 str(
                     q7_learning_error
                 )[:180]
+        }
+
+        execution_forensics_learning = {
+            'version': 'COMMIT2_EXECUTION_LEARNING_V2',
+            'status': 'UNAVAILABLE',
+            'diagnostic_only': True,
+            'reason': str(q7_learning_error)[:180]
+        }
+
+        strategy_attribution_learning = {
+            'version': 'COMMIT2_STRATEGY_ATTRIBUTION_V2',
+            'status': 'UNAVAILABLE',
+            'diagnostic_only': True,
+            'reason': str(q7_learning_error)[:180]
         }
 
     return {
@@ -37613,7 +37643,15 @@ def _build_ai_learning_context():
         # exclusivamente para Learning.
 
         'q7_strategy_lab':
-            q7_strategy_lab_learning
+            q7_strategy_lab_learning,
+
+        # COMMIT 2: Gemini recibe diagnóstico retrospectivo agregado.
+        # Sigue sin autoridad para modificar producción.
+        'execution_forensics_v2':
+            execution_forensics_learning,
+
+        'strategy_attribution_v2':
+            strategy_attribution_learning
     }
 
 # ============================================================================

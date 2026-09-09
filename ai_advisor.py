@@ -4076,6 +4076,21 @@ Analiza críticamente:
 
 No intentes aumentar operaciones simplemente bajando filtros.
 
+Si existe execution_forensics_v2 en el contexto:
+
+- estudia MFE y MAE como diagnóstico retrospectivo, no como certeza futura;
+- distingue Entry no alcanzado de Entry alcanzado pero no defendible;
+- identifica STOPPED_WITHOUT_PROGRESS frente a stops después de progreso;
+- presta atención a stop_was_possibly_tight y a TP alcanzado después del SL;
+- formula hipótesis para mejorar Entry/SL/TP sin mover niveles en producción.
+
+Si existe strategy_attribution_v2 en el contexto:
+
+- atribuye resultados al trader + estrategia + dirección que realmente votó;
+- separa SUPPORT, OPPOSE y NEUTRAL;
+- nunca acredites un TP LONG a una estrategia que votó SHORT;
+- usa expectancy R, muestra y Entry Activation; no uses WR aislado;
+- trata toda conclusión como evidencia diagnóstica hasta validación posterior.
 
 Si existe q7_strategy_lab en el contexto:
 

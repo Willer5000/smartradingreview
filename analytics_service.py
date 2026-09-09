@@ -1683,7 +1683,8 @@ class AnalyticsService:
                  .select('id,symbol,timeframe,system_type,action_normalized,status,created_at,'
                          'entry_price,stop_loss,take_profit,risk_reward,'
                          'q6_learning:context->learning,q6_execution:context->execution,'
-                         'signal_results(status,pnl_pct,exit_price,exit_timestamp,notes,created_at)')
+                         'signal_results(status,pnl_pct,exit_price,exit_timestamp,notes,created_at,'
+                         'mfe_r,mae_r,mfe_pct,mae_pct,candles_to_result,execution_forensics)')
                  .gte('created_at', cutoff).lt('created_at', end.isoformat())
                  .eq('context->execution->>quality_score_version', Q5_CURRENT_QUALITY_SCORE_VERSION)
                  .in_('action_normalized', ['LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT'])
@@ -1703,6 +1704,208 @@ class AnalyticsService:
                               'execution': row.pop('q6_execution', {}) or {}}
         return rows
 
+
+    # ========================================================================
+    # COMMIT 2 — EXECUTION LEARNING V2
+    # ========================================================================
+
+    @classmethod
+    def _execution_forensics_summary(cls, rows):
+        """Agrega diagnósticos retrospectivos sin cambiar producción."""
+        diagnoses = defaultdict(int)
+        mfe_values = []
+        mae_values = []
+        entry_reached = 0
+        stop_tight_suspects = 0
+        post_stop_tp = 0
+        post_stop_reclaims = 0
+        resolved = 0
+        with_forensics = 0
+
+        for signal in rows or []:
+            results = signal.get('signal_results') or []
+            if not isinstance(results, list) or not results:
+                continue
+            result = results[0] if isinstance(results[0], dict) else {}
+            forensics = result.get('execution_forensics') or {}
+            if not isinstance(forensics, dict) or not forensics:
+                continue
+
+            with_forensics += 1
+            diagnosis = str(forensics.get('diagnosis') or 'UNKNOWN')
+            diagnoses[diagnosis] += 1
+
+            if cls._q5_bool(forensics.get('entry_reached', False)):
+                entry_reached += 1
+
+            status = str(result.get('status') or signal.get('status') or '').lower()
+            if status in ('tp_hit', 'sl_hit'):
+                resolved += 1
+
+            mfe = cls._q5_float(forensics.get('mfe_r'), None)
+            mae = cls._q5_float(forensics.get('mae_r'), None)
+            if mfe is not None:
+                mfe_values.append(mfe)
+            if mae is not None:
+                mae_values.append(mae)
+
+            if cls._q5_bool(forensics.get('stop_was_possibly_tight', False)):
+                stop_tight_suspects += 1
+
+            recovery = forensics.get('post_stop_recovery') or {}
+            if isinstance(recovery, dict):
+                if cls._q5_bool(recovery.get('tp_reached_after_stop', False)):
+                    post_stop_tp += 1
+                if cls._q5_bool(recovery.get('reclaimed_entry', False)):
+                    post_stop_reclaims += 1
+
+        return {
+            'version': 'COMMIT2_EXECUTION_LEARNING_V2',
+            'diagnostic_only': True,
+            'n_with_forensics': with_forensics,
+            'resolved': resolved,
+            'entry_reached': entry_reached,
+            'entry_reach_rate_pct': (
+                round(entry_reached / with_forensics * 100.0, 2)
+                if with_forensics
+                else None
+            ),
+            'avg_mfe_r': (
+                round(sum(mfe_values) / len(mfe_values), 4)
+                if mfe_values
+                else None
+            ),
+            'avg_mae_r': (
+                round(sum(mae_values) / len(mae_values), 4)
+                if mae_values
+                else None
+            ),
+            'stop_tight_suspects': stop_tight_suspects,
+            'post_stop_tp_reached': post_stop_tp,
+            'post_stop_entry_reclaimed': post_stop_reclaims,
+            'diagnoses': dict(
+                sorted(
+                    diagnoses.items(),
+                    key=lambda item: (-item[1], item[0])
+                )
+            )
+        }
+
+    @classmethod
+    def _strategy_attribution_summary(cls, rows, top_n=20):
+        """
+        Atribuye outcomes sólo a la dirección que cada trader realmente votó.
+        Evita acreditar un TP LONG a una estrategia que había votado SHORT.
+        """
+        groups = defaultdict(lambda: {
+            'n': 0,
+            'tp': 0,
+            'sl': 0,
+            'expired': 0,
+            'entry_reached': 0,
+            'r_sum': 0.0,
+            'r_n': 0
+        })
+        signals_with_snapshot = 0
+
+        for signal in rows or []:
+            learning = cls._q5_learning(signal)
+            attribution = learning.get('strategy_attribution_v2') or {}
+            if not isinstance(attribution, dict):
+                continue
+            items = attribution.get('items') or []
+            if not isinstance(items, list) or not items:
+                continue
+            signals_with_snapshot += 1
+
+            status = str(signal.get('status') or '').lower()
+            entry = cls._q5_float(signal.get('entry_price'), 0.0) or 0.0
+            sl = cls._q5_float(signal.get('stop_loss'), 0.0) or 0.0
+            tp = cls._q5_float(signal.get('take_profit'), 0.0) or 0.0
+            risk = abs(entry - sl)
+            reward = abs(tp - entry)
+            realized_r = None
+            if risk > 0 and status == 'tp_hit':
+                realized_r = reward / risk
+            elif status == 'sl_hit':
+                realized_r = -1.0
+
+            results = signal.get('signal_results') or []
+            forensics = {}
+            if isinstance(results, list) and results and isinstance(results[0], dict):
+                forensics = results[0].get('execution_forensics') or {}
+            entry_was_reached = bool(
+                isinstance(forensics, dict)
+                and cls._q5_bool(forensics.get('entry_reached', False))
+            ) or status in ('tp_hit', 'sl_hit')
+
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                trader = str(item.get('trader') or 'UNKNOWN')
+                strategy = str(item.get('strategy') or '').upper().strip()
+                relation = str(item.get('relation_to_final') or 'UNKNOWN').upper()
+                if not strategy:
+                    continue
+                key = (trader, strategy, relation)
+                data = groups[key]
+                data['n'] += 1
+                if status == 'tp_hit':
+                    data['tp'] += 1
+                elif status == 'sl_hit':
+                    data['sl'] += 1
+                elif status == 'expired':
+                    data['expired'] += 1
+                if entry_was_reached:
+                    data['entry_reached'] += 1
+                if realized_r is not None:
+                    data['r_sum'] += realized_r
+                    data['r_n'] += 1
+
+        result = []
+        for (trader, strategy, relation), data in groups.items():
+            resolved = data['tp'] + data['sl']
+            result.append({
+                'trader': trader,
+                'strategy': strategy,
+                'relation_to_final': relation,
+                'n': data['n'],
+                'resolved': resolved,
+                'tp': data['tp'],
+                'sl': data['sl'],
+                'expired': data['expired'],
+                'entry_reached': data['entry_reached'],
+                'entry_activation_pct': (
+                    round(data['entry_reached'] / data['n'] * 100.0, 2)
+                    if data['n']
+                    else None
+                ),
+                'win_rate_pct': (
+                    round(data['tp'] / resolved * 100.0, 2)
+                    if resolved
+                    else None
+                ),
+                'expectancy_r': (
+                    round(data['r_sum'] / data['r_n'], 4)
+                    if data['r_n']
+                    else None
+                )
+            })
+
+        result.sort(
+            key=lambda row: (
+                -(row['resolved'] or 0),
+                -(row['n'] or 0),
+                row['trader'],
+                row['strategy']
+            )
+        )
+        return {
+            'version': 'COMMIT2_STRATEGY_ATTRIBUTION_V2',
+            'diagnostic_only': True,
+            'signals_with_snapshot': signals_with_snapshot,
+            'rows': result[:max(1, int(top_n))]
+        }
 
     # ========================================================================
     # Q5 — RESUMEN V2 POR MERCADO
@@ -1859,6 +2062,32 @@ class AnalyticsService:
                 self._q5_aggregate(
                     futures_shadow
                 ),
+
+            # ==========================================================
+            # COMMIT 2 — EXECUTION LEARNING / ATTRIBUTION
+            # ==========================================================
+            # Datos diagnósticos adicionales. El frontend actual puede
+            # ignorarlos sin romper compatibilidad. Gemini/ReviewTrader
+            # pueden utilizarlos como evidencia SHADOW/observacional.
+            # ==========================================================
+            'execution_forensics_v2': {
+                'spot':
+                    self._execution_forensics_summary(spot),
+                'futures_official':
+                    self._execution_forensics_summary(futures_official),
+                'futures_shadow':
+                    self._execution_forensics_summary(futures_shadow)
+            },
+
+            'strategy_attribution_v2': {
+                'spot':
+                    self._strategy_attribution_summary(spot),
+                'futures_official':
+                    self._strategy_attribution_summary(futures_official),
+                'futures_shadow':
+                    self._strategy_attribution_summary(futures_shadow)
+            },
+
             # ==========================================================
             # Q7C — ADAPTIVE INTRADAY STRATEGY LAB
             # ==========================================================

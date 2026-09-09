@@ -96,6 +96,9 @@ CREATE TABLE IF NOT EXISTS signal_results (
     candles_to_mfe INTEGER DEFAULT 0,
     candles_to_mae INTEGER DEFAULT 0,
 
+    -- COMMIT 2 — diagnóstico retrospectivo extensible
+    execution_forensics JSONB DEFAULT '{}'::jsonb,
+
     notes TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -118,7 +121,14 @@ ALTER TABLE IF EXISTS public.signal_results
     ADD COLUMN IF NOT EXISTS mfe_r NUMERIC(10, 4) DEFAULT 0,
     ADD COLUMN IF NOT EXISTS mae_r NUMERIC(10, 4) DEFAULT 0,
     ADD COLUMN IF NOT EXISTS candles_to_mfe INTEGER DEFAULT 0,
-    ADD COLUMN IF NOT EXISTS candles_to_mae INTEGER DEFAULT 0;
+    ADD COLUMN IF NOT EXISTS candles_to_mae INTEGER DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS execution_forensics JSONB DEFAULT '{}'::jsonb;
+
+CREATE INDEX IF NOT EXISTS idx_signal_results_forensics_diagnosis
+ON public.signal_results ((execution_forensics->>'diagnosis'));
+
+CREATE INDEX IF NOT EXISTS idx_signal_results_forensics_version
+ON public.signal_results ((execution_forensics->>'version'));
 
 -- ============================================================================
 -- TABLA 4: strategy_stats_specific (estadísticas por par + TF + acción + estrategia)

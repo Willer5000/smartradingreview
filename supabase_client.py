@@ -504,6 +504,25 @@ class SupabaseClient:
                         or 0
                     ),
 
+                # ======================================================
+                # COMMIT 2 — EXECUTION FORENSICS V2
+                # ======================================================
+                'execution_forensics':
+                    (
+                        result.get(
+                            'execution_forensics',
+                            {}
+                        )
+                        if isinstance(
+                            result.get(
+                                'execution_forensics',
+                                {}
+                            ),
+                            dict
+                        )
+                        else {}
+                    ),
+
                 'notes':
                     result.get(
                         'notes',
