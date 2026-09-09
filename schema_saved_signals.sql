@@ -177,6 +177,7 @@ ALTER TABLE public.saved_signals
     ADD COLUMN IF NOT EXISTS telegram_entry_notified_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS telegram_tp_notified_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS telegram_sl_notified_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS telegram_expired_notified_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS telegram_guardian_last_notified_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS telegram_guardian_last_action TEXT,
     ADD COLUMN IF NOT EXISTS telegram_guardian_last_bucket TEXT;

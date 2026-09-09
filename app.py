@@ -25714,12 +25714,13 @@ def analytics_page():
 
 @app.route('/health')
 def health():
-    """Health check para Render"""
+    """Health check para Render + telemetría de memoria no sensible."""
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now(bolivia_tz).isoformat(),
         'system': 'Crypto Trader Analyst Pro',
-        'version': '2.0'
+        'version': '2.0',
+        'memory': _memory_runtime_state()
     })
 
 # === CORRECCIÓN: app.py - Manejo de errores en rutas API ===
@@ -26332,6 +26333,140 @@ _HEAVY_ANALYSIS_LOCK = threading.Lock()
 # 20 minutos, abandonamos este ciclo en vez de esperar eternamente.
 _HEAVY_ANALYSIS_WAIT_SECONDS = 20 * 60
 
+# ============================================================================
+# COMMIT 1 — MEMORY GUARD
+# ============================================================================
+#
+# Render Free dispone de memoria muy limitada. El objetivo de este guard no es
+# cambiar ningún análisis, sino impedir que dos trabajos pesados mantengan
+# simultáneamente DataFrames/indicadores grandes en RAM.
+#
+# Todos los trabajos pesados de background deben pedir este mismo turno.
+# Los endpoints livianos, lecturas de caché y lifecycle operacional siguen
+# funcionando sin bloquearse.
+# ============================================================================
+
+_HEAVY_ANALYSIS_STATE_LOCK = threading.Lock()
+_HEAVY_ANALYSIS_OWNER = None
+
+
+def _process_rss_mb():
+    """RSS actual del proceso en Linux/Render; None si no está disponible."""
+    try:
+        with open('/proc/self/status', 'r', encoding='utf-8') as status_file:
+            for line in status_file:
+                if line.startswith('VmRSS:'):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return round(float(parts[1]) / 1024.0, 1)
+    except Exception:
+        pass
+
+    return None
+
+
+def _memory_runtime_state():
+    """Snapshot liviano para logs y /health; nunca expone secretos."""
+    with _HEAVY_ANALYSIS_STATE_LOCK:
+        heavy_owner = _HEAVY_ANALYSIS_OWNER
+
+    try:
+        with _ANALYSIS_CACHE_LOCK:
+            analysis_cache_entries = len(_ANALYSIS_CACHE)
+    except Exception:
+        analysis_cache_entries = None
+
+    endpoint_cache_entries = 0
+
+    try:
+        endpoint_fn = globals().get('api_analyze_with_portfolio')
+        endpoint_cache = getattr(endpoint_fn, '_cache_data', {}) if endpoint_fn else {}
+        endpoint_cache_entries = len(endpoint_cache or {})
+    except Exception:
+        endpoint_cache_entries = None
+
+    return {
+        'rss_mb': _process_rss_mb(),
+        'threads': threading.active_count(),
+        'analysis_cache_entries': analysis_cache_entries,
+        'portfolio_cache_entries': endpoint_cache_entries,
+        'heavy_job': heavy_owner
+    }
+
+
+def _log_memory_runtime(label):
+    state = _memory_runtime_state()
+    print(
+        "🧠 [MEM] "
+        f"{label} | rss={state.get('rss_mb')}MB "
+        f"threads={state.get('threads')} "
+        f"analysis_cache={state.get('analysis_cache_entries')} "
+        f"portfolio_cache={state.get('portfolio_cache_entries')} "
+        f"heavy={state.get('heavy_job') or '-'}"
+    )
+
+
+def _acquire_heavy_analysis(owner, timeout=None):
+    """Reserva el único slot pesado sin cambiar la lógica del trabajo."""
+    global _HEAVY_ANALYSIS_OWNER
+
+    owner = str(owner or 'heavy-analysis')
+    timeout = (
+        _HEAVY_ANALYSIS_WAIT_SECONDS
+        if timeout is None
+        else max(0, float(timeout))
+    )
+
+    _log_memory_runtime(f'{owner}: esperando turno')
+
+    acquired = _HEAVY_ANALYSIS_LOCK.acquire(timeout=timeout)
+
+    if not acquired:
+        print(
+            f"⚠️ [MEM] {owner}: no obtuvo turno pesado dentro del límite; "
+            "se conserva el estado/caché anterior."
+        )
+        return False
+
+    with _HEAVY_ANALYSIS_STATE_LOCK:
+        _HEAVY_ANALYSIS_OWNER = owner
+
+    _log_memory_runtime(f'{owner}: inicio')
+    return True
+
+
+def _release_heavy_analysis(owner):
+    """Libera el slot pesado después de forzar liberación de basura cíclica."""
+    global _HEAVY_ANALYSIS_OWNER
+
+    try:
+        import gc
+        gc.collect()
+    except Exception:
+        pass
+
+    with _HEAVY_ANALYSIS_STATE_LOCK:
+        _HEAVY_ANALYSIS_OWNER = None
+
+    _HEAVY_ANALYSIS_LOCK.release()
+    _log_memory_runtime(f'{owner}: fin')
+
+
+def _run_scheduled_spot_analysis(timeframe):
+    """Scheduler Spot protegido por el mismo slot de memoria que Futures."""
+    owner = f'spot-scheduled-{timeframe}'
+
+    acquired = _acquire_heavy_analysis(owner)
+
+    if not acquired:
+        return
+
+    try:
+        ejecutar_analisis_completo(timeframe)
+    finally:
+        _release_heavy_analysis(owner)
+
+
 def _compute_previous_signals():
     """
     v22: EXTRAÍDO del endpoint web para poder ejecutar en background.
@@ -26488,6 +26623,18 @@ def _compute_previous_signals():
         "📦 [SPOT CACHE] Señales activas publicadas "
         f"({len(active_results)})."
     )
+
+    # ================================================================
+    # COMMIT 1 — MEMORY GUARD
+    # ================================================================
+    # Los 12 análisis completos de la mitad ACTIVE ya no son necesarios.
+    # El replay histórico crea deliberadamente su propio contexto Q6-A.
+    # Liberarlos aquí evita mantener ambas mitades pesadas en RAM a la vez.
+    # ================================================================
+    analisis_correlacion.clear()
+    del analisis_correlacion
+    gc.collect()
+    _log_memory_runtime('spot-previous: active liberado')
 
     # Q6-A: historical context must not reuse ACTIVE correlation analyses.
     previous_correlations = {}
@@ -26761,27 +26908,13 @@ def _run_previous_signals_background():
             )
 
             heavy_acquired = (
-                _HEAVY_ANALYSIS_LOCK.acquire(
-                    timeout=(
-                        _HEAVY_ANALYSIS_WAIT_SECONDS
-                    )
+                _acquire_heavy_analysis(
+                    'spot-previous-signals'
                 )
             )
 
             if not heavy_acquired:
-
-                print(
-                    "⚠️ [7G.3] SPOT previous_signals "
-                    "no obtuvo turno pesado dentro del límite. "
-                    "Se conserva el caché anterior."
-                )
-
                 return
-
-            print(
-                "▶️ [7G.3] SPOT previous_signals "
-                "obtuvo turno pesado."
-            )
 
             _compute_previous_signals()
 
@@ -26799,12 +26932,8 @@ def _run_previous_signals_background():
         finally:
 
             if heavy_acquired:
-
-                _HEAVY_ANALYSIS_LOCK.release()
-
-                print(
-                    "✅ [7G.3] SPOT previous_signals "
-                    "liberó turno pesado."
+                _release_heavy_analysis(
+                    'spot-previous-signals'
                 )
 
             _PREV_SIGNALS_COMPUTING[
@@ -29932,26 +30061,13 @@ def _trigger_futures_refresh_async():
             )
 
             heavy_acquired = (
-                _HEAVY_ANALYSIS_LOCK.acquire(
-                    timeout=(
-                        _HEAVY_ANALYSIS_WAIT_SECONDS
-                    )
+                _acquire_heavy_analysis(
+                    'futures-refresh'
                 )
             )
 
             if not heavy_acquired:
-
-                print(
-                    "⚠️ [7G.3] FUTURES no obtuvo "
-                    "turno pesado dentro del límite. "
-                    "Se conserva el caché anterior."
-                )
-
                 return
-
-            print(
-                "▶️ [7G.3] FUTURES obtuvo turno pesado."
-            )
 
             print(
                 "\n🔄 [BG] Refrescando análisis futuros..."
@@ -30007,12 +30123,8 @@ def _trigger_futures_refresh_async():
         finally:
 
             if heavy_acquired:
-
-                _HEAVY_ANALYSIS_LOCK.release()
-
-                print(
-                    "✅ [7G.3] FUTURES liberó "
-                    "turno pesado."
+                _release_heavy_analysis(
+                    'futures-refresh'
                 )
 
             with cache[
@@ -32842,7 +32954,7 @@ def _build_saved_futures_lifecycle_message(
 ):
     """
     Construye mensajes personales para:
-    ENTRY / TP / SL.
+    ENTRY / TP / SL / EXPIRED.
     """
 
     event = str(
@@ -32862,6 +32974,10 @@ def _build_saved_futures_lifecycle_message(
         'SL': (
             '🛑',
             'STOP LOSS ALCANZADO'
+        ),
+        'EXPIRED': (
+            '⌛',
+            'SEÑAL EXPIRADA SIN ENTRY'
         ),
     }
 
@@ -32958,6 +33074,19 @@ def _build_saved_futures_lifecycle_message(
         ),
     ]
 
+    if event == 'EXPIRED':
+        lines.extend([
+            '',
+            (
+                '🚫 <b>ACCIÓN REQUERIDA: cancela/retira la orden '
+                'pendiente del exchange.</b>'
+            ),
+            (
+                'El Entry no fue activado dentro de su vigencia; '
+                'no se abrió la operación.'
+            )
+        ])
+
     if event in (
         'TP',
         'SL'
@@ -33025,7 +33154,8 @@ def _send_saved_futures_lifecycle_notifications():
                 status_filter=[
                     'entry_touched',
                     'tp_hit',
-                    'sl_hit'
+                    'sl_hit',
+                    'expired'
                 ],
                 limit=200,
                 user_name=user
@@ -33215,6 +33345,66 @@ def _send_saved_futures_lifecycle_notifications():
                         f"{sig.get('timeframe')}"
                     )
 
+            # --------------------------------------------------------
+            # EXPIRED SIN ENTRY
+            # --------------------------------------------------------
+            # Una señal que vence sin Entry requiere una acción operativa:
+            # retirar la orden pendiente del exchange. Se notifica una sola
+            # vez mediante estado persistente en Supabase.
+            # --------------------------------------------------------
+
+            if (
+                status == 'expired'
+                and str(sig.get('close_reason', '') or '').lower()
+                == 'expired_no_entry'
+                and not sig.get(
+                    'telegram_expired_notified_at'
+                )
+            ):
+
+                message = (
+                    _build_saved_futures_lifecycle_message(
+                        user=user,
+                        signal=sig,
+                        event='EXPIRED'
+                    )
+                )
+
+                sent = (
+                    expert_system
+                    .send_telegram_alert(
+                        message,
+                        None
+                    )
+                )
+
+                if sent:
+
+                    now_iso = (
+                        datetime.utcnow()
+                        .isoformat()
+                    )
+
+                    update_saved_signal_telegram_state(
+                        signal_id,
+                        {
+                            'telegram_expired_notified_at':
+                                now_iso
+                        }
+                    )
+
+                    sig[
+                        'telegram_expired_notified_at'
+                    ] = now_iso
+
+                    print(
+                        "⌛📱 Saved Futures EXPIRED: "
+                        f"{user} "
+                        f"{sig.get('symbol')} "
+                        f"{sig.get('timeframe')} "
+                        "— retirar orden pendiente"
+                    )
+
 
 def saved_futures_lifecycle_loop():
     """
@@ -33245,6 +33435,10 @@ def saved_futures_lifecycle_loop():
 
     while True:
 
+        # Cache de velas exclusivo del ciclo actual. Debe liberarse antes
+        # de dormir para no retener DataFrames durante el siguiente minuto.
+        price_cache = {}
+
         try:
 
             from saved_signals import (
@@ -33268,8 +33462,6 @@ def saved_futures_lifecycle_loop():
             # ========================================================
             # Una sola consulta de mercado por symbol/timeframe/ciclo.
             # ========================================================
-
-            price_cache = {}
 
             def _saved_futures_price_fetcher(
                 symbol,
@@ -33555,6 +33747,18 @@ def saved_futures_lifecycle_loop():
 
             traceback.print_exc()
 
+        finally:
+            try:
+                price_cache.clear()
+            except Exception:
+                pass
+
+            try:
+                import gc
+                gc.collect()
+            except Exception:
+                pass
+
         time.sleep(
             _SAVED_FUTURES_LIFECYCLE_INTERVAL
         )
@@ -33565,7 +33769,17 @@ _Q6_DAILY_LOCK = threading.Lock()
 def _q6_run_daily_review():
     if not _Q6_DAILY_LOCK.acquire(blocking=False):
         return
+
+    heavy_acquired = False
+
     try:
+        heavy_acquired = _acquire_heavy_analysis(
+            'reviewtrader-daily'
+        )
+
+        if not heavy_acquired:
+            return
+
         from review_trader import review_trader
         from q6_integrity import daily_slot, claim_daily_job, finish_daily_job
         slot = daily_slot(datetime.now(bolivia_tz))
@@ -33575,6 +33789,11 @@ def _q6_run_daily_review():
     except Exception as exc:
         print(f"Q6 ciclo diario pendiente: {type(exc).__name__}")
     finally:
+        if heavy_acquired:
+            _release_heavy_analysis(
+                'reviewtrader-daily'
+            )
+
         _Q6_DAILY_LOCK.release()
 
 
@@ -33621,8 +33840,12 @@ def verificar_y_ejecutar():
                     velas_disparadas.clear()
                     velas_disparadas.add(key)
                 print(f"\n🚀 DISPARANDO ANÁLISIS {tf} (cierre {hora_cierre_int:02d}:00) - {hora:02d}:{minuto:02d}")
-                threading.Thread(target=ejecutar_analisis_completo,
-                                  args=(tf,), daemon=True).start()
+                threading.Thread(
+                    target=_run_scheduled_spot_analysis,
+                    args=(tf,),
+                    daemon=True,
+                    name=f'spot-scheduled-{tf}'
+                ).start()
                 return True
             
             # ============ 4H: cierres 03, 07, 11, 15, 19, 23 ============
@@ -33960,6 +34183,57 @@ def _telegram_price(value):
 
     except Exception:
         return '—'
+
+
+def _tgp_telegram_operation_lines(tgp_result):
+    """
+    Formatea la operación TGP sin mezclar amount_crypto con la unidad fuente.
+    En BUY con USDT, amount_crypto representa el activo que se recibirá.
+    """
+
+    tgp_result = tgp_result or {}
+
+    action = str(tgp_result.get('action', '') or '').upper()
+    source = str(tgp_result.get('source_asset', '') or '')
+    target = str(tgp_result.get('target_asset', '') or '')
+
+    try:
+        amount_crypto = float(tgp_result.get('amount_crypto', 0) or 0)
+    except Exception:
+        amount_crypto = 0.0
+
+    try:
+        amount_usd = float(tgp_result.get('amount_usd', 0) or 0)
+    except Exception:
+        amount_usd = 0.0
+
+    if (
+        action in ('BUY_BTC', 'BUY_PAXG')
+        and source == 'USDT'
+        and target
+    ):
+        return [
+            f"Usar: <b>{amount_usd:,.2f} USDT</b>",
+            (
+                "Recibir aprox.: "
+                f"<b>{amount_crypto:.8f} {_telegram_escape(target)}</b>"
+            )
+        ]
+
+    lines = []
+
+    if amount_crypto > 0 and source:
+        lines.append(
+            "Usar: "
+            f"<b>{amount_crypto:.8f} {_telegram_escape(source)}</b>"
+        )
+
+    if amount_usd > 0:
+        lines.append(
+            f"Valor aprox.: <b>${amount_usd:,.2f}</b>"
+        )
+
+    return lines
 
 
 # ============================================================================
@@ -38361,20 +38635,14 @@ def _build_proactive_spot_guardian_message(
                 f"{_telegram_escape(source)}"
                 " → "
                 f"{_telegram_escape(target)}"
-            ),
-            (
-                "Valor aproximado: "
-                f"<b>${amount_usd:,.2f}</b>"
             )
         ])
 
-        if amount_crypto > 0:
-
-            lines.append(
-                "Cantidad del activo fuente: "
-                f"{amount_crypto:.8f} "
-                f"{_telegram_escape(source)}"
+        lines.extend(
+            _tgp_telegram_operation_lines(
+                tgp_result
             )
+        )
 
     if after:
 
@@ -39260,11 +39528,21 @@ def learning_worker_loop():
     stats_counter = 0
     
     while True:
+        heavy_acquired = False
+
         try:
             from review_trader import review_trader
             
             if not review_trader.db.enabled:
                 # Supabase no configurado — dormir y reintentar
+                time.sleep(LEARNING_WORKER_INTERVAL)
+                continue
+
+            heavy_acquired = _acquire_heavy_analysis(
+                'reviewtrader-learning'
+            )
+
+            if not heavy_acquired:
                 time.sleep(LEARNING_WORKER_INTERVAL)
                 continue
             
@@ -39327,6 +39605,12 @@ def learning_worker_loop():
         except Exception as loop_err:
             print(f"❌ learning_worker: excepción en loop: {loop_err}")
             import traceback; traceback.print_exc()
+
+        finally:
+            if heavy_acquired:
+                _release_heavy_analysis(
+                    'reviewtrader-learning'
+                )
         
         # Liberar memoria acumulada tras procesar señales
         try:
@@ -43298,6 +43582,24 @@ def api_analyze_with_portfolio():
 
         now = time.time()
 
+        # =============================================================
+        # COMMIT 1 — MEMORY GUARD DEL CACHE DE ESTE ENDPOINT
+        # =============================================================
+        # Antes este caché no eliminaba claves antiguas y podía retener
+        # resultados completos (incluido df) de cada symbol/timeframe.
+        # Se mantiene el TTL funcional de 300s, pero ahora se purga y se
+        # limita el número de objetos pesados retenidos.
+        # =============================================================
+        for stale_key, stale_ts in list(cache_ts.items()):
+            try:
+                is_stale = (now - float(stale_ts or 0)) >= 300
+            except Exception:
+                is_stale = True
+
+            if is_stale:
+                cache_ts.pop(stale_key, None)
+                cache_data.pop(stale_key, None)
+
         # ==============================================================
         # ==============================================================
         # FUNCIÓN LOCAL: SNAPSHOT COMPACTO
@@ -43995,6 +44297,19 @@ def api_analyze_with_portfolio():
         ] = dict(
             result
         )
+
+        # Mantener como máximo cuatro análisis completos recientes.
+        # El caché global de analyze_full_market sigue siendo la capa
+        # principal; éste sólo evita repetir la respuesta pesada del endpoint.
+        if len(cache_ts) > 4:
+            oldest_keys = sorted(
+                cache_ts,
+                key=lambda item: cache_ts.get(item, 0)
+            )[:len(cache_ts) - 4]
+
+            for oldest_key in oldest_keys:
+                cache_ts.pop(oldest_key, None)
+                cache_data.pop(oldest_key, None)
 
         api_analyze_with_portfolio._cache_ts = (
             cache_ts
@@ -44765,11 +45080,20 @@ def send_tgp_telegram_alert(tgp_result, user, symbol, timeframe, prices):
             or []
         )
 
-        if timeframe not in allowed_timeframes:
+        alert_timeframe = str(
+            tgp_result.get(
+                'best_timeframe',
+                ''
+            )
+            or timeframe
+            or ''
+        ).strip()
+
+        if alert_timeframe not in allowed_timeframes:
 
             print(
                 "   🔕 TGP Telegram "
-                f"{user}: {timeframe} "
+                f"{user}: {alert_timeframe} "
                 "no seleccionado."
             )
 
@@ -44888,15 +45212,14 @@ def send_tgp_telegram_alert(tgp_result, user, symbol, timeframe, prices):
    • USDT: {pct_usdt:.1f}%
 
 💰 Operación sugerida:
-   • Usar: {amount_crypto:.6f} {source}
-   • Valor: ${amount_usd:.2f} USD
+{chr(10).join('   • ' + line for line in _tgp_telegram_operation_lines(tgp_result))}
 
 📈 Después de la operación:
    • BTC:  {tgp_result.get('portfolio_after', {}).get('pct_btc', 0)*100:.1f}%
    • PAXG: {tgp_result.get('portfolio_after', {}).get('pct_paxg', 0)*100:.1f}%
    • USDT: {tgp_result.get('portfolio_after', {}).get('pct_usdt', 0)*100:.1f}%
 
-⏰ {symbol} {timeframe} | {datetime.now().strftime('%H:%M')}
+⏰ {symbol} {alert_timeframe} | {datetime.now().strftime('%H:%M')}
 """
         
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"

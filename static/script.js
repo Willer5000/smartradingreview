@@ -1949,7 +1949,7 @@ function displayTGPResult(tgp) {
         
         if (actionEl) actionEl.textContent = formatAction(tgp.action);
         if (confEl) confEl.textContent = tgp.confidence + '%';
-        if (amountEl) amountEl.textContent = tgp.amount_crypto.toFixed(8) + ' ' + tgp.source_asset;
+        if (amountEl) amountEl.textContent = formatTGPAmount(tgp);
         if (valueEl) valueEl.textContent = '$' + tgp.amount_usd.toFixed(2);
         
         const before = tgp.portfolio_before || {};
@@ -1969,6 +1969,21 @@ function displayTGPResult(tgp) {
         if (afterPaxg) afterPaxg.textContent = ((after.pct_paxg || 0) * 100).toFixed(1) + '%';
         if (afterUsdt) afterUsdt.textContent = ((after.pct_usdt || 0) * 100).toFixed(1) + '%';
     }
+}
+
+function formatTGPAmount(tgp) {
+    const amountCrypto = Number(tgp?.amount_crypto || 0);
+    const sourceAsset = String(tgp?.source_asset || '');
+    const targetAsset = String(tgp?.target_asset || '');
+    const action = String(tgp?.action || '');
+
+    // BUY_BTC / BUY_PAXG usan USDT como fuente, pero amount_crypto es la
+    // cantidad aproximada que se recibe del activo destino.
+    if ((action === 'BUY_BTC' || action === 'BUY_PAXG') && targetAsset) {
+        return amountCrypto.toFixed(8) + ' ' + targetAsset;
+    }
+
+    return amountCrypto.toFixed(8) + ' ' + sourceAsset;
 }
 
 function formatAction(action) {
@@ -1997,7 +2012,7 @@ function openSaveTradeModal() {
     
     if (userEl) userEl.value = currentUser;
     if (actionEl) actionEl.value = formatAction(tgp.action);
-    if (amountEl) amountEl.value = tgp.amount_crypto.toFixed(8) + ' ' + tgp.source_asset;
+    if (amountEl) amountEl.value = formatTGPAmount(tgp);
     if (valueEl) valueEl.value = '$' + tgp.amount_usd.toFixed(2);
     if (entryEl) entryEl.value = lastPrices['BTC-USDT'] || 0;
     

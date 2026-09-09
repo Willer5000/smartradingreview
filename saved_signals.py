@@ -4490,6 +4490,9 @@ def create_saved_signal(data: Dict) -> Optional[Dict]:
             'telegram_sl_notified_at':
                 None,
 
+            'telegram_expired_notified_at':
+                None,
+
             'telegram_guardian_last_notified_at':
                 None,
 
@@ -4708,6 +4711,7 @@ _TELEGRAM_STATE_FIELDS = {
     'telegram_entry_notified_at',
     'telegram_tp_notified_at',
     'telegram_sl_notified_at',
+    'telegram_expired_notified_at',
     'telegram_guardian_last_notified_at',
     'telegram_guardian_last_action',
     'telegram_guardian_last_bucket',

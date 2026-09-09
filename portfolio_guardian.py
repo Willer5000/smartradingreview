@@ -65,6 +65,24 @@ class PortfolioGuardian:
     # Número mínimo de temporalidades que deben favorecer
     # una rotación antes de ejecutarla.
     MIN_ROTATION_TIMEFRAMES = 2
+
+    # ========================================================================
+    # COMMIT 1 — OBJETIVO TÁCTICO DE ASIGNACIÓN
+    # ========================================================================
+    #
+    # BUY_BTC / BUY_PAXG ya no compra un porcentaje del USDT restante en
+    # cada refresh. El TGP calcula una asignación táctica objetivo y recomienda
+    # solamente la brecha necesaria para alcanzarla. Al llegar al objetivo,
+    # una nueva evaluación con la misma evidencia devuelve HOLD.
+    #
+    # Esto NO modifica los pisos estratégicos ni el techo de concentración.
+    # ========================================================================
+
+    TACTICAL_ALLOCATION_STEP_PER_TF = 0.045
+    TACTICAL_ALLOCATION_EDGE_BONUS_MAX = 0.03
+    TACTICAL_ALLOCATION_DEADBAND = 0.01
+    TACTICAL_ALLOCATION_MIN_TRADE_USD = 10.0
+
     # ========================================================================
     # FASE 7F.1 — COOLDOWN + ANTI-WHIPSAW
     # ========================================================================
@@ -4318,6 +4336,104 @@ class PortfolioGuardian:
             )
     
         return 0.0
+
+    def _tactical_target_allocation_pct(
+        self,
+        asset,
+        support_count,
+        best_tf_data=None
+    ):
+        """
+        Calcula la asignación táctica deseada para BUY con USDT.
+
+        La dirección ya fue decidida por el TGP multi-timeframe. Este helper
+        sólo traduce la fuerza de esa evidencia a un objetivo de portfolio.
+        Nunca supera MAX_CONCENTRATION_PCT ni consume las reservas mínimas de
+        los otros activos.
+        """
+
+        asset = str(asset or '').upper()
+
+        if asset not in ('BTC', 'PAXG'):
+            return 0.0
+
+        base_target = float(
+            self.TARGET_PCTS.get(
+                asset,
+                0
+            )
+            or 0
+        )
+
+        try:
+            support_count = max(
+                0,
+                min(
+                    4,
+                    int(support_count or 0)
+                )
+            )
+        except Exception:
+            support_count = 0
+
+        try:
+            raw_edge = float(
+                (best_tf_data or {}).get(
+                    'relative_edge',
+                    0
+                )
+                or 0
+            )
+        except Exception:
+            raw_edge = 0.0
+
+        directional_edge = (
+            max(0.0, raw_edge)
+            if asset == 'BTC'
+            else max(0.0, -raw_edge)
+        )
+
+        edge_bonus = min(
+            self.TACTICAL_ALLOCATION_EDGE_BONUS_MAX,
+            max(
+                0.0,
+                (
+                    directional_edge
+                    - self.ROTATION_EDGE_THRESHOLD
+                ) / 1000.0
+            )
+        )
+
+        target_pct = (
+            base_target
+            + (
+                support_count
+                * self.TACTICAL_ALLOCATION_STEP_PER_TF
+            )
+            + edge_bonus
+        )
+
+        reserve_cap = (
+            1.0
+            - sum(
+                float(value or 0)
+                for other_asset, value
+                in self.MIN_RESERVE_PCTS.items()
+                if other_asset != asset
+            )
+        )
+
+        target_pct = min(
+            target_pct,
+            self.MAX_CONCENTRATION_PCT,
+            reserve_cap
+        )
+
+        return max(
+            0.0,
+            round(target_pct, 4)
+        )
+
     def analyze_multi_timeframe(
         self,
         user,
@@ -4736,6 +4852,7 @@ class PortfolioGuardian:
             amount_usd = 0
             source_asset = None
             target_asset = None
+            tactical_hold_reason = ''
     
             # ==============================================================
             # BTC
@@ -4924,20 +5041,35 @@ class PortfolioGuardian:
                         ]
                     )
                 )
-    
-                if usable_usdt > 0:
-    
-                    size = min(
-                        0.35,
-                        max(
-                            0.08,
-                            btc_count / 10
-                        )
+
+                tactical_target_pct = (
+                    self._tactical_target_allocation_pct(
+                        'BTC',
+                        btc_count,
+                        best_tf_data
                     )
+                )
+
+                allocation_gap_pct = max(
+                    0.0,
+                    tactical_target_pct
+                    - pct_btc
+                )
     
-                    amount_usd = (
-                        usable_usdt
-                        * size
+                if (
+                    usable_usdt > 0
+                    and allocation_gap_pct
+                    > self.TACTICAL_ALLOCATION_DEADBAND
+                ):
+
+                    desired_usd = (
+                        total
+                        * allocation_gap_pct
+                    )
+
+                    amount_usd = min(
+                        usable_usdt,
+                        desired_usd
                     )
     
                     btc_price = (
@@ -4946,10 +5078,19 @@ class PortfolioGuardian:
                         ]
                     )
     
-                    if btc_price > 0:
+                    if (
+                        btc_price > 0
+                        and amount_usd
+                        >= self.TACTICAL_ALLOCATION_MIN_TRADE_USD
+                    ):
     
                         action = 'BUY_BTC'
-                        trade_size = size
+                        trade_size = (
+                            amount_usd
+                            / usable_usdt
+                            if usable_usdt > 0
+                            else 0
+                        )
     
                         amount_crypto = (
                             amount_usd
@@ -4965,11 +5106,27 @@ class PortfolioGuardian:
                         )
     
                         reason = (
-                            f'El TGP detecta ventaja '
-                            f'multitemporal de BTC y utiliza '
-                            f'USDT disponible sin consumir '
-                            f'la reserva mínima de liquidez.'
+                            f'El TGP detecta ventaja multitemporal '
+                            f'de BTC. La asignación actual es '
+                            f'{pct_btc * 100:.1f}% y el objetivo '
+                            f'táctico para esta evidencia es '
+                            f'{tactical_target_pct * 100:.1f}%. '
+                            f'Recomienda cubrir la brecha en una sola '
+                            f'operación usando únicamente USDT por encima '
+                            f'de la reserva mínima de liquidez.'
                         )
+
+                elif (
+                    usable_usdt > 0
+                    and allocation_gap_pct
+                    <= self.TACTICAL_ALLOCATION_DEADBAND
+                ):
+                    tactical_hold_reason = (
+                        f'BTC ya se encuentra dentro del objetivo táctico '
+                        f'de {tactical_target_pct * 100:.1f}% para la '
+                        f'evidencia multitemporal actual. No hace falta '
+                        f'comprar más mientras esa evidencia no cambie.'
+                    )
     
             # ==============================================================
             # COMPRAR PAXG CON USDT
@@ -4991,20 +5148,35 @@ class PortfolioGuardian:
                         ]
                     )
                 )
-    
-                if usable_usdt > 0:
-    
-                    size = min(
-                        0.35,
-                        max(
-                            0.08,
-                            paxg_count / 10
-                        )
+
+                tactical_target_pct = (
+                    self._tactical_target_allocation_pct(
+                        'PAXG',
+                        paxg_count,
+                        best_tf_data
                     )
+                )
+
+                allocation_gap_pct = max(
+                    0.0,
+                    tactical_target_pct
+                    - pct_paxg
+                )
     
-                    amount_usd = (
-                        usable_usdt
-                        * size
+                if (
+                    usable_usdt > 0
+                    and allocation_gap_pct
+                    > self.TACTICAL_ALLOCATION_DEADBAND
+                ):
+
+                    desired_usd = (
+                        total
+                        * allocation_gap_pct
+                    )
+
+                    amount_usd = min(
+                        usable_usdt,
+                        desired_usd
                     )
     
                     paxg_price = (
@@ -5013,10 +5185,19 @@ class PortfolioGuardian:
                         ]
                     )
     
-                    if paxg_price > 0:
+                    if (
+                        paxg_price > 0
+                        and amount_usd
+                        >= self.TACTICAL_ALLOCATION_MIN_TRADE_USD
+                    ):
     
                         action = 'BUY_PAXG'
-                        trade_size = size
+                        trade_size = (
+                            amount_usd
+                            / usable_usdt
+                            if usable_usdt > 0
+                            else 0
+                        )
     
                         amount_crypto = (
                             amount_usd
@@ -5032,19 +5213,40 @@ class PortfolioGuardian:
                         )
     
                         reason = (
-                            f'El TGP detecta ventaja '
-                            f'multitemporal de PAXG y utiliza '
-                            f'USDT disponible sin eliminar '
-                            f'la reserva de liquidez.'
+                            f'El TGP detecta ventaja multitemporal '
+                            f'de PAXG. La asignación actual es '
+                            f'{pct_paxg * 100:.1f}% y el objetivo '
+                            f'táctico para esta evidencia es '
+                            f'{tactical_target_pct * 100:.1f}%. '
+                            f'Recomienda cubrir la brecha en una sola '
+                            f'operación usando únicamente USDT por encima '
+                            f'de la reserva mínima de liquidez.'
                         )
+
+                elif (
+                    usable_usdt > 0
+                    and allocation_gap_pct
+                    <= self.TACTICAL_ALLOCATION_DEADBAND
+                    and not tactical_hold_reason
+                ):
+                    tactical_hold_reason = (
+                        f'PAXG ya se encuentra dentro del objetivo táctico '
+                        f'de {tactical_target_pct * 100:.1f}% para la '
+                        f'evidencia multitemporal actual. No hace falta '
+                        f'comprar más mientras esa evidencia no cambie.'
+                    )
     
             # ==============================================================
             # NO HAY ROTACIÓN
             # ==============================================================
     
             if action == 'HOLD':
+
+                if tactical_hold_reason:
+
+                    reason = tactical_hold_reason
     
-                if best_tf:
+                elif best_tf:
     
                     reason = (
                         f'No existe consenso suficiente '
