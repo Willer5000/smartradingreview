@@ -3,7 +3,7 @@
 
     const STORAGE_KEY = 'smartrading.chartWorkspace.v1';
     const MAX_AUTO = 4;
-    const ALWAYS = new Set(['trading-zones']);
+    const ALWAYS = new Set(['trading-zones', 'pattern4']);
 
     const META = {
         'trading-zones': { label: 'Zonas dinámicas de trading', category: 'Estructura', permanent: true },
@@ -29,7 +29,7 @@
         'mfi-force': { label: 'Flujo monetario y fuerza', category: 'Volumen' },
         'fear-greed': { label: 'Sentimiento de mercado', category: 'Sentimiento' },
         'formation': { label: 'Formación chartista', category: 'Estructura' },
-        'pattern4': { label: 'Patrón reciente de velas', category: 'Estructura' }
+        'pattern4': { label: 'Patrón reciente de velas', category: 'Estructura', permanent: true }
     };
 
     let state = loadState();

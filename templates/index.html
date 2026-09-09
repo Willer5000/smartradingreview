@@ -8,7 +8,7 @@
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <link
         rel="stylesheet"
-        href="{{ url_for('static', filename='style.css') }}?v=20260909-PRO-UI"
+        href="{{ url_for('static', filename='style.css') }}?v=20260909-PRO-UI-2"
     >
     <style>
         /* ============ ESTILOS DE PATRONES ============ */
@@ -247,9 +247,9 @@
 
     <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
         <div class="container">
-            <a class="navbar-brand" href="#">
-                <i class="fas fa-robot me-2 text-primary"></i>
-                CRYPTO TRADER ANALYST PRO
+            <a class="navbar-brand" href="#" aria-label="Crypto Trader Analyst Pro">
+                <span class="brand-desktop">CRYPTO TRADER ANALYST PRO</span>
+                <span class="brand-mobile">TRADER ANALYST PRO</span>
             </a>
             <div class="navbar-nav ms-auto">
                 {% if is_futures %}
@@ -257,16 +257,15 @@
                     <i class="fas fa-chart-line me-1"></i>📊 Volver a Spot
                 </a>
                 {% else %}
-                <a class="nav-link text-warning fw-bold" href="/futures" id="btn-open-futures">
-                    <i class="fas fa-rocket me-1"></i>🚀 FUTUROS
+                <a class="nav-link fw-semibold" href="/futures" id="btn-open-futures">
+                    <i class="fas fa-chart-line me-1" aria-hidden="true"></i>FUTUROS
                 </a>
                 {% endif %}
-                <a class="nav-link text-info fw-bold" href="/analytics">
-                    <i class="fas fa-chart-bar me-1"></i>📈 ANÁLISIS
+                <a class="nav-link fw-semibold" href="/analytics">
+                    <i class="fas fa-chart-column me-1" aria-hidden="true"></i>ANÁLISIS
                 </a>
             </div>
         </div>
-    </nav>
     </nav>
 
     <!-- ================================================================ -->
@@ -290,7 +289,7 @@
         <div class="container gemini-activity-ticker-inner">
 
             <span class="gemini-activity-ticker-label">
-                🧠 Gemini
+                <i class="fas fa-brain me-1" aria-hidden="true"></i>Gemini
             </span>
 
             <span
@@ -308,7 +307,6 @@
         </div>
     </div>
 
-    <div class="container-fluid mt-4">
     <div class="container-fluid mt-4">
         <div class="row">
             <!-- ============ PANEL DE CONTROL IZQUIERDO ============ -->
@@ -356,9 +354,28 @@
                             <i class="fas fa-brain me-2"></i>Ejecutar Análisis Completo
                         </button>
                         
-                        <button class="btn btn-outline-info w-100 mt-2" onclick="window.downloadAnalysisReport()">
-                            <i class="fas fa-download me-2"></i>Descargar Análisis
-                        </button>
+                        <div class="dropdown w-100 mt-2">
+                            <button
+                                class="btn btn-outline-info dropdown-toggle w-100"
+                                type="button"
+                                data-bs-toggle="dropdown"
+                                aria-expanded="false"
+                            >
+                                <i class="fas fa-file-lines me-2" aria-hidden="true"></i>Informe de análisis
+                            </button>
+                            <ul class="dropdown-menu dropdown-menu-dark w-100">
+                                <li>
+                                    <button class="dropdown-item" type="button" onclick="window.downloadAnalysisReport('download')">
+                                        <i class="fas fa-download me-2" aria-hidden="true"></i>Descargar aquí
+                                    </button>
+                                </li>
+                                <li>
+                                    <button class="dropdown-item" type="button" onclick="window.downloadAnalysisReport('telegram')">
+                                        <i class="fas fa-paper-plane me-2" aria-hidden="true"></i>Enviar a Telegram
+                                    </button>
+                                </li>
+                            </ul>
+                        </div>
                         
                         <button class="btn btn-outline-primary w-100 mt-2" onclick="window.downloadLearningReport()">
                             <i class="fas fa-brain me-2"></i>Aprendizaje del Sistema
@@ -372,7 +389,7 @@
                     class="card bg-dark border-success mb-4"
                 >
                     <div
-                        class="card-header bg-success bg-opacity-25 d-flex justify-content-between align-items-center"
+                        class="card-header d-flex justify-content-between align-items-center"
                         role="button"
                         data-bs-toggle="collapse"
                         data-bs-target="#system-status-body"
@@ -434,7 +451,7 @@
                     class="card bg-dark border-warning mb-3"
                 >
                     <div
-                        class="card-header bg-warning d-flex justify-content-between align-items-center py-2"
+                        class="card-header d-flex justify-content-between align-items-center py-2"
                         role="button"
                         data-bs-toggle="collapse"
                         data-bs-target="#futures-scalping-settings-body"
@@ -443,10 +460,10 @@
                         style="cursor: pointer;"
                     >
                         <div>
-                            <span class="fw-bold text-dark">
-                                ⚡ Alertas Scalping Futures
+                            <span class="fw-semibold">
+                                <i class="fas fa-bolt me-1" aria-hidden="true"></i>Alertas de scalping Futures
                             </span>
-                            <div class="small text-dark">
+                            <div class="small text-muted">
                                 5m · 15m · 30m · horario personal
                             </div>
                         </div>
@@ -458,7 +475,7 @@
                             >
                                 OFF
                             </span>
-                            <i class="fas fa-chevron-down text-dark"></i>
+                            <i class="fas fa-chevron-down text-muted"></i>
                         </div>
                     </div>
 
@@ -723,7 +740,7 @@
                     class="card bg-dark border-info mb-3"
                 >
                     <div
-                        class="card-header bg-info bg-opacity-25 d-flex justify-content-between align-items-center py-2"
+                        class="card-header d-flex justify-content-between align-items-center py-2"
                         role="button"
                         data-bs-toggle="collapse"
                         data-bs-target="#futures-risk-settings-body"
@@ -732,8 +749,8 @@
                         style="cursor: pointer;"
                     >
                         <div>
-                            <span class="fw-bold text-info">
-                                🛡️ Mi Riesgo Futures
+                            <span class="fw-semibold">
+                                <i class="fas fa-shield-halved me-1" aria-hidden="true"></i>Mi riesgo Futures
                             </span>
                         </div>
 
@@ -1174,10 +1191,22 @@
                 <!-- ============ NUEVO: TARJETA DE ESTADO DE ZONAS ============ -->
                 <!-- Reemplaza el card "Sobre el Sistema" -->
                 
-                <div class="card bg-dark border-info mb-4">
-                    <div class="card-header bg-info bg-opacity-25">
-                        <h6 class="mb-0"><i class="fas fa-chart-area me-2"></i>ESTADO DE ZONAS DE TRADING</h6>
+                <div class="card bg-dark border-secondary mb-4" id="zone-status-card">
+                    <div
+                        class="card-header d-flex justify-content-between align-items-center"
+                        role="button"
+                        data-bs-toggle="collapse"
+                        data-bs-target="#zone-status-body"
+                        aria-expanded="false"
+                        aria-controls="zone-status-body"
+                    >
+                        <h6 class="mb-0"><i class="fas fa-layer-group me-2" aria-hidden="true"></i>Zonas de trading</h6>
+                        <div class="d-flex align-items-center gap-2">
+                            <span id="zone-status-summary" class="zone-status-summary">Analizando</span>
+                            <i class="fas fa-chevron-down text-muted" aria-hidden="true"></i>
+                        </div>
                     </div>
+                    <div id="zone-status-body" class="collapse">
                     <div class="card-body">
                         <!-- Zonas principales -->
                         <div class="row mb-3">
@@ -1262,21 +1291,29 @@
                             </div>
                         </div>
                     </div>
+                    </div>
                 </div>
             </div>
             <!-- ============ CONTENIDO PRINCIPAL ============ -->
             <div class="col-lg-7">
             <!-- RECOMENDACIÓN DEL SISTEMA - MINIMIZABLE CON CONVICCIÓN -->
             <div class="recommendation-card" id="recommendation-card">
-                <div class="recommendation-header" onclick="window.toggleRecommendation()">
-                    <div class="d-flex align-items-center">
-                        <i class="fas fa-robot me-2" style="color: #FFD700; font-size: 1.2rem;"></i>
-                        <h5 class="mb-0 fw-bold" style="color: #FFD700;">RECOMENDACIÓN DEL SISTEMA</h5>
+                <div class="recommendation-header" onclick="window.toggleRecommendation()" role="button" aria-controls="recommendation-content" aria-expanded="true">
+                    <div class="recommendation-heading flex-grow-1">
+                        <h5 class="recommendation-title mb-0 fw-semibold">Recomendación del sistema</h5>
+                        <div id="recommendation-mobile-summary" class="recommendation-mobile-summary" aria-live="polite">
+                            <span id="mobile-rec-action" class="mobile-rec-action">ESPERANDO</span>
+                            <span class="mobile-rec-metric"><small>Entry</small><strong id="mobile-rec-entry">--</strong></span>
+                            <span class="mobile-rec-metric"><small>SL</small><strong id="mobile-rec-sl">--</strong></span>
+                            <span class="mobile-rec-metric"><small>TP</small><strong id="mobile-rec-tp">--</strong></span>
+                            <span class="mobile-rec-metric"><small>R/R</small><strong id="mobile-rec-rr">--</strong></span>
+                            <span class="mobile-rec-metric"><small>Lev.</small><strong id="mobile-rec-leverage">--</strong></span>
+                        </div>
                     </div>
-                    <div class="d-flex align-items-center">
+                    <div class="recommendation-header-actions d-flex align-items-center">
                         <span id="rec-badge-mini" class="badge bg-secondary me-3">ESPERANDO</span>
-                        <span id="conviction-badge-mini" class="badge bg-secondary me-3" style="display: none;">🟡 MEDIA</span>
-                        <i class="fas fa-chevron-down collapse-icon" id="recommendation-icon"></i>
+                        <span id="conviction-badge-mini" class="badge bg-secondary me-3" style="display: none;">MEDIA</span>
+                        <i class="fas fa-chevron-down collapse-icon" id="recommendation-icon" aria-hidden="true"></i>
                     </div>
                 </div>
                 <div id="recommendation-content" style="display: block;">
@@ -2146,9 +2183,9 @@
                 <!-- PATRÓN DE 4 VELAS (GRÁFICO PLOTLY CON VELAS REALES) -->
                 <div class="pattern-card mb-4">
                     <div class="d-flex justify-content-between align-items-center mb-2">
-                        <h6 class="mb-0 fw-bold">
-                            <i class="fas fa-chart-line me-2" style="color: #FFD700;"></i>
-                            PATRÓN DE 4 VELAS - AMPLIADO
+                        <h6 class="mb-0 fw-semibold">
+                            <i class="fas fa-chart-line me-2" aria-hidden="true"></i>
+                            Patrón de 4 velas
                         </h6>
                         <span class="badge bg-dark" id="pattern-4-timeframe">1D</span>
                     </div>
@@ -2170,7 +2207,7 @@
 
                 <!-- OPERACIÓN ACTUAL - FUSIONADA -->
                 <div class="card bg-dark border-warning mb-4">
-                    <div class="card-header bg-warning bg-opacity-25 d-flex justify-content-between align-items-center">
+                    <div class="card-header d-flex justify-content-between align-items-center">
                         <h5 class="mb-0"><i class="fas fa-bullhorn me-2"></i>Operación Actual</h5>
                         <span class="badge bg-dark" id="op-timeframe">1D</span>
                     </div>
@@ -2204,7 +2241,7 @@
                 </div>
                 <!-- NUEVO: SEÑALES ACTIVAS EN EL SISTEMA -->
                 <div class="card bg-dark border-success mb-4">
-                    <div class="card-header bg-success bg-opacity-25 d-flex justify-content-between align-items-center">
+                    <div class="card-header signal-header-active d-flex justify-content-between align-items-center">
                         <h5 class="mb-0"><i class="fas fa-bell me-2"></i>Señales Activas</h5>
                         <span class="badge bg-dark" id="active-signals-count">0</span>
                     </div>
@@ -2221,7 +2258,7 @@
                 </div>
                 <!-- NUEVO: SEÑALES DE LA VELA ANTERIOR -->
                 <div class="card bg-dark border-warning mt-4">
-                    <div class="card-header bg-warning bg-opacity-25 d-flex justify-content-between align-items-center">
+                    <div class="card-header signal-header-previous d-flex justify-content-between align-items-center">
                         <h5 class="mb-0">
                             <i class="fas fa-history me-2"></i>
                             Señales de la Vela Anterior
@@ -2654,9 +2691,9 @@
     </div>
 
 <!-- SECCIÓN DE CORRELACIÓN Y ROTACIÓN - VERSIÓN MEJORADA CON LOS 3 PARES -->
-<div class="card bg-dark border-info mt-4">
-    <div class="card-header bg-info bg-opacity-25 d-flex justify-content-between align-items-center">
-        <h6 class="mb-0"><i class="fas fa-exchange-alt me-2"></i>Correlación y Rotación - Vista Global</h6>
+<div class="card bg-dark border-secondary mt-4 correlation-compact">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <h6 class="mb-0"><i class="fas fa-arrows-rotate me-2" aria-hidden="true"></i>Correlación y rotación</h6>
         <span class="badge bg-info" id="correlation-timeframe">1D</span>
     </div>
     <div class="card-body">
@@ -2739,9 +2776,9 @@
     <!-- CORE DEL SISTEMA -->
     <!-- ============================================================= -->
 
-    <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI"></script>
+    <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI-2"></script>
     <script
-        src="{{ url_for('static', filename='script.js') }}?v=20260909-PRO-UI"
+        src="{{ url_for('static', filename='script.js') }}?v=20260909-PRO-UI-2"
     ></script>
 
 
@@ -2752,12 +2789,12 @@
     {% if is_futures %}
 
     <script
-        src="{{ url_for('static', filename='futures.js') }}?v=20260906-01"
+        src="{{ url_for('static', filename='futures.js') }}?v=20260909-PRO-UI-2"
     ></script>
 
     {% endif %}
 
-    <script src="{{ url_for('static', filename='chart_workspace.js') }}?v=20260909-PRO-UI"></script>
+    <script src="{{ url_for('static', filename='chart_workspace.js') }}?v=20260909-PRO-UI-2"></script>
 
     <!-- ============================================================= -->
     <!-- IA AISLADA -->
@@ -2803,14 +2840,24 @@
         window.toggleRecommendation = function() {
             const content = document.getElementById('recommendation-content');
             const icon = document.getElementById('recommendation-icon');
-            
-            if (content.style.display === 'none') {
-                content.style.display = 'block';
-                icon.classList.remove('collapsed');
-            } else {
-                content.style.display = 'none';
-                icon.classList.add('collapsed');
-            }
+            const header = document.querySelector('#recommendation-card .recommendation-header');
+            if (!content) return;
+            const opening = content.style.display === 'none';
+            content.style.display = opening ? 'block' : 'none';
+            icon?.classList.toggle('collapsed', !opening);
+            header?.setAttribute('aria-expanded', opening ? 'true' : 'false');
+        };
+
+        window.applyMobileRecommendationDefault = function() {
+            if (!window.matchMedia('(max-width: 767.98px)').matches) return;
+            const content = document.getElementById('recommendation-content');
+            const icon = document.getElementById('recommendation-icon');
+            const header = document.querySelector('#recommendation-card .recommendation-header');
+            if (!content || content.dataset.mobileDefaultApplied === '1') return;
+            content.dataset.mobileDefaultApplied = '1';
+            content.style.display = 'none';
+            icon?.classList.add('collapsed');
+            header?.setAttribute('aria-expanded', 'false');
         };
 
 
@@ -3492,30 +3539,45 @@
                 .catch(error => console.error('Error:', error));
         };
 
-        window.downloadAnalysisReport = function() {
+        window.downloadAnalysisReport = async function(delivery = 'download') {
             const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
             const interval = document.getElementById('interval-select')?.value || '1D';
-            
-            window.showToast('📥 Generando reporte PDF... (puede tardar ~5s)', 'info');
-            
-            fetch(`/api/generate_report?symbol=${symbol}&interval=${interval}`)
-                .then(response => {
-                    if (!response.ok) throw new Error('HTTP ' + response.status);
-                    return response.blob();
-                })
-                .then(blob => {
-                    const url = window.URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `analisis_${symbol}_${interval}_${new Date().toISOString().slice(0,10)}.pdf`;
-                    a.click();
-                    window.URL.revokeObjectURL(url);
-                    window.showToast('✅ Reporte PDF descargado', 'success');
-                })
-                .catch(error => {
-                    console.error('Error:', error);
-                    window.showToast('❌ Error al descargar reporte', 'danger');
-                });
+            const toTelegram = delivery === 'telegram';
+            window.showToast(
+                toTelegram ? 'Generando informe para Telegram…' : 'Generando informe PDF…',
+                'info'
+            );
+            try {
+                const url = `/api/generate_report?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}${toTelegram ? '&delivery=telegram' : ''}`;
+                const response = await fetch(url, {cache: 'no-store'});
+                if (!response.ok) {
+                    let detail = `HTTP ${response.status}`;
+                    try {
+                        const payload = await response.json();
+                        if (payload?.error) detail = payload.error;
+                    } catch (_) {}
+                    throw new Error(detail);
+                }
+                if (toTelegram) {
+                    const payload = await response.json();
+                    if (!payload?.success) throw new Error(payload?.error || 'Telegram no confirmó el envío');
+                    window.showToast('Informe enviado a Telegram correctamente', 'success');
+                    return;
+                }
+                const blob = await response.blob();
+                const objectUrl = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = objectUrl;
+                a.download = `analisis_${symbol}_${interval}_${new Date().toISOString().slice(0,10)}.pdf`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                window.URL.revokeObjectURL(objectUrl);
+                window.showToast('Informe PDF descargado', 'success');
+            } catch (error) {
+                console.error('Error generando informe:', error);
+                window.showToast(`No se pudo ${toTelegram ? 'enviar el informe a Telegram' : 'descargar el informe'}: ${error.message}`, 'danger');
+            }
         };
 
         window.downloadLearningReport = async function() {
@@ -3936,9 +3998,9 @@
                     if (window.IS_FUTURES_PAGE) {
                         const navBrand = document.querySelector('.navbar-brand');
                         if (navBrand) {
-                            navBrand.innerHTML = '<i class="fas fa-rocket me-2 text-warning"></i>🚀 CRYPTO TRADER ANALYST PRO - FUTUROS';
+                            navBrand.innerHTML = '<span class="brand-desktop">CRYPTO TRADER ANALYST PRO · FUTUROS</span><span class="brand-mobile">TRADER ANALYST · FUTUROS</span>';
                         }
-                        document.title = '🚀 FUTUROS - Crypto Trader Analyst Pro';
+                        document.title = 'Futuros - Crypto Trader Analyst Pro';
                     }
                     
                     console.log('✅ Selectores reconfigurados para:', window.PAGE_CONFIG.title);
@@ -3985,6 +4047,10 @@
             window.updateSystemStatus();
             window.updateSystemKPIs(); // ← NUEVA: KPIs del sistema (winrate + rentabilidad)
             
+            if (typeof window.applyMobileRecommendationDefault === 'function') {
+                window.applyMobileRecommendationDefault();
+            }
+
             // ============ EJECUTAR ANÁLISIS INICIAL ============
             setTimeout(function() {
                 if (typeof window.runCompleteAnalysis === 'function') {

@@ -28736,6 +28736,14 @@ def api_generate_report():
     import gc
     symbol = request.args.get('symbol', 'BTC-USDT')
     interval = request.args.get('interval', '1D')
+    delivery = str(request.args.get('delivery', 'download') or 'download').strip().lower()
+    if delivery not in {'download', 'telegram'}:
+        return jsonify({'success': False, 'error': 'Método de entrega no válido'}), 400
+    if delivery == 'telegram':
+        if not session.get('authenticated_user'):
+            return jsonify({'success': False, 'error': 'Debes iniciar sesión para enviar informes a Telegram'}), 401
+        if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+            return jsonify({'success': False, 'error': 'Telegram no está configurado en Render'}), 503
     # Por defecto CON gráficos (el usuario los necesita para justificación visual)
     with_charts = request.args.get('with_charts', '1') in ('1', 'true', 'yes')
     
@@ -28807,11 +28815,60 @@ def api_generate_report():
         traceback.print_exc()
         return jsonify({'success': False, 'error': f'Error generando PDF: {e}'}), 500
     
-    # Liberar todo agresivamente antes de devolver
+    filename = f'analisis_{symbol}_{interval}_{datetime.now().strftime("%Y%m%d_%H%M")}.pdf'
+
+    # Liberar estructuras pesadas antes de transmitir el PDF.
     del chart_bytes, supporting_charts, result
     gc.collect()
-    
-    filename = f'analisis_{symbol}_{interval}_{datetime.now().strftime("%Y%m%d_%H%M")}.pdf'
+
+    if delivery == 'telegram':
+        try:
+            telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+            caption = f"Informe de análisis · {symbol} · {interval}"
+            response = requests.post(
+                telegram_url,
+                data={
+                    'chat_id': TELEGRAM_CHAT_ID,
+                    'caption': caption,
+                },
+                files={
+                    'document': (filename, pdf_bytes, 'application/pdf'),
+                },
+                timeout=30,
+            )
+            try:
+                telegram_payload = response.json()
+            except Exception:
+                telegram_payload = {}
+            if not response.ok or telegram_payload.get('ok') is not True:
+                description = str(
+                    telegram_payload.get('description')
+                    or f'HTTP {response.status_code}'
+                )[:240]
+                print(f"❌ Telegram sendDocument falló: {description}")
+                del pdf_bytes
+                gc.collect()
+                return jsonify({
+                    'success': False,
+                    'error': f'Telegram no confirmó el envío: {description}',
+                }), 502
+            del pdf_bytes
+            gc.collect()
+            return jsonify({
+                'success': True,
+                'delivery': 'telegram',
+                'message': 'Informe enviado a Telegram',
+                'telegram_ok': True,
+            })
+        except requests.RequestException as exc:
+            print(f"❌ Telegram sendDocument error de red: {exc}")
+            del pdf_bytes
+            gc.collect()
+            return jsonify({
+                'success': False,
+                'error': 'No se pudo conectar con Telegram para enviar el informe',
+            }), 502
+
     return pdf_bytes, 200, {
         'Content-Type': 'application/pdf',
         'Content-Disposition': f'attachment; filename={filename}',

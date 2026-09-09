@@ -381,16 +381,16 @@ body {
    Dark, sober, accessible and responsive. Presentation only.
    ======================================================================== */
 :root {
-    --app-bg: #07101d;
-    --app-bg-elevated: #0b1523;
-    --app-panel: #0d1726;
-    --app-panel-soft: #111d2d;
-    --app-panel-hover: #152338;
-    --app-border: #263348;
-    --app-border-strong: #34445d;
-    --app-text: #e7edf5;
-    --app-text-muted: #9baabd;
-    --app-text-faint: #748399;
+    --app-bg: #050505;
+    --app-bg-elevated: #080808;
+    --app-panel: #0b0b0b;
+    --app-panel-soft: #0f0f0f;
+    --app-panel-hover: #171717;
+    --app-border: #252525;
+    --app-border-strong: #3a3a3a;
+    --app-text: #e8e8e8;
+    --app-text-muted: #a5a5a5;
+    --app-text-faint: #7f7f7f;
     --app-bullish: #22c982;
     --app-bearish: #f05d6f;
     --app-warning: #e5b94f;
@@ -399,7 +399,7 @@ body {
     --app-focus: #7bb6ff;
     --app-radius: 10px;
     --app-radius-sm: 7px;
-    --app-shadow: 0 10px 28px rgba(0, 0, 0, .22);
+    --app-shadow: 0 8px 22px rgba(0, 0, 0, .32);
 }
 
 html, body { background: var(--app-bg) !important; }
@@ -424,7 +424,7 @@ body.analytics-app .container-fluid { max-width: 1920px; }
 
 body.trading-app .navbar,
 body.analytics-app .navbar {
-    background: rgba(8, 17, 31, .96) !important;
+    background: rgba(5, 5, 5, .98) !important;
     border-bottom: 1px solid var(--app-border) !important;
     box-shadow: 0 4px 18px rgba(0, 0, 0, .18);
 }
@@ -483,7 +483,7 @@ body.trading-app .form-control,
 body.trading-app .form-select,
 body.analytics-app .form-control,
 body.analytics-app .form-select {
-    background: #091321 !important;
+    background: #090909 !important;
     border-color: var(--app-border) !important;
     color: var(--app-text) !important;
     min-height: 40px;
@@ -564,10 +564,10 @@ body.analytics-app .bg-info { background: rgba(90, 167, 255, .17) !important; co
 
 .workspace-ready #indicators-container {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
     gap: 1rem;
 }
-.workspace-ready #indicators-container > .workspace-card { margin: 0 !important; min-width: 0; }
+.workspace-ready #indicators-container > .workspace-card { margin: 0 !important; min-width: 0; grid-column: 1 / -1; }
 .workspace-ready #indicators-container > .workspace-permanent { grid-column: 1 / -1; }
 .workspace-ready .workspace-hidden { display: none !important; }
 .workspace-ready .workspace-visible { display: block; }
@@ -683,4 +683,224 @@ body.analytics-app h5 { letter-spacing: .005em; }
     #main-chart-container, #candle-chart { min-height: 300px; height: 320px !important; }
     .workspace-chart, .indicator-content > [id$="-chart"] { min-height: 255px; height: 270px !important; }
     .btn { min-height: 42px; }
+}
+
+
+/* ========================================================================
+   COMMIT 5.1 — FRONTEND POLISH / TRADINGVIEW-LIKE DARK WORKSPACE
+   Presentation only: neutral titles, full-width charts and mobile usability.
+   ======================================================================== */
+
+html, body,
+body.trading-app,
+body.analytics-app {
+    background: #050505 !important;
+}
+
+body.trading-app,
+body.analytics-app {
+    overflow-x: hidden;
+}
+
+body.trading-app .card,
+body.analytics-app .card,
+body.trading-app .pattern-card,
+body.analytics-app .chart-container,
+body.analytics-app .kpi-card,
+.chart-workspace-toolbar {
+    background: #0b0b0b !important;
+}
+
+/* Neutral titles are the default. Semantic color belongs to badges/lines, not headers. */
+body.trading-app .card-header,
+body.trading-app .card-header[class*="bg-"],
+body.analytics-app .card-header,
+body.analytics-app .card-header[class*="bg-"] {
+    background: #0b0b0b !important;
+    color: var(--app-text) !important;
+    border-bottom-color: var(--app-border) !important;
+}
+body.trading-app .card-header .text-dark,
+body.analytics-app .card-header .text-dark {
+    color: var(--app-text) !important;
+}
+
+/* Only the two operational signal lists keep differentiated title backgrounds. */
+body.trading-app .card-header.signal-header-active {
+    background: rgba(34, 201, 130, .10) !important;
+    border-left: 3px solid var(--app-bullish) !important;
+}
+body.trading-app .card-header.signal-header-previous {
+    background: rgba(229, 185, 79, .10) !important;
+    border-left: 3px solid var(--app-warning) !important;
+}
+
+/* Brand and top navigation: compact, serious and resistant to mobile overflow. */
+.brand-mobile { display: none; }
+body.trading-app .navbar-brand,
+body.analytics-app .navbar-brand {
+    color: var(--app-text) !important;
+    font-size: .94rem;
+    letter-spacing: .035em;
+    white-space: nowrap;
+}
+body.trading-app .navbar .nav-link,
+body.analytics-app .navbar .nav-link {
+    color: var(--app-text-muted) !important;
+    font-size: .82rem;
+}
+body.trading-app .navbar .nav-link:hover,
+body.analytics-app .navbar .nav-link:hover {
+    color: var(--app-text) !important;
+}
+
+/* One chart per row on laptop/desktop. Evidence remains readable instead of 2x2 quadrants. */
+.workspace-ready #indicators-container {
+    grid-template-columns: minmax(0, 1fr) !important;
+}
+.workspace-ready #indicators-container > .workspace-card,
+.workspace-ready #indicators-container > .workspace-permanent {
+    grid-column: 1 / -1 !important;
+    width: 100%;
+}
+.workspace-chart,
+.indicator-content > [id$="-chart"] {
+    width: 100% !important;
+}
+
+/* Compact, collapsible trading-zone status. */
+.zone-status-summary {
+    color: var(--app-text);
+    border: 1px solid var(--app-border);
+    border-radius: 999px;
+    padding: .22rem .55rem;
+    font-size: .70rem;
+    font-weight: 650;
+    white-space: nowrap;
+}
+#zone-status-card .card-header { min-height: 40px; }
+#zone-status-card .card-body { padding-top: .75rem; }
+
+/* Correlation: useful secondary context, not a dominant panel. */
+.correlation-compact .card-header {
+    min-height: 38px !important;
+    padding: .48rem .72rem !important;
+}
+.correlation-compact .card-header h6 { font-size: .82rem !important; }
+.correlation-compact .card-body {
+    padding: .62rem .75rem !important;
+    font-size: .79rem;
+}
+.correlation-compact .card-body .mb-3 { margin-bottom: .48rem !important; }
+.correlation-compact .badge {
+    padding: .26rem .48rem !important;
+    font-size: .67rem;
+}
+.correlation-compact hr { margin: .55rem 0 !important; }
+
+/* Report delivery dropdown. */
+body.trading-app .dropdown-menu-dark {
+    --bs-dropdown-bg: #101010;
+    --bs-dropdown-link-color: var(--app-text);
+    --bs-dropdown-link-hover-bg: #1a1a1a;
+    --bs-dropdown-border-color: var(--app-border);
+}
+
+/* Mobile recommendation summary: only the essentials remain visible when collapsed. */
+.recommendation-mobile-summary { display: none; }
+.recommendation-heading { min-width: 0; }
+.recommendation-title { color: var(--app-text) !important; }
+.recommendation-header-actions { flex: 0 0 auto; }
+
+@media (max-width: 991.98px) {
+    body.trading-app .navbar > .container,
+    body.analytics-app .navbar > .container {
+        max-width: 100%;
+        padding-left: .75rem;
+        padding-right: .75rem;
+        gap: .55rem;
+    }
+    body.trading-app .navbar-nav,
+    body.analytics-app .navbar-nav {
+        flex-direction: row;
+        margin-left: auto !important;
+        gap: .35rem;
+    }
+}
+
+@media (max-width: 767.98px) {
+    .brand-desktop { display: none; }
+    .brand-mobile { display: inline; }
+    body.trading-app .navbar-brand,
+    body.analytics-app .navbar-brand {
+        max-width: 48vw;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-size: .80rem;
+        letter-spacing: .02em;
+    }
+    body.trading-app .navbar .nav-link,
+    body.analytics-app .navbar .nav-link {
+        font-size: .72rem;
+        padding: .35rem .28rem !important;
+    }
+
+    #recommendation-card .recommendation-header {
+        padding: .62rem .72rem !important;
+        align-items: flex-start;
+        gap: .45rem;
+    }
+    #recommendation-card .recommendation-title { display: none; }
+    #recommendation-card #rec-badge-mini,
+    #recommendation-card #conviction-badge-mini { display: none !important; }
+    .recommendation-mobile-summary {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: .38rem .45rem;
+        width: 100%;
+    }
+    .mobile-rec-action {
+        grid-column: 1 / -1;
+        color: var(--app-text);
+        font-size: .92rem;
+        font-weight: 750;
+        letter-spacing: .02em;
+    }
+    .mobile-rec-metric {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        border-left: 2px solid var(--app-border-strong);
+        padding-left: .38rem;
+    }
+    .mobile-rec-metric small {
+        color: var(--app-text-faint);
+        font-size: .60rem;
+        text-transform: uppercase;
+        line-height: 1.1;
+    }
+    .mobile-rec-metric strong {
+        color: var(--app-text);
+        font-size: .73rem;
+        font-variant-numeric: tabular-nums;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .recommendation-header-actions .collapse-icon {
+        margin-top: .15rem;
+        color: var(--app-text-muted);
+    }
+
+    .correlation-compact .card-body { font-size: .76rem; }
+    .pattern-card { padding: .7rem !important; }
+    .pattern-4-chart { height: 145px !important; }
+}
+
+@media (max-width: 420px) {
+    .recommendation-mobile-summary {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: .32rem;
+    }
+    .mobile-rec-metric strong { font-size: .69rem; }
 }

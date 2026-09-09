@@ -2205,11 +2205,11 @@ function renderFuturesCorrelation(payload) {
         topHTML += `
             <div class="mb-2">
                 <small class="text-success fw-bold">
-                    <i class="fas fa-arrow-up me-1"></i>🚀 Mayor fuerza ALCISTA (LONG):
+                    <i class="fas fa-arrow-trend-up me-1"></i>Mayor fuerza alcista (LONG):
                 </small>
                 <div class="mt-1">
                     ${topLong.map((r, idx) => {
-                        const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : '🥉';
+                        const medal = `${idx + 1}.`;
                         return `
                             <div class="d-flex justify-content-between small">
                                 <span>${medal} ${r.symbol.replace('-', '/')}</span>
@@ -2226,11 +2226,11 @@ function renderFuturesCorrelation(payload) {
         topHTML += `
             <div class="mb-2">
                 <small class="text-danger fw-bold">
-                    <i class="fas fa-arrow-down me-1"></i>📉 Mayor fuerza BAJISTA (SHORT):
+                    <i class="fas fa-arrow-trend-down me-1"></i>Mayor fuerza bajista (SHORT):
                 </small>
                 <div class="mt-1">
                     ${topShort.map((r, idx) => {
-                        const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : '🥉';
+                        const medal = `${idx + 1}.`;
                         return `
                             <div class="d-flex justify-content-between small">
                                 <span>${medal} ${r.symbol.replace('-', '/')}</span>

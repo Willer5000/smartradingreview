@@ -2,13 +2,13 @@
     'use strict';
 
     const palette = {
-        bg: '#08111f',
-        panel: '#0d1726',
-        panelAlt: '#111d2d',
-        border: '#263348',
-        grid: 'rgba(120, 142, 170, 0.16)',
-        text: '#e7edf5',
-        muted: '#9baabd',
+        bg: '#050505',
+        panel: '#0b0b0b',
+        panelAlt: '#101010',
+        border: '#2a2a2a',
+        grid: 'rgba(150, 150, 150, 0.12)',
+        text: '#e8e8e8',
+        muted: '#a5a5a5',
         bullish: '#22c982',
         bearish: '#f05d6f',
         warning: '#e5b94f',

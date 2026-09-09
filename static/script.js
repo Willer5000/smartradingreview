@@ -5717,7 +5717,7 @@ function updateRSIChart(data) {
     if (systemType !== 'futures') {
         traces.push({
             x: dates, y: close, type: 'scatter', mode: 'lines', name: 'Precio',
-            line: {color: theme.text || '#e7edf5', width: 1.4}, yaxis: 'y',
+            line: {color: theme.text || '#e7edf5', width: 1.4}, xaxis: 'x', yaxis: 'y',
             hovertemplate: '$%{y:,.4f}<extra>Precio</extra>'
         });
     }
@@ -5731,6 +5731,7 @@ function updateRSIChart(data) {
                 ? (idx === 0 && periods.length > 1 ? 'RSI rápido' : idx === periods.length - 1 && periods.length > 1 ? 'RSI estructural' : 'RSI base')
                 : `RSI ${period}`,
             line: {color: rsiColors[idx % rsiColors.length], width: period === 14 ? 2.2 : 1.5},
+            xaxis: systemType === 'futures' ? 'x' : 'x2',
             yaxis: systemType === 'futures' ? 'y' : 'y2'
         });
     });
@@ -5764,14 +5765,14 @@ function updateRSIChart(data) {
                     x: pricePts.map(p => new Date(p.time)), y: pricePts.map(p => Number(p.value)),
                     type: 'scatter', mode: 'lines+markers',
                     name: `${hidden ? 'Divergencia oculta' : 'Divergencia'} ${bullish ? 'alcista' : 'bajista'}`,
-                    line: {color, width: 2, dash: hidden ? 'dash' : 'solid'}, marker: {size: 6, color}, yaxis: 'y', showlegend: idx === 0
+                    line: {color, width: 2, dash: hidden ? 'dash' : 'solid'}, marker: {size: 6, color}, xaxis: 'x', yaxis: 'y', showlegend: idx === 0
                 });
             }
             if (rsiPts.length === 2) {
                 traces.push({
                     x: rsiPts.map(p => new Date(p.time)), y: rsiPts.map(p => Number(p.value)),
                     type: 'scatter', mode: 'lines+markers', name: 'Confirmación RSI',
-                    line: {color, width: 2, dash: hidden ? 'dash' : 'solid'}, marker: {size: 6, color}, yaxis: 'y2', showlegend: false
+                    line: {color, width: 2, dash: hidden ? 'dash' : 'solid'}, marker: {size: 6, color}, xaxis: 'x2', yaxis: 'y2', showlegend: false
                 });
             }
         });
@@ -7438,8 +7439,8 @@ function updateVWAPChart(data) {
     if (!chartDiv || !data?.df) return;
     const df = data.df;
     const times = df.time || [];
-    const high = (df.high || []).map(Number), low = (df.low || []).map(Number), close = (df.close || []).map(Number), volume = (df.volume || []).map(Number);
-    const n = Math.min(times.length, high.length, low.length, close.length, volume.length);
+    const open = (df.open || []).map(Number), high = (df.high || []).map(Number), low = (df.low || []).map(Number), close = (df.close || []).map(Number), volume = (df.volume || []).map(Number);
+    const n = Math.min(times.length, open.length, high.length, low.length, close.length, volume.length);
     if (n < 12) return;
     const tf = String(data.timeframe || '1h');
     const targetMap = {'5m': 288, '15m': 96, '30m': 48, '1h': 24, '2h': 24, '4h': 18, '12h': 14, '1D': 14, '1W': 12};
@@ -7457,13 +7458,19 @@ function updateVWAPChart(data) {
     }
     const count = Math.min(100, n);
     const dates = times.slice(n - count, n).map(d => new Date(d));
+    const opens = open.slice(n - count, n), highs = high.slice(n - count, n), lows = low.slice(n - count, n);
     const prices = close.slice(n - count, n), vwaps = series.slice(n - count, n);
     const deviations = prices.map((price, idx) => price - vwaps[idx]);
     const std = Math.sqrt(deviations.reduce((acc, v) => acc + v * v, 0) / Math.max(1, deviations.length));
     const upper = vwaps.map(v => v + std), lower = vwaps.map(v => v - std);
     const theme = window.TradingTheme?.palette || {};
     const traces = [
-        {x: dates, y: prices, type: 'scatter', mode: 'lines', name: 'Precio', line: {color: theme.text || '#e7edf5', width: 1.4}},
+        {
+            x: dates, open: opens, high: highs, low: lows, close: prices,
+            type: 'candlestick', name: 'Precio',
+            increasing: {line: {color: theme.bullish || '#22c982'}, fillcolor: theme.bullish || '#22c982'},
+            decreasing: {line: {color: theme.bearish || '#f05d6f'}, fillcolor: theme.bearish || '#f05d6f'}
+        },
         {x: dates, y: vwaps, type: 'scatter', mode: 'lines', name: 'VWAP', line: {color: theme.info || '#5aa7ff', width: 2.2}},
         {x: dates, y: upper, type: 'scatter', mode: 'lines', name: 'Banda superior', line: {color: theme.warning || '#e5b94f', width: 1, dash: 'dot'}},
         {x: dates, y: lower, type: 'scatter', mode: 'lines', name: 'Banda inferior', line: {color: theme.warning || '#e5b94f', width: 1, dash: 'dot'}}
@@ -7474,7 +7481,7 @@ function updateVWAPChart(data) {
     const layout = window.TradingTheme?.baseLayout
         ? window.TradingTheme.baseLayout(`Precio medio ponderado por volumen · ${subtitle}`, {
             height: 340,
-            xaxis: {type: 'date', gridcolor: theme.grid || 'rgba(120,142,170,.16)'},
+            xaxis: {type: 'date', rangeslider: {visible: false}, gridcolor: theme.grid || 'rgba(120,142,170,.16)'},
             yaxis: {title: 'Precio', gridcolor: theme.grid || 'rgba(120,142,170,.16)'},
             margin: {l: 58, r: 28, t: 50, b: 44}
         })
@@ -8064,7 +8071,9 @@ function updateTradingZones(data) {
         const totalBars = dates.length;
         const visibleOffset = Math.max(0, totalBars - maxBars);
         const startGlobal = Math.max(Number(line.start_index || 0), visibleOffset);
-        const endGlobal = Math.min(Number(line.end_index ?? (totalBars - 1)), totalBars - 1);
+        // Proyectar la trendline hasta la vela actual para que funcione como
+        // soporte/resistencia dinámica visible, no como un segmento entre pivotes.
+        const endGlobal = totalBars - 1;
         if (startGlobal > endGlobal) return;
         const slope = Number(line.slope_per_candle || 0);
         const originalStart = Number(line.start_index || startGlobal);
@@ -8077,7 +8086,7 @@ function updateTradingZones(data) {
         traces.push({
             x: [startDate, endDate], y: [startPrice, endPrice], type: 'scatter', mode: 'lines',
             name: isSupport ? 'Soporte dinámico · en evaluación' : 'Resistencia dinámica · en evaluación',
-            line: {color: isSupport ? (window.TradingTheme?.palette?.bullish || '#22c982') : (window.TradingTheme?.palette?.bearish || '#f05d6f'), width: 2.2, dash: 'dash'},
+            line: {color: isSupport ? (window.TradingTheme?.palette?.bullish || '#22c982') : (window.TradingTheme?.palette?.bearish || '#f05d6f'), width: 2.5, dash: 'dash'},
             hovertemplate: `${isSupport ? 'Soporte' : 'Resistencia'} dinámico<br>Calidad geométrica: ${Math.round(Number(line.quality || 0))}/100<br>%{x}<br>$%{y:,.4f}<extra></extra>`
         });
     });
@@ -8204,6 +8213,16 @@ function updateZoneStatusCard(activeZones, priceStatus, currentPrice, decision, 
     // ============ DETECTAR CONFLICTO ============
     const conflicto = detectZoneConflict(activeZones, priceStatus, currentPrice);
     const estadoElem = document.getElementById('zone-status');
+    const zoneSummary = document.getElementById('zone-status-summary');
+    if (zoneSummary) {
+        let summary = 'Entre zonas';
+        if (priceStatus.dentro_long) summary = 'En zona LONG';
+        else if (priceStatus.dentro_short) summary = 'En zona SHORT';
+        else if (priceStatus.dentro_compra) summary = 'En zona de compra';
+        else if (priceStatus.dentro_venta) summary = 'En zona de venta';
+        else if (priceStatus.estado) summary = String(priceStatus.estado).replace(/^Dentro de /i, 'En ').replace(/^En el medio/i, 'Entre zonas');
+        zoneSummary.textContent = summary;
+    }
     
     if (conflicto) {
         if (conflicto.tipo === 'DOMINA_COMPRA' && decision === 'COMPRA_SPOT') {
@@ -8415,6 +8434,30 @@ function formatTradingRR(value) {
     return '1:'
         + numeric.toFixed(1);
 }
+function updateMobileRecommendationSummary(data, action) {
+    const labels = {
+        COMPRA_SPOT: 'COMPRA',
+        VENTA_SPOT: 'VENTA',
+        LONG: 'LONG',
+        SHORT: 'SHORT',
+        NO_OPERAR: 'NO OPERAR',
+        ESPERAR: 'ESPERAR',
+        PRECAUCION: 'PRECAUCIÓN'
+    };
+    const setText = (id, value) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = value;
+    };
+    const levels = data?.levels || {};
+    const trading = ['COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT'].includes(action);
+    setText('mobile-rec-action', labels[action] || String(action || 'ESPERANDO').replaceAll('_', ' '));
+    setText('mobile-rec-entry', trading ? formatTradingLevel(levels.entry, data?.symbol) : '--');
+    setText('mobile-rec-sl', trading ? formatTradingLevel(levels.stop_loss, data?.symbol) : '--');
+    setText('mobile-rec-tp', trading ? formatTradingLevel(levels.take_profit, data?.symbol) : '--');
+    setText('mobile-rec-rr', trading ? formatTradingRR(levels.risk_reward) : '--');
+    setText('mobile-rec-leverage', trading ? `${Number(levels.leverage || 1)}x` : '--');
+}
+
 // ============ ACTUALIZAR RECOMENDACIÓN ============
 window.updateRecommendation = function(data) {
     const container = document.getElementById('system-recommendation');
@@ -8424,21 +8467,24 @@ window.updateRecommendation = function(data) {
     
     if (!data || !data.decision) {
         container.innerHTML = '<div class="text-center py-4"><div class="spinner-border text-warning"></div><p class="mt-3">Analizando mercado...</p></div>';
+        updateMobileRecommendationSummary({}, 'ESPERAR');
         return;
     }
     
     const action = data.decision.action || 'NO_OPERAR';
     const confidence = data.decision.confidence || 0;
+    updateMobileRecommendationSummary(data, action);
     
     let badgeColor = 'secondary';
     let icon = '';
     
-    if (action === 'COMPRA_SPOT') { badgeColor = 'success'; icon = '🟢'; }
-    else if (action === 'VENTA_SPOT') { badgeColor = 'danger'; icon = '🔴'; }
-    else if (action === 'LONG') { badgeColor = 'info'; icon = '📈'; }
-    else if (action === 'SHORT') { badgeColor = 'warning'; icon = '📉'; }
-    else if (action === 'NO_OPERAR') { badgeColor = 'secondary'; icon = '⏸️'; }
-    else if (action === 'ESPERAR') { badgeColor = 'secondary'; icon = '⏳'; }
+    if (action === 'COMPRA_SPOT') { badgeColor = 'success'; icon = '<i class="fas fa-arrow-trend-up me-1" aria-hidden="true"></i>'; }
+    else if (action === 'VENTA_SPOT') { badgeColor = 'danger'; icon = '<i class="fas fa-arrow-trend-down me-1" aria-hidden="true"></i>'; }
+    else if (action === 'LONG') { badgeColor = 'info'; icon = '<i class="fas fa-arrow-up me-1" aria-hidden="true"></i>'; }
+    else if (action === 'SHORT') { badgeColor = 'warning'; icon = '<i class="fas fa-arrow-down me-1" aria-hidden="true"></i>'; }
+    else if (action === 'NO_OPERAR') { badgeColor = 'secondary'; icon = '<i class="fas fa-ban me-1" aria-hidden="true"></i>'; }
+    else if (action === 'ESPERAR') { badgeColor = 'secondary'; icon = '<i class="fas fa-clock me-1" aria-hidden="true"></i>'; }
+    else if (action === 'PRECAUCION') { badgeColor = 'warning'; icon = '<i class="fas fa-triangle-exclamation me-1" aria-hidden="true"></i>'; }
     
     // Actualizar badge mini
     const badgeMini = document.getElementById('rec-badge-mini');
@@ -9893,29 +9939,10 @@ function actualizarTextosPorDefecto() {
 }
 // FUNCIÓN sendTelegramTest ELIMINADA en v22 — no se usaba (código muerto).
 
-function downloadAnalysisReport() {
-    const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
-    const interval = document.getElementById('interval-select')?.value || '1D';
-    showToast('📥 Generando reporte PDF... (puede tardar ~5s)', 'info');
-    
-    fetch(`/api/generate_report?symbol=${symbol}&interval=${interval}`)
-        .then(response => {
-            if (!response.ok) throw new Error('Error en la descarga');
-            return response.blob();
-        })
-        .then(blob => {
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `analisis_${symbol}_${interval}_${new Date().toISOString().slice(0,10)}.pdf`;
-            a.click();
-            window.URL.revokeObjectURL(url);
-            showToast('✅ Reporte PDF descargado', 'success');
-        })
-        .catch(error => {
-            console.error('Error:', error);
-            showToast('❌ Error al descargar reporte', 'danger');
-        });
+function downloadAnalysisReport(delivery = 'download') {
+    if (typeof window.downloadAnalysisReport === 'function' && window.downloadAnalysisReport !== downloadAnalysisReport) {
+        return window.downloadAnalysisReport(delivery);
+    }
 }
 
 // ============ TOAST ============
