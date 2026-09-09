@@ -2894,33 +2894,17 @@
                 showlegend: false
             };
             
-            const chartFont = {
-                family: 'Arial',
-                size: 10,
-                color: '#FFFFFF'
-            };
-            
             const layout = {
                 paper_bgcolor: 'rgba(0,0,0,0)',
                 plot_bgcolor: 'rgba(0,0,0,0)',
-            
+
                 margin: {
                     l: 2,
                     r: 2,
                     t: 2,
                     b: 2
                 },
-            
-                font: chartFont,
-            
-                hoverlabel: {
-                    font: chartFont
-                },
-            
-                legend: {
-                    font: chartFont
-                },
-            
+
                 xaxis: {
                     type: 'date',
                     visible: false,
@@ -2929,13 +2913,17 @@
                     showline: false,
                     showticklabels: false,
                     fixedrange: true,
-                    tickfont: chartFont,
+
+                    rangeslider: {
+                        visible: false
+                    },
+
                     range: [
                         last4Dates[0].getTime() - 3600000,
                         last4Dates[last4Dates.length - 1].getTime() + 3600000
                     ]
                 },
-            
+
                 yaxis: {
                     visible: false,
                     showgrid: false,
@@ -2943,13 +2931,13 @@
                     showline: false,
                     showticklabels: false,
                     fixedrange: true,
-                    tickfont: chartFont,
+
                     range: [
                         minPrice - padding,
                         maxPrice + padding
                     ]
                 },
-            
+
                 height: 150,
                 showlegend: false
             };
@@ -3113,33 +3101,17 @@
                 showlegend: false
             };
             
-            const chartFont = {
-                family: 'Arial',
-                size: 10,
-                color: '#FFFFFF'
-            };
-            
             const layout = {
                 paper_bgcolor: 'rgba(0,0,0,0)',
                 plot_bgcolor: 'rgba(0,0,0,0)',
-            
+
                 margin: {
                     l: 2,
                     r: 2,
                     t: 2,
                     b: 2
                 },
-            
-                font: chartFont,
-            
-                hoverlabel: {
-                    font: chartFont
-                },
-            
-                legend: {
-                    font: chartFont
-                },
-            
+
                 xaxis: {
                     type: 'date',
                     visible: false,
@@ -3148,13 +3120,17 @@
                     showline: false,
                     showticklabels: false,
                     fixedrange: true,
-                    tickfont: chartFont,
+
+                    rangeslider: {
+                        visible: false
+                    },
+
                     range: [
                         last40Dates[0].getTime(),
                         last40Dates[last40Dates.length - 1].getTime()
                     ]
                 },
-            
+
                 yaxis: {
                     visible: false,
                     showgrid: false,
@@ -3162,13 +3138,13 @@
                     showline: false,
                     showticklabels: false,
                     fixedrange: true,
-                    tickfont: chartFont,
+
                     range: [
                         minPrice - padding,
                         maxPrice + padding
                     ]
                 },
-            
+
                 height: 200,
                 showlegend: false
             };

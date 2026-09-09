@@ -26106,6 +26106,198 @@ _PREV_SIGNALS_COMPUTING = {
 }
 
 # ============================================================================
+# SPOT SIGNALS CACHE — PERSISTENCIA LIVIANA ENTRE RECICLOS DE GUNICORN
+# ============================================================================
+#
+# Futures ya conserva un snapshot en /tmp. Spot no lo hacía: después de cada
+# reciclo/deploy el frontend podía quedar en "preparando" hasta terminar de
+# nuevo todo el lote pesado.
+#
+# Este snapshot sólo guarda los diccionarios compactos usados por los paneles.
+# NO guarda DataFrames, indicadores completos ni cambia decisiones.
+# ============================================================================
+
+_SPOT_SIGNALS_CACHE_FILE = (
+    '/tmp/smartradingreview_spot_signals_cache.json'
+)
+
+_SPOT_SIGNALS_CACHE_MAX_AGE = (
+    24 * 60 * 60
+)
+
+
+def _save_spot_signals_cache_to_disk():
+    try:
+        previous = getattr(
+            expert_system,
+            'prev_signals_cache',
+            None
+        )
+
+        active = getattr(
+            expert_system,
+            'spot_active_signals_cache',
+            None
+        )
+
+        if (
+            previous is None
+            and active is None
+        ):
+            return False
+
+        payload = {
+            'ts': time.time(),
+            'previous': (
+                previous
+                if isinstance(previous, dict)
+                else None
+            ),
+            'active': (
+                active
+                if isinstance(active, dict)
+                else None
+            )
+        }
+
+        temp_file = (
+            _SPOT_SIGNALS_CACHE_FILE
+            + '.tmp'
+        )
+
+        with open(
+            temp_file,
+            'w',
+            encoding='utf-8'
+        ) as file_handle:
+            json.dump(
+                payload,
+                file_handle,
+                ensure_ascii=False,
+                separators=(',', ':')
+            )
+
+        os.replace(
+            temp_file,
+            _SPOT_SIGNALS_CACHE_FILE
+        )
+
+        return True
+
+    except Exception as cache_error:
+        print(
+            "⚠️ [SPOT CACHE] No se pudo guardar snapshot: "
+            f"{cache_error}"
+        )
+
+        return False
+
+
+def _load_spot_signals_cache_from_disk():
+    try:
+        if not os.path.exists(
+            _SPOT_SIGNALS_CACHE_FILE
+        ):
+            print(
+                "📂 [SPOT CACHE] Sin snapshot previo."
+            )
+            return False
+
+        with open(
+            _SPOT_SIGNALS_CACHE_FILE,
+            'r',
+            encoding='utf-8'
+        ) as file_handle:
+            payload = (
+                json.load(
+                    file_handle
+                )
+                or {}
+            )
+
+        cache_ts = float(
+            payload.get(
+                'ts',
+                0
+            )
+            or 0
+        )
+
+        age = (
+            time.time()
+            - cache_ts
+        )
+
+        if (
+            cache_ts <= 0
+            or age > _SPOT_SIGNALS_CACHE_MAX_AGE
+        ):
+            print(
+                "📂 [SPOT CACHE] Snapshot demasiado viejo; "
+                "se recalculará."
+            )
+            return False
+
+        loaded_any = False
+
+        previous = payload.get(
+            'previous'
+        )
+
+        if isinstance(
+            previous,
+            dict
+        ):
+            setattr(
+                expert_system,
+                'prev_signals_cache',
+                previous
+            )
+            setattr(
+                expert_system,
+                'prev_signals_cache_time',
+                cache_ts
+            )
+            loaded_any = True
+
+        active = payload.get(
+            'active'
+        )
+
+        if isinstance(
+            active,
+            dict
+        ):
+            setattr(
+                expert_system,
+                'spot_active_signals_cache',
+                active
+            )
+            setattr(
+                expert_system,
+                'spot_active_signals_cache_time',
+                cache_ts
+            )
+            loaded_any = True
+
+        if loaded_any:
+            print(
+                "📂 [SPOT CACHE] Snapshot restaurado "
+                f"({int(age)}s de antigüedad)."
+            )
+
+        return loaded_any
+
+    except Exception as cache_error:
+        print(
+            "⚠️ [SPOT CACHE] No se pudo restaurar snapshot: "
+            f"{cache_error}"
+        )
+
+        return False
+
+
+# ============================================================================
 # FASE 7G.3 — COORDINADOR GLOBAL DE ANÁLISIS PESADOS
 # ============================================================================
 #
@@ -26277,6 +26469,25 @@ def _compute_previous_signals():
                     "      ⚠️ No se pudo compactar señal activa "
                     f"{symbol}-{timeframe}: {e}"
                 )
+
+    # Publicar el panel Activas apenas termina la primera mitad del trabajo.
+    # No esperamos a completar también las 12 reproducciones de vela anterior.
+    setattr(
+        expert_system,
+        'spot_active_signals_cache',
+        dict(active_results)
+    )
+    setattr(
+        expert_system,
+        'spot_active_signals_cache_time',
+        time.time()
+    )
+    _save_spot_signals_cache_to_disk()
+
+    print(
+        "📦 [SPOT CACHE] Señales activas publicadas "
+        f"({len(active_results)})."
+    )
 
     # Q6-A: historical context must not reuse ACTIVE correlation analyses.
     previous_correlations = {}
@@ -26505,6 +26716,9 @@ def _compute_previous_signals():
     setattr(expert_system, 'prev_signals_cache_time', time.time())
     setattr(expert_system, 'spot_active_signals_cache', active_results)
     setattr(expert_system, 'spot_active_signals_cache_time', time.time())
+
+    _save_spot_signals_cache_to_disk()
+
     activas = sum(1 for r in resultados.values() if r.get('activa', 0) == 1)
     print(f"\n✅ CÁLCULO COMPLETADO - {len(resultados)} señales totales, {activas} activas")
     return resultados
@@ -29820,9 +30034,10 @@ def _start_futures_warmup():
     """Al arrancar la app, disparar un análisis inicial en background."""
     import gc
     print("🔥 Iniciando warm-up de análisis futuros en background...")
-    # Esperar 15s inicial para que Flask termine de arrancar antes de la carga
+    # Dar prioridad al primer snapshot Spot tras un deploy.
+    # El lock global sigue impidiendo que Spot y Futures corran a la vez.
     def _delayed_first_warmup():
-        time.sleep(15)
+        time.sleep(45)
         _trigger_futures_refresh_async()
     threading.Thread(target=_delayed_first_warmup, daemon=True).start()
     
@@ -38951,6 +39166,17 @@ def ejecutar_review_diario(q6_slot=None):
 # Warm-up del caché de futuros al importar el módulo.
 # Se ejecuta cuando Gunicorn (o python app.py) arranca.
 # Skip si la variable de entorno DISABLE_WARMUP está definida (útil para tests).
+
+# Restaurar primero el último snapshot Spot compacto disponible.
+# Esto evita paneles vacíos durante reciclos normales de Gunicorn.
+try:
+    _load_spot_signals_cache_from_disk()
+except Exception as _spot_cache_load_error:
+    print(
+        "⚠️ [SPOT CACHE] Restauración inicial falló: "
+        f"{_spot_cache_load_error}"
+    )
+
 if not os.environ.get('DISABLE_WARMUP'):
     try:
         _start_futures_warmup()
@@ -38964,7 +39190,9 @@ if not os.environ.get('DISABLE_WARMUP'):
     def _start_previous_signals_warmup():
         import gc
         def _delayed_first():
-            time.sleep(30)  # esperar a que futuros termine su warmup primero
+            # Spot toma el primer turno pesado tras un arranque en frío.
+            # Futures comienza después y esperará el mismo lock global.
+            time.sleep(5)
             try:
                 _run_previous_signals_background()
             except Exception as e:
