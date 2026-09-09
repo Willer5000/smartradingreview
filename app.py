@@ -18625,6 +18625,51 @@ class TradingExpertSystem:
                     )
                 )
 
+                # ======================================================
+                # COMMIT 3 — TRENDLINE STRUCTURE LAB (SHADOW ONLY)
+                # ======================================================
+                # Runs after the committee and cannot change trading authority.
+                try:
+                    from trendline_strategy_lab import analyze_trendline_strategy_lab
+                    trendline_lab = analyze_trendline_strategy_lab(
+                        df=df,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        system_type=analysis_system_type,
+                        final_action=accion_consenso,
+                        fib_levels=(structure.get('fib_levels', {}) if isinstance(structure, dict) else {}),
+                        atr=(volatility.get('atr') if isinstance(volatility, dict) else None),
+                    )
+                except Exception as trendline_error:
+                    trendline_lab = {
+                        'version': 'C3_TRENDLINE_SHADOW_V1',
+                        'shadow_only': True,
+                        'affects_vote': False,
+                        'affects_safety': False,
+                        'affects_entry': False,
+                        'affects_levels': False,
+                        'affects_publication': False,
+                        'affects_leverage': False,
+                        'eligible': False,
+                        'reason': f'TRENDLINE_IMPORT_OR_RUNTIME_ERROR:{type(trendline_error).__name__}',
+                        'error': str(trendline_error)[:180],
+                        'strategies': {},
+                        'geometry': {},
+                    }
+
+                # Keep one Strategy Lab payload. Q7 remains Futures-only; trendlines
+                # are observational in both Spot and Futures.
+                strategy_lab['trendlines'] = trendline_lab
+                try:
+                    from strategy_registry import default_registry_snapshot
+                    strategy_lab['registry'] = default_registry_snapshot()
+                except Exception:
+                    strategy_lab['registry'] = {
+                        'version': 'C3_STRATEGY_REGISTRY_V1',
+                        'production_authority': False,
+                        'strategies': {},
+                    }
+
                 if strategy_lab.get(
                     'eligible',
                     False
@@ -25612,6 +25657,42 @@ class Moderador:
 # ============================================================================
 # RUTAS DE LA APLICACIÓN FLASK
 # ============================================================================
+# ============================================================================
+# COMMIT 3 — BOUNDED HISTORICAL STRATEGY RESEARCH (RESEARCH ONLY)
+# ============================================================================
+@app.route('/api/research/strategy-lab', methods=['POST'])
+def api_strategy_lab_research():
+    user = _require_auth()
+    if not isinstance(user, str):
+        return user
+
+    payload = request.get_json(silent=True) or {}
+    symbol = str(payload.get('symbol') or 'BTC-USDT').upper()
+    timeframe = str(payload.get('timeframe') or '1h')
+    allowed_symbols = {'BTC-USDT','ETH-USDT','SOL-USDT','XRP-USDT','ADA-USDT'}
+    allowed_timeframes = {'5m','15m','30m','1h','2h','4h'}
+    if symbol not in allowed_symbols or timeframe not in allowed_timeframes:
+        return jsonify({'success': False, 'error': 'Símbolo/timeframe fuera del laboratorio'}), 400
+
+    if not _acquire_heavy_analysis(f'historical-research:{symbol}:{timeframe}', timeout=1):
+        return jsonify({'success': False, 'busy': True, 'error': 'Hay otro análisis pesado en curso'}), 409
+    try:
+        _log_memory_runtime(f'historical-research:{symbol}:{timeframe}: inicio')
+        from historical_research import run_historical_strategy_research
+        df = expert_system.get_kucoin_data(symbol, timeframe)
+        if df is None or getattr(df, 'empty', True):
+            return jsonify({'success': False, 'error': 'No hay velas cerradas disponibles'}), 503
+        result = run_historical_strategy_research(
+            df=df, symbol=symbol, timeframe=timeframe, max_observations=120
+        )
+        return jsonify({'success': True, 'research': result})
+    except Exception as exc:
+        return jsonify({'success': False, 'error': str(exc)[:200]}), 500
+    finally:
+        _log_memory_runtime(f'historical-research:{symbol}:{timeframe}: fin')
+        _release_heavy_analysis(f'historical-research:{symbol}:{timeframe}')
+
+
 # ============================================================================
 # AUTENTICACIÓN
 # ============================================================================

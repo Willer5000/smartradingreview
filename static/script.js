@@ -4513,6 +4513,26 @@ function updateFibonacciChart(data) {
         }
     });
     
+    // COMMIT 3 — Trendlines objetivas, sólo visualización del Shadow Lab.
+    const trendGeometry = (((data || {}).strategy_lab || {}).trendlines || {}).geometry || {};
+    ['support', 'resistance'].forEach(kind => {
+        const line = trendGeometry[kind];
+        if (!line || line.quality < 45) return;
+        const totalBars = dates.length;
+        const offset = Math.max(0, totalBars - 30);
+        const startLocal = Math.max(0, Number(line.start_index || 0) - offset);
+        const endLocal = Math.min(lastDates.length - 1, Number(line.end_index || totalBars - 1) - offset);
+        if (startLocal > endLocal || !lastDates[startLocal] || !lastDates[endLocal]) return;
+        traces.push({
+            x: [lastDates[startLocal], lastDates[endLocal]],
+            y: [Number(line.start_price), Number(line.end_price)],
+            type: 'scatter', mode: 'lines',
+            name: `${kind === 'support' ? 'Soporte dinámico' : 'Resistencia dinámica'} · Q${Math.round(line.quality)}`,
+            line: {width: 2, dash: 'dot'},
+            opacity: 0.9, showlegend: true, yaxis: 'y'
+        });
+    });
+
     // Línea del precio actual
     if (data.current_price) {
         traces.push({
@@ -4553,7 +4573,7 @@ function updateFibonacciChart(data) {
     
     const layout = {
         title: {
-            text: 'Niveles de Fibonacci con Velas',
+            text: 'Estructura + Fibonacci + Trendlines Shadow',
             font: {
                 color: 'white',
                 size: 14,
@@ -5885,85 +5905,67 @@ function updateMACDChart(data) {
     Plotly.newPlot('macd-chart', traces, layout, {responsive: true, displaylogo: false});
 }
 
+// ============ COMMIT 3: RSI ADAPTATIVO Q7 (VISUAL ONLY) ============
+function calculateRSIPeriod(prices, period = 14) {
+    if (!Array.isArray(prices) || prices.length === 0) return [];
+    const out = new Array(prices.length).fill(50);
+    if (prices.length <= period) return out;
+    for (let i = period; i < prices.length; i++) {
+        let gains = 0, losses = 0;
+        for (let j = i - period + 1; j <= i; j++) {
+            const delta = Number(prices[j]) - Number(prices[j - 1]);
+            if (delta > 0) gains += delta; else losses -= delta;
+        }
+        const avgGain = gains / period;
+        const avgLoss = losses / period;
+        out[i] = avgLoss === 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss));
+    }
+    return out;
+}
+
 // ============ RSI Tradicional ============
 function updateRSIChart(data) {
     const chartDiv = document.getElementById('rsi-chart');
     if (!chartDiv || !data.df) return;
-    
-    const df = data.df;
-    const dates = df.time || [];
-    const close = df.close || [];
-    
-    const rsi = calculateRSI(close);
-    
-    const trace = {
-        x: dates.slice(-50),
-        y: rsi.slice(-50),
-        type: 'scatter',
-        mode: 'lines',
-        name: 'RSI',
-        line: {color: '#8A63D2', width: 2}
-    };
-    
+
+    const dates = data.df.time || [];
+    const close = data.df.close || [];
+    const timeframe = String(data.timeframe || '');
+    const systemType = String(data.system_type || '').toLowerCase();
     const lastDates = dates.slice(-50);
+    const traces = [];
+
+    let periods = [14];
+    let profile = 'TRADICIONAL';
+    if (systemType === 'futures') {
+        if (timeframe === '5m' || timeframe === '15m') { periods = [3, 7, 14]; profile = 'FAST'; }
+        else if (timeframe === '30m' || timeframe === '1h' || timeframe === '2h') { periods = [7, 14, 21]; profile = timeframe === '2h' ? 'STRUCTURAL' : 'BALANCED'; }
+        else if (timeframe === '4h') { periods = [14]; profile = 'STRUCTURAL'; }
+    }
+
+    periods.forEach((period, idx) => {
+        const rsi = calculateRSIPeriod(close, period);
+        traces.push({
+            x: lastDates, y: rsi.slice(-50), type: 'scatter', mode: 'lines',
+            name: `RSI ${period}${period === 14 ? ' · base' : ''}`,
+            line: {width: period === 14 ? 2.2 : 1.4}
+        });
+    });
+
     const layout = {
-        title: {
-            text: 'RSI Tradicional',
-            font: {color: 'white', size: 14}
-        },
-        xaxis: {
-            type: 'date',
-            gridcolor: 'rgba(128,128,128,0.2)',
-            gridwidth: 0.5,
-            showgrid: true,
-            showline: true,
-            mirror: true,
-            linecolor: 'rgba(128,128,128,0.5)'
-        },
-        yaxis: {
-            title: 'RSI',
-            range: [0, 100],
-            gridcolor: 'rgba(128,128,128,0.2)',
-            gridwidth: 0.5,
-            showgrid: true,
-            showline: true,
-            mirror: true,
-            linecolor: 'rgba(128,128,128,0.5)',
-            zeroline: true,
-            zerolinecolor: 'rgba(255,255,255,0.3)'
-        },
-        template: 'plotly_dark',
-        height: 300,
-        margin: {l: 50, r: 50, t: 50, b: 30},
-        paper_bgcolor: '#0A0C10',
-        plot_bgcolor: '#0A0C10',
-        hovermode: 'x',
-        hoverlabel: {
-            bgcolor: '#0A0C10',
-            bordercolor: 'rgba(255,255,255,0.2)',
-            font: {color: 'white', size: 11}
-        },
-        shapes: [
-            {
-                type: 'line',
-                x0: lastDates[0],
-                y0: 70,
-                x1: lastDates[lastDates.length - 1],
-                y1: 70,
-                line: {color: '#FF5B5B', width: 1, dash: 'dot'}
-            },
-            {
-                type: 'line',
-                x0: lastDates[0],
-                y0: 30,
-                x1: lastDates[lastDates.length - 1],
-                y1: 30,
-                line: {color: '#00C076', width: 1, dash: 'dot'}
-            }
+        title: {text: systemType === 'futures' ? `RSI · ${profile} · Q7 Shadow` : 'RSI Tradicional', font: {color: 'white', size: 14}},
+        xaxis: {type:'date', gridcolor:'rgba(128,128,128,0.2)', gridwidth:0.5, showgrid:true, showline:true, mirror:true, linecolor:'rgba(128,128,128,0.5)'},
+        yaxis: {title:'RSI', range:[0,100], gridcolor:'rgba(128,128,128,0.2)', gridwidth:0.5, showgrid:true, showline:true, mirror:true, linecolor:'rgba(128,128,128,0.5)'},
+        template:'plotly_dark', height:300, margin:{l:50,r:50,t:50,b:30},
+        paper_bgcolor:'#0A0C10', plot_bgcolor:'#0A0C10', hovermode:'x unified',
+        legend:{orientation:'h', yanchor:'bottom', y:1.02, xanchor:'right', x:1, font:{color:'white',size:9}},
+        shapes:[
+            {type:'line',x0:lastDates[0],y0:70,x1:lastDates[lastDates.length-1],y1:70,line:{width:1,dash:'dot'}},
+            {type:'line',x0:lastDates[0],y0:30,x1:lastDates[lastDates.length-1],y1:30,line:{width:1,dash:'dot'}},
+            {type:'line',x0:lastDates[0],y0:50,x1:lastDates[lastDates.length-1],y1:50,line:{width:1,dash:'dot'}}
         ]
     };
-    
-    Plotly.newPlot('rsi-chart', [trace], layout, {responsive: true, displaylogo: false});
+    Plotly.newPlot('rsi-chart', traces, layout, {responsive:true, displaylogo:false});
 }
 
 // ============ Estocástico ============

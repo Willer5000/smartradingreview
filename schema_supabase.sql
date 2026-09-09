@@ -300,3 +300,29 @@ WHERE tablename IN (
 ORDER BY tablename;
 
 -- Debe retornar 7 filas.
+
+-- ============================================================================
+-- COMMIT 3 — STRATEGY REGISTRY / HISTORICAL RESEARCH
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS public.strategy_registry (
+    strategy_key TEXT NOT NULL,
+    symbol TEXT NOT NULL DEFAULT '*',
+    timeframe TEXT NOT NULL DEFAULT '*',
+    market_regime TEXT NOT NULL DEFAULT '*',
+    state TEXT NOT NULL DEFAULT 'SHADOW' CHECK (state IN ('SHADOW','CHALLENGER','CANARY','ACTIVE','DEGRADED','DISABLED')),
+    config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+    version TEXT NOT NULL DEFAULT 'C3_STRATEGY_REGISTRY_V1',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (strategy_key, symbol, timeframe, market_regime)
+);
+CREATE TABLE IF NOT EXISTS public.strategy_research_runs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id TEXT,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    cohort TEXT NOT NULL DEFAULT 'HISTORICAL_RESEARCH',
+    engine_version TEXT NOT NULL,
+    result JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
