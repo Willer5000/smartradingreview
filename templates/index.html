@@ -374,6 +374,12 @@
                                         <i class="fas fa-paper-plane me-2" aria-hidden="true"></i>Enviar a Telegram
                                     </button>
                                 </li>
+                                <li><hr class="dropdown-divider"></li>
+                                <li>
+                                    <button class="dropdown-item" type="button" onclick="window.testTelegramConnection()">
+                                        <i class="fas fa-circle-check me-2" aria-hidden="true"></i>Probar conexión Telegram
+                                    </button>
+                                </li>
                             </ul>
                         </div>
                         
@@ -3548,7 +3554,7 @@
                 'info'
             );
             try {
-                const url = `/api/generate_report?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}${toTelegram ? '&delivery=telegram' : ''}`;
+                const url = `/api/generate_report?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}${toTelegram ? '&delivery=telegram&with_charts=0' : ''}`;
                 const response = await fetch(url, {cache: 'no-store'});
                 if (!response.ok) {
                     let detail = `HTTP ${response.status}`;
@@ -3561,7 +3567,8 @@
                 if (toTelegram) {
                     const payload = await response.json();
                     if (!payload?.success) throw new Error(payload?.error || 'Telegram no confirmó el envío');
-                    window.showToast('Informe enviado a Telegram correctamente', 'success');
+                    const mode = payload?.report_mode === 'ligero' ? ' (modo ligero para proteger la memoria del servidor)' : '';
+                    window.showToast(`Informe enviado a Telegram correctamente${mode}`, 'success');
                     return;
                 }
                 const blob = await response.blob();
@@ -3577,6 +3584,26 @@
             } catch (error) {
                 console.error('Error generando informe:', error);
                 window.showToast(`No se pudo ${toTelegram ? 'enviar el informe a Telegram' : 'descargar el informe'}: ${error.message}`, 'danger');
+            }
+        };
+
+        window.testTelegramConnection = async function() {
+            window.showToast('Probando conexión con Telegram…', 'info');
+            try {
+                const response = await fetch('/api/telegram/test', {
+                    method: 'POST',
+                    cache: 'no-store',
+                    headers: {'Content-Type': 'application/json'}
+                });
+                let payload = {};
+                try { payload = await response.json(); } catch (_) {}
+                if (!response.ok || !payload?.success) {
+                    throw new Error(payload?.error || `HTTP ${response.status}`);
+                }
+                window.showToast('Telegram funciona. Revisa el mensaje de prueba en el chat configurado.', 'success');
+            } catch (error) {
+                console.error('Error probando Telegram:', error);
+                window.showToast(`Telegram no respondió correctamente: ${error.message}`, 'danger');
             }
         };
 

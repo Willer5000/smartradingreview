@@ -28716,6 +28716,76 @@ def api_kpis_frontend_signals():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/telegram/test', methods=['POST'])
+def api_telegram_test():
+    """Prueba liviana y explícita de TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID.
+
+    No genera análisis, gráficos ni PDF. Esto permite distinguir un problema de
+    Telegram de un fallo de Kaleido/ReportLab o de memoria durante un informe.
+    """
+    if not session.get('authenticated_user'):
+        return jsonify({
+            'success': False,
+            'error': 'Debes iniciar sesión para probar Telegram',
+        }), 401
+
+    token = str(TELEGRAM_BOT_TOKEN or '').strip()
+    chat_id = str(TELEGRAM_CHAT_ID or '').strip()
+    if not token or not chat_id:
+        return jsonify({
+            'success': False,
+            'error': 'Telegram no está configurado en Render',
+        }), 503
+
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={
+                'chat_id': chat_id,
+                'text': (
+                    'Prueba de conexión · Crypto Trader Analyst Pro\n'
+                    'Telegram está configurado y puede enviar mensajes.'
+                ),
+                'disable_web_page_preview': True,
+            },
+            timeout=15,
+        )
+        try:
+            payload = response.json()
+        except Exception:
+            payload = {}
+
+        if not response.ok or payload.get('ok') is not True:
+            description = str(
+                payload.get('description')
+                or f'HTTP {response.status_code}'
+            )[:240]
+            print(f"❌ Telegram test falló: {description}")
+            return jsonify({
+                'success': False,
+                'error': f'Telegram no confirmó la prueba: {description}',
+            }), 502
+
+        print('✅ Telegram test: mensaje entregado correctamente')
+        return jsonify({
+            'success': True,
+            'telegram_ok': True,
+            'message': 'Telegram respondió correctamente. Revisa el chat configurado.',
+        })
+    except requests.RequestException as exc:
+        print(f"❌ Telegram test error de red: {exc}")
+        return jsonify({
+            'success': False,
+            'error': 'No se pudo conectar con Telegram',
+        }), 502
+    except Exception as exc:
+        print(f"❌ Telegram test error inesperado: {type(exc).__name__}: {exc}")
+        return jsonify({
+            'success': False,
+            'error': f'Error interno probando Telegram: {type(exc).__name__}',
+        }), 500
+
+
 @app.route('/api/generate_report')
 def api_generate_report():
     """
@@ -28739,19 +28809,35 @@ def api_generate_report():
     delivery = str(request.args.get('delivery', 'download') or 'download').strip().lower()
     if delivery not in {'download', 'telegram'}:
         return jsonify({'success': False, 'error': 'Método de entrega no válido'}), 400
+    telegram_token = str(TELEGRAM_BOT_TOKEN or '').strip()
+    telegram_chat_id = str(TELEGRAM_CHAT_ID or '').strip()
     if delivery == 'telegram':
         if not session.get('authenticated_user'):
             return jsonify({'success': False, 'error': 'Debes iniciar sesión para enviar informes a Telegram'}), 401
-        if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        if not telegram_token or not telegram_chat_id:
             return jsonify({'success': False, 'error': 'Telegram no está configurado en Render'}), 503
-    # Por defecto CON gráficos (el usuario los necesita para justificación visual)
-    with_charts = request.args.get('with_charts', '1') in ('1', 'true', 'yes')
-    
-    # Ejecutar análisis (usa caché si está caliente → 0ms)
-    result = expert_system.analyze_full_market(symbol, interval)
-    
+
+    # Render Free (512 MB): enviar a Telegram usa por defecto el PDF ligero.
+    # La descarga local conserva gráficos por defecto. Esto separa el transporte
+    # Telegram de los picos de RAM de Kaleido y evita interpretar un OOM como
+    # una falla del bot. Se puede solicitar explícitamente with_charts=1.
+    default_with_charts = '0' if delivery == 'telegram' else '1'
+    with_charts = request.args.get('with_charts', default_with_charts) in ('1', 'true', 'yes')
+
+    # Ejecutar análisis (usa caché si está caliente → 0ms).
+    try:
+        result = expert_system.analyze_full_market(symbol, interval)
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': f'Error preparando el análisis: {type(exc).__name__}',
+            'stage': 'analysis',
+        }), 500
+
     if not result or not result.get('success'):
-        return jsonify({'success': False, 'error': 'No se pudo generar el análisis'}), 400
+        return jsonify({'success': False, 'error': 'No se pudo generar el análisis', 'stage': 'analysis'}), 400
     
     chart_bytes = None
     supporting_charts = []
@@ -28823,12 +28909,12 @@ def api_generate_report():
 
     if delivery == 'telegram':
         try:
-            telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+            telegram_url = f"https://api.telegram.org/bot{telegram_token}/sendDocument"
             caption = f"Informe de análisis · {symbol} · {interval}"
             response = requests.post(
                 telegram_url,
                 data={
-                    'chat_id': TELEGRAM_CHAT_ID,
+                    'chat_id': telegram_chat_id,
                     'caption': caption,
                 },
                 files={
@@ -28859,6 +28945,7 @@ def api_generate_report():
                 'delivery': 'telegram',
                 'message': 'Informe enviado a Telegram',
                 'telegram_ok': True,
+                'report_mode': 'completo' if with_charts else 'ligero',
             })
         except requests.RequestException as exc:
             print(f"❌ Telegram sendDocument error de red: {exc}")
@@ -28867,7 +28954,17 @@ def api_generate_report():
             return jsonify({
                 'success': False,
                 'error': 'No se pudo conectar con Telegram para enviar el informe',
+                'stage': 'telegram_transport',
             }), 502
+        except Exception as exc:
+            print(f"❌ Telegram sendDocument error inesperado: {type(exc).__name__}: {exc}")
+            del pdf_bytes
+            gc.collect()
+            return jsonify({
+                'success': False,
+                'error': f'Error interno enviando el informe: {type(exc).__name__}',
+                'stage': 'telegram_transport',
+            }), 500
 
     return pdf_bytes, 200, {
         'Content-Type': 'application/pdf',

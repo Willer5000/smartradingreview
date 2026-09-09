@@ -8062,36 +8062,54 @@ function updateTradingZones(data) {
         });
     });
     
-    // COMMIT 5 — líneas de tendencia objetivas dentro de Zonas Dinámicas.
-    // Evidencia visual únicamente; no cambia la decisión.
+    // COMMIT 5.3 — CANAL DE TENDENCIA VISUAL.
+    // Se muestran las DOS referencias dinámicas disponibles (soporte inferior y
+    // resistencia superior) como líneas blancas continuas. Siguen siendo evidencia
+    // visual/Shadow: no alteran Entry, SL, TP, Safety ni la decisión.
     const trendGeometry = data?.strategy_lab?.trendlines?.geometry || {};
+    const currentPrice = data.current_price || lastClose[lastClose.length - 1];
+    const trendProjectionBars = 10;
+    const trendProjectionDate = new Date(
+        lastDates[lastDates.length - 1].getTime() + (barWidth * trendProjectionBars)
+    );
+
     ['support', 'resistance'].forEach(kind => {
         const line = trendGeometry[kind];
-        if (!line || Number(line.quality || 0) < 45) return;
+        if (!line) return;
         const totalBars = dates.length;
         const visibleOffset = Math.max(0, totalBars - maxBars);
         const startGlobal = Math.max(Number(line.start_index || 0), visibleOffset);
-        // Proyectar la trendline hasta la vela actual para que funcione como
-        // soporte/resistencia dinámica visible, no como un segmento entre pivotes.
-        const endGlobal = totalBars - 1;
-        if (startGlobal > endGlobal) return;
+        const currentGlobal = totalBars - 1;
+        const projectedGlobal = currentGlobal + trendProjectionBars;
+        if (startGlobal > currentGlobal) return;
+
         const slope = Number(line.slope_per_candle || 0);
         const originalStart = Number(line.start_index || startGlobal);
         const originalPrice = Number(line.start_price || 0);
         const startPrice = originalPrice + slope * (startGlobal - originalStart);
-        const endPrice = originalPrice + slope * (endGlobal - originalStart);
-        const startDate = dates[startGlobal], endDate = dates[endGlobal];
-        if (!startDate || !endDate || !(startPrice > 0) || !(endPrice > 0)) return;
+        const currentLinePrice = originalPrice + slope * (currentGlobal - originalStart);
+        const projectedPrice = originalPrice + slope * (projectedGlobal - originalStart);
+        const startDate = dates[startGlobal];
+        if (!startDate || !(startPrice > 0) || !(projectedPrice > 0)) return;
+
         const isSupport = kind === 'support';
+        const sideText = isSupport ? 'Soporte dinámico' : 'Resistencia dinámica';
         traces.push({
-            x: [startDate, endDate], y: [startPrice, endPrice], type: 'scatter', mode: 'lines',
-            name: isSupport ? 'Soporte dinámico · en evaluación' : 'Resistencia dinámica · en evaluación',
-            line: {color: isSupport ? (window.TradingTheme?.palette?.bullish || '#22c982') : (window.TradingTheme?.palette?.bearish || '#f05d6f'), width: 2.5, dash: 'dash'},
-            hovertemplate: `${isSupport ? 'Soporte' : 'Resistencia'} dinámico<br>Calidad geométrica: ${Math.round(Number(line.quality || 0))}/100<br>%{x}<br>$%{y:,.4f}<extra></extra>`
+            x: [startDate, trendProjectionDate],
+            y: [startPrice, projectedPrice],
+            type: 'scatter',
+            mode: 'lines',
+            name: sideText,
+            line: {color: '#f2f2f2', width: 2.2, dash: 'solid'},
+            opacity: 0.95,
+            hovertemplate:
+                `${sideText}<br>` +
+                `Nivel actual: $${Number(currentLinePrice).toLocaleString(undefined, {maximumFractionDigits: 6})}<br>` +
+                `Proyección: %{y:,.6f}<br>` +
+                `Calidad geométrica: ${Math.round(Number(line.quality || 0))}/100` +
+                `<extra></extra>`
         });
     });
-
-    const currentPrice = data.current_price || lastClose[lastClose.length - 1];
     shapes.push({
         type: 'line',
         xref: 'paper',
@@ -8108,7 +8126,9 @@ function updateTradingZones(data) {
         title: { text: `Zonas dinámicas de trading · ${timeframe}`, font: { color: window.TradingTheme?.palette?.text || '#e7edf5', size: 14 } },
         xaxis: {
             type: 'date',
-            range: [lastDates[0], lastDates[lastDates.length - 1]],
+            // Deja espacio a la derecha como un gráfico de trading para ver la
+            // proyección de soporte/resistencia dinámica hacia las próximas velas.
+            range: [lastDates[0], trendProjectionDate],
             showgrid: true,
             gridcolor: 'rgba(128,128,128,0.2)',
             title: 'Fecha/Hora'
