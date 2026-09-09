@@ -8,7 +8,7 @@
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <link
         rel="stylesheet"
-        href="{{ url_for('static', filename='style.css') }}?v=20260907-36Y"
+        href="{{ url_for('static', filename='style.css') }}?v=20260909-PRO-UI"
     >
     <style>
         /* ============ ESTILOS DE PATRONES ============ */
@@ -178,7 +178,7 @@
         console.log('📌 Página cargada:', window.PAGE_CONFIG.title);
     </script>
 </head>
-<body>
+<body class="trading-app {{ 'mode-futures' if is_futures else 'mode-spot' }}">
     <!-- Reloj Digital Bolivia + KPIs del Sistema (Rendimiento del ReviewTrader) -->
     <div class="container-fluid bg-dark border-bottom border-secondary py-2">
         <div class="row align-items-center">
@@ -2274,7 +2274,7 @@
                             <span
                                 class="badge bg-dark"
                                 id="ss-kpi-econ-coverage"
-                                title="Cobertura de operaciones cerradas que ya tienen economía 36O utilizable"
+                                title="Cobertura de operaciones cerradas que ya tienen datos económicos utilizables"
                             >
                                 Costes: --/--
                             </span>
@@ -2384,7 +2384,7 @@
                                             id="ss-risk-profile-preview"
                                             class="alert alert-secondary py-2 px-3 small mb-0"
                                         >
-                                            Perfil 36P: modo manual.
+                                            Perfil de riesgo: modo manual.
                                             El sizing actual no ha sido modificado.
                                         </div>
 
@@ -2739,8 +2739,9 @@
     <!-- CORE DEL SISTEMA -->
     <!-- ============================================================= -->
 
+    <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI"></script>
     <script
-        src="{{ url_for('static', filename='script.js') }}?v=20260906-CORE-FIX2"
+        src="{{ url_for('static', filename='script.js') }}?v=20260909-PRO-UI"
     ></script>
 
 
@@ -2756,6 +2757,7 @@
 
     {% endif %}
 
+    <script src="{{ url_for('static', filename='chart_workspace.js') }}?v=20260909-PRO-UI"></script>
 
     <!-- ============================================================= -->
     <!-- IA AISLADA -->

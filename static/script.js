@@ -4391,308 +4391,66 @@ function updateFVGAOBChart(data) {
 // ============ GRÁFICO DE FIBONACCI CON VELAS - VERSIÓN ORIGINAL ============
 function updateFibonacciChart(data) {
     const chartDiv = document.getElementById('fibonacci-chart');
-    if (!chartDiv) {
-        const container = document.querySelector('.col-lg-8');
-        if (container) {
-            const fibCard = document.createElement('div');
-            fibCard.className = 'card bg-dark border-secondary mb-4';
-            fibCard.innerHTML = `
-                <div class="card-header">
-                    <h5 class="mb-0" style="color: white;">Niveles de Fibonacci con Velas</h5>
-                </div>
-                <div class="card-body">
-                    <div id="fibonacci-chart" style="height: 350px;"></div>
-                    <div class="mt-2">
-                        <small class="text-muted">
-                            <strong>Interpretación:</strong> Niveles clave de soporte/resistencia basados en Fibonacci.
-                            <span id="fibonacci-interpretation" style="color: #FFD700;">Calculando...</span>
-                        </small>
-                    </div>
-                </div>
-            `;
-            container.appendChild(fibCard);
-        } else {
-            return;
-        }
-    }
-    
-    if (!data || !data.df || !data.structure) return;
-    
+    if (!chartDiv || !data || !data.df || !data.structure) return;
+
     const df = data.df;
-    const dates = df.time || [];
-    const open = df.open || [];
-    const high = df.high || [];
-    const low = df.low || [];
-    const close = df.close || [];
-    
-    if (dates.length < 30) return;
-    
-    // Convertir fechas a objetos Date
-    const dateObjects = dates.map(d => new Date(d));
-    const lastDates = dateObjects.slice(-30);
-    const lastOpen = open.slice(-30);
-    const lastHigh = high.slice(-30);
-    const lastLow = low.slice(-30);
-    const lastClose = close.slice(-30);
-    
+    const dates = (df.time || []).slice(-50).map(d => new Date(d));
+    const open = (df.open || []).slice(-50);
+    const high = (df.high || []).slice(-50);
+    const low = (df.low || []).slice(-50);
+    const close = (df.close || []).slice(-50);
+    if (dates.length < 20) return;
+
+    const theme = window.TradingTheme?.palette || {};
     const fibLevels = data.structure.fib_levels || {};
     const fibExtensions = data.structure.fib_extensions || {};
-    
-    const traces = [];
-    
-    // Velas Japonesas
-    traces.push({
-        x: lastDates,
-        open: lastOpen,
-        high: lastHigh,
-        low: lastLow,
-        close: lastClose,
-        type: 'candlestick',
-        name: 'Precio',
-        increasing: {line: {color: '#00C076', width: 1}, fillcolor: '#00C076'},
-        decreasing: {line: {color: '#FF5B5B', width: 1}, fillcolor: '#FF5B5B'},
-        showlegend: true,
-        yaxis: 'y'
-    });
-    
-    // Líneas de Fibonacci con etiquetas de precio
-    const fibLines = [
-        {level: '0.236', color: '#FFD700', name: '23.6%'},
-        {level: '0.382', color: '#FF8C00', name: '38.2%'},
-        {level: '0.5', color: '#FF69B4', name: '50%'},
-        {level: '0.618', color: '#00C076', name: '61.8%'},
-        {level: '0.786', color: '#3A8BFF', name: '78.6%'},
-        {level: '1.272', color: '#8A63D2', name: '127.2%'},
-        {level: '1.618', color: '#FF5B5B', name: '161.8%'}
-    ];
-    
-    fibLines.forEach(fib => {
-        let price = null;
-        if (fib.level.startsWith('1')) {
-            price = fibExtensions[fib.level];
-        } else {
-            price = fibLevels[fib.level];
-        }
-        
-        if (price && price > 0) {
-            // Línea horizontal de Fibonacci
-            traces.push({
-                x: [lastDates[0], lastDates[lastDates.length - 1]],
-                y: [price, price],
-                type: 'scatter',
-                mode: 'lines',
-                name: `${fib.name}`,
-                line: {
-                    color: fib.color,
-                    width: 1.5,
-                    dash: 'dash'
-                },
-                opacity: 0.8,
-                showlegend: true,
-                yaxis: 'y'
-            });
-            
-            // Etiqueta de precio al final de la línea
-            traces.push({
-                x: [lastDates[lastDates.length - 1]],
-                y: [price],
-                type: 'scatter',
-                mode: 'text',
-                text: [`$${price.toFixed(2)}`],
-                textposition: 'middle right',
-                textfont: {
-                    color: fib.color,
-                    size: 10,
-                    family: 'Arial',
-                    weight: 'bold'
-                },
-                showlegend: false,
-                hoverinfo: 'none',
-                yaxis: 'y'
-            });
-        }
-    });
-    
-    // COMMIT 3 — Trendlines objetivas, sólo visualización del Shadow Lab.
-    const trendGeometry = (((data || {}).strategy_lab || {}).trendlines || {}).geometry || {};
-    ['support', 'resistance'].forEach(kind => {
-        const line = trendGeometry[kind];
-        if (!line || line.quality < 45) return;
-        const totalBars = dates.length;
-        const offset = Math.max(0, totalBars - 30);
-        const startLocal = Math.max(0, Number(line.start_index || 0) - offset);
-        const endLocal = Math.min(lastDates.length - 1, Number(line.end_index || totalBars - 1) - offset);
-        if (startLocal > endLocal || !lastDates[startLocal] || !lastDates[endLocal]) return;
+    const traces = [{
+        x: dates, open, high, low, close,
+        type: 'candlestick', name: 'Precio',
+        increasing: {line: {color: theme.bullish || '#22c982', width: 1}},
+        decreasing: {line: {color: theme.bearish || '#f05d6f', width: 1}}
+    }];
+
+    [
+        ['0.236', '23,6%', '#7c8ba1'], ['0.382', '38,2%', '#5aa7ff'],
+        ['0.5', '50%', '#e5b94f'], ['0.618', '61,8%', '#22c982'],
+        ['0.786', '78,6%', '#a78bfa'], ['1.272', '127,2%', '#e19055'],
+        ['1.618', '161,8%', '#f05d6f']
+    ].forEach(([key, label, color]) => {
+        const raw = key.startsWith('1') ? fibExtensions[key] : fibLevels[key];
+        const price = Number(raw || 0);
+        if (!(price > 0)) return;
         traces.push({
-            x: [lastDates[startLocal], lastDates[endLocal]],
-            y: [Number(line.start_price), Number(line.end_price)],
-            type: 'scatter', mode: 'lines',
-            name: `${kind === 'support' ? 'Soporte dinámico' : 'Resistencia dinámica'} · Q${Math.round(line.quality)}`,
-            line: {width: 2, dash: 'dot'},
-            opacity: 0.9, showlegend: true, yaxis: 'y'
+            x: [dates[0], dates[dates.length - 1]], y: [price, price],
+            type: 'scatter', mode: 'lines', name: label,
+            line: {color, width: 1.2, dash: 'dot'},
+            hovertemplate: `${label}: $%{y:,.4f}<extra></extra>`
         });
     });
 
-    // Línea del precio actual
-    if (data.current_price) {
+    const currentPrice = Number(data.current_price || close[close.length - 1] || 0);
+    if (currentPrice > 0) {
         traces.push({
-            x: [lastDates[0], lastDates[lastDates.length - 1]],
-            y: [data.current_price, data.current_price],
-            type: 'scatter',
-            mode: 'lines',
-            name: 'Precio Actual',
-            line: {
-                color: 'white',
-                width: 1.5,
-                dash: 'solid'
-            },
-            opacity: 0.9,
-            showlegend: true,
-            yaxis: 'y'
-        });
-        
-        // Etiqueta del precio actual
-        traces.push({
-            x: [lastDates[lastDates.length - 1]],
-            y: [data.current_price],
-            type: 'scatter',
-            mode: 'text',
-            text: [`$${data.current_price.toFixed(2)}`],
-            textposition: 'middle right',
-            textfont: {
-                color: 'white',
-                size: 11,
-                family: 'Arial',
-                weight: 'bold'
-            },
-            showlegend: false,
-            hoverinfo: 'none',
-            yaxis: 'y'
+            x: [dates[0], dates[dates.length - 1]], y: [currentPrice, currentPrice],
+            type: 'scatter', mode: 'lines', name: 'Precio actual',
+            line: {color: theme.text || '#e7edf5', width: 1.3}
         });
     }
-    
-    const layout = {
-        title: {
-            text: 'Estructura + Fibonacci + Trendlines Shadow',
-            font: {
-                color: 'white',
-                size: 14,
-                family: 'Arial'
-            },
-            x: 0.5,
-            xanchor: 'center'
-        },
-        xaxis: {
-            type: 'date',
-            gridcolor: 'rgba(128,128,128,0.2)',
-            gridwidth: 0.5,
-            range: [lastDates[0], lastDates[lastDates.length - 1]],
-            showgrid: true,
-            showline: true,
-            mirror: true,
-            linecolor: 'rgba(128,128,128,0.5)',
-            rangeslider: {visible: false},
-            title: {
-                text: 'Fecha/Hora',
-                font: {color: 'white', size: 11},
-                standoff: 20
-            }
-        },
-        yaxis: {
-            title: 'Precio',
-            gridcolor: 'rgba(128,128,128,0.2)',
-            gridwidth: 0.5,
-            showgrid: true,
-            showline: true,
-            mirror: true,
-            linecolor: 'rgba(128,128,128,0.5)',
-            fixedrange: false,
-            autorange: true,
-            titlefont: {
-                color: 'white',
-                size: 12
-            }
-        },
-        template: 'plotly_dark',
-        height: 350,
-        margin: {
-            l: 60,
-            r: 80,
-            t: 50,
-            b: 80  // Más espacio abajo para la leyenda
-        },
-        showlegend: true,
-        legend: {
-            orientation: 'h',
-            yanchor: 'top',
-            y: -0.2,  // Debajo del gráfico
-            xanchor: 'center',
-            x: 0.5,
-            font: {
-                color: 'white',
-                size: 8,
-                family: 'Arial'
-            },
-            bgcolor: 'rgba(0,0,0,0.7)',
-            bordercolor: 'rgba(255,255,255,0.2)',
-            borderwidth: 1
-        },
-        paper_bgcolor: '#0A0C10',
-        plot_bgcolor: '#0A0C10',
-        hovermode: 'x unified',
-        hoverlabel: {
-            bgcolor: '#0A0C10',
-            bordercolor: 'rgba(255,255,255,0.2)',
-            font: {
-                color: 'white',
-                size: 11,
-                family: 'Arial'
-            }
-        }
-    };
-    
-    Plotly.newPlot('fibonacci-chart', traces, layout, {
-        responsive: true,
-        displaylogo: false,
-        displayModeBar: true,
-        modeBarButtonsToRemove: ['zoom2d', 'pan2d', 'select2d', 'lasso2d', 'zoomIn2d', 'zoomOut2d', 'autoScale2d', 'resetScale2d']
-    });
-    
-    const interpretation = document.getElementById('fibonacci-interpretation');
-    if (interpretation && data.current_price) {
-        const currentPrice = data.current_price;
-        let nearestFib = '';
-        let minDiff = Infinity;
-        let nearestPrice = 0;
-        
-        // Buscar el nivel Fibonacci más cercano
-        Object.entries(fibLevels).forEach(([level, price]) => {
-            const diff = Math.abs(price - currentPrice);
-            if (diff < minDiff) {
-                minDiff = diff;
-                nearestFib = `${(parseFloat(level) * 100).toFixed(1)}%`;
-                nearestPrice = price;
-            }
-        });
-        
-        Object.entries(fibExtensions).forEach(([level, price]) => {
-            const diff = Math.abs(price - currentPrice);
-            if (diff < minDiff) {
-                minDiff = diff;
-                nearestFib = `${(parseFloat(level) * 100).toFixed(1)}%`;
-                nearestPrice = price;
-            }
-        });
-        
-        // Determinar si es soporte o resistencia
-        const isSupport = nearestPrice < currentPrice;
-        const type = isSupport ? 'soporte' : 'resistencia';
-        const color = isSupport ? '#00C076' : '#FF5B5B';
-        
-        interpretation.innerHTML = `Nivel Fibonacci más cercano: <span style="color: ${color}; font-weight: bold;">${nearestFib}</span> ($${nearestPrice.toFixed(2)}) - Actúa como <span style="color: ${color};">${type}</span>`;
-    }
+
+    const layout = window.TradingTheme?.baseLayout
+        ? window.TradingTheme.baseLayout('Niveles de Fibonacci', {
+            height: 350,
+            xaxis: {type: 'date', rangeslider: {visible: false}, gridcolor: theme.grid || 'rgba(120,142,170,.16)'},
+            yaxis: {title: 'Precio', gridcolor: theme.grid || 'rgba(120,142,170,.16)'},
+            margin: {l: 58, r: 28, t: 48, b: 46}
+        })
+        : {template: 'plotly_dark', height: 350, xaxis: {rangeslider: {visible: false}}};
+
+    try { Plotly.react(chartDiv, traces, layout, {responsive: true, displaylogo: false}); }
+    catch (error) { console.error('Error al generar Fibonacci:', error); }
 }
-// ============ DETECTOR DE BALLENAS - SOLO HISTOGRAMA ============
+
+// ============ GRÁFICO DE BALLENAS ============
 function updateWhaleChart(data) {
     const chartDiv = document.getElementById('whale-chart');
     if (!chartDiv || !data.df) return;
@@ -5926,46 +5684,124 @@ function calculateRSIPeriod(prices, period = 14) {
 // ============ RSI Tradicional ============
 function updateRSIChart(data) {
     const chartDiv = document.getElementById('rsi-chart');
-    if (!chartDiv || !data.df) return;
+    if (!chartDiv || !data?.df) return;
 
-    const dates = data.df.time || [];
-    const close = data.df.close || [];
+    const datesAll = data.df.time || [];
+    const closeAll = (data.df.close || []).map(Number);
+    if (datesAll.length < 20 || closeAll.length !== datesAll.length) return;
+
     const timeframe = String(data.timeframe || '');
     const systemType = String(data.system_type || '').toLowerCase();
-    const lastDates = dates.slice(-50);
+    const count = Math.min(70, datesAll.length);
+    const dates = datesAll.slice(-count).map(d => new Date(d));
+    const close = closeAll.slice(-count);
+    const theme = window.TradingTheme?.palette || {};
     const traces = [];
+    const shapes = [];
+    const annotations = [];
 
     let periods = [14];
-    let profile = 'TRADICIONAL';
+    let profileLabel = 'RSI tradicional';
     if (systemType === 'futures') {
-        if (timeframe === '5m' || timeframe === '15m') { periods = [3, 7, 14]; profile = 'FAST'; }
-        else if (timeframe === '30m' || timeframe === '1h' || timeframe === '2h') { periods = [7, 14, 21]; profile = timeframe === '2h' ? 'STRUCTURAL' : 'BALANCED'; }
-        else if (timeframe === '4h') { periods = [14]; profile = 'STRUCTURAL'; }
+        if (timeframe === '5m' || timeframe === '15m') {
+            periods = [3, 7, 14]; profileLabel = 'Perfil rápido · estrategia en evaluación';
+        } else if (timeframe === '30m' || timeframe === '1h') {
+            periods = [7, 14, 21]; profileLabel = 'Perfil equilibrado · estrategia en evaluación';
+        } else if (timeframe === '2h') {
+            periods = [7, 14, 21]; profileLabel = 'Perfil estructural · estrategia en evaluación';
+        } else {
+            periods = [14]; profileLabel = 'Perfil estructural';
+        }
     }
 
-    periods.forEach((period, idx) => {
-        const rsi = calculateRSIPeriod(close, period);
+    if (systemType !== 'futures') {
         traces.push({
-            x: lastDates, y: rsi.slice(-50), type: 'scatter', mode: 'lines',
-            name: `RSI ${period}${period === 14 ? ' · base' : ''}`,
-            line: {width: period === 14 ? 2.2 : 1.4}
+            x: dates, y: close, type: 'scatter', mode: 'lines', name: 'Precio',
+            line: {color: theme.text || '#e7edf5', width: 1.4}, yaxis: 'y',
+            hovertemplate: '$%{y:,.4f}<extra>Precio</extra>'
+        });
+    }
+
+    const rsiColors = [theme.info || '#5aa7ff', theme.warning || '#e5b94f', theme.research || '#a78bfa'];
+    periods.forEach((period, idx) => {
+        const full = calculateRSIPeriod(closeAll, period);
+        traces.push({
+            x: dates, y: full.slice(-count), type: 'scatter', mode: 'lines',
+            name: systemType === 'futures'
+                ? (idx === 0 && periods.length > 1 ? 'RSI rápido' : idx === periods.length - 1 && periods.length > 1 ? 'RSI estructural' : 'RSI base')
+                : `RSI ${period}`,
+            line: {color: rsiColors[idx % rsiColors.length], width: period === 14 ? 2.2 : 1.5},
+            yaxis: systemType === 'futures' ? 'y' : 'y2'
         });
     });
 
-    const layout = {
-        title: {text: systemType === 'futures' ? `RSI · ${profile} · Q7 Shadow` : 'RSI Tradicional', font: {color: 'white', size: 14}},
-        xaxis: {type:'date', gridcolor:'rgba(128,128,128,0.2)', gridwidth:0.5, showgrid:true, showline:true, mirror:true, linecolor:'rgba(128,128,128,0.5)'},
-        yaxis: {title:'RSI', range:[0,100], gridcolor:'rgba(128,128,128,0.2)', gridwidth:0.5, showgrid:true, showline:true, mirror:true, linecolor:'rgba(128,128,128,0.5)'},
-        template:'plotly_dark', height:300, margin:{l:50,r:50,t:50,b:30},
-        paper_bgcolor:'#0A0C10', plot_bgcolor:'#0A0C10', hovermode:'x unified',
-        legend:{orientation:'h', yanchor:'bottom', y:1.02, xanchor:'right', x:1, font:{color:'white',size:9}},
-        shapes:[
-            {type:'line',x0:lastDates[0],y0:70,x1:lastDates[lastDates.length-1],y1:70,line:{width:1,dash:'dot'}},
-            {type:'line',x0:lastDates[0],y0:30,x1:lastDates[lastDates.length-1],y1:30,line:{width:1,dash:'dot'}},
-            {type:'line',x0:lastDates[0],y0:50,x1:lastDates[lastDates.length-1],y1:50,line:{width:1,dash:'dot'}}
-        ]
-    };
-    Plotly.newPlot('rsi-chart', traces, layout, {responsive:true, displaylogo:false});
+    const x0 = dates[0], x1 = dates[dates.length - 1];
+    const rsiAxis = systemType === 'futures' ? 'y' : 'y2';
+    const xref = systemType === 'futures' ? 'x' : 'x2';
+    [
+        [70, 'Sobrecompra', theme.bearish || '#f05d6f'],
+        [50, 'Equilibrio', theme.neutral || '#8190a5'],
+        [30, 'Sobreventa', theme.bullish || '#22c982']
+    ].forEach(([level, label, color]) => {
+        shapes.push({type: 'line', xref, yref: rsiAxis, x0, x1, y0: level, y1: level, line: {color, width: 1, dash: 'dot'}});
+        annotations.push({xref: 'paper', yref: rsiAxis, x: 1, y: level, text: label, showarrow: false, xanchor: 'right', yanchor: 'bottom', font: {color, size: 9}});
+    });
+
+    if (systemType !== 'futures') {
+        shapes.push(
+            {type: 'rect', xref: 'x2', yref: 'y2', x0, x1, y0: 70, y1: 100, fillcolor: 'rgba(240,93,111,0.06)', line: {width: 0}, layer: 'below'},
+            {type: 'rect', xref: 'x2', yref: 'y2', x0, x1, y0: 0, y1: 30, fillcolor: 'rgba(34,201,130,0.06)', line: {width: 0}, layer: 'below'}
+        );
+        const details = data.momentum?.divergence_details || [];
+        details.filter(d => String(d.oscillator || '').toUpperCase() === 'RSI').forEach((div, idx) => {
+            const pricePts = (div.price_points || []).filter(Boolean);
+            const rsiPts = (div.oscillator_points || []).filter(Boolean);
+            const bullish = String(div.type || '').includes('bullish');
+            const hidden = String(div.type || '').startsWith('hidden_');
+            const color = bullish ? (theme.bullish || '#22c982') : (theme.bearish || '#f05d6f');
+            if (pricePts.length === 2) {
+                traces.push({
+                    x: pricePts.map(p => new Date(p.time)), y: pricePts.map(p => Number(p.value)),
+                    type: 'scatter', mode: 'lines+markers',
+                    name: `${hidden ? 'Divergencia oculta' : 'Divergencia'} ${bullish ? 'alcista' : 'bajista'}`,
+                    line: {color, width: 2, dash: hidden ? 'dash' : 'solid'}, marker: {size: 6, color}, yaxis: 'y', showlegend: idx === 0
+                });
+            }
+            if (rsiPts.length === 2) {
+                traces.push({
+                    x: rsiPts.map(p => new Date(p.time)), y: rsiPts.map(p => Number(p.value)),
+                    type: 'scatter', mode: 'lines+markers', name: 'Confirmación RSI',
+                    line: {color, width: 2, dash: hidden ? 'dash' : 'solid'}, marker: {size: 6, color}, yaxis: 'y2', showlegend: false
+                });
+            }
+        });
+    }
+
+    let layout;
+    if (systemType === 'futures') {
+        layout = window.TradingTheme?.baseLayout
+            ? window.TradingTheme.baseLayout(`RSI · ${profileLabel}`, {
+                height: 330, shapes, annotations,
+                xaxis: {type: 'date', gridcolor: theme.grid || 'rgba(120,142,170,.16)'},
+                yaxis: {title: 'RSI', range: [0, 100], gridcolor: theme.grid || 'rgba(120,142,170,.16)'},
+                margin: {l: 52, r: 24, t: 50, b: 42}
+            })
+            : {template: 'plotly_dark', height: 330, shapes, annotations, yaxis: {range: [0, 100]}};
+    } else {
+        layout = window.TradingTheme?.baseLayout
+            ? window.TradingTheme.baseLayout('RSI tradicional y divergencias', {
+                height: 430, shapes, annotations, hovermode: 'x unified',
+                xaxis: {domain: [0, 1], anchor: 'y', showticklabels: false, gridcolor: theme.grid || 'rgba(120,142,170,.16)'},
+                yaxis: {domain: [0.58, 1], title: 'Precio', gridcolor: theme.grid || 'rgba(120,142,170,.16)'},
+                xaxis2: {domain: [0, 1], anchor: 'y2', matches: 'x', type: 'date', gridcolor: theme.grid || 'rgba(120,142,170,.16)'},
+                yaxis2: {domain: [0, 0.47], title: 'RSI', range: [0, 100], gridcolor: theme.grid || 'rgba(120,142,170,.16)'},
+                margin: {l: 58, r: 30, t: 50, b: 44}
+            })
+            : {template: 'plotly_dark', height: 430, shapes, annotations};
+    }
+
+    try { Plotly.react(chartDiv, traces, layout, {responsive: true, displaylogo: false}); }
+    catch (error) { console.error('Error al generar RSI:', error); }
 }
 
 // ============ Estocástico ============
@@ -7596,59 +7432,117 @@ function calculateEMA(prices, period) {
     return ema;
 }
 
+// ============ VWAP — VISUALIZACIÓN ADAPTATIVA / MANUAL ============
+function updateVWAPChart(data) {
+    const chartDiv = document.getElementById('vwap-chart');
+    if (!chartDiv || !data?.df) return;
+    const df = data.df;
+    const times = df.time || [];
+    const high = (df.high || []).map(Number), low = (df.low || []).map(Number), close = (df.close || []).map(Number), volume = (df.volume || []).map(Number);
+    const n = Math.min(times.length, high.length, low.length, close.length, volume.length);
+    if (n < 12) return;
+    const tf = String(data.timeframe || '1h');
+    const targetMap = {'5m': 288, '15m': 96, '30m': 48, '1h': 24, '2h': 24, '4h': 18, '12h': 14, '1D': 14, '1W': 12};
+    const windowBars = Math.max(12, targetMap[tf] || 24);
+    const series = new Array(n).fill(null);
+    for (let i = 0; i < n; i++) {
+        const from = Math.max(0, i - windowBars + 1);
+        let pv = 0, vv = 0;
+        for (let j = from; j <= i; j++) {
+            const typical = (high[j] + low[j] + close[j]) / 3;
+            const vol = Math.max(0, volume[j] || 0);
+            pv += typical * vol; vv += vol;
+        }
+        series[i] = vv > 0 ? pv / vv : close[i];
+    }
+    const count = Math.min(100, n);
+    const dates = times.slice(n - count, n).map(d => new Date(d));
+    const prices = close.slice(n - count, n), vwaps = series.slice(n - count, n);
+    const deviations = prices.map((price, idx) => price - vwaps[idx]);
+    const std = Math.sqrt(deviations.reduce((acc, v) => acc + v * v, 0) / Math.max(1, deviations.length));
+    const upper = vwaps.map(v => v + std), lower = vwaps.map(v => v - std);
+    const theme = window.TradingTheme?.palette || {};
+    const traces = [
+        {x: dates, y: prices, type: 'scatter', mode: 'lines', name: 'Precio', line: {color: theme.text || '#e7edf5', width: 1.4}},
+        {x: dates, y: vwaps, type: 'scatter', mode: 'lines', name: 'VWAP', line: {color: theme.info || '#5aa7ff', width: 2.2}},
+        {x: dates, y: upper, type: 'scatter', mode: 'lines', name: 'Banda superior', line: {color: theme.warning || '#e5b94f', width: 1, dash: 'dot'}},
+        {x: dates, y: lower, type: 'scatter', mode: 'lines', name: 'Banda inferior', line: {color: theme.warning || '#e5b94f', width: 1, dash: 'dot'}}
+    ];
+    const lab = data.strategy_lab?.strategies?.vwap_reversion || {};
+    const state = String(lab.state || '');
+    const subtitle = state.includes('LONG') ? 'Posible reversión alcista en evaluación' : state.includes('SHORT') ? 'Posible reversión bajista en evaluación' : 'Contexto de precio y volumen';
+    const layout = window.TradingTheme?.baseLayout
+        ? window.TradingTheme.baseLayout(`Precio medio ponderado por volumen · ${subtitle}`, {
+            height: 340,
+            xaxis: {type: 'date', gridcolor: theme.grid || 'rgba(120,142,170,.16)'},
+            yaxis: {title: 'Precio', gridcolor: theme.grid || 'rgba(120,142,170,.16)'},
+            margin: {l: 58, r: 28, t: 50, b: 44}
+        })
+        : {template: 'plotly_dark', height: 340};
+    try { Plotly.react(chartDiv, traces, layout, {responsive: true, displaylogo: false}); }
+    catch (error) { console.error('Error VWAP:', error); }
+}
+
 // ============ UPDATE ALL CHARTS ============
+window.renderIndicatorChart = function(indicatorId, data) {
+    const renderers = {
+        'ftm': updateFTMChart,
+        'liquidation-heatmap': updateLiquidationHeatmap,
+        'fear-greed': window.updateFearGreedChart,
+        'whale': updateWhaleChart,
+        'rsi_maverick': updateRSIMaverickChart,
+        'ichimoku': updateIchimokuChart,
+        'squeeze': updateSqueezeChart,
+        'adx': updateADXChart,
+        'macd': updateMACDChart,
+        'rsi': updateRSIChart,
+        'stochastic': updateStochasticChart,
+        'volume': updateVolumeChart,
+        'supertrend': updateSuperTrendChart,
+        'bollinger': updateBollingerChart,
+        'atr': updateATRChart,
+        'volume-profile': updateVolumeProfileChart,
+        'fvg-ob': updateFVGAOBChart,
+        'williams-cci': updateWilliamsCCIChart,
+        'mfi-force': updateMFIForceChart,
+        'fibonacci': updateFibonacciChart,
+        'vwap': updateVWAPChart,
+        'trading-zones': updateTradingZones
+    };
+    const fn = renderers[indicatorId];
+    if (typeof fn === 'function') {
+        try { fn(data); } catch (error) { console.error(`Error renderizando ${indicatorId}:`, error); }
+    }
+};
+
 window.updateAllCharts = function(data) {
     if (!data || !data.df) {
         console.warn('No hay datos para actualizar gráficos');
         return;
     }
-    
-    console.log('Actualizando todos los gráficos...');
-    
-    // ============ GRÁFICOS EXISTENTES ============
-    updateCandleChart(data);
-    updateFibonacciChart(data);
-    updateFTMChart(data);
-    updateWhaleChart(data);
-    updateRSIMaverickChart(data);
-    updateIchimokuChart(data);
-    updateSqueezeChart(data);
-    updateADXChart(data);
-    updateMACDChart(data);
-    updateRSIChart(data);
-    updateStochasticChart(data);
-    updateSuperTrendChart(data);
-    updateBollingerChart(data);
-    updateATRChart(data);
-    
-    // ============ GRÁFICOS FUSIONADOS ============
-    updateVolumeChart(data);
-    updateVolumeProfileChart(data);
-    updateFVGAOBChart(data);
-    updateWilliamsCCIChart(data);
-    updateMFIForceChart(data);
-    
-    // ============ NUEVO GRÁFICO FEAR & GREED ============
-    if (typeof window.updateFearGreedChart === 'function') {
-        window.updateFearGreedChart(data);
-        console.log('✅ Gráfico Fear & Greed actualizado');
-    } else {
-        console.warn('⚠️ updateFearGreedChart no está disponible');
-    }
-    
-    // ============ NUEVO: MAPA DE CALOR DE LIQUIDACIONES ============
-    updateLiquidationHeatmap(data);  // <--- AÑADIR ESTA LÍNEA
-    // ============ NUEVO: ZONAS DINÁMICAS DE TRADING ============
-    updateTradingZones(data); //Se añadio esta linea    
-    // ============ ACTUALIZAR INFORMACIÓN DE CORRELACIÓN ============
-    if (typeof window.updateCorrelationInfo === 'function') {
-        window.updateCorrelationInfo(data);
-        console.log('✅ Correlación actualizada');
-    } else {
-        console.warn('⚠️ updateCorrelationInfo no está disponible');
-    }
-}
+    const workspace = window.ChartWorkspace;
+    if (workspace?.updateAnalysis) workspace.updateAnalysis(data);
+    const should = id => !workspace?.shouldRender || workspace.shouldRender(id);
 
+    updateCandleChart(data);
+    updateTradingZones(data);
+
+    [
+        ['ftm', updateFTMChart], ['liquidation-heatmap', updateLiquidationHeatmap],
+        ['whale', updateWhaleChart], ['rsi_maverick', updateRSIMaverickChart],
+        ['ichimoku', updateIchimokuChart], ['squeeze', updateSqueezeChart],
+        ['adx', updateADXChart], ['macd', updateMACDChart], ['rsi', updateRSIChart],
+        ['stochastic', updateStochasticChart], ['volume', updateVolumeChart],
+        ['supertrend', updateSuperTrendChart], ['bollinger', updateBollingerChart],
+        ['atr', updateATRChart], ['volume-profile', updateVolumeProfileChart],
+        ['fvg-ob', updateFVGAOBChart], ['williams-cci', updateWilliamsCCIChart],
+        ['mfi-force', updateMFIForceChart], ['fibonacci', updateFibonacciChart],
+        ['vwap', updateVWAPChart]
+    ].forEach(([id, fn]) => { if (should(id)) fn(data); });
+    if (should('fear-greed') && typeof window.updateFearGreedChart === 'function') window.updateFearGreedChart(data);
+    if (typeof window.updateCorrelationInfo === 'function') window.updateCorrelationInfo(data);
+    setTimeout(() => window.TradingTheme?.applyVisible(document), 20);
+};
 
 // ============ NUEVO: MAPA DE CALOR DE LIQUIDACIONES ============
 // Ubicación: DESPUÉS de la función updateAllCharts
@@ -7896,8 +7790,8 @@ function updateTradingZones(data) {
     
     let zones = data.zones || (data.data && data.data.zones);
     if (!zones || !zones.active_zones) {
-        console.log('❌ No hay datos de zonas');
-        return;
+        console.log('ℹ️ Sin zonas activas; se mantiene estructura y líneas dinámicas');
+        zones = {active_zones: {}, price_status: {}};
     }
     
     const activeZones = zones.active_zones;
@@ -8161,6 +8055,33 @@ function updateTradingZones(data) {
         });
     });
     
+    // COMMIT 5 — líneas de tendencia objetivas dentro de Zonas Dinámicas.
+    // Evidencia visual únicamente; no cambia la decisión.
+    const trendGeometry = data?.strategy_lab?.trendlines?.geometry || {};
+    ['support', 'resistance'].forEach(kind => {
+        const line = trendGeometry[kind];
+        if (!line || Number(line.quality || 0) < 45) return;
+        const totalBars = dates.length;
+        const visibleOffset = Math.max(0, totalBars - maxBars);
+        const startGlobal = Math.max(Number(line.start_index || 0), visibleOffset);
+        const endGlobal = Math.min(Number(line.end_index ?? (totalBars - 1)), totalBars - 1);
+        if (startGlobal > endGlobal) return;
+        const slope = Number(line.slope_per_candle || 0);
+        const originalStart = Number(line.start_index || startGlobal);
+        const originalPrice = Number(line.start_price || 0);
+        const startPrice = originalPrice + slope * (startGlobal - originalStart);
+        const endPrice = originalPrice + slope * (endGlobal - originalStart);
+        const startDate = dates[startGlobal], endDate = dates[endGlobal];
+        if (!startDate || !endDate || !(startPrice > 0) || !(endPrice > 0)) return;
+        const isSupport = kind === 'support';
+        traces.push({
+            x: [startDate, endDate], y: [startPrice, endPrice], type: 'scatter', mode: 'lines',
+            name: isSupport ? 'Soporte dinámico · en evaluación' : 'Resistencia dinámica · en evaluación',
+            line: {color: isSupport ? (window.TradingTheme?.palette?.bullish || '#22c982') : (window.TradingTheme?.palette?.bearish || '#f05d6f'), width: 2.2, dash: 'dash'},
+            hovertemplate: `${isSupport ? 'Soporte' : 'Resistencia'} dinámico<br>Calidad geométrica: ${Math.round(Number(line.quality || 0))}/100<br>%{x}<br>$%{y:,.4f}<extra></extra>`
+        });
+    });
+
     const currentPrice = data.current_price || lastClose[lastClose.length - 1];
     shapes.push({
         type: 'line',
@@ -8175,7 +8096,7 @@ function updateTradingZones(data) {
     });
     
     const layout = {
-        title: { text: `Zonas de Trading (${timeframe})`, font: { color: 'white', size: 14 } },
+        title: { text: `Zonas dinámicas de trading · ${timeframe}`, font: { color: window.TradingTheme?.palette?.text || '#e7edf5', size: 14 } },
         xaxis: {
             type: 'date',
             range: [lastDates[0], lastDates[lastDates.length - 1]],
@@ -8193,8 +8114,8 @@ function updateTradingZones(data) {
         template: 'plotly_dark',
         height: 350,
         margin: { l: 60, r: 60, t: 50, b: 80 },
-        paper_bgcolor: '#0A0C10',
-        plot_bgcolor: '#0A0C10',
+        paper_bgcolor: window.TradingTheme?.palette?.panel || '#0d1726',
+        plot_bgcolor: window.TradingTheme?.palette?.panel || '#0d1726',
         shapes: shapes,
         showlegend: false,
         hovermode: 'x unified',

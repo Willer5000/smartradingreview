@@ -9187,6 +9187,39 @@ class TradingExpertSystem:
             divergence_signals = []
             hidden_divergence_signals = []
             divergence_details = []
+
+            # COMMIT 5 — coordenadas visuales de divergencia.
+            # Sólo describen la misma divergencia ya detectada; no cambian votos ni score.
+            def _visual_point(series, start_idx, end_idx, mode='min'):
+                try:
+                    start_idx = max(0, int(start_idx))
+                    end_idx = min(n, int(end_idx))
+                    if end_idx <= start_idx:
+                        return None
+                    indices = list(range(start_idx, end_idx))
+                    if mode == 'max':
+                        idx = max(indices, key=lambda i: float(series[i]))
+                    else:
+                        idx = min(indices, key=lambda i: float(series[i]))
+                    raw_time = df['time'].iloc[idx] if 'time' in df.columns else idx
+                    try:
+                        time_value = raw_time.strftime('%Y-%m-%d %H:%M:%S')
+                    except Exception:
+                        time_value = str(raw_time)
+                    return {
+                        'index': int(idx),
+                        'time': str(time_value),
+                        'value': float(series[idx])
+                    }
+                except Exception:
+                    return None
+
+            def _pair_points(series, first_range, second_range, mode='min'):
+                points = [
+                    _visual_point(series, first_range[0], first_range[1], mode),
+                    _visual_point(series, second_range[0], second_range[1], mode),
+                ]
+                return [point for point in points if point]
             
             direction_score = 0
             
@@ -9279,7 +9312,9 @@ class TradingExpertSystem:
                     divergence_details.append({
                         'type': 'bullish',
                         'oscillator': 'RSI',
-                        'description': f'RSI en {rsi_low_5:.1f} vs {rsi_low_10:.1f}'
+                        'description': f'RSI en {rsi_low_5:.1f} vs {rsi_low_10:.1f}',
+                        'price_points': _pair_points(close, (n - 10, n - 5), (n - 5, n), 'min'),
+                        'oscillator_points': _pair_points(rsi, (n - 10, n - 5), (n - 5, n), 'min')
                     })
                     direction_score += 3
                 
@@ -9294,7 +9329,9 @@ class TradingExpertSystem:
                     divergence_details.append({
                         'type': 'bearish',
                         'oscillator': 'RSI',
-                        'description': f'RSI en {rsi_high_5:.1f} vs {rsi_high_10:.1f}'
+                        'description': f'RSI en {rsi_high_5:.1f} vs {rsi_high_10:.1f}',
+                        'price_points': _pair_points(close, (n - 10, n - 5), (n - 5, n), 'max'),
+                        'oscillator_points': _pair_points(rsi, (n - 10, n - 5), (n - 5, n), 'max')
                     })
                     direction_score -= 3
                 
@@ -9396,7 +9433,9 @@ class TradingExpertSystem:
                     divergence_details.append({
                         'type': 'hidden_bullish',
                         'oscillator': 'RSI',
-                        'description': 'Divergencia oculta alcista'
+                        'description': 'Divergencia oculta alcista',
+                        'price_points': _pair_points(close, (n - 15, n - 5), (n - 5, n), 'min'),
+                        'oscillator_points': _pair_points(rsi, (n - 15, n - 5), (n - 5, n), 'min')
                     })
                     direction_score += 4
                 
@@ -9412,7 +9451,9 @@ class TradingExpertSystem:
                     divergence_details.append({
                         'type': 'hidden_bearish',
                         'oscillator': 'RSI',
-                        'description': 'Divergencia oculta bajista'
+                        'description': 'Divergencia oculta bajista',
+                        'price_points': _pair_points(close, (n - 15, n - 5), (n - 5, n), 'max'),
+                        'oscillator_points': _pair_points(rsi, (n - 15, n - 5), (n - 5, n), 'max')
                     })
                     direction_score -= 4
             
@@ -19345,6 +19386,77 @@ class TradingExpertSystem:
                 dataframe=df
             )
             
+            # COMMIT 5 — Visual Evidence Router.
+            # Metadatos exclusivos de presentación: no alteran consenso, Safety ni niveles.
+            visual_evidence = {'version': 'VISUAL_EVIDENCE_V1', 'recommended': [], 'max_auto': 4}
+            try:
+                evidence = {}
+                def _add_visual(chart, label, score, reason):
+                    current = evidence.get(chart)
+                    item = {
+                        'chart': str(chart),
+                        'label': str(label),
+                        'score': int(score),
+                        'reason': str(reason)[:160],
+                    }
+                    if current is None or item['score'] > current['score']:
+                        evidence[chart] = item
+
+                reason_text = ' '.join(
+                    [str(message or '')]
+                    + [str(v) for v in (razones_consenso or [])]
+                    + [str(v) for v in (estrategias_consenso or [])]
+                ).lower()
+
+                divs = (momentum.get('divergences', []) if isinstance(momentum, dict) else []) or []
+                hidden_divs = (momentum.get('hidden_divergences', []) if isinstance(momentum, dict) else []) or []
+                rsi_value = float(((momentum.get('indicators', {}) or {}).get('rsi', 50)) if isinstance(momentum, dict) else 50)
+                if divs or hidden_divs:
+                    _add_visual('rsi', 'RSI y divergencias', 100, 'Divergencia detectada')
+                elif rsi_value <= 35 or rsi_value >= 65 or 'rsi' in reason_text:
+                    _add_visual('rsi', 'RSI y divergencias', 84, 'Momentum RSI relevante')
+
+                adx_value = float((trend.get('adx', 0) if isinstance(trend, dict) else 0) or 0)
+                if adx_value >= 25 or 'adx' in reason_text or 'dmi' in reason_text:
+                    _add_visual('adx', 'Fuerza de tendencia', 82, 'Fuerza direccional relevante')
+
+                if any(token in reason_text for token in ('volumen', 'ballena', 'whale', 'obv', 'mfi')):
+                    _add_visual('volume', 'Volumen y presión de mercado', 88, 'Volumen citado en la justificación')
+                if any(token in reason_text for token in ('poc', 'hvn', 'lvn', 'perfil de volumen')):
+                    _add_visual('volume-profile', 'Perfil de volumen', 90, 'Nivel de volumen relevante')
+                if any(token in reason_text for token in ('liquid', 'liquidez agrupada')):
+                    _add_visual('liquidation-heatmap', 'Mapa de liquidaciones', 86, 'Liquidez o liquidaciones relevantes')
+                if any(token in reason_text for token in ('order block', 'fvg', 'sweep', 'barrido', 'mss', 'displacement')):
+                    _add_visual('fvg-ob', 'Estructura institucional', 94, 'Estructura institucional en la justificación')
+                if 'fibonacci' in reason_text or ' fib ' in f' {reason_text} ':
+                    _add_visual('fibonacci', 'Niveles de Fibonacci', 76, 'Confluencia Fibonacci relevante')
+                if 'macd' in reason_text:
+                    _add_visual('macd', 'MACD', 72, 'MACD citado en la justificación')
+                if 'squeeze' in reason_text or 'compresi' in reason_text:
+                    _add_visual('squeeze', 'Compresión de volatilidad', 80, 'Compresión de volatilidad relevante')
+                if 'bollinger' in reason_text:
+                    _add_visual('bollinger', 'Bandas de Bollinger', 74, 'Bandas de Bollinger relevantes')
+
+                strategies_visual = strategy_lab.get('strategies', {}) if isinstance(strategy_lab, dict) else {}
+                retest_visual = strategies_visual.get('breakout_retest', {}) if isinstance(strategies_visual, dict) else {}
+                if str(retest_visual.get('direction', 'NEUTRAL')).upper() in ('LONG', 'SHORT'):
+                    _add_visual('trading-zones', 'Zonas dinámicas de trading', 98, 'Ruptura y retesteo en evaluación')
+                trendline_visual = strategy_lab.get('trendlines', {}) if isinstance(strategy_lab, dict) else {}
+                if trendline_visual.get('eligible'):
+                    _add_visual('trading-zones', 'Zonas dinámicas de trading', 97, 'Soporte o resistencia dinámica detectada')
+
+                visual_evidence['recommended'] = sorted(
+                    evidence.values(),
+                    key=lambda item: (-item['score'], item['label'])
+                )
+            except Exception as visual_error:
+                visual_evidence = {
+                    'version': 'VISUAL_EVIDENCE_V1',
+                    'recommended': [],
+                    'max_auto': 4,
+                    'error': str(visual_error)[:120],
+                }
+
             print(f"✅ ANÁLISIS COMPLETADO para {symbol} {timeframe}")
             print(f"{'='*60}\n")
             
@@ -19382,6 +19494,7 @@ class TradingExpertSystem:
                 'liquidation': self._make_serializable(liquidation_data),
                 'market_regime': self._make_serializable(market_regime),   # nueva capa
                 'strategy_lab': self._make_serializable(strategy_lab),
+                'visual_evidence': self._make_serializable(visual_evidence),
                 'zones': self._make_serializable({
                     'active_zones': zonas_data,
                     'price_status': price_status,

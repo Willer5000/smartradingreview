@@ -1,12 +1,28 @@
 // analytics.js - Lógica de la página /analytics
 // Consume /api/analytics/* y /api/review/logs
 
-console.log('📈 analytics.js cargado');
+console.log('Análisis del sistema cargado');
+
+function uiHumanLabel(value) {
+    const raw = String(value ?? '');
+    const exact = {
+        'SHADOW_ONLY': 'En evaluación · no afecta operaciones',
+        'C4_STRATEGY_REGISTRY_V2': 'Registro de estrategias actual',
+        'Q7_STRATEGY_LAB_SHADOW_V1': 'Laboratorio de estrategias actual',
+        '36W_V2_NORMALIZED': 'Motor de calidad actual',
+        'HARD_SAFETY': 'Descartada por seguridad',
+        'PRE_GATE_REJECTION': 'Descartada antes de publicación',
+        'CAUTIOUS_SHADOW': 'Configuración prudente en evaluación'
+    };
+    if (exact[raw]) return exact[raw];
+    if (/^[A-Z]?\d+[A-Z][A-Z0-9_.-]*$/.test(raw) || /^Q\d[A-Z0-9_.-]*$/i.test(raw)) return 'Motor actual';
+    return raw.replace(/_/g, ' ');
+}
 
 const PLOTLY_LAYOUT_BASE = {
-    paper_bgcolor: '#0F1115',
-    plot_bgcolor: '#0F1115',
-    font: { family: 'Arial', size: 11, color: 'white' },
+    paper_bgcolor: '#0d1726',
+    plot_bgcolor: '#0d1726',
+    font: { family: '-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif', size: 11, color: '#e7edf5' },
     margin: { l: 60, r: 30, t: 30, b: 60 }
 };
 
@@ -686,6 +702,30 @@ function q7PushMetricRows(
 }
 
 
+function q7FriendlyGroup(value) {
+    const raw = String(value || '');
+    const upper = raw.toUpperCase();
+    const profile = upper.split('|')[0];
+    const alignment = upper.split('|')[1];
+    const profileLabels = { FAST: 'Perfil rápido', BALANCED: 'Perfil equilibrado', STRUCTURAL: 'Perfil estructural' };
+    const alignmentLabels = { ALIGNED: 'alineado', NEUTRAL: 'neutral', CONFLICT: 'en conflicto' };
+    if (profileLabels[profile] && alignmentLabels[alignment]) return `${profileLabels[profile]} · ${alignmentLabels[alignment]}`;
+    const exact = {
+        VWAP_RANGE_REVERSION_LONG: 'Reversión VWAP alcista',
+        VWAP_RANGE_REVERSION_SHORT: 'Reversión VWAP bajista',
+        ACCEPTED_LONG_RETEST: 'Retesteo alcista confirmado',
+        ACCEPTED_SHORT_RETEST: 'Retesteo bajista confirmado',
+        BREAKOUT_PENDING_RETEST: 'Ruptura pendiente de retesteo',
+        BREAKDOWN_PENDING_RETEST: 'Ruptura bajista pendiente de retesteo'
+    };
+    return exact[upper] || uiHumanLabel(raw);
+}
+
+function q7FriendlyCategory(value) {
+    const raw = String(value || '').toUpperCase();
+    return ({ CONTROL: 'Referencia', RSI: 'RSI', VWAP: 'VWAP', RETEST: 'Ruptura y retesteo' })[raw] || uiHumanLabel(value);
+}
+
 function q7BuildRows(cohort) {
 
     const source = (
@@ -716,7 +756,7 @@ function q7BuildRows(cohort) {
                 'CONTROL',
 
             name:
-                'Todas las observaciones Q7',
+                'Todas las observaciones de estrategias adaptativas',
 
             row:
                 control
@@ -790,7 +830,7 @@ function q7RenderTable(
         tbody.innerHTML = `
             <tr>
                 <td colspan="10" class="text-center text-muted py-3">
-                    Sin observaciones Q7 en esta cohorte.
+                    Sin observaciones de estrategias adaptativas en esta cohorte.
                 </td>
             </tr>
         `;
@@ -873,8 +913,8 @@ function q7RenderTable(
 
             html += `
                 <tr>
-                    <td class="text-nowrap">${item.category}</td>
-                    <td><strong>${item.name}</strong></td>
+                    <td class="text-nowrap">${q7FriendlyCategory(item.category)}</td>
+                    <td><strong>${q7FriendlyGroup(item.name)}</strong></td>
                     <td>${total}</td>
                     <td>${q7EntryText(row)}</td>
                     <td class="text-success">${Number(row.tp_hit || 0)}</td>
@@ -937,15 +977,14 @@ function q7RenderStrategyLab(q7) {
 
     q5SetText(
         'q7-mode',
-        data.mode
-        || 'SHADOW_ONLY'
+        uiHumanLabel(data.mode || 'En evaluación · no afecta operaciones')
     );
 
     q5SetText(
         'q7-summary',
         (
             `Oficial: ${officialObservations.toLocaleString()} observaciones · `
-            + `Shadow: ${shadowObservations.toLocaleString()} · `
+            + `En evaluación: ${shadowObservations.toLocaleString()} · `
             + `Excluidas por integridad: ${excluded.toLocaleString()}`
         )
     );
@@ -978,17 +1017,17 @@ function q7RenderStrategyLab(q7) {
     ) {
 
         statusEl.textContent = (
-            '⏳ Q7 está activo en Shadow, pero todavía no existen '
-            + 'observaciones persistidas de esta versión.'
+            'Aún no existen resultados suficientes de las estrategias en evaluación. '
+            + 'observaciones suficientes para una comparación estable.'
         );
 
         return;
     }
 
     statusEl.textContent = (
-        '🧪 Q7 continúa SHADOW ONLY. '
-        + 'Las tablas sirven para comparar timing y outcomes; '
-        + 'ningún resultado cambia Safety, Entry, SL, TP, votos o publicación.'
+        'Las estrategias adaptativas continúan en evaluación y no afectan operaciones. '
+        + 'Las tablas comparan el momento de entrada y los resultados; '
+        + 'ningún resultado cambia seguridad, entrada, stop, objetivo, votos o publicación.'
     );
 }
 
@@ -1005,7 +1044,7 @@ async function loadQualityV2() {
         );
 
         statusEl.textContent = (
-            'Cargando cohorte V2...'
+            'Cargando rendimiento actual...'
         );
     }
 
@@ -1088,9 +1127,7 @@ async function loadQualityV2() {
 
         q5SetText(
             'q5-v2-version',
-            data.quality_score_version
-            || data.version
-            || 'V2'
+            'Motor de calidad actual'
         );
 
         // ============================================================
@@ -1218,7 +1255,7 @@ async function loadQualityV2() {
                         || 0
                     ).toLocaleString()
                 } · `
-                + `Futures Shadow: ${
+                + `Futures en evaluación: ${
                     Number(
                         coverage.futures_shadow_v2
                         || 0
@@ -1315,7 +1352,7 @@ async function loadQualityV2() {
                 body.innerHTML = `
                     <tr>
                         <td colspan="10" class="text-center text-danger">
-                            Q7 Analytics no disponible
+                            Análisis de estrategias adaptativas no disponible
                         </td>
                     </tr>
                 `;

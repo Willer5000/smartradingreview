@@ -3201,7 +3201,7 @@ async function({
     } catch (error) {
 
         console.warn(
-            '⚠️ 36P perfil de riesgo:',
+            '⚠️ Perfil de riesgo:',
             error
         );
 
@@ -3733,7 +3733,7 @@ function _futApplyRiskProfileToSaveModal(
 
             preview.textContent =
                 (
-                    'Perfil 36P: MANUAL. '
+                    'Perfil de riesgo: MANUAL. '
                     + 'Se conserva el sizing actual.'
                 );
         }
@@ -3806,7 +3806,7 @@ function _futApplyRiskProfileToSaveModal(
 
         preview.textContent =
             (
-                '36P · Margen sugerido: '
+                'Margen sugerido: '
                 + `${sizing.suggestedMargin.toFixed(2)} USDT`
                 + ' · pérdida aprox. al SL: '
                 + lossText
@@ -5018,7 +5018,7 @@ window.updateSavedSignalsList = async function() {
 
                     netEl.title =
                         (
-                            `36O — Neto ESTIMADO. `
+                            `Neto estimado. `
                             + `Muestra: ${netSamples}. `
                             + `Expectancy neta est.: `
                             + `${netExpText}R. `
@@ -5038,7 +5038,7 @@ window.updateSavedSignalsList = async function() {
                     netEl.title =
                         (
                             'Todavía no existen operaciones '
-                            + 'cerradas con economía 36O '
+                            + 'cerradas con economía calculable '
                             + 'completa.'
                         );
                 }
@@ -5102,7 +5102,7 @@ window.updateSavedSignalsList = async function() {
 
                 economicsEl.title =
                     (
-                        `Cobertura económica 36O: `
+                        `Cobertura económica: `
                         + `${netSamples}/${closedTotal}. `
                         + `Expectancy bruta: `
                         + `${grossExpText}R. `
