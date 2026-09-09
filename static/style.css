@@ -904,3 +904,73 @@ body.trading-app .dropdown-menu-dark {
     }
     .mobile-rec-metric strong { font-size: .69rem; }
 }
+
+/* ========================================================================
+   COMMIT 5.2 — MOBILE MARKET HEADER OVERFLOW FIX
+   Mobile-only containment for session/liquidity/schedule information.
+   ======================================================================== */
+@media (max-width: 767.98px) {
+    html,
+    body,
+    body.trading-app,
+    body.analytics-app {
+        width: 100%;
+        max-width: 100%;
+        overflow-x: hidden !important;
+    }
+
+    #calendar-info {
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+        flex-direction: column !important;
+        align-items: stretch !important;
+        justify-content: flex-start !important;
+        gap: .42rem;
+    }
+
+    #calendar-info > .d-flex {
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+        flex-wrap: wrap !important;
+        align-items: center !important;
+        justify-content: flex-start !important;
+        gap: .28rem .42rem;
+    }
+
+    #calendar-info span {
+        min-width: 0;
+        max-width: 100%;
+        margin-right: 0 !important;
+        overflow-wrap: anywhere;
+        word-break: normal;
+    }
+
+    #market-session-badge,
+    #next-alert,
+    #market-status {
+        white-space: normal !important;
+        line-height: 1.2;
+        text-align: left;
+    }
+
+    #market-liquidity,
+    #market-day-name,
+    #active-timeframes {
+        white-space: normal;
+    }
+}
+
+@media (max-width: 420px) {
+    #calendar-info {
+        font-size: .76rem;
+    }
+
+    #market-session-badge,
+    #next-alert,
+    #market-status {
+        font-size: .67rem;
+        padding: .28rem .45rem;
+    }
+}
