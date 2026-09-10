@@ -1698,6 +1698,16 @@ class ReviewTrader:
                     attribution_error
                 )
 
+            # ==========================================================
+            # COMMIT 11 — PERSISTIR TESIS DE ESPECIALISTAS
+            # ==========================================================
+            # La tesis fue construida DESPUÉS del consenso. Guardarla permite
+            # medir abstención, especialización y calibración sin recalcular
+            # ni cambiar una señal histórica.
+            runtime_intelligence = analysis_result.get('trader_intelligence_v2')
+            if isinstance(runtime_intelligence, dict):
+                context['learning']['trader_intelligence_v2'] = runtime_intelligence
+
             if (
                 self._normalize_system_type(
                     system_type

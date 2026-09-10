@@ -285,3 +285,273 @@ def build_trader_scorecard(scoped_rows: Dict[str, Iterable[Dict[str, Any]]], *, 
             "note": "El scorecard mide especialización; Commit 10 no modifica pesos del comité.",
         },
     }
+
+# ============================================================================
+# COMMIT 11 — TRADER INTELLIGENCE V2 (SHADOW / DIAGNOSTIC)
+# ============================================================================
+TRADER_INTELLIGENCE_V2_VERSION = "C11_TRADER_INTELLIGENCE_V2"
+
+_REGIME_CANONICAL = {
+    "TRENDING_BULL": "TREND_UP",
+    "TRENDING_BEAR": "TREND_DOWN",
+    "RANGING": "BALANCE",
+    "HIGH_VOLATILITY": "VOLATILITY_SHOCK",
+    "TREND_UP": "TREND_UP",
+    "TREND_DOWN": "TREND_DOWN",
+    "BALANCE": "BALANCE",
+    "TRANSITION": "TRANSITION",
+    "VOLATILITY_SHOCK": "VOLATILITY_SHOCK",
+}
+
+
+def canonical_regime(value: Any) -> str:
+    raw = str(value or "UNKNOWN").strip().upper()
+    return _REGIME_CANONICAL.get(raw, raw if raw else "UNKNOWN")
+
+
+def _runtime_votes(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
+    decision = analysis.get("decision") or {}
+    audit = decision.get("audit") or analysis.get("decision_audit") or {}
+    if isinstance(audit, dict) and isinstance(audit.get("votes"), list):
+        return [v for v in audit.get("votes") if isinstance(v, dict)]
+
+    register = decision.get("registro_votacion") or {}
+    if isinstance(register, dict) and isinstance(register.get("todos_los_votos"), list):
+        return [v for v in register.get("todos_los_votos") if isinstance(v, dict)]
+    return []
+
+
+def build_runtime_trader_theses(analysis: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert the already-finished committee vote into structured theses.
+
+    This function executes AFTER the moderator has decided.  It never calls a
+    trader again and never changes the final vote.  Missing trader-specific
+    geometry is left explicit instead of being invented.
+    """
+    if not isinstance(analysis, dict):
+        analysis = {}
+    decision = analysis.get("decision") or {}
+    final_action = normalize_action(decision.get("action"))
+    market = str(analysis.get("system_type") or "spot").upper()
+    timeframe = str(analysis.get("timeframe") or "UNKNOWN").upper()
+    symbol = str(analysis.get("symbol") or "UNKNOWN")
+    regime = canonical_regime((analysis.get("market_regime") or {}).get("regime"))
+    levels = analysis.get("levels") or {}
+
+    def _level(name: str) -> Optional[float]:
+        value = safe_float(levels.get(name))
+        return value if value is not None and value > 0 else None
+
+    final_entry = _level("entry")
+    final_sl = _level("stop_loss")
+    final_tp = _level("take_profit")
+    theses: List[Dict[str, Any]] = []
+
+    for raw in _runtime_votes(analysis):
+        trader = str(raw.get("trader") or "UNKNOWN")
+        raw_action = str(
+            raw.get("normalized_action")
+            or raw.get("accion_normalizada")
+            or raw.get("accion")
+            or raw.get("original_action")
+            or "NO_OPERAR"
+        ).upper()
+        direction = normalize_action(raw_action)
+        confidence = safe_float(
+            raw.get("original_confidence"),
+            safe_float(raw.get("confianza_original"), safe_float(raw.get("confianza"), 0.0)),
+        ) or 0.0
+        confidence = max(0.0, min(100.0, confidence))
+
+        disposition = str(raw.get("disposition") or "").upper()
+        if disposition == "APOYO_FINAL" or (direction in {"LONG", "SHORT"} and direction == final_action):
+            relation = "SUPPORT"
+        elif disposition == "OPOSICION_DIRECCIONAL" or (
+            direction in {"LONG", "SHORT"}
+            and final_action in {"LONG", "SHORT"}
+            and direction != final_action
+        ):
+            relation = "OPPOSE"
+        else:
+            relation = "NEUTRAL"
+
+        if raw_action in {"NO_OPERAR", "NEUTRAL", "ESPERAR"}:
+            stance = "VETO" if raw_action == "NO_OPERAR" and confidence >= 80.0 else "ABSTAIN"
+        else:
+            stance = "DIRECTIONAL"
+
+        strategies = raw.get("strategies") or raw.get("estrategias") or []
+        reasons = raw.get("reasons") or raw.get("razones") or []
+        strategies = [str(v)[:120] for v in strategies if str(v).strip()][:8]
+        reasons = [str(v)[:240] for v in reasons if str(v).strip()][:4]
+
+        has_shared_geometry = relation == "SUPPORT" and final_action in {"LONG", "SHORT"}
+        thesis = {
+            "trader": trader,
+            "market": market,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "direction": direction if direction in {"LONG", "SHORT"} else "NO_EDGE",
+            "conviction_pct": round(confidence, 2),
+            "regime": regime,
+            "stance": stance,
+            "relation_to_final": relation,
+            "setups": strategies,
+            "entry_zone": final_entry if has_shared_geometry else None,
+            "invalidation": final_sl if has_shared_geometry else None,
+            "objective": final_tp if has_shared_geometry else None,
+            "geometry_source": "FINAL_SYSTEM_LEVELS" if has_shared_geometry else "TRADER_SPECIFIC_GEOMETRY_NOT_AVAILABLE",
+            "evidence_for": reasons,
+            "evidence_against": [],
+            "explicit_counter_evidence_available": False,
+            "competence_key": f"{market}|{timeframe}|{direction}|{regime}",
+            "affects_vote": False,
+            "affects_levels": False,
+        }
+        theses.append(thesis)
+
+    abstain_n = sum(1 for t in theses if t["stance"] == "ABSTAIN")
+    veto_n = sum(1 for t in theses if t["stance"] == "VETO")
+    directional_n = sum(1 for t in theses if t["stance"] == "DIRECTIONAL")
+    return {
+        "version": TRADER_INTELLIGENCE_V2_VERSION,
+        "authority": "SHADOW_DIAGNOSTIC",
+        "production_change": False,
+        "market": market,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "regime": regime,
+        "final_direction": final_action,
+        "theses": theses,
+        "coverage": {
+            "traders_seen": len(theses),
+            "directional": directional_n,
+            "abstentions": abstain_n,
+            "veto_stances": veto_n,
+        },
+        "policy": {
+            "market_specific": True,
+            "timeframe_specific": True,
+            "direction_specific": True,
+            "regime_specific": True,
+            "abstention_allowed": True,
+            "missing_geometry_is_not_invented": True,
+            "weights_changed": False,
+        },
+    }
+
+
+def _created_key(row: Dict[str, Any]) -> str:
+    return str(row.get("created_at") or row.get("source_candle_timestamp") or row.get("id") or "")
+
+
+def build_trader_intelligence_v2_summary(
+    scoped_rows: Dict[str, Iterable[Dict[str, Any]]], *, top_n: int = 120
+) -> Dict[str, Any]:
+    """Temporal validation + calibration diagnostics for Commit 11.
+
+    The split is chronological 70/30 and remains research-only.  One trader is
+    counted once per signal/relation, even when it emitted multiple strategies.
+    """
+    baseline = build_trader_scorecard(scoped_rows, top_n=top_n)
+    groups: Dict[Tuple[str, str, str, str, str, str], List[Tuple[str, float]]] = defaultdict(list)
+    thesis_snapshots = 0
+    thesis_signals = 0
+    total_rows = 0
+
+    for rows in (scoped_rows or {}).values():
+        for row in rows or []:
+            total_rows += 1
+            learning = learning_context(row)
+            runtime = learning.get("trader_intelligence_v2") or {}
+            if isinstance(runtime, dict) and isinstance(runtime.get("theses"), list):
+                thesis_signals += 1
+                thesis_snapshots += len([t for t in runtime.get("theses") if isinstance(t, dict)])
+
+            final_r = realized_r(row)
+            if final_r is None:
+                continue
+            market = normalize_market(row).upper() or "UNKNOWN"
+            timeframe = str(row.get("timeframe") or "UNKNOWN").upper()
+            direction = normalize_action(row.get("action_normalized") or row.get("action"))
+            regime = canonical_regime(_regime(row))
+            seen = set()
+            for item in _attribution_items(row):
+                trader = str(item.get("trader") or "UNKNOWN").strip() or "UNKNOWN"
+                relation = str(item.get("relation_to_final") or "UNKNOWN").upper()
+                if relation not in {"SUPPORT", "OPPOSE"}:
+                    continue
+                dedupe = (trader, relation)
+                if dedupe in seen:
+                    continue
+                seen.add(dedupe)
+                judged = _judge_r(relation, final_r)
+                if judged is None:
+                    continue
+                # Market, TF and regime rows. Direction is always kept separate.
+                for tf, rg in (("ALL", "ALL"), (timeframe, "ALL"), (timeframe, regime)):
+                    key = (trader, market, tf, direction, rg, relation)
+                    groups[key].append((_created_key(row), judged))
+
+    validation_rows: List[Dict[str, Any]] = []
+    for key, observations in groups.items():
+        observations.sort(key=lambda item: item[0])
+        n = len(observations)
+        if n < 3:
+            continue
+        cut = max(1, min(n - 1, int(math.floor(n * 0.70))))
+        discovery = [v for _, v in observations[:cut]]
+        validation = [v for _, v in observations[cut:]]
+        discovery_exp = sum(discovery) / len(discovery) if discovery else None
+        validation_exp = sum(validation) / len(validation) if validation else None
+        trader, market, tf, direction, regime, relation = key
+
+        if n < 25:
+            state = "INSUFFICIENT"
+        elif len(validation) < 10:
+            state = "NEEDS_OOS"
+        elif discovery_exp is not None and validation_exp is not None and discovery_exp > 0 and validation_exp >= 0.05:
+            state = "PROMISING_OOS"
+        elif validation_exp is not None and validation_exp <= -0.20:
+            state = "DEGRADED_OOS"
+        else:
+            state = "OBSERVE"
+
+        validation_rows.append({
+            "trader": trader,
+            "market": market,
+            "timeframe": tf,
+            "direction": direction,
+            "regime": regime,
+            "relation": relation,
+            "n_resolved": n,
+            "discovery_n": len(discovery),
+            "validation_n": len(validation),
+            "discovery_expectancy_r": round(discovery_exp, 4) if discovery_exp is not None else None,
+            "validation_expectancy_r": round(validation_exp, 4) if validation_exp is not None else None,
+            "state": state,
+        })
+
+    state_rank = {"PROMISING_OOS": 0, "DEGRADED_OOS": 1, "OBSERVE": 2, "NEEDS_OOS": 3, "INSUFFICIENT": 4}
+    validation_rows.sort(key=lambda r: (state_rank.get(r["state"], 9), -r["n_resolved"], r["trader"]))
+
+    return {
+        "version": TRADER_INTELLIGENCE_V2_VERSION,
+        "authority": "SHADOW_DIAGNOSTIC",
+        "production_change": False,
+        "scorecard_v1": baseline,
+        "temporal_validation": validation_rows[:max(20, int(top_n))],
+        "runtime_thesis_coverage": {
+            "signals_seen": total_rows,
+            "signals_with_c11_theses": thesis_signals,
+            "theses_persisted": thesis_snapshots,
+        },
+        "policy": {
+            "min_total_resolved_for_weight_review": 25,
+            "min_validation_resolved_for_weight_review": 10,
+            "validation_split": "70_30_CHRONOLOGICAL",
+            "confidence_is_diagnostic_only": True,
+            "abstention_is_measured": True,
+            "weights_changed": False,
+        },
+    }

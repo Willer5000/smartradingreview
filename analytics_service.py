@@ -14,7 +14,10 @@ from supabase_client import supabase_db
 from edge_discovery import build_edge_discovery_summary
 from promotion_governance import get_promotion_governance_status
 from learning_integrity import build_integrity_manifest
-from trader_intelligence import build_trader_scorecard
+from trader_intelligence import (
+    build_trader_scorecard,
+    build_trader_intelligence_v2_summary,
+)
 
 logger = logging.getLogger('ANALYTICS')
 # ============================================================================
@@ -2180,11 +2183,15 @@ class AnalyticsService:
             coverage=getattr(signals, 'coverage', {}) or {},
             governance=integrity_governance,
         )
-        trader_scorecard = build_trader_scorecard({
+        scoped_trader_rows = {
             'SPOT_CURRENT_OFFICIAL': spot,
             'FUTURES_CURRENT_OFFICIAL': futures_official,
             'FUTURES_CURRENT_SHADOW': futures_shadow,
-        })
+        }
+        trader_scorecard = build_trader_scorecard(scoped_trader_rows)
+        trader_intelligence_v2 = build_trader_intelligence_v2_summary(
+            scoped_trader_rows
+        )
 
         return {
             'version':
@@ -2244,6 +2251,7 @@ class AnalyticsService:
             # COMMIT 10 — observability only; no committee authority.
             'learning_integrity_v1': learning_integrity,
             'trader_intelligence_v1': trader_scorecard,
+            'trader_intelligence_v2': trader_intelligence_v2,
 
             # ==========================================================
             # COMMIT 6 — LEARNING OBSERVATORY

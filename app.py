@@ -19524,6 +19524,26 @@ class TradingExpertSystem:
                         'source_candle_close_timestamp', 'analysis_version', 'analysis_mode')
                 })
 
+            # ==========================================================
+            # COMMIT 11 — TRADER INTELLIGENCE V2
+            # ==========================================================
+            # El comité YA decidió. Esta capa sólo estructura la tesis de cada
+            # especialista para aprendizaje posterior. No vuelve a votar ni
+            # cambia confianza, niveles, Safety, publicación o leverage.
+            try:
+                from trader_intelligence import build_runtime_trader_theses
+                resultado_final['trader_intelligence_v2'] = (
+                    build_runtime_trader_theses(resultado_final)
+                )
+            except Exception as trader_intelligence_error:
+                resultado_final['trader_intelligence_v2'] = {
+                    'version': 'C11_TRADER_INTELLIGENCE_V2',
+                    'authority': 'SHADOW_DIAGNOSTIC',
+                    'production_change': False,
+                    'status': 'UNAVAILABLE',
+                    'reason': str(trader_intelligence_error)[:180],
+                }
+
             # === FASE 7: Registrar señal en Supabase (best-effort, no bloqueante) ===
             # Si el subsistema de futuros nos invocó, saltar registro spot
             # (FuturesAnalysis lo registrará después con system_type='futures')
@@ -38255,6 +38275,11 @@ def _build_ai_learning_context():
             or {}
         )
 
+        trader_intelligence_v2_learning = (
+            quality_v2.get('trader_intelligence_v2', {})
+            or {}
+        )
+
     except Exception as q7_learning_error:
 
         q7_strategy_lab_learning = {
@@ -38308,6 +38333,13 @@ def _build_ai_learning_context():
             'version': 'C10_TRADER_INTELLIGENCE_FOUNDATION_V1',
             'status': 'UNAVAILABLE',
             'authority': 'RESEARCH_ONLY',
+            'reason': str(q7_learning_error)[:180]
+        }
+
+        trader_intelligence_v2_learning = {
+            'version': 'C11_TRADER_INTELLIGENCE_V2',
+            'status': 'UNAVAILABLE',
+            'authority': 'SHADOW_DIAGNOSTIC',
             'reason': str(q7_learning_error)[:180]
         }
 
@@ -38393,7 +38425,10 @@ def _build_ai_learning_context():
             learning_integrity_learning,
 
         'trader_intelligence_v1':
-            trader_intelligence_learning
+            trader_intelligence_learning,
+
+        'trader_intelligence_v2':
+            trader_intelligence_v2_learning
     }
 
 # ============================================================================
