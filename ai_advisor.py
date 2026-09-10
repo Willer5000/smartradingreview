@@ -4767,7 +4767,8 @@ def run_ai_advisor(
 
     if selected_provider not in (
         "GROQ",
-        "GEMINI"
+        "GEMINI",
+        "GROQ_LEARNING"
     ):
         return {
             "success":
@@ -4917,7 +4918,7 @@ def run_ai_advisor(
 
     if (
         selected_provider
-        == "GROQ"
+        in {"GROQ", "GROQ_LEARNING"}
     ):
         backoff_remaining = (
             _groq_backoff_remaining_seconds()

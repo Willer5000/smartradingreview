@@ -67,10 +67,12 @@ class Commit12DynamicExpertCommitteeTests(unittest.TestCase):
         self.assertFalse(result['production_change'])
         self.assertEqual(result['authority'], 'SHADOW_ONLY')
 
-    def test_app_production_weight_formula_does_not_include_shadow_multiplier(self):
+    def test_shadow_multiplier_stays_separate_from_governed_production_multiplier(self):
         source = Path('app.py').read_text(encoding='utf-8')
-        self.assertIn('peso_efectivo = trader.peso_base * regime_mult * review_mult', source)
-        self.assertIn('peso_efectivo_shadow = peso_efectivo * expert_shadow_mult', source)
+        self.assertIn('peso_efectivo_base = trader.peso_base * regime_mult * review_mult', source)
+        self.assertIn('peso_efectivo = peso_efectivo_base * expert_governed_mult', source)
+        self.assertIn('peso_efectivo_shadow = peso_efectivo_base * expert_shadow_mult', source)
+        self.assertNotIn('peso_efectivo = peso_efectivo_base * expert_shadow_mult', source)
 
 
 if __name__ == '__main__':

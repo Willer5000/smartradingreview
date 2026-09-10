@@ -20,6 +20,7 @@ from trader_intelligence import (
 )
 from dynamic_expert_committee import build_shadow_profile, install_shadow_profile
 from execution_challenger_lab import summarize_execution_challenger_evidence
+from governed_self_calibration import build_self_calibration_state
 
 logger = logging.getLogger('ANALYTICS')
 # ============================================================================
@@ -1693,7 +1694,8 @@ class AnalyticsService:
                          'entry_price,stop_loss,take_profit,risk_reward,'
                          'q6_learning:context->learning,q6_execution:context->execution,'
                          'signal_results(status,pnl_pct,exit_price,exit_timestamp,notes,created_at,'
-                         'mfe_r,mae_r,mfe_pct,mae_pct,candles_to_result,execution_forensics)')
+                         'mfe_r,mae_r,mfe_pct,mae_pct,candles_to_result,execution_forensics,'
+                         'gross_r,modeled_net_r,modeled_total_cost_r,economics_cost_components_complete)')
                  .gte('created_at', cutoff).lt('created_at', end.isoformat())
                  .eq('context->execution->>quality_score_version', Q5_CURRENT_QUALITY_SCORE_VERSION)
                  .in_('action_normalized', ['LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT'])
@@ -2204,6 +2206,24 @@ class AnalyticsService:
         execution_challenger_lab = summarize_execution_challenger_evidence(
             scoped_trader_rows
         )
+        # Commit 14 — Analytics is OBSERVABILITY ONLY. Production authority is
+        # installed by the governance/autopilot refresh, never by opening this
+        # page. Prefer the persisted governed snapshot; when it does not exist
+        # yet, build a neutral/read-only preview for the UI.
+        persisted_self_calibration = (
+            promotion_governance.get('self_calibration_v1')
+            if isinstance(promotion_governance, dict) else None
+        )
+        if isinstance(persisted_self_calibration, dict):
+            self_calibration = persisted_self_calibration
+        else:
+            self_calibration = build_self_calibration_state(
+                trader_intelligence_v2,
+                dynamic_expert_committee,
+                execution_challenger_lab,
+                promotion_governance,
+            )
+            self_calibration['preview_only'] = True
 
         return {
             'version':
@@ -2266,6 +2286,7 @@ class AnalyticsService:
             'trader_intelligence_v2': trader_intelligence_v2,
             'dynamic_expert_committee_v1': dynamic_expert_committee,
             'execution_challenger_lab_v1': execution_challenger_lab,
+            'self_calibration_v1': self_calibration,
 
             # ==========================================================
             # COMMIT 6 — LEARNING OBSERVATORY
@@ -2300,7 +2321,8 @@ class AnalyticsService:
                     'futures_shadow': attribution_shadow
                 },
                 'learning_integrity': learning_integrity,
-                'trader_intelligence': trader_scorecard
+                'trader_intelligence': trader_scorecard,
+                'self_calibration': self_calibration
             },
 
             # ==========================================================

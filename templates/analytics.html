@@ -1082,7 +1082,7 @@
 
                     <div class="mt-4">
                         <div class="fw-semibold mb-1">Especialización de traders · diagnóstico</div>
-                        <div class="small text-muted mb-2">Compara el juicio de cada especialista por mercado, temporalidad, dirección y régimen. Commit 10 no cambia pesos del comité.</div>
+                        <div class="small text-muted mb-2">Compara el juicio de cada especialista por mercado, temporalidad, dirección y régimen. Los autoajustes sólo se habilitan con evidencia suficiente y validada.</div>
                         <div class="table-responsive">
                             <table class="table table-dark table-hover table-sm align-middle mb-0">
                                 <thead><tr><th>Trader</th><th>Mercado</th><th>TF</th><th>Dirección</th><th>Régimen</th><th>Rol</th><th>Res.</th><th>Exp. juicio</th><th>Conf.</th><th>Estado</th></tr></thead>
@@ -1098,6 +1098,59 @@
                     </div>
 
                     <div class="small text-muted mt-3" id="lo-block-reasons">ReviewTrader continúa recopilando evidencia.</div>
+                </div>
+            </div>
+
+            <!-- ============================================================
+                 V1.0 — AUTOCALIBRACIÓN GOBERNADA
+                 ============================================================ -->
+            <div class="card bg-dark border-secondary mb-3" id="self-calibration-section">
+                <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                    <div>
+                        <strong>Mejora automática · V1.0</strong>
+                        <div class="small text-muted">El sistema aprende, valida y sólo entonces ajusta especialistas o geometría. Safety y leverage permanecen protegidos por sus propios controles.</div>
+                    </div>
+                    <span class="badge bg-secondary" id="sc-state">Observación</span>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3 mb-4">
+                        <div class="col-6 col-lg-3"><div class="text-muted small">Ajustes activos</div><strong class="h5" id="sc-active">0</strong></div>
+                        <div class="col-6 col-lg-3"><div class="text-muted small">En prueba controlada</div><strong class="h5" id="sc-canary">0</strong></div>
+                        <div class="col-6 col-lg-3"><div class="text-muted small">Protecciones automáticas</div><strong class="h5" id="sc-protect">0</strong></div>
+                        <div class="col-6 col-lg-3"><div class="text-muted small">Costes cubiertos para calibrar</div><strong class="h5" id="sc-economics">No</strong></div>
+                    </div>
+
+                    <div class="row g-4">
+                        <div class="col-xl-6">
+                            <div class="fw-semibold mb-1">TOP especialistas</div>
+                            <div class="small text-muted mb-2">Ranking por calidad de juicio observada. La barra es visual y se calcula en el navegador; no consume memoria de análisis del servidor.</div>
+                            <div id="sc-trader-bars" class="mb-3"></div>
+                            <div class="table-responsive">
+                                <table class="table table-dark table-hover table-sm align-middle mb-0">
+                                    <thead><tr><th>Trader</th><th>Mercado</th><th>Dir.</th><th>Res.</th><th>Exp.R juicio</th><th>Estado</th></tr></thead>
+                                    <tbody id="sc-top-traders"><tr><td colspan="6" class="text-center text-muted py-2">Recopilando evidencia.</td></tr></tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div class="col-xl-6">
+                            <div class="fw-semibold mb-1">TOP indicadores / estrategias</div>
+                            <div class="small text-muted mb-2">Usa atribución ya cargada en Analytics; no ejecuta consultas adicionales.</div>
+                            <div class="table-responsive mb-4">
+                                <table class="table table-dark table-hover table-sm align-middle mb-0">
+                                    <thead><tr><th>Indicador / estrategia</th><th>Ámbito</th><th>Res.</th><th>WR</th><th>Exp.R</th></tr></thead>
+                                    <tbody id="sc-top-strategies"><tr><td colspan="5" class="text-center text-muted py-2">Recopilando evidencia.</td></tr></tbody>
+                                </table>
+                            </div>
+                            <div class="fw-semibold mb-1">Candidatos de Entry / SL / TP</div>
+                            <div class="table-responsive">
+                                <table class="table table-dark table-hover table-sm align-middle mb-0">
+                                    <thead><tr><th>Candidato</th><th>Res.</th><th>Exp.R neta</th><th>Validación</th><th>Estado</th></tr></thead>
+                                    <tbody id="sc-execution-candidates"><tr><td colspan="5" class="text-center text-muted py-2">Esperando resultados del laboratorio.</td></tr></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="small text-muted mt-3" id="sc-note">Los ajustes positivos requieren evidencia fuera de muestra y costes; la evidencia negativa puede reducir riesgo de decisión antes para proteger.</div>
                 </div>
             </div>
 

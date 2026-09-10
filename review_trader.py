@@ -4261,6 +4261,11 @@ class ReviewTrader:
                         )
                         if challenger_results:
                             result['execution_challenger_results'] = challenger_results
+                            # Commit 14: persist C13 evidence inside the existing
+                            # execution_forensics JSON column.  No schema change
+                            # and no extra row/table is required.
+                            if isinstance(result.get('execution_forensics'), dict):
+                                result['execution_forensics']['execution_challenger_results'] = challenger_results
                     except Exception as challenger_error:
                         logger.warning(
                             'Execution Challenger Lab no disponible: %s',
@@ -4311,6 +4316,11 @@ class ReviewTrader:
                         )
                         if challenger_results:
                             result['execution_challenger_results'] = challenger_results
+                            # Commit 14: persist C13 evidence inside the existing
+                            # execution_forensics JSON column.  No schema change
+                            # and no extra row/table is required.
+                            if isinstance(result.get('execution_forensics'), dict):
+                                result['execution_forensics']['execution_challenger_results'] = challenger_results
                     except Exception as challenger_error:
                         logger.warning(
                             'Execution Challenger Lab no disponible en expiración: %s',

@@ -1120,6 +1120,132 @@ function traderRegimeLabel(value) {
     return labels[regime] || uiHumanLabel(regime || '--');
 }
 
+function selfCalibrationStateLabel(value) {
+    const state = String(value || 'OBSERVE').toUpperCase();
+    const labels = {
+        OBSERVE: 'Observación', PROTECT: 'Protección', CANARY: 'Prueba controlada', ACTIVE: 'Activo'
+    };
+    return labels[state] || uiHumanLabel(state);
+}
+
+function selfCalibrationEvidenceLabel(value) {
+    const state = String(value || '').toUpperCase();
+    if (state === 'ACTIVE_READY' || state === 'ACTIVE') return 'Activo / robusto';
+    if (state === 'CANARY_READY' || state === 'CANARY') return 'Prueba controlada';
+    if (state === 'PROTECT') return 'Protección';
+    if (state === 'REVIEWABLE') return 'Revisable';
+    if (state === 'PROMISING') return 'Prometedor';
+    if (state === 'DEGRADED') return 'Débil';
+    return 'Observación';
+}
+
+function renderSelfCalibrationV1(data) {
+    const selfCal = data?.self_calibration_v1
+        || data?.learning_observatory_v1?.self_calibration
+        || {};
+    const summary = selfCal?.summary || {};
+    const state = String(selfCal?.state || 'OBSERVE').toUpperCase();
+    const badge = document.getElementById('sc-state');
+    if (badge) {
+        const cls = state === 'ACTIVE' ? 'bg-success'
+            : state === 'CANARY' ? 'bg-primary'
+            : state === 'PROTECT' ? 'bg-warning text-dark' : 'bg-secondary';
+        badge.className = `badge ${cls}`;
+        badge.textContent = selfCalibrationStateLabel(state);
+    }
+    q5SetText('sc-active', Number(summary.active_adjustments || 0).toLocaleString());
+    q5SetText('sc-canary', Number(summary.canary_adjustments || 0).toLocaleString());
+    q5SetText('sc-protect', Number(summary.protective_adjustments || 0).toLocaleString());
+    q5SetText('sc-economics', summary.economics_ready ? 'Sí' : 'No');
+
+    const intel = data?.trader_intelligence_v2?.scorecard_v1
+        || data?.trader_intelligence_v1
+        || {};
+    const traderRows = (Array.isArray(intel.rows) ? intel.rows : [])
+        .filter(row => row && row.relation === 'SUPPORT'
+            && Number(row.resolved || 0) >= 3
+            && row.judgement_expectancy_r !== null
+            && row.judgement_expectancy_r !== undefined)
+        .sort((a, b) => Number(b.judgement_expectancy_r || -999) - Number(a.judgement_expectancy_r || -999))
+        .slice(0, 6);
+
+    const traderBody = document.getElementById('sc-top-traders');
+    if (traderBody) {
+        traderBody.innerHTML = traderRows.length ? traderRows.map(row => `<tr>
+            <td><strong>${uiHumanLabel(row.trader || '--')}</strong></td>
+            <td>${String(row.market || '--').toUpperCase()}</td>
+            <td>${uiHumanLabel(row.direction || '--')}</td>
+            <td>${Number(row.resolved || 0).toLocaleString()}</td>
+            <td>${loR(row.judgement_expectancy_r, 3)}</td>
+            <td>${traderEvidenceLabel(row.evidence_state)}</td>
+        </tr>`).join('') : '<tr><td colspan="6" class="text-center text-muted py-2">Aún no hay muestra suficiente para un TOP estable.</td></tr>';
+    }
+
+    const bars = document.getElementById('sc-trader-bars');
+    if (bars) {
+        bars.innerHTML = traderRows.length ? traderRows.map(row => {
+            const exp = Number(row.judgement_expectancy_r || 0);
+            const width = Math.max(4, Math.min(100, 50 + exp * 22));
+            return `<div class="mb-2">
+                <div class="d-flex justify-content-between small"><span>${uiHumanLabel(row.trader || '--')}</span><span>${loR(exp, 2)}</span></div>
+                <div class="progress" style="height:6px"><div class="progress-bar" role="progressbar" style="width:${width}%" aria-valuenow="${width}" aria-valuemin="0" aria-valuemax="100"></div></div>
+            </div>`;
+        }).join('') : '<div class="small text-muted">Esperando más resultados.</div>';
+    }
+
+    const strategyScopes = [
+        ['Spot', data?.strategy_attribution_v2?.spot],
+        ['Futures', data?.strategy_attribution_v2?.futures_official],
+        ['Futures · evaluación', data?.strategy_attribution_v2?.futures_shadow]
+    ];
+    const strategies = [];
+    strategyScopes.forEach(([scope, block]) => {
+        (Array.isArray(block?.rows) ? block.rows : []).forEach(row => {
+            if (!row || !row.strategy) return;
+            const resolved = Number(row.resolved || 0);
+            const exp = row.expectancy_r;
+            if (resolved < 2 || exp === null || exp === undefined) return;
+            strategies.push({...row, _scope: scope});
+        });
+    });
+    strategies.sort((a, b) => Number(b.expectancy_r || -999) - Number(a.expectancy_r || -999));
+    const strategyBody = document.getElementById('sc-top-strategies');
+    if (strategyBody) {
+        const rows = strategies.slice(0, 7);
+        strategyBody.innerHTML = rows.length ? rows.map(row => `<tr>
+            <td>${uiHumanLabel(row.strategy)}</td>
+            <td>${row._scope}</td>
+            <td>${Number(row.resolved || 0).toLocaleString()}</td>
+            <td>${row.win_rate_pct === null || row.win_rate_pct === undefined ? '--' : loPct(row.win_rate_pct)}</td>
+            <td>${loR(row.expectancy_r, 3)}</td>
+        </tr>`).join('') : '<tr><td colspan="5" class="text-center text-muted py-2">Aún no hay atribución suficiente.</td></tr>';
+    }
+
+    const executionRows = (Array.isArray(data?.execution_challenger_lab_v1?.rows)
+        ? data.execution_challenger_lab_v1.rows : [])
+        .filter(row => row && String(row.candidate || '').toUpperCase() !== 'BASELINE')
+        .sort((a, b) => Number(b.validation_net_expectancy_r ?? -999) - Number(a.validation_net_expectancy_r ?? -999))
+        .slice(0, 6);
+    const executionBody = document.getElementById('sc-execution-candidates');
+    if (executionBody) {
+        executionBody.innerHTML = executionRows.length ? executionRows.map(row => `<tr>
+            <td>${uiHumanLabel(row.candidate || '--')}</td>
+            <td>${Number(row.resolved || 0).toLocaleString()}</td>
+            <td>${row.net_expectancy_r === null || row.net_expectancy_r === undefined ? '--' : loR(row.net_expectancy_r, 3)}</td>
+            <td>${row.validation_net_expectancy_r === null || row.validation_net_expectancy_r === undefined ? '--' : loR(row.validation_net_expectancy_r, 3)}</td>
+            <td>${selfCalibrationEvidenceLabel(row.evidence_state)}</td>
+        </tr>`).join('') : '<tr><td colspan="5" class="text-center text-muted py-2">Los resultados nuevos empezarán a llenar esta tabla automáticamente.</td></tr>';
+    }
+
+    const note = document.getElementById('sc-note');
+    if (note) {
+        const updated = selfCal?.updated_at ? new Date(selfCal.updated_at).toLocaleString() : '--';
+        note.textContent = summary.economics_ready
+            ? `Última recalibración: ${updated}. Los ajustes positivos siguen sujetos a validación temporal y rollback automático.`
+            : `Última recalibración: ${updated}. Aún no hay cobertura económica suficiente para habilitar ajustes positivos; las protecciones por evidencia negativa sí pueden actuar.`;
+    }
+}
+
 function renderLearningObservatory(data) {
     const observatory = data?.learning_observatory_v1 || {};
     const forensics = observatory?.execution_forensics?.futures_official
@@ -1662,10 +1788,11 @@ async function loadQualityV2() {
             q7
         );
 
-        // Commit 6 — exponer Forensics/Attribution que ya venían en el API.
+        // Observabilidad y autocalibración V1.0.
         renderLearningObservatory(data);
+        renderSelfCalibrationV1(data);
 
-        // Commit 7 — hipótesis de edge, siempre research-only.
+        // Hipótesis de edge, siempre research-only.
         renderEdgeDiscovery(data);
 
         

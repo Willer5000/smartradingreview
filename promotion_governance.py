@@ -436,6 +436,20 @@ def refresh_promotion_governance(db, *, days_back: int = 90) -> Dict[str, Any]:
     try:
         rows, coverage = _read_window(db, days_back=days_back)
         status = evaluate_promotion_gate(rows, coverage_complete=bool(coverage.get("complete", False)), coverage=coverage)
+        # Commit 14 — bounded closed-loop recalibration.  It reuses persisted
+        # resolved evidence, never lowers Safety and never grows leverage.
+        try:
+            from governed_self_calibration import refresh_self_calibration_from_db
+            status["self_calibration_v1"] = refresh_self_calibration_from_db(
+                db, status, days_back=days_back
+            )
+        except Exception as self_cal_error:
+            status["self_calibration_v1"] = {
+                "version": "C14_GOVERNED_SELF_CALIBRATION_V1",
+                "state": "OBSERVE",
+                "production_change": False,
+                "reason": f"SELF_CALIBRATION_FAIL_NEUTRAL:{type(self_cal_error).__name__}",
+            }
         payload = {
             "scope": GOVERNANCE_SCOPE,
             "quality_optimization_allowed": status["quality_optimization_allowed"],
@@ -563,6 +577,24 @@ def get_promotion_governance_status(db=None) -> Dict[str, Any]:
                 result = stale
     except Exception as exc:
         result = fail_closed_status(f"READ_FAILED:{type(exc).__name__}", error=str(exc)[:180])
+
+    # Commit 14: restore the persisted self-calibration snapshot after a
+    # process restart.  A stale governance row restores NEUTRAL authority.
+    try:
+        from governed_self_calibration import install_self_calibration_state
+        if result.get("stale"):
+            install_self_calibration_state({
+                "version": "C14_GOVERNED_SELF_CALIBRATION_V1",
+                "state": "OBSERVE",
+                "production_change": False,
+                "reason": "STALE_GOVERNANCE_STATE",
+                "expert_profile": {"rows": []},
+                "execution_profile": {"rows": [], "selected": None},
+            })
+        elif isinstance(result.get("self_calibration_v1"), dict):
+            install_self_calibration_state(result.get("self_calibration_v1") or {})
+    except Exception:
+        pass
 
     with _cache_lock:
         _status_cache = (now, result)

@@ -8,8 +8,11 @@ net-execution geometry before any later governed promotion.
 from __future__ import annotations
 
 from collections import defaultdict
+from copy import deepcopy
 from typing import Any, Dict, Iterable, List, Optional
+import hashlib
 import math
+import threading
 
 import pandas as pd
 
@@ -326,47 +329,180 @@ def evaluate_execution_challengers(signal: Dict[str, Any], df: pd.DataFrame, eva
     }
 
 
+def _profit_factor(values: List[float]) -> Optional[float]:
+    gains = sum(v for v in values if v > 0)
+    losses = abs(sum(v for v in values if v < 0))
+    if losses <= 0:
+        return 99.0 if gains > 0 else None
+    return gains / losses
+
+
+def _candidate_evaluation_from_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    direct = result.get('execution_challenger_results') or {}
+    if isinstance(direct, dict) and direct:
+        return direct
+    forensics = result.get('execution_forensics') or {}
+    if isinstance(forensics, dict):
+        nested = forensics.get('execution_challenger_results') or {}
+        return nested if isinstance(nested, dict) else {}
+    return {}
+
+
+def _signal_cost_r(result: Dict[str, Any]) -> Optional[float]:
+    direct = safe_float(result.get('modeled_total_cost_r'))
+    if direct is not None and direct >= 0:
+        return direct
+    gross = safe_float(result.get('gross_r'))
+    net = safe_float(result.get('modeled_net_r'))
+    if gross is not None and net is not None:
+        return max(0.0, gross - net)
+    return None
+
+
+def _evidence_metrics(observations: List[Dict[str, Any]]) -> Dict[str, Any]:
+    resolved = [o for o in observations if o.get('status') in {'tp_hit', 'sl_hit'} and o.get('realized_r') is not None]
+    resolved.sort(key=lambda o: str(o.get('created_at') or ''))
+    cut = max(1, min(len(resolved) - 1, int(math.floor(len(resolved) * 0.70)))) if len(resolved) >= 2 else len(resolved)
+    discovery = resolved[:cut]
+    validation = resolved[cut:]
+
+    def vals(rows, key):
+        out = []
+        for row in rows:
+            value = safe_float(row.get(key))
+            if value is not None:
+                out.append(value)
+        return out
+
+    gross = vals(resolved, 'realized_r')
+    net = vals(resolved, 'net_r')
+    disc_net = vals(discovery, 'net_r')
+    val_net = vals(validation, 'net_r')
+    val_gross = vals(validation, 'realized_r')
+    pf = _profit_factor(net)
+    val_pf = _profit_factor(val_net)
+    coverage = len(net) / len(resolved) * 100.0 if resolved else 0.0
+    return {
+        'resolved': len(resolved),
+        'discovery_resolved': len(discovery),
+        'validation_resolved': len(validation),
+        'expectancy_r': round(sum(gross) / len(gross), 4) if gross else None,
+        'validation_expectancy_r': round(sum(val_gross) / len(val_gross), 4) if val_gross else None,
+        'net_rows': len(net),
+        'net_coverage_pct': round(coverage, 2),
+        'net_expectancy_r': round(sum(net) / len(net), 4) if net else None,
+        'discovery_net_expectancy_r': round(sum(disc_net) / len(disc_net), 4) if disc_net else None,
+        'validation_net_expectancy_r': round(sum(val_net) / len(val_net), 4) if val_net else None,
+        'net_profit_factor': round(pf, 3) if pf is not None else None,
+        'validation_net_profit_factor': round(val_pf, 3) if val_pf is not None else None,
+    }
+
+
 def summarize_execution_challenger_evidence(scoped_rows: Dict[str, Iterable[Dict[str, Any]]]) -> Dict[str, Any]:
-    groups = defaultdict(lambda: {'n': 0, 'entry': 0, 'tp': 0, 'sl': 0, 'ambiguous': 0, 'r_sum': 0.0, 'r_n': 0, 'mfe_sum': 0.0, 'mae_sum': 0.0})
+    """Compare C13 candidates chronologically and with conservative cost-R.
+
+    Commit 14 reads the challenger snapshot persisted inside execution_forensics,
+    so no new database column is required.  Net-R is a conservative proxy using
+    the cost-R already modeled for the source signal; it is never called an
+    exchange-realized result.
+    """
+    groups = defaultdict(list)
+    counters = defaultdict(lambda: {'n': 0, 'entry': 0, 'tp': 0, 'sl': 0, 'ambiguous': 0, 'mfe_sum': 0.0, 'mfe_n': 0, 'mae_sum': 0.0, 'mae_n': 0})
+
     for rows in (scoped_rows or {}).values():
         for row in rows or []:
             market = normalize_market(row).upper() or 'UNKNOWN'
             result = latest_result(row)
-            evaluation = result.get('execution_challenger_results') or {}
+            evaluation = _candidate_evaluation_from_result(result)
             items = evaluation.get('results') if isinstance(evaluation, dict) else []
+            cost_r = _signal_cost_r(result)
+            created_at = row.get('created_at') or result.get('created_at')
             for item in items if isinstance(items, list) else []:
                 if not isinstance(item, dict):
                     continue
-                name = str(item.get('name') or 'UNKNOWN')
-                g = groups[(market, name)]
-                g['n'] += 1
-                g['entry'] += int(bool(item.get('entry_reached')))
-                status = str(item.get('status') or '')
-                if status == 'tp_hit': g['tp'] += 1
-                elif status == 'sl_hit': g['sl'] += 1
-                elif status == 'ambiguous': g['ambiguous'] += 1
-                r = safe_float(item.get('realized_r'))
-                if r is not None:
-                    g['r_sum'] += r; g['r_n'] += 1
+                name = str(item.get('name') or 'UNKNOWN').upper()
+                key = (market, name)
+                c = counters[key]
+                c['n'] += 1
+                c['entry'] += int(bool(item.get('entry_reached')))
+                status = str(item.get('status') or '').lower()
+                if status == 'tp_hit': c['tp'] += 1
+                elif status == 'sl_hit': c['sl'] += 1
+                elif status == 'ambiguous': c['ambiguous'] += 1
+                realized = safe_float(item.get('realized_r'))
+                net_r = None
+                if realized is not None and cost_r is not None:
+                    net_r = realized - max(0.0, cost_r)
                 mfe = safe_float(item.get('mfe_r'))
                 mae = safe_float(item.get('mae_r'))
-                if mfe is not None: g['mfe_sum'] += mfe
-                if mae is not None: g['mae_sum'] += mae
+                if mfe is not None:
+                    c['mfe_sum'] += mfe; c['mfe_n'] += 1
+                if mae is not None:
+                    c['mae_sum'] += mae; c['mae_n'] += 1
+                groups[key].append({
+                    'created_at': created_at,
+                    'status': status,
+                    'realized_r': realized,
+                    'net_r': net_r,
+                })
+
+    metrics_by_key = {key: _evidence_metrics(obs) for key, obs in groups.items()}
+    baseline_by_market = {
+        market: metrics
+        for (market, candidate), metrics in metrics_by_key.items()
+        if candidate == 'BASELINE'
+    }
 
     rows_out = []
-    for (market, name), g in groups.items():
-        resolved = g['tp'] + g['sl']
+    for key, observations in groups.items():
+        market, name = key
+        c = counters[key]
+        m = metrics_by_key[key]
+        baseline = baseline_by_market.get(market) or {}
+        val_net = safe_float(m.get('validation_net_expectancy_r'))
+        base_val_net = safe_float(baseline.get('validation_net_expectancy_r'))
+        improvement = None
+        if val_net is not None and base_val_net is not None:
+            improvement = val_net - base_val_net
+
+        resolved = int(m.get('resolved') or 0)
+        val_n = int(m.get('validation_resolved') or 0)
+        net_cov = safe_float(m.get('net_coverage_pct'), 0.0) or 0.0
+        net_exp = safe_float(m.get('net_expectancy_r'))
+        pf = safe_float(m.get('net_profit_factor'))
+        if (
+            name != 'BASELINE' and resolved >= 50 and val_n >= 15 and net_cov >= 95.0
+            and net_exp is not None and net_exp >= 0.10 and val_net is not None and val_net >= 0.10
+            and pf is not None and pf >= 1.25 and improvement is not None and improvement >= 0.10
+        ):
+            evidence_state = 'ACTIVE_READY'
+        elif (
+            name != 'BASELINE' and resolved >= 25 and val_n >= 10 and net_cov >= 95.0
+            and net_exp is not None and net_exp >= 0.05 and val_net is not None and val_net >= 0.05
+            and pf is not None and pf >= 1.15 and improvement is not None and improvement >= 0.05
+        ):
+            evidence_state = 'CANARY_READY'
+        elif resolved >= 25:
+            evidence_state = 'REVIEWABLE'
+        else:
+            evidence_state = 'INSUFFICIENT'
+
         rows_out.append({
-            'market': market, 'candidate': name, 'n_evaluated': g['n'],
-            'entry_reached_pct': round(g['entry'] / g['n'] * 100.0, 2) if g['n'] else None,
-            'resolved': resolved, 'tp': g['tp'], 'sl': g['sl'], 'ambiguous': g['ambiguous'],
-            'win_rate_pct': round(g['tp'] / resolved * 100.0, 2) if resolved else None,
-            'expectancy_r': round(g['r_sum'] / g['r_n'], 4) if g['r_n'] else None,
-            'avg_mfe_r': round(g['mfe_sum'] / g['n'], 4) if g['n'] else None,
-            'avg_mae_r': round(g['mae_sum'] / g['n'], 4) if g['n'] else None,
-            'evidence_state': 'REVIEWABLE' if resolved >= 25 else 'INSUFFICIENT',
+            'market': market,
+            'candidate': name,
+            'n_evaluated': c['n'],
+            'entry_reached_pct': round(c['entry'] / c['n'] * 100.0, 2) if c['n'] else None,
+            'tp': c['tp'], 'sl': c['sl'], 'ambiguous': c['ambiguous'],
+            'win_rate_pct': round(c['tp'] / resolved * 100.0, 2) if resolved else None,
+            'avg_mfe_r': round(c['mfe_sum'] / c['mfe_n'], 4) if c['mfe_n'] else None,
+            'avg_mae_r': round(c['mae_sum'] / c['mae_n'], 4) if c['mae_n'] else None,
+            **m,
+            'validation_net_improvement_vs_baseline_r': round(improvement, 4) if improvement is not None else None,
+            'evidence_state': evidence_state,
+            'economics_basis': 'MODELED_SIGNAL_COST_R_PROXY',
         })
-    rows_out.sort(key=lambda r: (r['market'], -(r['resolved'] or 0), -(r['expectancy_r'] or -999), r['candidate']))
+
+    rows_out.sort(key=lambda r: (r['market'], -(r['resolved'] or 0), -(safe_float(r.get('validation_net_expectancy_r'), -999) or -999), r['candidate']))
     return {
         'version': CHALLENGER_LAB_VERSION,
         'authority': 'SHADOW_ONLY', 'production_change': False,
@@ -376,5 +512,115 @@ def summarize_execution_challenger_evidence(scoped_rows: Dict[str, Iterable[Dict
             'min_resolved_before_review': 25,
             'oos_required_before_promotion': True,
             'costs_required_before_promotion': True,
+            'cost_basis': 'CONSERVATIVE_MODELED_COST_R_FROM_SOURCE_SIGNAL',
         },
     }
+
+
+# ============================================================================
+# COMMIT 14 — GOVERNED EXECUTION CHAMPION
+# ============================================================================
+_GOVERNED_EXECUTION_LOCK = threading.Lock()
+_GOVERNED_EXECUTION_PROFILE: Dict[str, Any] = {'rows': [], 'selected': None}
+
+
+def install_governed_execution_profile(profile: Dict[str, Any]) -> None:
+    global _GOVERNED_EXECUTION_PROFILE
+    safe_profile = deepcopy(profile if isinstance(profile, dict) else {})
+    with _GOVERNED_EXECUTION_LOCK:
+        _GOVERNED_EXECUTION_PROFILE = safe_profile
+
+
+def get_governed_execution_profile() -> Dict[str, Any]:
+    with _GOVERNED_EXECUTION_LOCK:
+        return deepcopy(_GOVERNED_EXECUTION_PROFILE)
+
+
+def _canary_selected(analysis: Dict[str, Any], fraction: float) -> bool:
+    timestamp = str(
+        analysis.get('source_candle_timestamp')
+        or (analysis.get('levels') or {}).get('source_candle_timestamp')
+        or ''
+    )
+    if not timestamp:
+        return False
+    key = f"{analysis.get('symbol')}|{analysis.get('timeframe')}|{timestamp}"
+    bucket = int(hashlib.sha256(key.encode('utf-8')).hexdigest()[:8], 16) % 10000
+    return bucket < int(max(0.0, min(1.0, fraction)) * 10000)
+
+
+def apply_governed_execution_calibration(analysis: Dict[str, Any], lab: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply one already-governed execution champion without changing direction.
+
+    CANARY affects a deterministic 25% of eligible source candles. ACTIVE affects
+    all eligible signals.  A candidate is rejected if it widens baseline risk by
+    more than 5%, preserving the no-hide-bad-entry policy.
+    """
+    audit = {
+        'version': 'C14_GOVERNED_SELF_CALIBRATION_V1',
+        'applied': False,
+        'state': 'OBSERVE',
+        'candidate': None,
+        'reason': 'NO_GOVERNED_CHAMPION',
+    }
+    if not isinstance(analysis, dict) or not isinstance(lab, dict):
+        return audit
+    market = str(analysis.get('system_type') or '').upper()
+    if market != 'FUTURES':
+        audit['reason'] = 'FUTURES_ONLY_V1'
+        return audit
+
+    profile = get_governed_execution_profile()
+    selected = profile.get('selected') or {}
+    if not isinstance(selected, dict) or str(selected.get('market') or '').upper() != 'FUTURES':
+        return audit
+    state = str(selected.get('state') or 'OBSERVE').upper()
+    if state not in {'CANARY', 'ACTIVE'}:
+        audit['reason'] = 'CHAMPION_NOT_PROMOTED'
+        return audit
+    if state == 'CANARY' and not _canary_selected(analysis, safe_float(profile.get('canary_fraction'), 0.25) or 0.25):
+        audit.update({'state': 'CANARY', 'candidate': selected.get('candidate'), 'reason': 'CANARY_CONTROL_BUCKET'})
+        return audit
+
+    name = str(selected.get('candidate') or '').upper()
+    candidates = lab.get('candidates') or []
+    candidate = next((c for c in candidates if isinstance(c, dict) and str(c.get('name') or '').upper() == name), None)
+    if not candidate or not candidate.get('geometry_valid'):
+        audit.update({'state': state, 'candidate': name, 'reason': 'CANDIDATE_NOT_AVAILABLE_THIS_SIGNAL'})
+        return audit
+
+    action = normalize_action((analysis.get('decision') or {}).get('action'))
+    if normalize_action(candidate.get('action')) != action or action not in {'LONG', 'SHORT'}:
+        audit.update({'state': state, 'candidate': name, 'reason': 'DIRECTION_GUARD'})
+        return audit
+
+    levels = analysis.get('levels') or {}
+    base_entry = _positive(levels.get('entry'))
+    base_sl = _positive(levels.get('stop_loss'))
+    new_entry = _positive(candidate.get('entry'))
+    new_sl = _positive(candidate.get('stop_loss'))
+    new_tp = _positive(candidate.get('take_profit'))
+    if not all((base_entry, base_sl, new_entry, new_sl, new_tp)):
+        audit.update({'state': state, 'candidate': name, 'reason': 'MISSING_GEOMETRY'})
+        return audit
+    base_risk = abs(base_entry - base_sl)
+    new_risk = abs(new_entry - new_sl)
+    if base_risk <= 0 or new_risk > base_risk * 1.05:
+        audit.update({'state': state, 'candidate': name, 'reason': 'NO_STOP_WIDENING_GUARD'})
+        return audit
+
+    old = {'entry': base_entry, 'stop_loss': base_sl, 'take_profit': _positive(levels.get('take_profit'))}
+    levels['entry'] = float(new_entry)
+    levels['stop_loss'] = float(new_sl)
+    levels['take_profit'] = float(new_tp)
+    levels['risk_reward'] = float(candidate.get('risk_reward') or 0.0)
+    analysis['levels'] = levels
+    audit.update({
+        'applied': True,
+        'state': state,
+        'candidate': name,
+        'reason': 'GOVERNED_EXECUTION_CHAMPION',
+        'baseline': old,
+        'calibrated': {'entry': new_entry, 'stop_loss': new_sl, 'take_profit': new_tp},
+    })
+    return audit

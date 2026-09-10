@@ -243,3 +243,85 @@ def simulate_shadow_decision(votes: Iterable[Dict[str, Any]], baseline_action: s
         "average_confidence_by_action": {k: round(v, 2) for k, v in averages.items()},
         "votes": details,
     }
+
+# ============================================================================
+# COMMIT 14 — GOVERNED PRODUCTION PROFILE
+# ============================================================================
+_GOVERNED_PROFILE_LOCK = threading.Lock()
+_GOVERNED_PROFILE: Dict[str, Any] = {"rows": []}
+
+
+def install_governed_profile(profile: Dict[str, Any]) -> None:
+    """Install a bounded, already-governed expert profile in process memory."""
+    global _GOVERNED_PROFILE
+    safe_profile = deepcopy(profile if isinstance(profile, dict) else {})
+    with _GOVERNED_PROFILE_LOCK:
+        _GOVERNED_PROFILE = safe_profile
+
+
+def get_governed_profile() -> Dict[str, Any]:
+    with _GOVERNED_PROFILE_LOCK:
+        return deepcopy(_GOVERNED_PROFILE)
+
+
+def get_governed_multiplier(
+    trader: str,
+    market: str,
+    timeframe: str,
+    direction: str,
+    regime: str,
+    relation: str = "SUPPORT",
+) -> Tuple[float, str]:
+    """Return the most-specific bounded production multiplier and state.
+
+    A missing/stale profile returns (1.0, OBSERVE).  Positive CANARY/ACTIVE
+    authority is created only by Commit 14's governance controller; PROTECT may
+    attenuate a trader but never remove it from the committee.
+    """
+    trader = str(trader or "UNKNOWN")
+    market = str(market or "UNKNOWN").upper()
+    timeframe = str(timeframe or "ALL").upper()
+    direction = normalize_action(direction)
+    regime = canonical_regime(regime)
+    relation = str(relation or "SUPPORT").upper()
+    profile = get_governed_profile()
+    rows = profile.get("rows") or []
+
+    candidates = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict) or str(row.get("trader")) != trader:
+            continue
+        if str(row.get("market") or "").upper() != market:
+            continue
+        if normalize_action(row.get("direction")) != direction:
+            continue
+        if str(row.get("relation") or "").upper() != relation:
+            continue
+        tf = str(row.get("timeframe") or "ALL").upper()
+        rg = canonical_regime(row.get("regime"))
+        if tf not in {"ALL", timeframe}:
+            continue
+        if rg not in {"ALL", "UNKNOWN", regime}:
+            continue
+        state = str(row.get("state") or "OBSERVE").upper()
+        if state not in {"PROTECT", "CANARY", "ACTIVE"}:
+            continue
+        specificity = int(tf == timeframe) + int(rg == regime)
+        candidates.append((specificity, int(row.get("validation_n") or 0), row))
+
+    if not candidates:
+        return 1.0, "OBSERVE"
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    row = candidates[0][2]
+    state = str(row.get("state") or "OBSERVE").upper()
+    multiplier = safe_float(row.get("production_multiplier"), 1.0) or 1.0
+    # Final independent hard guardrail.
+    if state == "PROTECT":
+        multiplier = _clamp(multiplier, 0.85, 1.0)
+    elif state == "CANARY":
+        multiplier = _clamp(multiplier, 1.0, 1.08)
+    elif state == "ACTIVE":
+        multiplier = _clamp(multiplier, 1.0, 1.20)
+    else:
+        multiplier = 1.0
+    return multiplier, state

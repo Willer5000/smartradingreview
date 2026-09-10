@@ -19554,9 +19554,22 @@ class TradingExpertSystem:
             # mismas velas ya cargadas. No sustituye Entry/SL/TP productivos,
             # no cambia dirección, Safety, publicación ni leverage.
             try:
-                from execution_challenger_lab import build_execution_challenger_lab
+                from execution_challenger_lab import (
+                    build_execution_challenger_lab,
+                    apply_governed_execution_calibration,
+                )
                 resultado_final['execution_challenger_lab'] = (
                     build_execution_challenger_lab(resultado_final, df)
+                )
+                # Commit 14 — one validated Champion may replace geometry only
+                # in CANARY/ACTIVE. Direction and Safety are never bypassed; the
+                # Futures quality/publication gates run afterwards on the new
+                # levels.
+                resultado_final['self_calibration_execution'] = (
+                    apply_governed_execution_calibration(
+                        resultado_final,
+                        resultado_final['execution_challenger_lab'],
+                    )
                 )
             except Exception as challenger_lab_error:
                 resultado_final['execution_challenger_lab'] = {
@@ -19565,6 +19578,12 @@ class TradingExpertSystem:
                     'production_change': False,
                     'status': 'UNAVAILABLE',
                     'reason': str(challenger_lab_error)[:180],
+                }
+                resultado_final['self_calibration_execution'] = {
+                    'version': 'C14_GOVERNED_SELF_CALIBRATION_V1',
+                    'applied': False,
+                    'state': 'OBSERVE',
+                    'reason': 'FAIL_NEUTRAL',
                 }
 
             # === FASE 7: Registrar señal en Supabase (best-effort, no bloqueante) ===
@@ -25483,14 +25502,27 @@ class Moderador:
                     except Exception:
                         review_mult = 1.0
                 
-                # Commit 12: calcular un multiplicador EXPERIMENTAL por
-                # especialización. No participa en peso_efectivo ni en la
-                # confianza productiva; sólo se guarda para simulación Shadow.
+                # Commit 12 mantiene el multiplicador Shadow para auditoría.
+                # Commit 14 añade un multiplicador PRODUCTIVO gobernado, que es
+                # 1.0 mientras no exista evidencia OOS/costes suficiente.
                 expert_shadow_mult = 1.0
+                expert_governed_mult = 1.0
+                expert_governed_state = 'OBSERVE'
                 if trader.nombre != 'Trader de Revisión':
                     try:
-                        from dynamic_expert_committee import get_shadow_multiplier
+                        from dynamic_expert_committee import (
+                            get_shadow_multiplier,
+                            get_governed_multiplier,
+                        )
                         expert_shadow_mult = get_shadow_multiplier(
+                            trader=trader.nombre,
+                            market=system_type,
+                            timeframe=timeframe,
+                            direction=accion,
+                            regime=regime,
+                            relation='SUPPORT',
+                        )
+                        expert_governed_mult, expert_governed_state = get_governed_multiplier(
                             trader=trader.nombre,
                             market=system_type,
                             timeframe=timeframe,
@@ -25500,9 +25532,12 @@ class Moderador:
                         )
                     except Exception:
                         expert_shadow_mult = 1.0
+                        expert_governed_mult = 1.0
+                        expert_governed_state = 'OBSERVE'
 
-                peso_efectivo = trader.peso_base * regime_mult * review_mult
-                peso_efectivo_shadow = peso_efectivo * expert_shadow_mult
+                peso_efectivo_base = trader.peso_base * regime_mult * review_mult
+                peso_efectivo = peso_efectivo_base * expert_governed_mult
+                peso_efectivo_shadow = peso_efectivo_base * expert_shadow_mult
                 confianza_ponderada = min(100.0, max(0.0, confianza * peso_efectivo))
                 
                 # Mostrar voto del trader
@@ -25532,6 +25567,8 @@ class Moderador:
                     'multiplicador_regimen': regime_mult,
                     'multiplicador_review': review_mult,
                     'peso_efectivo': peso_efectivo,
+                    'multiplicador_experto_gobernado': expert_governed_mult,
+                    'estado_experto_gobernado': expert_governed_state,
                     'multiplicador_experto_shadow': expert_shadow_mult,
                     'peso_efectivo_shadow': peso_efectivo_shadow,
                     'system_type': system_type
@@ -25558,6 +25595,8 @@ class Moderador:
                     'multiplicador_regimen': 1.0,
                     'multiplicador_review': 1.0,
                     'peso_efectivo': trader.peso_base,
+                    'multiplicador_experto_gobernado': 1.0,
+                    'estado_experto_gobernado': 'OBSERVE',
                     'multiplicador_experto_shadow': 1.0,
                     'peso_efectivo_shadow': trader.peso_base,
                     'system_type': system_type
@@ -25842,6 +25881,12 @@ class Moderador:
                     'multiplicador_regimen': v['multiplicador_regimen'],
                     'multiplicador_review': v['multiplicador_review'],
                     'peso_efectivo': v['peso_efectivo'],
+                    'multiplicador_experto_gobernado': v.get(
+                        'multiplicador_experto_gobernado', 1.0
+                    ),
+                    'estado_experto_gobernado': v.get(
+                        'estado_experto_gobernado', 'OBSERVE'
+                    ),
                     'multiplicador_experto_shadow': v.get(
                         'multiplicador_experto_shadow', 1.0
                     ),
@@ -38360,6 +38405,11 @@ def _build_ai_learning_context():
             or {}
         )
 
+        self_calibration_learning = (
+            quality_v2.get('self_calibration_v1', {})
+            or {}
+        )
+
     except Exception as q7_learning_error:
 
         q7_strategy_lab_learning = {
@@ -38434,6 +38484,13 @@ def _build_ai_learning_context():
             'version': 'C13_EXECUTION_CHALLENGER_LAB_V1',
             'status': 'UNAVAILABLE',
             'authority': 'SHADOW_ONLY',
+            'reason': str(q7_learning_error)[:180]
+        }
+
+        self_calibration_learning = {
+            'version': 'C14_GOVERNED_SELF_CALIBRATION_V1',
+            'state': 'OBSERVE',
+            'production_change': False,
             'reason': str(q7_learning_error)[:180]
         }
 
@@ -38528,7 +38585,10 @@ def _build_ai_learning_context():
             dynamic_expert_committee_learning,
 
         'execution_challenger_lab_v1':
-            execution_challenger_lab_learning
+            execution_challenger_lab_learning,
+
+        'self_calibration_v1':
+            self_calibration_learning
     }
 
 # ============================================================================
