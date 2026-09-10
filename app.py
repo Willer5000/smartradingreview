@@ -28827,9 +28827,24 @@ def api_saved_signals_chart_data(signal_id):
         symbol = sig.get('symbol')
         tf = sig.get('timeframe')
         
-        df = expert_system.get_kucoin_data(symbol, tf)
+        # HOTFIX 14.1 — Saved Signals es exclusivamente FUTURES.
+        # El detalle gráfico debe usar el mismo contrato perpetuo que el
+        # lifecycle; antes consultaba `expert_system` (Spot), por lo que el
+        # usuario podía ver una vela/precio que tocaba Entry mientras el
+        # monitor Futures estaba evaluando otro mercado.
+        futures_market = _get_futures_system()
+        if futures_market is None:
+            return jsonify({
+                'success': False,
+                'error': 'FuturesSystem no disponible'
+            }), 200
+
+        df = futures_market.get_kucoin_data(symbol, tf)
         if df is None or len(df) < 5:
-            return jsonify({'success': False, 'error': 'Sin datos de velas'}), 200
+            return jsonify({
+                'success': False,
+                'error': 'Sin datos de velas Futures perpetuos'
+            }), 200
         
         # Últimas 100 velas
         df = df.tail(100).copy().reset_index(drop=True)
@@ -28849,6 +28864,7 @@ def api_saved_signals_chart_data(signal_id):
             'signal': sig,
             'candles': candles,
             'current_price': current_price,
+            'market_data_source': 'KUCOIN_FUTURES_PERPETUAL_REST',
         })
     except Exception as e:
         print(f"❌ api_saved_signals_chart_data: {e}")

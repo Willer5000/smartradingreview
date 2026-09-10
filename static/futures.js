@@ -6094,6 +6094,19 @@ window.openSavedSignalDetail = async function(signalId) {
         window._currentSavedSignal = sig;
         const c = json.candles;
         const currentPrice = json.current_price;
+        const savedEntry = Number(sig.entry || 0);
+        const originalEntry = Number(sig.original_entry || 0);
+        const hasDifferentOriginalEntry = (
+            savedEntry > 0
+            && originalEntry > 0
+            && Math.abs(savedEntry - originalEntry)
+                > Math.max(1e-10, savedEntry * 0.000001)
+        );
+        const marketDataLabel = (
+            json.market_data_source === 'KUCOIN_FUTURES_PERPETUAL_REST'
+                ? 'KuCoin Futures perpetuo'
+                : 'Futures'
+        );
         
         // Habilitar/deshabilitar botones según estado
         const isOpen = (sig.status === 'active' || sig.status === 'entry_touched');
@@ -6116,11 +6129,18 @@ window.openSavedSignalDetail = async function(signalId) {
                 ${statusBadge}
                 <div class="ms-auto">${pnlDisplay}</div>
             </div>
-            <div class="row g-2 mb-3 small">
-                <div class="col-md-3"><span class="text-muted">Entry:</span> <strong class="text-primary">${sig.entry}</strong></div>
+            <div class="row g-2 mb-2 small">
+                <div class="col-md-3"><span class="text-muted">Entry operativo guardado:</span> <strong class="text-primary">${sig.entry}</strong></div>
                 <div class="col-md-3"><span class="text-muted">SL:</span> <strong class="text-danger">${sig.stop_loss}</strong></div>
                 <div class="col-md-3"><span class="text-muted">TP:</span> <strong class="text-success">${sig.take_profit}</strong></div>
-                <div class="col-md-3"><span class="text-muted">Precio actual:</span> <strong>${currentPrice}</strong></div>
+                <div class="col-md-3"><span class="text-muted">Precio actual Futures:</span> <strong>${currentPrice}</strong></div>
+            </div>
+            <div class="small text-muted mb-3">
+                Fuente de seguimiento: <strong>${marketDataLabel}</strong>.
+                ${hasDifferentOriginalEntry
+                    ? `· Entry original del análisis: <strong>${originalEntry}</strong>.`
+                    : ''}
+                El lifecycle usa el <strong>Entry operativo guardado</strong>.
             </div>
             <div class="row g-2 mb-3 small">
                 <div class="col-md-6"><span class="text-muted">🕒 Ingreso:</span> <strong>${_fmtLocalDate(sig.entry_at || sig.created_at)}</strong></div>

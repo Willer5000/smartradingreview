@@ -1563,6 +1563,104 @@ def _check_entry_touched(entry: float, high: float, low: float,
     tol = entry * (tolerance_pct / 100.0)
     return (low - tol) <= entry <= (high + tol)
 
+
+# ============================================================================
+# HOTFIX 14.1 — CURRENT-CANDLE ENTRY PROBE
+# ============================================================================
+#
+# Las velas de KuCoin están fechadas por APERTURA de vela. Si el usuario guarda
+# una señal, por ejemplo, a mitad de una vela 2h, el filtro histórico estricto
+# `candle_time > entry_at` excluye correctamente esa vela para no usar máximos/
+# mínimos que pudieron ocurrir ANTES del guardado. El efecto secundario era un
+# punto ciego: el precio vivo podía llegar al Entry dentro de esa misma vela y
+# Saved Signals no lo veía hasta la vela siguiente.
+#
+# Solución conservadora: para la vela que ya estaba abierta al guardar NO usamos
+# su high/low acumulado (evita falsos positivos pre-guardado). Sólo usamos el
+# último close observado por el monitor, que se refresca cada minuto.
+# ============================================================================
+
+_SAVED_SIGNAL_TF_SECONDS = {
+    '5m': 5 * 60,
+    '15m': 15 * 60,
+    '30m': 30 * 60,
+    '1h': 60 * 60,
+    '2h': 2 * 60 * 60,
+    '4h': 4 * 60 * 60,
+}
+
+
+def _current_candle_live_entry_probe(
+    entry: float,
+    df,
+    start_ts,
+    action: str,
+    timeframe: str,
+    tolerance_pct: float = 0.15,
+) -> Optional[Dict]:
+    """Detecta un Entry en la vela que ya estaba abierta al guardar.
+
+    Retorna ``{'time': ..., 'price': ...}`` cuando el último precio observable
+    está en la tolerancia del Entry. No usa high/low de esa vela porque contienen
+    recorrido anterior a ``entry_at``.
+    """
+    try:
+        import pandas as pd
+
+        if df is None or len(df) == 0 or entry <= 0:
+            return None
+
+        latest = df.iloc[-1]
+        candle_ts = pd.Timestamp(latest['time'])
+        if candle_ts.tz is None:
+            candle_ts = candle_ts.tz_localize('UTC')
+        else:
+            candle_ts = candle_ts.tz_convert('UTC')
+
+        start_ts = pd.Timestamp(start_ts)
+        if start_ts.tz is None:
+            start_ts = start_ts.tz_localize('UTC')
+        else:
+            start_ts = start_ts.tz_convert('UTC')
+
+        # Si la última vela abrió DESPUÉS del guardado, el flujo normal df_after
+        # ya dispone de un high/low íntegramente posterior; no usar este probe.
+        if candle_ts > start_ts:
+            return None
+
+        # Evitar que un close viejo/caché atrasado se interprete como precio vivo.
+        tf_seconds = _SAVED_SIGNAL_TF_SECONDS.get(str(timeframe or ''))
+        now_utc = pd.Timestamp.now(tz='UTC')
+        if tf_seconds:
+            max_age = tf_seconds + max(120, int(tf_seconds * 0.25))
+            if (now_utc - candle_ts).total_seconds() > max_age:
+                return None
+
+        live_price = float(latest['close'] or 0)
+        if live_price <= 0:
+            return None
+
+        if not _check_entry_touched(
+            entry,
+            live_price,
+            live_price,
+            action,
+            tolerance_pct=tolerance_pct,
+        ):
+            return None
+
+        return {
+            'time': now_utc,
+            'price': live_price,
+        }
+
+    except Exception as exc:
+        logger.debug(
+            'current-candle entry probe omitido: %s',
+            exc,
+        )
+        return None
+
 def _calculate_open_excursions(
     signal: Dict,
     df_after,
@@ -5080,8 +5178,22 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                     ]
                 )
 
-                if len(df_after) == 0:
-                    # No hay velas nuevas aún.
+                # HOTFIX 14.1 — si la señal se guardó dentro de la vela
+                # actualmente abierta, `df_time > start_ts` la excluye a
+                # propósito para no reutilizar high/low previos al guardado.
+                # Aun así debemos poder detectar el precio vivo tocando Entry.
+                live_entry_probe = None
+                if not already_touched:
+                    live_entry_probe = _current_candle_live_entry_probe(
+                        entry=entry,
+                        df=df,
+                        start_ts=start_ts,
+                        action=action,
+                        timeframe=tf,
+                    )
+
+                if len(df_after) == 0 and live_entry_probe is None:
+                    # No hay velas nuevas ni toque vivo verificable todavía.
                     continue
 
                 # ============================================================
@@ -5263,109 +5375,77 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
 
                 if not already_touched:
 
-                    for _, row in df_after.iterrows():
+                    touch_ts = None
+                    touch_price = None
 
-                        if not _check_entry_touched(
-                            entry,
-                            float(
-                                row['high']
-                            ),
-                            float(
-                                row['low']
-                            ),
-                            action
-                        ):
-                            continue
+                    # Primero, el precio vivo de la vela que ya estaba abierta
+                    # cuando se guardó la señal. Esto corrige el punto ciego de
+                    # 2h/4h sin aceptar high/low ocurridos antes del guardado.
+                    if live_entry_probe is not None:
+                        touch_ts = live_entry_probe.get('time')
+                        touch_price = live_entry_probe.get('price')
 
-                        # ====================================================
-                        # GUARDAR EL TIMESTAMP REAL DE LA VELA
-                        # ====================================================
+                    # Si no hubo toque vivo, usar las velas cuya APERTURA es
+                    # estrictamente posterior a entry_at; ahí todo el high/low
+                    # pertenece al período válido de seguimiento.
+                    if touch_ts is None:
+                        for _, row in df_after.iterrows():
 
-                        try:
-                            touch_ts = (
-                                pd.Timestamp(
-                                    row['time']
-                                )
-                            )
+                            if not _check_entry_touched(
+                                entry,
+                                float(row['high']),
+                                float(row['low']),
+                                action
+                            ):
+                                continue
 
-                            if touch_ts.tz is None:
-                                touch_ts = (
-                                    touch_ts
-                                    .tz_localize(
-                                        'UTC'
-                                    )
-                                )
-                            else:
-                                touch_ts = (
-                                    touch_ts
-                                    .tz_convert(
-                                        'UTC'
-                                    )
-                                )
+                            try:
+                                touch_ts = pd.Timestamp(row['time'])
+                                if touch_ts.tz is None:
+                                    touch_ts = touch_ts.tz_localize('UTC')
+                                else:
+                                    touch_ts = touch_ts.tz_convert('UTC')
+                            except Exception:
+                                touch_ts = pd.Timestamp.now(tz='UTC')
 
-                        except Exception:
-                            touch_ts = (
-                                pd.Timestamp.now(
-                                    tz='UTC'
-                                )
-                            )
+                            # El nivel ejecutable sigue siendo `entry`; el precio
+                            # observado se conserva sólo como evidencia de toque.
+                            touch_price = entry
+                            break
 
-                        touch_iso = (
-                            touch_ts.isoformat()
+                    if touch_ts is not None:
+                        touch_iso = pd.Timestamp(touch_ts).isoformat()
+                        observed_touch_price = float(
+                            touch_price if touch_price is not None else entry
                         )
 
                         db.client.table(
                             'saved_signals'
                         ).update({
-                            'entry_touched':
-                                True,
-
-                            'entry_touched_at':
-                                touch_iso,
-
-                            'entry_touched_price':
-                                entry,
-
-                            'status':
-                                'entry_touched',
-
-                            'updated_at':
-                                datetime.utcnow()
-                                .isoformat(),
+                            'entry_touched': True,
+                            'entry_touched_at': touch_iso,
+                            'entry_touched_price': observed_touch_price,
+                            'status': 'entry_touched',
+                            'updated_at': datetime.utcnow().isoformat(),
                         }).eq(
                             'id',
                             sig['id']
                         ).execute()
 
                         already_touched = True
+                        excursion_start_ts = pd.Timestamp(touch_ts)
 
-                        excursion_start_ts = (
-                            touch_ts
-                        )
+                        sig['entry_touched'] = True
+                        sig['entry_touched_at'] = touch_iso
+                        sig['entry_touched_price'] = observed_touch_price
 
-                        # Mantener también el snapshot local
-                        # coherente durante esta misma evaluación.
-                        sig[
-                            'entry_touched'
-                        ] = True
-
-                        sig[
-                            'entry_touched_at'
-                        ] = touch_iso
-
-                        stats[
-                            'entry_touched'
-                        ] += 1
+                        stats['entry_touched'] += 1
 
                         logger.info(
-                            f"Entry tocado: "
-                            f"{symbol} "
-                            f"{tf} "
-                            f"{action} "
-                            f"@ {entry}"
+                            "Entry tocado: "
+                            f"{symbol} {tf} {action} "
+                            f"entry={entry} observed={observed_touch_price}"
                         )
-
-                        break
 
                 # ============================================================
                 # SI TODAVÍA NO HAY ENTRY, NO EXISTE POSICIÓN
