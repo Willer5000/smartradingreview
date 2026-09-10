@@ -2223,13 +2223,13 @@ class AnalyticsService:
             # ninguna decisión. La promoción permanece bloqueada mientras
             # la cohorte/costes no sean verificables.
             'learning_observatory_v1': {
-                'version': 'COMMIT8_LEARNING_GOVERNANCE_V1',
+                'version': 'COMMIT9_NET_EDGE_GOVERNANCE_V1',
                 'diagnostic_only': False,
                 # Positive authority here means quality selection only. It never
                 # lowers Safety and Commit 8 never grows leverage.
                 'calibration_allowed': bool(promotion_governance.get('quality_optimization_allowed', False)),
                 'promotion_allowed': bool(promotion_governance.get('strategy_veto_authority_allowed', False)),
-                'leverage_growth_allowed': False,
+                'leverage_growth_allowed': bool(promotion_governance.get('risk_growth_allowed', False)),
                 'block_reasons': observatory_reasons,
                 'coverage_complete': bool((promotion_governance.get('coverage') or {}).get('complete', False)),
                 'coverage': dict(promotion_governance.get('coverage') or {}),

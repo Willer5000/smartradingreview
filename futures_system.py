@@ -14,6 +14,7 @@
 
 import logging
 import math
+import os
 import threading
 import time
 from datetime import datetime
@@ -22,6 +23,7 @@ from typing import Dict, List, Optional
 import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter
+from leverage_policy import select_risk_budget_leverage
 
 # Importamos la clase base del sistema principal
 from app import TradingExpertSystem, KUCOIN_INTERVALS, SYMBOLS as SPOT_SYMBOLS
@@ -3091,295 +3093,154 @@ class FuturesAnalysis(TradingExpertSystem):
         adaptive_profile=None
     ):
         """
-        Elige el MENOR leverage entero que hace viable la operación.
+        Selecciona leverage desde viabilidad económica + límites de riesgo.
 
-        Debe caber simultáneamente bajo cuatro techos independientes:
-        riesgo del SL, estrés de volatilidad ATR, Execution Safety y TF.
-        Si el mínimo rentable no cabe bajo todos los techos, devuelve None.
+        Commit 9 conserva EXACTAMENTE la filosofía estática cuando el gate de
+        riesgo está cerrado. Sólo con net-edge robusto y gobernanza abierta la
+        temporalidad pasa de techo duro a referencia blanda, y el leverage se
+        deriva de un presupuesto de pérdida sobre el SL estructural.
         """
         try:
-            margin = float(
-                margin_usdt
-                or FUTURES_RISK_CONFIG['default_margin_usdt']
-            )
-
+            margin = float(margin_usdt or FUTURES_RISK_CONFIG['default_margin_usdt'])
             tp_pct = abs(float(tp_distance_pct or 0))
             sl_pct = abs(float(sl_distance_pct or 0))
             normalized_atr_pct = abs(float(atr_pct or 0))
-            safety = max(
-                0.0,
-                min(100.0, float(execution_safety or 0))
-            )
-
-            if (
-                margin <= 0
-                or tp_pct <= 0
-                or sl_pct <= 0
-                or normalized_atr_pct <= 0
-            ):
+            safety = max(0.0, min(100.0, float(execution_safety or 0)))
+            if margin <= 0 or tp_pct <= 0 or sl_pct <= 0 or normalized_atr_pct <= 0:
                 return None
 
-            # El TP debe dejar ventaja después del coste de entrada y salida.
-            round_trip_cost = float(
-                FUTURES_RISK_CONFIG['round_trip_cost_pct']
-            )
-            edge_after_cost = (
-                tp_pct / 100.0
-                - round_trip_cost
-            )
-
+            round_trip_cost = float(FUTURES_RISK_CONFIG['round_trip_cost_pct'])
+            edge_after_cost = tp_pct / 100.0 - round_trip_cost
             if edge_after_cost <= 0:
                 return None
 
-            target_profit = float(
-                FUTURES_RISK_CONFIG[
-                    'target_net_profit_usdt'
-                ]
-            )
-            min_leverage_economic = (
-                target_profit
-                / (margin * edge_after_cost)
-            )
-
-            minimum_roi_tp = float(
-                FUTURES_RISK_CONFIG['minimum_roi_tp_pct']
-            )
+            target_profit = float(FUTURES_RISK_CONFIG['target_net_profit_usdt'])
+            min_leverage_economic = target_profit / (margin * edge_after_cost)
+            minimum_roi_tp = float(FUTURES_RISK_CONFIG['minimum_roi_tp_pct'])
             min_leverage_by_roi = minimum_roi_tp / tp_pct
 
-            # Techo 1: pérdida prevista si se ejecuta el SL.
-            max_loss_pct = float(
-                FUTURES_RISK_CONFIG[
-                    'max_loss_pct_margin'
-                ]
-            )
-            max_leverage_by_risk = (
-                max_loss_pct
-                / sl_pct
-            )
+            max_loss_pct = float(FUTURES_RISK_CONFIG['max_loss_pct_margin'])
+            max_leverage_by_risk = max_loss_pct / sl_pct
 
-            # Techo 2: prueba de estrés. Aunque el SL sea estrecho, un salto
-            # adverso de 1.5 ATR no debe acercar el margen a liquidación.
-            atr_stress_multiplier = float(
-                FUTURES_RISK_CONFIG['atr_stress_multiplier']
-            )
-            atr_stress_move_pct = max(
-                sl_pct,
-                normalized_atr_pct * atr_stress_multiplier,
-            )
-            max_atr_stress_loss = float(
-                FUTURES_RISK_CONFIG[
-                    'max_atr_stress_loss_pct_margin'
-                ]
-            )
-            max_leverage_by_atr_stress = (
-                max_atr_stress_loss / atr_stress_move_pct
-            )
+            atr_stress_multiplier = float(FUTURES_RISK_CONFIG['atr_stress_multiplier'])
+            atr_stress_move_pct = max(sl_pct, normalized_atr_pct * atr_stress_multiplier)
+            max_atr_stress_loss = float(FUTURES_RISK_CONFIG['max_atr_stress_loss_pct_margin'])
+            max_leverage_by_atr_stress = max_atr_stress_loss / atr_stress_move_pct
 
-            # Techo 3: temporalidad y techo absoluto del sistema.
-            min_leverage_tf, tf_max = LEVERAGE_RANGES.get(
-                timeframe,
-                (1, 10)
-            )
-            absolute_max = float(
-                FUTURES_RISK_CONFIG[
-                    'absolute_max_leverage'
-                ]
-            )
+            min_leverage_tf, tf_max = LEVERAGE_RANGES.get(timeframe, (1, 10))
+            absolute_max = float(FUTURES_RISK_CONFIG['absolute_max_leverage'])
 
-            # ==========================================================
-            # COMMIT 4 — LEVERAGE V2 AUTOPILOT (BOUNDED)
-            # ==========================================================
-            # ReviewTrader may shrink the policy ceiling after robust negative
-            # evidence. Positive evidence may choose a slightly higher leverage
-            # *inside* all existing hard ceilings. The TF/absolute caps are not
-            # removed in Commit 4 because the exchange contract leverage limit is
-            # not yet consumed as a verified runtime constraint.
-            adaptive_profile = (
-                adaptive_profile
-                if isinstance(adaptive_profile, dict)
-                else {}
-            )
+            adaptive_profile = adaptive_profile if isinstance(adaptive_profile, dict) else {}
             adaptive_config = adaptive_profile.get('config', {}) or {}
-            adaptive_authority = bool(
-                adaptive_profile.get('production_authority', False)
-            )
+            adaptive_authority = bool(adaptive_profile.get('production_authority', False))
             try:
                 leverage_cap_factor = float(
                     adaptive_config.get('leverage_cap_factor', 1.0)
-                    if adaptive_authority
-                    else 1.0
+                    if adaptive_authority else 1.0
                 )
             except Exception:
                 leverage_cap_factor = 1.0
             leverage_cap_factor = max(0.75, min(1.0, leverage_cap_factor))
 
-            max_leverage_by_policy_static = min(
-                float(tf_max),
-                absolute_max
-            )
-            max_leverage_by_policy = max(
-                1.0,
-                max_leverage_by_policy_static * leverage_cap_factor
-            )
-
-            # Diagnostic only: how far risk/ATR geometry would allow before TF
-            # policy. This is NOT a recommendation and does not override exchange
-            # limits or the absolute production cap.
+            static_policy_max = max(1.0, min(float(tf_max), absolute_max) * leverage_cap_factor)
             risk_based_max_without_timeframe_cap = min(
-                max_leverage_by_risk,
-                max_leverage_by_atr_stress,
+                max_leverage_by_risk, max_leverage_by_atr_stress
             )
 
-            # Techo 4: una mejor puntuación permite utilizar una parte mayor
-            # del techo, pero nunca convierte directamente 90 puntos en 90x.
-            security_factor = (
-                0.25
-                + 0.75 * (safety / 100.0)
+            allow_leverage_growth = bool(
+                adaptive_authority
+                and adaptive_config.get('allow_leverage_growth', False)
+                and str(adaptive_config.get('leverage_policy_mode') or '').upper() == 'RISK_BUDGET_V3'
             )
-            if safety >= FUTURES_RISK_CONFIG[
-                'high_safety_threshold'
-            ]:
-                security_factor = min(
-                    1.0,
-                    security_factor + 0.05
+            try:
+                target_loss_budget = float(
+                    adaptive_config.get('target_loss_budget_pct_margin', 5.0) or 5.0
                 )
-            max_leverage_by_security = (
-                max_leverage_by_policy
-                * security_factor
-            )
+            except Exception:
+                target_loss_budget = 5.0
+            target_loss_budget = max(2.0, min(6.0, target_loss_budget))
 
-            final_max_leverage = min(
-                max_leverage_by_risk,
-                max_leverage_by_atr_stress,
-                max_leverage_by_security,
-                max_leverage_by_policy,
-            )
+            # A value here must be explicitly operator/exchange verified.  When
+            # absent, the old 50x system maximum remains the safe fallback.
+            verified_exchange_max = None
+            raw_verified_max = str(os.environ.get('FUTURES_VERIFIED_EXCHANGE_MAX_LEVERAGE', '') or '').strip()
+            if raw_verified_max:
+                try:
+                    candidate = float(raw_verified_max)
+                    if 1.0 <= candidate <= 125.0:
+                        verified_exchange_max = candidate
+                except Exception:
+                    verified_exchange_max = None
 
             minimum_required = max(
-                float(min_leverage_tf),
-                min_leverage_economic,
-                min_leverage_by_roi,
+                float(min_leverage_tf), min_leverage_economic, min_leverage_by_roi
             )
-            minimum_required_integer = int(math.ceil(minimum_required))
-            maximum_safe_integer = int(math.floor(final_max_leverage))
-
-            if (
-                maximum_safe_integer < 1
-                or minimum_required_integer > maximum_safe_integer
-            ):
+            policy = select_risk_budget_leverage(
+                minimum_required=minimum_required,
+                sl_distance_pct=sl_pct,
+                max_by_risk=max_leverage_by_risk,
+                max_by_atr_stress=max_leverage_by_atr_stress,
+                safety_score=safety,
+                # Passing the already-reduced static cap preserves PROTECT.
+                timeframe_static_max=static_policy_max,
+                fallback_exchange_max=absolute_max,
+                verified_exchange_max=verified_exchange_max,
+                adaptive_enabled=allow_leverage_growth,
+                target_loss_budget_pct_margin=target_loss_budget,
+                # Even a verified runtime value cannot exceed this emergency
+                # application guard without a future reviewed code change.
+                emergency_max_leverage=100.0,
+                high_safety_threshold=float(FUTURES_RISK_CONFIG['high_safety_threshold']),
+            )
+            if not policy:
                 logger.info(
                     f'FUTURES {timeframe} sin leverage viable: '
-                    f'mínimo rentable {minimum_required:.2f}x > '
-                    f'máximo seguro {final_max_leverage:.2f}x'
+                    f'mínimo rentable {minimum_required:.2f}x no cabe bajo riesgo/ATR/seguridad'
                 )
                 return None
 
-            # Static behavior remains MINIMUM_SAFE_VIABLE. Only a robust ACTIVE
-            # adaptive profile may select a modestly higher leverage, and still
-            # never beyond SL/ATR/security/policy ceilings.
-            leverage = minimum_required_integer
-            leverage_target_factor = 1.0
-            allow_leverage_growth = False
-            if adaptive_authority:
-                allow_leverage_growth = bool(
-                    adaptive_config.get('allow_leverage_growth', False)
-                )
-                try:
-                    leverage_target_factor = float(
-                        adaptive_config.get('leverage_target_factor', 1.0)
-                        or 1.0
-                    )
-                except Exception:
-                    leverage_target_factor = 1.0
-                leverage_target_factor = max(1.0, min(1.20, leverage_target_factor))
-
-            if allow_leverage_growth and leverage_target_factor > 1.0:
-                adaptive_target = int(math.ceil(
-                    minimum_required_integer * leverage_target_factor
-                ))
-                leverage = min(maximum_safe_integer, max(minimum_required_integer, adaptive_target))
+            leverage = int(policy['leverage'])
+            security_factor = 0.25 + 0.75 * (safety / 100.0)
+            if safety >= FUTURES_RISK_CONFIG['high_safety_threshold']:
+                security_factor = min(1.0, security_factor + 0.05)
 
             return {
                 'leverage': leverage,
-                'min_economic': round(
-                    min_leverage_economic,
-                    2
-                ),
-                'min_by_roi': round(
-                    min_leverage_by_roi,
-                    2
-                ),
-                'max_by_risk': round(
-                    max_leverage_by_risk,
-                    2
-                ),
-                'max_by_atr_stress': round(
-                    max_leverage_by_atr_stress,
-                    2
-                ),
-                'max_by_security': round(
-                    max_leverage_by_security,
-                    2
-                ),
-                'max_safe': round(
-                    final_max_leverage,
-                    2
-                ),
-                'risk_based_max_without_timeframe_cap': round(
-                    risk_based_max_without_timeframe_cap,
-                    2
-                ),
-                'adaptive_profile_state': str(
-                    adaptive_profile.get('state', 'OBSERVE')
-                ),
+                'min_economic': round(min_leverage_economic, 2),
+                'min_by_roi': round(min_leverage_by_roi, 2),
+                'max_by_risk': round(max_leverage_by_risk, 2),
+                'max_by_atr_stress': round(max_leverage_by_atr_stress, 2),
+                'max_by_security': round(float(policy['max_by_security']), 2),
+                'max_safe': round(float(policy['max_safe']), 2),
+                'risk_based_max_without_timeframe_cap': round(risk_based_max_without_timeframe_cap, 2),
+                'adaptive_profile_state': str(adaptive_profile.get('state', 'OBSERVE')),
                 'adaptive_profile_authority': adaptive_authority,
-                'adaptive_leverage_cap_factor': round(
-                    leverage_cap_factor,
-                    3
-                ),
+                'adaptive_leverage_cap_factor': round(leverage_cap_factor, 3),
                 'adaptive_leverage_target_factor': round(
-                    leverage_target_factor,
-                    3
+                    float(adaptive_config.get('leverage_target_factor', 1.0) or 1.0), 3
                 ),
-                'adaptive_leverage_growth': bool(
-                    allow_leverage_growth
-                ),
-                'min_by_timeframe': int(
-                    min_leverage_tf
-                ),
-                'max_by_timeframe': int(
-                    tf_max
-                ),
-                'atr_pct': round(
-                    normalized_atr_pct,
-                    4
-                ),
-                'atr_stress_move_pct': round(
-                    atr_stress_move_pct,
-                    4
-                ),
-                'estimated_atr_stress_loss_pct_margin': round(
-                    atr_stress_move_pct * leverage,
-                    2
-                ),
-                'security_factor': round(
-                    security_factor,
-                    3
-                ),
-                'selection_policy': (
-                    'ADAPTIVE_EDGE_BOUNDED'
-                    if allow_leverage_growth and leverage > minimum_required_integer
-                    else 'MINIMUM_SAFE_VIABLE'
-                ),
+                'adaptive_leverage_growth': bool(allow_leverage_growth),
+                'leverage_policy_version': policy.get('version'),
+                'leverage_policy_mode': policy.get('selection_policy'),
+                'target_loss_budget_pct_margin': policy.get('target_loss_budget_pct_margin'),
+                'timeframe_cap_mode': policy.get('timeframe_cap_mode'),
+                'exchange_limit_verified': bool(policy.get('exchange_limit_verified')),
+                'exchange_limit_source': policy.get('exchange_limit_source'),
+                'exchange_cap': policy.get('exchange_cap'),
+                'min_by_timeframe': int(min_leverage_tf),
+                'max_by_timeframe': int(tf_max),
+                'atr_pct': round(normalized_atr_pct, 4),
+                'atr_stress_move_pct': round(atr_stress_move_pct, 4),
+                'estimated_atr_stress_loss_pct_margin': round(atr_stress_move_pct * leverage, 2),
+                'estimated_sl_loss_pct_margin': round(sl_pct * leverage, 2),
+                'security_factor': round(security_factor, 3),
+                'selection_policy': policy.get('selection_policy', 'MINIMUM_SAFE_VIABLE'),
                 'economically_viable': True
             }
-
         except Exception as e:
-            logger.warning(
-                f"Error en cálculo económico de leverage: {e}"
-            )
-            return None    
-   
+            logger.warning(f"Error en cálculo económico de leverage: {e}")
+            return None
+
     def calculate_optimal_leverage(
         self,
         timeframe: str,

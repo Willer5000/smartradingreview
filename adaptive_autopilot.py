@@ -23,8 +23,8 @@ import math
 import threading
 import time
 
-AUTOPILOT_VERSION = "C4_REVIEWTRADER_AUTOPILOT_V1"
-EXECUTION_PROFILE_VERSION = "C4_ADAPTIVE_EXECUTION_PROFILE_V1"
+AUTOPILOT_VERSION = "C9_REVIEWTRADER_AUTOPILOT_V2"
+EXECUTION_PROFILE_VERSION = "C9_ADAPTIVE_EXECUTION_PROFILE_V2"
 STRATEGY_GOVERNANCE_VERSION = "C8_STRATEGY_GOVERNANCE_V2"
 
 # Evidence gates. These are not trading thresholds; they govern whether learning
@@ -161,6 +161,11 @@ def default_execution_profile(
             "leverage_target_factor": 1.0,
             "leverage_cap_factor": 1.0,
             "allow_leverage_growth": False,
+            # Commit 9: growth, when globally governed, is selected from a
+            # bounded loss budget and structural SL geometry. Timeframe then
+            # becomes a soft reference instead of an arbitrary hard ceiling.
+            "leverage_policy_mode": "STATIC_MINIMUM",
+            "target_loss_budget_pct_margin": 5.0,
             # No learned rule may lower the static safety floor.
             "minimum_safety_delta": 0.0,
         },
@@ -170,6 +175,9 @@ def default_execution_profile(
             "sl": 0,
             "expectancy_r": None,
             "profit_factor": None,
+            "model_complete_net_coverage_pct": 0.0,
+            "model_complete_net_expectancy_r": None,
+            "model_complete_net_profit_factor": None,
             "avg_mfe_r": None,
             "avg_mae_r": None,
             "stop_without_progress_ratio": None,
@@ -210,6 +218,7 @@ def calculate_execution_metrics(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any
     tp = sum(1 for row in resolved if str(row.get("status") or "").lower() == "tp_hit")
     sl = n - tp
     rs: List[float] = []
+    net_rs: List[float] = []
     mfe_values: List[float] = []
     mae_values: List[float] = []
     stopped_without_progress = 0
@@ -224,6 +233,19 @@ def calculate_execution_metrics(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any
         if isinstance(result, dict):
             mfe_values.append(max(0.0, _safe_float(result.get("mfe_r"), 0.0)))
             mae_values.append(max(0.0, _safe_float(result.get("mae_r"), 0.0)))
+            if bool(result.get("economics_cost_components_complete", False)):
+                net_value = result.get("modeled_net_r")
+                if net_value is not None:
+                    net_rs.append(_safe_float(net_value, 0.0))
+            elif result.get("net_pnl_pct") is not None:
+                # Future actual-fill integrations are stronger evidence. Convert
+                # only when Entry/SL geometry is present in the signal row.
+                entry = _safe_float(row.get("entry_price"), 0.0)
+                stop = _safe_float(row.get("stop_loss"), 0.0)
+                actual_pct = _safe_float(result.get("net_pnl_pct"), 0.0)
+                risk_pct = abs(entry - stop) / entry * 100.0 if entry > 0 else 0.0
+                if risk_pct > 0:
+                    net_rs.append(actual_pct / risk_pct)
             forensic = result.get("execution_forensics") or {}
             if isinstance(forensic, dict):
                 if str(forensic.get("diagnosis") or "") == "STOPPED_WITHOUT_PROGRESS":
@@ -231,10 +253,17 @@ def calculate_execution_metrics(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any
                 if _as_bool(forensic.get("stop_was_possibly_tight", False)):
                     tight_suspects += 1
 
-    gross_win = sum(max(0.0, value) for value in rs)
-    gross_loss = abs(sum(min(0.0, value) for value in rs))
+    def _pf(values: List[float]):
+        gains = sum(max(0.0, value) for value in values)
+        losses = abs(sum(min(0.0, value) for value in values))
+        if losses > 0:
+            return gains / losses
+        return None if gains == 0 else 99.0
+
     expectancy = (sum(rs) / n) if n else None
-    pf = (gross_win / gross_loss) if gross_loss > 0 else (None if gross_win == 0 else 99.0)
+    pf = _pf(rs)
+    net_expectancy = (sum(net_rs) / len(net_rs)) if net_rs else None
+    net_pf = _pf(net_rs)
 
     return {
         "resolved": n,
@@ -243,6 +272,10 @@ def calculate_execution_metrics(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any
         "win_rate_pct": round(tp / n * 100.0, 2) if n else None,
         "expectancy_r": round(expectancy, 4) if expectancy is not None else None,
         "profit_factor": round(pf, 3) if pf is not None else None,
+        "model_complete_net_rows": len(net_rs),
+        "model_complete_net_coverage_pct": round(len(net_rs) / n * 100.0, 2) if n else 0.0,
+        "model_complete_net_expectancy_r": round(net_expectancy, 4) if net_expectancy is not None else None,
+        "model_complete_net_profit_factor": round(net_pf, 3) if net_pf is not None else None,
         "avg_mfe_r": round(sum(mfe_values) / len(mfe_values), 4) if mfe_values else None,
         "avg_mae_r": round(sum(mae_values) / len(mae_values), 4) if mae_values else None,
         "stop_without_progress_ratio": round(stopped_without_progress / sl, 4) if sl else 0.0,
@@ -272,6 +305,11 @@ def derive_execution_profile(
     tight_ratio = _safe_float(metrics.get("stop_tight_suspect_ratio"), 0.0)
     avg_mae = metrics.get("avg_mae_r")
     avg_mae_value = _safe_float(avg_mae, 99.0) if avg_mae is not None else 99.0
+    net_coverage = _safe_float(metrics.get("model_complete_net_coverage_pct"), 0.0)
+    net_expectancy = metrics.get("model_complete_net_expectancy_r")
+    net_pf = metrics.get("model_complete_net_profit_factor")
+    net_expectancy_value = _safe_float(net_expectancy, 0.0) if net_expectancy is not None else None
+    net_pf_value = _safe_float(net_pf, 0.0) if net_pf is not None else None
 
     config = dict(profile["config"])
     config["q2_weights"] = dict(DEFAULT_Q2_WEIGHTS)
@@ -294,6 +332,8 @@ def derive_execution_profile(
         config["leverage_cap_factor"] = 0.85 if expectancy_value <= -0.25 else 0.90
         config["leverage_target_factor"] = 1.0
         config["allow_leverage_growth"] = False
+        config["leverage_policy_mode"] = "STATIC_MINIMUM"
+        config["target_loss_budget_pct_margin"] = 5.0
         config["minimum_safety_delta"] = 0.0  # 7E.3 already handles Safety protection.
 
         if stop_direct >= 0.40:
@@ -317,12 +357,20 @@ def derive_execution_profile(
     # ------------------------------------------------------------------
     # ACTIVE: only robust positive edge may optimize upward.
     # ------------------------------------------------------------------
-    if (
+    net_profile_ready = bool(
+        net_coverage >= 95.0
+        and net_expectancy_value is not None
+        and net_expectancy_value >= 0.05
+        and net_pf_value is not None
+        and net_pf_value >= 1.10
+    )
+    gross_profile_ready = bool(
         expectancy_value is not None
         and pf_value is not None
         and expectancy_value >= 0.10
         and pf_value >= 1.15
-    ):
+    )
+    if gross_profile_ready and (net_profile_ready or net_coverage <= 0.0):
         profile["state"] = "ACTIVE"
         profile["production_authority"] = True
         evidence["reason"] = "ROBUST_POSITIVE_EXECUTION_EVIDENCE"
@@ -332,22 +380,47 @@ def derive_execution_profile(
             config["q2_min_pair_improvement"] = 2.5
 
         # Growth needs stronger evidence than configuration selection.
-        if (
+        candidate_growth_ready = bool(
             n >= MIN_GROWTH_SAMPLE
-            and expectancy_value >= 0.15
-            and pf_value >= 1.20
             and avg_mae_value <= 0.80
-        ):
+            and (
+                (
+                    net_coverage >= 95.0
+                    and net_expectancy_value is not None and net_expectancy_value >= 0.15
+                    and net_pf_value is not None and net_pf_value >= 1.25
+                )
+                or (
+                    net_coverage <= 0.0
+                    and expectancy_value is not None and expectancy_value >= 0.15
+                    and pf_value is not None and pf_value >= 1.20
+                )
+            )
+        )
+        if candidate_growth_ready:
             config["allow_leverage_growth"] = True
-            config["leverage_target_factor"] = 1.10
+            config["leverage_target_factor"] = 1.10  # compatibility diagnostic
+            config["leverage_policy_mode"] = "RISK_BUDGET_V3"
+            config["target_loss_budget_pct_margin"] = 5.0
 
-        if (
+        strong_candidate_ready = bool(
             n >= MIN_STRONG_GROWTH_SAMPLE
-            and expectancy_value >= 0.25
-            and pf_value >= 1.40
             and avg_mae_value <= 0.65
-        ):
+            and (
+                (
+                    net_coverage >= 95.0
+                    and net_expectancy_value is not None and net_expectancy_value >= 0.25
+                    and net_pf_value is not None and net_pf_value >= 1.40
+                )
+                or (
+                    net_coverage <= 0.0
+                    and expectancy_value is not None and expectancy_value >= 0.25
+                    and pf_value is not None and pf_value >= 1.40
+                )
+            )
+        )
+        if strong_candidate_ready:
             config["leverage_target_factor"] = MAX_LEVERAGE_TARGET_FACTOR
+            config["target_loss_budget_pct_margin"] = 6.0
 
         profile["config"] = config
         profile["evidence"] = evidence
@@ -434,24 +507,40 @@ def get_execution_profile(
     # Commit 8: ACTIVE quality profiles obtain authority only from the persisted
     # evidence gate. PROTECT remains allowed because it can only reduce risk.
     governance = _governance_status(db)
+    profile_evidence = dict(profile.get('evidence') or {})
+    profile_net_coverage = _safe_float(
+        profile_evidence.get('model_complete_net_coverage_pct'), 0.0
+    )
+    profile_net_exp = profile_evidence.get('model_complete_net_expectancy_r')
+    profile_net_ready = bool(
+        profile_net_coverage >= 95.0
+        and profile_net_exp is not None
+        and _safe_float(profile_net_exp, -99.0) >= 0.05
+    )
+
     if str(profile.get('state') or '').upper() == 'ACTIVE':
         profile['production_authority'] = bool(
             governance.get('quality_optimization_allowed', False)
+            and profile_net_ready
         )
-        evidence = dict(profile.get('evidence') or {})
-        evidence['promotion_governance'] = {
+        profile_evidence['promotion_governance'] = {
             'quality_optimization_allowed': bool(governance.get('quality_optimization_allowed', False)),
             'risk_growth_allowed': bool(governance.get('risk_growth_allowed', False)),
+            'profile_net_evidence_ready': profile_net_ready,
             'block_reasons': list(governance.get('block_reasons') or []),
+            'risk_block_reasons': list(governance.get('risk_block_reasons') or []),
         }
-        profile['evidence'] = evidence
+        profile['evidence'] = profile_evidence
 
-    # Commit 8 never increases leverage. Even a valid ACTIVE quality profile can
-    # only improve structural selection; risk scaling belongs to Commit 9.
-    if not _risk_growth_enabled(db):
+    # Commit 9: even when the GLOBAL risk gate opens, the selected profile must
+    # itself have complete positive net evidence. This prevents a globally good
+    # cohort from granting leverage growth to an unvalidated symbol/timeframe.
+    if not (_risk_growth_enabled(db) and profile_net_ready):
         config = dict(profile.get('config') or {})
         config['allow_leverage_growth'] = False
         config['leverage_target_factor'] = min(1.0, _safe_float(config.get('leverage_target_factor'), 1.0))
+        config['leverage_policy_mode'] = 'STATIC_MINIMUM'
+        config['target_loss_budget_pct_margin'] = 5.0
         profile['config'] = config
 
     with _cache_lock:
@@ -560,7 +649,7 @@ def _fetch_execution_rows(db, limit: int = 400) -> List[Dict[str, Any]]:
     try:
         signals_response = (
             db.client.table("signals")
-            .select("id,symbol,timeframe,system_type,status,context,risk_reward,created_at")
+            .select("id,symbol,timeframe,system_type,status,context,risk_reward,entry_price,stop_loss,created_at")
             .eq("system_type", "futures")
             .in_("status", ["tp_hit", "sl_hit", "expired"])
             .order("created_at", desc=True)
@@ -576,7 +665,7 @@ def _fetch_execution_rows(db, limit: int = 400) -> List[Dict[str, Any]]:
             batch = ids[start:start + 100]
             response = (
                 db.client.table("signal_results")
-                .select("signal_id,status,pnl_pct,mfe_r,mae_r,execution_forensics,created_at")
+                .select("signal_id,status,pnl_pct,mfe_r,mae_r,execution_forensics,economics_status,economics_cost_components_complete,modeled_net_r,net_pnl_pct,created_at")
                 .in_("signal_id", batch)
                 .execute()
             )
@@ -1119,8 +1208,9 @@ def _transition_strategy_registry(
             "live_shadow": l,
             "global_governance": {
                 "strategy_veto_authority_allowed": strategy_veto_allowed,
-                "risk_growth_allowed": False,
+                "risk_growth_allowed": bool(governance.get("risk_growth_allowed", False)),
                 "block_reasons": list(governance.get("block_reasons") or []),
+                "risk_block_reasons": list(governance.get("risk_block_reasons") or []),
             },
             "governance_version": STRATEGY_GOVERNANCE_VERSION,
             "reason": reason or "NO_TRANSITION",

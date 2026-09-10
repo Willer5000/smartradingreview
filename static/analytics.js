@@ -1070,14 +1070,25 @@ function loHumanReason(value) {
     if (raw === 'validation_sample_ok') return 'Aún falta muestra suficiente en la ventana temporal de validación.';
     if (raw === 'gross_expectancy_ok') return 'La expectancy oficial todavía no demuestra ventaja suficiente.';
     if (raw === 'profit_factor_ok') return 'El Profit Factor oficial todavía no supera el mínimo de gobernanza.';
-    if (raw === 'modeled_net_coverage_ok') return 'No todas las operaciones resueltas tienen geometría suficiente para estimar costes de forma comparable.';
-    if (raw === 'modeled_net_expectancy_ok') return 'La expectancy conservadora después de costes modelados todavía no es positiva.';
+    if (raw === 'modeled_net_coverage_ok' || raw === 'model_complete_net_coverage_ok') return 'Aún falta completar la economía modelada de suficientes operaciones, incluido el funding observado.';
+    if (raw === 'modeled_net_expectancy_ok' || raw === 'model_complete_net_expectancy_ok') return 'La expectancy neta modelada todavía no demuestra ventaja suficiente.';
     if (raw === 'validation_net_expectancy_ok') return 'La ventaja neta modelada no se mantiene todavía fuera de la ventana de descubrimiento.';
     if (raw === 'validation_profit_factor_ok') return 'El Profit Factor de validación todavía no confirma la ventaja.';
-    if (raw === 'realized_net_coverage_ok') return 'Comisión, slippage y funding realizados todavía no están atribuidos de forma uniforme.';
-    if (raw === 'realized_net_expectancy_ok') return 'La expectancy neta realizada todavía no demuestra ventaja positiva.';
-    if (raw === 'validation_realized_net_expectancy_ok') return 'La ventaja neta realizada todavía no se confirma fuera de la ventana de calibración.';
-    if (raw === 'validation_realized_net_profit_factor_ok') return 'El Profit Factor neto realizado de validación todavía no confirma la ventaja.';
+    if (raw === 'realized_net_coverage_ok') return 'Aún falta cobertura económica completa suficiente para habilitar optimización.';
+    if (raw === 'realized_net_expectancy_ok') return 'La evidencia neta después de costes todavía no demuestra ventaja positiva.';
+    if (raw === 'validation_realized_net_expectancy_ok') return 'La ventaja neta todavía no se confirma fuera de la ventana de descubrimiento.';
+    if (raw === 'validation_realized_net_profit_factor_ok') return 'El Profit Factor neto de validación todavía no confirma la ventaja.';
+    if (raw === 'risk_sample_ok') return 'El escalado requiere al menos 50 resultados Futures oficiales.';
+    if (raw === 'risk_validation_sample_ok') return 'El escalado requiere al menos 15 resultados en validación temporal.';
+    if (raw === 'risk_net_coverage_ok') return 'El escalado espera economía neta modelada completa en al menos 95% de resultados.';
+    if (raw === 'risk_net_expectancy_ok') return 'La expectancy neta modelada aún no alcanza el margen exigido para escalar riesgo.';
+    if (raw === 'risk_net_profit_factor_ok') return 'El Profit Factor neto modelado aún no alcanza el mínimo exigido para escalar riesgo.';
+    if (raw === 'risk_validation_expectancy_ok') return 'La ventaja neta todavía no es suficientemente fuerte en validación temporal.';
+    if (raw === 'risk_validation_pf_ok') return 'El Profit Factor de validación todavía no es suficiente para escalar riesgo.';
+    if (raw === 'risk_recent_health_ok') return 'Los resultados netos recientes no permiten aumentar exposición.';
+    if (raw === 'risk_mae_ok') return 'La excursión adversa media todavía es demasiado alta para aumentar exposición.';
+    if (raw === 'risk_failure_streak_ok') return 'La racha reciente de pérdidas bloquea cualquier aumento de exposición.';
+    if (raw === 'quality_gate_open') return 'La optimización de calidad todavía no ha superado todos sus controles.';
     if (raw === 'STALE_GOVERNANCE_STATE') return 'La última comprobación de gobernanza está desactualizada; la autoridad positiva se cerró por seguridad.';
     if (raw === 'recent_health_ok') return 'Los resultados recientes muestran deterioro y bloquean promoción positiva.';
     if (raw === 'failure_streak_ok') return 'Existe una racha de pérdidas demasiado larga para habilitar promoción positiva.';
@@ -1272,7 +1283,7 @@ async function loadLearningGovernanceStatus() {
             q5SetText('lo-autopilot-state', state === 'PROTECT' ? 'Protección' : state === 'ACTIVE' ? 'Perfil de calidad validado' : 'Observación');
             q5SetText('lo-autopilot-authority', productionAuthority ? 'Habilitada bajo evidencia' : 'Bloqueada');
             q5SetText('lo-strategy-veto-authority', strategyVeto ? `${activeStrategies} activas · veto solamente` : 'Bloqueado');
-            q5SetText('lo-leverage-growth', 'Bloqueado · siguiente fase');
+            q5SetText('lo-leverage-growth', governance.risk_growth_allowed ? 'Habilitado por edge neto' : 'Bloqueado');
 
             const coverage = governance.coverage || {};
             const gEvidence = governance.evidence || {};
@@ -1282,14 +1293,24 @@ async function loadLearningGovernanceStatus() {
             q5SetText('lo-governance-coverage', coverage.complete ? 'Completa' : 'Incompleta');
             q5SetText('lo-governance-sample', `${Number(total.resolved || 0)}/25`);
             q5SetText('lo-governance-validation', `${Number(validation.resolved || 0)}/10`);
-            q5SetText('lo-governance-net-exp', total.modeled_net_expectancy_r === null || total.modeled_net_expectancy_r === undefined ? '--' : loR(total.modeled_net_expectancy_r, 3));
+            const modelCoverage = Number(total.model_complete_net_coverage_pct ?? total.modeled_net_coverage_pct ?? 0);
+            const modelExp = total.model_complete_net_expectancy_r ?? total.modeled_net_expectancy_r;
+            const modelPf = total.model_complete_net_profit_factor ?? total.modeled_net_profit_factor;
+            const fundingCoverage = Number(total.funding_observed_coverage_pct || 0);
+            q5SetText('lo-economics-coverage', `${modelCoverage.toFixed(0)}% de resultados`);
+            q5SetText('lo-governance-net-exp', modelExp === null || modelExp === undefined ? '--' : loR(modelExp, 3));
+            q5SetText('lo-governance-net-pf', modelPf === null || modelPf === undefined ? '--' : Number(modelPf).toFixed(2));
+            q5SetText('lo-funding-coverage', `${fundingCoverage.toFixed(0)}% de resultados`);
             const realizedCoverage = Number(total.realized_net_coverage_pct || 0);
-            q5SetText('lo-governance-realized-net', `${realizedCoverage.toFixed(0)}% de resultados`);
+            q5SetText('lo-governance-realized-net', realizedCoverage > 0 ? `${realizedCoverage.toFixed(0)}% con datos reales` : 'No disponibles · sin ejecución del exchange');
             q5SetText('lo-governance-sl-streak', streak > 0 ? `${streak} consecutivos` : 'Sin racha activa');
+            q5SetText('lo-leverage-mode', governance.risk_growth_allowed ? 'Presupuesto de riesgo adaptativo' : 'Estática · mínima viable');
 
             const reasons = Array.isArray(governance.block_reasons) ? governance.block_reasons : [];
-            const governanceReason = reasons.length
-                ? reasons.map(loHumanReason).join(' · ')
+            const riskReasons = Array.isArray(governance.risk_block_reasons) ? governance.risk_block_reasons : [];
+            const visibleReasons = [...new Set([...reasons, ...riskReasons])];
+            const governanceReason = visibleReasons.length
+                ? visibleReasons.slice(0, 6).map(loHumanReason).join(' · ')
                 : (evidence.reason || 'EVIDENCE_GATE_OPEN');
             q5SetText('lo-autopilot-reason', governanceReason);
             const gateBadge = document.getElementById('learning-observatory-gate');

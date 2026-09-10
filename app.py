@@ -40024,6 +40024,7 @@ def learning_worker_loop():
     time.sleep(120)
     
     stats_counter = 0
+    governance_bootstrapped = False
     
     while True:
         heavy_acquired = False
@@ -40060,6 +40061,61 @@ def learning_worker_loop():
             except Exception as ev_err:
                 print(f"⚠️ learning_worker.evaluate_pending_signals: {ev_err}")
                 import traceback; traceback.print_exc()
+
+            # ============================================================
+            # COMMIT 9 — NET EDGE ECONOMICS (BOUNDED)
+            # ============================================================
+            # No new worker/thread is created. At most a few already-resolved
+            # Futures outcomes are enriched per 30-minute learning cycle using
+            # public funding observations. Lifecycle/status never changes here.
+            try:
+                from execution_economics import (
+                    seed_missing_execution_economics,
+                    enrich_pending_execution_economics,
+                )
+                seeded_economics = seed_missing_execution_economics(
+                    review_trader.db, limit=2
+                )
+                enriched_economics = enrich_pending_execution_economics(
+                    review_trader.db, limit=4
+                )
+                if (
+                    seeded_economics.get('seeded', 0)
+                    or enriched_economics.get('completed', 0)
+                    or enriched_economics.get('retry', 0)
+                ):
+                    print(
+                        "🧠 [C9 ECON] "
+                        f"seeded={seeded_economics.get('seeded', 0)} "
+                        f"completed={enriched_economics.get('completed', 0)} "
+                        f"retry={enriched_economics.get('retry', 0)}"
+                    )
+            except Exception as econ_err:
+                print(f"⚠️ learning_worker.net_economics: {econ_err}")
+
+            # Commit 9 bootstrap: Commit 8 originally refreshed the persisted
+            # governance singleton only every 4h. Refresh it once on the first
+            # worker cycle so Analytics does not remain WAITING for hours after
+            # a deploy. This still runs inside the existing heavy-analysis lock.
+            if not governance_bootstrapped:
+                try:
+                    from promotion_governance import refresh_promotion_governance
+                    bootstrap_governance = refresh_promotion_governance(
+                        review_trader.db
+                    )
+                    governance_bootstrapped = bool(
+                        bootstrap_governance.get('updated_at')
+                    )
+                    print(
+                        "🧠 [C9 GOVERNANCE] bootstrap "
+                        f"quality={bootstrap_governance.get('quality_optimization_allowed', False)} "
+                        f"risk={bootstrap_governance.get('risk_growth_allowed', False)}"
+                    )
+                except Exception as governance_bootstrap_error:
+                    print(
+                        "⚠️ learning_worker.governance_bootstrap: "
+                        f"{governance_bootstrap_error}"
+                    )
             
             # ============================================================
             # COMMIT 36N

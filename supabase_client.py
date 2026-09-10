@@ -532,6 +532,56 @@ class SupabaseClient:
                 'created_at':
                     datetime.utcnow().isoformat()
             }
+
+            # ======================================================
+            # COMMIT 9 — NET EDGE ECONOMICS
+            # ======================================================
+            # Only fields explicitly present in the result are written. Spot
+            # and old callers therefore remain schema-compatible. None values
+            # are intentional for not-yet-observed funding components.
+            economics_text_fields = (
+                'entry_timestamp',
+                'economics_model_version',
+                'economics_status',
+                'economics_cost_model_source',
+                'funding_data_source',
+                'funding_calculation_status',
+                'funding_contract_symbol',
+                'funding_observed_at',
+                'economics_quality',
+                'economics_last_error',
+                'economics_updated_at',
+            )
+            economics_float_fields = (
+                'economics_round_trip_cost_rate',
+                'gross_r',
+                'gross_pnl_pct_margin',
+                'modeled_fee_slippage_cost_r',
+                'funding_rate_sum',
+                'modeled_funding_cost_r',
+                'modeled_total_cost_r',
+                'modeled_net_r',
+                'modeled_net_pnl_pct_margin',
+            )
+            economics_int_fields = (
+                'funding_settlements_count',
+                'funding_attempts',
+            )
+            for key in economics_text_fields:
+                if key in result:
+                    payload[key] = result.get(key)
+            for key in economics_float_fields:
+                if key in result:
+                    value = result.get(key)
+                    payload[key] = float(value) if value is not None else None
+            for key in economics_int_fields:
+                if key in result:
+                    value = result.get(key)
+                    payload[key] = int(value) if value is not None else None
+            if 'economics_cost_components_complete' in result:
+                payload['economics_cost_components_complete'] = bool(
+                    result.get('economics_cost_components_complete')
+                )
             
             from uuid import uuid5, NAMESPACE_URL
             payload['id'] = str(uuid5(NAMESPACE_URL,

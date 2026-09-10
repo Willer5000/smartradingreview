@@ -24,6 +24,7 @@ from execution_learning import (
     build_execution_forensics,
     build_strategy_attribution_v2,
 )
+from execution_economics import build_provisional_economics
 
 logger = logging.getLogger('REVIEW_TRADER')
 logger.setLevel(logging.INFO)
@@ -4228,6 +4229,13 @@ class ReviewTrader:
                             evaluation_end
                         )
                     )
+                    # COMMIT 9 — persist conservative provisional economics at
+                    # the same time as the immutable TP/SL outcome. Funding is
+                    # enriched later in a bounded background pass.
+                    if result.get('status') in ('tp_hit', 'sl_hit'):
+                        economics = build_provisional_economics(signal, result)
+                        if economics:
+                            result.update(economics)
                     if not self.db.update_signal_result(signal['id'], result):
                         stats.setdefault('write_errors', 0)
                         stats['write_errors'] += 1
@@ -4513,6 +4521,7 @@ class ReviewTrader:
             # ==========================================================
 
             entry_touched = False
+            entry_timestamp = None
             last_close = entry
             first_candle_ts = None
             last_candle_ts = evaluation_start
@@ -4616,6 +4625,14 @@ class ReviewTrader:
 
                     'candles_to_mae': int(
                         candles_to_mae
+                    ),
+
+                    # COMMIT 9 — exact observed first Entry touch.
+                    # Never substitute signal creation time for a fill.
+                    'entry_timestamp': (
+                        str(entry_timestamp)
+                        if entry_timestamp is not None
+                        else None
                     )
                 }
 
@@ -4669,6 +4686,7 @@ class ReviewTrader:
                         continue
 
                     entry_touched = True
+                    entry_timestamp = candle_ts
                     # Q6-B: TP can have occurred BEFORE the first limit fill.
                     # OHLC cannot prove the sequence when opening outside Entry.
                     opening = float(row.get('open', float('nan')))
