@@ -10444,6 +10444,177 @@ function updateSystemStatus() {
 
 
 // ============================================================================
+// V1.0 — RADAR MACRO / TRADERMACRO · CONTEXTO SOLAMENTE
+// ============================================================================
+// Lee un snapshot cacheado. No dispara análisis, no consulta LLM y no modifica
+// decisiones. El backend conserva el último contexto si una fuente pública cae.
+// ============================================================================
+
+window.__macroContextState = window.__macroContextState || {
+    snapshot: null,
+    items: [],
+    index: 0,
+    rotateTimer: null,
+    pollTimer: null,
+};
+
+function _macroRiskLabel(level) {
+    const labels = {
+        LOW: 'BAJO',
+        MEDIUM: 'MEDIO',
+        HIGH: 'ALTO',
+        CRITICAL: 'CRÍTICO',
+        UNKNOWN: 'SIN DATO',
+    };
+    return labels[String(level || 'UNKNOWN').toUpperCase()] || 'SIN DATO';
+}
+
+function _macroRiskClass(level) {
+    const normalized = String(level || 'UNKNOWN').toLowerCase();
+    return ['low', 'medium', 'high', 'critical'].includes(normalized)
+        ? `risk-${normalized}`
+        : 'risk-unknown';
+}
+
+function _macroRenderBadge(snapshot) {
+    const badge = document.getElementById('macro-risk-badge');
+    if (!badge) return;
+    const level = String(snapshot?.risk_level || 'UNKNOWN').toUpperCase();
+    badge.className = `macro-risk-badge ${_macroRiskClass(level)}`;
+    badge.innerHTML = `<i class="fas fa-globe-americas" aria-hidden="true"></i> MACRO · ${_macroRiskLabel(level)}`;
+}
+
+function _macroRenderItem(item, immediate = false) {
+    const message = document.getElementById('macro-ticker-message');
+    const meta = document.getElementById('macro-ticker-meta');
+    if (!message) return;
+
+    const apply = () => {
+        message.classList.remove('is-leaving');
+        message.classList.add('is-entering');
+        message.textContent = item?.text || 'Radar macro activo · sin titulares relevantes por el momento.';
+        const url = String(item?.url || '').trim();
+        if (/^https?:\/\//i.test(url)) {
+            message.href = url;
+            message.classList.remove('is-disabled');
+            message.setAttribute('aria-disabled', 'false');
+        } else {
+            message.href = '#';
+            message.classList.add('is-disabled');
+            message.setAttribute('aria-disabled', 'true');
+        }
+        if (meta) {
+            const src = String(item?.source || '').trim();
+            meta.textContent = src ? `${src} · Contexto` : 'Contexto';
+        }
+        window.requestAnimationFrame(() => message.classList.remove('is-entering'));
+    };
+
+    if (immediate) {
+        apply();
+        return;
+    }
+    message.classList.add('is-leaving');
+    window.setTimeout(apply, 220);
+}
+
+function _macroNormalizeItems(snapshot) {
+    const items = Array.isArray(snapshot?.ticker_items) ? snapshot.ticker_items : [];
+    const usable = items
+        .filter(item => item && String(item.text || '').trim())
+        .slice(0, 10);
+    if (usable.length) return usable;
+
+    const errors = Array.isArray(snapshot?.errors) ? snapshot.errors : [];
+    if (errors.length) {
+        return [{
+            text: 'Radar macro temporalmente sin una fuente · trading continúa normalmente.',
+            source: 'Fail-open',
+            level: 'UNKNOWN',
+            url: '',
+        }];
+    }
+    return [{
+        text: 'Radar macro activo · sin eventos o titulares relevantes por el momento.',
+        source: 'Fuentes públicas',
+        level: snapshot?.risk_level || 'LOW',
+        url: '',
+    }];
+}
+
+function _macroApplySnapshot(snapshot) {
+    const state = window.__macroContextState;
+    state.snapshot = snapshot || {};
+    state.items = _macroNormalizeItems(snapshot || {});
+    state.index = 0;
+    _macroRenderBadge(snapshot || {});
+    _macroRenderItem(state.items[0], true);
+    if (typeof window.refreshActionNowPanel === 'function') {
+        window.refreshActionNowPanel(false);
+    }
+}
+
+async function refreshMacroContext(force = false) {
+    if (!document.getElementById('macro-news-ticker')) return;
+    try {
+        const response = await fetch(`/api/macro/context${force ? '?refresh=1' : ''}`, {
+            credentials: 'same-origin',
+            cache: 'no-store',
+        });
+        const payload = await response.json();
+        if (response.status === 401) {
+            _macroApplySnapshot({
+                risk_level: 'UNKNOWN',
+                errors: ['AUTH_REQUIRED'],
+                ticker_items: [{
+                    text: 'Radar macro disponible al iniciar sesión.',
+                    source: 'Sistema',
+                    url: '',
+                }],
+            });
+            return;
+        }
+        _macroApplySnapshot(payload?.data || {});
+    } catch (error) {
+        // Fail-open visual: conservar el último snapshot si existía.
+        if (!window.__macroContextState.snapshot) {
+            _macroApplySnapshot({
+                risk_level: 'UNKNOWN',
+                errors: ['NETWORK_ERROR'],
+                ticker_items: [{
+                    text: 'Radar macro sin conexión temporal · el motor de trading continúa independiente.',
+                    source: 'Fail-open',
+                    url: '',
+                }],
+            });
+        }
+    }
+}
+window.refreshMacroContext = refreshMacroContext;
+
+function _advanceMacroTicker() {
+    const state = window.__macroContextState;
+    if (!state.items.length) return;
+    state.index = (state.index + 1) % state.items.length;
+    _macroRenderItem(state.items[state.index], false);
+}
+
+function _startMacroTicker() {
+    if (!document.getElementById('macro-news-ticker')) return;
+    refreshMacroContext(false);
+    if (!window.__macroContextState.rotateTimer) {
+        window.__macroContextState.rotateTimer = window.setInterval(_advanceMacroTicker, 10000);
+    }
+    if (!window.__macroContextState.pollTimer) {
+        // El endpoint está cacheado; 5 min es suficiente para UI y muy barato.
+        window.__macroContextState.pollTimer = window.setInterval(
+            () => refreshMacroContext(false),
+            300000
+        );
+    }
+}
+
+// ============================================================================
 // V1.0 UX — "QUÉ DEBO HACER AHORA"
 // ============================================================================
 // Panel muy liviano: sólo lee el DOM ya existente. No genera requests nuevos,
@@ -10474,6 +10645,22 @@ function _actionNowMessages(forceError = false) {
     const guardian = _actionNowCleanText(document.getElementById('tgp-title')?.textContent);
 
     const messages = [];
+
+    const macro = window.__macroContextState?.snapshot || {};
+    const macroRisk = String(macro.risk_level || '').toUpperCase();
+    const macroPosture = String(macro.futures_posture || '').toUpperCase();
+    const macroFirst = Array.isArray(macro.ticker_items) ? macro.ticker_items[0] : null;
+    if (macroPosture === 'NO_NEW_TRADES') {
+        messages.push({
+            html: `<strong>MACRO</strong> · Riesgo inmediato ${_macroRiskLabel(macroRisk)} · evitar nuevas posiciones Futures hasta que pase el evento de alto impacto.`,
+            critical: true,
+        });
+    } else if (['HIGH', 'CRITICAL'].includes(macroRisk)) {
+        messages.push({
+            html: `<strong>MACRO</strong> · Riesgo ${_macroRiskLabel(macroRisk)}${macroFirst?.text ? ` · ${_actionNowCleanText(macroFirst.text)}` : ''}.`,
+            critical: false,
+        });
+    }
 
     if (forceError || /error|desconect/i.test(api)) {
         messages.push({
@@ -10588,6 +10775,13 @@ if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', _startActionNowPanel, {once: true});
 } else {
     _startActionNowPanel();
+}
+
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _startMacroTicker, {once: true});
+} else {
+    _startMacroTicker();
 }
 
 function toggleFullScreen() {

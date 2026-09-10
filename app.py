@@ -18571,6 +18571,29 @@ class TradingExpertSystem:
                 else 'spot'
             )
 
+            # ============ V1.0 MACRO CONTEXT RADAR ============
+            # Contexto externo gratuito y cacheado. Nunca debe bloquear trading
+            # ni cambiar por sí solo Safety / Entry / SL / TP / leverage.
+            try:
+                from macro_context import get_macro_context_snapshot
+                macro_context_snapshot = get_macro_context_snapshot(
+                    fetch_if_stale=False
+                )
+            except Exception as macro_context_error:
+                print(
+                    "⚠️ Macro Context no disponible: "
+                    f"{macro_context_error}"
+                )
+                macro_context_snapshot = {
+                    'enabled': False,
+                    'mode': 'CONTEXT_ONLY',
+                    'authority': 'NONE',
+                    'risk_level': 'UNKNOWN',
+                    'futures_posture': 'NORMAL',
+                    'ticker_items': [],
+                    'production_change': False,
+                }
+
             # ============ CONSTRUIR CAPAS PARA TRADERS ============
             capas = {
                 'system_type': analysis_system_type,
@@ -18589,7 +18612,8 @@ class TradingExpertSystem:
                 'timeframe': timeframe,
                 'btc_analysis': btc_analysis,
                 'paxg_analysis': paxg_analysis,
-                'ratio_analysis': paxg_btc_analysis
+                'ratio_analysis': paxg_btc_analysis,
+                'macro_context': macro_context_snapshot
             }
             
             # ============ SISTEMA DE 9 TRADERS ============
@@ -23736,9 +23760,36 @@ class TraderMacro(TraderBase):
         razones = []
         
         try:
-            if str(capas.get('system_type', 'spot')).lower() == 'futures':
-                razones.append('Macro/rotación PAXG-BTC queda reservado para acumulación Spot')
-                return accion, confianza, estrategias, razones
+            system_type = str(capas.get('system_type', 'spot')).lower()
+            macro_context = capas.get('macro_context', {}) or {}
+            macro_risk = str(macro_context.get('risk_level', 'UNKNOWN')).upper()
+            macro_posture = str(macro_context.get('futures_posture', 'NORMAL')).upper()
+            upcoming_macro = macro_context.get('upcoming_events', []) or []
+            macro_headlines = macro_context.get('headlines', []) or []
+
+            # V1.0: Futures ya puede LEER el contexto macro, pero permanece
+            # CONTEXT_ONLY. No convertimos una noticia en LONG/SHORT ni en veto.
+            if system_type == 'futures':
+                if macro_posture == 'NO_NEW_TRADES':
+                    estrategias.append('MACRO_EVENT_RISK')
+                    razones.append(
+                        'Contexto macro: evento de alto impacto muy próximo; '
+                        'el radar recomienda máxima prudencia con riesgo nuevo'
+                    )
+                elif macro_risk in ('HIGH', 'CRITICAL'):
+                    estrategias.append('MACRO_NEWS_RISK')
+                    razones.append(
+                        f'Contexto macro {macro_risk.lower()}: prudencia adicional; '
+                        'sin sesgo direccional automático'
+                    )
+                else:
+                    razones.append(
+                        'Macro Futures en contexto: sin amenaza externa suficiente '
+                        'para alterar la operativa'
+                    )
+
+                # Abstención/contexto. No cambia el consenso productivo.
+                return accion, 0, estrategias, razones
 
             # ============ OBTENER ANÁLISIS DE BTC Y RATIO ============
             btc_analysis = capas.get('btc_analysis', {})
@@ -23996,6 +24047,22 @@ class TraderMacro(TraderBase):
                 confianza = max(0, confianza - 10)
                 razones.append(f"Sentimiento extremo ({classification}) sin dirección clara")
             
+            # ============ CONTEXTO MACRO EXTERNO (V1.0 READ-ONLY) ============
+            # Se conserva para atribución/aprendizaje, pero todavía NO modifica
+            # el voto Spot. La evidencia cuantitativa decidirá cualquier autoridad.
+            if macro_risk in ('HIGH', 'CRITICAL'):
+                estrategias.append('MACRO_NEWS_RISK')
+                if upcoming_macro:
+                    razones.append(
+                        f'Radar macro {macro_risk.lower()}: evento relevante próximo; '
+                        'contexto de riesgo, no orden de trading'
+                    )
+                elif macro_headlines:
+                    razones.append(
+                        f'Radar macro {macro_risk.lower()}: titulares relevantes; '
+                        'sesgo direccional no confirmado'
+                    )
+
             # v24: Super-peso en divergencia extrema
             if correlation.get('extreme_divergence', False):
                 confianza = min(100, int(confianza * 1.4))
@@ -42718,6 +42785,117 @@ def futures_scalping_alert_loop():
             _FUTURES_SCALPING_LOOP_INTERVAL
         )
 
+# ============================================================================
+# V1.0 — MACRO CONTEXT TELEGRAM
+# ============================================================================
+# Ligero y fail-open. Dedup persistente reutilizando review_logs para evitar
+# repetir una misma alerta tras reinicios de Render.
+# ============================================================================
+
+_MACRO_ALERT_LOOP_INTERVAL = 10 * 60
+_MACRO_ALERT_MEMORY_KEYS = set()
+
+
+def _macro_alert_already_sent(alert_key: str) -> bool:
+    if not alert_key:
+        return True
+    if alert_key in _MACRO_ALERT_MEMORY_KEYS:
+        return True
+    try:
+        from review_trader import review_trader
+        db = review_trader.db
+        if not db or not db.enabled:
+            return False
+        def _op():
+            return (
+                db.client.table('review_logs')
+                .select('notes,created_at')
+                .eq('trigger_source', 'macro_alert')
+                .order('created_at', desc=True)
+                .limit(40)
+                .execute()
+            )
+        result = db._with_retry(_op)
+        token = f'MACRO_ALERT_KEY:{alert_key}'
+        for row in (result.data or []) if result else []:
+            if token in str(row.get('notes') or ''):
+                _MACRO_ALERT_MEMORY_KEYS.add(alert_key)
+                return True
+    except Exception as error:
+        print(f'⚠️ Macro dedup read: {error}')
+    return False
+
+
+def _mark_macro_alert_sent(alert_key: str, text: str) -> None:
+    if not alert_key:
+        return
+    _MACRO_ALERT_MEMORY_KEYS.add(alert_key)
+    try:
+        from review_trader import review_trader
+        db = review_trader.db
+        if not db or not db.enabled:
+            return
+        now_iso = datetime.utcnow().isoformat()
+        db.insert_review_log({
+            'run_started_at': now_iso,
+            'run_finished_at': now_iso,
+            'duration_seconds': 0,
+            'trigger_source': 'macro_alert',
+            'signals_evaluated': 0,
+            'tp_hits': 0,
+            'sl_hits': 0,
+            'expired': 0,
+            'still_pending': 0,
+            'missed_opportunities_found': 0,
+            'stats_specific_updated': 0,
+            'stats_general_updated': 0,
+            'recommendations_updated': 0,
+            'ttl_deleted': 0,
+            'low_sample_deleted': 0,
+            'storage_stats': {},
+            'errors': [],
+            'warnings': [],
+            'notes': f'MACRO_ALERT_KEY:{alert_key} | {str(text)[:500]}',
+            'status': 'success',
+        })
+    except Exception as error:
+        print(f'⚠️ Macro dedup persist: {error}')
+
+
+def macro_context_alert_loop():
+    enabled = str(os.getenv('MACRO_TELEGRAM_ALERTS_ENABLED', 'true')).lower()
+    if enabled not in ('1', 'true', 'yes', 'on', 'si', 'sí'):
+        print('⏭️ Macro Telegram deshabilitado')
+        return
+    time.sleep(180)
+    while True:
+        try:
+            from macro_context import refresh_macro_context
+            snapshot = refresh_macro_context(force=False) or {}
+            posture = str(snapshot.get('futures_posture') or 'NORMAL')
+            for alert in snapshot.get('telegram_alert_candidates', []) or []:
+                alert_key = str(alert.get('key') or '')
+                if not alert_key or _macro_alert_already_sent(alert_key):
+                    continue
+                level = str(alert.get('level') or 'HIGH').upper()
+                text = str(alert.get('text') or 'Evento macro relevante')
+                source = str(alert.get('source') or 'Fuente pública')
+                message = (
+                    f"🧭 ALERTA MACRO · {level}\n"
+                    f"{text}\n"
+                    f"Futures: {posture}\n"
+                    f"Fuente: {source}\n"
+                    "Contexto informativo: no es una orden ni modifica Safety/Entry/SL/TP."
+                )
+                sent = expert_system.send_telegram_alert(message, None)
+                if sent:
+                    _mark_macro_alert_sent(alert_key, text)
+                    print(f'✅ Macro Telegram: {alert_key}')
+        except Exception as error:
+            print(f'⚠️ macro_context_alert_loop: {error}')
+        time.sleep(_MACRO_ALERT_LOOP_INTERVAL)
+
+
 def _start_background_threads():
     """
     Arranca los threads de background del sistema:
@@ -42839,6 +43017,21 @@ def _start_background_threads():
             "⚠️ Error iniciando Guardian Telegram: "
             f"{e}"
         )    
+    # 5. Macro Context — noticias/calendario gratuitos + Telegram.
+    try:
+        t_macro = threading.Thread(
+            target=macro_context_alert_loop,
+            name='macro-context',
+            daemon=True
+        )
+        t_macro.start()
+        print(
+            "✅ Thread macro-context iniciado "
+            f"(cada {_MACRO_ALERT_LOOP_INTERVAL}s)"
+        )
+    except Exception as e:
+        print(f"⚠️ Error iniciando macro-context: {e}")
+
     # Commit 36K — notifier personalizado de scalping Futures.
     #
     # Es liviano: sólo lee el caché Futures existente.
@@ -44158,6 +44351,51 @@ def api_ai_performance():
                     e
                 )[:200]
 
+        }), 200
+
+
+# ============================================================================
+# V1.0 — MACRO CONTEXT RADAR (READ ONLY)
+# ============================================================================
+
+@app.route('/api/macro/context', methods=['GET'])
+def api_macro_context():
+    """Snapshot macro gratuito/cacheado para frontend y diagnóstico."""
+    user = _authenticated_user()
+    if not user:
+        return jsonify({
+            'success': False,
+            'authenticated': False,
+            'error': 'Debes iniciar sesión.'
+        }), 401
+
+    try:
+        from macro_context import (
+            get_macro_context_snapshot,
+            refresh_macro_context,
+        )
+        force = str(request.args.get('refresh', '')).lower() in ('1', 'true', 'yes')
+        data = (
+            refresh_macro_context(force=True)
+            if force
+            else get_macro_context_snapshot(fetch_if_stale=True)
+        )
+        return jsonify({'success': True, 'data': data}), 200
+    except Exception as error:
+        # Fail-open: noticias no pueden bloquear trading.
+        return jsonify({
+            'success': False,
+            'data': {
+                'enabled': True,
+                'mode': 'CONTEXT_ONLY',
+                'authority': 'NONE',
+                'risk_level': 'UNKNOWN',
+                'futures_posture': 'NORMAL',
+                'ticker_items': [],
+                'production_change': False,
+                'errors': [str(error)[:180]],
+            },
+            'error': str(error)[:180],
         }), 200
 
 

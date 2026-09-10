@@ -1187,3 +1187,66 @@ body.trading-app .dropdown-menu-dark {
     .app-footer-row { gap: .25rem .55rem; }
     .footer-rights { display: none; }
 }
+
+/* ========================================================================== */
+/* V1.0 — RADAR MACRO / TRADERMACRO                                           */
+/* ========================================================================== */
+.macro-news-ticker {
+    min-height: 30px;
+    max-height: 30px;
+    overflow: hidden;
+    border-bottom: 1px solid rgba(255,255,255,.075);
+    background: rgba(8,12,17,.96);
+}
+.macro-news-ticker-inner {
+    height: 30px;
+    display: flex;
+    align-items: center;
+    gap: .55rem;
+    min-width: 0;
+}
+.macro-risk-badge {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: .3rem;
+    padding: .16rem .38rem;
+    border: 1px solid rgba(255,255,255,.10);
+    border-radius: .35rem;
+    font-size: .62rem;
+    font-weight: 700;
+    letter-spacing: .035em;
+    white-space: nowrap;
+}
+.macro-risk-badge.risk-low { color: #7fda9b; border-color: rgba(127,218,155,.25); }
+.macro-risk-badge.risk-medium { color: #e9cf76; border-color: rgba(233,207,118,.25); }
+.macro-risk-badge.risk-high { color: #f4a261; border-color: rgba(244,162,97,.30); }
+.macro-risk-badge.risk-critical { color: #ff7b7b; border-color: rgba(255,123,123,.34); }
+.macro-risk-badge.risk-unknown { color: var(--text-secondary); }
+.macro-ticker-message {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: rgba(255,255,255,.78);
+    font-size: .70rem;
+    text-decoration: none;
+    transition: opacity .22s ease, transform .22s ease;
+}
+.macro-ticker-message:hover { color: rgba(255,255,255,.96); }
+.macro-ticker-message.is-leaving { opacity: 0; transform: translateY(-7px); }
+.macro-ticker-message.is-entering { opacity: 0; transform: translateY(7px); }
+.macro-ticker-message.is-disabled { pointer-events: none; }
+.macro-ticker-meta {
+    flex: 0 0 auto;
+    color: var(--text-secondary);
+    font-size: .61rem;
+    white-space: nowrap;
+}
+@media (max-width: 575.98px) {
+    .macro-news-ticker-inner { gap: .35rem; padding-left: .55rem; padding-right: .55rem; }
+    .macro-risk-badge { font-size: .58rem; padding: .14rem .30rem; }
+    .macro-ticker-message { font-size: .66rem; }
+    .macro-ticker-meta { display: none; }
+}

@@ -8,7 +8,7 @@
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <link
         rel="stylesheet"
-        href="{{ url_for('static', filename='style.css') }}?v=20260910-V1-UX-COMPACT"
+        href="{{ url_for('static', filename='style.css') }}?v=20260910-V1-MACRO-RADAR"
     >
     <style>
         /* ============ ESTILOS DE PATRONES ============ */
@@ -304,6 +304,39 @@
                 class="gemini-activity-ticker-meta"
             ></span>
 
+        </div>
+    </div>
+
+    <!-- ================================================================ -->
+    <!-- V1.0 — RADAR MACRO / TRADERMACRO · CONTEXTO SOLAMENTE -->
+    <!-- ================================================================ -->
+    <!--
+        Cintillo liviano de titulares y eventos macro.
+        Lee /api/macro/context (cacheado). No llama al motor de trading,
+        no altera Safety/Entry/SL/TP/leverage y falla abierto si una fuente cae.
+    -->
+    <div
+        id="macro-news-ticker"
+        class="macro-news-ticker"
+        aria-live="polite"
+        aria-label="Radar macroeconómico de TraderMacro"
+    >
+        <div class="container macro-news-ticker-inner">
+            <span id="macro-risk-badge" class="macro-risk-badge risk-unknown">
+                <i class="fas fa-globe-americas" aria-hidden="true"></i>
+                MACRO · LEYENDO
+            </span>
+            <a
+                id="macro-ticker-message"
+                class="macro-ticker-message"
+                href="#"
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="Abrir fuente del titular macro"
+            >
+                Consultando fuentes públicas…
+            </a>
+            <span id="macro-ticker-meta" class="macro-ticker-meta">Contexto</span>
         </div>
     </div>
 
@@ -2744,7 +2777,7 @@
 
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI-2"></script>
     <script
-        src="{{ url_for('static', filename='script.js') }}?v=20260910-V1-UX-COMPACT"
+        src="{{ url_for('static', filename='script.js') }}?v=20260910-V1-MACRO-RADAR"
     ></script>
 
 

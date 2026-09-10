@@ -1396,6 +1396,8 @@ STRATEGY_TO_TRADER = {
     'CORRELACION_POSITIVA': 'TraderMacro',
     'EVITAR_BTC_POR_ROTACION': 'TraderMacro',
     'EVITAR_PAXG_POR_ROTACION': 'TraderMacro',
+    'MACRO_EVENT_RISK': 'TraderMacro',
+    'MACRO_NEWS_RISK': 'TraderMacro',
     'PAXG_MAS_FUERTE': 'TraderMacro',
     'PAXG_MAS_FUERTE_RATIO': 'TraderMacro',
     'RATIO_ALCISTA': 'TraderMacro',
