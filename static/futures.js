@@ -4738,10 +4738,7 @@ async function(detailsEl) {
                                 class="text-end"
                             >
                                 ${
-                                    _statusBadge(
-                                        s.status,
-                                        s.entry_touched
-                                    )
+                                    _statusBadge(s)
                                 }
 
                                 ${
@@ -5236,10 +5233,7 @@ window.updateSavedSignalsList = async function() {
                     ? 'success'
                     : 'danger';        
             const statusBadge =
-                _statusBadge(
-                    s.status,
-                    s.entry_touched
-                );
+                _statusBadge(s);
         
             const pnlDisplay =
                 _formatPnl(s);
@@ -6047,17 +6041,55 @@ window.updateSavedSignalsList = async function() {
     }
 };
 
-function _statusBadge(status, entryTouched) {
+function _statusBadge(signalOrStatus, entryTouched) {
+    const signal = (
+        signalOrStatus
+        && typeof signalOrStatus === 'object'
+    )
+        ? signalOrStatus
+        : {
+            status: signalOrStatus,
+            entry_touched: entryTouched,
+        };
+
+    const status = String(signal.status || '').toLowerCase();
+    const touched = Boolean(signal.entry_touched);
+
+    // HOTFIX 14.2: el motivo SL no equivale necesariamente a LOSS.
+    // Si Guardian/manual movió el SL por encima de Entry (LONG) o por debajo
+    // (SHORT), el PnL observado manda para la etiqueta económica.
+    let grossOutcome = String(signal.gross_outcome || '').toUpperCase();
+    if (!grossOutcome && touched && !['active', 'entry_touched', 'expired'].includes(status)) {
+        const pnl = Number(signal.pnl_pct);
+        if (Number.isFinite(pnl)) {
+            grossOutcome = pnl > 0 ? 'WIN' : pnl < 0 ? 'LOSS' : 'BREAKEVEN';
+        }
+    }
+
     if (status === 'active') return '<span class="badge bg-info">⏳ Esperando entry</span>';
     if (status === 'entry_touched') return '<span class="badge bg-primary">🎯 En operación</span>';
-    if (status === 'tp_hit') return '<span class="badge bg-success">✅ TP</span>';
-    if (status === 'sl_hit') return '<span class="badge bg-danger">❌ SL</span>';
+    if (status === 'tp_hit') {
+        if (grossOutcome === 'LOSS') return '<span class="badge bg-danger">TP · resultado negativo</span>';
+        if (grossOutcome === 'BREAKEVEN') return '<span class="badge bg-secondary">TP · break-even</span>';
+        return '<span class="badge bg-success">✅ TP · WIN</span>';
+    }
+    if (status === 'sl_hit') {
+        if (grossOutcome === 'WIN') {
+            return '<span class="badge bg-success">✅ SL protegido · WIN</span>';
+        }
+        if (grossOutcome === 'BREAKEVEN') {
+            return '<span class="badge bg-secondary">◦ SL protegido · BE</span>';
+        }
+        return '<span class="badge bg-danger">❌ SL · LOSS</span>';
+    }
     if (status === 'expired') {
         return '<span class="badge bg-secondary">⌛ Expirada sin Entry</span>';
     }
     if (status === 'closed_manual') {
-        return entryTouched ? '<span class="badge bg-warning text-dark">🔒 Cerrada</span>'
-                             : '<span class="badge bg-secondary">🔒 Cerrada (sin entry)</span>';
+        if (!touched) return '<span class="badge bg-secondary">🔒 Cerrada (sin entry)</span>';
+        if (grossOutcome === 'WIN') return '<span class="badge bg-success">✅ Cierre manual · WIN</span>';
+        if (grossOutcome === 'LOSS') return '<span class="badge bg-danger">❌ Cierre manual · LOSS</span>';
+        return '<span class="badge bg-secondary">◦ Cierre manual · BE</span>';
     }
     return `<span class="badge bg-secondary">${status}</span>`;
 }
@@ -6116,7 +6148,7 @@ window.openSavedSignalDetail = async function(signalId) {
         // Renderizar body con panel de info + div para el gráfico
         const emoji = sig.action === 'LONG' ? '📈' : '📉';
         const badgeClass = sig.action === 'LONG' ? 'success' : 'danger';
-        const statusBadge = _statusBadge(sig.status, sig.entry_touched);
+        const statusBadge = _statusBadge(sig);
         const pnlDisplay = _formatPnl(sig);
         
         body.innerHTML = `

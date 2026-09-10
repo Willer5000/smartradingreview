@@ -70,6 +70,105 @@ def _calc_pnl(entry: float, current: float, leverage: int, investment: float,
         'pct': round(leveraged_pct, 4),
         'usdt': round(pnl_usdt, 4)
     }
+
+# ============================================================================
+# HOTFIX 14.2 — ECONOMIC OUTCOME CLASSIFICATION FOR SAVED FUTURES
+# ============================================================================
+#
+# El motivo de salida (TP / SL / manual) y el resultado económico son dos
+# conceptos distintos. Un SL movido por el Guardian puede cerrar una posición
+# con beneficio. No lo convertimos artificialmente en "tp_hit": conservamos
+# el motivo de cierre y exponemos WIN / LOSS / BREAKEVEN por PnL.
+#
+# Sin SQL: estos campos se calculan al leer la fila y no requieren columnas
+# nuevas en Supabase.
+# ============================================================================
+
+
+def _saved_signal_outcome_label(value, epsilon: float = 1e-9) -> Optional[str]:
+    """Clasifica un PnL firmado como WIN / LOSS / BREAKEVEN."""
+    try:
+        if value is None:
+            return None
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    if numeric > epsilon:
+        return 'WIN'
+    if numeric < -epsilon:
+        return 'LOSS'
+    return 'BREAKEVEN'
+
+
+def _with_saved_signal_economic_outcome(signal: Optional[Dict]) -> Optional[Dict]:
+    """
+    Añade clasificación económica derivada a una señal guardada.
+
+    Campos derivados:
+      - gross_outcome: según pnl_pct observado.
+      - net_modeled_outcome: según estimated_net_pnl_pct, si existe.
+      - economic_outcome: usa net modeled cuando está disponible; si no, gross.
+      - economic_outcome_basis: MODELED_NET / GROSS / NONE.
+      - protected_stop_exit: True cuando un cierre por SL terminó >= break-even.
+
+    Nunca modifica el status persistido. `sl_hit` sigue significando que la
+    salida ocurrió por el stop; no significa automáticamente una pérdida.
+    """
+    if not isinstance(signal, dict):
+        return signal
+
+    row = dict(signal)
+    status = str(row.get('status') or '').lower()
+    entry_touched = bool(row.get('entry_touched'))
+
+    if status in ('active', 'entry_touched'):
+        row.update({
+            'gross_outcome': 'OPEN',
+            'net_modeled_outcome': None,
+            'economic_outcome': 'OPEN',
+            'economic_outcome_basis': 'NONE',
+            'protected_stop_exit': False,
+        })
+        return row
+
+    if not entry_touched:
+        row.update({
+            'gross_outcome': 'NO_TRADE',
+            'net_modeled_outcome': None,
+            'economic_outcome': 'NO_TRADE',
+            'economic_outcome_basis': 'NONE',
+            'protected_stop_exit': False,
+        })
+        return row
+
+    gross = _saved_signal_outcome_label(row.get('pnl_pct'))
+    net_modeled = _saved_signal_outcome_label(
+        row.get('estimated_net_pnl_pct')
+    )
+
+    if net_modeled is not None:
+        primary = net_modeled
+        basis = 'MODELED_NET'
+    elif gross is not None:
+        primary = gross
+        basis = 'GROSS'
+    else:
+        primary = None
+        basis = 'NONE'
+
+    row.update({
+        'gross_outcome': gross,
+        'net_modeled_outcome': net_modeled,
+        'economic_outcome': primary,
+        'economic_outcome_basis': basis,
+        'protected_stop_exit': bool(
+            status == 'sl_hit'
+            and gross in ('WIN', 'BREAKEVEN')
+        ),
+    })
+    return row
+
 # ============================================================================
 # COMMIT 36O.2 — COSTES POR PROCEDENCIA + FUNDING PÚBLICO OBSERVADO
 # ============================================================================
@@ -4777,7 +4876,11 @@ def list_saved_signals(status_filter: Optional[List[str]] = None,
                 q = q.neq('status', 'deleted')
             return q.order('created_at', desc=True).limit(limit).execute()
         r = db._with_retry(_op)
-        return r.data if r and r.data else []
+        rows = r.data if r and r.data else []
+        return [
+            _with_saved_signal_economic_outcome(row)
+            for row in rows
+        ]
     except Exception as e:
         logger.error(f"list_saved_signals: {e}")
         return []
@@ -4796,7 +4899,11 @@ def get_saved_signal(signal_id: str) -> Optional[Dict]:
                     .limit(1)
                     .execute())
         r = db._with_retry(_op)
-        return r.data[0] if r and r.data else None
+        return (
+            _with_saved_signal_economic_outcome(r.data[0])
+            if r and r.data
+            else None
+        )
     except Exception as e:
         logger.error(f"get_saved_signal: {e}")
         return None
