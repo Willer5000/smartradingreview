@@ -8,7 +8,7 @@
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <link
         rel="stylesheet"
-        href="{{ url_for('static', filename='style.css') }}?v=20260909-PRO-UI-2"
+        href="{{ url_for('static', filename='style.css') }}?v=20260910-V1-UX-COMPACT"
     >
     <style>
         /* ============ ESTILOS DE PATRONES ============ */
@@ -350,102 +350,83 @@
                             </select>
                         </div>
 
-                        <button class="btn btn-primary w-100 mb-2" onclick="window.runCompleteAnalysis()">
-                            <i class="fas fa-brain me-2"></i>Ejecutar Análisis Completo
-                        </button>
-                        
-                        <div class="dropdown w-100 mt-2">
+                        <div class="analysis-actions-compact" aria-label="Acciones de análisis">
                             <button
-                                class="btn btn-outline-info dropdown-toggle w-100"
-                                type="button"
-                                data-bs-toggle="dropdown"
-                                aria-expanded="false"
+                                class="btn btn-primary btn-sm analysis-action-primary"
+                                onclick="window.runCompleteAnalysis()"
+                                title="Ejecutar análisis completo"
                             >
-                                <i class="fas fa-file-lines me-2" aria-hidden="true"></i>Informe de análisis
+                                <i class="fas fa-play me-1" aria-hidden="true"></i>Analizar
                             </button>
-                            <ul class="dropdown-menu dropdown-menu-dark w-100">
-                                <li>
-                                    <button class="dropdown-item" type="button" onclick="window.downloadAnalysisReport('download')">
-                                        <i class="fas fa-download me-2" aria-hidden="true"></i>Descargar aquí
-                                    </button>
-                                </li>
-                                <li>
-                                    <button class="dropdown-item" type="button" onclick="window.downloadAnalysisReport('telegram')">
-                                        <i class="fas fa-paper-plane me-2" aria-hidden="true"></i>Enviar a Telegram
-                                    </button>
-                                </li>
-                                <li><hr class="dropdown-divider"></li>
-                                <li>
-                                    <button class="dropdown-item" type="button" onclick="window.testTelegramConnection()">
-                                        <i class="fas fa-circle-check me-2" aria-hidden="true"></i>Probar conexión Telegram
-                                    </button>
-                                </li>
-                            </ul>
+
+                            <div class="dropdown">
+                                <button
+                                    class="btn btn-outline-info btn-sm dropdown-toggle"
+                                    type="button"
+                                    data-bs-toggle="dropdown"
+                                    aria-expanded="false"
+                                    title="Informe de análisis"
+                                >
+                                    <i class="fas fa-file-lines me-1" aria-hidden="true"></i>Informe
+                                </button>
+                                <ul class="dropdown-menu dropdown-menu-dark">
+                                    <li>
+                                        <button class="dropdown-item" type="button" onclick="window.downloadAnalysisReport('download')">
+                                            <i class="fas fa-download me-2" aria-hidden="true"></i>Descargar aquí
+                                        </button>
+                                    </li>
+                                    <li>
+                                        <button class="dropdown-item" type="button" onclick="window.downloadAnalysisReport('telegram')">
+                                            <i class="fas fa-paper-plane me-2" aria-hidden="true"></i>Enviar a Telegram
+                                        </button>
+                                    </li>
+                                    <li><hr class="dropdown-divider"></li>
+                                    <li>
+                                        <button class="dropdown-item" type="button" onclick="window.testTelegramConnection()">
+                                            <i class="fas fa-circle-check me-2" aria-hidden="true"></i>Probar conexión Telegram
+                                        </button>
+                                    </li>
+                                </ul>
+                            </div>
+
+                            <button
+                                class="btn btn-outline-primary btn-sm"
+                                onclick="window.downloadLearningReport()"
+                                title="Descargar aprendizaje del sistema"
+                            >
+                                <i class="fas fa-chart-line me-1" aria-hidden="true"></i>Aprendizaje
+                            </button>
                         </div>
-                        
-                        <button class="btn btn-outline-primary w-100 mt-2" onclick="window.downloadLearningReport()">
-                            <i class="fas fa-brain me-2"></i>Aprendizaje del Sistema
-                        </button>
                     </div>
                 </div>
 
-                <!-- Estado del Sistema — minimizado por defecto -->
+                <!-- V1.0 UX — resumen rotativo en lugar del panel alto de Estado -->
                 <div
-                    id="system-status-card"
-                    class="card bg-dark border-success mb-4"
+                    id="action-now-card"
+                    class="card bg-dark border-success mb-4 action-now-card"
                 >
-                    <div
-                        class="card-header d-flex justify-content-between align-items-center"
-                        role="button"
-                        data-bs-toggle="collapse"
-                        data-bs-target="#system-status-body"
-                        aria-expanded="false"
-                        aria-controls="system-status-body"
-                        style="cursor: pointer;"
-                    >
+                    <div class="card-header action-now-header">
                         <h6 class="mb-0">
-                            <i class="fas fa-server me-2"></i>
-                            Estado del Sistema
+                            <i class="fas fa-compass me-2" aria-hidden="true"></i>
+                            Qué debo hacer ahora
                         </h6>
-
-                        <i class="fas fa-chevron-down text-success"></i>
+                        <span id="action-now-health" class="action-now-health text-success">
+                            <i class="fas fa-circle" aria-hidden="true"></i> Sistema OK
+                        </span>
                     </div>
 
-                    <div
-                        id="system-status-body"
-                        class="collapse"
-                    >
-                        <div class="card-body">
-                            <div class="system-status">
-                                <div class="d-flex justify-content-between mb-2">
-                                    <span>API KuCoin:</span>
-                                    <span class="badge bg-success" id="api-status">
-                                        Conectado
-                                    </span>
-                                </div>
-
-                                <div class="d-flex justify-content-between mb-2">
-                                    <span>Telegram Bot:</span>
-                                    <span class="badge bg-success" id="telegram-status">
-                                        Activo
-                                    </span>
-                                </div>
-
-                                <div class="d-flex justify-content-between mb-2">
-                                    <span>Análisis Activo:</span>
-                                    <span class="badge bg-warning" id="analysis-status">
-                                        Ejecutando
-                                    </span>
-                                </div>
-
-                                <div class="d-flex justify-content-between">
-                                    <span>Última Señal:</span>
-                                    <span class="text-info" id="last-signal">
-                                        Hace 5min
-                                    </span>
-                                </div>
-                            </div>
+                    <div class="action-now-viewport" aria-live="polite">
+                        <div id="action-now-message" class="action-now-message">
+                            Comprobando mercado y servicios…
                         </div>
+                    </div>
+
+                    <!-- IDs históricos conservados para updateSystemStatus(), sin ocupar altura -->
+                    <div class="visually-hidden" aria-hidden="true">
+                        <span id="api-status">Conectado</span>
+                        <span id="telegram-status">Activo</span>
+                        <span id="analysis-status">Ejecutando</span>
+                        <span id="last-signal">--</span>
                     </div>
                 </div>
                 {% if is_futures %}
@@ -2696,79 +2677,58 @@
         </div>
     </div>
 
-<!-- SECCIÓN DE CORRELACIÓN Y ROTACIÓN - VERSIÓN MEJORADA CON LOS 3 PARES -->
-<div class="card bg-dark border-secondary mt-4 correlation-compact">
-    <div class="card-header d-flex justify-content-between align-items-center">
+<!-- V1.0 UX — CORRELACIÓN / ROTACIÓN COMPACTA -->
+<div class="card bg-dark border-secondary mt-3 correlation-compact">
+    <div class="card-header correlation-compact-header">
         <h6 class="mb-0"><i class="fas fa-arrows-rotate me-2" aria-hidden="true"></i>Correlación y rotación</h6>
         <span class="badge bg-info" id="correlation-timeframe">1D</span>
     </div>
-    <div class="card-body">
+    <div class="card-body correlation-compact-body">
         <div id="correlation-info">
-            <!-- BTC/USDT -->
-            <div class="d-flex justify-content-between align-items-center mb-3">
-                <span class="fw-bold" style="color: #FFD700;">BTC/USDT</span>
-                <div class="text-end">
-                    <span id="btc-correlation-status" class="badge bg-secondary me-2">Cargando...</span>
-                    <span id="btc-correlation-adx" class="badge bg-dark">ADX: --</span>
+            <div class="correlation-chip-row">
+                <div class="correlation-chip">
+                    <strong class="correlation-symbol btc">BTC/USDT</strong>
+                    <span id="btc-correlation-status" class="badge bg-secondary">Cargando…</span>
+                    <span id="btc-correlation-adx" class="correlation-adx">ADX --</span>
                 </div>
-            </div>
-            
-            <!-- PAXG/USDT -->
-            <div class="d-flex justify-content-between align-items-center mb-3">
-                <span class="fw-bold" style="color: #00C076;">PAXG/USDT</span>
-                <div class="text-end">
-                    <span id="paxg-correlation-status" class="badge bg-secondary me-2">Cargando...</span>
-                    <span id="paxg-correlation-adx" class="badge bg-dark">ADX: --</span>
+
+                <div class="correlation-chip">
+                    <strong class="correlation-symbol paxg">PAXG/USDT</strong>
+                    <span id="paxg-correlation-status" class="badge bg-secondary">Cargando…</span>
+                    <span id="paxg-correlation-adx" class="correlation-adx">ADX --</span>
                 </div>
-            </div>
-            
-            <!-- PAXG/BTC (RATIO) -->
-            <div class="d-flex justify-content-between align-items-center mb-3">
-                <span class="fw-bold" style="color: #8A63D2;">PAXG/BTC</span>
-                <div class="text-end">
-                    <span id="ratio-correlation-status" class="badge bg-secondary me-2">Cargando...</span>
-                    <span id="ratio-correlation-adx" class="badge bg-dark">ADX: --</span>
+
+                <div class="correlation-chip">
+                    <strong class="correlation-symbol ratio">PAXG/BTC</strong>
+                    <span id="ratio-correlation-status" class="badge bg-secondary">Cargando…</span>
+                    <span id="ratio-correlation-adx" class="correlation-adx">ADX --</span>
                 </div>
-            </div>
-            
-            <hr class="my-3">
-            
-            <!-- Señal de Rotación con explicación -->
-            <div class="row">
-                <div class="col-md-6">
-                    <div class="d-flex align-items-center mb-2">
-                        <span class="fw-bold me-2">Rotación:</span>
-                        <span id="rotation-signal" class="badge bg-secondary">NEUTRAL</span>
-                    </div>
-                    <div id="rotation-description" class="small text-muted"></div>
-                </div>
-                <div class="col-md-6">
-                    <div class="d-flex align-items-center mb-2">
-                        <span class="fw-bold me-2">Peso en decisión:</span>
+
+                <div class="correlation-chip correlation-chip-rotation">
+                    <span class="text-muted">Rotación</span>
+                    <span id="rotation-signal" class="badge bg-secondary">NEUTRAL</span>
+                    <span class="correlation-weight-inline">
                         <span id="weight-value" class="badge bg-dark">0%</span>
-                    </div>
-                    <div id="correlation-weight-explanation" class="small text-muted">
-                        Modificador de confianza
-                    </div>
+                    </span>
                 </div>
             </div>
-            
-            <!-- JUSTIFICACIÓN DETALLADA DE LA ROTACIÓN -->
-            <div class="mt-4 p-3 bg-dark rounded" style="border-left: 4px solid #17a2b8;">
-                <div class="d-flex align-items-center mb-2">
-                    <i class="fas fa-info-circle me-2 text-info"></i>
-                    <span class="fw-bold">Análisis de Rotación:</span>
+
+            <div id="rotation-description" class="small text-muted correlation-rotation-description"></div>
+            <div id="correlation-weight-explanation" class="visually-hidden">Modificador de confianza</div>
+
+            <details class="correlation-details mt-1">
+                <summary>
+                    <i class="fas fa-circle-info me-1" aria-hidden="true"></i>Ver explicación
+                </summary>
+                <div id="correlation-explanation" class="small text-muted pt-2">
+                    Esperando datos del servidor…
                 </div>
-                <div id="correlation-explanation" class="small text-muted" style="line-height: 1.6;">
-                    Esperando datos del servidor...
+
+                <div class="mt-2" id="timeframe-matrix" style="display: none;">
+                    <small class="text-muted d-block mb-1"><strong>Matriz por temporalidad</strong></small>
+                    <div class="row g-1" id="timeframe-matrix-content"></div>
                 </div>
-            </div>
-            
-            <!-- Matriz de Temporalidades (solo visible cuando hay datos) -->
-            <div class="mt-3" id="timeframe-matrix" style="display: none;">
-                <small class="text-muted d-block mb-2">⏱️ <strong>Matriz por Temporalidad:</strong></small>
-                <div class="row g-1" id="timeframe-matrix-content"></div>
-            </div>
+            </details>
         </div>
     </div>
 </div>
@@ -2784,7 +2744,7 @@
 
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI-2"></script>
     <script
-        src="{{ url_for('static', filename='script.js') }}?v=20260909-PRO-UI-2"
+        src="{{ url_for('static', filename='script.js') }}?v=20260910-V1-UX-COMPACT"
     ></script>
 
 
@@ -4102,25 +4062,20 @@
              
             });
     </script>
-    <!-- ============ FIRMA DEL DESARROLLADOR ============ -->
-    <footer class="container-fluid bg-dark border-top border-secondary py-3 mt-4">
-        <div class="row">
-            <div class="col-12 text-center">
-                <p class="small text-muted mb-1">
-                    Elaborado por el Ing. Willer Gianni Torrico Arispe
-                </p>
-                <div class="d-flex justify-content-center gap-3">
-                    <a href="https://github.com/Willer5000" target="_blank" class="text-decoration-none text-muted">
-                        <i class="fab fa-github fa-lg"></i> GitHub
-                    </a>
-                    <a href="https://www.linkedin.com/in/willer-gianni-torrico-arispe/" target="_blank" class="text-decoration-none text-muted">
-                        <i class="fab fa-linkedin fa-lg"></i> LinkedIn
-                    </a>
-                </div>
-                <p class="small text-muted mt-2 mb-0">
-                    © 2026 Crypto Trader Analyst Pro - Todos los derechos reservados
-                </p>
-            </div>
+    <!-- V1.0 UX — FIRMA COMPACTA -->
+    <footer class="container-fluid bg-dark border-top border-secondary app-footer-compact">
+        <div class="app-footer-row">
+            <span>© 2026 Crypto Trader Analyst Pro</span>
+            <span class="footer-author">Ing. Willer Gianni Torrico Arispe</span>
+            <span class="footer-links" aria-label="Enlaces del desarrollador">
+                <a href="https://github.com/Willer5000" target="_blank" rel="noopener noreferrer" class="text-muted" title="GitHub" aria-label="GitHub">
+                    <i class="fab fa-github" aria-hidden="true"></i>
+                </a>
+                <a href="https://www.linkedin.com/in/willer-gianni-torrico-arispe/" target="_blank" rel="noopener noreferrer" class="text-muted" title="LinkedIn" aria-label="LinkedIn">
+                    <i class="fab fa-linkedin" aria-hidden="true"></i>
+                </a>
+            </span>
+            <span class="footer-rights">Todos los derechos reservados</span>
         </div>
     </footer>
     <!-- =============================================== -->

@@ -10429,11 +10429,165 @@ function updateSystemStatus() {
                 const diffMinutes = Math.floor((now - lastUpdate) / 60000);
                 lastSignal.textContent = `Hace ${diffMinutes}min`;
             }
+            if (typeof window.refreshActionNowPanel === 'function') {
+                window.refreshActionNowPanel();
+            }
         })
         .catch(error => {
             const apiStatus = document.getElementById('api-status');
             if (apiStatus) { apiStatus.textContent = 'Error'; apiStatus.className = 'badge bg-danger'; }
+            if (typeof window.refreshActionNowPanel === 'function') {
+                window.refreshActionNowPanel(true);
+            }
         });
+}
+
+
+// ============================================================================
+// V1.0 UX — "QUÉ DEBO HACER AHORA"
+// ============================================================================
+// Panel muy liviano: sólo lee el DOM ya existente. No genera requests nuevos,
+// salvo el /health que updateSystemStatus() ya realizaba.
+// ============================================================================
+
+window.__actionNowState = window.__actionNowState || {
+    index: 0,
+    timer: null,
+    messages: [],
+};
+
+function _actionNowCleanText(value) {
+    return String(value || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function _actionNowMessages(forceError = false) {
+    const api = _actionNowCleanText(document.getElementById('api-status')?.textContent) || 'Comprobando';
+    const telegram = _actionNowCleanText(document.getElementById('telegram-status')?.textContent) || 'Comprobando';
+    const analysis = _actionNowCleanText(document.getElementById('analysis-status')?.textContent) || 'Comprobando';
+    const lastSignal = _actionNowCleanText(document.getElementById('last-signal')?.textContent) || '--';
+
+    const symbol = _actionNowCleanText(document.getElementById('symbol-select')?.selectedOptions?.[0]?.textContent);
+    const timeframe = _actionNowCleanText(document.getElementById('interval-select')?.selectedOptions?.[0]?.textContent);
+    const recommendation = _actionNowCleanText(document.getElementById('rec-action')?.textContent);
+    const guardian = _actionNowCleanText(document.getElementById('tgp-title')?.textContent);
+
+    const messages = [];
+
+    if (forceError || /error|desconect/i.test(api)) {
+        messages.push({
+            html: '<strong>SISTEMA</strong> · API de mercado no disponible. Evitar decisiones nuevas hasta recuperar conexión.',
+            critical: true,
+        });
+        return messages;
+    }
+
+    messages.push({
+        html: `<strong>SISTEMA</strong> · KuCoin ${api} · Telegram ${telegram} · análisis ${analysis.toLowerCase()} · actualización ${lastSignal}.`,
+        critical: false,
+    });
+
+    if (symbol || timeframe || (recommendation && recommendation !== '---')) {
+        messages.push({
+            html: `<strong>ANÁLISIS</strong> · ${symbol || 'Mercado'}${timeframe ? ` · ${timeframe}` : ''}${recommendation && recommendation !== '---' ? ` · recomendación ${recommendation}` : ''}.`,
+            critical: false,
+        });
+    }
+
+    if (guardian) {
+        messages.push({
+            html: `<strong>PORTAFOLIO</strong> · ${guardian}.`,
+            critical: /veto|salir|riesgo alto/i.test(guardian),
+        });
+    }
+
+    messages.push({
+        html: '<strong>DISCIPLINA</strong> · Operar sólo señales autorizadas; la observación y el aprendizaje continúan en segundo plano.',
+        critical: false,
+    });
+
+    return messages;
+}
+
+function _renderActionNowMessage(message) {
+    const el = document.getElementById('action-now-message');
+    const health = document.getElementById('action-now-health');
+    if (!el || !message) return;
+
+    el.classList.add('is-leaving');
+
+    window.setTimeout(() => {
+        el.classList.remove('is-leaving');
+        el.classList.add('is-entering');
+        el.innerHTML = message.html;
+        el.classList.toggle('action-critical', Boolean(message.critical));
+
+        if (health) {
+            health.className = message.critical
+                ? 'action-now-health text-danger'
+                : 'action-now-health text-success';
+            health.innerHTML = message.critical
+                ? '<i class="fas fa-circle" aria-hidden="true"></i> Atención'
+                : '<i class="fas fa-circle" aria-hidden="true"></i> Sistema OK';
+        }
+
+        window.requestAnimationFrame(() => {
+            el.classList.remove('is-entering');
+        });
+    }, 260);
+}
+
+window.refreshActionNowPanel = function(forceError = false) {
+    const state = window.__actionNowState;
+    state.messages = _actionNowMessages(forceError);
+
+    // Una alerta crítica se fija; la información normal rota como una cinta
+    // vertical sobria, sin marquee horizontal.
+    const critical = state.messages.find(item => item.critical);
+    if (critical) {
+        _renderActionNowMessage(critical);
+        return;
+    }
+
+    if (!state.messages.length) return;
+    state.index = state.index % state.messages.length;
+    _renderActionNowMessage(state.messages[state.index]);
+};
+
+function _advanceActionNowPanel() {
+    const state = window.__actionNowState;
+    const messages = _actionNowMessages(false);
+    const critical = messages.find(item => item.critical);
+
+    if (critical) {
+        state.messages = messages;
+        _renderActionNowMessage(critical);
+        return;
+    }
+
+    state.messages = messages;
+    if (!messages.length) return;
+    state.index = (state.index + 1) % messages.length;
+    _renderActionNowMessage(messages[state.index]);
+}
+
+function _startActionNowPanel() {
+    if (!document.getElementById('action-now-message')) return;
+    window.refreshActionNowPanel(false);
+
+    if (!window.__actionNowState.timer) {
+        window.__actionNowState.timer = window.setInterval(
+            _advanceActionNowPanel,
+            8000
+        );
+    }
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _startActionNowPanel, {once: true});
+} else {
+    _startActionNowPanel();
 }
 
 function toggleFullScreen() {

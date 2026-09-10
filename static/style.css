@@ -245,11 +245,11 @@ body {
     .digital-clock {
         font-size: 1rem;
     }
-    
+
     .card-header h5, .card-header h6 {
         font-size: 1rem;
     }
-    
+
     .btn {
         padding: 0.4rem 0.8rem;
         font-size: 0.9rem;
@@ -978,4 +978,212 @@ body.trading-app .dropdown-menu-dark {
         font-size: .67rem;
         padding: .28rem .45rem;
     }
+}
+
+
+/* ==========================================================================
+   V1.0 UX COMPACT — panel de acción, controles, correlación y footer
+   No modifica gráficos ni lógica de trading.
+   ========================================================================== */
+.analysis-actions-compact {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: .4rem;
+    align-items: stretch;
+}
+.analysis-actions-compact .analysis-action-primary {
+    grid-column: 1 / -1;
+}
+.analysis-actions-compact .dropdown,
+.analysis-actions-compact .dropdown > button,
+.analysis-actions-compact > button {
+    width: 100%;
+}
+.analysis-actions-compact .btn {
+    padding: .32rem .45rem;
+    font-size: .78rem;
+    line-height: 1.2;
+    min-height: 30px;
+}
+
+.action-now-card {
+    overflow: hidden;
+}
+.action-now-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: .5rem;
+    padding-top: .55rem;
+    padding-bottom: .55rem;
+}
+.action-now-health {
+    font-size: .68rem;
+    white-space: nowrap;
+}
+.action-now-health .fa-circle {
+    font-size: .42rem;
+    margin-right: .3rem;
+    vertical-align: middle;
+}
+.action-now-viewport {
+    min-height: 44px;
+    max-height: 44px;
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+    padding: .45rem .75rem;
+    border-top: 1px solid rgba(255,255,255,.05);
+}
+.action-now-message {
+    width: 100%;
+    font-size: .78rem;
+    line-height: 1.35;
+    color: var(--text-secondary);
+    transform: translateY(0);
+    opacity: 1;
+    transition: transform .28s ease, opacity .28s ease;
+}
+.action-now-message.is-leaving {
+    transform: translateY(-10px);
+    opacity: 0;
+}
+.action-now-message.is-entering {
+    transform: translateY(10px);
+    opacity: 0;
+}
+.action-now-message strong {
+    color: var(--text-primary);
+}
+.action-now-message.action-critical {
+    color: var(--accent-red);
+    font-weight: 600;
+}
+
+.correlation-compact-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-top: .5rem;
+    padding-bottom: .5rem;
+}
+.correlation-compact-body {
+    padding: .55rem .7rem;
+}
+.correlation-chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .35rem;
+    align-items: center;
+}
+.correlation-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: .32rem;
+    min-height: 27px;
+    padding: .18rem .38rem;
+    border: 1px solid rgba(255,255,255,.09);
+    border-radius: .4rem;
+    background: rgba(255,255,255,.025);
+    white-space: nowrap;
+}
+.correlation-chip .badge {
+    font-size: .67rem;
+    padding: .22rem .38rem;
+}
+.correlation-symbol {
+    font-size: .72rem;
+}
+.correlation-symbol.btc { color: #FFD700; }
+.correlation-symbol.paxg { color: #00C076; }
+.correlation-symbol.ratio { color: #B29AF3; }
+.correlation-adx {
+    color: var(--text-secondary);
+    font-size: .66rem;
+}
+.correlation-chip-rotation {
+    margin-left: auto;
+}
+.correlation-weight-inline {
+    padding-left: .15rem;
+    border-left: 1px solid rgba(255,255,255,.10);
+}
+.correlation-rotation-description {
+    margin-top: .28rem;
+    line-height: 1.25;
+}
+.correlation-details summary {
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: .69rem;
+    list-style: none;
+    user-select: none;
+}
+.correlation-details summary::-webkit-details-marker { display: none; }
+.correlation-details[open] summary { color: var(--accent-blue); }
+
+.app-footer-compact {
+    padding: .48rem .8rem;
+    margin-top: 1.25rem;
+    font-size: .68rem;
+    color: var(--text-secondary);
+}
+.app-footer-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: .35rem .75rem;
+    text-align: center;
+}
+.footer-author {
+    color: rgba(255,255,255,.58);
+}
+.footer-links {
+    display: inline-flex;
+    align-items: center;
+    gap: .45rem;
+}
+.footer-links a {
+    display: inline-flex;
+    width: 22px;
+    height: 22px;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    text-decoration: none;
+    border: 1px solid rgba(255,255,255,.10);
+    font-size: .75rem;
+}
+.footer-links a:hover {
+    color: var(--text-primary) !important;
+    border-color: rgba(255,255,255,.25);
+}
+.footer-rights { opacity: .72; }
+
+@media (max-width: 991.98px) {
+    .correlation-chip-rotation { margin-left: 0; }
+}
+@media (max-width: 575.98px) {
+    .analysis-actions-compact .btn {
+        font-size: .74rem;
+        padding-left: .3rem;
+        padding-right: .3rem;
+    }
+    .action-now-header h6 { font-size: .83rem; }
+    .action-now-health { font-size: .62rem; }
+    .action-now-viewport {
+        min-height: 50px;
+        max-height: 50px;
+    }
+    .correlation-chip-row {
+        display: grid;
+        grid-template-columns: 1fr;
+    }
+    .correlation-chip {
+        justify-content: space-between;
+        width: 100%;
+    }
+    .app-footer-row { gap: .25rem .55rem; }
+    .footer-rights { display: none; }
 }
