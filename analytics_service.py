@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 from collections import defaultdict
 
 from supabase_client import supabase_db
+from edge_discovery import build_edge_discovery_summary
 
 logger = logging.getLogger('ANALYTICS')
 # ============================================================================
@@ -2109,6 +2110,27 @@ class AnalyticsService:
         attribution_spot = self._strategy_attribution_summary(spot)
         attribution_futures = self._strategy_attribution_summary(futures_official)
         attribution_shadow = self._strategy_attribution_summary(futures_shadow)
+
+        # COMMIT 7 — Edge Discovery utiliza exactamente las cohortes ya
+        # separadas arriba. No hace otra consulta ni puede cambiar producción.
+        try:
+            edge_discovery = build_edge_discovery_summary(
+                spot,
+                futures_shadow,
+                futures_official
+            )
+        except Exception as edge_error:
+            edge_discovery = {
+                'version': 'C7_EDGE_DISCOVERY_V1',
+                'authority': 'RESEARCH_ONLY',
+                'production_change': False,
+                'status': f'UNAVAILABLE:{type(edge_error).__name__}',
+                'error': str(edge_error)[:160],
+                'futures_shadow': {'priority': [], 'watch': [], 'low_priority': []},
+                'spot': {'priority': [], 'watch': [], 'low_priority': []},
+                'early_failure_watch': {}
+            }
+
         coverage = getattr(signals, 'coverage', {'complete': False}) or {'complete': False}
 
         resolved_futures = sum(
@@ -2181,6 +2203,9 @@ class AnalyticsService:
                 'futures_official': attribution_futures,
                 'futures_shadow': attribution_shadow
             },
+
+            # COMMIT 7 — hipótesis falsables, research-only.
+            'edge_discovery_v1': edge_discovery,
 
             # ==========================================================
             # COMMIT 6 — LEARNING OBSERVATORY

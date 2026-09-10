@@ -824,9 +824,8 @@
                         <strong>Laboratorio sin autoridad operativa.</strong>
 
                         El laboratorio observa si distintas estrategias mejoran el momento de entrada.
-                        No modifica votos, Safety, Entry, SL, TP, leverage ni
-                        Publication Gate. Una muestra ≥25 sólo habilita revisión
-                        humana; nunca promoción automática.
+                        No modifica una operación por tener una muestra grande. Cualquier cambio de autoridad
+                        exige validación temporal, evidencia live y gobernanza de ReviewTrader.
 
                     </div>
 
@@ -982,6 +981,143 @@
 
                 </div>
 
+            </div>
+
+            <!-- ============================================================
+                 COMMIT 6 — OBSERVATORIO DE APRENDIZAJE
+                 ============================================================ -->
+            <div class="card bg-dark border-secondary mb-3" id="learning-observatory-section">
+                <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                    <div>
+                        <strong>Aprendizaje de ejecución</strong>
+                        <div class="small text-muted">Qué ocurre después de tocar la entrada y qué puede aprender ReviewTrader.</div>
+                    </div>
+                    <span class="badge bg-secondary" id="learning-observatory-gate">Recopilando evidencia</span>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3 mb-3">
+                        <div class="col-6 col-lg-3">
+                            <div class="text-muted small">Entradas diagnosticadas</div>
+                            <strong class="h5" id="lo-forensics-n">--</strong>
+                        </div>
+                        <div class="col-6 col-lg-3">
+                            <div class="text-muted small">Entrada alcanzada</div>
+                            <strong class="h5" id="lo-entry-reach">--</strong>
+                        </div>
+                        <div class="col-6 col-lg-3">
+                            <div class="text-muted small">Defensa del nivel · proxy</div>
+                            <strong class="h5" id="lo-defensibility">--</strong>
+                        </div>
+                        <div class="col-6 col-lg-3">
+                            <div class="text-muted small">SL casi inmediato</div>
+                            <strong class="h5" id="lo-direct-stop">--</strong>
+                        </div>
+                        <div class="col-6 col-lg-3">
+                            <div class="text-muted small">MFE medio</div>
+                            <strong id="lo-mfe">--</strong>
+                        </div>
+                        <div class="col-6 col-lg-3">
+                            <div class="text-muted small">MAE medio</div>
+                            <strong id="lo-mae">--</strong>
+                        </div>
+                        <div class="col-6 col-lg-3">
+                            <div class="text-muted small">SL posiblemente estrecho</div>
+                            <strong id="lo-tight-stop">--</strong>
+                        </div>
+                        <div class="col-6 col-lg-3">
+                            <div class="text-muted small">TP alcanzado después del SL</div>
+                            <strong id="lo-post-stop-tp">--</strong>
+                        </div>
+                    </div>
+
+                    <div class="row g-3">
+                        <div class="col-xl-6">
+                            <div class="border rounded p-3 h-100" style="border-color: var(--bs-border-color) !important;">
+                                <div class="fw-semibold mb-2">Gobernanza adaptativa</div>
+                                <div class="small d-flex justify-content-between gap-2"><span class="text-muted">Estado</span><strong id="lo-autopilot-state">--</strong></div>
+                                <div class="small d-flex justify-content-between gap-2"><span class="text-muted">Autoridad productiva</span><strong id="lo-autopilot-authority">--</strong></div>
+                                <div class="small d-flex justify-content-between gap-2"><span class="text-muted">Escalado de leverage</span><strong id="lo-leverage-growth">--</strong></div>
+                                <div class="small text-muted mt-2" id="lo-autopilot-reason">Esperando estado de ReviewTrader.</div>
+                            </div>
+                        </div>
+                        <div class="col-xl-6">
+                            <div class="border rounded p-3 h-100" style="border-color: var(--bs-border-color) !important;">
+                                <div class="fw-semibold mb-2">Gemini · científico de aprendizaje</div>
+                                <div class="small d-flex justify-content-between gap-2"><span class="text-muted">Estado</span><strong id="lo-gemini-state">--</strong></div>
+                                <div class="small d-flex justify-content-between gap-2"><span class="text-muted">Última ejecución</span><strong id="lo-gemini-last">--</strong></div>
+                                <div class="small d-flex justify-content-between gap-2"><span class="text-muted">Proveedor alternativo</span><strong id="lo-gemini-fallback">--</strong></div>
+                                <div class="small text-muted mt-2" id="lo-gemini-reason">Esperando actividad persistida.</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mt-3">
+                        <div class="fw-semibold mb-2">Estrategias con atribución verificable</div>
+                        <div class="table-responsive">
+                            <table class="table table-dark table-hover table-sm align-middle mb-0">
+                                <thead><tr><th>Trader</th><th>Estrategia</th><th>Relación</th><th>N</th><th>Resueltas</th><th>WR</th><th>Exp.R</th></tr></thead>
+                                <tbody id="lo-attribution-body"><tr><td colspan="7" class="text-center text-muted py-2">Aún sin muestra visible.</td></tr></tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="small text-muted mt-3" id="lo-block-reasons">ReviewTrader continúa recopilando evidencia.</div>
+                </div>
+            </div>
+
+            <!-- ============================================================
+                 COMMIT 7 — DESCUBRIMIENTO DE EDGE
+                 ============================================================ -->
+            <div class="card bg-dark border-secondary mb-3" id="edge-discovery-section">
+                <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                    <div>
+                        <strong>Descubrimiento de ventaja estadística</strong>
+                        <div class="small text-muted">ReviewTrader compara contextos para encontrar qué distingue mejores entradas de las pérdidas.</div>
+                    </div>
+                    <span class="badge bg-secondary" id="edge-discovery-mode">Sólo investigación</span>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3 mb-3">
+                        <div class="col-6 col-lg-3">
+                            <div class="text-muted small">Expectancy base · Futures en evaluación</div>
+                            <strong class="h5" id="edge-baseline-exp">--</strong>
+                        </div>
+                        <div class="col-6 col-lg-3">
+                            <div class="text-muted small">Resultados estudiados</div>
+                            <strong class="h5" id="edge-resolved">--</strong>
+                        </div>
+                        <div class="col-6 col-lg-3">
+                            <div class="text-muted small">Hipótesis priorizadas</div>
+                            <strong class="h5" id="edge-priority-count">--</strong>
+                        </div>
+                        <div class="col-6 col-lg-3">
+                            <div class="text-muted small">Alerta Premium</div>
+                            <strong class="h5" id="edge-failure-watch">--</strong>
+                        </div>
+                    </div>
+
+                    <div class="small text-muted mb-3" id="edge-discovery-note">
+                        Ninguna hipótesis modifica señales reales. Descubrimiento y validación se mantienen separados temporalmente.
+                    </div>
+
+                    <div class="fw-semibold mb-2">Hipótesis con mejor evidencia relativa</div>
+                    <div class="table-responsive mb-3">
+                        <table class="table table-dark table-hover table-sm align-middle mb-0">
+                            <thead><tr><th>Hipótesis</th><th>N</th><th>Exp.R</th><th>Validación</th><th>PF</th><th>Mejora</th><th>Estado</th></tr></thead>
+                            <tbody id="edge-priority-body"><tr><td colspan="7" class="text-center text-muted py-2">Esperando evidencia suficiente.</td></tr></tbody>
+                        </table>
+                    </div>
+
+                    <details>
+                        <summary class="small text-muted">Ver hipótesis de baja prioridad</summary>
+                        <div class="table-responsive mt-2">
+                            <table class="table table-dark table-hover table-sm align-middle mb-0">
+                                <thead><tr><th>Hipótesis</th><th>N</th><th>Exp.R</th><th>Validación</th><th>Estado</th></tr></thead>
+                                <tbody id="edge-low-body"><tr><td colspan="5" class="text-center text-muted py-2">Sin hipótesis degradadas.</td></tr></tbody>
+                            </table>
+                        </div>
+                    </details>
+                </div>
             </div>
 
             <!-- ===================== COBERTURA ===================== -->

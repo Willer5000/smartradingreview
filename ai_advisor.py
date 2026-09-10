@@ -4106,6 +4106,17 @@ Si existe q7_strategy_lab en el contexto:
 - una evidencia positiva sólo puede generar revisión humana;
 - nunca promociones automáticamente una estrategia Q7.
 
+Si existe edge_discovery_v1 en el contexto:
+
+- úsalo como mapa de hipótesis falsables, nunca como autoridad operativa;
+- compara expectancy de Discovery y Validation por separado;
+- exige que una mejora sobreviva fuera de muestra antes de llamarla prometedora;
+- presta especial atención a diferencias por régimen, acción y contexto;
+- una hipótesis RESEARCH_PRIORITY sigue siendo investigación, no una señal;
+- una hipótesis LOW_PRIORITY_RESEARCH puede descartarse de prioridad, pero no reescribas historia;
+- usa MFE/MAE y Entry Defensibility para explicar por qué una combinación mejora o empeora;
+- nunca aumentes leverage ni bajes Safety por una hipótesis de este laboratorio.
+
 Busca qué características hacen que una señal SEA MEJOR.
 
 Debes generar hipótesis falsables.

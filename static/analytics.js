@@ -1124,6 +1124,108 @@ function renderLearningObservatory(data) {
     }
 }
 
+// ============================================================================
+// COMMIT 7 — DESCUBRIMIENTO DE EDGE
+// ============================================================================
+
+function edgeStateLabel(state) {
+    const value = String(state || '').toUpperCase();
+    if (value === 'RESEARCH_PRIORITY') return 'Prioridad de investigación';
+    if (value === 'PROMISING_NEEDS_VALIDATION') return 'Prometedora · falta validar';
+    if (value === 'LOW_PRIORITY_RESEARCH') return 'Baja prioridad';
+    return 'Observación';
+}
+
+function edgeFriendlyText(value) {
+    return String(value || '--')
+        .replaceAll('Trend Down', 'Tendencia bajista')
+        .replaceAll('Trend Up', 'Tendencia alcista')
+        .replaceAll('Balance', 'Mercado equilibrado')
+        .replaceAll('Transition', 'Transición')
+        .replaceAll('Volatility Shock', 'Choque de volatilidad')
+        .replaceAll('Fast|Aligned', 'Perfil rápido · alineado')
+        .replaceAll('Fast|Conflict', 'Perfil rápido · en conflicto')
+        .replaceAll('Balanced|Aligned', 'Perfil equilibrado · alineado')
+        .replaceAll('Balanced|Conflict', 'Perfil equilibrado · en conflicto')
+        .replaceAll('Aligned', 'Alineado')
+        .replaceAll('Conflict', 'En conflicto')
+        .replaceAll('Vwap Range Reversion Short', 'Reversión VWAP bajista')
+        .replaceAll('Vwap Range Reversion Long', 'Reversión VWAP alcista')
+        .replaceAll('Accepted Short Retest', 'Retesteo bajista confirmado')
+        .replaceAll('Accepted Long Retest', 'Retesteo alcista confirmado')
+        .replaceAll('Breakdown Pending Retest', 'Ruptura bajista pendiente de retesteo')
+        .replaceAll('Breakout Pending Retest', 'Ruptura alcista pendiente de retesteo');
+}
+
+function renderEdgeDiscovery(data) {
+    const edge = data?.edge_discovery_v1 || {};
+    const futures = edge?.futures_shadow || {};
+    const baseline = futures?.baseline || {};
+    const priority = Array.isArray(futures.priority) ? futures.priority : [];
+    const watch = Array.isArray(futures.watch) ? futures.watch : [];
+    const low = Array.isArray(futures.low_priority) ? futures.low_priority : [];
+    const failure = edge?.early_failure_watch || {};
+
+    q5SetText('edge-baseline-exp', loR(baseline.expectancy_r, 3));
+    q5SetText('edge-resolved', Number(futures.resolved || 0).toLocaleString());
+    q5SetText('edge-priority-count', Number(priority.length || 0).toLocaleString());
+    q5SetText(
+        'edge-failure-watch',
+        failure.alert ? `${Number(failure.consecutive_sl || 0)} SL seguidos` : 'Sin alerta'
+    );
+
+    const note = document.getElementById('edge-discovery-note');
+    if (note) {
+        const cutoff = futures.cutoff ? formatDate(futures.cutoff) : null;
+        note.textContent = cutoff
+            ? `Sólo investigación. Corte temporal Descubrimiento/Validación: ${cutoff}. Ninguna hipótesis cambia señales, Safety, niveles o leverage.`
+            : 'Sólo investigación. Aún no existe muestra suficiente para una separación temporal estable.';
+    }
+
+    const mainRows = [...priority, ...watch].slice(0, 10);
+    const body = document.getElementById('edge-priority-body');
+    if (body) {
+        if (!mainRows.length) {
+            body.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-2">Aún no hay una hipótesis con muestra suficiente.</td></tr>';
+        } else {
+            body.innerHTML = mainRows.map(row => {
+                const total = row.total || {};
+                const validation = row.validation || {};
+                const lift = q5FiniteNumber(row.lift_vs_baseline_r);
+                const liftText = lift === null ? '--' : `${lift >= 0 ? '+' : ''}${lift.toFixed(3)}R`;
+                const pf = q5FiniteNumber(total.profit_factor);
+                const cls = String(row.state || '').toUpperCase() === 'RESEARCH_PRIORITY' ? 'text-success'
+                    : String(row.state || '').toUpperCase() === 'PROMISING_NEEDS_VALIDATION' ? 'text-warning' : '';
+                return `<tr>
+                    <td><strong>${edgeFriendlyText(row.label || '--')}</strong></td>
+                    <td>${Number(total.resolved || 0).toLocaleString()}</td>
+                    <td>${loR(total.expectancy_r, 3)}</td>
+                    <td>${Number(validation.resolved || 0) > 0 ? loR(validation.expectancy_r, 3) : '--'}</td>
+                    <td>${pf === null ? '--' : pf.toFixed(2)}</td>
+                    <td>${liftText}</td>
+                    <td class="${cls}">${edgeStateLabel(row.state)}</td>
+                </tr>`;
+            }).join('');
+        }
+    }
+
+    const lowBody = document.getElementById('edge-low-body');
+    if (lowBody) {
+        const rows = low.slice(0, 8);
+        lowBody.innerHTML = rows.length ? rows.map(row => {
+            const total = row.total || {};
+            const validation = row.validation || {};
+            return `<tr>
+                <td>${edgeFriendlyText(row.label || '--')}</td>
+                <td>${Number(total.resolved || 0).toLocaleString()}</td>
+                <td>${loR(total.expectancy_r, 3)}</td>
+                <td>${Number(validation.resolved || 0) > 0 ? loR(validation.expectancy_r, 3) : '--'}</td>
+                <td class="text-muted">${edgeStateLabel(row.state)}</td>
+            </tr>`;
+        }).join('') : '<tr><td colspan="5" class="text-center text-muted py-2">Sin hipótesis de baja prioridad con muestra suficiente.</td></tr>';
+    }
+}
+
 async function loadLearningGovernanceStatus() {
     const requests = [
         fetch('/api/review/autopilot/status').then(async response => ({ kind: 'autopilot', response, json: await response.json() })),
@@ -1364,6 +1466,9 @@ async function loadQualityV2() {
 
         // Commit 6 — exponer Forensics/Attribution que ya venían en el API.
         renderLearningObservatory(data);
+
+        // Commit 7 — hipótesis de edge, siempre research-only.
+        renderEdgeDiscovery(data);
 
         
         // ============================================================

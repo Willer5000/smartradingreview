@@ -32333,6 +32333,26 @@ def api_review_autopilot_status():
 
 
 # ============================================================================
+# COMMIT 7 — EDGE DISCOVERY STATUS (READ ONLY)
+# ============================================================================
+@app.route('/api/review/edge-discovery/status', methods=['GET'])
+def api_review_edge_discovery_status():
+    user = _require_auth()
+    if not isinstance(user, str):
+        return user
+    try:
+        from edge_discovery import get_latest_edge_discovery
+        from supabase_client import supabase_db
+        return jsonify({
+            'success': True,
+            'data': get_latest_edge_discovery(supabase_db),
+            'timestamp': datetime.now(bolivia_tz).isoformat()
+        })
+    except Exception as exc:
+        return jsonify({'success': False, 'error': str(exc)[:200]}), 500
+
+
+# ============================================================================
 # ENDPOINT AUXILIAR: Health check extendido con estado de Supabase/ReviewTrader
 # ============================================================================
 @app.route('/api/review/fix_confidence_overflow', methods=['POST'])
@@ -34176,6 +34196,78 @@ def saved_futures_lifecycle_loop():
 _Q6_DAILY_LOCK = threading.Lock()
 
 
+def _run_ai_learning_daily(q6_slot=None, trigger_source='daily'):
+    """
+    COMMIT 7 — Gemini recovery-safe daily learning.
+
+    AI_LEARNING has its own Q6 job key.  It can therefore recover after a
+    Render restart even when the REVIEW job for the same day is already DONE.
+    A failed attempt is marked FAILED and may retry later; a successful job is
+    never duplicated.
+    """
+    claimed = False
+    try:
+        from review_trader import review_trader
+        from q6_integrity import claim_daily_job, finish_daily_job, daily_slot
+        from ai_advisor import run_ai_advisor
+
+        if not review_trader.db.enabled:
+            return False
+
+        q6_slot = q6_slot or daily_slot(datetime.now(bolivia_tz))
+
+        # retry=True recupera FAILED después de 15 min y leases RUNNING
+        # abandonados tras un reinicio. DONE sigue siendo idempotente.
+        claimed = claim_daily_job(
+            review_trader.db,
+            'AI_LEARNING',
+            q6_slot,
+            retry=True,
+            failed_retry_minutes=15,
+            abandoned_after_minutes=15
+        )
+        if not claimed:
+            return False
+
+        learning_context = _build_ai_learning_context()
+        ai_learning_result = run_ai_advisor(
+            user_name='SYSTEM',
+            usage_type='LEARNING',
+            context_type='LEARNING',
+            event_type='DAILY_REVIEW',
+            market='SYSTEM',
+            context=learning_context
+        )
+
+        success = bool(ai_learning_result.get('success'))
+        finish_daily_job(review_trader.db, 'AI_LEARNING', q6_slot, success)
+
+        if success:
+            data = ai_learning_result.get('data', {}) or {}
+            print(
+                "🧠 [C7] Gemini Learning "
+                f"({trigger_source}): {data.get('verdict')} - "
+                f"{data.get('headline')}"
+            )
+        else:
+            print(
+                "⚠️ [C7] Gemini Learning no completado: "
+                f"{ai_learning_result.get('reason', 'sin detalle')}"
+            )
+        return success
+
+    except Exception as exc:
+        if claimed:
+            try:
+                from review_trader import review_trader
+                from q6_integrity import finish_daily_job
+                finish_daily_job(review_trader.db, 'AI_LEARNING', q6_slot, False)
+            except Exception:
+                pass
+        print(f"⚠️ [C7] Gemini Learning recovery: {type(exc).__name__}: {exc}")
+        return False
+
+
 def _q6_run_daily_review():
     if not _Q6_DAILY_LOCK.acquire(blocking=False):
         return
@@ -34193,9 +34285,14 @@ def _q6_run_daily_review():
         from review_trader import review_trader
         from q6_integrity import daily_slot, claim_daily_job, finish_daily_job
         slot = daily_slot(datetime.now(bolivia_tz))
-        if claim_daily_job(review_trader.db, 'REVIEW', slot, retry=True):
+        review_claimed = claim_daily_job(review_trader.db, 'REVIEW', slot, retry=True)
+        if review_claimed:
             success = ejecutar_review_diario(q6_slot=slot)
             finish_daily_job(review_trader.db, 'REVIEW', slot, success)
+        else:
+            # El review puede estar DONE mientras Gemini nunca llegó a correr
+            # por un reinicio/error previo. Recuperamos sólo AI_LEARNING.
+            _run_ai_learning_daily(q6_slot=slot, trigger_source='recovery')
     except Exception as exc:
         print(f"Q6 ciclo diario pendiente: {type(exc).__name__}")
     finally:
@@ -37957,6 +38054,14 @@ def _build_ai_learning_context():
             or {}
         )
 
+        edge_discovery_learning = (
+            quality_v2.get(
+                'edge_discovery_v1',
+                {}
+            )
+            or {}
+        )
+
     except Exception as q7_learning_error:
 
         q7_strategy_lab_learning = {
@@ -37989,6 +38094,13 @@ def _build_ai_learning_context():
             'version': 'COMMIT2_STRATEGY_ATTRIBUTION_V2',
             'status': 'UNAVAILABLE',
             'diagnostic_only': True,
+            'reason': str(q7_learning_error)[:180]
+        }
+
+        edge_discovery_learning = {
+            'version': 'C7_EDGE_DISCOVERY_V1',
+            'status': 'UNAVAILABLE',
+            'authority': 'RESEARCH_ONLY',
             'reason': str(q7_learning_error)[:180]
         }
 
@@ -38061,7 +38173,12 @@ def _build_ai_learning_context():
             execution_forensics_learning,
 
         'strategy_attribution_v2':
-            strategy_attribution_learning
+            strategy_attribution_learning,
+
+        # COMMIT 7: Gemini estudia las hipótesis ya calculadas por
+        # ReviewTrader. No puede promoverlas ni modificar producción.
+        'edge_discovery_v1':
+            edge_discovery_learning
     }
 
 # ============================================================================
@@ -39794,79 +39911,12 @@ def ejecutar_review_diario(q6_slot=None):
         print(f"{'#'*60}\n")
 
         # ==============================================================
-        # COMMIT 36R.4
-        # AI LEARNING ANALYST
+        # COMMIT 7 — AI LEARNING desacoplado y recuperable
         # ==============================================================
-
-        try:
-
-            from ai_advisor import (
-                run_ai_advisor
-            )
-
-
-            from q6_integrity import claim_daily_job, finish_daily_job, daily_slot
-            q6_slot = q6_slot or daily_slot(datetime.now(bolivia_tz))
-            if not claim_daily_job(review_trader.db, 'AI_LEARNING', q6_slot):
-                return review_success
-            learning_context = (
-                _build_ai_learning_context()
-            )
-
-
-            ai_learning_result = (
-                run_ai_advisor(
-
-                    user_name='SYSTEM',
-
-                    usage_type='LEARNING',
-
-                    context_type='LEARNING',
-
-                    event_type='DAILY_REVIEW',
-
-                    market='SYSTEM',
-
-                    context=(
-                        learning_context
-                    )
-                )
-            )
-
-
-            finish_daily_job(review_trader.db, 'AI_LEARNING', q6_slot,
-                             bool(ai_learning_result.get('success')))
-            if (
-                ai_learning_result.get(
-                    'success'
-                )
-            ):
-
-                ai_learning_data = (
-                    ai_learning_result.get(
-                        'data',
-                        {}
-                    )
-                    or {}
-                )
-
-
-                print(
-                    "🤖🧠 [36R.4] "
-                    "AI Learning: "
-                    f"{ai_learning_data.get('verdict')} "
-                    f"- "
-                    f"{ai_learning_data.get('headline')}"
-                )
-
-
-        except Exception as ai_learning_err:
-
-            print(
-                "⚠️ [36R.4] "
-                "AI Learning no disponible: "
-                f"{ai_learning_err}"
-            )
+        _run_ai_learning_daily(
+            q6_slot=q6_slot,
+            trigger_source='review'
+        )
         return review_success
     except Exception as e:
         print(f"❌ Error en ejecutar_review_diario: {e}")

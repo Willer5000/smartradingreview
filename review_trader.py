@@ -2552,6 +2552,50 @@ class ReviewTrader:
                             )
                             else {}
                     }
+            # ==============================================================
+            # COMMIT 7 — TRENDLINE SHADOW → APRENDIZAJE PROSPECTIVO
+            # ==============================================================
+            # Persistimos el snapshot compacto ya calculado en app.py.
+            # No modifica votos, Safety, Entry, SL, TP, leverage ni publicación.
+            try:
+                raw_strategy_lab = analysis_result.get('strategy_lab') or {}
+                raw_trendline = (
+                    raw_strategy_lab.get('trendlines', {})
+                    if isinstance(raw_strategy_lab, dict)
+                    else {}
+                ) or {}
+                if isinstance(raw_trendline, dict) and raw_trendline.get('shadow_only', False):
+                    compact_strategies = {}
+
+                    def _trendline_optional_float(value):
+                        try:
+                            number = float(value)
+                            return number if math.isfinite(number) else None
+                        except (TypeError, ValueError):
+                            return None
+
+                    for key, item in (raw_trendline.get('strategies', {}) or {}).items():
+                        if not isinstance(item, dict):
+                            continue
+                        compact_strategies[str(key)[:60]] = {
+                            'name': str(item.get('name') or key)[:100],
+                            'direction': str(item.get('direction') or 'NEUTRAL').upper()[:20],
+                            'state': str(item.get('state') or 'NO_EDGE').upper()[:80],
+                            'alignment_with_system': str(item.get('alignment_with_system') or 'NEUTRAL').upper()[:30],
+                            'quality': _trendline_optional_float(item.get('quality')),
+                            'shadow_only': True,
+                        }
+                    context['learning']['trendline_strategy_lab_shadow'] = {
+                        'snapshot_version': 'C7_TRENDLINE_LEARNING_V1',
+                        'lab_version': str(raw_trendline.get('version') or '')[:80],
+                        'shadow_only': True,
+                        'eligible': self._as_bool(raw_trendline.get('eligible', False)),
+                        'reason': str(raw_trendline.get('reason') or '')[:120],
+                        'strategies': compact_strategies,
+                    }
+            except Exception as trendline_learning_error:
+                logger.warning('Trendline learning snapshot no disponible: %s', trendline_learning_error)
+
             # Datos de la señal
             decision = analysis_result.get('decision', {})
             levels = analysis_result.get('levels', {})
@@ -2911,6 +2955,23 @@ class ReviewTrader:
                     0
                 ),
                 0.0
+            ),
+
+            # COMMIT 7 — separar alcanzabilidad de defendibilidad.
+            # Persistimos el score ya calculado por Futures; no lo recalculamos.
+            'entry_defensibility_score': _safe_float(
+                levels.get(
+                    'entry_defensibility_score'
+                ),
+                None
+            ),
+
+            'entry_defensibility_version': str(
+                levels.get(
+                    'entry_defensibility_version',
+                    ''
+                )
+                or ''
             ),
 
             'entry_distance_atr': _safe_float(
@@ -12798,6 +12859,35 @@ class ReviewTrader:
             }
 
     # ========================================================================
+    # COMMIT 7 — EDGE DISCOVERY ENGINE
+    # ========================================================================
+
+    def run_edge_discovery(self) -> Dict:
+        """
+        Busca subconjuntos con mejor/peor expectancy usando sólo evidencia
+        persistida. Es investigación: nunca cambia producción.
+        """
+        try:
+            from edge_discovery import run_edge_discovery
+            result = run_edge_discovery(self.db, days_back=90)
+            logger.info(
+                'C7 Edge Discovery: rows=%s priority=%s',
+                result.get('rows_scanned', 0),
+                len((result.get('futures_shadow') or {}).get('priority') or [])
+            )
+            return result
+        except Exception as exc:
+            logger.error('C7 Edge Discovery fallback: %s', exc)
+            return {
+                'version': 'C7_EDGE_DISCOVERY_V1',
+                'authority': 'RESEARCH_ONLY',
+                'production_change': False,
+                'success': False,
+                'reason': f'FAIL_OPEN:{type(exc).__name__}',
+                'error': str(exc)[:180],
+            }
+
+    # ========================================================================
     # 7. MÉTODO PRINCIPAL (para ser llamado por el scheduler)
     # ========================================================================
     
@@ -12828,6 +12918,7 @@ class ReviewTrader:
             'evaluated': {},
             'missed': 0,
             'stats': {},
+            'edge_discovery': {},
             'adaptive_autopilot': {},
             'optimization': {}
         }
@@ -12858,7 +12949,15 @@ class ReviewTrader:
             logger.error(err_msg)
             errors.append(err_msg)
         
-        # 4. Autopilot gobernado — fail-open, bounded, auditable
+        # 4. Descubrimiento de edge — sólo investigación, sin autoridad.
+        try:
+            results['edge_discovery'] = self.run_edge_discovery()
+        except Exception as e:
+            err_msg = f"run_edge_discovery: {str(e)[:200]}"
+            logger.error(err_msg)
+            warnings.append(err_msg)
+
+        # 5. Autopilot gobernado — consume evidencia sólo bajo sus guardrails.
         try:
             results['adaptive_autopilot'] = self.run_adaptive_autopilot(
                 price_fetcher=price_fetcher
@@ -12868,7 +12967,7 @@ class ReviewTrader:
             logger.error(err_msg)
             warnings.append(err_msg)
 
-        # 5. Optimizaciones de almacenamiento
+        # 6. Optimizaciones de almacenamiento
         try:
             results['optimization'] = self.apply_optimization_cleanup()
         except Exception as e:

@@ -166,10 +166,19 @@ def daily_slot(now):
     return due.strftime('%Y-%m-%d')
 
 
-def claim_daily_job(db, job_name, slot, retry=False):
+def claim_daily_job(
+    db,
+    job_name,
+    slot,
+    retry=False,
+    failed_retry_minutes=15,
+    abandoned_after_minutes=120,
+):
     """Atomic primary-key claim. Missing DB/table fails closed, never fake success.
 
-    AI attempts are at-most-once. Review may recover a two-hour abandoned lease.
+    Callers without retry are at-most-once. With retry=True, FAILED and stale
+    RUNNING jobs may recover after caller-selected safe leases. Defaults keep
+    the historical 15 min / 2 h behavior.
     """
     if not getattr(db, 'enabled', False):
         return False
@@ -188,7 +197,11 @@ def claim_daily_job(db, job_name, slot, retry=False):
                 return False
             previous = rows[0]['updated_at']
             age = now - datetime.fromisoformat(previous.replace('Z', '+00:00'))
-            delay = timedelta(minutes=15) if rows[0]['status'] == 'FAILED' else timedelta(hours=2)
+            delay = (
+                timedelta(minutes=max(1, int(failed_retry_minutes)))
+                if rows[0]['status'] == 'FAILED'
+                else timedelta(minutes=max(1, int(abandoned_after_minutes)))
+            )
             if age < delay:
                 return False
             claimed = db.client.table('q6_job_runs').update(payload).eq('job_key', key).eq('updated_at', previous).execute()
