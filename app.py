@@ -19342,6 +19342,9 @@ class TradingExpertSystem:
                             'conteo_acciones': {str(k): int(v) for k, v in registro_votacion.get('conteo_acciones', {}).items()},
                             'confianza_por_accion': {str(k): float(v) for k, v in registro_votacion.get('confianza_por_accion', {}).items()},
                             'estrategias_consenso': [str(e) for e in registro_votacion.get('estrategias_consenso', [])],
+                            'dynamic_expert_committee_shadow': self._make_serializable(
+                                registro_votacion.get('dynamic_expert_committee_shadow', {})
+                            ),
                             'todos_los_votos': todos_votos_serial,   # ← CRÍTICO
                         }
                     else:
@@ -25460,7 +25463,26 @@ class Moderador:
                     except Exception:
                         review_mult = 1.0
                 
+                # Commit 12: calcular un multiplicador EXPERIMENTAL por
+                # especialización. No participa en peso_efectivo ni en la
+                # confianza productiva; sólo se guarda para simulación Shadow.
+                expert_shadow_mult = 1.0
+                if trader.nombre != 'Trader de Revisión':
+                    try:
+                        from dynamic_expert_committee import get_shadow_multiplier
+                        expert_shadow_mult = get_shadow_multiplier(
+                            trader=trader.nombre,
+                            market=system_type,
+                            timeframe=timeframe,
+                            direction=accion,
+                            regime=regime,
+                            relation='SUPPORT',
+                        )
+                    except Exception:
+                        expert_shadow_mult = 1.0
+
                 peso_efectivo = trader.peso_base * regime_mult * review_mult
+                peso_efectivo_shadow = peso_efectivo * expert_shadow_mult
                 confianza_ponderada = min(100.0, max(0.0, confianza * peso_efectivo))
                 
                 # Mostrar voto del trader
@@ -25490,6 +25512,8 @@ class Moderador:
                     'multiplicador_regimen': regime_mult,
                     'multiplicador_review': review_mult,
                     'peso_efectivo': peso_efectivo,
+                    'multiplicador_experto_shadow': expert_shadow_mult,
+                    'peso_efectivo_shadow': peso_efectivo_shadow,
                     'system_type': system_type
                 })
                 
@@ -25514,6 +25538,8 @@ class Moderador:
                     'multiplicador_regimen': 1.0,
                     'multiplicador_review': 1.0,
                     'peso_efectivo': trader.peso_base,
+                    'multiplicador_experto_shadow': 1.0,
+                    'peso_efectivo_shadow': trader.peso_base,
                     'system_type': system_type
                 })
                 print()
@@ -25750,6 +25776,23 @@ class Moderador:
                 razones_consolidadas = ["Sin consenso claro entre los traders"]
                 print(f"\n🤷 Sin consenso - Decisión: NO_OPERAR")
         
+        # Commit 12 — simulación paralela del comité experto. Se calcula
+        # después de la decisión baseline y nunca reemplaza accion_ganadora.
+        try:
+            from dynamic_expert_committee import simulate_shadow_decision
+            dynamic_committee_shadow = simulate_shadow_decision(
+                votos,
+                accion_ganadora,
+            )
+        except Exception as dynamic_shadow_error:
+            dynamic_committee_shadow = {
+                'version': 'C12_DYNAMIC_EXPERT_COMMITTEE_SHADOW_V1',
+                'authority': 'SHADOW_ONLY',
+                'production_change': False,
+                'status': 'UNAVAILABLE',
+                'reason': str(dynamic_shadow_error)[:160],
+            }
+
         # 7. REGISTRO DE VOTACIÓN
         registro_votacion = {
             'accion_ganadora': accion_ganadora,
@@ -25762,6 +25805,7 @@ class Moderador:
             'confianza_regimen': regime_conf,
             'penalizacion_neutral_review': review_neutral_penalty,
             'veto_estado': veto_estado,
+            'dynamic_expert_committee_shadow': dynamic_committee_shadow,
             'todos_los_votos': [
                 {
                     'trader': v['trader'],
@@ -25778,6 +25822,12 @@ class Moderador:
                     'multiplicador_regimen': v['multiplicador_regimen'],
                     'multiplicador_review': v['multiplicador_review'],
                     'peso_efectivo': v['peso_efectivo'],
+                    'multiplicador_experto_shadow': v.get(
+                        'multiplicador_experto_shadow', 1.0
+                    ),
+                    'peso_efectivo_shadow': v.get(
+                        'peso_efectivo_shadow', v['peso_efectivo']
+                    ),
                     'penalizacion_neutral_review': v.get(
                         'penalizacion_neutral_review',
                         1.0
@@ -38280,6 +38330,11 @@ def _build_ai_learning_context():
             or {}
         )
 
+        dynamic_expert_committee_learning = (
+            quality_v2.get('dynamic_expert_committee_v1', {})
+            or {}
+        )
+
     except Exception as q7_learning_error:
 
         q7_strategy_lab_learning = {
@@ -38340,6 +38395,13 @@ def _build_ai_learning_context():
             'version': 'C11_TRADER_INTELLIGENCE_V2',
             'status': 'UNAVAILABLE',
             'authority': 'SHADOW_DIAGNOSTIC',
+            'reason': str(q7_learning_error)[:180]
+        }
+
+        dynamic_expert_committee_learning = {
+            'version': 'C12_DYNAMIC_EXPERT_COMMITTEE_SHADOW_V1',
+            'status': 'UNAVAILABLE',
+            'authority': 'SHADOW_ONLY',
             'reason': str(q7_learning_error)[:180]
         }
 
@@ -38428,7 +38490,10 @@ def _build_ai_learning_context():
             trader_intelligence_learning,
 
         'trader_intelligence_v2':
-            trader_intelligence_v2_learning
+            trader_intelligence_v2_learning,
+
+        'dynamic_expert_committee_v1':
+            dynamic_expert_committee_learning
     }
 
 # ============================================================================

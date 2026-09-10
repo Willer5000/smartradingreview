@@ -1708,6 +1708,15 @@ class ReviewTrader:
             if isinstance(runtime_intelligence, dict):
                 context['learning']['trader_intelligence_v2'] = runtime_intelligence
 
+            dynamic_shadow = (
+                ((analysis_result.get('decision') or {}).get('registro_votacion') or {})
+                .get('dynamic_expert_committee_shadow')
+                if isinstance((analysis_result.get('decision') or {}).get('registro_votacion'), dict)
+                else None
+            )
+            if isinstance(dynamic_shadow, dict):
+                context['learning']['dynamic_expert_committee_shadow'] = dynamic_shadow
+
             if (
                 self._normalize_system_type(
                     system_type
