@@ -26582,6 +26582,24 @@ _HEAVY_ANALYSIS_WAIT_SECONDS = 20 * 60
 _HEAVY_ANALYSIS_STATE_LOCK = threading.Lock()
 _HEAVY_ANALYSIS_OWNER = None
 
+# Commit 10.1 — límites operativos deliberadamente por debajo de los ~512 MB
+# de Render Free. Son configurables sin redeploy de código. El HARD limit no
+# mata el proceso: impide comenzar/continuar otro bloque pesado y conserva el
+# último snapshot válido.
+def _env_mb(name, default):
+    try:
+        return max(64.0, float(os.environ.get(name, default) or default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+_MEMORY_SOFT_LIMIT_MB = _env_mb('MEMORY_SOFT_LIMIT_MB', 390)
+_MEMORY_HARD_LIMIT_MB = max(
+    _MEMORY_SOFT_LIMIT_MB + 16.0,
+    _env_mb('MEMORY_HARD_LIMIT_MB', 455),
+)
+_MEMORY_ANALYSIS_CACHE_KEEP = max(2, int(os.environ.get('MEMORY_ANALYSIS_CACHE_KEEP', '8') or 8))
+
 
 def _process_rss_mb():
     """RSS actual del proceso en Linux/Render; None si no está disponible."""
@@ -26596,6 +26614,117 @@ def _process_rss_mb():
         pass
 
     return None
+
+
+def _trim_process_heap():
+    """Best-effort: devuelve páginas libres del heap al SO en Linux/glibc.
+
+    gc.collect() libera objetos Python, pero pandas/numpy pueden dejar arenas del
+    allocator retenidas en el RSS. malloc_trim(0) es seguro como best-effort y
+    no modifica ningún dato de trading.
+    """
+    try:
+        import gc
+        gc.collect()
+    except Exception:
+        pass
+
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None)
+        malloc_trim = getattr(libc, 'malloc_trim', None)
+        if malloc_trim is not None:
+            malloc_trim.argtypes = [ctypes.c_size_t]
+            malloc_trim.restype = ctypes.c_int
+            malloc_trim(0)
+    except Exception:
+        pass
+
+
+def _shed_recreatable_memory(reason='memory-pressure', *, aggressive=False):
+    """Libera sólo caches recreables; nunca borra señales/lifecycle/BD."""
+    released = {
+        'analysis_cache': 0,
+        'futures_raw': 0,
+        'futures_micro': 0,
+        'spot_raw': 0,
+    }
+
+    try:
+        with _ANALYSIS_CACHE_LOCK:
+            _analysis_cache_purge_expired_locked()
+            if len(_ANALYSIS_CACHE) > _MEMORY_ANALYSIS_CACHE_KEEP:
+                ordered = sorted(
+                    _ANALYSIS_CACHE.items(),
+                    key=lambda item: float((item[1] or {}).get('ts') or 0),
+                    reverse=True,
+                )
+                keep = {key for key, _ in ordered[:_MEMORY_ANALYSIS_CACHE_KEEP]}
+                for key in list(_ANALYSIS_CACHE):
+                    if key not in keep:
+                        _ANALYSIS_CACHE.pop(key, None)
+                        released['analysis_cache'] += 1
+    except Exception:
+        pass
+
+    # No importar futures_system durante su propio bootstrap circular.
+    try:
+        import sys
+        fut = sys.modules.get('futures_system')
+        clear_fn = getattr(fut, 'clear_futures_runtime_caches', None) if fut else None
+        if callable(clear_fn):
+            stats = clear_fn(include_microstructure=bool(aggressive)) or {}
+            released['futures_raw'] = int(stats.get('raw_ohlcv') or 0)
+            released['futures_micro'] = int(stats.get('microstructure') or 0)
+    except Exception:
+        pass
+
+    if aggressive:
+        try:
+            import kucoin_cache
+            clear_spot = getattr(kucoin_cache, 'clear_cache', None)
+            if callable(clear_spot):
+                released['spot_raw'] = int(clear_spot() or 0)
+        except Exception:
+            pass
+
+    _trim_process_heap()
+    print(
+        "🧹 [MEM] cache shed "
+        f"reason={reason} aggressive={bool(aggressive)} "
+        f"released={released}"
+    )
+    return released
+
+
+def _memory_pressure_guard(owner, *, allow_soft=True):
+    """Devuelve True si un trabajo pesado puede continuar con margen."""
+    rss = _process_rss_mb()
+    if rss is None:
+        return True
+
+    if rss >= _MEMORY_SOFT_LIMIT_MB:
+        _shed_recreatable_memory(
+            reason=f'{owner}:soft',
+            aggressive=rss >= _MEMORY_HARD_LIMIT_MB,
+        )
+        rss = _process_rss_mb()
+
+    if rss is not None and rss >= _MEMORY_HARD_LIMIT_MB:
+        print(
+            f"🛑 [MEM] {owner}: RSS {rss:.1f}MB >= hard "
+            f"{_MEMORY_HARD_LIMIT_MB:.1f}MB; se conserva el último snapshot."
+        )
+        return False
+
+    if (
+        not allow_soft
+        and rss is not None
+        and rss >= _MEMORY_SOFT_LIMIT_MB
+    ):
+        return False
+
+    return True
 
 
 def _memory_runtime_state():
@@ -26623,7 +26752,9 @@ def _memory_runtime_state():
         'threads': threading.active_count(),
         'analysis_cache_entries': analysis_cache_entries,
         'portfolio_cache_entries': endpoint_cache_entries,
-        'heavy_job': heavy_owner
+        'heavy_job': heavy_owner,
+        'memory_soft_limit_mb': _MEMORY_SOFT_LIMIT_MB,
+        'memory_hard_limit_mb': _MEMORY_HARD_LIMIT_MB,
     }
 
 
@@ -26664,6 +26795,14 @@ def _acquire_heavy_analysis(owner, timeout=None):
     with _HEAVY_ANALYSIS_STATE_LOCK:
         _HEAVY_ANALYSIS_OWNER = owner
 
+    # El lock evita concurrencia; este segundo guard evita que UN solo trabajo
+    # pesado comience cuando el proceso ya está demasiado cerca del OOM.
+    if not _memory_pressure_guard(owner):
+        with _HEAVY_ANALYSIS_STATE_LOCK:
+            _HEAVY_ANALYSIS_OWNER = None
+        _HEAVY_ANALYSIS_LOCK.release()
+        return False
+
     _log_memory_runtime(f'{owner}: inicio')
     return True
 
@@ -26672,11 +26811,15 @@ def _release_heavy_analysis(owner):
     """Libera el slot pesado después de forzar liberación de basura cíclica."""
     global _HEAVY_ANALYSIS_OWNER
 
-    try:
-        import gc
-        gc.collect()
-    except Exception:
-        pass
+    # Primero soltar objetos cíclicos y arenas C; si el RSS sigue alto,
+    # purgar caches recreables antes de devolver el turno al siguiente job.
+    _trim_process_heap()
+    rss = _process_rss_mb()
+    if rss is not None and rss >= _MEMORY_SOFT_LIMIT_MB:
+        _shed_recreatable_memory(
+            reason=f'{owner}:release',
+            aggressive=rss >= _MEMORY_HARD_LIMIT_MB,
+        )
 
     with _HEAVY_ANALYSIS_STATE_LOCK:
         _HEAVY_ANALYSIS_OWNER = None
@@ -30131,6 +30274,8 @@ def _analyze_futures_all_parallel():
     }
     results = dict(previous_analysis)
     errors = []
+    aborted_memory_pressure = False
+    completed_count = 0
 
     total = len(combos)
 
@@ -30150,6 +30295,21 @@ def _analyze_futures_all_parallel():
     for index, (symbol, timeframe) in enumerate(combos, start=1):
 
         combo_name = f"{symbol} {timeframe}"
+
+        # Commit 10.1: proteger el proceso ANTES de crear otro DataFrame/
+        # conjunto de indicadores. Si estamos cerca del OOM dejamos intactos
+        # los resultados previos de las combinaciones restantes.
+        if not _memory_pressure_guard(
+            f'futures-refresh:{combo_name}'
+        ):
+            aborted_memory_pressure = True
+            errors.append(
+                f'MEMORY_GUARD: refresh detenido antes de {combo_name}'
+            )
+            with cache['lock']:
+                cache['progress']['current'] = 'MEMORY_GUARD'
+                cache['progress']['errors'] = len(errors)
+            break
 
         with cache['lock']:
             cache['progress']['current'] = combo_name
@@ -30196,7 +30356,8 @@ def _analyze_futures_all_parallel():
                 r = futures.analyze_futures_market(
                     symbol,
                     timeframe,
-                    closed_candle_only=True
+                    closed_candle_only=True,
+                    prepared_context=prepared,
                 )
 
             if not isinstance(r, dict):
@@ -30306,6 +30467,8 @@ def _analyze_futures_all_parallel():
                 cache['progress']['last_completed'] = combo_name
                 cache['progress']['errors'] = len(errors)
 
+            completed_count = index
+
             print(
                 f"✅ [FUT {index}/{total}] "
                 f"{combo_name} completado"
@@ -30325,32 +30488,47 @@ def _analyze_futures_all_parallel():
                 cache['progress']['last_completed'] = combo_name
                 cache['progress']['errors'] = len(errors)
 
+            completed_count = index
+
             print(
                 f"❌ [FUT {index}/{total}] "
                 f"{error_text}"
             )
 
-        # Garbage collector cada 3 análisis
-        if index % 3 == 0:
-            gc.collect()
+        # El prepared_context contiene closed_df; eliminar la referencia cuanto
+        # antes. malloc_trim ayuda a devolver arenas de pandas/numpy al SO.
+        try:
+            if isinstance(prepared, dict):
+                prepared.pop('closed_df', None)
+            del prepared
+        except Exception:
+            pass
 
-    gc.collect()
+        if index % 3 == 0:
+            _trim_process_heap()
+
+    _trim_process_heap()
 
     with cache['lock']:
         cache['progress']['current'] = None
-        cache['progress']['completed'] = total
+        cache['progress']['completed'] = completed_count
         cache['progress']['errors'] = len(errors)
+        cache['progress']['memory_guard_abort'] = bool(aborted_memory_pressure)
 
+    status_word = 'detenido por Memory Guard' if aborted_memory_pressure else 'completo'
     print(
-        f"🏁 [FUT] Análisis completo: "
-        f"{len(results)}/{total} resultados, "
+        f"🏁 [FUT] Análisis {status_word}: "
+        f"{len(results)}/{total} resultados disponibles, "
         f"{len(errors)} errores."
     )
 
     return {
         'analysis': results,
         'errors': errors,
-        'lifecycle': lifecycle
+        'lifecycle': lifecycle,
+        'memory_guard_abort': bool(aborted_memory_pressure),
+        'completed_combinations': completed_count,
+        'total_combinations': total,
     }
 
 
@@ -30482,13 +30660,18 @@ def _trigger_futures_refresh_async():
                 'data'
             ] = data
 
-            cache[
-                'ts'
-            ] = time.time()
+            # No presentar un barrido cortado por memoria como un snapshot
+            # recién validado. Conservamos el ts anterior para que el siguiente
+            # ciclo vuelva a intentarlo cuando baje el RSS.
+            if not data.get('memory_guard_abort'):
+                cache[
+                    'ts'
+                ] = time.time()
 
             try:
 
-                _save_futures_cache_to_disk()
+                if not data.get('memory_guard_abort'):
+                    _save_futures_cache_to_disk()
 
             except Exception as save_err:
 

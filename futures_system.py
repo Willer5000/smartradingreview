@@ -110,6 +110,12 @@ _futures_fetch_inflight_lock = threading.Lock()
 _futures_http_session = None
 _futures_http_session_lock = threading.Lock()
 
+# Commit 10.1 — Render Free memory guard.  The raw OHLCV cache is useful
+# inside one refresh but it must never grow without a bound.  Twelve entries
+# cover the hottest short timeframes while keeping the 30-symbol/TF sweep from
+# retaining every DataFrame at once.
+FUTURES_DATA_CACHE_MAX_ENTRIES = max(4, int(os.environ.get('FUTURES_DATA_CACHE_MAX_ENTRIES', '12') or 12))
+
 # ============================================================================
 # QUALITY ENGINE Q3A — FUTURES MICROSTRUCTURE SHADOW
 # ============================================================================
@@ -211,13 +217,52 @@ def _get_cached_futures_data(symbol: str, interval: str):
 
 
 def _store_futures_data(symbol: str, interval: str, df) -> None:
-    """Guarda únicamente velas reales ya validadas."""
+    """Guarda velas reales con TTL y límite duro de entradas en RAM."""
     cache_key = (symbol, interval)
+    now = time.monotonic()
     with _futures_data_cache_lock:
+        # Purga TTL antes de reservar otro DataFrame.
+        for key, cached in list(_futures_data_cache.items()):
+            ttl = FUTURES_DATA_TTL_SECONDS.get(key[1], 30)
+            if now - float(cached.get('stored_at') or 0) >= ttl:
+                _futures_data_cache.pop(key, None)
+
         _futures_data_cache[cache_key] = {
             'df': df.copy(deep=True),
-            'stored_at': time.monotonic(),
+            'stored_at': now,
         }
+
+        if len(_futures_data_cache) > FUTURES_DATA_CACHE_MAX_ENTRIES:
+            oldest = sorted(
+                _futures_data_cache.items(),
+                key=lambda item: float((item[1] or {}).get('stored_at') or 0),
+            )
+            excess = len(_futures_data_cache) - FUTURES_DATA_CACHE_MAX_ENTRIES
+            for key, _ in oldest[:excess]:
+                _futures_data_cache.pop(key, None)
+
+
+def clear_futures_runtime_caches(*, include_microstructure: bool = False) -> Dict[str, int]:
+    """Libera caches recreables de Futures sin tocar señales ni lifecycle.
+
+    Se usa únicamente bajo presión de memoria.  No borra el snapshot de
+    análisis publicado en app.py; por tanto el frontend puede seguir leyendo
+    el último estado conocido mientras el siguiente refresh espera.
+    """
+    with _futures_data_cache_lock:
+        raw_n = len(_futures_data_cache)
+        _futures_data_cache.clear()
+
+    micro_n = 0
+    if include_microstructure:
+        with _futures_microstructure_cache_lock:
+            micro_n = len(_futures_microstructure_cache)
+            _futures_microstructure_cache.clear()
+
+    return {
+        'raw_ohlcv': raw_n,
+        'microstructure': micro_n,
+    }
 def _get_cached_futures_microstructure(
     symbol: str
 ):
@@ -6514,7 +6559,8 @@ class FuturesAnalysis(TradingExpertSystem):
     
     def analyze_futures_market(self, symbol: str, timeframe: str, 
                                 btc_analysis: Optional[Dict] = None,
-                                closed_candle_only: bool = True) -> Dict:
+                                closed_candle_only: bool = True,
+                                prepared_context: Optional[Dict] = None) -> Dict:
         """
         Análisis completo para futuros.
         
@@ -6555,10 +6601,16 @@ class FuturesAnalysis(TradingExpertSystem):
         closed_context = None
 
         if closed_candle_only:
-            closed_context = self._prepare_closed_candle_analysis_data(
-                symbol,
-                timeframe
-            )
+            # Commit 10.1: app.py ya consulta la vela cerrada para saber si
+            # puede reutilizar el resultado previo.  Reusar ese mismo contexto
+            # evita una segunda copia completa del DataFrame en el mismo ciclo.
+            if isinstance(prepared_context, dict) and prepared_context.get('success'):
+                closed_context = prepared_context
+            else:
+                closed_context = self._prepare_closed_candle_analysis_data(
+                    symbol,
+                    timeframe
+                )
 
             if not closed_context.get('success'):
                 return {
