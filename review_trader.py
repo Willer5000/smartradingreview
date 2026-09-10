@@ -25,6 +25,7 @@ from execution_learning import (
     build_strategy_attribution_v2,
 )
 from execution_economics import build_provisional_economics
+from execution_challenger_lab import evaluate_execution_challengers
 
 logger = logging.getLogger('REVIEW_TRADER')
 logger.setLevel(logging.INFO)
@@ -1716,6 +1717,10 @@ class ReviewTrader:
             )
             if isinstance(dynamic_shadow, dict):
                 context['learning']['dynamic_expert_committee_shadow'] = dynamic_shadow
+
+            challenger_lab = analysis_result.get('execution_challenger_lab')
+            if isinstance(challenger_lab, dict):
+                context['learning']['execution_challenger_lab'] = challenger_lab
 
             if (
                 self._normalize_system_type(
@@ -4248,6 +4253,19 @@ class ReviewTrader:
                             evaluation_end
                         )
                     )
+                    # COMMIT 13 — evaluate every SHADOW geometry on exactly the
+                    # same closed candles. Official outcome remains immutable.
+                    try:
+                        challenger_results = evaluate_execution_challengers(
+                            signal, df, evaluation_start, evaluation_end
+                        )
+                        if challenger_results:
+                            result['execution_challenger_results'] = challenger_results
+                    except Exception as challenger_error:
+                        logger.warning(
+                            'Execution Challenger Lab no disponible: %s',
+                            challenger_error
+                        )
                     # COMMIT 9 — persist conservative provisional economics at
                     # the same time as the immutable TP/SL outcome. Funding is
                     # enriched later in a bounded background pass.
@@ -4287,6 +4305,17 @@ class ReviewTrader:
                             evaluation_end
                         )
                     )
+                    try:
+                        challenger_results = evaluate_execution_challengers(
+                            signal, df, evaluation_start, evaluation_end
+                        )
+                        if challenger_results:
+                            result['execution_challenger_results'] = challenger_results
+                    except Exception as challenger_error:
+                        logger.warning(
+                            'Execution Challenger Lab no disponible en expiración: %s',
+                            challenger_error
+                        )
                     if not self._has_complete_expiration_coverage(
                         signal,
                         result,
@@ -5133,6 +5162,10 @@ class ReviewTrader:
             'candles_to_mae': observation.get('candles_to_mae', 0),
             'execution_forensics': observation.get(
                 'execution_forensics',
+                {}
+            ),
+            'execution_challenger_results': observation.get(
+                'execution_challenger_results',
                 {}
             )
         }

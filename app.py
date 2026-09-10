@@ -19547,6 +19547,26 @@ class TradingExpertSystem:
                     'reason': str(trader_intelligence_error)[:180],
                 }
 
+            # ==========================================================
+            # COMMIT 13 — ENTRY / SL / TP CHALLENGER LAB
+            # ==========================================================
+            # Genera geometrías paralelas exclusivamente SHADOW usando las
+            # mismas velas ya cargadas. No sustituye Entry/SL/TP productivos,
+            # no cambia dirección, Safety, publicación ni leverage.
+            try:
+                from execution_challenger_lab import build_execution_challenger_lab
+                resultado_final['execution_challenger_lab'] = (
+                    build_execution_challenger_lab(resultado_final, df)
+                )
+            except Exception as challenger_lab_error:
+                resultado_final['execution_challenger_lab'] = {
+                    'version': 'C13_EXECUTION_CHALLENGER_LAB_V1',
+                    'authority': 'SHADOW_ONLY',
+                    'production_change': False,
+                    'status': 'UNAVAILABLE',
+                    'reason': str(challenger_lab_error)[:180],
+                }
+
             # === FASE 7: Registrar señal en Supabase (best-effort, no bloqueante) ===
             # Si el subsistema de futuros nos invocó, saltar registro spot
             # (FuturesAnalysis lo registrará después con system_type='futures')
@@ -38335,6 +38355,11 @@ def _build_ai_learning_context():
             or {}
         )
 
+        execution_challenger_lab_learning = (
+            quality_v2.get('execution_challenger_lab_v1', {})
+            or {}
+        )
+
     except Exception as q7_learning_error:
 
         q7_strategy_lab_learning = {
@@ -38400,6 +38425,13 @@ def _build_ai_learning_context():
 
         dynamic_expert_committee_learning = {
             'version': 'C12_DYNAMIC_EXPERT_COMMITTEE_SHADOW_V1',
+            'status': 'UNAVAILABLE',
+            'authority': 'SHADOW_ONLY',
+            'reason': str(q7_learning_error)[:180]
+        }
+
+        execution_challenger_lab_learning = {
+            'version': 'C13_EXECUTION_CHALLENGER_LAB_V1',
             'status': 'UNAVAILABLE',
             'authority': 'SHADOW_ONLY',
             'reason': str(q7_learning_error)[:180]
@@ -38493,7 +38525,10 @@ def _build_ai_learning_context():
             trader_intelligence_v2_learning,
 
         'dynamic_expert_committee_v1':
-            dynamic_expert_committee_learning
+            dynamic_expert_committee_learning,
+
+        'execution_challenger_lab_v1':
+            execution_challenger_lab_learning
     }
 
 # ============================================================================

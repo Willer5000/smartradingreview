@@ -19,6 +19,7 @@ from trader_intelligence import (
     build_trader_intelligence_v2_summary,
 )
 from dynamic_expert_committee import build_shadow_profile, install_shadow_profile
+from execution_challenger_lab import summarize_execution_challenger_evidence
 
 logger = logging.getLogger('ANALYTICS')
 # ============================================================================
@@ -2200,6 +2201,9 @@ class AnalyticsService:
         # Lightweight in-process snapshot. Runtime voting only READS candidate
         # multipliers for shadow diagnostics; production weights remain intact.
         install_shadow_profile(dynamic_expert_committee)
+        execution_challenger_lab = summarize_execution_challenger_evidence(
+            scoped_trader_rows
+        )
 
         return {
             'version':
@@ -2261,6 +2265,7 @@ class AnalyticsService:
             'trader_intelligence_v1': trader_scorecard,
             'trader_intelligence_v2': trader_intelligence_v2,
             'dynamic_expert_committee_v1': dynamic_expert_committee,
+            'execution_challenger_lab_v1': execution_challenger_lab,
 
             # ==========================================================
             # COMMIT 6 — LEARNING OBSERVATORY
