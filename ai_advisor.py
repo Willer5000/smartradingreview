@@ -335,6 +335,39 @@ def _activate_groq_backoff(
 
     return retry_seconds
     
+def _learning_key_provider():
+    """Commit 10: detect the provider stored in the legacy learning key slot.
+
+    Historical deployments used GEMINI_API_KEY as the learning-scientist slot.
+    If that value is a Groq key (gsk_), we route it to Groq instead of sending
+    it incorrectly to Google's endpoint.  The variable name is retained only
+    for backwards compatibility; Analytics exposes the real provider.
+    """
+    dedicated_groq = os.getenv("GROQ_LEARNING_API_KEY", "").strip()
+    if dedicated_groq:
+        return "GROQ_LEARNING", dedicated_groq
+
+    # Legacy slot requested by the current deployment.  A gsk_ value is a
+    # Groq key; any other non-empty value is treated as a Gemini key.
+    key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not key:
+        return "NONE", ""
+    if key.lower().startswith("gsk_"):
+        return "GROQ_LEARNING", key
+    return "GEMINI", key
+
+
+def _learning_provider_label(provider):
+    provider = str(provider or "").upper()
+    if provider == "GROQ_LEARNING":
+        return "Groq · científico de aprendizaje"
+    if provider == "GEMINI":
+        return "Gemini · científico de aprendizaje"
+    if provider == "GROQ":
+        return "Groq · proveedor alternativo"
+    return "Científico de aprendizaje IA"
+
+
 def _resolve_ai_route(
     usage_type,
     context_type
@@ -388,13 +421,7 @@ def _resolve_ai_route(
     # LEARNING
     # ================================================================
 
-    gemini_key = (
-        os.getenv(
-            "GEMINI_API_KEY",
-            ""
-        )
-        .strip()
-    )
+    learning_provider, learning_key = _learning_key_provider()
 
     gemini_enabled = (
         os.getenv(
@@ -420,24 +447,24 @@ def _resolve_ai_route(
         )
     )
 
-    if (
-        gemini_key
-        and gemini_enabled
-        and gemini_function_ready
-    ):
-        model = (
-            os.getenv(
-                "GEMINI_LEARNING_MODEL",
-                "gemini-3.7-flash"
+    if learning_key and gemini_enabled:
+        if learning_provider == "GROQ_LEARNING":
+            model = (
+                os.getenv("GROQ_LEARNING_MODEL", AI_MODEL).strip()
+                or AI_MODEL
             )
-            .strip()
-            or "gemini-3.7-flash"
-        )
+            return ("GROQ_LEARNING", model)
 
-        return (
-            "GEMINI",
-            model
-        )
+        if learning_provider == "GEMINI" and gemini_function_ready:
+            model = (
+                os.getenv(
+                    "GEMINI_LEARNING_MODEL",
+                    "gemini-3.7-flash"
+                )
+                .strip()
+                or "gemini-3.7-flash"
+            )
+            return ("GEMINI", model)
 
     # ================================================================
     # FALLBACK
@@ -493,20 +520,13 @@ GEMINI_LEARNING_TIMEOUT = max(
 
 
 def _gemini_learning_available():
-    """
-    Gemini sólo se considera disponible cuando:
-    - Learning está habilitado;
-    - existe GEMINI_API_KEY.
+    """Backward-compatible availability check for the learning scientist.
 
-    Nunca afecta al proveedor operativo Groq.
+    Commit 10 accepts either a real Gemini key or a Groq learning key in the
+    historical GEMINI_API_KEY slot.  Operational Groq remains independent.
     """
-    return bool(
-        GEMINI_LEARNING_ENABLED
-        and os.getenv(
-            "GEMINI_API_KEY",
-            ""
-        ).strip()
-    )
+    provider, key = _learning_key_provider()
+    return bool(GEMINI_LEARNING_ENABLED and key and provider in {"GEMINI", "GROQ_LEARNING"})
 
 
 def _gemini_safe_learning_context(
@@ -1501,16 +1521,15 @@ def get_gemini_activity_status():
     cuota de Gemini.
     """
 
-    configured = bool(
-        os.getenv(
-            "GEMINI_API_KEY",
-            ""
-        ).strip()
-    )
+    configured_provider, configured_key = _learning_key_provider()
+    configured = bool(configured_key)
 
     result = {
         "mode":
             "WORK_REPORT",
+
+        "provider": configured_provider if configured_provider != "NONE" else None,
+        "provider_label": _learning_provider_label(configured_provider),
 
         "configured":
             configured,
@@ -1521,7 +1540,11 @@ def get_gemini_activity_status():
             ),
 
         "model":
-            GEMINI_LEARNING_MODEL,
+            (
+                (os.getenv("GROQ_LEARNING_MODEL", AI_MODEL).strip() or AI_MODEL)
+                if configured_provider == "GROQ_LEARNING"
+                else GEMINI_LEARNING_MODEL
+            ),
 
         "state":
             "WAITING_FIRST_RUN",
@@ -1562,12 +1585,12 @@ def get_gemini_activity_status():
 
         result[
             "reason"
-        ] = "GEMINI_API_KEY no está configurada."
+        ] = "No hay una clave configurada para el científico de aprendizaje."
 
         result[
             "ticker_items"
         ] = [
-            "🧠 Gemini Learning · API key no configurada."
+            "Científico de aprendizaje · API key no configurada."
         ]
 
         return result
@@ -1584,7 +1607,7 @@ def get_gemini_activity_status():
         result[
             "ticker_items"
         ] = [
-            "🧠 Gemini Learning · deshabilitado por configuración."
+            "Científico de aprendizaje · deshabilitado por configuración."
         ]
 
         return result
@@ -1614,7 +1637,7 @@ def get_gemini_activity_status():
             "ticker_items"
         ] = [
             (
-                "🧠 Gemini Learning configurado · "
+                "Científico de aprendizaje configurado · "
                 "estado histórico no disponible."
             )
         ]
@@ -1698,7 +1721,7 @@ def get_gemini_activity_status():
                 )
                 .eq(
                     "provider",
-                    "GEMINI"
+                    configured_provider
                 )
                 .eq(
                     "usage_type",
@@ -1790,7 +1813,7 @@ def get_gemini_activity_status():
                 )
                 .eq(
                     "provider",
-                    "GEMINI"
+                    configured_provider
                 )
                 .eq(
                     "context_type",
@@ -1830,8 +1853,8 @@ def get_gemini_activity_status():
             result[
                 "reason"
             ] = (
-                "Gemini está configurado pero aún no existe "
-                "un evento LEARNING persistido."
+                "El científico de aprendizaje está configurado pero aún no existe "
+                "un evento LEARNING persistido para el proveedor actual."
             )
 
             if (
@@ -1852,9 +1875,8 @@ def get_gemini_activity_status():
                     "ticker_items"
                 ] = [
                     (
-                        "🧠 Gemini configurado · "
-                        "el último Learning registrado "
-                        "fue atendido por Groq."
+                        "Científico de aprendizaje configurado · "
+                        "el último ciclo fue atendido por el proveedor alternativo."
                     )
                 ]
 
@@ -1863,9 +1885,8 @@ def get_gemini_activity_status():
                     "ticker_items"
                 ] = [
                     (
-                        "🧠 Gemini configurado · "
-                        "esperando el próximo ciclo "
-                        "diario de aprendizaje."
+                        "Científico de aprendizaje configurado · "
+                        "esperando el próximo ciclo de aprendizaje."
                     )
                 ]
 
@@ -1889,14 +1910,14 @@ def get_gemini_activity_status():
             "last_run"
         ] = {
             "provider":
-                "GEMINI",
+                configured_provider,
 
             "model":
                 str(
                     gemini_usage.get(
                         "model"
                     )
-                    or GEMINI_LEARNING_MODEL
+                    or result.get("model")
                 ),
 
             "status":
@@ -1952,16 +1973,16 @@ def get_gemini_activity_status():
             result[
                 "reason"
             ] = (
-                "El último intento Gemini Learning no terminó "
-                "correctamente; el sistema puede usar fallback a Groq."
+                "El último intento del científico de aprendizaje no terminó "
+                "correctamente; el sistema puede usar un proveedor alternativo."
             )
 
             result[
                 "ticker_items"
             ] = [
                 (
-                    "⚠️ Gemini Learning · último intento con error; "
-                    "el trading continúa sin depender de Gemini."
+                    "Científico de aprendizaje · último intento con error; "
+                    "el trading continúa sin depender de la IA."
                 )
             ]
 
@@ -2003,7 +2024,7 @@ def get_gemini_activity_status():
 
         if headline:
             ticker_items.append(
-                "🧠 Gemini Learning · "
+                "Aprendizaje IA · "
                 + headline
             )
 
@@ -3690,24 +3711,19 @@ def _normalize_ai_advice(
 def _call_groq(
     context,
     question=None,
-    context_type=None
+    context_type=None,
+    api_key_override=None,
+    model_override=None
 ):
 
-    key = (
-        os.getenv(
-            "GROQ_API_KEY",
-            ""
-        )
-        .strip()
-    )
+    key = str(api_key_override or os.getenv("GROQ_API_KEY", "")).strip()
 
 
     if not key:
 
         raise RuntimeError(
             (
-                "GROQ_API_KEY no está "
-                "configurada en Render."
+                "No existe una API key Groq válida para esta ruta."
             )
         )
     backoff_remaining = (
@@ -3837,7 +3853,7 @@ en el contexto recibido.
         json={
 
             "model":
-                AI_MODEL,
+                (model_override or AI_MODEL),
 
             "messages": [
 
@@ -3995,6 +4011,25 @@ en el contexto recibido.
         )
         or {}
     )
+def _call_groq_learning_slot(context, question=None):
+    """Use a Groq key stored in the legacy GEMINI_API_KEY learning slot.
+
+    This is intentionally separate from GROQ_API_KEY so a secondary Groq key
+    can be dedicated to daily learning without changing operational chat/advice.
+    """
+    provider, key = _learning_key_provider()
+    if provider != "GROQ_LEARNING" or not key:
+        raise RuntimeError("La clave del científico de aprendizaje no es una clave Groq.")
+    model = os.getenv("GROQ_LEARNING_MODEL", AI_MODEL).strip() or AI_MODEL
+    return _call_groq(
+        context,
+        question=question,
+        context_type="LEARNING",
+        api_key_override=key,
+        model_override=model,
+    )
+
+
 def _call_gemini_learning(
     context,
     question=None
@@ -4116,6 +4151,22 @@ Si existe edge_discovery_v1 en el contexto:
 - una hipótesis LOW_PRIORITY_RESEARCH puede descartarse de prioridad, pero no reescribas historia;
 - usa MFE/MAE y Entry Defensibility para explicar por qué una combinación mejora o empeora;
 - nunca aumentes leverage ni bajes Safety por una hipótesis de este laboratorio.
+
+Si existe learning_integrity_v1 en el contexto:
+
+- verifica que cada conclusión declare su scope de cohorte;
+- no exijas que el PDF de aprendizaje y el dashboard tengan el mismo N si estudian scopes distintos;
+- si Analytics y Governance declaran el mismo scope pero sus fingerprints no coinciden, trata la evidencia como stale/incompleta;
+- nunca recomiendes recalibrar desde una cohorte truncada.
+
+Si existe trader_intelligence_v1 en el contexto:
+
+- estudia a cada trader por MERCADO, TEMPORALIDAD, DIRECCIÓN y RÉGIMEN;
+- distingue SUPPORT de OPPOSE: un buen veto puede aportar aunque no "gane" la operación;
+- usa judgement_expectancy_r y calibración de confianza, no WR aislado;
+- detecta especialización real y también redundancia entre traders;
+- no propongas pesos dinámicos todavía: Commit 10 es diagnóstico;
+- formula hipótesis de especialización que luego deban pasar validación temporal.
 
 Busca qué características hacen que una señal SEA MEJOR.
 
@@ -4899,7 +4950,29 @@ def run_ai_advisor(
 
     try:
 
-        if (
+        if selected_provider == "GROQ_LEARNING":
+            try:
+                logger.info(
+                    "AI Learning provider=GROQ_LEARNING model=%s",
+                    selected_model
+                )
+                advice, usage = _call_groq_learning_slot(context)
+            except Exception as learning_groq_error:
+                logger.warning(
+                    "Groq Learning dedicado no disponible: %s. Fallback a GROQ_API_KEY.",
+                    learning_groq_error
+                )
+                _record_usage(
+                    user_name, usage_type, context_type, market, "ERROR", {},
+                    provider="GROQ_LEARNING", model=selected_model
+                )
+                selected_provider = "GROQ"
+                selected_model = AI_MODEL
+                advice, usage = _call_groq(
+                    context, question=question, context_type=context_type
+                )
+
+        elif (
             selected_provider
             == "GEMINI"
         ):

@@ -23,6 +23,8 @@ import math
 import threading
 import time
 
+from learning_integrity import cohort_fingerprint
+
 PROMOTION_GOVERNANCE_VERSION = "C9_NET_EDGE_GOVERNANCE_V2"
 QUALITY_SCORE_VERSION = "36W_V2_NORMALIZED"
 GOVERNANCE_SCOPE = "FUTURES_GLOBAL"
@@ -376,6 +378,10 @@ def evaluate_promotion_gate(
             "actual_account_costs_available": total_m["realized_net_coverage_pct"] > 0.0,
             "actual_account_cost_coverage_pct": total_m["realized_net_coverage_pct"],
             "realized_cost_claim": total_m["realized_net_coverage_pct"] >= 95.0,
+            "cohort_fingerprint": cohort_fingerprint(
+                verified, scope="CURRENT_QUALITY_FUTURES_OFFICIAL"
+            ),
+            "cohort_n": len(verified),
         },
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }

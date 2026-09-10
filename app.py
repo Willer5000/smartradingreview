@@ -34245,13 +34245,13 @@ def _run_ai_learning_daily(q6_slot=None, trigger_source='daily'):
         if success:
             data = ai_learning_result.get('data', {}) or {}
             print(
-                "🧠 [C7] Gemini Learning "
+                "🧠 [C10] AI Learning Scientist "
                 f"({trigger_source}): {data.get('verdict')} - "
                 f"{data.get('headline')}"
             )
         else:
             print(
-                "⚠️ [C7] Gemini Learning no completado: "
+                "⚠️ [C10] AI Learning Scientist no completado: "
                 f"{ai_learning_result.get('reason', 'sin detalle')}"
             )
         return success
@@ -34264,7 +34264,7 @@ def _run_ai_learning_daily(q6_slot=None, trigger_source='daily'):
                 finish_daily_job(review_trader.db, 'AI_LEARNING', q6_slot, False)
             except Exception:
                 pass
-        print(f"⚠️ [C7] Gemini Learning recovery: {type(exc).__name__}: {exc}")
+        print(f"⚠️ [C10] AI Learning Scientist recovery: {type(exc).__name__}: {exc}")
         return False
 
 
@@ -38024,7 +38024,7 @@ def _build_ai_learning_context():
         quality_v2 = (
             analytics_service
             .get_quality_v2_summary(
-                system_type='futures',
+                system_type='both',
                 days_back=90
             )
             or {}
@@ -38059,6 +38059,16 @@ def _build_ai_learning_context():
                 'edge_discovery_v1',
                 {}
             )
+            or {}
+        )
+
+        learning_integrity_learning = (
+            quality_v2.get('learning_integrity_v1', {})
+            or {}
+        )
+
+        trader_intelligence_learning = (
+            quality_v2.get('trader_intelligence_v1', {})
             or {}
         )
 
@@ -38099,6 +38109,20 @@ def _build_ai_learning_context():
 
         edge_discovery_learning = {
             'version': 'C7_EDGE_DISCOVERY_V1',
+            'status': 'UNAVAILABLE',
+            'authority': 'RESEARCH_ONLY',
+            'reason': str(q7_learning_error)[:180]
+        }
+
+        learning_integrity_learning = {
+            'version': 'C10_LEARNING_INTEGRITY_V1',
+            'status': 'UNAVAILABLE',
+            'authority': 'DIAGNOSTIC_ONLY',
+            'reason': str(q7_learning_error)[:180]
+        }
+
+        trader_intelligence_learning = {
+            'version': 'C10_TRADER_INTELLIGENCE_FOUNDATION_V1',
             'status': 'UNAVAILABLE',
             'authority': 'RESEARCH_ONLY',
             'reason': str(q7_learning_error)[:180]
@@ -38175,10 +38199,18 @@ def _build_ai_learning_context():
         'strategy_attribution_v2':
             strategy_attribution_learning,
 
-        # COMMIT 7: Gemini estudia las hipótesis ya calculadas por
+        # COMMIT 7: el científico estudia las hipótesis ya calculadas por
         # ReviewTrader. No puede promoverlas ni modificar producción.
         'edge_discovery_v1':
-            edge_discovery_learning
+            edge_discovery_learning,
+
+        # COMMIT 10: contrato explícito de cohortes y scorecard de
+        # especialización por mercado/timeframe/régimen. Research-only.
+        'learning_integrity_v1':
+            learning_integrity_learning,
+
+        'trader_intelligence_v1':
+            trader_intelligence_learning
     }
 
 # ============================================================================
@@ -43737,7 +43769,7 @@ def api_ai_performance():
 
 # ============================================================================
 # COMMIT 36Y
-# GEMINI LEARNING ACTIVITY — READ ONLY / ZERO EXTRA LLM CALLS
+# AI LEARNING SCIENTIST ACTIVITY — READ ONLY / ZERO EXTRA LLM CALLS
 # ============================================================================
 
 @app.route(
@@ -43746,11 +43778,11 @@ def api_ai_performance():
 )
 def api_ai_gemini_activity():
     """
-    Estado visible del Learning Scientist Gemini.
+    Estado visible del científico de aprendizaje IA.
 
     IMPORTANTE:
 
-    - NO llama a Gemini;
+    - NO llama al proveedor IA;
     - NO consume cuota LLM;
     - NO modifica TraderMacro;
     - NO modifica Spot/Futures;
@@ -43822,7 +43854,7 @@ def api_ai_gemini_activity():
 
                 'ticker_items': [
                     (
-                        '🧠 Gemini Learning · '
+                        'Aprendizaje IA · '
                         'estado temporalmente no disponible.'
                     )
                 ]
@@ -43834,6 +43866,79 @@ def api_ai_gemini_activity():
                 )[:180]
 
         }), 200
+# ============================================================================
+# COMMIT 10 — MANUAL LEARNING / GOVERNANCE DIAGNOSTICS
+# ============================================================================
+
+@app.route('/api/ai/learning/test', methods=['POST'])
+def api_ai_learning_test():
+    """One explicit learning-scientist call for diagnostics.
+
+    It never changes trading authority.  It exists so a new provider/key can
+    be verified immediately instead of waiting for the daily slot.
+    """
+    user = _authenticated_user()
+    if not user:
+        return jsonify({'success': False, 'error': 'Debes iniciar sesión.'}), 401
+
+    acquired = _acquire_heavy_analysis('ai-learning-manual-test', timeout=0)
+    if not acquired:
+        return jsonify({
+            'success': False,
+            'error': 'Hay otro trabajo pesado en curso. Intenta nuevamente en unos minutos.'
+        }), 409
+
+    try:
+        from ai_advisor import run_ai_advisor, get_gemini_activity_status
+        result = run_ai_advisor(
+            user_name=user,
+            usage_type='LEARNING',
+            context_type='LEARNING',
+            event_type='MANUAL_LEARNING_TEST',
+            market='SYSTEM',
+            context=_build_ai_learning_context()
+        ) or {}
+        return jsonify({
+            'success': bool(result.get('success')),
+            'result': result,
+            'activity': get_gemini_activity_status()
+        }), 200 if result.get('success') else 502
+    except Exception as error:
+        return jsonify({'success': False, 'error': str(error)[:220]}), 500
+    finally:
+        _release_heavy_analysis('ai-learning-manual-test')
+
+
+@app.route('/api/review/governance/refresh', methods=['POST'])
+def api_review_governance_refresh():
+    """Explicitly refresh the fail-closed governance snapshot.
+
+    Diagnostic/control-plane action only: it may close/open gates according to
+    already-persisted evidence, but it does not create signals or alter the
+    evidence itself.
+    """
+    user = _authenticated_user()
+    if not user:
+        return jsonify({'success': False, 'error': 'Debes iniciar sesión.'}), 401
+
+    acquired = _acquire_heavy_analysis('governance-manual-refresh', timeout=0)
+    if not acquired:
+        return jsonify({
+            'success': False,
+            'error': 'Hay otro trabajo pesado en curso. Intenta nuevamente en unos minutos.'
+        }), 409
+
+    try:
+        from promotion_governance import refresh_promotion_governance
+        from supabase_client import supabase_db
+        status = refresh_promotion_governance(supabase_db, days_back=90) or {}
+        return jsonify({'success': True, 'governance': status}), 200
+    except Exception as error:
+        return jsonify({'success': False, 'error': str(error)[:220]}), 500
+    finally:
+        _release_heavy_analysis('governance-manual-refresh')
+
+
 # ============================================================================
 # COMMIT 36T.1
 # SPOT / TGP AI SHADOW EVIDENCE

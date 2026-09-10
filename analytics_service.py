@@ -13,6 +13,8 @@ from collections import defaultdict
 from supabase_client import supabase_db
 from edge_discovery import build_edge_discovery_summary
 from promotion_governance import get_promotion_governance_status
+from learning_integrity import build_integrity_manifest
+from trader_intelligence import build_trader_scorecard
 
 logger = logging.getLogger('ANALYTICS')
 # ============================================================================
@@ -2161,6 +2163,29 @@ class AnalyticsService:
         if resolved_spot < 25:
             observatory_reasons.append(f'SPOT_{resolved_spot}_DE_25_RESUELTAS')
 
+        # COMMIT 10 — diagnostic-only scope manifest and trader scorecard.
+        # IMPORTANT: the cohort selection above is intentionally unchanged.
+        # Commit 10 measures the existing system before Commit 11 can adapt it.
+        integrity_governance = promotion_governance if (
+            not symbol
+            and not timeframe
+            and (not action or action == 'ALL')
+            and (not system_type or system_type in ('both', 'futures'))
+        ) else {}
+        learning_integrity = build_integrity_manifest(
+            spot_rows=spot,
+            futures_official_rows=futures_official,
+            futures_shadow_rows=futures_shadow,
+            quality_score_version=Q5_CURRENT_QUALITY_SCORE_VERSION,
+            coverage=getattr(signals, 'coverage', {}) or {},
+            governance=integrity_governance,
+        )
+        trader_scorecard = build_trader_scorecard({
+            'SPOT_CURRENT_OFFICIAL': spot,
+            'FUTURES_CURRENT_OFFICIAL': futures_official,
+            'FUTURES_CURRENT_SHADOW': futures_shadow,
+        })
+
         return {
             'version':
                 Q5_ANALYTICS_VERSION,
@@ -2216,6 +2241,10 @@ class AnalyticsService:
             # COMMIT 7 — hipótesis falsables, research-only.
             'edge_discovery_v1': edge_discovery,
 
+            # COMMIT 10 — observability only; no committee authority.
+            'learning_integrity_v1': learning_integrity,
+            'trader_intelligence_v1': trader_scorecard,
+
             # ==========================================================
             # COMMIT 6 — LEARNING OBSERVATORY
             # ==========================================================
@@ -2247,7 +2276,9 @@ class AnalyticsService:
                     'spot': attribution_spot,
                     'futures_official': attribution_futures,
                     'futures_shadow': attribution_shadow
-                }
+                },
+                'learning_integrity': learning_integrity,
+                'trader_intelligence': trader_scorecard
             },
 
             # ==========================================================

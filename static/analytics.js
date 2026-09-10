@@ -1095,6 +1095,31 @@ function loHumanReason(value) {
     return uiHumanLabel(raw);
 }
 
+function traderEvidenceLabel(value) {
+    const state = String(value || '').toUpperCase();
+    if (state === 'PROMISING') return 'Prometedor';
+    if (state === 'DEGRADED') return 'Débil';
+    if (state === 'OBSERVE') return 'Observar';
+    return 'Muestra insuficiente';
+}
+
+function traderRelationLabel(value) {
+    const relation = String(value || '').toUpperCase();
+    if (relation === 'SUPPORT') return 'Apoya';
+    if (relation === 'OPPOSE') return 'Veta / contradice';
+    return 'Neutral';
+}
+
+function traderRegimeLabel(value) {
+    const regime = String(value || '').toUpperCase();
+    const labels = {
+        ALL: 'Todos', UNKNOWN: 'Sin clasificar', TREND_DOWN: 'Tendencia bajista',
+        TREND_UP: 'Tendencia alcista', TRANSITION: 'Transición', BALANCE: 'Equilibrado',
+        VOLATILITY_SHOCK: 'Alta volatilidad', RANGING: 'Lateral'
+    };
+    return labels[regime] || uiHumanLabel(regime || '--');
+}
+
 function renderLearningObservatory(data) {
     const observatory = data?.learning_observatory_v1 || {};
     const forensics = observatory?.execution_forensics?.futures_official
@@ -1102,6 +1127,12 @@ function renderLearningObservatory(data) {
         || {};
     const attribution = observatory?.strategy_attribution?.futures_official
         || data?.strategy_attribution_v2?.futures_official
+        || {};
+    const traderIntel = observatory?.trader_intelligence
+        || data?.trader_intelligence_v1
+        || {};
+    const integrity = observatory?.learning_integrity
+        || data?.learning_integrity_v1
         || {};
 
     q5SetText('lo-forensics-n', Number(forensics.n_with_forensics || 0).toLocaleString());
@@ -1150,6 +1181,60 @@ function renderLearningObservatory(data) {
                 </tr>`;
             }).join('');
         }
+    }
+
+    const scoreBody = document.getElementById('lo-trader-scorecard-body');
+    if (scoreBody) {
+        const rows = Array.isArray(traderIntel.rows)
+            ? traderIntel.rows.filter(row => row.dimensionality !== 'REGIME' || Number(row.resolved || 0) > 0).slice(0, 14)
+            : [];
+        if (!rows.length) {
+            scoreBody.innerHTML = '<tr><td colspan="10" class="text-center text-muted py-2">Aún no hay outcomes suficientes para perfilar especialistas.</td></tr>';
+        } else {
+            scoreBody.innerHTML = rows.map(row => {
+                const exp = row.judgement_expectancy_r === null || row.judgement_expectancy_r === undefined
+                    ? '--' : loR(row.judgement_expectancy_r, 3);
+                const confidence = row.avg_confidence_pct === null || row.avg_confidence_pct === undefined
+                    ? '--' : loPct(row.avg_confidence_pct);
+                const state = traderEvidenceLabel(row.evidence_state);
+                const cls = String(row.evidence_state || '').toUpperCase() === 'PROMISING' ? 'text-success'
+                    : String(row.evidence_state || '').toUpperCase() === 'DEGRADED' ? 'text-danger' : 'text-muted';
+                return `<tr>
+                    <td><strong>${uiHumanLabel(row.trader || '--')}</strong></td>
+                    <td>${String(row.market || '--').toUpperCase()}</td>
+                    <td>${row.timeframe === 'ALL' ? 'Todas' : uiHumanLabel(row.timeframe || '--')}</td>
+                    <td>${uiHumanLabel(row.direction || '--')}</td>
+                    <td>${traderRegimeLabel(row.regime)}</td>
+                    <td>${traderRelationLabel(row.relation)}</td>
+                    <td>${Number(row.resolved || 0).toLocaleString()}</td>
+                    <td>${exp}</td>
+                    <td>${confidence}</td>
+                    <td class="${cls}">${state}</td>
+                </tr>`;
+            }).join('');
+        }
+    }
+
+    const redundancyEl = document.getElementById('lo-trader-redundancy');
+    if (redundancyEl) {
+        const pairs = Array.isArray(traderIntel.pairwise_redundancy) ? traderIntel.pairwise_redundancy : [];
+        const top = pairs.find(row => Number(row.co_signal_n || 0) >= 3);
+        redundancyEl.textContent = top
+            ? `Redundancia observada: ${uiHumanLabel(top.trader_a)} y ${uiHumanLabel(top.trader_b)} coincidieron en ${Number(top.co_signal_n)} señales; misma dirección ${loPct(top.same_side_pct)}. Es diagnóstico, no modifica pesos.`
+            : 'Todavía no hay suficiente co-ocurrencia para medir redundancia entre traders.';
+    }
+
+    const integrityEl = document.getElementById('lo-learning-integrity');
+    if (integrityEl) {
+        const scopes = integrity.scopes || {};
+        const spotScope = scopes.spot_current || {};
+        const futScope = scopes.futures_official_current || {};
+        const comparison = integrity.governance_comparison || {};
+        const matchText = comparison.same_scope_match === true ? 'coincide con gobernanza'
+            : comparison.same_scope_match === false ? 'snapshot distinto o desactualizado'
+            : 'esperando primer refresh de gobernanza';
+        integrityEl.textContent = `Motor actual: Spot ${Number(spotScope.n || 0)} señales / ${Number(spotScope.resolved || 0)} resueltas; Futures ${Number(futScope.n || 0)} / ${Number(futScope.resolved || 0)}. Analytics ↔ gobernanza: ${matchText}. El PDF de aprendizaje puede usar una cohorte Q6 más amplia y por eso no necesita tener el mismo N.`;
+        q5SetText('lo-governance-cohort-match', comparison.same_scope_match === true ? 'Coherente' : comparison.same_scope_match === false ? 'Revisar snapshot' : 'Esperando refresh');
     }
 }
 
@@ -1255,6 +1340,55 @@ function renderEdgeDiscovery(data) {
     }
 }
 
+async function refreshLearningGovernanceNow() {
+    const button = document.getElementById('lo-refresh-governance');
+    if (button) {
+        button.disabled = true;
+        button.textContent = 'Actualizando...';
+    }
+    try {
+        const response = await fetch('/api/review/governance/refresh', { method: 'POST' });
+        const payload = await response.json();
+        if (!response.ok || !payload.success) {
+            throw new Error(payload.error || 'No se pudo actualizar la gobernanza.');
+        }
+        showToast('Gobernanza actualizada con la evidencia persistida.', 'success');
+        await Promise.all([loadQualityV2(), loadLearningGovernanceStatus()]);
+    } catch (error) {
+        showToast(error.message || 'Error actualizando gobernanza.', 'danger');
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = 'Actualizar';
+        }
+    }
+}
+
+async function runLearningScientistTest() {
+    const button = document.getElementById('lo-test-learning');
+    if (button) {
+        button.disabled = true;
+        button.textContent = 'Probando...';
+    }
+    try {
+        const response = await fetch('/api/ai/learning/test', { method: 'POST' });
+        const payload = await response.json();
+        if (!response.ok || !payload.success) {
+            const reason = payload?.result?.reason || payload?.error || 'El proveedor no completó la prueba.';
+            throw new Error(reason);
+        }
+        showToast('El científico de aprendizaje respondió y dejó actividad persistida.', 'success');
+        await loadLearningGovernanceStatus();
+    } catch (error) {
+        showToast(error.message || 'Error probando el científico de aprendizaje.', 'danger');
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = 'Probar ahora';
+        }
+    }
+}
+
 async function loadLearningGovernanceStatus() {
     const requests = [
         fetch('/api/review/autopilot/status').then(async response => ({ kind: 'autopilot', response, json: await response.json() })),
@@ -1323,7 +1457,8 @@ async function loadLearningGovernanceStatus() {
         if (kind === 'gemini' && json.success) {
             const data = json.data || {};
             const state = String(data.state || 'WAITING_FIRST_RUN');
-            q5SetText('lo-gemini-state', state === 'SUCCESS' || state === 'READY' ? 'Activo' : uiHumanLabel(state));
+            q5SetText('lo-gemini-state', state === 'SUCCESS' || state === 'READY' || state === 'WORKING' ? 'Activo' : uiHumanLabel(state));
+            q5SetText('lo-learning-provider', data.provider_label || uiHumanLabel(data.provider || '--'));
             const last = data.last_run;
             const lastText = last && typeof last === 'object'
                 ? (last.created_at || last.timestamp || last.at || '--')
@@ -2326,6 +2461,11 @@ document.addEventListener('DOMContentLoaded', function() {
     // Carga inicial
     window.loadAllAnalytics();
     window.loadLogs();
+
+    const governanceButton = document.getElementById('lo-refresh-governance');
+    if (governanceButton) governanceButton.addEventListener('click', refreshLearningGovernanceNow);
+    const learningButton = document.getElementById('lo-test-learning');
+    if (learningButton) learningButton.addEventListener('click', runLearningScientistTest);
     
     // ================================================================
     // AUTO-REFRESH LEGACY

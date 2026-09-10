@@ -364,11 +364,13 @@
 
                 const model =
                     String(
+                        data.provider_label
+                        ||
                         data.model
                         ||
                         lastRun.model
                         ||
-                        'Gemini'
+                        'Aprendizaje IA'
                     );
 
 
@@ -404,7 +406,7 @@
             hideTicker();
 
             console.debug(
-                'Gemini ticker no disponible:',
+                'Ticker de aprendizaje IA no disponible:',
                 error
             );
 
@@ -440,7 +442,7 @@
 
         // Refrescar sólo el estado persistido.
         //
-        // NO llama directamente a Gemini.
+        // NO llama directamente al proveedor IA.
 
         setInterval(
             loadActivity,
