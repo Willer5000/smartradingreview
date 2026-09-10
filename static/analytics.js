@@ -1063,6 +1063,24 @@ function loHumanReason(value) {
     if (raw === 'ROBUST_NEGATIVE_EXECUTION_EVIDENCE') return 'La evidencia disponible sólo autoriza protección, no mayor riesgo.';
     if (raw === 'ROBUST_POSITIVE_EXECUTION_EVIDENCE') return 'Existe evidencia positiva preliminar bajo guardrails.';
     if (raw === 'BLOCKED_PENDING_COMPLETE_NET_EVIDENCE' || raw === 'POSITIVE_AUTHORITY_BLOCKED_PENDING_COMPLETE_NET_EVIDENCE') return 'La promoción positiva y el aumento de leverage siguen bloqueados hasta completar cohorte y costes netos.';
+    if (raw === 'EVIDENCE_GATE_CLOSED') return 'La optimización positiva sigue bloqueada hasta que la evidencia completa sea suficiente.';
+    if (raw === 'EVIDENCE_GATE_OPEN') return 'La evidencia completa permite optimización de calidad bajo límites de riesgo.';
+    if (raw === 'coverage_complete') return 'La lectura completa de la ventana estadística todavía no está demostrada.';
+    if (raw === 'sample_ok') return 'Aún faltan resultados Futures oficiales para habilitar optimización automática.';
+    if (raw === 'validation_sample_ok') return 'Aún falta muestra suficiente en la ventana temporal de validación.';
+    if (raw === 'gross_expectancy_ok') return 'La expectancy oficial todavía no demuestra ventaja suficiente.';
+    if (raw === 'profit_factor_ok') return 'El Profit Factor oficial todavía no supera el mínimo de gobernanza.';
+    if (raw === 'modeled_net_coverage_ok') return 'No todas las operaciones resueltas tienen geometría suficiente para estimar costes de forma comparable.';
+    if (raw === 'modeled_net_expectancy_ok') return 'La expectancy conservadora después de costes modelados todavía no es positiva.';
+    if (raw === 'validation_net_expectancy_ok') return 'La ventaja neta modelada no se mantiene todavía fuera de la ventana de descubrimiento.';
+    if (raw === 'validation_profit_factor_ok') return 'El Profit Factor de validación todavía no confirma la ventaja.';
+    if (raw === 'realized_net_coverage_ok') return 'Comisión, slippage y funding realizados todavía no están atribuidos de forma uniforme.';
+    if (raw === 'realized_net_expectancy_ok') return 'La expectancy neta realizada todavía no demuestra ventaja positiva.';
+    if (raw === 'validation_realized_net_expectancy_ok') return 'La ventaja neta realizada todavía no se confirma fuera de la ventana de calibración.';
+    if (raw === 'validation_realized_net_profit_factor_ok') return 'El Profit Factor neto realizado de validación todavía no confirma la ventaja.';
+    if (raw === 'STALE_GOVERNANCE_STATE') return 'La última comprobación de gobernanza está desactualizada; la autoridad positiva se cerró por seguridad.';
+    if (raw === 'recent_health_ok') return 'Los resultados recientes muestran deterioro y bloquean promoción positiva.';
+    if (raw === 'failure_streak_ok') return 'Existe una racha de pérdidas demasiado larga para habilitar promoción positiva.';
     return uiHumanLabel(raw);
 }
 
@@ -1245,16 +1263,40 @@ async function loadLearningGovernanceStatus() {
             const state = String(profile.state || 'OBSERVE').toUpperCase();
             const config = profile.config || {};
             const evidence = profile.evidence || {};
-            const positiveAuthority = Boolean(status.positive_authority_enabled);
+            const governance = status.promotion_governance || {};
+            const positiveAuthority = Boolean(governance.quality_optimization_allowed);
+            const strategyVeto = Boolean(governance.strategy_veto_authority_allowed);
+            const strategies = Array.isArray(status.strategies) ? status.strategies : [];
+            const activeStrategies = strategies.filter(row => String(row.state || '').toUpperCase() === 'ACTIVE').length;
             const productionAuthority = state === 'PROTECT' || (state === 'ACTIVE' && positiveAuthority);
-            const growthAllowed = positiveAuthority && Boolean(config.allow_leverage_growth);
-            q5SetText('lo-autopilot-state', state === 'PROTECT' ? 'Protección' : state === 'ACTIVE' ? 'Activo en evaluación' : 'Observación');
-            q5SetText('lo-autopilot-authority', productionAuthority ? 'Limitada y gobernada' : 'No');
-            q5SetText('lo-leverage-growth', growthAllowed ? 'Permitido por evidencia' : 'Bloqueado');
-            const governanceReason = (!positiveAuthority && state === 'ACTIVE')
-                ? (status.positive_authority_reason || 'BLOCKED_PENDING_COMPLETE_NET_EVIDENCE')
-                : (evidence.reason || 'INSUFFICIENT_EVIDENCE');
-            q5SetText('lo-autopilot-reason', loHumanReason(governanceReason));
+            q5SetText('lo-autopilot-state', state === 'PROTECT' ? 'Protección' : state === 'ACTIVE' ? 'Perfil de calidad validado' : 'Observación');
+            q5SetText('lo-autopilot-authority', productionAuthority ? 'Habilitada bajo evidencia' : 'Bloqueada');
+            q5SetText('lo-strategy-veto-authority', strategyVeto ? `${activeStrategies} activas · veto solamente` : 'Bloqueado');
+            q5SetText('lo-leverage-growth', 'Bloqueado · siguiente fase');
+
+            const coverage = governance.coverage || {};
+            const gEvidence = governance.evidence || {};
+            const total = gEvidence.total || {};
+            const validation = gEvidence.validation_30 || {};
+            const streak = Number(gEvidence.consecutive_sl || 0);
+            q5SetText('lo-governance-coverage', coverage.complete ? 'Completa' : 'Incompleta');
+            q5SetText('lo-governance-sample', `${Number(total.resolved || 0)}/25`);
+            q5SetText('lo-governance-validation', `${Number(validation.resolved || 0)}/10`);
+            q5SetText('lo-governance-net-exp', total.modeled_net_expectancy_r === null || total.modeled_net_expectancy_r === undefined ? '--' : loR(total.modeled_net_expectancy_r, 3));
+            const realizedCoverage = Number(total.realized_net_coverage_pct || 0);
+            q5SetText('lo-governance-realized-net', `${realizedCoverage.toFixed(0)}% de resultados`);
+            q5SetText('lo-governance-sl-streak', streak > 0 ? `${streak} consecutivos` : 'Sin racha activa');
+
+            const reasons = Array.isArray(governance.block_reasons) ? governance.block_reasons : [];
+            const governanceReason = reasons.length
+                ? reasons.map(loHumanReason).join(' · ')
+                : (evidence.reason || 'EVIDENCE_GATE_OPEN');
+            q5SetText('lo-autopilot-reason', governanceReason);
+            const gateBadge = document.getElementById('learning-observatory-gate');
+            if (gateBadge) {
+                gateBadge.className = `badge ${positiveAuthority ? 'bg-success' : 'bg-secondary'}`;
+                gateBadge.textContent = positiveAuthority ? 'Optimización de calidad habilitada' : 'Recopilando evidencia';
+            }
         }
 
         if (kind === 'gemini' && json.success) {

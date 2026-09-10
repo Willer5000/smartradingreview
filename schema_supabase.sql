@@ -405,3 +405,18 @@ CREATE TABLE IF NOT EXISTS public.edge_hypotheses (
 );
 CREATE INDEX IF NOT EXISTS idx_edge_hypotheses_state
 ON public.edge_hypotheses(market, state, last_seen_at DESC);
+
+-- ==========================================================================
+-- COMMIT 8 — GOVERNED PROMOTION
+-- ==========================================================================
+CREATE TABLE IF NOT EXISTS public.autopilot_governance_state (
+    scope TEXT PRIMARY KEY,
+    quality_optimization_allowed BOOLEAN NOT NULL DEFAULT FALSE,
+    strategy_veto_authority_allowed BOOLEAN NOT NULL DEFAULT FALSE,
+    risk_growth_allowed BOOLEAN NOT NULL DEFAULT FALSE,
+    evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+    version TEXT NOT NULL DEFAULT 'C8_PROMOTION_GOVERNANCE_V1',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_autopilot_governance_updated
+ON public.autopilot_governance_state(updated_at DESC);

@@ -5150,8 +5150,13 @@ class FuturesAnalysis(TradingExpertSystem):
         return round(smc * 0.55 + reach * 0.15 + sl_quality * 0.30, 2)
 
     @staticmethod
-    def _active_strategy_registry_diagnostic(decision, structure):
-        """ACTIVE experimental strategies may veto a conflict, never create/boost a trade."""
+    def _active_strategy_registry_diagnostic(decision, structure, timeframe=None, market_regime=None):
+        """ACTIVE experimental strategies may veto a conflict, never create/boost a trade.
+
+        Commit 8 additionally requires the exact validated subtype predicate
+        stored in Strategy Registry. A broad family ACTIVE row without a runtime
+        filter fails closed.
+        """
         result = {
             'active': False,
             'conflicts': [],
@@ -5183,7 +5188,24 @@ class FuturesAnalysis(TradingExpertSystem):
             if not strategy_key:
                 continue
             reg = strategies_registry.get(strategy_key) or {}
-            if not isinstance(reg, dict) or str(reg.get('state') or '').upper() != 'ACTIVE':
+            if (
+                not isinstance(reg, dict)
+                or str(reg.get('state') or '').upper() != 'ACTIVE'
+                or not bool(reg.get('production_authority', False))
+            ):
+                continue
+            try:
+                from strategy_registry import observation_matches_runtime_filter
+                matches_validated_predicate = observation_matches_runtime_filter(
+                    observation,
+                    reg.get('config') or {},
+                    decision=decision,
+                    timeframe=str(timeframe or ''),
+                    market_regime=str(market_regime or ''),
+                )
+            except Exception:
+                matches_validated_predicate = False
+            if not matches_validated_predicate:
                 continue
             direction = str(observation.get('direction') or 'NEUTRAL').upper()
             if direction not in ('LONG', 'SHORT'):
@@ -5356,7 +5378,9 @@ class FuturesAnalysis(TradingExpertSystem):
 
         strategy_registry_diag = self._active_strategy_registry_diagnostic(
             decision,
-            structure
+            structure,
+            timeframe=timeframe,
+            market_regime=_adaptive_market_regime,
         )
         levels['active_strategy_registry'] = strategy_registry_diag
 

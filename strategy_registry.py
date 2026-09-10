@@ -63,6 +63,59 @@ def _specificity(row: Dict[str, Any], symbol: str, timeframe: str, regime: str) 
     return score
 
 
+
+
+def observation_matches_runtime_filter(
+    observation: Dict[str, Any],
+    config: Dict[str, Any],
+    *,
+    decision: str,
+    timeframe: str,
+    market_regime: str,
+) -> bool:
+    """Match one ACTIVE lab observation against its validated predicate.
+
+    Commit 8 fails closed: a manually-created ACTIVE registry row without an
+    explicit observation_filter has no runtime authority. This prevents a good
+    subtype (for example FAST|ALIGNED) from accidentally authorizing the whole
+    broad RSI family.
+    """
+    if not isinstance(observation, dict) or not isinstance(config, dict):
+        return False
+    rule = config.get("observation_filter") or {}
+    if not isinstance(rule, dict) or not rule:
+        return False
+
+    expected_profile = str(rule.get("profile") or "").upper()
+    if expected_profile and str(observation.get("profile") or "").upper() != expected_profile:
+        return False
+
+    expected_alignment = str(rule.get("alignment_with_system") or "").upper()
+    if expected_alignment and str(observation.get("alignment_with_system") or "").upper() != expected_alignment:
+        return False
+
+    expected_state = str(rule.get("state") or "").upper()
+    if expected_state and str(observation.get("state") or "").upper() != expected_state:
+        return False
+
+    expected_direction = str(rule.get("direction") or "").upper()
+    if expected_direction and str(observation.get("direction") or "").upper() != expected_direction:
+        return False
+
+    expected_action = str(rule.get("action") or "").upper()
+    if expected_action and str(decision or "").upper() != expected_action:
+        return False
+
+    expected_tf = str(rule.get("timeframe") or "").upper()
+    if expected_tf and str(timeframe or "").upper() != expected_tf:
+        return False
+
+    expected_regime = str(rule.get("market_regime") or "").upper()
+    if expected_regime and str(market_regime or "").upper() != expected_regime:
+        return False
+
+    return True
+
 def get_registry_snapshot(
     symbol: str = "*",
     timeframe: str = "*",
@@ -113,19 +166,45 @@ def get_registry_snapshot(
             if previous is None or score > previous[0]:
                 best[strategy_key] = (score, row)
 
+        # Commit 8: a persisted ACTIVE row is not enough by itself. Runtime
+        # authority also requires the global evidence/coverage gate.
+        try:
+            from promotion_governance import get_promotion_governance_status
+            governance = get_promotion_governance_status(db)
+        except Exception:
+            governance = {
+                "strategy_veto_authority_allowed": False,
+                "block_reasons": ["PROMOTION_GOVERNANCE_UNAVAILABLE"],
+            }
+        veto_authority_allowed = bool(
+            governance.get("strategy_veto_authority_allowed", False)
+        )
+
         strategies = dict(snapshot["strategies"])
         any_active = False
         for strategy_key, (_, row) in best.items():
             state = str(row.get("state") or "SHADOW").upper()
             if state not in VALID_STATES:
                 state = "SHADOW"
-            production_authority = state == "ACTIVE"
+            config = row.get("config") or {}
+            if not isinstance(config, dict):
+                config = {}
+            has_exact_runtime_filter = bool(
+                isinstance(config.get("observation_filter"), dict)
+                and config.get("observation_filter")
+            )
+            production_authority = bool(
+                state == "ACTIVE"
+                and veto_authority_allowed
+                and has_exact_runtime_filter
+            )
             any_active = any_active or production_authority
             strategies[strategy_key] = {
                 "state": state,
                 "source": "SUPABASE_REGISTRY",
                 "production_authority": production_authority,
-                "config": row.get("config") or {},
+                "authority_mode": "CONFLICT_VETO_ONLY" if production_authority else "NONE",
+                "config": config,
                 "evidence": row.get("evidence") or {},
                 "updated_at": row.get("updated_at"),
             }
@@ -133,6 +212,11 @@ def get_registry_snapshot(
         snapshot = {
             "version": REGISTRY_VERSION,
             "production_authority": any_active,
+            "authority_mode": "CONFLICT_VETO_ONLY",
+            "promotion_governance": {
+                "strategy_veto_authority_allowed": veto_authority_allowed,
+                "block_reasons": list(governance.get("block_reasons") or []),
+            },
             "strategies": strategies,
         }
     except Exception:

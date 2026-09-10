@@ -20,13 +20,12 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import hashlib
 import json
 import math
-import os
 import threading
 import time
 
 AUTOPILOT_VERSION = "C4_REVIEWTRADER_AUTOPILOT_V1"
 EXECUTION_PROFILE_VERSION = "C4_ADAPTIVE_EXECUTION_PROFILE_V1"
-STRATEGY_GOVERNANCE_VERSION = "C4_STRATEGY_GOVERNANCE_V1"
+STRATEGY_GOVERNANCE_VERSION = "C8_STRATEGY_GOVERNANCE_V2"
 
 # Evidence gates. These are not trading thresholds; they govern whether learning
 # is allowed to change production behavior.
@@ -69,18 +68,32 @@ _profile_cache: Dict[Tuple[str, str, str, str], Tuple[float, Dict[str, Any]]] = 
 _profile_cache_ttl = 180.0
 
 
-def _positive_authority_enabled() -> bool:
-    """
-    Commit 6 fail-closed gate.
+def _governance_status(db=None) -> Dict[str, Any]:
+    """Commit 8: read the persisted fail-closed promotion gate."""
+    try:
+        from promotion_governance import get_promotion_governance_status
+        return get_promotion_governance_status(db)
+    except Exception as exc:
+        return {
+            "quality_optimization_allowed": False,
+            "strategy_veto_authority_allowed": False,
+            "risk_growth_allowed": False,
+            "block_reasons": [f"GOVERNANCE_UNAVAILABLE:{type(exc).__name__}"],
+        }
 
-    Mientras la cohorte y el PnL neto realizado no sean verificables,
-    ReviewTrader puede OBSERVAR/PROTEGER y mover estrategias hasta CANARY,
-    pero no aumentar riesgo ni conceder autoridad ACTIVE. Commit 8 reemplazará
-    este gate por evidencia automática completa.
-    """
-    return str(os.getenv('AUTOPILOT_POSITIVE_AUTHORITY_ENABLED', 'false')).strip().lower() in {
-        '1', 'true', 'yes', 'si', 'sí'
-    }
+
+def _positive_authority_enabled(db=None) -> bool:
+    """Compatibility alias: positive quality authority is evidence-driven."""
+    return bool(_governance_status(db).get("quality_optimization_allowed", False))
+
+
+def _strategy_veto_authority_enabled(db=None) -> bool:
+    return bool(_governance_status(db).get("strategy_veto_authority_allowed", False))
+
+
+def _risk_growth_enabled(db=None) -> bool:
+    # Deliberately false in Commit 8; Commit 9 owns leverage scaling.
+    return bool(_governance_status(db).get("risk_growth_allowed", False))
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -418,17 +431,28 @@ def get_execution_profile(
     except Exception:
         profile = fallback
 
-    # Commit 6: los perfiles positivos siguen visibles para investigación,
-    # pero no obtienen autoridad productiva hasta cerrar cobertura + costes.
-    if str(profile.get('state') or '').upper() == 'ACTIVE' and not _positive_authority_enabled():
-        profile['production_authority'] = False
+    # Commit 8: ACTIVE quality profiles obtain authority only from the persisted
+    # evidence gate. PROTECT remains allowed because it can only reduce risk.
+    governance = _governance_status(db)
+    if str(profile.get('state') or '').upper() == 'ACTIVE':
+        profile['production_authority'] = bool(
+            governance.get('quality_optimization_allowed', False)
+        )
+        evidence = dict(profile.get('evidence') or {})
+        evidence['promotion_governance'] = {
+            'quality_optimization_allowed': bool(governance.get('quality_optimization_allowed', False)),
+            'risk_growth_allowed': bool(governance.get('risk_growth_allowed', False)),
+            'block_reasons': list(governance.get('block_reasons') or []),
+        }
+        profile['evidence'] = evidence
+
+    # Commit 8 never increases leverage. Even a valid ACTIVE quality profile can
+    # only improve structural selection; risk scaling belongs to Commit 9.
+    if not _risk_growth_enabled(db):
         config = dict(profile.get('config') or {})
         config['allow_leverage_growth'] = False
         config['leverage_target_factor'] = min(1.0, _safe_float(config.get('leverage_target_factor'), 1.0))
         profile['config'] = config
-        evidence = dict(profile.get('evidence') or {})
-        evidence['positive_authority_gate'] = 'BLOCKED_PENDING_COMPLETE_NET_EVIDENCE'
-        profile['evidence'] = evidence
 
     with _cache_lock:
         _profile_cache[key] = (now, profile)
@@ -689,6 +713,196 @@ def _research_evidence(db, limit: int = 120) -> Dict[str, Dict[str, Any]]:
     return output
 
 
+def _edge_family_evidence(db, limit_runs: int = 12) -> Dict[str, Dict[str, Any]]:
+    """Return only edge hypotheses that can be enforced exactly at runtime.
+
+    Commit 7 may discover useful combinations containing arbitrary context. An
+    arbitrary text hypothesis must never become production code implicitly. For
+    Commit 8 we promote only predicates that map losslessly to an existing lab
+    strategy observation plus optional action/timeframe/regime constraints.
+
+    This is especially important for Q7 RSI: FAST|ALIGNED evidence must not
+    accidentally authorize BALANCED|CONFLICT merely because both observations
+    share the broad ``Q7_RSI_PROFILE_V1`` strategy name.
+    """
+    if not getattr(db, "enabled", False):
+        return {}
+    try:
+        response = (
+            db.client.table("edge_discovery_runs")
+            .select("summary,created_at")
+            .order("created_at", desc=True)
+            .limit(max(1, min(int(limit_runs), 30)))
+            .execute()
+        )
+    except Exception:
+        return {}
+
+    state_to_trendline = {
+        "TRENDLINE_SUPPORT_BOUNCE": "TRENDLINE_SUPPORT_REACTION_V1",
+        "TRENDLINE_RESISTANCE_REJECTION": "TRENDLINE_RESISTANCE_REACTION_V1",
+        "TRENDLINE_BREAK_RETEST_LONG": "TRENDLINE_BREAK_RETEST_LONG_V1",
+        "TRENDLINE_BREAK_RETEST_SHORT": "TRENDLINE_BREAK_RETEST_SHORT_V1",
+        "FALSE_BREAK_RECLAIM_LONG": "TRENDLINE_SUPPORT_REACTION_V1",
+        "FALSE_BREAK_RECLAIM_SHORT": "TRENDLINE_RESISTANCE_REACTION_V1",
+    }
+
+    def parse_enforceable_predicate(factors):
+        strategy_key = None
+        rule: Dict[str, Any] = {}
+        for raw in factors or []:
+            factor = str(raw or "")
+            if factor.startswith("RSI_PROFILE:"):
+                if strategy_key and strategy_key != "Q7_RSI_PROFILE_V1":
+                    return None
+                strategy_key = "Q7_RSI_PROFILE_V1"
+                value = factor.split(":", 1)[1].upper()
+                parts = value.split("|", 1)
+                if len(parts) != 2 or not all(parts):
+                    return None
+                rule["profile"] = parts[0]
+                rule["alignment_with_system"] = parts[1]
+            elif factor.startswith("VWAP:"):
+                if strategy_key and strategy_key != "Q7_ROLLING_VWAP_REVERSION_V1":
+                    return None
+                strategy_key = "Q7_ROLLING_VWAP_REVERSION_V1"
+                state = factor.split(":", 1)[1].upper()
+                if not state:
+                    return None
+                rule["state"] = state
+                if state.endswith("_LONG"):
+                    rule["direction"] = "LONG"
+                elif state.endswith("_SHORT"):
+                    rule["direction"] = "SHORT"
+            elif factor.startswith("RETEST:"):
+                if strategy_key and strategy_key != "Q7_BREAKOUT_RETEST_V1":
+                    return None
+                strategy_key = "Q7_BREAKOUT_RETEST_V1"
+                state = factor.split(":", 1)[1].upper()
+                if not state:
+                    return None
+                rule["state"] = state
+                if "LONG" in state:
+                    rule["direction"] = "LONG"
+                elif "SHORT" in state:
+                    rule["direction"] = "SHORT"
+            elif factor.startswith("TRENDLINE_STATE:"):
+                state = factor.split(":", 1)[1].upper()
+                key = state_to_trendline.get(state)
+                if not key or (strategy_key and strategy_key != key):
+                    return None
+                strategy_key = key
+                rule["state"] = state
+                if "LONG" in state or state == "TRENDLINE_SUPPORT_BOUNCE":
+                    rule["direction"] = "LONG"
+                elif "SHORT" in state or state == "TRENDLINE_RESISTANCE_REJECTION":
+                    rule["direction"] = "SHORT"
+            elif factor.startswith("ACTION:"):
+                value = factor.split(":", 1)[1].upper()
+                if value not in {"LONG", "SHORT"}:
+                    return None
+                rule["action"] = value
+            elif factor.startswith("TF:"):
+                value = factor.split(":", 1)[1].upper()
+                if not value:
+                    return None
+                rule["timeframe"] = value
+            elif factor.startswith("REGIME:"):
+                value = factor.split(":", 1)[1].upper()
+                if not value:
+                    return None
+                rule["market_regime"] = value
+            else:
+                # Entry/TP/Safety/Cautious/microstructure/etc. are useful for
+                # research, but Commit 8 has no exact runtime predicate for them.
+                # They remain research-only rather than being approximated.
+                return None
+
+        if not strategy_key or not rule:
+            return None
+        signature = json.dumps(rule, sort_keys=True, separators=(",", ":"))
+        return strategy_key, rule, signature
+
+    candidates: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    seen_snapshot = set()
+    for run_idx, row in enumerate(response.data or []):
+        summary = row.get("summary") or {}
+        futures = summary.get("futures_shadow") or {} if isinstance(summary, dict) else {}
+        hypotheses = list(futures.get("priority") or [])
+        for hyp in hypotheses:
+            if not isinstance(hyp, dict) or str(hyp.get("state") or "") != "RESEARCH_PRIORITY":
+                continue
+            parsed = parse_enforceable_predicate(hyp.get("factors") or [])
+            if not parsed:
+                continue
+            key, observation_filter, signature = parsed
+            validation = hyp.get("validation") or {}
+            total = hyp.get("total") or {}
+            vn = _safe_int(validation.get("resolved"), 0)
+            vexp = validation.get("expectancy_r")
+            vpf = validation.get("profit_factor")
+            total_n = _safe_int(total.get("resolved"), 0)
+            total_exp = total.get("expectancy_r")
+            total_pf = total.get("profit_factor")
+            positive = bool(
+                total_n >= 25
+                and vn >= 10
+                and vexp is not None and _safe_float(vexp) >= 0.10
+                and total_exp is not None and _safe_float(total_exp) >= 0.05
+                and (vpf is None or _safe_float(vpf) >= 1.10)
+                and (total_pf is None or _safe_float(total_pf) >= 1.10)
+            )
+            if not positive:
+                continue
+
+            candidate_key = (key, signature)
+            item = candidates.setdefault(candidate_key, {
+                "positive_snapshots": 0,
+                "latest_validation_n": 0,
+                "latest_validation_expectancy_r": None,
+                "latest_validation_profit_factor": None,
+                "latest_total_n": 0,
+                "latest_total_expectancy_r": None,
+                "latest_total_profit_factor": None,
+                "latest_label": None,
+                "latest_at": None,
+                "observation_filter": observation_filter,
+                "filter_signature": signature,
+            })
+            marker = (run_idx, key, signature)
+            if marker not in seen_snapshot:
+                seen_snapshot.add(marker)
+                item["positive_snapshots"] += 1
+            if item["latest_at"] is None:
+                item.update({
+                    "latest_validation_n": vn,
+                    "latest_validation_expectancy_r": _safe_float(vexp),
+                    "latest_validation_profit_factor": _safe_float(vpf, None) if vpf is not None else None,
+                    "latest_total_n": total_n,
+                    "latest_total_expectancy_r": _safe_float(total_exp, None),
+                    "latest_total_profit_factor": _safe_float(total_pf, None) if total_pf is not None else None,
+                    "latest_label": hyp.get("label"),
+                    "latest_at": row.get("created_at"),
+                })
+
+    # Only one predicate can own the broad registry key at a time. Choose the
+    # predicate with the strongest repeated time-separated evidence; ties use
+    # validation sample and expectancy. Once CHALLENGER/CANARY, transition code
+    # pins the predicate in config so later cycles cannot silently swap subtype.
+    out: Dict[str, Dict[str, Any]] = {}
+    for (key, _signature), item in candidates.items():
+        score = (
+            _safe_int(item.get("positive_snapshots"), 0),
+            _safe_int(item.get("latest_validation_n"), 0),
+            _safe_float(item.get("latest_validation_expectancy_r"), -999.0),
+        )
+        current = out.get(key)
+        if current is None or score > current.get("_score", (-1, -1, -999.0)):
+            out[key] = {**item, "_score": score}
+    for item in out.values():
+        item.pop("_score", None)
+    return out
+
 def _bounded_q7_live_evidence(db, limit: int = 600) -> Dict[str, Dict[str, Any]]:
     """Compact live Q7 evidence used only for governance, never official KPIs."""
     if not getattr(db, "enabled", False):
@@ -715,32 +929,49 @@ def _bounded_q7_live_evidence(db, limit: int = 600) -> Dict[str, Dict[str, Any]]
         if learning.get("cohort") != "FUTURES_PERPETUAL_REAL_CLOSED_V1":
             continue
         q7 = learning.get("q7_strategy_lab_shadow") or {}
-        if not isinstance(q7, dict) or not q7.get("shadow_only", False):
-            continue
-        strategies = q7.get("strategies") or {}
-        if not isinstance(strategies, dict):
+        trendline = learning.get("trendline_strategy_lab_shadow") or {}
+        strategy_sets = []
+        if isinstance(q7, dict) and q7.get("shadow_only", False):
+            q7_strategies = q7.get("strategies") or {}
+            if isinstance(q7_strategies, dict):
+                strategy_sets.append(q7_strategies)
+        if isinstance(trendline, dict) and trendline.get("shadow_only", False):
+            tl_strategies = trendline.get("strategies") or {}
+            if isinstance(tl_strategies, dict):
+                strategy_sets.append(tl_strategies)
+        if not strategy_sets:
             continue
         status = str(signal.get("status") or "").lower()
         if status not in {"tp_hit", "sl_hit"}:
             continue
         final_action = str(signal.get("action_normalized") or "")
         r_value = max(0.0, _safe_float(signal.get("risk_reward"), 0.0)) if status == "tp_hit" else -1.0
-        for strategy in strategies.values():
-            if not isinstance(strategy, dict):
-                continue
-            key = str(strategy.get("name") or "")
-            if key not in _RESEARCH_TO_REGISTRY.values():
-                continue
-            direction = str(strategy.get("direction") or "NEUTRAL").upper()
-            if direction not in {"LONG", "SHORT"} or direction != final_action:
-                continue
-            item = agg[key]
-            item["n"] += 1
-            item["tp"] += int(status == "tp_hit")
-            item["sl"] += int(status == "sl_hit")
-            item["r_sum"] += r_value
-            item["gross_win"] += max(0.0, r_value)
-            item["gross_loss"] += abs(min(0.0, r_value))
+        for strategies in strategy_sets:
+            for strategy in strategies.values():
+                if not isinstance(strategy, dict):
+                    continue
+                key = str(strategy.get("name") or "")
+                if key not in {
+                    "Q7_RSI_PROFILE_V1",
+                    "Q7_ROLLING_VWAP_REVERSION_V1",
+                    "Q7_BREAKOUT_RETEST_V1",
+                    "TRENDLINE_SUPPORT_REACTION_V1",
+                    "TRENDLINE_RESISTANCE_REACTION_V1",
+                    "TRENDLINE_BREAK_RETEST_LONG_V1",
+                    "TRENDLINE_BREAK_RETEST_SHORT_V1",
+                    "TRENDLINE_FIB_CONFLUENCE_V1",
+                }:
+                    continue
+                direction = str(strategy.get("direction") or "NEUTRAL").upper()
+                if direction not in {"LONG", "SHORT"} or direction != final_action:
+                    continue
+                item = agg[key]
+                item["n"] += 1
+                item["tp"] += int(status == "tp_hit")
+                item["sl"] += int(status == "sl_hit")
+                item["r_sum"] += r_value
+                item["gross_win"] += max(0.0, r_value)
+                item["gross_loss"] += abs(min(0.0, r_value))
 
     out: Dict[str, Dict[str, Any]] = {}
     for key, item in agg.items():
@@ -756,10 +987,21 @@ def _bounded_q7_live_evidence(db, limit: int = 600) -> Dict[str, Dict[str, Any]]
     return out
 
 
-def _transition_strategy_registry(db, research: Dict[str, Dict[str, Any]], live: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _transition_strategy_registry(
+    db,
+    research: Dict[str, Dict[str, Any]],
+    live: Dict[str, Dict[str, Any]],
+    governance: Optional[Dict[str, Any]] = None,
+    edge: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
     changes: List[Dict[str, Any]] = []
     if not getattr(db, "enabled", False):
         return changes
+    governance = governance or _governance_status(db)
+    strategy_veto_allowed = bool(
+        governance.get("strategy_veto_authority_allowed", False)
+    )
+    edge = edge or {}
     try:
         response = db.client.table("strategy_registry").select("*").limit(200).execute()
         rows = response.data or []
@@ -780,12 +1022,52 @@ def _transition_strategy_registry(db, research: Dict[str, Dict[str, Any]], live:
         live_n = _safe_int(l.get("n"), 0)
         live_exp = l.get("expectancy_r")
         live_pf = l.get("profit_factor")
+        e = edge.get(key) or {}
+        edge_positive_snapshots = _safe_int(e.get("positive_snapshots"), 0)
+        edge_val_n = _safe_int(e.get("latest_validation_n"), 0)
+        edge_val_exp = e.get("latest_validation_expectancy_r")
+        edge_val_pf = e.get("latest_validation_profit_factor")
+        edge_total_n = _safe_int(e.get("latest_total_n"), 0)
+        edge_total_exp = e.get("latest_total_expectancy_r")
+        edge_filter = e.get("observation_filter") or {}
+        edge_signature = str(e.get("filter_signature") or "")
+        existing_config = row.get("config") or {}
+        if not isinstance(existing_config, dict):
+            existing_config = {}
+        existing_filter = existing_config.get("observation_filter") or {}
+        if not isinstance(existing_filter, dict):
+            existing_filter = {}
+        existing_signature = (
+            json.dumps(existing_filter, sort_keys=True, separators=(",", ":"))
+            if existing_filter else ""
+        )
+        # Once a strategy reaches CANARY, its validated subtype predicate is
+        # pinned. A later run cannot silently swap FAST|ALIGNED for another RSI
+        # subtype under the same broad registry key.
+        predicate_compatible = bool(
+            edge_filter
+            and (not existing_signature or existing_signature == edge_signature)
+        )
+        edge_positive = bool(
+            predicate_compatible
+            and edge_positive_snapshots >= 1
+            and edge_total_n >= 25
+            and edge_val_n >= 10
+            and edge_val_exp is not None and _safe_float(edge_val_exp) >= 0.10
+            and edge_total_exp is not None and _safe_float(edge_total_exp) >= 0.05
+            and (edge_val_pf is None or _safe_float(edge_val_pf) >= 1.10)
+        )
 
-        research_positive = bool(
+        historical_research_positive = bool(
             val_n >= MIN_RESEARCH_VALIDATION_N
             and val_exp is not None and _safe_float(val_exp) >= MIN_RESEARCH_EXPECTANCY_R
             and (val_pf is None or _safe_float(val_pf) >= MIN_RESEARCH_PF)
         )
+        research_positive = bool(historical_research_positive or edge_positive)
+        # Historical replay can nominate a broad family as CHALLENGER, but only
+        # an exact Commit-7 predicate with repeated time-separated evidence can
+        # reach CANARY/ACTIVE. This prevents broad-family overpromotion.
+        repeated_edge_positive = bool(edge_positive and edge_positive_snapshots >= 2)
         live_positive = bool(
             live_n >= MIN_LIVE_STRATEGY_N
             and live_exp is not None and _safe_float(live_exp) >= MIN_LIVE_EXPECTANCY_R
@@ -800,34 +1082,61 @@ def _transition_strategy_registry(db, research: Dict[str, Dict[str, Any]], live:
         reason = None
         if current == "SHADOW" and research_positive:
             new_state = "CHALLENGER"
-            reason = "HISTORICAL_VALIDATION_POSITIVE"
-        elif current == "CHALLENGER" and research_positive and positive_runs >= 2 and val_n >= 50:
+            reason = (
+                "HISTORICAL_VALIDATION_POSITIVE"
+                if historical_research_positive
+                else "EDGE_VALIDATION_POSITIVE_RESEARCH_ONLY"
+            )
+        elif (
+            current == "CHALLENGER"
+            and repeated_edge_positive
+            and edge_total_n >= 25
+            and edge_val_n >= 10
+        ):
             new_state = "CANARY"
-            reason = "REPEATED_OUT_OF_TIME_RESEARCH_POSITIVE"
-        elif current == "CANARY" and research_positive and live_positive:
-            if _positive_authority_enabled():
+            reason = "REPEATED_ENFORCEABLE_EDGE_PREDICATE_POSITIVE"
+        elif current == "CANARY" and edge_positive and live_positive:
+            if strategy_veto_allowed:
                 new_state = "ACTIVE"
-                reason = "RESEARCH_AND_LIVE_SHADOW_EDGE_CONFIRMED"
+                reason = "ENFORCEABLE_EDGE_AND_LIVE_EVIDENCE_CONFIRMED_VETO_ONLY"
             else:
                 new_state = "CANARY"
-                reason = "POSITIVE_AUTHORITY_BLOCKED_PENDING_COMPLETE_NET_EVIDENCE"
+                reason = "GLOBAL_COVERAGE_GATE_BLOCKS_ACTIVE_VETO"
         elif current == "ACTIVE" and live_degraded:
             new_state = "DEGRADED"
             reason = "LIVE_EDGE_DEGRADED"
-        elif current == "DEGRADED" and research_positive and live_positive:
+        elif current == "ACTIVE" and not strategy_veto_allowed:
+            # Global evidence became incomplete/stale: fail closed immediately.
+            new_state = "CANARY"
+            reason = "GLOBAL_GOVERNANCE_GATE_CLOSED"
+        elif current == "DEGRADED" and edge_positive and live_positive:
             new_state = "CANARY"
             reason = "RECOVERY_REQUIRES_CANARY_REVALIDATION"
 
         evidence = {
             "research": r,
+            "edge_discovery": e,
             "live_shadow": l,
+            "global_governance": {
+                "strategy_veto_authority_allowed": strategy_veto_allowed,
+                "risk_growth_allowed": False,
+                "block_reasons": list(governance.get("block_reasons") or []),
+            },
             "governance_version": STRATEGY_GOVERNANCE_VERSION,
             "reason": reason or "NO_TRANSITION",
         }
         if new_state != current:
             try:
+                next_config = dict(existing_config)
+                # Pin the exact runtime predicate when a strategy advances into
+                # CANARY. ACTIVE may only consume this explicit filter.
+                if new_state in {"CANARY", "ACTIVE"} and edge_positive and edge_filter:
+                    next_config["observation_filter"] = dict(edge_filter)
+                    next_config["filter_signature"] = edge_signature
+                    next_config["authority_mode"] = "CONFLICT_VETO_ONLY"
                 db.client.table("strategy_registry").update({
                     "state": new_state,
+                    "config": next_config,
                     "evidence": evidence,
                     "version": STRATEGY_GOVERNANCE_VERSION,
                     "updated_at": _now_iso(),
@@ -895,12 +1204,33 @@ def run_autopilot_cycle(db=None, price_fetcher=None) -> Dict[str, Any]:
         "strategy_transitions": [],
         "execution_rows": 0,
         "auto_research": {},
+        "promotion_governance": {},
         "reason": None,
         "timestamp": _now_iso(),
     }
     if db is None or not getattr(db, "enabled", False):
         result["reason"] = "SUPABASE_DISABLED"
         return result
+
+    # Commit 8: refresh one persisted global gate before any positive authority
+    # is considered. This is the only heavy governance read; per-signal reads use
+    # the cached singleton state. Failure closes positive authority, never PROTECT.
+    try:
+        from promotion_governance import refresh_promotion_governance
+        result["promotion_governance"] = refresh_promotion_governance(db)
+        invalidate_profile_cache()
+        try:
+            from strategy_registry import invalidate_registry_cache
+            invalidate_registry_cache()
+        except Exception:
+            pass
+    except Exception as governance_error:
+        result["promotion_governance"] = {
+            "quality_optimization_allowed": False,
+            "strategy_veto_authority_allowed": False,
+            "risk_growth_allowed": False,
+            "block_reasons": [f"GOVERNANCE_REFRESH_FAILED:{type(governance_error).__name__}"],
+        }
 
     # Research runs sequentially inside the caller's existing heavy-analysis
     # turn. It never spawns threads and processes only one symbol/TF per cycle.
@@ -921,9 +1251,17 @@ def run_autopilot_cycle(db=None, price_fetcher=None) -> Dict[str, Any]:
     result["profiles_updated"] = profiles_updated
 
     research = _research_evidence(db)
+    edge = _edge_family_evidence(db)
     live = _bounded_q7_live_evidence(db)
-    result["strategy_transitions"] = _transition_strategy_registry(db, research, live)
+    result["strategy_transitions"] = _transition_strategy_registry(
+        db,
+        research,
+        live,
+        result.get("promotion_governance") or {},
+        edge,
+    )
     result["research_evidence"] = research
+    result["edge_strategy_evidence"] = edge
     result["live_strategy_evidence"] = live
     result["success"] = True
     result["reason"] = "OK"
@@ -936,15 +1274,18 @@ def get_autopilot_status(db=None) -> Dict[str, Any]:
             from supabase_client import supabase_db as db
         except Exception:
             db = None
+    governance = _governance_status(db)
     status = {
         "version": AUTOPILOT_VERSION,
         "enabled": bool(db is not None and getattr(db, "enabled", False)),
-        "positive_authority_enabled": _positive_authority_enabled(),
+        "positive_authority_enabled": bool(governance.get("quality_optimization_allowed", False)),
         "positive_authority_reason": (
-            "ENABLED_BY_EXPLICIT_GATE"
-            if _positive_authority_enabled()
-            else "BLOCKED_PENDING_COMPLETE_NET_EVIDENCE"
+            "EVIDENCE_GATE_OPEN"
+            if governance.get("quality_optimization_allowed", False)
+            else "EVIDENCE_GATE_CLOSED"
         ),
+        "risk_growth_enabled": False,
+        "promotion_governance": governance,
         "profiles": [],
         "strategies": [],
         "recent_events": [],

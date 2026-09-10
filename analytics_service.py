@@ -12,6 +12,7 @@ from collections import defaultdict
 
 from supabase_client import supabase_db
 from edge_discovery import build_edge_discovery_summary
+from promotion_governance import get_promotion_governance_status
 
 logger = logging.getLogger('ANALYTICS')
 # ============================================================================
@@ -2141,16 +2142,24 @@ class AnalyticsService:
             1 for signal in spot
             if str(signal.get('status') or '').lower() in ('tp_hit', 'sl_hit')
         )
-        observatory_reasons = []
-        if not bool(coverage.get('complete', False)):
-            observatory_reasons.append('COHORTE_INCOMPLETA')
-        if resolved_futures < 25:
-            observatory_reasons.append(f'FUTURES_{resolved_futures}_DE_25_RESUELTAS')
+
+        # Commit 8: use the persisted lightweight full-window governance probe
+        # rather than reinterpreting this heavier Analytics read as authority.
+        try:
+            promotion_governance = get_promotion_governance_status(self.db)
+        except Exception as governance_error:
+            promotion_governance = {
+                'quality_optimization_allowed': False,
+                'strategy_veto_authority_allowed': False,
+                'risk_growth_allowed': False,
+                'block_reasons': [f'GOVERNANCE_UNAVAILABLE:{type(governance_error).__name__}'],
+                'coverage': {'complete': False},
+                'evidence': {},
+            }
+
+        observatory_reasons = list(promotion_governance.get('block_reasons') or [])
         if resolved_spot < 25:
             observatory_reasons.append(f'SPOT_{resolved_spot}_DE_25_RESUELTAS')
-        # Costes realizados todavía no están disponibles de forma uniforme
-        # en signal_results; no inventamos comisión/slippage/funding.
-        observatory_reasons.append('PNL_NETO_REALIZADO_AUN_NO_VERIFICABLE')
 
         return {
             'version':
@@ -2214,14 +2223,17 @@ class AnalyticsService:
             # ninguna decisión. La promoción permanece bloqueada mientras
             # la cohorte/costes no sean verificables.
             'learning_observatory_v1': {
-                'version': 'COMMIT6_LEARNING_OBSERVATORY_V1',
-                'diagnostic_only': True,
-                'calibration_allowed': False,
-                'promotion_allowed': False,
+                'version': 'COMMIT8_LEARNING_GOVERNANCE_V1',
+                'diagnostic_only': False,
+                # Positive authority here means quality selection only. It never
+                # lowers Safety and Commit 8 never grows leverage.
+                'calibration_allowed': bool(promotion_governance.get('quality_optimization_allowed', False)),
+                'promotion_allowed': bool(promotion_governance.get('strategy_veto_authority_allowed', False)),
                 'leverage_growth_allowed': False,
                 'block_reasons': observatory_reasons,
-                'coverage_complete': bool(coverage.get('complete', False)),
-                'coverage': dict(coverage),
+                'coverage_complete': bool((promotion_governance.get('coverage') or {}).get('complete', False)),
+                'coverage': dict(promotion_governance.get('coverage') or {}),
+                'promotion_governance': promotion_governance,
                 'resolved': {
                     'spot': resolved_spot,
                     'futures_official': resolved_futures
