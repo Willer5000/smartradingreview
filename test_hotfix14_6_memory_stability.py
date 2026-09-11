@@ -53,7 +53,7 @@ class Hotfix146MemoryStabilityTests(unittest.TestCase):
         self.assertNotIn("/tmp/entry_alerts_sent.json", app_source)
         self.assertNotIn("/tmp/guardian_telegram_events.json", app_source)
         self.assertIn("runtime_snapshots_v1", inspect.getsource(rp))
-        self.assertIn("l_attr:context->learning->strategy_attribution_v2", analytics_source)
+        self.assertIn("analytics_quality_v2_compact_v1", analytics_source)
         self.assertNotIn("select('*, signal_results(*)')", analytics_source)
 
     def test_v1_anti_sweep_logic_is_preserved(self):

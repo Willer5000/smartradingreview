@@ -29523,26 +29523,14 @@ def api_futures_analyze():
                     cached_result = ((_futures_analysis_cache.get('data') or {}).get('analysis') or {}).get((symbol, timeframe))
             except Exception:
                 cached_result = None
-            if cached_result:
-                analysis_status = _classify_futures_analysis_result(
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    result=cached_result,
-                    lifecycle={},
-                    min_confidence=0
-                )
-                return jsonify({
-                    'success': True,
-                    'data': cached_result,
-                    'analysis_status': analysis_status,
-                    'cached': True,
-                    'busy': True,
-                    'message': 'Servidor en modo memoria segura; se sirve el último snapshot.'
-                }), 200
+            # El snapshot runtime es intencionalmente demasiado compacto para
+            # dibujar velas/indicadores. No devolverlo como si fuese un análisis
+            # completo: el frontend reintenta cuando quede libre el slot pesado.
             return jsonify({
                 'success': False,
                 'busy': True,
-                'error': 'Análisis pesado ocupado o sin margen de memoria. Reintenta en unos segundos.'
+                'cached_summary_available': bool(cached_result),
+                'error': 'Futures está actualizando otra combinación. Reintentando para cargar gráficos completos.'
             }), 503
 
         try:
@@ -29557,8 +29545,25 @@ def api_futures_analyze():
                     symbol,
                     timeframe
                 )
-                if _LOW_MEMORY_MODE:
-                    result = _compact_futures_runtime_result(result)
+                # IMPORTANT: cache and browser have different contracts.
+                # Runtime snapshots stay compact, but the browser needs df +
+                # indicators to render Futures charts. Keep only one transient
+                # chart-capable payload; never store it in the 30-combo cache.
+                ui_result = _compact_futures_ui_result(result)
+
+                try:
+                    runtime_result = _compact_futures_runtime_result(result)
+                    with _futures_analysis_cache['lock']:
+                        current_data = dict(_futures_analysis_cache.get('data') or {})
+                        current_analysis = dict(current_data.get('analysis') or {})
+                        current_analysis[(symbol, timeframe)] = runtime_result
+                        current_data['analysis'] = current_analysis
+                        current_data.setdefault('errors', [])
+                        current_data.setdefault('lifecycle', {})
+                        _futures_analysis_cache['data'] = current_data
+                        _futures_analysis_cache['ts'] = time.time()
+                except Exception as cache_error:
+                    print(f'⚠️ [FUT UI] No se pudo actualizar snapshot compacto: {cache_error}')
         finally:
             _release_heavy_analysis(heavy_owner)
 
@@ -29583,7 +29588,7 @@ def api_futures_analyze():
         # Envolver en formato consistente con /api/analyze
         return jsonify({
             'success': result.get('success', True),
-            'data': result if result.get('success') else None,
+            'data': ui_result if result.get('success') else None,
             'analysis_status': analysis_status,
             'error': result.get('error')
         })
@@ -29793,6 +29798,54 @@ def _compact_futures_runtime_result(result):
             }
 
     return compact
+
+
+def _compact_futures_ui_result(result):
+    """Return the chart-capable Futures payload without research-only bulk.
+
+    Hotfix 14.7 correctly made the *runtime cache* tiny, but the same compact
+    object was accidentally returned to the browser.  ``script.js`` needs the
+    top-level ``df`` plus structure/momentum/volume/volatility objects to draw
+    the Futures charts.  This helper preserves presentation data for ONE
+    on-demand request while dropping duplicate/research-only branches that must
+    not accumulate in the Gunicorn heap.
+    """
+    if not isinstance(result, dict):
+        return result
+
+    ui = dict(result)
+
+    # Durable research/audit layers are already stored by ReviewTrader and are
+    # not required to render the trading screen.
+    for key in (
+        'trader_intelligence_v2',
+        'execution_challenger_lab',
+        'dynamic_expert_committee_v1',
+        'self_calibration_v1',
+    ):
+        ui.pop(key, None)
+
+    # ``structure.df`` duplicates the top-level chart frame on some code paths.
+    structure = ui.get('structure')
+    if isinstance(structure, dict):
+        structure = dict(structure)
+        structure.pop('df', None)
+        ui['structure'] = structure
+
+    # Keep committee summary/reasons but not the full per-trader vote dump in
+    # the HTTP chart payload.  The audit is persisted and active/previous signal
+    # endpoints expose the compact decision audit separately.
+    decision = ui.get('decision')
+    if isinstance(decision, dict):
+        decision = dict(decision)
+        registry = decision.get('registro_votacion')
+        if isinstance(registry, dict):
+            registry = dict(registry)
+            registry.pop('todos_los_votos', None)
+            decision['registro_votacion'] = registry
+        ui['decision'] = decision
+
+    return ui
 
 
 def _serialize_futures_cache(data):
@@ -33245,6 +33298,38 @@ def _parse_analytics_filters():
 _ANALYTICS_SNAPSHOT_FRESH_SECONDS = max(300, int(os.getenv('ANALYTICS_SNAPSHOT_FRESH_SECONDS', '1800') or 1800))
 
 
+def _analytics_quality_snapshot_usable(data):
+    """Reject fake-empty snapshots produced by an incomplete DB read.
+
+    A legitimately empty *filtered* cohort is safe only when the read proved
+    completion with no errors.  If the database read failed/was truncated and
+    returned zero rows, persisting it for 30 minutes makes Analytics appear to
+    have forgotten its learning even though durable ReviewTrader data remains.
+    """
+    if not isinstance(data, dict):
+        return False
+
+    coverage = data.get('coverage') or {}
+    if not isinstance(coverage, dict):
+        return False
+
+    try:
+        total = int(
+            coverage.get('v2_directional_total')
+            or coverage.get('fetched_rows')
+            or 0
+        )
+    except (TypeError, ValueError):
+        total = 0
+
+    if total > 0:
+        return True
+
+    errors = coverage.get('errors') or []
+    complete = bool(coverage.get('complete'))
+    return complete and not errors
+
+
 def _analytics_snapshot_key(filters):
     import hashlib as _hashlib
     canonical = json.dumps({
@@ -33268,9 +33353,13 @@ def _load_analytics_quality_snapshot(filters, *, allow_expired=True):
         payload = stored.get('payload') or {}
         if not isinstance(payload, dict) or not isinstance(payload.get('data'), dict):
             return None
+        snapshot_data = payload.get('data')
+        if not _analytics_quality_snapshot_usable(snapshot_data):
+            print('⚠️ [ANALYTICS] Snapshot vacío/parcial ignorado; se recalculará desde Supabase.')
+            return None
         ts = float(payload.get('ts') or 0)
         return {
-            'data': payload.get('data'),
+            'data': snapshot_data,
             'age_seconds': max(0, int(time.time() - ts)) if ts else None,
             'expired': bool(stored.get('expired')),
         }
@@ -33280,6 +33369,9 @@ def _load_analytics_quality_snapshot(filters, *, allow_expired=True):
 
 def _save_analytics_quality_snapshot(filters, data):
     try:
+        if not _analytics_quality_snapshot_usable(data):
+            print('⚠️ [ANALYTICS] No se persiste snapshot vacío/parcial de aprendizaje.')
+            return False
         from runtime_persistence import save_runtime_snapshot
         return save_runtime_snapshot(
             'analytics',

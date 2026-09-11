@@ -2816,12 +2816,18 @@ window.runCompleteAnalysis = function() {
             }
         
             if (!response.ok) {
-        
-                throw new Error(
+                const requestError = new Error(
                     data.error
                     || data.message
                     || `Error HTTP ${response.status}`
                 );
+                requestError.status = response.status;
+                requestError.busy = Boolean(
+                    data.busy
+                    || data.deferred
+                );
+                requestError.serverData = data;
+                throw requestError;
             }
         
             return data;
@@ -2858,6 +2864,9 @@ window.runCompleteAnalysis = function() {
                 && data.success === true
                 && data.data
             ) {
+                if (window.IS_FUTURES_PAGE) {
+                    window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = 0;
+                }
                 window.currentAnalysis = data.data;
                 // ============================================================
                 // MOSTRAR TGP
@@ -3049,7 +3058,21 @@ window.runCompleteAnalysis = function() {
                     window.updateConvictionInfo(data.data);
                 }
                 
-                // ============ AHORA OBTENER LOS DATOS DE LOS OTROS DOS PARES SOLO PARA CORRELACIÓN ============
+                // ============ CORRELACIÓN ============
+                // Hotfix 14.9: en FUTURES jamás lanzar aquí los tres análisis
+                // Spot (BTC/PAXG/PAXG-BTC). futures.js tiene su endpoint de
+                // correlación propio. Además de ser conceptualmente incorrecto,
+                // esos tres análisis paralelos recreaban presión de memoria al
+                // entrar en la pestaña Futures.
+                if (window.IS_FUTURES_PAGE) {
+                    if (typeof window.updateCorrelationInfo === 'function') {
+                        window.updateCorrelationInfo({});
+                    }
+                    window.showToast('✅ Análisis Futures completado', 'success');
+                    return;
+                }
+
+                // ============ SPOT: VISTA GLOBAL DE CORRELACIÓN ============
                 console.log('📡 Obteniendo datos de los otros pares para vista global de correlación...');
                 
                 // Determinar qué otros pares necesitamos
@@ -3324,6 +3347,48 @@ window.runCompleteAnalysis = function() {
                 '❌ Error en análisis:',
                 error
             );
+
+            // Hotfix 14.9: en Render Free el worker incremental puede ocupar
+            // unos segundos el único slot pesado. No presentar eso como un
+            // fallo permanente ni dejar Futures sin gráficos: reintentar con
+            // backoff corto, máximo cuatro veces.
+            if (
+                window.IS_FUTURES_PAGE
+                && error?.busy
+            ) {
+                const retryCount = Number(
+                    window.__FUTURES_ANALYSIS_BUSY_RETRIES__ || 0
+                );
+
+                if (retryCount < 4) {
+                    window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = retryCount + 1;
+
+                    const recommendationEl = document.getElementById(
+                        'system-recommendation'
+                    );
+                    if (recommendationEl) {
+                        recommendationEl.innerHTML = `
+                            <div class="alert alert-info mb-0">
+                                <strong>⏳ Futures actualizando datos.</strong>
+                                <div class="small mt-2">
+                                    Se reintentará automáticamente para cargar los gráficos completos.
+                                </div>
+                            </div>
+                        `;
+                    }
+
+                    window.setTimeout(() => {
+                        if (typeof window.runCompleteAnalysis === 'function') {
+                            window.runCompleteAnalysis();
+                        }
+                    }, 4500);
+                    return;
+                }
+            }
+
+            if (window.IS_FUTURES_PAGE) {
+                window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = 0;
+            }
 
             // ============================================================
             // EVITAR CARGA INFINITA EN LA INTERFAZ
