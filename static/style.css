@@ -1013,12 +1013,15 @@ body.trading-app .dropdown-menu-dark {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: .5rem;
-    padding-top: .55rem;
-    padding-bottom: .55rem;
+    gap: .75rem;
+    padding: .68rem .95rem;
+}
+.action-now-header h6 {
+    font-size: .92rem;
+    line-height: 1.25;
 }
 .action-now-health {
-    font-size: .68rem;
+    font-size: .70rem;
     white-space: nowrap;
 }
 .action-now-health .fa-circle {
@@ -1027,18 +1030,18 @@ body.trading-app .dropdown-menu-dark {
     vertical-align: middle;
 }
 .action-now-viewport {
-    min-height: 44px;
-    max-height: 44px;
+    min-height: 58px;
+    max-height: 74px;
     display: flex;
     align-items: center;
     overflow: hidden;
-    padding: .45rem .75rem;
+    padding: .68rem 1rem;
     border-top: 1px solid rgba(255,255,255,.05);
 }
 .action-now-message {
     width: 100%;
-    font-size: .78rem;
-    line-height: 1.35;
+    font-size: .82rem;
+    line-height: 1.48;
     color: var(--text-secondary);
     transform: translateY(0);
     opacity: 1;
@@ -1170,11 +1173,20 @@ body.trading-app .dropdown-menu-dark {
         padding-left: .3rem;
         padding-right: .3rem;
     }
-    .action-now-header h6 { font-size: .83rem; }
+    .action-now-header {
+        gap: .45rem;
+        padding: .62rem .75rem;
+    }
+    .action-now-header h6 { font-size: .86rem; }
     .action-now-health { font-size: .62rem; }
     .action-now-viewport {
-        min-height: 50px;
-        max-height: 50px;
+        min-height: 58px;
+        max-height: 78px;
+        padding: .62rem .78rem;
+    }
+    .action-now-message {
+        font-size: .79rem;
+        line-height: 1.44;
     }
     .correlation-chip-row {
         display: grid;

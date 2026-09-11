@@ -26542,194 +26542,69 @@ _PREV_SIGNALS_COMPUTING = {
 }
 
 # ============================================================================
-# SPOT SIGNALS CACHE — PERSISTENCIA LIVIANA ENTRE RECICLOS DE GUNICORN
+# SPOT SIGNALS CACHE — PERSISTENCIA EN SUPABASE (HOTFIX 14.6)
 # ============================================================================
 #
-# Futures ya conserva un snapshot en /tmp. Spot no lo hacía: después de cada
-# reciclo/deploy el frontend podía quedar en "preparando" hasta terminar de
-# nuevo todo el lote pesado.
-#
-# Este snapshot sólo guarda los diccionarios compactos usados por los paneles.
-# NO guarda DataFrames, indicadores completos ni cambia decisiones.
+# Render Free usa disco efímero y 512 MB de RAM. Los snapshots compactos que
+# deben sobrevivir a reciclados ya no se escriben en /tmp: se guardan en una
+# única fila JSONB de runtime_snapshots_v1. El caché caliente en RAM sigue
+# existiendo porque el frontend lo necesita, pero queda estrictamente acotado.
 # ============================================================================
 
-_SPOT_SIGNALS_CACHE_FILE = (
-    '/tmp/smartradingreview_spot_signals_cache.json'
-)
-
-_SPOT_SIGNALS_CACHE_MAX_AGE = (
-    24 * 60 * 60
-)
+_SPOT_SIGNALS_CACHE_MAX_AGE = 24 * 60 * 60
 
 
 def _save_spot_signals_cache_to_disk():
+    """Compat name: persistence is Supabase, not Render disk."""
     try:
-        previous = getattr(
-            expert_system,
-            'prev_signals_cache',
-            None
-        )
-
-        active = getattr(
-            expert_system,
-            'spot_active_signals_cache',
-            None
-        )
-
-        if (
-            previous is None
-            and active is None
-        ):
+        from runtime_persistence import save_runtime_snapshot
+        previous = getattr(expert_system, 'prev_signals_cache', None)
+        active = getattr(expert_system, 'spot_active_signals_cache', None)
+        if previous is None and active is None:
             return False
-
         payload = {
             'ts': time.time(),
-            'previous': (
-                previous
-                if isinstance(previous, dict)
-                else None
-            ),
-            'active': (
-                active
-                if isinstance(active, dict)
-                else None
-            )
+            'previous': previous if isinstance(previous, dict) else None,
+            'active': active if isinstance(active, dict) else None,
         }
-
-        temp_file = (
-            _SPOT_SIGNALS_CACHE_FILE
-            + '.tmp'
+        return save_runtime_snapshot(
+            'spot', 'signals_cache', payload, ttl_seconds=_SPOT_SIGNALS_CACHE_MAX_AGE
         )
-
-        with open(
-            temp_file,
-            'w',
-            encoding='utf-8'
-        ) as file_handle:
-            json.dump(
-                payload,
-                file_handle,
-                ensure_ascii=False,
-                separators=(',', ':')
-            )
-
-        os.replace(
-            temp_file,
-            _SPOT_SIGNALS_CACHE_FILE
-        )
-
-        return True
-
     except Exception as cache_error:
-        print(
-            "⚠️ [SPOT CACHE] No se pudo guardar snapshot: "
-            f"{cache_error}"
-        )
-
+        print(f"⚠️ [SPOT CACHE] No se pudo persistir snapshot: {cache_error}")
         return False
 
 
 def _load_spot_signals_cache_from_disk():
+    """Compat name: restore the compact cache from Supabase."""
     try:
-        if not os.path.exists(
-            _SPOT_SIGNALS_CACHE_FILE
-        ):
-            print(
-                "📂 [SPOT CACHE] Sin snapshot previo."
-            )
+        from runtime_persistence import load_runtime_snapshot
+        stored = load_runtime_snapshot('spot', 'signals_cache', allow_expired=False)
+        payload = (stored or {}).get('payload') or {}
+        if not payload:
+            print('📂 [SPOT CACHE] Sin snapshot persistido.')
             return False
-
-        with open(
-            _SPOT_SIGNALS_CACHE_FILE,
-            'r',
-            encoding='utf-8'
-        ) as file_handle:
-            payload = (
-                json.load(
-                    file_handle
-                )
-                or {}
-            )
-
-        cache_ts = float(
-            payload.get(
-                'ts',
-                0
-            )
-            or 0
-        )
-
-        age = (
-            time.time()
-            - cache_ts
-        )
-
-        if (
-            cache_ts <= 0
-            or age > _SPOT_SIGNALS_CACHE_MAX_AGE
-        ):
-            print(
-                "📂 [SPOT CACHE] Snapshot demasiado viejo; "
-                "se recalculará."
-            )
+        cache_ts = float(payload.get('ts') or 0)
+        age = time.time() - cache_ts if cache_ts else 999999
+        if cache_ts <= 0 or age > _SPOT_SIGNALS_CACHE_MAX_AGE:
+            print('📂 [SPOT CACHE] Snapshot persistido viejo; se recalculará.')
             return False
-
         loaded_any = False
-
-        previous = payload.get(
-            'previous'
-        )
-
-        if isinstance(
-            previous,
-            dict
-        ):
-            setattr(
-                expert_system,
-                'prev_signals_cache',
-                previous
-            )
-            setattr(
-                expert_system,
-                'prev_signals_cache_time',
-                cache_ts
-            )
+        previous = payload.get('previous')
+        if isinstance(previous, dict):
+            setattr(expert_system, 'prev_signals_cache', previous)
+            setattr(expert_system, 'prev_signals_cache_time', cache_ts)
             loaded_any = True
-
-        active = payload.get(
-            'active'
-        )
-
-        if isinstance(
-            active,
-            dict
-        ):
-            setattr(
-                expert_system,
-                'spot_active_signals_cache',
-                active
-            )
-            setattr(
-                expert_system,
-                'spot_active_signals_cache_time',
-                cache_ts
-            )
+        active = payload.get('active')
+        if isinstance(active, dict):
+            setattr(expert_system, 'spot_active_signals_cache', active)
+            setattr(expert_system, 'spot_active_signals_cache_time', cache_ts)
             loaded_any = True
-
         if loaded_any:
-            print(
-                "📂 [SPOT CACHE] Snapshot restaurado "
-                f"({int(age)}s de antigüedad)."
-            )
-
+            print(f"📂 [SPOT CACHE] Snapshot Supabase restaurado ({int(age)}s).")
         return loaded_any
-
     except Exception as cache_error:
-        print(
-            "⚠️ [SPOT CACHE] No se pudo restaurar snapshot: "
-            f"{cache_error}"
-        )
-
+        print(f"⚠️ [SPOT CACHE] No se pudo restaurar snapshot: {cache_error}")
         return False
 
 
@@ -26795,12 +26670,12 @@ def _env_mb(name, default):
         return float(default)
 
 
-_MEMORY_SOFT_LIMIT_MB = _env_mb('MEMORY_SOFT_LIMIT_MB', 390)
+_MEMORY_SOFT_LIMIT_MB = _env_mb('MEMORY_SOFT_LIMIT_MB', 325)
 _MEMORY_HARD_LIMIT_MB = max(
     _MEMORY_SOFT_LIMIT_MB + 16.0,
-    _env_mb('MEMORY_HARD_LIMIT_MB', 455),
+    _env_mb('MEMORY_HARD_LIMIT_MB', 395),
 )
-_MEMORY_ANALYSIS_CACHE_KEEP = max(2, int(os.environ.get('MEMORY_ANALYSIS_CACHE_KEEP', '8') or 8))
+_MEMORY_ANALYSIS_CACHE_KEEP = max(2, int(os.environ.get('MEMORY_ANALYSIS_CACHE_KEEP', '5') or 5))
 
 
 def _process_rss_mb():
@@ -29576,11 +29451,10 @@ def api_futures_analyze_all(timeframe):
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
 
-# v22.9.3: caché en RAM + persistencia en disco para sobrevivir reciclos del
-# worker gunicorn (--max-requests 200). Antes: al reciclar el worker, el
-# cache se perdía → durante ~2 min (warmup) el frontend veía lista vacía y
-# las alertas ENTRY_TOCADO no podían dispararse. Ahora: al arrancar el nuevo
-# worker se carga el snapshot desde /tmp/ y el frontend tiene datos inmediatos.
+# v22.9.3 / Hotfix 14.6: caché en RAM + snapshot acotado en Supabase para
+# sobrevivir reciclos del worker Gunicorn sin depender del filesystem efímero
+# de Render. El frontend recupera el último snapshot mientras se calienta el
+# nuevo proceso.
 _futures_analysis_cache = {
     'data': None,
     'ts': 0,
@@ -29597,7 +29471,6 @@ _futures_analysis_cache = {
 }
 _futures_correlation_cache = {'data': None, 'ts': 0, 'key': None}
 
-_FUTURES_CACHE_FILE = os.environ.get('FUTURES_CACHE_FILE', '/tmp/futures_analysis_cache.json')
 _FUTURES_CACHE_SCHEMA_VERSION = 2
 _FUTURES_SIGNAL_MAX_WAIT_BARS = 6
 _FUTURES_TF_SECONDS = {
@@ -29664,111 +29537,60 @@ def _deserialize_futures_cache(payload):
 
 
 def _load_futures_cache_from_disk():
-    """
-    Al arrancar el worker, cargar el último snapshot conocido.
-    
-    v22.9.4: log MUY explícito (aparecen en logs de Render) para diagnosticar
-    fallos silenciosos. También aceptamos snapshots más viejos (24h en vez
-    de 4h) porque en Render Free el redeploy puede tardar horas si el
-    servicio duerme por inactividad.
-    """
+    """Compat name: restore Futures snapshot from Supabase, never /tmp."""
     global _futures_analysis_cache
-    print(f"📂 [FUT] Intentando cargar snapshot desde {_FUTURES_CACHE_FILE}...")
+    print('📂 [FUT] Buscando snapshot persistido en Supabase...')
     try:
-        if not os.path.exists(_FUTURES_CACHE_FILE):
-            print(f"📂 [FUT] Sin snapshot previo (archivo no existe) — se hará warmup completo")
+        from runtime_persistence import load_runtime_snapshot
+        stored = load_runtime_snapshot('futures', 'analysis_cache', allow_expired=False)
+        payload = (stored or {}).get('payload') or {}
+        if not payload:
+            print('📂 [FUT] Sin snapshot persistido — se hará warmup acotado')
             return
-        
-        file_size = os.path.getsize(_FUTURES_CACHE_FILE)
-        print(f"📂 [FUT] Archivo encontrado: {file_size} bytes")
-        
-        import json
-        t_start = time.time()
-        with open(_FUTURES_CACHE_FILE, 'r') as f:
-            payload = json.load(f)
-        t_load = time.time() - t_start
-        print(f"📂 [FUT] JSON parseado en {t_load:.2f}s")
-
         schema_version = int(payload.get('schema_version', 0) or 0)
         if schema_version != _FUTURES_CACHE_SCHEMA_VERSION:
-            print(
-                "📂 [FUT] Snapshot con contrato antiguo "
-                f"(v{schema_version}); se ignora para evitar vela abierta"
-            )
+            print(f'📂 [FUT] Snapshot Supabase con contrato v{schema_version}; ignorado')
             return
-        
-        ts = float(payload.get('ts', 0))
-        age = time.time() - ts
-        
-        # v22.9.4: aumentamos ventana a 24h. Los snapshots viejos siguen siendo
-        # útiles como "algo mejor que nada" mientras el warmup nuevo corre.
+        ts = float(payload.get('ts', 0) or 0)
+        age = time.time() - ts if ts else 999999
         if age > 24 * 3600:
-            print(f"📂 [FUT] Snapshot muy viejo ({int(age/3600)}h), ignorado — warmup completo")
+            print(f'📂 [FUT] Snapshot Supabase muy viejo ({int(age/3600)}h); ignorado')
             return
-        
         data = _deserialize_futures_cache(payload.get('data'))
-        if not data:
-            print(f"📂 [FUT] Deserialización falló (data=None) — warmup completo")
+        if not data or not (data.get('analysis') or {}):
+            print('📂 [FUT] Snapshot Supabase vacío; ignorado')
             return
-        n_entries = len(data.get('analysis') or {})
-        if n_entries == 0:
-            print(f"📂 [FUT] Snapshot vacío (0 pares) — ignorado")
-            return
-        
         _futures_analysis_cache['data'] = data
         _futures_analysis_cache['ts'] = ts
-        print(f"✅ [FUT] Snapshot APLICADO: {n_entries} pares en memoria (edad {int(age)}s)")
+        print(f"✅ [FUT] Snapshot Supabase aplicado: {len(data.get('analysis') or {})} pares ({int(age)}s)")
     except Exception as e:
-        import traceback
-        print(f"❌ [FUT] Error cargando snapshot: {e}")
-        traceback.print_exc()
+        print(f'⚠️ [FUT] No se pudo restaurar snapshot Supabase: {e}')
 
 
 def _save_futures_cache_to_disk():
-    """Guarda el snapshot actual del cache. Best-effort."""
+    """Compat name: persist one compact Futures snapshot in Supabase."""
     try:
+        from runtime_persistence import save_runtime_snapshot
         cache = _futures_analysis_cache
         if not cache.get('data'):
-            return
+            return False
         serial_data = _serialize_futures_cache(cache['data'])
         if not serial_data:
-            return
+            return False
         payload = {
             'schema_version': _FUTURES_CACHE_SCHEMA_VERSION,
             'ts': cache.get('ts', time.time()),
             'data': serial_data,
         }
-        import json
-        tmp_path = (
-            f"{_FUTURES_CACHE_FILE}."
-            f"{os.getpid()}."
-            f"{uuid.uuid4().hex}.tmp"
+        ok = save_runtime_snapshot(
+            'futures', 'analysis_cache', payload, ttl_seconds=24 * 3600
         )
-        with open(tmp_path, 'w') as f:
-            json.dump(payload, f)
-        os.replace(tmp_path, _FUTURES_CACHE_FILE)
-        print(f"💾 [FUT] Snapshot guardado ({len(serial_data.get('analysis_serial', {}))} pares)")
+        if ok:
+            print(f"💾 [FUT] Snapshot Supabase guardado ({len(serial_data.get('analysis_serial', {}))} pares)")
+        return ok
     except Exception as e:
-    
-        print(
-            f"⚠️ [FUT] Error guardando snapshot: {e}"
-        )
-    
-        try:
-    
-            if (
-                'tmp_path' in locals()
-                and os.path.exists(
-                    tmp_path
-                )
-            ):
-    
-                os.remove(
-                    tmp_path
-                )
-    
-        except Exception:
-            pass
+        print(f'⚠️ [FUT] Error persistiendo snapshot Supabase: {e}')
+        return False
 
 
 # Cargar al importar el módulo (una vez por worker)
@@ -32966,6 +32788,69 @@ def _parse_analytics_filters():
     }
 
 
+# HOTFIX 14.6 — Analytics must never become an OOM trigger.
+_ANALYTICS_SNAPSHOT_FRESH_SECONDS = max(300, int(os.getenv('ANALYTICS_SNAPSHOT_FRESH_SECONDS', '1800') or 1800))
+
+
+def _analytics_snapshot_key(filters):
+    import hashlib as _hashlib
+    canonical = json.dumps({
+        'symbol': filters.get('symbol'),
+        'timeframe': filters.get('timeframe'),
+        'system_type': filters.get('system_type'),
+        'action': filters.get('action'),
+        'days_back': int(filters.get('days_back', 90) or 90),
+    }, sort_keys=True, separators=(',', ':'))
+    return 'quality_v2_' + _hashlib.sha1(canonical.encode('utf-8')).hexdigest()[:16]
+
+
+def _load_analytics_quality_snapshot(filters, *, allow_expired=True):
+    try:
+        from runtime_persistence import load_runtime_snapshot
+        stored = load_runtime_snapshot(
+            'analytics', _analytics_snapshot_key(filters), allow_expired=allow_expired
+        )
+        if not stored:
+            return None
+        payload = stored.get('payload') or {}
+        if not isinstance(payload, dict) or not isinstance(payload.get('data'), dict):
+            return None
+        ts = float(payload.get('ts') or 0)
+        return {
+            'data': payload.get('data'),
+            'age_seconds': max(0, int(time.time() - ts)) if ts else None,
+            'expired': bool(stored.get('expired')),
+        }
+    except Exception:
+        return None
+
+
+def _save_analytics_quality_snapshot(filters, data):
+    try:
+        from runtime_persistence import save_runtime_snapshot
+        return save_runtime_snapshot(
+            'analytics',
+            _analytics_snapshot_key(filters),
+            {'ts': time.time(), 'filters': dict(filters), 'data': data},
+            ttl_seconds=8 * 3600,
+        )
+    except Exception:
+        return False
+
+
+@app.after_request
+def _memory_cleanup_after_analytics(response):
+    """Release transient Analytics objects before the next request."""
+    try:
+        if request.path.startswith('/api/analytics/'):
+            rss = _process_rss_mb()
+            if rss is None or rss >= (_MEMORY_SOFT_LIMIT_MB - 30):
+                _trim_process_heap()
+    except Exception:
+        pass
+    return response
+
+
 @app.route('/api/analytics/summary')
 def api_analytics_summary():
     """Retorna KPIs globales con filtros opcionales"""
@@ -33003,120 +32888,93 @@ def api_analytics_summary():
 
 @app.route('/api/analytics/quality-v2')
 def api_analytics_quality_v2():
+    """Memory-safe current-quality Analytics.
+
+    A fresh compact snapshot is served directly from Supabase. Recalculation is
+    serialized through the global heavy-job slot and refuses to start near the
+    hard RSS guard. If another heavy job is running, the last snapshot is shown
+    instead of killing the Render instance.
     """
-    Analytics limpio de la generación actual.
-
-    Devuelve por separado:
-
-        SPOT V2
-        FUTURES V2 OFICIAL
-        FUTURES SHADOW
-
-    junto con:
-
-        WR
-        PnL
-        Expectancy R
-        Profit Factor
-        Safety
-        Entry Quality
-        SL Quality
-        TP Quality
-        bandas de Safety.
-    """
-
+    acquired = False
+    data = None
     try:
-
-        svc = (
-            _get_analytics_service()
-        )
-
+        svc = _get_analytics_service()
         if svc is None:
+            return jsonify({'success': False, 'error': 'AnalyticsService no disponible'}), 503
+        filters = _parse_analytics_filters()
+        try:
+            requested_days = int(filters.get('days_back', 90) or 90)
+        except (TypeError, ValueError):
+            requested_days = 90
+        filters['days_back'] = max(1, min(365, requested_days))
 
+        stored = _load_analytics_quality_snapshot(filters, allow_expired=True)
+        if stored and stored.get('age_seconds') is not None and stored['age_seconds'] <= _ANALYTICS_SNAPSHOT_FRESH_SECONDS:
             return jsonify({
-                'success':
-                    False,
+                'success': True, 'data': stored['data'],
+                'cached': True, 'cache_age_seconds': stored['age_seconds'],
+                'timestamp': datetime.now(bolivia_tz).isoformat()
+            })
 
-                'error':
-                    'AnalyticsService no disponible'
+        # Analytics gets at most a short opportunity to compute. Trading and
+        # lifecycle workers always have priority over a dashboard refresh.
+        acquired = _acquire_heavy_analysis('analytics-quality-v2', timeout=2)
+        if not acquired:
+            if stored:
+                return jsonify({
+                    'success': True, 'data': stored['data'], 'cached': True,
+                    'stale': True, 'cache_age_seconds': stored.get('age_seconds'),
+                    'note': 'Snapshot conservado mientras el motor realiza otro trabajo pesado.',
+                    'timestamp': datetime.now(bolivia_tz).isoformat()
+                })
+            return jsonify({
+                'success': False,
+                'deferred': True,
+                'error': 'Analytics pospuesto para proteger la memoria; el trading sigue activo.'
             }), 503
 
-        filters = (
-            _parse_analytics_filters()
-        )
+        if not _memory_pressure_guard('analytics-quality-v2', allow_soft=False):
+            if stored:
+                return jsonify({
+                    'success': True, 'data': stored['data'], 'cached': True, 'stale': True,
+                    'note': 'Se muestra el último snapshot para proteger la memoria.',
+                    'timestamp': datetime.now(bolivia_tz).isoformat()
+                })
+            return jsonify({'success': False, 'deferred': True, 'error': 'Memoria protegida; reintenta en unos minutos.'}), 503
 
-        # ================================================================
-        # GUARDRAIL DE LECTURA
-        # ================================================================
-        #
-        # La interfaz actual permite como máximo 365 días.
-        #
-        # No aceptamos por URL una ventana arbitrariamente enorme porque
-        # Q5 necesita leer context JSON y Render dispone de memoria limitada.
-        # ================================================================
-
-        try:
-
-            requested_days = int(
-                filters.get(
-                    'days_back',
-                    90
-                )
-                or 90
-            )
-
-        except (
-            TypeError,
-            ValueError
-        ):
-
-            requested_days = 90
-
-        filters[
-            'days_back'
-        ] = max(
-            1,
-            min(
-                365,
-                requested_days
-            )
-        )
-
-        data = (
-            svc.get_quality_v2_summary(
-                **filters
-            )
-        )
-
+        data = svc.get_quality_v2_summary(**filters)
+        _save_analytics_quality_snapshot(filters, data)
         return jsonify({
-            'success':
-                True,
-
-            'data':
-                data,
-
-            'timestamp':
-                datetime.now(
-                    bolivia_tz
-                ).isoformat()
+            'success': True, 'data': data, 'cached': False,
+            'timestamp': datetime.now(bolivia_tz).isoformat()
         })
-
     except Exception as e:
-
         import traceback
-
         traceback.print_exc()
+        try:
+            filters = filters if 'filters' in locals() else {'days_back': 90}
+            stored = _load_analytics_quality_snapshot(filters, allow_expired=True)
+            if stored:
+                return jsonify({
+                    'success': True, 'data': stored['data'], 'cached': True, 'stale': True,
+                    'note': f'Fallback snapshot: {type(e).__name__}',
+                    'timestamp': datetime.now(bolivia_tz).isoformat()
+                })
+        except Exception:
+            pass
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        data = None
+        if acquired:
+            _release_heavy_analysis('analytics-quality-v2')
+        else:
+            # Cheap best-effort cleanup after dashboard access.
+            try:
+                _trim_process_heap()
+            except Exception:
+                pass
 
-        return jsonify({
-            'success':
-                False,
 
-            'error':
-                str(
-                    e
-                )
-        }), 500
-        
 @app.route('/api/analytics/strategies')
 def api_analytics_strategies():
     """Ranking de estrategias por win rate"""
@@ -33387,60 +33245,45 @@ def _normalize_candle_start(timeframe, candle_ts):
         return str(candle_ts)
 
 
-# Deduplicación: guarda (symbol, timeframe, candle_start_normalizado) -> timestamp de envío.
-#
-# v22.7 BUGFIX CRÍTICO: antes _entry_alerts_sent era un dict en RAM. Gunicorn
-# reinicia el worker cada 200 requests (--max-requests 200) para liberar
-# memoria → el dict se perdía → todas las señales activas se re-alertaban.
-# Por eso las alertas de 12h/1D llegaban cada 3 min (MONITOR_CHECK_INTERVAL)
-# tras cada reciclo de worker.
-#
-# AHORA: se persiste en /tmp/entry_alerts_sent.json (sobrevive reciclos de
-# worker aunque no reinicios completos de Render). Al arrancar el worker,
-# se carga desde disco. Cada mark_sent hace flush inmediato a disco.
+# Deduplicación ENTRY — HOTFIX 14.6
+# Persistencia durable en Supabase; RAM sólo conserva la ventana caliente.
 _entry_alerts_sent = {}
 _entry_alerts_lock = threading.Lock()
-_ENTRY_ALERTS_FILE = os.environ.get('ENTRY_ALERTS_FILE', '/tmp/entry_alerts_sent.json')
 
 
 def _load_entry_alerts_from_disk():
-    """Carga el dict de dedup desde disco al arrancar. Best-effort."""
+    """Compat name: restore dedup state from Supabase."""
     global _entry_alerts_sent
     try:
-        if os.path.exists(_ENTRY_ALERTS_FILE):
-            import json
-            with open(_ENTRY_ALERTS_FILE, 'r') as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    # Limpiar entradas viejas al cargar (>7 días)
-                    cutoff = time.time() - 7 * 86400
-                    _entry_alerts_sent = {
-                        k: float(v) for k, v in data.items()
-                        if isinstance(v, (int, float)) and float(v) >= cutoff
-                    }
-                    print(f"📂 Cargadas {len(_entry_alerts_sent)} entradas de dedup desde {_ENTRY_ALERTS_FILE}")
+        from runtime_persistence import load_runtime_snapshot
+        stored = load_runtime_snapshot('telegram', 'entry_alerts_dedup', allow_expired=False)
+        data = ((stored or {}).get('payload') or {}).get('events') or {}
+        cutoff = time.time() - 7 * 86400
+        _entry_alerts_sent = {
+            str(k): float(v) for k, v in data.items()
+            if isinstance(v, (int, float)) and float(v) >= cutoff
+        } if isinstance(data, dict) else {}
+        if _entry_alerts_sent:
+            print(f"📂 ENTRY dedup Supabase: {len(_entry_alerts_sent)} eventos.")
     except Exception as e:
-        print(f"⚠️ No se pudo cargar dedup desde disco: {e}")
+        print(f"⚠️ ENTRY dedup Supabase no disponible: {e}")
         _entry_alerts_sent = {}
 
 
 def _save_entry_alerts_to_disk():
-    """Guarda el dict de dedup a disco. Best-effort, no bloquea si falla."""
+    """Compat name: persist bounded dedup state in Supabase."""
     try:
-        import json
-        # Snapshot bajo el lock
+        from runtime_persistence import save_runtime_snapshot
         with _entry_alerts_lock:
             snap = dict(_entry_alerts_sent)
-        # Escribir fuera del lock (I/O no debe bloquear otros threads)
-        tmp_path = _ENTRY_ALERTS_FILE + '.tmp'
-        with open(tmp_path, 'w') as f:
-            json.dump(snap, f)
-        os.replace(tmp_path, _ENTRY_ALERTS_FILE)
+        return save_runtime_snapshot(
+            'telegram', 'entry_alerts_dedup', {'events': snap}, ttl_seconds=8 * 86400
+        )
     except Exception as e:
-        print(f"⚠️ No se pudo guardar dedup a disco: {e}")
+        print(f"⚠️ ENTRY dedup persistencia: {e}")
+        return False
 
 
-# Cargar al importar el módulo (una sola vez por worker)
 _load_entry_alerts_from_disk()
 
 
@@ -35049,18 +34892,13 @@ def ejecutar_analisis_completo(timeframe):
 # - Nunca modifica posiciones, SL, TP o Supabase.
 # - No cambia TELEGRAM_BOT_TOKEN ni TELEGRAM_CHAT_ID.
 #
-# La deduplicación se persiste en /tmp para sobrevivir al reciclado normal
-# del worker de Gunicorn.
+# La deduplicación se persiste como snapshot acotado en Supabase para
+# sobrevivir al reciclado normal del worker de Gunicorn.
 # ============================================================================
 
 GUARDIAN_TELEGRAM_CHECK_INTERVAL = 180       # 3 minutos
 GUARDIAN_TELEGRAM_MIN_INTERVAL = 45 * 60     # 45 min entre gestiones no urgentes
 GUARDIAN_TELEGRAM_RETENTION = 7 * 24 * 3600  # 7 días
-
-_GUARDIAN_TELEGRAM_FILE = os.environ.get(
-    'GUARDIAN_TELEGRAM_FILE',
-    '/tmp/guardian_telegram_events.json'
-)
 
 _guardian_telegram_events = {}
 _guardian_telegram_lock = threading.Lock()
@@ -35218,103 +35056,35 @@ def _telegram_user_has_market_permission(
 # ============================================================================
 
 def _load_guardian_telegram_events():
-
     global _guardian_telegram_events
-
     try:
-
-        if not os.path.exists(
-            _GUARDIAN_TELEGRAM_FILE
-        ):
-            return
-
-        with open(
-            _GUARDIAN_TELEGRAM_FILE,
-            'r'
-        ) as f:
-
-            data = json.load(
-                f
-            )
-
-        if not isinstance(
-            data,
-            dict
-        ):
-            return
-
-        cutoff = (
-            time.time()
-            - GUARDIAN_TELEGRAM_RETENTION
-        )
-
+        from runtime_persistence import load_runtime_snapshot
+        stored = load_runtime_snapshot('telegram', 'guardian_events_dedup', allow_expired=False)
+        data = ((stored or {}).get('payload') or {}).get('events') or {}
+        cutoff = time.time() - GUARDIAN_TELEGRAM_RETENTION
         _guardian_telegram_events = {
-
-            str(key):
-                float(value)
-
-            for key, value
-            in data.items()
-
-            if isinstance(
-                value,
-                (int, float)
-            )
-            and float(value) >= cutoff
-        }
-
-        print(
-            "📂 Guardian Telegram: "
-            f"{len(_guardian_telegram_events)} "
-            "eventos deduplicados cargados."
-        )
-
+            str(key): float(value) for key, value in data.items()
+            if isinstance(value, (int, float)) and float(value) >= cutoff
+        } if isinstance(data, dict) else {}
+        if _guardian_telegram_events:
+            print(f"📂 Guardian Telegram Supabase: {len(_guardian_telegram_events)} eventos deduplicados.")
     except Exception as e:
-
-        print(
-            "⚠️ Guardian Telegram: "
-            f"no se pudo cargar dedup: {e}"
-        )
-
+        print(f"⚠️ Guardian Telegram: no se pudo cargar dedup Supabase: {e}")
         _guardian_telegram_events = {}
 
 
 def _save_guardian_telegram_events():
-
     try:
-
+        from runtime_persistence import save_runtime_snapshot
         with _guardian_telegram_lock:
-
-            snapshot = dict(
-                _guardian_telegram_events
-            )
-
-        tmp_path = (
-            _GUARDIAN_TELEGRAM_FILE
-            + '.tmp'
+            snapshot = dict(_guardian_telegram_events)
+        return save_runtime_snapshot(
+            'telegram', 'guardian_events_dedup', {'events': snapshot},
+            ttl_seconds=GUARDIAN_TELEGRAM_RETENTION + 86400
         )
-
-        with open(
-            tmp_path,
-            'w'
-        ) as f:
-
-            json.dump(
-                snapshot,
-                f
-            )
-
-        os.replace(
-            tmp_path,
-            _GUARDIAN_TELEGRAM_FILE
-        )
-
     except Exception as e:
-
-        print(
-            "⚠️ Guardian Telegram: "
-            f"no se pudo guardar dedup: {e}"
-        )
+        print(f"⚠️ Guardian Telegram: no se pudo persistir dedup Supabase: {e}")
+        return False
 
 
 _load_guardian_telegram_events()

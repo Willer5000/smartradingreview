@@ -114,7 +114,7 @@ _futures_http_session_lock = threading.Lock()
 # inside one refresh but it must never grow without a bound.  Twelve entries
 # cover the hottest short timeframes while keeping the 30-symbol/TF sweep from
 # retaining every DataFrame at once.
-FUTURES_DATA_CACHE_MAX_ENTRIES = max(4, int(os.environ.get('FUTURES_DATA_CACHE_MAX_ENTRIES', '12') or 12))
+FUTURES_DATA_CACHE_MAX_ENTRIES = max(4, int(os.environ.get('FUTURES_DATA_CACHE_MAX_ENTRIES', '8') or 8))
 
 # ============================================================================
 # QUALITY ENGINE Q3A — FUTURES MICROSTRUCTURE SHADOW

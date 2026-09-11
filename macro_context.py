@@ -43,7 +43,7 @@ MACRO_CONTEXT_ENABLED = str(os.getenv("MACRO_CONTEXT_ENABLED", "true")).strip().
 }
 MACRO_NEWS_CACHE_SECONDS = max(300, min(3600, int(os.getenv("MACRO_NEWS_CACHE_SECONDS", "900"))))
 MACRO_CALENDAR_CACHE_SECONDS = max(1800, min(43200, int(os.getenv("MACRO_CALENDAR_CACHE_SECONDS", "21600"))))
-MACRO_NEWS_MAX_ARTICLES = max(5, min(40, int(os.getenv("MACRO_NEWS_MAX_ARTICLES", "20"))))
+MACRO_NEWS_MAX_ARTICLES = max(5, min(24, int(os.getenv("MACRO_NEWS_MAX_ARTICLES", "12"))))
 MACRO_HTTP_TIMEOUT = max(3, min(15, int(os.getenv("MACRO_HTTP_TIMEOUT", "7"))))
 
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
@@ -60,6 +60,7 @@ except Exception:
 NY_TZ = ZoneInfo("America/New_York")
 
 _LOCK = threading.Lock()
+_DB_HYDRATED = False
 _CACHE: Dict[str, object] = {
     "news_fetched_at": 0.0,
     "calendar_fetched_at": 0.0,
@@ -461,6 +462,43 @@ def _fetch_fomc_calendar(now: Optional[datetime] = None) -> List[Dict]:
     return events
 
 
+def _hydrate_cache_from_db_once() -> None:
+    """Restore only still-relevant compact macro rows after a Render restart.
+
+    The DB is the durable store; RAM holds a very small hot window. Failure is
+    harmless because public sources can repopulate it.
+    """
+    global _DB_HYDRATED
+    if _DB_HYDRATED:
+        return
+    _DB_HYDRATED = True
+    try:
+        from runtime_persistence import load_active_macro_events
+        rows = load_active_macro_events(limit=60) or []
+    except Exception:
+        rows = []
+    if not rows:
+        return
+    news = [r for r in rows if str(r.get("kind") or "").upper() == "HEADLINE"][:MACRO_NEWS_MAX_ARTICLES]
+    events = [r for r in rows if str(r.get("kind") or "").upper() == "SCHEDULED_EVENT"][:16]
+    with _LOCK:
+        if news and not _CACHE.get("news"):
+            _CACHE["news"] = news
+        if events and not _CACHE.get("calendar"):
+            _CACHE["calendar"] = events
+
+
+def _persist_macro_cache_best_effort() -> None:
+    try:
+        from runtime_persistence import persist_macro_events
+        with _LOCK:
+            news = list(_CACHE.get("news") or [])[:MACRO_NEWS_MAX_ARTICLES]
+            calendar_rows = list(_CACHE.get("calendar") or [])[:16]
+        persist_macro_events(news, calendar_rows)
+    except Exception as exc:
+        logger.warning("Macro persistence unavailable: %s", exc)
+
+
 def _refresh_news_if_needed(force: bool = False) -> None:
     now_monotonic = time.monotonic()
     with _LOCK:
@@ -476,9 +514,11 @@ def _refresh_news_if_needed(force: bool = False) -> None:
         logger.warning("Macro GDELT no disponible: %s", exc)
     with _LOCK:
         if rows:
-            _CACHE["news"] = rows
+            _CACHE["news"] = rows[:MACRO_NEWS_MAX_ARTICLES]
         _CACHE["news_fetched_at"] = now_monotonic
         _CACHE["errors"] = (list(_CACHE.get("errors") or []) + errors)[-8:]
+    if rows:
+        _persist_macro_cache_best_effort()
 
 
 def _refresh_calendar_if_needed(force: bool = False) -> None:
@@ -500,12 +540,15 @@ def _refresh_calendar_if_needed(force: bool = False) -> None:
     events = sorted(unique.values(), key=lambda row: row.get("scheduled_at") or "")
     with _LOCK:
         if events:
-            _CACHE["calendar"] = events
+            _CACHE["calendar"] = events[:16]
         _CACHE["calendar_fetched_at"] = now_monotonic
         _CACHE["errors"] = (list(_CACHE.get("errors") or []) + errors)[-8:]
+    if events:
+        _persist_macro_cache_best_effort()
 
 
 def refresh_macro_context(force: bool = False) -> Dict:
+    _hydrate_cache_from_db_once()
     if not MACRO_CONTEXT_ENABLED:
         return get_macro_context_snapshot(fetch_if_stale=False)
     _refresh_news_if_needed(force=force)
@@ -571,6 +614,7 @@ def _build_alert_candidates(events: List[Dict], news: List[Dict], now: datetime)
 
 
 def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
+    _hydrate_cache_from_db_once()
     if fetch_if_stale and MACRO_CONTEXT_ENABLED:
         _refresh_news_if_needed(force=False)
         _refresh_calendar_if_needed(force=False)

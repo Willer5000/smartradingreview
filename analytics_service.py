@@ -81,8 +81,14 @@ class AnalyticsService:
         try:
             cutoff = (datetime.utcnow() - timedelta(days=days_back)).isoformat()
             
+            # HOTFIX 14.6: Analytics legacy no necesita el JSON completo de
+            # cada señal. Leer sólo columnas utilizadas evita duplicar decenas de
+            # MB cuando la pestaña abre varios paneles.
             query = (self.db.client.table('signals')
-                     .select('*, signal_indicators(strategy_name), signal_results(status, pnl_pct, exit_price, exit_timestamp)')
+                     .select('id,symbol,timeframe,system_type,action_normalized,status,created_at,'
+                             'entry_price,stop_loss,take_profit,risk_reward,'
+                             'signal_indicators(strategy_name),'
+                             'signal_results(status,pnl_pct,exit_price,exit_timestamp)')
                      .gte('created_at', cutoff)
                      .neq('status', 'pending'))
             
@@ -1683,19 +1689,60 @@ class AnalyticsService:
 
     def _fetch_q5_v2_signals(self, symbol=None, timeframe=None, system_type=None,
                              action=None, days_back=90):
+        """Memory-bounded current-quality read.
+
+        HOTFIX 14.6 stops selecting the full ``context`` JSON for every signal.
+        Only the learning/execution fields actually consumed by Analytics are
+        projected from PostgreSQL. This preserves the same cohort semantics
+        while dramatically lowering peak RSS on Render Free.
+        """
         from q6_integrity import ReadRows, read_pages
         if not self.db.enabled:
             return ReadRows(coverage={'complete': False, 'errors': ['DB_UNAVAILABLE']})
         end = datetime.utcnow()
         cutoff = (end - timedelta(days=max(1, min(int(days_back), 365)))).isoformat()
+
+        # Compact PostgREST projection. JSON sub-objects needed by Edge
+        # Discovery / Trader Intelligence stay intact, but unrelated analysis
+        # layers are never transferred into Python memory.
+        select_fields = (
+            'id,symbol,timeframe,system_type,action_normalized,status,created_at,'
+            'entry_price,stop_loss,take_profit,risk_reward,'
+            'l_cohort:context->learning->>cohort,'
+            'l_source:context->learning->>market_data_source,'
+            'l_synth:context->learning->>market_data_is_synthetic,'
+            'l_closed:context->learning->>source_candle_closed,'
+            'l_eligible:context->learning->>statistically_eligible,'
+            'l_role:context->learning->>evaluation_role,'
+            'l_analysis_version:context->learning->>analysis_version,'
+            'l_contract_version:context->learning->>contract_version,'
+            'l_source_ts:context->learning->>source_candle_timestamp,'
+            'l_source_close_ts:context->learning->>source_candle_close_timestamp,'
+            'l_micro:context->learning->microstructure_shadow,'
+            'l_quant:context->learning->quantitative_shadow,'
+            'l_cautious:context->learning->cautious_shadow,'
+            'l_q7:context->learning->q7_strategy_lab_shadow,'
+            'l_attr:context->learning->strategy_attribution_v2,'
+            'l_ti2:context->learning->trader_intelligence_v2,'
+            'l_challenger:context->learning->execution_challenger_lab,'
+            'l_trendline:context->learning->trendline_strategy_lab_shadow,'
+            'e_version:context->execution->>quality_score_version,'
+            'e_safety:context->execution->>execution_safety,'
+            'e_entry:context->execution->>entry_score,'
+            'e_sl:context->execution->>sl_reliability,'
+            'e_tpq:context->execution->>tp_quality_score,'
+            'e_refined:context->execution->>futures_execution_refined,'
+            'e_def:context->execution->>entry_defensibility_score,'
+            'e_reach:context->execution->>entry_reachability_score,'
+            'e_source:context->execution->>entry_source,'
+            'signal_results(status,pnl_pct,exit_price,exit_timestamp,notes,created_at,'
+            'mfe_r,mae_r,mfe_pct,mae_pct,candles_to_result,execution_forensics,'
+            'gross_r,modeled_net_r,modeled_total_cost_r,economics_cost_components_complete)'
+        )
+
         def query():
             q = (self.db.client.table('signals')
-                 .select('id,symbol,timeframe,system_type,action_normalized,status,created_at,'
-                         'entry_price,stop_loss,take_profit,risk_reward,'
-                         'q6_learning:context->learning,q6_execution:context->execution,'
-                         'signal_results(status,pnl_pct,exit_price,exit_timestamp,notes,created_at,'
-                         'mfe_r,mae_r,mfe_pct,mae_pct,candles_to_result,execution_forensics,'
-                         'gross_r,modeled_net_r,modeled_total_cost_r,economics_cost_components_complete)')
+                 .select(select_fields)
                  .gte('created_at', cutoff).lt('created_at', end.isoformat())
                  .eq('context->execution->>quality_score_version', Q5_CURRENT_QUALITY_SCORE_VERSION)
                  .in_('action_normalized', ['LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT'])
@@ -1709,10 +1756,51 @@ class AnalyticsService:
             if action and action != 'ALL':
                 q = q.eq('action_normalized', action)
             return q
-        rows = read_pages(query)
+
+        rows = read_pages(query, page_size=120, max_rows=4000, budget_seconds=20)
+        alias_keys = {
+            'l_cohort', 'l_source', 'l_synth', 'l_closed', 'l_eligible',
+            'l_role', 'l_analysis_version', 'l_contract_version', 'l_source_ts',
+            'l_source_close_ts', 'l_micro', 'l_quant', 'l_cautious', 'l_q7',
+            'l_attr', 'l_ti2', 'l_challenger', 'l_trendline', 'e_version',
+            'e_safety', 'e_entry', 'e_sl', 'e_tpq', 'e_refined', 'e_def',
+            'e_reach', 'e_source'
+        }
         for row in rows:
-            row['context'] = {'learning': row.pop('q6_learning', {}) or {},
-                              'execution': row.pop('q6_execution', {}) or {}}
+            learning = {
+                'cohort': row.get('l_cohort'),
+                'market_data_source': row.get('l_source'),
+                'market_data_is_synthetic': row.get('l_synth'),
+                'source_candle_closed': row.get('l_closed'),
+                'statistically_eligible': row.get('l_eligible'),
+                'evaluation_role': row.get('l_role'),
+                'analysis_version': row.get('l_analysis_version'),
+                'contract_version': row.get('l_contract_version'),
+                'source_candle_timestamp': row.get('l_source_ts'),
+                'source_candle_close_timestamp': row.get('l_source_close_ts'),
+                'microstructure_shadow': row.get('l_micro') or {},
+                'quantitative_shadow': row.get('l_quant') or {},
+                'cautious_shadow': row.get('l_cautious') or {},
+                'q7_strategy_lab_shadow': row.get('l_q7') or {},
+                'strategy_attribution_v2': row.get('l_attr') or {},
+                'trader_intelligence_v2': row.get('l_ti2') or {},
+                'execution_challenger_lab': row.get('l_challenger') or {},
+                'trendline_strategy_lab_shadow': row.get('l_trendline') or {},
+            }
+            execution = {
+                'quality_score_version': row.get('e_version'),
+                'execution_safety': row.get('e_safety'),
+                'entry_score': row.get('e_entry'),
+                'sl_reliability': row.get('e_sl'),
+                'tp_quality_score': row.get('e_tpq'),
+                'futures_execution_refined': row.get('e_refined'),
+                'entry_defensibility_score': row.get('e_def'),
+                'entry_reachability_score': row.get('e_reach'),
+                'entry_source': row.get('e_source'),
+            }
+            row['context'] = {'learning': learning, 'execution': execution}
+            for key in alias_keys:
+                row.pop(key, None)
         return rows
 
 

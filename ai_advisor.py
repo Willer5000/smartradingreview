@@ -4705,6 +4705,96 @@ def _persist(
 
 
 # ============================================================================
+# HOTFIX 14.6 — RESPALDO LOCAL 24/7
+# ============================================================================
+
+def _local_operational_fallback(context, market, question=None, reason=''):
+    """Deterministic fail-open summary when the external LLM is rate-limited.
+
+    It never invents a trade and never changes production. The purpose is to
+    keep Consejo/Asistente useful 24/7 while being explicit that the LLM is
+    temporarily unavailable.
+    """
+    context = context if isinstance(context, dict) else {}
+    market = str(market or 'SPOT').upper()
+    selected = context.get('selected_signal') or {}
+    signals = context.get('signals') or []
+    if not isinstance(selected, dict):
+        selected = {}
+    if not selected and isinstance(signals, list) and signals and isinstance(signals[0], dict):
+        selected = signals[0]
+
+    why = []
+    risks = []
+    watch = []
+    advice_parts = [
+        'El proveedor LLM está temporalmente limitado; se muestra un resumen local basado sólo en datos del sistema.'
+    ]
+
+    if selected:
+        symbol = str(selected.get('symbol') or selected.get('pair') or '').upper()
+        tf = str(selected.get('timeframe') or '')
+        action = str(selected.get('action') or selected.get('decision') or '').upper()
+        confidence = selected.get('confidence')
+        if symbol or action:
+            line = 'Señal destacada'
+            if symbol: line += f' {symbol}'
+            if tf: line += f' {tf}'
+            if action: line += f' · {action}'
+            if confidence is not None:
+                try: line += f' · confianza {float(confidence):.0f}%'
+                except Exception: pass
+            why.append(line)
+        for label, key in (('Entry','entry'), ('SL','stop_loss'), ('TP','take_profit')):
+            value = selected.get(key)
+            if value is not None:
+                try: watch.append(f'{label}: {float(value):g}')
+                except Exception: pass
+
+    macro = context.get('macro_context') or context.get('macro') or {}
+    if isinstance(macro, dict):
+        risk = str(macro.get('risk_level') or '').upper()
+        posture = str(macro.get('futures_posture') or '').upper()
+        if risk:
+            why.append(f'Contexto macro: {risk}')
+        if posture and posture != 'NORMAL':
+            risks.append(f'Postura macro Futures: {posture}')
+
+    saved = context.get('saved_kpis') or {}
+    if isinstance(saved, dict):
+        open_count = saved.get('active') or saved.get('open') or context.get('open_saved_count')
+        if open_count:
+            why.append(f'Posiciones/señales guardadas activas: {open_count}')
+
+    if market == 'FUTURES':
+        risks.append('Mantener el riesgo definido por Entry–SL y respetar Guardian/Publication Gate.')
+        advice_parts.append('No se altera LONG/SHORT, Entry, SL, TP ni leverage en este modo de respaldo.')
+    else:
+        risks.append('Mantener reservas y evitar rotaciones por una sola lectura de corto plazo.')
+        advice_parts.append('Guardian TGP conserva prioridad sobre cualquier comentario del asistente.')
+
+    if question:
+        advice_parts.append('Para preguntas interpretativas complejas, reintenta cuando el proveedor externo recupere cuota.')
+
+    payload = _normalize_ai_advice({
+        'verdict': 'INFO',
+        'confidence': 0,
+        'headline': 'Modo local de respaldo',
+        'advice': ' '.join(advice_parts),
+        'why': why[:5],
+        'risks': risks[:5],
+        'what_to_watch': watch[:5],
+        'learning_hypotheses': [],
+        'strategy_proposals': [],
+        'system_alignment': 'Fail-open: trading y gobernanza siguen funcionando sin depender del LLM.'
+    })
+    payload['provider'] = 'LOCAL_RULES'
+    payload['degraded_mode'] = True
+    payload['provider_reason'] = str(reason or '')[:220]
+    return payload
+
+
+# ============================================================================
 # PUNTO ÚNICO DE ENTRADA
 # ============================================================================
 
@@ -4925,27 +5015,29 @@ def run_ai_advisor(
         )
 
         if backoff_remaining > 0:
+            reason_text = (
+                "Groq alcanzó su cuota temporal. "
+                "El sistema está esperando automáticamente "
+                f"aproximadamente {max(1, backoff_remaining // 60)} min "
+                "antes de volver a consultar al proveedor."
+            )
+            if usage_type in {"AUTO", "MANUAL"} and context_type in {"HOURLY_MARKET_ADVICE", "MANUAL_CHAT"}:
+                return {
+                    "success": True,
+                    "cached": False,
+                    "provider_limited": True,
+                    "degraded_mode": True,
+                    "retry_after_seconds": backoff_remaining,
+                    "reason": reason_text,
+                    "data": _local_operational_fallback(context, market, question, reason_text),
+                    "quota": quota
+                }
             return {
-                "success":
-                    False,
-
-                "provider_limited":
-                    True,
-
-                "retry_after_seconds":
-                    backoff_remaining,
-
-                "reason":
-                    (
-                        "Groq alcanzó su cuota temporal. "
-                        "El sistema está esperando automáticamente "
-                        f"aproximadamente "
-                        f"{max(1, backoff_remaining // 60)} min "
-                        "antes de volver a consultar al proveedor."
-                    ),
-
-                "quota":
-                    quota
+                "success": False,
+                "provider_limited": True,
+                "retry_after_seconds": backoff_remaining,
+                "reason": reason_text,
+                "quota": quota
             }
 
 
@@ -5127,20 +5219,21 @@ def run_ai_advisor(
         )
 
 
+        error_reason = str(e)[:220]
+        if usage_type in {"AUTO", "MANUAL"} and context_type in {"HOURLY_MARKET_ADVICE", "MANUAL_CHAT"}:
+            return {
+                "success": True,
+                "cached": False,
+                "provider_limited": True,
+                "degraded_mode": True,
+                "reason": error_reason,
+                "data": _local_operational_fallback(context, market, question, error_reason),
+                "quota": get_ai_quota_status(user_name)
+            }
         return {
-
-            "success":
-                False,
-
-            "reason":
-                str(
-                    e
-                )[:220],
-
-            "quota":
-                get_ai_quota_status(
-                    user_name
-                )
+            "success": False,
+            "reason": error_reason,
+            "quota": get_ai_quota_status(user_name)
         }
 
 

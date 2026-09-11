@@ -7,6 +7,18 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
+      - key: MALLOC_ARENA_MAX
+        value: "2"
+      - key: MEMORY_SOFT_LIMIT_MB
+        value: "325"
+      - key: MEMORY_HARD_LIMIT_MB
+        value: "395"
+      - key: MEMORY_ANALYSIS_CACHE_KEEP
+        value: "5"
+      - key: FUTURES_DATA_CACHE_MAX_ENTRIES
+        value: "8"
+      - key: ANALYTICS_SNAPSHOT_FRESH_SECONDS
+        value: "1800"
       # Credenciales Supabase — configurar en el dashboard de Render
       # (Settings → Environment → Add Environment Variable)
       - key: SUPABASE_URL

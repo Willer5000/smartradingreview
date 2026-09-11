@@ -2560,17 +2560,30 @@ window.loadAllAnalytics = async function() {
         'info'
     );
 
-    await Promise.all([
-        loadQualityV2(),
-        loadSummary(),
-        loadStrategiesRanking(),
-        loadHeatmap(),
-        loadTimeline(),
-        loadPnLDistribution(),
-        loadTopOperations('best'),
-        loadTopOperations('worst'),
-        loadLearningGovernanceStatus()
-    ]);
+    // HOTFIX 14.6: no lanzar 9 lecturas estadísticas simultáneas.
+    // En Render Free, cada respuesta puede materializar cientos/miles de filas
+    // y los picos concurrentes eran capaces de superar 512 MB. El usuario ve
+    // la misma información, pero se carga secuencialmente y cede el event loop
+    // entre paneles.
+    const tasks = [
+        () => loadQualityV2(),
+        () => loadLearningGovernanceStatus(),
+        () => loadSummary(),
+        () => loadStrategiesRanking(),
+        () => loadHeatmap(),
+        () => loadTimeline(),
+        () => loadPnLDistribution(),
+        () => loadTopOperations('best'),
+        () => loadTopOperations('worst')
+    ];
+    for (const task of tasks) {
+        try {
+            await task();
+        } catch (err) {
+            console.warn('Analytics parcial:', err);
+        }
+        await new Promise(resolve => setTimeout(resolve, 80));
+    }
 
     showToast(
         '✅ Estadísticas actualizadas',
