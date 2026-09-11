@@ -24,7 +24,17 @@ services:
       - key: LOW_MEMORY_MODE
         value: "1"
       - key: FUTURES_INCREMENTAL_INTERVAL_SECONDS
-        value: "15"
+        value: "30"
+      - key: SYSTEM_INTERACTIVE_PRIORITY_SECONDS
+        value: "60"
+      - key: FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS
+        value: "120"
+      - key: LEARNING_MICROBATCH_ROWS
+        value: "8"
+      - key: LEARNING_MICROBATCH_BUDGET_SECONDS
+        value: "6"
+      - key: LEARNING_MICROBATCHES_PER_CYCLE
+        value: "1"
       - key: FUTURES_INCREMENTAL_START_DELAY_SECONDS
         value: "180"
       - key: RUNTIME_BOOTSTRAP_DELAY_SECONDS

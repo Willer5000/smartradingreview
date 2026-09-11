@@ -10,9 +10,9 @@ class Hotfix152PriorityAndUiTests(unittest.TestCase):
         start = source.index('def _acquire_heavy_analysis')
         end = source.index('def _release_heavy_analysis', start)
         block = source[start:end]
-        self.assertIn("if not owner.startswith('futures-ui:')", block)
-        self.assertIn("globals().get('_futures_interactive_priority_active')", block)
-        self.assertIn('cede turno a Futures interactivo', block)
+        self.assertIn("owner.startswith(('futures-ui:', 'spot-ui:'))", block)
+        self.assertIn("globals().get('_system_interactive_priority_active')", block)
+        self.assertIn('cede turno a la interfaz activa', block)
 
     def test_learning_worker_uses_cooperative_microbatches(self):
         source = (ROOT / 'app.py').read_text(encoding='utf-8')
@@ -39,7 +39,7 @@ class Hotfix152PriorityAndUiTests(unittest.TestCase):
     def test_futures_http_request_has_watchdog_and_bounded_retry(self):
         source = (ROOT / 'static' / 'script.js').read_text(encoding='utf-8')
         self.assertIn('const analysisAbortController = new AbortController()', source)
-        self.assertIn('window.IS_FUTURES_PAGE ? 12000 : 60000', source)
+        self.assertIn('window.IS_FUTURES_PAGE ? 12000 : 45000', source)
         self.assertIn("error?.name === 'AbortError'", source)
         self.assertIn('elapsedMs < 45000 && retryCount < 18', source)
 
