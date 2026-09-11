@@ -3,7 +3,7 @@
 # Versión 1.0 - FASE 4
 #
 # CARACTERÍSTICAS:
-# - 5 criptomonedas: BTC, ETH, SOL, XRP, ADA (contra USDT)
+# - 5 criptomonedas oficiales + LINK/BNB en research Shadow (contra USDT)
 # - 6 temporalidades: 5m, 15m, 30m, 1h, 2h, 4h
 # - Solo acciones LONG y SHORT (nunca COMPRA_SPOT/VENTA_SPOT)
 # - Apalancamiento dinámico sin mínimo forzado y limitado por riesgo/ATR
@@ -44,6 +44,16 @@ FUTURES_SYMBOLS = {
     'ADA-USDT': {'name': 'ADA/USDT', 'type': 'crypto_alt', 'decimals': 4}
 }
 
+# Commit 15A — two extra contracts are deliberately RESEARCH/SHADOW only.
+# They expand cross-asset validation without increasing the production universe.
+FUTURES_RESEARCH_SYMBOLS = {
+    'LINK-USDT': {'name': 'LINK/USDT', 'type': 'crypto_alt', 'decimals': 3},
+    'BNB-USDT': {'name': 'BNB/USDT', 'type': 'crypto_major', 'decimals': 2},
+}
+FUTURES_RESEARCH_TIMEFRAMES = ('15m', '30m', '1h')
+FUTURES_RESEARCH_ENABLED = str(os.environ.get('C15_RESEARCH_SHADOW_ENABLED', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
+FUTURES_ALL_SYMBOLS = {**FUTURES_SYMBOLS, **FUTURES_RESEARCH_SYMBOLS}
+
 # Temporalidades para futuros (TF cortas)
 FUTURES_TIMEFRAMES = {
     '5m':  {'name': '5 Minutos',  'type': 'scalping',   'kucoin': '5min'},
@@ -62,6 +72,8 @@ FUTURES_CONTRACT_SYMBOLS = {
     'SOL-USDT': 'SOLUSDTM',
     'XRP-USDT': 'XRPUSDTM',
     'ADA-USDT': 'ADAUSDTM',
+    'LINK-USDT': 'LINKUSDTM',
+    'BNB-USDT': 'BNBUSDTM',
 }
 
 # Duración real de cada temporalidad. Se usa únicamente para comprobar
@@ -147,10 +159,10 @@ if str(os.environ.get('LOW_MEMORY_MODE', '1')).strip().lower() not in ('0', 'fal
 # ============================================================================
 
 FUTURES_MICROSTRUCTURE_VERSION = (
-    'Q3_KUCOIN_PUBLIC_MICROSTRUCTURE_V1'
+    'C15_KUCOIN_PUBLIC_MICROSTRUCTURE_V2'
 )
 
-FUTURES_MICROSTRUCTURE_TTL_SECONDS = 90
+FUTURES_MICROSTRUCTURE_TTL_SECONDS = max(20, int(os.environ.get('FUTURES_MICROSTRUCTURE_TTL_SECONDS', '30') or 30))
 
 KUCOIN_FUTURES_ORDERBOOK_URL = (
     'https://api-futures.kucoin.com/'
@@ -634,6 +646,37 @@ def _fetch_public_futures_microstructure(
                     * 100.0
                 )
 
+        # Commit 15B — perfil compacto para visualización.  Conservamos sólo
+        # 10 niveles por lado y valores escalares; nunca persistimos el libro
+        # completo ni mantenemos un DataFrame de profundidad en RAM.
+        midpoint_for_profile = None
+        if best_bid and best_ask and best_bid > 0 and best_ask > 0:
+            midpoint_for_profile = (best_bid + best_ask) / 2.0
+
+        bid_profile = []
+        ask_profile = []
+        for side_name, rows, side_total, target in (
+            ('BID', bids[:10], bid_size, bid_profile),
+            ('ASK', asks[:10], ask_size, ask_profile),
+        ):
+            for row in rows:
+                if not isinstance(row, (list, tuple)) or len(row) < 2:
+                    continue
+                price = _safe_micro_float(row[0])
+                quantity = _safe_micro_float(row[1], 0.0) or 0.0
+                if price is None or price <= 0 or quantity <= 0:
+                    continue
+                distance_bps = None
+                if midpoint_for_profile and midpoint_for_profile > 0:
+                    distance_bps = (price - midpoint_for_profile) / midpoint_for_profile * 10000.0
+                target.append({
+                    'side': side_name,
+                    'price': round(price, 10),
+                    'size': round(quantity, 6),
+                    'side_share': round(quantity / side_total, 6) if side_total > 0 else None,
+                    'distance_bps': round(distance_bps, 3) if distance_bps is not None else None,
+                })
+
         base[
             'orderbook'
         ] = {
@@ -697,7 +740,15 @@ def _fetch_public_futures_microstructure(
                     if spread_pct
                     is not None
                     else None
-                )
+                ),
+
+            'midpoint':
+                round(midpoint_for_profile, 10)
+                if midpoint_for_profile is not None
+                else None,
+
+            'bid_profile': bid_profile,
+            'ask_profile': ask_profile,
         }
 
         base[
@@ -1241,6 +1292,26 @@ def _fetch_public_futures_microstructure(
     return dict(
         base
     )
+
+
+def get_futures_microstructure_snapshot(symbol: str) -> Dict:
+    """Public lightweight snapshot for the UI indicator.
+
+    This helper never creates OHLCV DataFrames and reuses the same 30-second
+    cache as the learning layer.  It is safe to call independently from a full
+    Futures analysis, including when the committee says NO_OPERAR.
+    """
+    symbol = str(symbol or '').strip().upper()
+    if symbol not in FUTURES_ALL_SYMBOLS:
+        return {
+            'available': False,
+            'status': 'SYMBOL_NOT_ALLOWED',
+            'symbol': symbol,
+            'model_version': FUTURES_MICROSTRUCTURE_VERSION,
+        }
+    return _fetch_public_futures_microstructure(symbol)
+
+
 # Extender el mapeo de intervalos KuCoin
 FUTURES_KUCOIN_INTERVALS = {
     '5m': '5min',
@@ -2727,6 +2798,26 @@ class FuturesAnalysis(TradingExpertSystem):
                         )
                         or 0
                     )
+            },
+
+            # Compact display payload for the Futures indicator.  This is
+            # transient UI data only; ReviewTrader persists only aggregate metrics.
+            'display': {
+                'orderbook': {
+                    'best_bid': orderbook.get('best_bid'),
+                    'best_ask': orderbook.get('best_ask'),
+                    'midpoint': orderbook.get('midpoint'),
+                    'spread_pct': orderbook.get('spread_pct'),
+                    'bid_profile': list(orderbook.get('bid_profile') or [])[:10],
+                    'ask_profile': list(orderbook.get('ask_profile') or [])[:10],
+                },
+                'flow': {
+                    'buy_share': buy_share,
+                    'buy_sell_ratio': _safe_micro_float(recent_trades.get('buy_sell_ratio')),
+                    'trade_count': int(recent_trades.get('sample_size', 0) or 0),
+                },
+                'funding_rate': funding_rate,
+                'oi_change_pct': oi_change_pct,
             },
 
             'source_status': {
@@ -6576,13 +6667,26 @@ class FuturesAnalysis(TradingExpertSystem):
         closed_candle_only=True excluye la vela abierta de todos los
         indicadores, traders, votación y niveles.
         """
-        # Validar
-        if symbol not in FUTURES_SYMBOLS:
+        # Validar. Commit 15A acepta LINK/BNB sólo como universo de
+        # investigación; nunca se convierten en señal ejecutable en V1.0.
+        if symbol not in FUTURES_ALL_SYMBOLS:
             return {
                 'success': False,
-                'error': f'Símbolo {symbol} no permitido en futuros. Válidos: {list(FUTURES_SYMBOLS.keys())}',
+                'error': f'Símbolo {symbol} no permitido en futuros. Válidos: {list(FUTURES_ALL_SYMBOLS.keys())}',
                 'symbol': symbol,
                 'timeframe': timeframe
+            }
+        research_only_symbol = symbol in FUTURES_RESEARCH_SYMBOLS
+        if research_only_symbol and timeframe not in FUTURES_RESEARCH_TIMEFRAMES:
+            return {
+                'success': False,
+                'error': (
+                    f'{symbol} es research-only en Commit 15 y sólo usa '
+                    f'{list(FUTURES_RESEARCH_TIMEFRAMES)}'
+                ),
+                'symbol': symbol,
+                'timeframe': timeframe,
+                'research_only': True,
             }
         
         if timeframe not in FUTURES_TIMEFRAMES:
@@ -6670,6 +6774,10 @@ class FuturesAnalysis(TradingExpertSystem):
         # ============ MARCAR COMO FUTUROS ============
         result['system_type'] = 'futures'
         result['is_futures'] = True
+        result['research_only'] = bool(research_only_symbol)
+        result['research_universe'] = (
+            'C15_LINK_BNB_SHADOW' if research_only_symbol else 'PRODUCTION_UNIVERSE'
+        )
         result['market_data_source'] = KUCOIN_FUTURES_DATA_SOURCE
         result['market_data_is_synthetic'] = False
         result['contract_symbol'] = FUTURES_CONTRACT_SYMBOLS.get(symbol)
@@ -6909,6 +7017,73 @@ class FuturesAnalysis(TradingExpertSystem):
             'decision'
         ] = decision
 
+        # ==============================================================
+        # COMMIT 15C / 15E — EXECUTION INTELLIGENCE V2 (SHADOW ONLY)
+        # ==============================================================
+        # The microstructure challenger filters a research cohort; the
+        # uncertainty layer records a nonconformity-like score.  Neither can
+        # modify production before OOS calibration + governance.
+        try:
+            from execution_intelligence_v2 import (
+                attach_microstructure_entry_challenger,
+                build_uncertainty_shadow_gate,
+            )
+
+            result = attach_microstructure_entry_challenger(
+                result,
+                microstructure_context,
+            )
+            uncertainty_shadow = build_uncertainty_shadow_gate(
+                result,
+                microstructure_context,
+            )
+            result['uncertainty_shadow_gate'] = uncertainty_shadow
+
+            levels_for_uncertainty = dict(result.get('levels') or {})
+            levels_for_uncertainty['uncertainty_model_version'] = (
+                uncertainty_shadow.get('version')
+            )
+            levels_for_uncertainty['uncertainty_score_shadow'] = float(
+                uncertainty_shadow.get('uncertainty_score', 0.0) or 0.0
+            )
+            levels_for_uncertainty['uncertainty_bucket_shadow'] = (
+                uncertainty_shadow.get('uncertainty_bucket', 'UNAVAILABLE')
+            )
+            levels_for_uncertainty['uncertainty_affects_publication'] = False
+            result['levels'] = levels_for_uncertainty
+
+            decision = dict(result.get('decision') or {})
+            decision['uncertainty_observation'] = {
+                'score': uncertainty_shadow.get('uncertainty_score'),
+                'bucket': uncertainty_shadow.get('uncertainty_bucket'),
+                'shadow_gate': uncertainty_shadow.get('shadow_gate'),
+                'conformal_status': uncertainty_shadow.get('conformal_status'),
+                'affects_publication': False,
+            }
+            result['decision'] = decision
+
+            # Make the new indicator discoverable by the chart workspace.
+            visual = dict(result.get('visual_evidence') or {})
+            recommended = list(visual.get('recommended') or [])
+            if microstructure_context.get('available') and not any(
+                isinstance(item, dict) and item.get('chart') == 'order-flow'
+                for item in recommended
+            ):
+                recommended.append({
+                    'chart': 'order-flow',
+                    'label': 'Order Book / Order Flow',
+                    'score': 99,
+                    'reason': 'Microestructura Futures pública disponible',
+                })
+            visual['recommended'] = recommended
+            result['visual_evidence'] = visual
+
+        except Exception as execution_intelligence_error:
+            logger.debug(
+                'Execution Intelligence V2 no disponible: %s',
+                execution_intelligence_error,
+            )
+
         if microstructure_context.get(
             'available'
         ):
@@ -6934,7 +7109,8 @@ class FuturesAnalysis(TradingExpertSystem):
                 symbol_name_map = {
                     'BTC-USDT': 'BTC/USDT', 'ETH-USDT': 'ETH/USDT',
                     'SOL-USDT': 'SOL/USDT', 'XRP-USDT': 'XRP/USDT',
-                    'ADA-USDT': 'ADA/USDT',
+                    'ADA-USDT': 'ADA/USDT', 'LINK-USDT': 'LINK/USDT',
+                    'BNB-USDT': 'BNB/USDT',
                 }
                 pretty_name = symbol_name_map.get(symbol, symbol.replace('-', '/'))
                 
@@ -7015,6 +7191,35 @@ class FuturesAnalysis(TradingExpertSystem):
         # Pero verificamos que la traducción sea consistente
         levels = result.get('levels', {})
         
+        # ==============================================================
+        # COMMIT 15A — LINK/BNB ARE RESEARCH-ONLY
+        # ==============================================================
+        # Preserve the full deterministic analysis for learning, but force the
+        # publication contract closed so these two new assets cannot enter V1.0
+        # official KPIs or user-executable signals before validation.
+        if research_only_symbol:
+            result['publication_status'] = 'RESEARCH_ONLY_SHADOW'
+            result['publication_eligible'] = False
+            result['is_executable'] = False
+            result['futures_signal_tier'] = 'RESEARCH_ONLY'
+            result['rejected_reason'] = 'C15_RESEARCH_ONLY_UNIVERSE'
+
+            levels = dict(result.get('levels') or {})
+            levels['publication_status'] = 'RESEARCH_ONLY_SHADOW'
+            levels['publication_eligible'] = False
+            levels['is_executable'] = False
+            levels['research_only'] = True
+            result['levels'] = levels
+
+            gate = dict(result.get('futures_publication_gate') or {})
+            gate.update({
+                'eligible': False,
+                'status': 'RESEARCH_ONLY_SHADOW',
+                'reasons': ['C15_RESEARCH_ONLY_UNIVERSE'],
+                'affects_production': False,
+            })
+            result['futures_publication_gate'] = gate
+
         # ============ REGISTRAR EN REVIEWTRADER (si está disponible) ============
         # IMPORTANTE: solo registrar si el análisis fue FRESCO (no vino del caché).
         # Antes se registraba SIEMPRE, causando 5-10 duplicados idénticos por

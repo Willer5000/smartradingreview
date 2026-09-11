@@ -82,6 +82,8 @@
                             <option>SOL-USDT</option>
                             <option>XRP-USDT</option>
                             <option>ADA-USDT</option>
+                            <option>LINK-USDT</option>
+                            <option>BNB-USDT</option>
                             <option>PAXG-USDT</option>
                             <option>PAXG-BTC</option>
                         </select>
@@ -778,6 +780,60 @@
 
             </div>
             <!-- ============================================================
+                 COMMIT 15 — EXECUTION INTELLIGENCE V2
+                 ============================================================ -->
+            <div class="card bg-dark border-primary mb-3" id="c15-execution-intelligence">
+                <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                    <div>
+                        <strong>Execution Intelligence V2 · Observación</strong>
+                        <div class="small text-muted">Order Flow, incertidumbre y resiliencia a barridos. No modifica producción.</div>
+                    </div>
+                    <span class="badge bg-secondary">Investigación</span>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3 mb-3 text-center">
+                        <div class="col-md-3 col-6">
+                            <div class="text-muted small">Order Flow alineado · Exp.R</div>
+                            <strong id="c15-micro-aligned-exp" class="h6">--</strong>
+                        </div>
+                        <div class="col-md-3 col-6">
+                            <div class="text-muted small">Incertidumbre baja · Exp.R</div>
+                            <strong id="c15-uncertainty-low-exp" class="h6">--</strong>
+                        </div>
+                        <div class="col-md-3 col-6">
+                            <div class="text-muted small">Wick-outs / barridos</div>
+                            <strong id="c15-wick-outs" class="h6">--</strong>
+                        </div>
+                        <div class="col-md-3 col-6">
+                            <div class="text-muted small">LINK + BNB Shadow</div>
+                            <strong id="c15-research-universe" class="h6">--</strong>
+                        </div>
+                    </div>
+                    <div class="row g-3">
+                        <div class="col-lg-6">
+                            <div class="small fw-semibold mb-2">Microestructura → resultado</div>
+                            <div class="table-responsive">
+                                <table class="table table-dark table-sm align-middle mb-0">
+                                    <thead><tr><th>Contexto</th><th>N</th><th>Res.</th><th>WR</th><th>Exp.R</th></tr></thead>
+                                    <tbody id="c15-micro-table"><tr><td colspan="5" class="text-muted">Recopilando evidencia...</td></tr></tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div class="col-lg-6">
+                            <div class="small fw-semibold mb-2">Incertidumbre → resultado</div>
+                            <div class="table-responsive">
+                                <table class="table table-dark table-sm align-middle mb-0">
+                                    <thead><tr><th>Banda</th><th>N</th><th>Res.</th><th>WR</th><th>Exp.R</th></tr></thead>
+                                    <tbody id="c15-uncertainty-table"><tr><td colspan="5" class="text-muted">Calibración prospectiva...</td></tr></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="small text-muted mt-3">El filtro de incertidumbre permanece sin calibrar hasta acumular evidencia fuera de muestra suficiente; por ahora sólo registra incertidumbre.</div>
+                </div>
+            </div>
+
+            <!-- ============================================================
                  ESTRATEGIAS INTRADÍA EN EVALUACIÓN
                  ============================================================ -->
 
@@ -1441,6 +1497,6 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI"></script>
-    <script src="{{ url_for('static', filename='analytics.js') }}?v=20260909-PRO-UI"></script>
+    <script src="{{ url_for('static', filename='analytics.js') }}?v=20260911-C15-EXECUTION-INTELLIGENCE"></script>
 </body>
 </html>

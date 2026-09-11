@@ -17,6 +17,7 @@
         'fvg-ob': { label: 'Estructura institucional', category: 'Estructura' },
         'fibonacci': { label: 'Niveles de Fibonacci', category: 'Estructura' },
         'liquidation-heatmap': { label: 'Mapa de liquidaciones', category: 'Riesgo' },
+        'order-flow': { label: 'Order Book / Order Flow', category: 'Microestructura' },
         'ftm': { label: 'Fuerza y momentum del mercado', category: 'Tendencia' },
         'whale': { label: 'Actividad de grandes órdenes', category: 'Volumen' },
         'rsi_maverick': { label: 'RSI de bandas', category: 'Momentum' },
@@ -214,6 +215,10 @@
         const liq = data?.liquidation || {};
         const lab = data?.strategy_lab?.strategies || {};
 
+        // Commit 15: microstructure is a first-class Futures indicator.  It is
+        // auto-visible on Futures and remains absent on Spot.
+        if (window.IS_FUTURES_PAGE) add('order-flow');
+
         if ((momentum.divergences || []).length || (momentum.hidden_divergences || []).length || /\brsi\b|divergen/.test(text)) add('rsi');
         if (Number(trend.adx || 0) >= 22 || /\badx\b|\bdmi\b|tendencia/.test(text)) add('adx');
         if (/macd/.test(text)) add('macd');
@@ -248,6 +253,7 @@
     }
 
     function shouldRender(id) {
+        if (id === 'order-flow' && window.IS_FUTURES_PAGE) return true;
         if (ALWAYS.has(id)) return true;
         if (state.hidden.has(id) && !state.pinned.has(id) && !state.manual.has(id)) return false;
         return state.pinned.has(id) || state.manual.has(id) || autoEvidence.includes(id);

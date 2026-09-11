@@ -29493,14 +29493,71 @@ def _get_review_trader():
 
 
 # ============================================================================
+# COMMIT 15B — MICROSTRUCTURE INDICATOR (PUBLIC, LIGHTWEIGHT DATA)
+# ============================================================================
+@app.route('/api/futures/microstructure', methods=['GET'])
+def api_futures_microstructure():
+    user = _require_auth()
+    if not isinstance(user, str):
+        return user
+    symbol = str(request.args.get('symbol') or 'BTC-USDT').strip().upper()
+    try:
+        from futures_system import get_futures_microstructure_snapshot
+        snapshot = get_futures_microstructure_snapshot(symbol)
+        orderbook = snapshot.get('orderbook') or {}
+        trades = snapshot.get('recent_trades') or {}
+        payload = {
+            'success': bool(snapshot.get('available')),
+            'symbol': symbol,
+            'model_version': snapshot.get('model_version'),
+            'status': snapshot.get('status'),
+            'fetched_at': snapshot.get('fetched_at'),
+            'cache_hit': bool(snapshot.get('cache_hit', False)),
+            'sources_available': list(snapshot.get('sources_available') or []),
+            'source_errors': list(snapshot.get('source_errors') or [])[:4],
+            'orderbook': {
+                'best_bid': orderbook.get('best_bid'),
+                'best_ask': orderbook.get('best_ask'),
+                'midpoint': orderbook.get('midpoint'),
+                'spread_pct': orderbook.get('spread_pct'),
+                'imbalance': orderbook.get('imbalance'),
+                'bid_ask_depth_ratio': orderbook.get('bid_ask_depth_ratio'),
+                'bid_profile': list(orderbook.get('bid_profile') or [])[:10],
+                'ask_profile': list(orderbook.get('ask_profile') or [])[:10],
+            },
+            'flow': {
+                'buy_share': trades.get('buy_share'),
+                'buy_sell_ratio': trades.get('buy_sell_ratio'),
+                'trade_count': trades.get('sample_size'),
+            },
+            'funding': snapshot.get('funding') or {},
+            'open_interest': snapshot.get('open_interest') or {},
+        }
+        return jsonify(payload), (200 if payload['success'] else 503)
+    except Exception as exc:
+        return jsonify({
+            'success': False,
+            'symbol': symbol,
+            'error': str(exc)[:180],
+        }), 503
+
+
+# ============================================================================
 # ENDPOINT 1: Analizar UN par de futuros
 # ============================================================================
 @app.route('/api/futures/analyze', methods=['POST'])
 def api_futures_analyze():
-    """
-    Analiza un par específico de futuros.
-    
-    Body JSON: { "symbol": "BTC-USDT", "timeframe": "1h" }
+    """Return one chart-capable Futures analysis without blocking Gunicorn.
+
+    Hotfix 15.1: Render Free uses one web thread. Running the heavy Futures
+    analysis inside that request made every other API call wait and the page
+    looked like an infinite loader. The request now only:
+
+      1) returns a fresh one-item UI cache immediately when available;
+      2) otherwise gives the interactive request priority over the incremental
+         researcher and schedules the heavy calculation in a background thread;
+      3) returns a short BUSY response so the browser polls without blocking the
+         only Gunicorn request thread.
     """
     try:
         futures = _get_futures_system()
@@ -29509,99 +29566,52 @@ def api_futures_analyze():
                 'success': False,
                 'error': 'FuturesSystem no disponible'
             }), 503
-        
+
         data = request.get_json() if request.is_json else {}
-        symbol = data.get('symbol', 'BTC-USDT')
-        timeframe = data.get('timeframe', '1h')
-        
-        heavy_owner = f'futures-api:{symbol}:{timeframe}'
-        heavy_acquired = _acquire_heavy_analysis(heavy_owner, timeout=5)
-        if not heavy_acquired:
-            cached_result = None
-            try:
-                with _futures_analysis_cache['lock']:
-                    cached_result = ((_futures_analysis_cache.get('data') or {}).get('analysis') or {}).get((symbol, timeframe))
-            except Exception:
-                cached_result = None
-            # El snapshot runtime es intencionalmente demasiado compacto para
-            # dibujar velas/indicadores. No devolverlo como si fuese un análisis
-            # completo: el frontend reintenta cuando quede libre el slot pesado.
-            return jsonify({
-                'success': False,
-                'busy': True,
-                'cached_summary_available': bool(cached_result),
-                'error': 'Futures está actualizando otra combinación. Reintentando para cargar gráficos completos.'
-            }), 503
+        symbol = str(data.get('symbol') or 'BTC-USDT').strip()
+        timeframe = str(data.get('timeframe') or '1h').strip()
 
-        try:
-            result = futures.analyze_futures_market(
-                symbol,
-                timeframe
+        cached_ui = _get_futures_ui_cached(symbol, timeframe)
+        if cached_ui is not None:
+            analysis_status = _classify_futures_analysis_result(
+                symbol=symbol,
+                timeframe=timeframe,
+                result=cached_ui,
+                lifecycle={},
+                min_confidence=0,
             )
-
-            if result:
-                result = _apply_36s_futures_ai_control(
-                    result,
-                    symbol,
-                    timeframe
-                )
-                # IMPORTANT: cache and browser have different contracts.
-                # Runtime snapshots stay compact, but the browser needs df +
-                # indicators to render Futures charts. Keep only one transient
-                # chart-capable payload; never store it in the 30-combo cache.
-                ui_result = _compact_futures_ui_result(result)
-
-                try:
-                    runtime_result = _compact_futures_runtime_result(result)
-                    with _futures_analysis_cache['lock']:
-                        current_data = dict(_futures_analysis_cache.get('data') or {})
-                        current_analysis = dict(current_data.get('analysis') or {})
-                        current_analysis[(symbol, timeframe)] = runtime_result
-                        current_data['analysis'] = current_analysis
-                        current_data.setdefault('errors', [])
-                        current_data.setdefault('lifecycle', {})
-                        _futures_analysis_cache['data'] = current_data
-                        _futures_analysis_cache['ts'] = time.time()
-                except Exception as cache_error:
-                    print(f'⚠️ [FUT UI] No se pudo actualizar snapshot compacto: {cache_error}')
-        finally:
-            _release_heavy_analysis(heavy_owner)
-
-        if not result:
-
             return jsonify({
-                'success':
-                    False,
+                'success': bool(cached_ui.get('success', True)),
+                'data': cached_ui if cached_ui.get('success', True) else None,
+                'analysis_status': analysis_status,
+                'ui_cache': True,
+                'error': cached_ui.get('error'),
+            })
 
-                'error':
-                    'Análisis vacío'
-            }), 500
+        _mark_futures_interactive_priority()
+        job_state = _start_futures_ui_analysis_async(symbol, timeframe)
 
-        analysis_status = _classify_futures_analysis_result(
-            symbol=symbol,
-            timeframe=timeframe,
-            result=result,
-            lifecycle={},
-            min_confidence=0
-        )
-        
-        # Envolver en formato consistente con /api/analyze
         return jsonify({
-            'success': result.get('success', True),
-            'data': ui_result if result.get('success') else None,
-            'analysis_status': analysis_status,
-            'error': result.get('error')
-        })
-        
+            'success': False,
+            'busy': True,
+            'deferred': True,
+            'job_state': job_state,
+            'retry_after_ms': 1800,
+            'error': (
+                'Preparando gráficos Futures en segundo plano. '
+                'La página seguirá disponible mientras termina el análisis.'
+            ),
+        }), 503
+
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return jsonify({'success': False, 'error': f'Error interno: {str(e)}'}), 500
+        return jsonify({
+            'success': False,
+            'error': f'Error interno: {str(e)}'
+        }), 500
 
 
-# ============================================================================
-# ENDPOINT 2: Analizar TODOS los pares de futuros en una temporalidad
-# ============================================================================
 @app.route('/api/futures/analyze_all/<timeframe>')
 def api_futures_analyze_all(timeframe):
     """
@@ -29692,7 +29702,7 @@ _futures_analysis_cache = {
 }
 _futures_correlation_cache = {'data': None, 'ts': 0, 'key': None}
 
-_FUTURES_CACHE_SCHEMA_VERSION = 3
+_FUTURES_CACHE_SCHEMA_VERSION = 4
 _FUTURES_SIGNAL_MAX_WAIT_BARS = 6
 _FUTURES_TF_SECONDS = {
     '5m': 5 * 60,
@@ -29732,7 +29742,7 @@ def _compact_futures_runtime_result(result):
         'live_candle_timestamp', 'open_candle_present',
         'market_data_source', 'market_data_is_synthetic', 'contract_symbol',
         'market_data_fetched_at', 'market_data_candles', 'publication_status',
-        'rejected_reason', 'timestamp',
+        'rejected_reason', 'timestamp', 'research_only', 'research_universe',
     )
     for key in simple_keys:
         if key in result:
@@ -29744,6 +29754,7 @@ def _compact_futures_runtime_result(result):
         for key in (
             'action', 'original_action', 'confidence', 'reason', 'conviction',
             'audit', 'quantitative_observation', 'microstructure_observation',
+            'uncertainty_observation',
         ):
             if key in decision:
                 compact_decision[key] = decision.get(key)
@@ -29797,6 +29808,18 @@ def _compact_futures_runtime_result(result):
                 if key in source
             }
 
+    uncertainty = result.get('uncertainty_shadow_gate') or {}
+    if isinstance(uncertainty, dict) and uncertainty:
+        compact['uncertainty_shadow_gate'] = {
+            key: uncertainty.get(key)
+            for key in (
+                'version', 'authority', 'conformal_status', 'calibrated',
+                'uncertainty_score', 'uncertainty_bucket', 'shadow_gate',
+                'affects_publication', 'affects_safety'
+            )
+            if key in uncertainty
+        }
+
     return compact
 
 
@@ -29846,6 +29869,160 @@ def _compact_futures_ui_result(result):
         ui['decision'] = decision
 
     return ui
+
+
+# ============================================================================
+# HOTFIX 15.1 — FUTURES INTERACTIVE PRIORITY / NON-BLOCKING UI ANALYSIS
+# ============================================================================
+#
+# Render Free runs Gunicorn with one request thread to protect RAM.  A heavy
+# Futures analysis must therefore never execute inside that request thread:
+# doing so stalls auth, charts, saved signals and every other endpoint.
+#
+# We keep at most TWO short-lived chart payloads, while research/30-combo state
+# remains compact.  Interactive requests pause new incremental research jobs
+# long enough to acquire the existing global heavy-analysis slot.
+# ============================================================================
+
+_FUTURES_UI_CACHE_TTL_SECONDS = max(30, int(os.environ.get(
+    'FUTURES_UI_CACHE_TTL_SECONDS', '90'
+) or 90))
+_FUTURES_UI_CACHE_MAX_ITEMS = 2
+_FUTURES_UI_CACHE = {
+    'items': {},
+    'running': set(),
+    'errors': {},
+    'lock': threading.Lock(),
+}
+_FUTURES_INTERACTIVE_PRIORITY_SECONDS = max(15, int(os.environ.get(
+    'FUTURES_INTERACTIVE_PRIORITY_SECONDS', '45'
+) or 45))
+_FUTURES_INTERACTIVE_PRIORITY_UNTIL = 0.0
+_FUTURES_INTERACTIVE_PRIORITY_LOCK = threading.Lock()
+
+
+def _futures_ui_key(symbol, timeframe):
+    return f"{str(symbol or '').strip()}|{str(timeframe or '').strip()}"
+
+
+def _mark_futures_interactive_priority(seconds=None):
+    """Pause NEW background research while a human waits for charts."""
+    global _FUTURES_INTERACTIVE_PRIORITY_UNTIL
+    hold = max(5, int(seconds or _FUTURES_INTERACTIVE_PRIORITY_SECONDS))
+    until = time.monotonic() + hold
+    with _FUTURES_INTERACTIVE_PRIORITY_LOCK:
+        _FUTURES_INTERACTIVE_PRIORITY_UNTIL = max(
+            _FUTURES_INTERACTIVE_PRIORITY_UNTIL,
+            until,
+        )
+    return _FUTURES_INTERACTIVE_PRIORITY_UNTIL
+
+
+def _futures_interactive_priority_active():
+    with _FUTURES_INTERACTIVE_PRIORITY_LOCK:
+        return time.monotonic() < _FUTURES_INTERACTIVE_PRIORITY_UNTIL
+
+
+def _get_futures_ui_cached(symbol, timeframe):
+    key = _futures_ui_key(symbol, timeframe)
+    now = time.time()
+    with _FUTURES_UI_CACHE['lock']:
+        item = (_FUTURES_UI_CACHE.get('items') or {}).get(key)
+        if not item:
+            return None
+        age = now - float(item.get('ts') or 0)
+        if age > _FUTURES_UI_CACHE_TTL_SECONDS:
+            _FUTURES_UI_CACHE['items'].pop(key, None)
+            return None
+        return item.get('data')
+
+
+def _store_futures_ui_cached(symbol, timeframe, payload):
+    key = _futures_ui_key(symbol, timeframe)
+    with _FUTURES_UI_CACHE['lock']:
+        items = _FUTURES_UI_CACHE['items']
+        items[key] = {'ts': time.time(), 'data': payload}
+        if len(items) > _FUTURES_UI_CACHE_MAX_ITEMS:
+            ordered = sorted(
+                items.items(),
+                key=lambda pair: float((pair[1] or {}).get('ts') or 0),
+            )
+            for old_key, _ in ordered[:-_FUTURES_UI_CACHE_MAX_ITEMS]:
+                items.pop(old_key, None)
+
+
+def _start_futures_ui_analysis_async(symbol, timeframe):
+    """Schedule exactly one chart analysis and return immediately to HTTP."""
+    key = _futures_ui_key(symbol, timeframe)
+    _mark_futures_interactive_priority()
+
+    with _FUTURES_UI_CACHE['lock']:
+        if key in _FUTURES_UI_CACHE['running']:
+            return 'RUNNING'
+        _FUTURES_UI_CACHE['running'].add(key)
+        _FUTURES_UI_CACHE['errors'].pop(key, None)
+
+    def _do_ui_analysis():
+        owner = f'futures-ui:{symbol}:{timeframe}'
+        heavy_acquired = False
+        try:
+            # Current incremental combo may finish first.  Because interactive
+            # priority is already active, the loop will not start a replacement.
+            heavy_acquired = _acquire_heavy_analysis(owner, timeout=35)
+            if not heavy_acquired:
+                raise RuntimeError('No se obtuvo turno de análisis Futures')
+
+            futures = _get_futures_system()
+            if futures is None:
+                raise RuntimeError('FuturesSystem no disponible')
+
+            _log_memory_runtime(f'{owner}:before')
+            result = futures.analyze_futures_market(symbol, timeframe)
+            if not result:
+                raise RuntimeError('Análisis Futures vacío')
+
+            result = _apply_36s_futures_ai_control(result, symbol, timeframe)
+            ui_result = _compact_futures_ui_result(result)
+            runtime_result = _compact_futures_runtime_result(result)
+
+            # Only the small 30-combo summary stays in the normal runtime cache.
+            try:
+                with _futures_analysis_cache['lock']:
+                    current_data = dict(_futures_analysis_cache.get('data') or {})
+                    current_analysis = dict(current_data.get('analysis') or {})
+                    current_analysis[(symbol, timeframe)] = runtime_result
+                    current_data['analysis'] = current_analysis
+                    current_data.setdefault('errors', [])
+                    current_data.setdefault('lifecycle', {})
+                    _futures_analysis_cache['data'] = current_data
+                    _futures_analysis_cache['ts'] = time.time()
+            except Exception as cache_error:
+                print(f'⚠️ [FUT UI] Snapshot compacto no actualizado: {cache_error}')
+
+            _store_futures_ui_cached(symbol, timeframe, ui_result)
+            _log_memory_runtime(f'{owner}:after')
+        except Exception as exc:
+            print(f'❌ [FUT UI] {symbol} {timeframe}: {exc}')
+            with _FUTURES_UI_CACHE['lock']:
+                _FUTURES_UI_CACHE['errors'][key] = {
+                    'ts': time.time(),
+                    'error': str(exc)[:240],
+                }
+        finally:
+            if heavy_acquired:
+                _release_heavy_analysis(owner)
+            with _FUTURES_UI_CACHE['lock']:
+                _FUTURES_UI_CACHE['running'].discard(key)
+            # Small grace window so the polling request can consume the result
+            # before the incremental researcher starts the next heavy combo.
+            _mark_futures_interactive_priority(seconds=6)
+
+    threading.Thread(
+        target=_do_ui_analysis,
+        daemon=True,
+        name=f'futures-ui-{symbol}-{timeframe}',
+    ).start()
+    return 'SCHEDULED'
 
 
 def _serialize_futures_cache(data):
@@ -30962,15 +31139,28 @@ _FUTURES_INCREMENTAL_START_DELAY_SECONDS = max(60, int(os.environ.get('FUTURES_I
 
 
 def _next_futures_incremental_combo():
-    """Round-robin one symbol/timeframe at a time; no 30-combo heap spike."""
+    """Round-robin one symbol/timeframe at a time; bounded for 512 MB RAM."""
     global _FUTURES_INCREMENTAL_CURSOR
-    from futures_system import FUTURES_SYMBOLS, FUTURES_TIMEFRAMES
-    # Refresh short TF first after a restart, then progress through the rest.
+    from futures_system import (
+        FUTURES_SYMBOLS,
+        FUTURES_TIMEFRAMES,
+        FUTURES_RESEARCH_SYMBOLS,
+        FUTURES_RESEARCH_TIMEFRAMES,
+        FUTURES_RESEARCH_ENABLED,
+    )
+    # Production universe keeps all six TF. Commit 15 adds only six research
+    # combinations (LINK/BNB × 15m/30m/1h), never 12 extra combinations.
     combos = [
         (symbol, timeframe)
         for timeframe in FUTURES_TIMEFRAMES.keys()
         for symbol in FUTURES_SYMBOLS.keys()
     ]
+    if FUTURES_RESEARCH_ENABLED:
+        combos.extend(
+            (symbol, timeframe)
+            for timeframe in FUTURES_RESEARCH_TIMEFRAMES
+            for symbol in FUTURES_RESEARCH_SYMBOLS.keys()
+        )
     if not combos:
         return None
     with _FUTURES_INCREMENTAL_CURSOR_LOCK:
@@ -30984,8 +31174,13 @@ def _trigger_futures_combo_refresh_async(symbol=None, timeframe=None):
 
     This is the Render-Free default.  A rich result is persisted by ReviewTrader,
     while only a compact live snapshot remains in the Gunicorn process.
+    Human chart requests have priority: while one is pending, do not start a new
+    research combo. The currently running combo is allowed to finish safely.
     """
     global _futures_analysis_cache
+
+    if _futures_interactive_priority_active():
+        return False
     cache = _futures_analysis_cache
     if not symbol or not timeframe:
         combo = _next_futures_incremental_combo()
@@ -31244,7 +31439,11 @@ def _start_futures_warmup():
             time.sleep(_FUTURES_INCREMENTAL_START_DELAY_SECONDS)
             while True:
                 try:
-                    if not _futures_analysis_cache['running']:
+                    if _futures_interactive_priority_active():
+                        # UI priority prevents the 15-second round-robin from
+                        # repeatedly winning the lock while the user waits.
+                        pass
+                    elif not _futures_analysis_cache['running']:
                         _trigger_futures_combo_refresh_async()
                 except Exception as error:
                     print(f"⚠️ [FUT INC] loop: {error}")

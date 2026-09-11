@@ -1784,6 +1784,8 @@ class AnalyticsService:
         stop_tight_suspects = 0
         post_stop_tp = 0
         post_stop_reclaims = 0
+        wick_outs = 0
+        false_invalidations_to_target = 0
         resolved = 0
         sl_resolved = 0
         with_forensics = 0
@@ -1823,6 +1825,10 @@ class AnalyticsService:
 
             if cls._q5_bool(forensics.get('stop_was_possibly_tight', False)):
                 stop_tight_suspects += 1
+            if cls._q5_bool(forensics.get('wick_out', False)):
+                wick_outs += 1
+            if cls._q5_bool(forensics.get('false_invalidation_to_target', False)):
+                false_invalidations_to_target += 1
 
             recovery = forensics.get('post_stop_recovery') or {}
             if isinstance(recovery, dict):
@@ -1914,12 +1920,86 @@ class AnalyticsService:
                 if sl_resolved
                 else None
             ),
+            'wick_outs': wick_outs,
+            'wick_out_rate_pct': (
+                round(wick_outs / sl_resolved * 100.0, 2)
+                if sl_resolved
+                else None
+            ),
+            'false_invalidations_to_target': false_invalidations_to_target,
+            'false_invalidation_to_target_rate_pct': (
+                round(false_invalidations_to_target / sl_resolved * 100.0, 2)
+                if sl_resolved
+                else None
+            ),
+            'wick_resilience_version': 'C15_WICK_RESILIENCE_V1',
             'diagnoses': dict(
                 sorted(
                     diagnoses.items(),
                     key=lambda item: (-item[1], item[0])
                 )
             )
+        }
+
+    @classmethod
+    def _execution_intelligence_summary(cls, rows):
+        """Commit 15F: compact attribution for microstructure/uncertainty.
+
+        Uses only the already loaded Analytics cohort; no extra Supabase query,
+        no market request and no production authority.
+        """
+        rows = list(rows or [])
+
+        def compact_aggregate(group):
+            agg = cls._q5_aggregate(group, include_bands=False)
+            return {
+                'n': agg.get('total_directional', 0),
+                'resolved': agg.get('resolved', 0),
+                'tp': agg.get('tp_hit', 0),
+                'sl': agg.get('sl_hit', 0),
+                'win_rate': agg.get('win_rate'),
+                'expectancy_r': agg.get('expectancy_r'),
+                'profit_factor': agg.get('profit_factor'),
+                'pnl_total_pct': agg.get('pnl_total_pct'),
+            }
+
+        micro_groups = {'ALIGNED': [], 'NEUTRAL': [], 'CONFLICT': [], 'OTHER': []}
+        uncertainty_groups = {'LOW': [], 'MEDIUM': [], 'HIGH': [], 'OTHER': []}
+        research_groups = {'LINK-USDT': [], 'BNB-USDT': []}
+
+        for signal in rows:
+            learning = cls._q5_learning(signal)
+            micro = learning.get('microstructure_shadow') or {}
+            alignment = str(micro.get('alignment') or '').upper() if isinstance(micro, dict) else ''
+            micro_groups[alignment if alignment in micro_groups else 'OTHER'].append(signal)
+
+            uncertainty = learning.get('uncertainty_shadow') or {}
+            bucket = str(uncertainty.get('uncertainty_bucket') or '').upper() if isinstance(uncertainty, dict) else ''
+            uncertainty_groups[bucket if bucket in uncertainty_groups else 'OTHER'].append(signal)
+
+            symbol = str(signal.get('symbol') or '').upper()
+            research = learning.get('research_only_universe') or {}
+            if symbol in research_groups and isinstance(research, dict) and research.get('research_only'):
+                research_groups[symbol].append(signal)
+
+        return {
+            'version': 'C15_EXECUTION_INTELLIGENCE_ANALYTICS_V1',
+            'authority': 'RESEARCH_ONLY',
+            'production_change': False,
+            'microstructure_alignment': {
+                key: compact_aggregate(group)
+                for key, group in micro_groups.items()
+                if group or key in ('ALIGNED', 'NEUTRAL', 'CONFLICT')
+            },
+            'uncertainty_buckets': {
+                key: compact_aggregate(group)
+                for key, group in uncertainty_groups.items()
+                if group or key in ('LOW', 'MEDIUM', 'HIGH')
+            },
+            'research_universe': {
+                key: compact_aggregate(group)
+                for key, group in research_groups.items()
+            },
         }
 
     @classmethod
@@ -2168,6 +2248,8 @@ class AnalyticsService:
         attribution_spot = self._strategy_attribution_summary(spot)
         attribution_futures = self._strategy_attribution_summary(futures_official)
         attribution_shadow = self._strategy_attribution_summary(futures_shadow)
+        execution_intelligence_official = self._execution_intelligence_summary(futures_official)
+        execution_intelligence_shadow = self._execution_intelligence_summary(futures_shadow)
 
         # COMMIT 7 — Edge Discovery utiliza exactamente las cohortes ya
         # separadas arriba. No hace otra consulta ni puede cambiar producción.
@@ -2323,6 +2405,24 @@ class AnalyticsService:
                 'spot': attribution_spot,
                 'futures_official': attribution_futures,
                 'futures_shadow': attribution_shadow
+            },
+
+            'execution_intelligence_v2': {
+                'version': 'C15_EXECUTION_INTELLIGENCE_ANALYTICS_V1',
+                'official': execution_intelligence_official,
+                'shadow': execution_intelligence_shadow,
+                'wick_resilience': {
+                    'official': {
+                        'wick_outs': forensics_futures.get('wick_outs', 0),
+                        'wick_out_rate_pct': forensics_futures.get('wick_out_rate_pct'),
+                        'false_invalidations_to_target': forensics_futures.get('false_invalidations_to_target', 0),
+                    },
+                    'shadow': {
+                        'wick_outs': forensics_shadow.get('wick_outs', 0),
+                        'wick_out_rate_pct': forensics_shadow.get('wick_out_rate_pct'),
+                        'false_invalidations_to_target': forensics_shadow.get('false_invalidations_to_target', 0),
+                    },
+                },
             },
 
             # COMMIT 7 — hipótesis falsables, research-only.

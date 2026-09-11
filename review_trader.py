@@ -1722,6 +1722,36 @@ class ReviewTrader:
             if isinstance(challenger_lab, dict):
                 context['learning']['execution_challenger_lab'] = challenger_lab
 
+            # Commit 15E — lightweight uncertainty/conformal foundation.
+            # Persist only scalars/labels already computed by Futures; no new
+            # market query and no production authority.
+            uncertainty_shadow = analysis_result.get('uncertainty_shadow_gate')
+            if isinstance(uncertainty_shadow, dict) and uncertainty_shadow:
+                context['learning']['uncertainty_shadow'] = {
+                    'version': str(uncertainty_shadow.get('version') or '')[:100],
+                    'authority': 'SHADOW_ONLY',
+                    'method': str(uncertainty_shadow.get('method') or '')[:80],
+                    'conformal_status': str(uncertainty_shadow.get('conformal_status') or '')[:80],
+                    'calibrated': self._as_bool(uncertainty_shadow.get('calibrated', False)),
+                    'uncertainty_score': uncertainty_shadow.get('uncertainty_score'),
+                    'uncertainty_bucket': str(uncertainty_shadow.get('uncertainty_bucket') or 'UNAVAILABLE')[:20],
+                    'shadow_gate': str(uncertainty_shadow.get('shadow_gate') or 'UNAVAILABLE')[:40],
+                    'components': dict(uncertainty_shadow.get('components') or {}),
+                    'affects_entry': False,
+                    'affects_safety': False,
+                    'affects_publication': False,
+                    'affects_leverage': False,
+                }
+
+            if self._as_bool(analysis_result.get('research_only', False)):
+                context['learning']['research_only_universe'] = {
+                    'version': 'C15_RESEARCH_UNIVERSE_V1',
+                    'research_only': True,
+                    'universe': str(analysis_result.get('research_universe') or 'C15_LINK_BNB_SHADOW')[:80],
+                    'affects_official_kpis': False,
+                    'affects_publication': False,
+                }
+
             if (
                 self._normalize_system_type(
                     system_type

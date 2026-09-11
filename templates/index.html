@@ -1573,6 +1573,45 @@
                         </div>
                     </div>
 
+                {% if is_futures %}
+                <!-- COMMIT 15B — ORDER BOOK / ORDER FLOW MICROSTRUCTURE -->
+                <div class="card bg-dark border-primary mb-4 indicator-card" data-indicator="order-flow">
+                    <div class="card-header d-flex justify-content-between align-items-center bg-primary bg-opacity-10">
+                        <div>
+                            <h5 class="mb-0"><i class="fas fa-layer-group me-2"></i>Order Book / Order Flow</h5>
+                            <small class="text-muted">Microestructura Futures pública · profundidad relativa al precio</small>
+                        </div>
+                    </div>
+                    <div class="card-body indicator-content">
+                        <div id="order-flow-chart" style="height: 360px;"></div>
+                        <div class="row g-2 mt-2 text-center">
+                            <div class="col-md-3 col-6">
+                                <small class="text-muted d-block">Imbalance libro</small>
+                                <strong id="order-flow-imbalance">--</strong>
+                            </div>
+                            <div class="col-md-3 col-6">
+                                <small class="text-muted d-block">Compras recientes</small>
+                                <strong id="order-flow-buy-share">--</strong>
+                            </div>
+                            <div class="col-md-3 col-6">
+                                <small class="text-muted d-block">Spread</small>
+                                <strong id="order-flow-spread">--</strong>
+                            </div>
+                            <div class="col-md-3 col-6">
+                                <small class="text-muted d-block">Contexto</small>
+                                <strong id="order-flow-alignment">OBSERVANDO</strong>
+                            </div>
+                        </div>
+                        <div class="mt-3 p-2 rounded border border-secondary border-opacity-50">
+                            <small class="text-muted">
+                                <strong>Cómo leerlo:</strong> las barras a la izquierda representan profundidad BID debajo/cerca del precio; las barras a la derecha representan ASK. El sistema compara esa presión con los trades recientes. <span class="text-warning">En observación: todavía no modifica Entry ni Safety.</span>
+                                <span id="order-flow-interpretation" class="d-block mt-1">Esperando snapshot...</span>
+                            </small>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+
                 <!-- ============ GRÁFICO DE ZONAS DE TRADING ============ -->
                 <div class="card bg-dark border-info mb-4 indicator-card" data-indicator="trading-zones">
                     <div class="card-header d-flex justify-content-between align-items-center bg-info bg-opacity-25">
@@ -2777,7 +2816,7 @@
 
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI-2"></script>
     <script
-        src="{{ url_for('static', filename='script.js') }}?v=20260910-V1-MACRO-RADAR"
+        src="{{ url_for('static', filename='script.js') }}?v=20260911-H15-1-INTERACTIVE"
     ></script>
 
 
@@ -2793,7 +2832,7 @@
 
     {% endif %}
 
-    <script src="{{ url_for('static', filename='chart_workspace.js') }}?v=20260909-PRO-UI-2"></script>
+    <script src="{{ url_for('static', filename='chart_workspace.js') }}?v=20260911-C15-ORDERFLOW"></script>
 
     <!-- ============================================================= -->
     <!-- IA AISLADA -->

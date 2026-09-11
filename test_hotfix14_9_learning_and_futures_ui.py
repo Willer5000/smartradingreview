@@ -54,9 +54,15 @@ class Hotfix149Tests(unittest.TestCase):
         start = source.index("@app.route('/api/futures/analyze', methods=['POST'])")
         end = source.index("@app.route('/api/futures/analyze_all/<timeframe>')", start)
         block = source[start:end]
-        self.assertIn('ui_result = _compact_futures_ui_result(result)', block)
-        self.assertIn("'data': ui_result if result.get('success') else None", block)
-        self.assertIn('runtime_result = _compact_futures_runtime_result(result)', block)
+        # Hotfix 15.1 moved the heavy chart calculation out of Gunicorn's only
+        # request thread. The endpoint returns the short-lived rich UI cache.
+        self.assertIn('_get_futures_ui_cached(symbol, timeframe)', block)
+        self.assertIn("'data': cached_ui if cached_ui.get('success', True) else None", block)
+        helper_start = source.index('def _start_futures_ui_analysis_async')
+        helper_end = source.index('def _serialize_futures_cache', helper_start)
+        helper = source[helper_start:helper_end]
+        self.assertIn('ui_result = _compact_futures_ui_result(result)', helper)
+        self.assertIn('runtime_result = _compact_futures_runtime_result(result)', helper)
 
     def test_futures_frontend_does_not_launch_spot_correlation_analysis(self):
         source = (ROOT / 'static' / 'script.js').read_text(encoding='utf-8')
@@ -68,7 +74,7 @@ class Hotfix149Tests(unittest.TestCase):
         source = (ROOT / 'static' / 'script.js').read_text(encoding='utf-8')
         self.assertIn('window.__FUTURES_ANALYSIS_BUSY_RETRIES__', source)
         self.assertIn('error?.busy', source)
-        self.assertIn('Se reintentará automáticamente para cargar los gráficos completos.', source)
+        self.assertIn('Preparando gráficos Futures.', source)
 
     def test_sql_only_invalidates_ephemeral_analytics_snapshots(self):
         sql = (ROOT / 'schema_hotfix14_9_restore_learning.sql').read_text(encoding='utf-8')

@@ -214,7 +214,7 @@ class SupabaseClient:
         """Determina si el símbolo es spot o futures según el par"""
         # PAXG es solo spot; el resto son ambos pero se distinguen por contexto
         spot_only = ['PAXG-USDT', 'PAXG-BTC']
-        futures_symbols = ['BTC-USDT', 'ETH-USDT', 'SOL-USDT', 'XRP-USDT', 'ADA-USDT']
+        futures_symbols = ['BTC-USDT', 'ETH-USDT', 'SOL-USDT', 'XRP-USDT', 'ADA-USDT', 'LINK-USDT', 'BNB-USDT']
         
         if symbol in spot_only:
             return 'spot'

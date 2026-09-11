@@ -1596,6 +1596,62 @@ async function loadLearningGovernanceStatus() {
     });
 }
 
+
+function renderExecutionIntelligenceV2(data) {
+    const root = data?.execution_intelligence_v2 || {};
+    const shadow = root?.shadow || {};
+    const micro = shadow?.microstructure_alignment || {};
+    const uncertainty = shadow?.uncertainty_buckets || {};
+    const research = shadow?.research_universe || {};
+    const wick = root?.wick_resilience?.shadow || {};
+
+    const fmtR = value => {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return '--';
+        return `${n >= 0 ? '+' : ''}${n.toFixed(3)}R`;
+    };
+    const fmtPct = value => {
+        const n = Number(value);
+        return Number.isFinite(n) ? `${n.toFixed(1)}%` : '--';
+    };
+    const fmtN = value => Number(value || 0).toLocaleString();
+
+    q5SetText('c15-micro-aligned-exp', fmtR(micro?.ALIGNED?.expectancy_r));
+    q5SetText('c15-uncertainty-low-exp', fmtR(uncertainty?.LOW?.expectancy_r));
+    q5SetText(
+        'c15-wick-outs',
+        `${fmtN(wick?.wick_outs)}${Number.isFinite(Number(wick?.wick_out_rate_pct)) ? ` · ${fmtPct(wick.wick_out_rate_pct)}` : ''}`
+    );
+    const researchN = Number(research?.['LINK-USDT']?.n || 0) + Number(research?.['BNB-USDT']?.n || 0);
+    q5SetText('c15-research-universe', fmtN(researchN));
+
+    const renderRows = (targetId, groups, order, labels) => {
+        const body = document.getElementById(targetId);
+        if (!body) return;
+        body.innerHTML = order.map(key => {
+            const item = groups?.[key] || {};
+            return `<tr>
+                <td>${labels[key] || key}</td>
+                <td>${fmtN(item.n)}</td>
+                <td>${fmtN(item.resolved)}</td>
+                <td>${fmtPct(item.win_rate)}</td>
+                <td>${fmtR(item.expectancy_r)}</td>
+            </tr>`;
+        }).join('');
+    };
+
+    renderRows(
+        'c15-micro-table', micro,
+        ['ALIGNED', 'NEUTRAL', 'CONFLICT'],
+        {ALIGNED: 'Alineado', NEUTRAL: 'Neutral', CONFLICT: 'En conflicto'}
+    );
+    renderRows(
+        'c15-uncertainty-table', uncertainty,
+        ['LOW', 'MEDIUM', 'HIGH'],
+        {LOW: 'Baja', MEDIUM: 'Media', HIGH: 'Alta'}
+    );
+}
+
 async function loadQualityV2() {
 
     const statusEl = document.getElementById(
@@ -1779,6 +1835,9 @@ async function loadQualityV2() {
                 || 0
             ).toLocaleString()
         );
+
+        // Commit 15F — Order Flow / incertidumbre / wick resilience.
+        renderExecutionIntelligenceV2(data);
 
         // ============================================================
         // Q7 STRATEGY LAB

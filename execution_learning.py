@@ -223,6 +223,27 @@ def build_execution_forensics(
         )
     )
 
+    # Commit 15D — explicit wick/sweep resilience diagnostic.  A stop remains
+    # a real LOSS; these labels only describe what happened afterwards so the
+    # next Entry/SL challenger can learn whether invalidation was too exposed to
+    # a liquidity sweep.  We never rewrite a historical SL into a win.
+    wick_out = bool(
+        status == "sl_hit"
+        and recovery.get("reclaimed_entry")
+        and _safe_float(recovery.get("best_favorable_r_after_stop"), 0.0) >= 0.50
+    )
+    false_invalidation_to_target = bool(
+        wick_out and recovery.get("tp_reached_after_stop")
+    )
+    if false_invalidation_to_target:
+        wick_classification = "FALSE_INVALIDATION_TO_TARGET"
+    elif wick_out:
+        wick_classification = "WICK_OUT_RECLAIMED_ENTRY"
+    elif status == "sl_hit":
+        wick_classification = "STRUCTURAL_STOP_OR_NO_RECOVERY"
+    else:
+        wick_classification = "NOT_APPLICABLE"
+
     return {
         "version": EXECUTION_LEARNING_VERSION,
         "diagnostic_only": True,
@@ -241,5 +262,9 @@ def build_execution_forensics(
         "target_progress_ratio": round(target_progress, 4),
         "diagnosis": diagnosis,
         "stop_was_possibly_tight": stop_was_possibly_tight,
+        "wick_out": wick_out,
+        "false_invalidation_to_target": false_invalidation_to_target,
+        "wick_classification": wick_classification,
+        "wick_resilience_version": "C15_WICK_RESILIENCE_V1",
         "post_stop_recovery": recovery,
     }

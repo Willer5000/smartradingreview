@@ -2710,6 +2710,18 @@ window.runCompleteAnalysis = function() {
         );
     const symbol = document.getElementById('symbol-select')?.value || cfg.defaultSymbol;
     const interval = document.getElementById('interval-select')?.value || cfg.defaultTimeframe;
+
+    // Hotfix 15.1: retries belong to one exact Futures view. Changing pair/TF
+    // must never inherit an old busy loop.
+    if (window.IS_FUTURES_PAGE) {
+        const retryKey = `${symbol}|${interval}`;
+        if (window.__FUTURES_ANALYSIS_RETRY_KEY__ !== retryKey) {
+            window.__FUTURES_ANALYSIS_RETRY_KEY__ = retryKey;
+            window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = 0;
+            window.__FUTURES_ANALYSIS_RETRY_STARTED_AT__ = 0;
+            clearTimeout(window.__FUTURES_ANALYSIS_RETRY_TIMER__);
+        }
+    }
     
     window.currentSymbol = symbol;
     window.currentInterval = interval;
@@ -2866,6 +2878,8 @@ window.runCompleteAnalysis = function() {
             ) {
                 if (window.IS_FUTURES_PAGE) {
                     window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = 0;
+                    window.__FUTURES_ANALYSIS_RETRY_STARTED_AT__ = 0;
+                    clearTimeout(window.__FUTURES_ANALYSIS_RETRY_TIMER__);
                 }
                 window.currentAnalysis = data.data;
                 // ============================================================
@@ -3348,19 +3362,39 @@ window.runCompleteAnalysis = function() {
                 error
             );
 
-            // Hotfix 14.9: en Render Free el worker incremental puede ocupar
-            // unos segundos el único slot pesado. No presentar eso como un
-            // fallo permanente ni dejar Futures sin gráficos: reintentar con
-            // backoff corto, máximo cuatro veces.
+            // Hotfix 15.1: el análisis interactivo Futures se calcula fuera
+            // del único hilo web de Gunicorn. Mientras termina, el endpoint
+            // responde BUSY rápidamente y esta vista hace polling ACOTADO.
+            // Nunca dejamos un spinner infinito.
             if (
                 window.IS_FUTURES_PAGE
                 && error?.busy
             ) {
+                const now = Date.now();
+                let startedAt = Number(
+                    window.__FUTURES_ANALYSIS_RETRY_STARTED_AT__ || 0
+                );
+                if (!startedAt) {
+                    startedAt = now;
+                    window.__FUTURES_ANALYSIS_RETRY_STARTED_AT__ = startedAt;
+                }
+
+                const elapsedMs = now - startedAt;
                 const retryCount = Number(
                     window.__FUTURES_ANALYSIS_BUSY_RETRIES__ || 0
                 );
+                const serverRetry = Number(
+                    error?.serverData?.retry_after_ms || 1800
+                );
+                const retryAfterMs = Math.min(
+                    4000,
+                    Math.max(1200, serverRetry)
+                );
 
-                if (retryCount < 4) {
+                // 45 s / 18 polls is a hard ceiling. If the backend cannot
+                // prepare the rich chart payload in that window, surface a
+                // normal retry button instead of keeping the page spinning.
+                if (elapsedMs < 45000 && retryCount < 18) {
                     window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = retryCount + 1;
 
                     const recommendationEl = document.getElementById(
@@ -3369,25 +3403,29 @@ window.runCompleteAnalysis = function() {
                     if (recommendationEl) {
                         recommendationEl.innerHTML = `
                             <div class="alert alert-info mb-0">
-                                <strong>⏳ Futures actualizando datos.</strong>
+                                <strong>⏳ Preparando gráficos Futures.</strong>
                                 <div class="small mt-2">
-                                    Se reintentará automáticamente para cargar los gráficos completos.
+                                    El análisis se ejecuta en segundo plano para mantener la página disponible.
+                                    Intento ${retryCount + 1}.
                                 </div>
                             </div>
                         `;
                     }
 
-                    window.setTimeout(() => {
+                    clearTimeout(window.__FUTURES_ANALYSIS_RETRY_TIMER__);
+                    window.__FUTURES_ANALYSIS_RETRY_TIMER__ = window.setTimeout(() => {
                         if (typeof window.runCompleteAnalysis === 'function') {
                             window.runCompleteAnalysis();
                         }
-                    }, 4500);
+                    }, retryAfterMs);
                     return;
                 }
             }
 
             if (window.IS_FUTURES_PAGE) {
                 window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = 0;
+                window.__FUTURES_ANALYSIS_RETRY_STARTED_AT__ = 0;
+                clearTimeout(window.__FUTURES_ANALYSIS_RETRY_TIMER__);
             }
 
             // ============================================================
@@ -3401,11 +3439,18 @@ window.runCompleteAnalysis = function() {
 
             if (recommendationEl) {
                 recommendationEl.innerHTML = `
-                    <div class="alert alert-danger mb-0">
-                        <strong>⚠️ No se pudo completar el análisis.</strong>
+                    <div class="alert alert-warning mb-0">
+                        <strong>⚠️ El análisis Futures tardó más de lo esperado.</strong>
                         <div class="small mt-2">
-                            ${error?.message || 'El servidor devolvió un error.'}
+                            ${error?.message || 'El servidor está ocupado temporalmente.'}
                         </div>
+                        <button
+                            type="button"
+                            class="btn btn-sm btn-outline-warning mt-2"
+                            onclick="window.runCompleteAnalysis?.()"
+                        >
+                            Reintentar análisis
+                        </button>
                     </div>
                 `;
             }
@@ -7555,11 +7600,174 @@ function updateVWAPChart(data) {
     catch (error) { console.error('Error VWAP:', error); }
 }
 
+
+// ============ COMMIT 15B: ORDER BOOK / ORDER FLOW ============
+const __orderFlowUiCache = new Map();
+const __orderFlowUiInflight = new Set();
+
+function _orderFlowSnapshotFromAnalysis(data) {
+    const ctx = data?.futures_microstructure_context || {};
+    const display = ctx?.display || {};
+    const book = display?.orderbook || {};
+    const flow = display?.flow || {};
+    if (!Array.isArray(book.bid_profile) || !Array.isArray(book.ask_profile)) return null;
+    return {
+        success: true,
+        symbol: data?.symbol,
+        orderbook: {
+            ...book,
+            imbalance: ctx?.metrics?.orderbook_imbalance,
+        },
+        flow,
+        alignment: ctx?.alignment,
+        alignment_score: ctx?.alignment_score,
+        reasons: Array.isArray(ctx?.reasons) ? ctx.reasons : [],
+        fetched_at: ctx?.source_status?.fetched_at,
+    };
+}
+
+function _renderOrderFlowSnapshot(snapshot, symbol) {
+    const chartDiv = document.getElementById('order-flow-chart');
+    if (!chartDiv || typeof Plotly === 'undefined') return;
+
+    const book = snapshot?.orderbook || {};
+    const bids = Array.isArray(book.bid_profile) ? book.bid_profile : [];
+    const asks = Array.isArray(book.ask_profile) ? book.ask_profile : [];
+    if (!bids.length && !asks.length) {
+        chartDiv.innerHTML = '<div class="text-muted text-center py-5">Microestructura no disponible en este momento.</div>';
+        return;
+    }
+
+    const theme = window.TradingTheme?.palette || {};
+    const bidX = bids.map(row => -Math.max(0, Number(row.side_share || 0)) * 100);
+    const askX = asks.map(row => Math.max(0, Number(row.side_share || 0)) * 100);
+    const bidY = bids.map(row => Number(row.price));
+    const askY = asks.map(row => Number(row.price));
+    const bidCustom = bids.map(row => [Number(row.size || 0), Number(row.distance_bps || 0)]);
+    const askCustom = asks.map(row => [Number(row.size || 0), Number(row.distance_bps || 0)]);
+
+    const traces = [
+        {
+            type: 'bar', orientation: 'h', name: 'BID', x: bidX, y: bidY,
+            customdata: bidCustom,
+            marker: {color: theme.bullish || '#22c982'},
+            hovertemplate: 'BID<br>Precio %{y}<br>Profundidad relativa %{x:.2f}%<br>Tamaño %{customdata[0]:.4f}<br>%{customdata[1]:.1f} bps del medio<extra></extra>'
+        },
+        {
+            type: 'bar', orientation: 'h', name: 'ASK', x: askX, y: askY,
+            customdata: askCustom,
+            marker: {color: theme.bearish || '#f05d6f'},
+            hovertemplate: 'ASK<br>Precio %{y}<br>Profundidad relativa %{x:.2f}%<br>Tamaño %{customdata[0]:.4f}<br>+%{customdata[1]:.1f} bps del medio<extra></extra>'
+        }
+    ];
+
+    const midpoint = Number(book.midpoint || ((Number(book.best_bid || 0) + Number(book.best_ask || 0)) / 2));
+    const layoutBase = {
+        barmode: 'overlay',
+        height: 360,
+        margin: {l: 74, r: 34, t: 48, b: 50},
+        xaxis: {
+            title: 'Profundidad relativa · BID ← 0 → ASK',
+            zeroline: true,
+            zerolinewidth: 1,
+            gridcolor: theme.grid || 'rgba(120,142,170,.16)',
+            ticksuffix: '%'
+        },
+        yaxis: {
+            title: 'Precio',
+            gridcolor: theme.grid || 'rgba(120,142,170,.16)'
+        },
+        showlegend: true,
+        legend: {orientation: 'h', x: 0, y: 1.12},
+        shapes: Number.isFinite(midpoint) && midpoint > 0 ? [{
+            type: 'line', xref: 'paper', x0: 0, x1: 1, y0: midpoint, y1: midpoint,
+            line: {color: theme.info || '#5aa7ff', width: 1.4, dash: 'dot'}
+        }] : []
+    };
+    const layout = window.TradingTheme?.baseLayout
+        ? window.TradingTheme.baseLayout(`Order Book · ${String(symbol || '').replace('-', '/')}`, layoutBase)
+        : {template: 'plotly_dark', ...layoutBase};
+
+    try {
+        Plotly.react(chartDiv, traces, layout, {responsive: true, displaylogo: false, scrollZoom: false});
+    } catch (error) {
+        console.error('Order Flow chart:', error);
+    }
+
+    const imbalanceRaw = Number(book.imbalance);
+    const buyShareRaw = Number(snapshot?.flow?.buy_share);
+    const spreadRaw = Number(book.spread_pct);
+    const alignment = String(snapshot?.alignment || 'OBSERVANDO').toUpperCase();
+    const score = Number(snapshot?.alignment_score);
+
+    const imbalanceEl = document.getElementById('order-flow-imbalance');
+    const buyEl = document.getElementById('order-flow-buy-share');
+    const spreadEl = document.getElementById('order-flow-spread');
+    const alignmentEl = document.getElementById('order-flow-alignment');
+    const interpretationEl = document.getElementById('order-flow-interpretation');
+
+    if (imbalanceEl) {
+        imbalanceEl.textContent = Number.isFinite(imbalanceRaw) ? `${imbalanceRaw >= 0 ? '+' : ''}${(imbalanceRaw * 100).toFixed(1)}%` : '--';
+        imbalanceEl.className = Number.isFinite(imbalanceRaw) ? (imbalanceRaw > 0.10 ? 'text-success' : imbalanceRaw < -0.10 ? 'text-danger' : 'text-warning') : '';
+    }
+    if (buyEl) buyEl.textContent = Number.isFinite(buyShareRaw) ? `${(buyShareRaw * 100).toFixed(1)}%` : '--';
+    if (spreadEl) spreadEl.textContent = Number.isFinite(spreadRaw) ? `${spreadRaw.toFixed(4)}%` : '--';
+    if (alignmentEl) {
+        alignmentEl.textContent = `${alignment}${Number.isFinite(score) ? ` · ${score.toFixed(0)}/100` : ''}`;
+        alignmentEl.className = alignment === 'ALIGNED' ? 'text-success' : alignment === 'CONFLICT' ? 'text-danger' : 'text-warning';
+    }
+
+    if (interpretationEl) {
+        const bidPressure = Number.isFinite(imbalanceRaw) ? (imbalanceRaw > 0.10 ? 'profundidad compradora dominante' : imbalanceRaw < -0.10 ? 'profundidad vendedora dominante' : 'libro equilibrado') : 'imbalance no disponible';
+        const flowText = Number.isFinite(buyShareRaw) ? (buyShareRaw >= 0.55 ? 'trades recientes compradores' : buyShareRaw <= 0.45 ? 'trades recientes vendedores' : 'trades recientes equilibrados') : 'flujo de trades no disponible';
+        interpretationEl.textContent = `${bidPressure}; ${flowText}. La línea punteada es el precio medio BID/ASK. No es una señal autónoma.`;
+    }
+}
+
+async function _fetchOrderFlowUi(symbol) {
+    if (!symbol || !window.IS_FUTURES_PAGE) return null;
+    const now = Date.now();
+    const cached = __orderFlowUiCache.get(symbol);
+    if (cached && (now - cached.ts) < 20000) return cached.data;
+    if (__orderFlowUiInflight.has(symbol)) return cached?.data || null;
+    __orderFlowUiInflight.add(symbol);
+    try {
+        const response = await fetch(`/api/futures/microstructure?symbol=${encodeURIComponent(symbol)}`, {credentials: 'same-origin'});
+        const json = await response.json().catch(() => ({}));
+        if (response.ok && json?.success) {
+            __orderFlowUiCache.set(symbol, {ts: now, data: json});
+            return json;
+        }
+        return cached?.data || null;
+    } catch (error) {
+        console.warn('Microestructura UI no disponible:', error);
+        return cached?.data || null;
+    } finally {
+        __orderFlowUiInflight.delete(symbol);
+    }
+}
+
+function updateOrderFlowChart(data) {
+    if (!window.IS_FUTURES_PAGE) return;
+    const chartDiv = document.getElementById('order-flow-chart');
+    if (!chartDiv) return;
+    const symbol = String(data?.symbol || document.getElementById('symbol-select')?.value || 'BTC-USDT').toUpperCase();
+    const embedded = _orderFlowSnapshotFromAnalysis(data);
+    if (embedded) {
+        _renderOrderFlowSnapshot(embedded, symbol);
+        return;
+    }
+    _fetchOrderFlowUi(symbol).then(snapshot => {
+        if (snapshot) _renderOrderFlowSnapshot(snapshot, symbol);
+    });
+}
+
 // ============ UPDATE ALL CHARTS ============
 window.renderIndicatorChart = function(indicatorId, data) {
     const renderers = {
         'ftm': updateFTMChart,
         'liquidation-heatmap': updateLiquidationHeatmap,
+        'order-flow': updateOrderFlowChart,
         'fear-greed': window.updateFearGreedChart,
         'whale': updateWhaleChart,
         'rsi_maverick': updateRSIMaverickChart,
@@ -7601,6 +7809,7 @@ window.updateAllCharts = function(data) {
 
     [
         ['ftm', updateFTMChart], ['liquidation-heatmap', updateLiquidationHeatmap],
+        ['order-flow', updateOrderFlowChart],
         ['whale', updateWhaleChart], ['rsi_maverick', updateRSIMaverickChart],
         ['ichimoku', updateIchimokuChart], ['squeeze', updateSqueezeChart],
         ['adx', updateADXChart], ['macd', updateMACDChart], ['rsi', updateRSIChart],

@@ -18,7 +18,7 @@ import pandas as pd
 
 from learning_integrity import learning_context, latest_result, normalize_action, normalize_market, safe_float
 
-CHALLENGER_LAB_VERSION = "C13_EXECUTION_CHALLENGER_LAB_V1"
+CHALLENGER_LAB_VERSION = "C15_EXECUTION_CHALLENGER_LAB_V2"
 
 
 def _positive(value: Any) -> Optional[float]:
@@ -205,8 +205,9 @@ def build_execution_challenger_lab(analysis: Dict[str, Any], df: Optional[pd.Dat
             d_tp = min(baseline_tp, d_entry - abs(d_entry - d_sl) * 1.8)
         candidates.append(_candidate('SPECIALIST_COMMITTEE', d_entry, d_sl, d_tp, action, 'C12_SHADOW_AGREEMENT'))
 
-    # Maximum four total candidates (Baseline + up to three challengers) to
-    # limit multiple-testing and memory. Prefer structural candidates first.
+    # Commit 15 reserves one additional slot for a predeclared microstructure
+    # confirmation challenger appended later by futures_system.py.  Baseline +
+    # three structural candidates are still produced here.
     candidates = candidates[:4]
     return {
         'version': CHALLENGER_LAB_VERSION,
@@ -218,7 +219,7 @@ def build_execution_challenger_lab(analysis: Dict[str, Any], df: Optional[pd.Dat
         'candidates': candidates,
         'status': 'OBSERVING',
         'policy': {
-            'max_candidates_per_signal': 4,
+            'max_candidates_per_signal': 5,
             'no_stop_widening_in_production': True,
             'no_direction_change': True,
             'compare_activation_mfe_mae_tp_sl_expectancy': True,
@@ -248,8 +249,13 @@ def evaluate_execution_challengers(signal: Dict[str, Any], df: pd.DataFrame, eva
         frame = df
 
     results = []
-    for candidate in candidates[:4]:
+    for candidate in candidates[:5]:
         if not isinstance(candidate, dict) or not candidate.get('geometry_valid'):
+            continue
+        # Commit 15: conditional challengers form a subset cohort.  If the
+        # predeclared condition was not met at signal time, there is nothing to
+        # evaluate for this candidate; production remains unchanged.
+        if candidate.get('activation_condition') and not candidate.get('condition_met_at_signal'):
             continue
         action = normalize_action(candidate.get('action'))
         entry = _positive(candidate.get('entry'))
