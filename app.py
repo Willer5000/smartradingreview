@@ -9,28 +9,72 @@ import math
 import random
 import base64
 import requests
-import numpy as np
-import pandas as pd
+import importlib
+import threading
 from datetime import datetime, timedelta
 from io import BytesIO, StringIO
 import pytz
 from flask import Flask, render_template, jsonify, request, send_file, session
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import warnings
+
+# ============================================================================
+# HOTFIX 14.8 — LAZY SCIENTIFIC IMPORTS / SAFE BOOT
+# ============================================================================
+# Render Free tiene 512 MB. NumPy/Pandas/Plotly se utilizaban desde el import
+# de app.py, antes incluso de que Gunicorn pudiera abrir el puerto. En Python
+# 3.14 + versiones recientes esto puede consumir una fracción muy grande del
+# presupuesto sólo para arrancar. Cargamos estos módulos únicamente cuando un
+# cálculo/gráfico los necesita. La API de uso dentro del resto del archivo no
+# cambia: np.*, pd.* y go.* siguen funcionando.
+# ============================================================================
+
+class _LazyModule:
+    def __init__(self, module_name):
+        self._module_name = module_name
+        self._module = None
+        self._lock = threading.RLock() if 'threading' in globals() else None
+
+    def _load(self):
+        if self._module is not None:
+            return self._module
+        if self._lock is None:
+            module = importlib.import_module(self._module_name)
+            self._module = module
+            return module
+        with self._lock:
+            if self._module is None:
+                self._module = importlib.import_module(self._module_name)
+            return self._module
+
+    def __getattr__(self, name):
+        return getattr(self._load(), name)
+
+
+np = _LazyModule('numpy')
+pd = _LazyModule('pandas')
+go = _LazyModule('plotly.graph_objects')
+
+def make_subplots(*args, **kwargs):
+    from plotly.subplots import make_subplots as _make_subplots
+    return _make_subplots(*args, **kwargs)
 # kaleido: import opcional. v19 migró a matplotlib (chart_renderer.py) que es
 # 10× más ligero. Si kaleido no está instalado (default post v19), los métodos
 # generate_chart_image ya delegan a matplotlib. El fallback plotly+kaleido solo
 # se usa si matplotlib falla — con este try/except no rompe el deploy aunque
 # kaleido no esté en requirements.
-try:
-    import kaleido
-    KALEIDO_AVAILABLE = True
-except ImportError:
-    kaleido = None
-    KALEIDO_AVAILABLE = False
-import threading
+# Kaleido no se importa durante el arranque. Los renderers modernos usan
+# matplotlib bajo demanda; el fallback Plotly/Kaleido intentará importarlo sólo
+# si una función de gráfico realmente lo requiere.
+kaleido = None
+KALEIDO_AVAILABLE = False
 warnings.filterwarnings('ignore')
+
+# Los threads del sistema son I/O-bound y no requieren stacks de 8 MB.
+# Reducir el stack reservado evita que 6-8 daemons contribuyan a picos de RAM.
+try:
+    threading.stack_size(1024 * 1024)  # 1 MiB por thread
+except (ValueError, RuntimeError):
+    pass
 # ============================================================================
 # CONFIGURACIÓN DE LOGGING PARA DEPURACIÓN
 # ============================================================================
@@ -43,6 +87,23 @@ print("=" * 60)
 print("🚀 CRYPTO TRADER ANALYST PRO - INICIANDO SISTEMA")
 print("=" * 60)
 print(f"✅ Logging activado - Nivel: DEBUG")
+
+
+def _boot_rss_mb():
+    """RSS mínimo para diagnosticar boot sin importar psutil."""
+    try:
+        with open('/proc/self/status', 'r', encoding='utf-8') as status_file:
+            for line in status_file:
+                if line.startswith('VmRSS:'):
+                    return float(line.split()[1]) / 1024.0
+    except Exception:
+        return None
+    return None
+
+
+_boot_rss = _boot_rss_mb()
+if _boot_rss is not None:
+    print(f"🧠 [BOOT] RSS tras imports base: {_boot_rss:.1f} MB", flush=True)
 
 # ============================================================================
 # Importacion de portafolio guardian
@@ -22433,6 +22494,10 @@ class TradingExpertSystem:
 
 expert_system = TradingExpertSystem()
 
+_boot_rss = _boot_rss_mb()
+if _boot_rss is not None:
+    print(f"🧠 [BOOT] RSS tras ExpertSystem: {_boot_rss:.1f} MB", flush=True)
+
 
 # ============================================================================
 # CLASE: LIQUIDATION HEATMAP (NUEVO INDICADOR)
@@ -29840,8 +29905,8 @@ def _save_futures_cache_to_disk():
         return False
 
 
-# Cargar al importar el módulo (una vez por worker)
-_load_futures_cache_from_disk()
+# Hotfix 14.8: restauración diferida DESPUÉS de que Gunicorn abra el puerto.
+# No tocar Supabase durante import app.
 
 
 def _refresh_futures_signal_lifecycle(
@@ -33672,7 +33737,7 @@ def _save_entry_alerts_to_disk():
         return False
 
 
-_load_entry_alerts_from_disk()
+# Hotfix 14.8: carga diferida en _deferred_runtime_bootstrap().
 
 
 def _entry_alert_key(symbol, timeframe, candle_ts):
@@ -35475,7 +35540,7 @@ def _save_guardian_telegram_events():
         return False
 
 
-_load_guardian_telegram_events()
+# Hotfix 14.8: carga diferida en _deferred_runtime_bootstrap().
 
 
 # ============================================================================
@@ -40584,89 +40649,131 @@ def ejecutar_review_diario(q6_slot=None):
 # Se ejecuta cuando Gunicorn (o python app.py) arranca.
 # Skip si la variable de entorno DISABLE_WARMUP está definida (útil para tests).
 
-# Restaurar primero el último snapshot Spot compacto disponible.
-# Esto evita paneles vacíos durante reciclos normales de Gunicorn.
-try:
-    _load_spot_signals_cache_from_disk()
-except Exception as _spot_cache_load_error:
-    print(
-        "⚠️ [SPOT CACHE] Restauración inicial falló: "
-        f"{_spot_cache_load_error}"
-    )
+# Hotfix 14.8 — SAFE BOOT REAL
+# --------------------------------
+# Ninguna lectura de Supabase, análisis Spot/Futures ni scheduler pesado se
+# ejecuta durante `import app`. Gunicorn primero debe poder importar Flask,
+# abrir el puerto y responder. Luego un único hilo de bootstrap restaura
+# snapshots compactos y habilita los workers de forma escalonada.
+_RUNTIME_BOOTSTRAP_STARTED = False
+_RUNTIME_BOOTSTRAP_LOCK = threading.Lock()
 
-if not os.environ.get('DISABLE_WARMUP'):
-    try:
-        _start_futures_warmup()
-    except Exception as _e:
-        print(f"⚠️ Warm-up de futuros al importar módulo falló: {_e}")
-    
-    # v22: warm-up de previous_signals (SPOT + PAXG) en background.
-    # Antes: la primera request GET /api/previous_signals disparaba 12
-    # analyze_full_market en el worker web → SIGKILL OOM.
-    # Ahora: se calcula al arrancar en un hilo, y se refresca cada 15 min.
-    def _start_previous_signals_warmup():
-        import gc
 
-        # Hotfix 14.7: on 512 MB do not launch 12 Spot analyses during boot.
-        # The last compact snapshot was already restored from Supabase above.
-        if _LOW_MEMORY_MODE:
-            print(
-                "🛡️ [MEM] Spot previous_signals: sin warm-up masivo al arranque; "
-                "se conserva snapshot Supabase y se refresca diferido."
-            )
+def _start_previous_signals_warmup():
+    """Programa Spot previous_signals sin análisis masivo en el arranque."""
+    import gc
 
-            def _low_memory_periodic_prev():
-                # Main web app + incremental Futures get first priority.
-                time.sleep(15 * 60)
-                while True:
-                    try:
-                        if not _PREV_SIGNALS_COMPUTING['running']:
-                            _run_previous_signals_background()
-                    except Exception as error:
-                        print(f"⚠️ [MEM] previous_signals diferido: {error}")
-                    _trim_process_heap()
-                    time.sleep(60 * 60)
+    if _LOW_MEMORY_MODE:
+        print(
+            "🛡️ [MEM] Spot previous_signals: sin warm-up masivo al arranque; "
+            "snapshot Supabase + refresh diferido.",
+            flush=True,
+        )
 
-            threading.Thread(
-                target=_low_memory_periodic_prev,
-                daemon=True,
-                name='prev-signals-low-memory',
-            ).start()
-            return
-
-        def _delayed_first():
-            time.sleep(5)
-            try:
-                _run_previous_signals_background()
-            except Exception as e:
-                print(f"⚠️ Warm-up previous_signals inicial: {e}")
-        threading.Thread(
-            target=_delayed_first,
-            daemon=True,
-            name='prev-signals-warmup'
-        ).start()
-
-        def _periodic_prev():
+        def _low_memory_periodic_prev():
+            # Primer cálculo real: 20 min después del boot. Luego cada 60 min.
+            time.sleep(20 * 60)
             while True:
-                time.sleep(900)
                 try:
                     if not _PREV_SIGNALS_COMPUTING['running']:
                         _run_previous_signals_background()
-                        time.sleep(30)
-                        gc.collect()
-                except Exception as e:
-                    print(f"❌ Error refresh periódico previous_signals: {e}")
+                except Exception as error:
+                    print(f"⚠️ [MEM] previous_signals diferido: {error}", flush=True)
+                _trim_process_heap()
+                time.sleep(60 * 60)
+
         threading.Thread(
-            target=_periodic_prev,
+            target=_low_memory_periodic_prev,
             daemon=True,
-            name='prev-signals-periodic'
+            name='prev-signals-low-memory',
         ).start()
+        return
+
+    def _delayed_first():
+        time.sleep(30)
+        try:
+            _run_previous_signals_background()
+        except Exception as error:
+            print(f"⚠️ Warm-up previous_signals inicial: {error}", flush=True)
+
+    threading.Thread(
+        target=_delayed_first,
+        daemon=True,
+        name='prev-signals-warmup',
+    ).start()
+
+
+def _restore_runtime_snapshots_after_bind():
+    """Restaura estado compacto secuencialmente y con guard de memoria."""
+    loaders = (
+        ('spot-signals', _load_spot_signals_cache_from_disk),
+        ('futures-cache', _load_futures_cache_from_disk),
+        ('telegram-entry-dedup', _load_entry_alerts_from_disk),
+        ('telegram-guardian-dedup', _load_guardian_telegram_events),
+    )
+
+    for label, loader in loaders:
+        rss = _process_rss_mb()
+        if rss is not None and rss >= 300.0:
+            print(
+                f"🛑 [BOOT] {label} pospuesto: RSS {rss:.1f} MB >= 300 MB",
+                flush=True,
+            )
+            break
+        try:
+            loader()
+            print(f"✅ [BOOT] restaurado: {label}", flush=True)
+        except Exception as error:
+            print(f"⚠️ [BOOT] {label}: {error}", flush=True)
+        _trim_process_heap()
+        time.sleep(1)
+
+
+def _deferred_runtime_bootstrap():
+    """Boot en fases: web primero, persistencia después, workers al final."""
+    # Dar prioridad absoluta a que Gunicorn termine el import y abra $PORT.
+    delay = max(20, int(os.getenv('RUNTIME_BOOTSTRAP_DELAY_SECONDS', '30') or 30))
+    time.sleep(delay)
+
+    print("🪶 [BOOT] iniciando restauración diferida de runtime", flush=True)
+    _restore_runtime_snapshots_after_bind()
+    _trim_process_heap()
+
+    if not os.environ.get('DISABLE_WARMUP'):
+        try:
+            _start_futures_warmup()
+        except Exception as error:
+            print(f"⚠️ [BOOT] Futures incremental: {error}", flush=True)
+        try:
+            _start_previous_signals_warmup()
+        except Exception as error:
+            print(f"⚠️ [BOOT] previous_signals: {error}", flush=True)
+
+    # No arrancar 7 daemons al mismo tiempo que se crea el cliente Supabase.
+    time.sleep(15)
     try:
-        _start_previous_signals_warmup()
-    except Exception as _e:
-        print(f"⚠️ Warm-up de previous_signals falló: {_e}")
-else:
-    print("⏭️ Warm-up de futuros DESHABILITADO por variable DISABLE_WARMUP")
+        _start_background_threads()
+    except Exception as error:
+        print(f"⚠️ [BOOT] background threads: {error}", flush=True)
+
+    rss = _process_rss_mb()
+    if rss is not None:
+        print(f"🧠 [BOOT] RSS después de bootstrap: {rss:.1f} MB", flush=True)
+
+
+def _schedule_deferred_runtime_bootstrap():
+    global _RUNTIME_BOOTSTRAP_STARTED
+    if os.environ.get('DISABLE_SCHEDULER') and os.environ.get('DISABLE_WARMUP'):
+        return
+    with _RUNTIME_BOOTSTRAP_LOCK:
+        if _RUNTIME_BOOTSTRAP_STARTED:
+            return
+        _RUNTIME_BOOTSTRAP_STARTED = True
+    threading.Thread(
+        target=_deferred_runtime_bootstrap,
+        daemon=True,
+        name='runtime-bootstrap',
+    ).start()
 
 
 # ============================================================================
@@ -44845,10 +44952,16 @@ def api_ai_spot_shadow_evidence():
 # ============================================================================
 # Ahora que verificar_y_ejecutar y monitor_entries_loop están definidos,
 # los arrancamos. Esto ocurre TANTO bajo Gunicorn (importa app) COMO en dev.
+# Hotfix 14.8: un solo hilo liviano queda programado durante el import.
+# El servidor web se vuelve accesible ANTES de restaurar Supabase y de arrancar
+# los workers reales.
 try:
-    _start_background_threads()
+    _schedule_deferred_runtime_bootstrap()
+    _boot_rss = _boot_rss_mb()
+    if _boot_rss is not None:
+        print(f"🧠 [BOOT] app importada; RSS={_boot_rss:.1f} MB", flush=True)
 except Exception as _start_err:
-    print(f"⚠️ Error arrancando threads background: {_start_err}")
+    print(f"⚠️ Error programando bootstrap diferido: {_start_err}", flush=True)
 
 # ============================================================================
 # FASE 7B — ENDPOINT /api/analyze-with-portfolio

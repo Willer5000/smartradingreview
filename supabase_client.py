@@ -2695,17 +2695,9 @@ supabase_db = SupabaseClient()
 # El alias apunta al mismo objeto.
 supabase_client = supabase_db
 
+# Hotfix 14.8: NO ejecutar health_check() automático al importar el módulo.
+# El chequeo recorría varias tablas justo durante el bootstrap y retenía
+# respuestas HTTP/Pydantic sin aportar funcionalidad al arranque. Las consultas
+# reales ya son fail-open y validan sus tablas cuando se usan.
 if supabase_db.enabled:
-    health = supabase_db.health_check()
-
-    print(
-        "✅ Tablas verificadas: "
-        f"{sum(1 for v in health['tables_ok'].values() if v)}"
-        f"/{len(health['tables_ok'])}"
-    )
-
-    for table, ok in health['tables_ok'].items():
-        status = "✅" if ok else "❌"
-        print(
-            f"   {status} {table}"
-        )
+    print("✅ Supabase listo (health-check profundo diferido)")
