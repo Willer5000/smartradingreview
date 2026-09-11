@@ -26303,31 +26303,9 @@ def api_analyze():
             print(f"❌ Error 400: {error_response['error']}")
             return jsonify(error_response), 400
         
-        # Hotfix 15.3 — la UI Spot tiene prioridad sobre research/learning.
-        # Si existe caché fresco no tomamos el slot pesado. En cache miss,
-        # serializamos el cálculo con Futures/Learning para evitar competencia.
-        _mark_system_interactive_priority()
+        # Ejecutar análisis
         print(f"🔍 Ejecutando analyze_full_market...")
-        cache_key = (symbol, interval)
-        result = _analysis_cache_get(cache_key)
-        if result is None:
-            ui_owner = f'spot-ui:analyze:{symbol}:{interval}'
-            ui_acquired = _acquire_heavy_analysis(ui_owner, timeout=20)
-            if not ui_acquired:
-                return jsonify({
-                    'success': False,
-                    'busy': True,
-                    'deferred': True,
-                    'retry_after_ms': 1500,
-                    'error': 'El sistema está terminando una tarea de mercado.'
-                }), 503
-            try:
-                result = expert_system.analyze_full_market(symbol, interval)
-            finally:
-                _release_heavy_analysis(ui_owner)
-                _mark_system_interactive_priority(seconds=8)
-        else:
-            print(f"⚡ CACHÉ UI: {symbol} {interval}")
+        result = expert_system.analyze_full_market(symbol, interval)
         
         # Verificar resultado
         if result is None:
@@ -26974,19 +26952,12 @@ def _acquire_heavy_analysis(owner, timeout=None):
         else max(0, float(timeout))
     )
 
-    interactive_owner = owner.startswith(('futures-ui:', 'spot-ui:'))
-    if not interactive_owner:
-        priority_fn = globals().get('_system_interactive_priority_active')
-        fallback_fn = globals().get('_futures_interactive_priority_active')
+    if not owner.startswith('futures-ui:'):
+        priority_fn = globals().get('_futures_interactive_priority_active')
         try:
-            priority_active = (
-                bool(priority_fn()) if callable(priority_fn)
-                else bool(fallback_fn()) if callable(fallback_fn)
-                else False
-            )
-            if priority_active:
+            if callable(priority_fn) and priority_fn():
                 print(
-                    f"⏸️ [PRIORITY] {owner}: cede turno a la interfaz activa."
+                    f"⏸️ [PRIORITY] {owner}: cede turno a Futures interactivo."
                 )
                 return False
         except Exception:
@@ -27006,18 +26977,10 @@ def _acquire_heavy_analysis(owner, timeout=None):
     with _HEAVY_ANALYSIS_STATE_LOCK:
         _HEAVY_ANALYSIS_OWNER = owner
 
-    # Hotfix 15.3 — no destruir caches pequeños en CADA trabajo.
-    # Con RSS normal (~130-170 MB) vaciar OHLCV/microestructura en cada vuelta
-    # obliga a descargar y reconstruir los mismos datos una y otra vez, lo que
-    # aumenta CPU/red y perjudica la UI. Sólo hacemos shed real bajo presión.
-    preflight_rss = _process_rss_mb()
-    if preflight_rss is not None and preflight_rss >= 210.0:
-        _shed_recreatable_memory(
-            reason=f'{owner}:preflight',
-            aggressive=preflight_rss >= 230.0,
-        )
-    else:
-        _trim_process_heap()
+    # El lock evita concurrencia. Hotfix 14.7 además exige HEADROOM antes
+    # de iniciar: un análisis Futures puede crear temporalmente pandas/numpy
+    # + 9 traders + capas y saltar más de 100 MB antes del siguiente guard.
+    _shed_recreatable_memory(reason=f'{owner}:preflight', aggressive=True)
     rss = _process_rss_mb()
     if rss is not None and rss >= _MEMORY_JOB_START_LIMIT_MB:
         print(
@@ -29954,40 +29917,13 @@ _FUTURES_INTERACTIVE_PRIORITY_SECONDS = max(15, int(os.environ.get(
 _FUTURES_INTERACTIVE_PRIORITY_UNTIL = 0.0
 _FUTURES_INTERACTIVE_PRIORITY_LOCK = threading.Lock()
 
-# Hotfix 15.3 — prioridad interactiva GLOBAL. Antes sólo Futures podía hacer
-# ceder al research; la pantalla Spot podía competir con Futures incremental o
-# Learning y quedar aparentemente en carga infinita. Ahora cualquier análisis
-# solicitado por una persona obtiene una ventana corta sin nuevos jobs pesados.
-_SYSTEM_INTERACTIVE_PRIORITY_SECONDS = max(20, int(os.environ.get(
-    'SYSTEM_INTERACTIVE_PRIORITY_SECONDS', '60'
-) or 60))
-_SYSTEM_INTERACTIVE_PRIORITY_UNTIL = 0.0
-_SYSTEM_INTERACTIVE_PRIORITY_LOCK = threading.Lock()
-
-
-def _mark_system_interactive_priority(seconds=None):
-    global _SYSTEM_INTERACTIVE_PRIORITY_UNTIL
-    hold = max(5, int(seconds or _SYSTEM_INTERACTIVE_PRIORITY_SECONDS))
-    until = time.monotonic() + hold
-    with _SYSTEM_INTERACTIVE_PRIORITY_LOCK:
-        _SYSTEM_INTERACTIVE_PRIORITY_UNTIL = max(
-            _SYSTEM_INTERACTIVE_PRIORITY_UNTIL,
-            until,
-        )
-    return _SYSTEM_INTERACTIVE_PRIORITY_UNTIL
-
-
-def _system_interactive_priority_active():
-    with _SYSTEM_INTERACTIVE_PRIORITY_LOCK:
-        return time.monotonic() < _SYSTEM_INTERACTIVE_PRIORITY_UNTIL
-
 
 def _futures_ui_key(symbol, timeframe):
     return f"{str(symbol or '').strip()}|{str(timeframe or '').strip()}"
 
 
 def _mark_futures_interactive_priority(seconds=None):
-    """Compat: Futures marca la misma prioridad global de la interfaz."""
+    """Pause NEW background research while a human waits for charts."""
     global _FUTURES_INTERACTIVE_PRIORITY_UNTIL
     hold = max(5, int(seconds or _FUTURES_INTERACTIVE_PRIORITY_SECONDS))
     until = time.monotonic() + hold
@@ -29996,16 +29932,12 @@ def _mark_futures_interactive_priority(seconds=None):
             _FUTURES_INTERACTIVE_PRIORITY_UNTIL,
             until,
         )
-    _mark_system_interactive_priority(hold)
     return _FUTURES_INTERACTIVE_PRIORITY_UNTIL
 
 
 def _futures_interactive_priority_active():
-    # Learning/incremental existentes llaman esta función; devolver también la
-    # prioridad Spot hace que cedan ante cualquier análisis humano.
     with _FUTURES_INTERACTIVE_PRIORITY_LOCK:
-        futures_active = time.monotonic() < _FUTURES_INTERACTIVE_PRIORITY_UNTIL
-    return futures_active or _system_interactive_priority_active()
+        return time.monotonic() < _FUTURES_INTERACTIVE_PRIORITY_UNTIL
 
 
 def _get_futures_ui_cached(symbol, timeframe):
@@ -30194,26 +30126,9 @@ def _load_futures_cache_from_disk():
         print(f'⚠️ [FUT] No se pudo restaurar snapshot Supabase: {e}')
 
 
-_FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS = max(30, int(os.environ.get(
-    'FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS', '120'
-) or 120))
-_FUTURES_LAST_SNAPSHOT_SAVE_AT = 0.0
-_FUTURES_SNAPSHOT_SAVE_LOCK = threading.Lock()
-
-
-def _save_futures_cache_to_disk(force=False):
-    """Persist compact Futures state without writing Supabase every 15s."""
-    global _FUTURES_LAST_SNAPSHOT_SAVE_AT
+def _save_futures_cache_to_disk():
+    """Compat name: persist one compact Futures snapshot in Supabase."""
     try:
-        now_mono = time.monotonic()
-        if not force:
-            with _FUTURES_SNAPSHOT_SAVE_LOCK:
-                if (
-                    _FUTURES_LAST_SNAPSHOT_SAVE_AT > 0
-                    and now_mono - _FUTURES_LAST_SNAPSHOT_SAVE_AT
-                    < _FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS
-                ):
-                    return True
         from runtime_persistence import save_runtime_snapshot
         cache = _futures_analysis_cache
         if not cache.get('data'):
@@ -30230,8 +30145,6 @@ def _save_futures_cache_to_disk(force=False):
             'futures', 'analysis_cache', payload, ttl_seconds=24 * 3600
         )
         if ok:
-            with _FUTURES_SNAPSHOT_SAVE_LOCK:
-                _FUTURES_LAST_SNAPSHOT_SAVE_AT = now_mono
             print(f"💾 [FUT] Snapshot Supabase guardado ({len(serial_data.get('analysis_serial', {}))} pares)")
         return ok
     except Exception as e:
@@ -31238,15 +31151,8 @@ def _analyze_futures_all_parallel(combos_override=None):
 
 _FUTURES_INCREMENTAL_CURSOR = 0
 _FUTURES_INCREMENTAL_CURSOR_LOCK = threading.Lock()
-_FUTURES_INCREMENTAL_INTERVAL_SECONDS = max(10, int(os.environ.get('FUTURES_INCREMENTAL_INTERVAL_SECONDS', '30') or 30))
+_FUTURES_INCREMENTAL_INTERVAL_SECONDS = max(10, int(os.environ.get('FUTURES_INCREMENTAL_INTERVAL_SECONDS', '15') or 15))
 _FUTURES_INCREMENTAL_START_DELAY_SECONDS = max(60, int(os.environ.get('FUTURES_INCREMENTAL_START_DELAY_SECONDS', '180') or 180))
-if _LOW_MEMORY_MODE:
-    # 15s hacía 5.760 ciclos/día potenciales y escrituras/descargas innecesarias.
-    # 30s mantiene el Shadow vivo sin competir constantemente con la UI.
-    _FUTURES_INCREMENTAL_INTERVAL_SECONDS = max(
-        30,
-        _FUTURES_INCREMENTAL_INTERVAL_SECONDS,
-    )
 
 
 def _next_futures_incremental_combo():
@@ -41211,21 +41117,16 @@ def learning_worker_loop():
 
     learning_batch_rows = max(
         4,
-        int(os.environ.get('LEARNING_MICROBATCH_ROWS', '8') or 8),
+        int(os.environ.get('LEARNING_MICROBATCH_ROWS', '16') or 16),
     )
     learning_batch_budget = max(
         4,
-        int(os.environ.get('LEARNING_MICROBATCH_BUDGET_SECONDS', '6') or 6),
+        int(os.environ.get('LEARNING_MICROBATCH_BUDGET_SECONDS', '8') or 8),
     )
     learning_batches_per_cycle = max(
         1,
-        int(os.environ.get('LEARNING_MICROBATCHES_PER_CYCLE', '1') or 1),
+        int(os.environ.get('LEARNING_MICROBATCHES_PER_CYCLE', '4') or 4),
     )
-    if _LOW_MEMORY_MODE:
-        # Blindaje ante variables antiguas del Dashboard de Render.
-        learning_batch_rows = min(learning_batch_rows, 8)
-        learning_batch_budget = min(learning_batch_budget, 6)
-        learning_batches_per_cycle = 1
     ui_retry_seconds = max(
         20,
         int(os.environ.get('LEARNING_UI_YIELD_RETRY_SECONDS', '60') or 60),
@@ -45497,10 +45398,6 @@ def api_analyze_with_portfolio():
             )
         )
 
-        # El usuario que abrió Spot tiene prioridad sobre Futures incremental,
-        # ReviewTrader y research. Es una marca corta; no detiene lifecycle.
-        _mark_system_interactive_priority()
-
         # ==============================================================
         # IDENTIDAD Y PORTFOLIO SERVER-SIDE
         # ==============================================================
@@ -46078,31 +45975,32 @@ def api_analyze_with_portfolio():
             # 8. ANÁLISIS NORMAL DEL SISTEMA
             # ==========================================================
 
-            # Hotfix 15.3: reutilizar el ExpertSystem global. Mantener una
-            # segunda instancia completa dentro del endpoint duplicaba estado,
-            # caches y objetos que no aportan nada al análisis.
-            trading_system = expert_system
+            if not hasattr(
+                api_analyze_with_portfolio,
+                '_trading_system'
+            ):
+
+                api_analyze_with_portfolio._trading_system = (
+                    TradingExpertSystem()
+                )
+
+            trading_system = (
+                api_analyze_with_portfolio
+                ._trading_system
+            )
 
             print(
                 f"   🧠 Analizando "
                 f"{symbol} {timeframe}..."
             )
 
-            ui_owner = f'spot-ui:tgp:{symbol}:{timeframe}'
-            ui_acquired = _acquire_heavy_analysis(ui_owner, timeout=20)
-            if not ui_acquired:
-                return jsonify({
-                    'success': False,
-                    'busy': True,
-                    'deferred': True,
-                    'retry_after_ms': 1500,
-                    'error': 'El sistema está terminando una tarea de mercado.'
-                }), 503
-            try:
-                result = trading_system.analyze_full_market(symbol, timeframe)
-            finally:
-                _release_heavy_analysis(ui_owner)
-                _mark_system_interactive_priority(seconds=8)
+            result = (
+                trading_system
+                .analyze_full_market(
+                    symbol,
+                    timeframe
+                )
+            )
 
             if (
                 not result
@@ -46383,14 +46281,14 @@ def api_analyze_with_portfolio():
             result
         )
 
-        # Hotfix 15.3: conservar sólo el análisis completo más reciente.
+        # Mantener como máximo cuatro análisis completos recientes.
         # El caché global de analyze_full_market sigue siendo la capa
         # principal; éste sólo evita repetir la respuesta pesada del endpoint.
-        if len(cache_ts) > 1:
+        if len(cache_ts) > 4:
             oldest_keys = sorted(
                 cache_ts,
                 key=lambda item: cache_ts.get(item, 0)
-            )[:len(cache_ts) - 1]
+            )[:len(cache_ts) - 4]
 
             for oldest_key in oldest_keys:
                 cache_ts.pop(oldest_key, None)
