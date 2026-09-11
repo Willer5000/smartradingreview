@@ -26936,7 +26936,13 @@ def _log_memory_runtime(label):
 
 
 def _acquire_heavy_analysis(owner, timeout=None):
-    """Reserva el único slot pesado sin cambiar la lógica del trabajo."""
+    """Reserva el único slot pesado sin cambiar la lógica del trabajo.
+
+    Hotfix 15.2: una petición humana de gráficos Futures tiene prioridad real
+    sobre NUEVOS trabajos de investigación/learning. Un trabajo que ya empezó
+    termina de forma segura; los siguientes esperan. Esto evita que el dashboard
+    quede atrapado detrás de una cadena de jobs background.
+    """
     global _HEAVY_ANALYSIS_OWNER
 
     owner = str(owner or 'heavy-analysis')
@@ -26945,6 +26951,17 @@ def _acquire_heavy_analysis(owner, timeout=None):
         if timeout is None
         else max(0, float(timeout))
     )
+
+    if not owner.startswith('futures-ui:'):
+        priority_fn = globals().get('_futures_interactive_priority_active')
+        try:
+            if callable(priority_fn) and priority_fn():
+                print(
+                    f"⏸️ [PRIORITY] {owner}: cede turno a Futures interactivo."
+                )
+                return False
+        except Exception:
+            pass
 
     _log_memory_runtime(f'{owner}: esperando turno')
 
@@ -41089,185 +41106,252 @@ LEARNING_WORKER_INTERVAL = 30 * 60  # 30 minutos entre evaluaciones (antes 15min
 
 
 def learning_worker_loop():
-    """
-    Bucle que evalúa periódicamente las señales pendientes.
-    
-    IMPORTANTE: espera 120s inicial (antes 60s) para que el warm-up de futuros
-    termine antes de cargar más carga. Y libera memoria con gc.collect al final
-    de cada ciclo para no acumular en Render Free (512MB).
+    """Evalúa aprendizaje sin secuestrar el único slot pesado de Render.
+
+    Hotfix 15.2 convierte la evaluación de pendientes en micro-lotes
+    cooperativos. Cada lote libera el lock pesado antes de continuar y cede
+    inmediatamente si una petición interactiva de Futures está esperando.
+    La lógica de TP/SL/expiración y las estadísticas permanecen iguales.
     """
     import gc
+
+    learning_batch_rows = max(
+        4,
+        int(os.environ.get('LEARNING_MICROBATCH_ROWS', '16') or 16),
+    )
+    learning_batch_budget = max(
+        4,
+        int(os.environ.get('LEARNING_MICROBATCH_BUDGET_SECONDS', '8') or 8),
+    )
+    learning_batches_per_cycle = max(
+        1,
+        int(os.environ.get('LEARNING_MICROBATCHES_PER_CYCLE', '4') or 4),
+    )
+    ui_retry_seconds = max(
+        20,
+        int(os.environ.get('LEARNING_UI_YIELD_RETRY_SECONDS', '60') or 60),
+    )
+
     print("=" * 60)
-    print(f"🧠 LEARNING WORKER iniciado (cada {LEARNING_WORKER_INTERVAL//60} min)")
+    print(
+        f"🧠 LEARNING WORKER iniciado (cada {LEARNING_WORKER_INTERVAL//60} min; "
+        f"micro-lotes {learning_batch_rows} filas / {learning_batch_budget}s)"
+    )
     print("=" * 60)
-    
-    # Hotfix 14.7: first priority after a restart is to make the web app
-    # reachable.  On Render Free defer learning so it cannot overlap bootstrap.
+
+    # Hotfix 14.7/14.8: primero debe quedar accesible la aplicación web.
     initial_learning_delay = 600 if _LOW_MEMORY_MODE else 120
     time.sleep(initial_learning_delay)
-    
+
     stats_counter = 0
     governance_bootstrapped = False
-    
+
     while True:
-        heavy_acquired = False
+        next_sleep = LEARNING_WORKER_INTERVAL
 
         try:
             from review_trader import review_trader
-            
+
             if not review_trader.db.enabled:
-                # Supabase no configurado — dormir y reintentar
                 time.sleep(LEARNING_WORKER_INTERVAL)
                 continue
 
-            heavy_acquired = _acquire_heavy_analysis(
-                'reviewtrader-learning'
-            )
+            def _price_fetcher(sym, tf):
+                """Proveedor Spot reutilizado por ReviewTrader."""
+                return expert_system.get_kucoin_data(sym, tf)
 
-            if not heavy_acquired:
-                time.sleep(LEARNING_WORKER_INTERVAL)
-                continue
-            
-            # 1. Evaluar signals pendientes → tp_hit / sl_hit / expired
-            try:
-                def _price_fetcher(sym, tf):
-                    """Callable que ReviewTrader usa para obtener velas."""
-                    return expert_system.get_kucoin_data(sym, tf)
-                
-                stats = review_trader.evaluate_pending_signals(_price_fetcher)
-                processed = stats.get('processed', 0)
-                tp = stats.get('tp_hit', 0)
-                sl = stats.get('sl_hit', 0)
-                exp = stats.get('expired', 0)
-                if processed > 0:
-                    print(f"🧠 [LEARN] Evaluadas {processed} señales: {tp} TP, {sl} SL, {exp} Expired")
-            except Exception as ev_err:
-                print(f"⚠️ learning_worker.evaluate_pending_signals: {ev_err}")
-                import traceback; traceback.print_exc()
+            aggregate = {
+                'processed': 0,
+                'tp_hit': 0,
+                'sl_hit': 0,
+                'expired': 0,
+                'scanned': 0,
+            }
+            yielded_for_ui = False
 
-            # ============================================================
-            # COMMIT 9 — NET EDGE ECONOMICS (BOUNDED)
-            # ============================================================
-            # No new worker/thread is created. At most a few already-resolved
-            # Futures outcomes are enriched per 30-minute learning cycle using
-            # public funding observations. Lifecycle/status never changes here.
-            try:
-                from execution_economics import (
-                    seed_missing_execution_economics,
-                    enrich_pending_execution_economics,
-                )
-                seeded_economics = seed_missing_execution_economics(
-                    review_trader.db, limit=2
-                )
-                enriched_economics = enrich_pending_execution_economics(
-                    review_trader.db, limit=4
-                )
-                if (
-                    seeded_economics.get('seeded', 0)
-                    or enriched_economics.get('completed', 0)
-                    or enriched_economics.get('retry', 0)
-                ):
-                    print(
-                        "🧠 [C9 ECON] "
-                        f"seeded={seeded_economics.get('seeded', 0)} "
-                        f"completed={enriched_economics.get('completed', 0)} "
-                        f"retry={enriched_economics.get('retry', 0)}"
-                    )
-            except Exception as econ_err:
-                print(f"⚠️ learning_worker.net_economics: {econ_err}")
+            # ------------------------------------------------------------
+            # 1. OUTCOMES EN MICRO-LOTES
+            # ------------------------------------------------------------
+            for batch_index in range(learning_batches_per_cycle):
+                if _futures_interactive_priority_active():
+                    yielded_for_ui = True
+                    break
 
-            # Commit 9 bootstrap: Commit 8 originally refreshed the persisted
-            # governance singleton only every 4h. Refresh it once on the first
-            # worker cycle so Analytics does not remain WAITING for hours after
-            # a deploy. This still runs inside the existing heavy-analysis lock.
-            if not governance_bootstrapped:
+                owner = f'reviewtrader-learning:{batch_index + 1}'
+                heavy_acquired = _acquire_heavy_analysis(owner, timeout=2)
+                if not heavy_acquired:
+                    if _futures_interactive_priority_active():
+                        yielded_for_ui = True
+                    break
+
+                stats = {}
                 try:
-                    from promotion_governance import refresh_promotion_governance
-                    bootstrap_governance = refresh_promotion_governance(
-                        review_trader.db
-                    )
-                    governance_bootstrapped = bool(
-                        bootstrap_governance.get('updated_at')
-                    )
+                    stats = review_trader.evaluate_pending_signals(
+                        _price_fetcher,
+                        max_rows=learning_batch_rows,
+                        budget_seconds=learning_batch_budget,
+                        should_yield=_futures_interactive_priority_active,
+                    ) or {}
+                except Exception as ev_err:
                     print(
-                        "🧠 [C9 GOVERNANCE] bootstrap "
-                        f"quality={bootstrap_governance.get('quality_optimization_allowed', False)} "
-                        f"risk={bootstrap_governance.get('risk_growth_allowed', False)}"
+                        "⚠️ learning_worker.evaluate_pending_signals: "
+                        f"{ev_err}"
                     )
-                except Exception as governance_bootstrap_error:
-                    print(
-                        "⚠️ learning_worker.governance_bootstrap: "
-                        f"{governance_bootstrap_error}"
-                    )
-            
-            # ============================================================
-            # COMMIT 36N
-            # ============================================================
-            #
-            # Saved Futures YA NO se evalúa dentro del learning worker.
-            #
-            # Motivos:
-            # 1. evitar dos evaluadores compitiendo;
-            # 2. usar siempre Futures perpetual real;
-            # 3. separar learning de lifecycle operacional;
-            # 4. permitir detección más frecuente de Entry / TP / SL.
-            #
-            # El responsable ahora es:
-            # saved_futures_lifecycle_loop()
-            # ============================================================
-            
-            # ============================================================
-            # 2. RECALCULAR APRENDIZAJE AGREGADO CADA 4 HORAS
-            # ============================================================
-            #
-            # El learning worker actualmente corre cada 30 minutos.
-            #
-            #     8 ciclos × 30 min = 4 horas.
-            #
-            # Antes este contador permaneció en 16 después de cambiar
-            # el worker de 15 a 30 minutos, haciendo que las estadísticas
-            # se actualizaran realmente cada 8 horas.
+                    import traceback
+                    traceback.print_exc()
+                finally:
+                    _release_heavy_analysis(owner)
+
+                for key in aggregate:
+                    aggregate[key] += int(stats.get(key, 0) or 0)
+
+                if stats.get('yielded_for_ui'):
+                    yielded_for_ui = True
+                    break
+
+                # Si el iterador devolvió menos filas que el máximo, no hay
+                # motivo para encadenar otro lote inmediatamente.
+                if int(stats.get('scanned', 0) or 0) < learning_batch_rows:
+                    break
+
+                # Ventana pequeña para que un request que llegó entre lotes
+                # pueda marcar prioridad y tomar el slot pesado.
+                time.sleep(0.25)
+
+            if aggregate['processed'] > 0:
+                print(
+                    "🧠 [LEARN] Evaluadas "
+                    f"{aggregate['processed']} señales: "
+                    f"{aggregate['tp_hit']} TP, "
+                    f"{aggregate['sl_hit']} SL, "
+                    f"{aggregate['expired']} Expired "
+                    f"(revisadas={aggregate['scanned']})"
+                )
+
+            if yielded_for_ui:
+                print(
+                    "⏸️ [LEARN] Futures interactivo tiene prioridad; "
+                    f"learning reintentará en {ui_retry_seconds}s."
+                )
+                next_sleep = ui_retry_seconds
+
+            # El contador representa ciclos programados, no micro-lotes.
             stats_counter += 1
 
-            if stats_counter >= 8:
-                stats_counter = 0
-                try:
-                    result = review_trader.recalculate_stats()
-                    print(f"🧠 [LEARN] Stats recalculadas: "
-                          f"{result.get('specific', 0)} específicas, "
-                          f"{result.get('general', 0)} generales")
+            # ------------------------------------------------------------
+            # 2. MANTENIMIENTO / ECONOMICS / GOVERNANCE
+            # ------------------------------------------------------------
+            # Nunca arrancar esta parte mientras el usuario espera gráficos.
+            maintenance_due = (
+                not yielded_for_ui
+                and not _futures_interactive_priority_active()
+            )
 
-                    # Commit 4: Autopilot runs only after the 4h aggregate refresh.
-                    # It uses bounded DB reads and fails open to the static engine.
-                    adaptive = review_trader.run_adaptive_autopilot(
-                        price_fetcher=_price_fetcher
-                    )
-                    if adaptive.get('success'):
-                        print(
-                            "🧠 [C4 AUTOPILOT] "
-                            f"profiles={adaptive.get('profiles_updated', 0)} "
-                            f"transitions={len(adaptive.get('strategy_transitions', []) or [])}"
-                        )
-                except Exception as rc_err:
-                    print(f"⚠️ learning_worker.recalculate_stats/autopilot: {rc_err}")
-        
+            if maintenance_due:
+                maintenance_owner = 'reviewtrader-maintenance'
+                maintenance_acquired = _acquire_heavy_analysis(
+                    maintenance_owner,
+                    timeout=2,
+                )
+
+                if maintenance_acquired:
+                    try:
+                        # COMMIT 9 — NET EDGE ECONOMICS (acotado)
+                        try:
+                            from execution_economics import (
+                                seed_missing_execution_economics,
+                                enrich_pending_execution_economics,
+                            )
+                            seeded_economics = seed_missing_execution_economics(
+                                review_trader.db,
+                                limit=2,
+                            )
+                            enriched_economics = enrich_pending_execution_economics(
+                                review_trader.db,
+                                limit=4,
+                            )
+                            if (
+                                seeded_economics.get('seeded', 0)
+                                or enriched_economics.get('completed', 0)
+                                or enriched_economics.get('retry', 0)
+                            ):
+                                print(
+                                    "🧠 [C9 ECON] "
+                                    f"seeded={seeded_economics.get('seeded', 0)} "
+                                    f"completed={enriched_economics.get('completed', 0)} "
+                                    f"retry={enriched_economics.get('retry', 0)}"
+                                )
+                        except Exception as econ_err:
+                            print(
+                                "⚠️ learning_worker.net_economics: "
+                                f"{econ_err}"
+                            )
+
+                        # Bootstrap de governance una sola vez después del deploy.
+                        if not governance_bootstrapped:
+                            try:
+                                from promotion_governance import (
+                                    refresh_promotion_governance,
+                                )
+                                bootstrap_governance = refresh_promotion_governance(
+                                    review_trader.db
+                                )
+                                governance_bootstrapped = bool(
+                                    bootstrap_governance.get('updated_at')
+                                )
+                                print(
+                                    "🧠 [C9 GOVERNANCE] bootstrap "
+                                    f"quality={bootstrap_governance.get('quality_optimization_allowed', False)} "
+                                    f"risk={bootstrap_governance.get('risk_growth_allowed', False)}"
+                                )
+                            except Exception as governance_bootstrap_error:
+                                print(
+                                    "⚠️ learning_worker.governance_bootstrap: "
+                                    f"{governance_bootstrap_error}"
+                                )
+
+                        # Cada 4 h: stats + autopilot. Si no pudo ejecutarse por
+                        # prioridad UI, stats_counter NO se reinicia y se intenta
+                        # de nuevo en el próximo ciclo.
+                        if stats_counter >= 8:
+                            try:
+                                result = review_trader.recalculate_stats()
+                                print(
+                                    "🧠 [LEARN] Stats recalculadas: "
+                                    f"{result.get('specific', 0)} específicas, "
+                                    f"{result.get('general', 0)} generales"
+                                )
+
+                                adaptive = review_trader.run_adaptive_autopilot(
+                                    price_fetcher=_price_fetcher
+                                )
+                                if adaptive.get('success'):
+                                    print(
+                                        "🧠 [C4 AUTOPILOT] "
+                                        f"profiles={adaptive.get('profiles_updated', 0)} "
+                                        f"transitions={len(adaptive.get('strategy_transitions', []) or [])}"
+                                    )
+                                stats_counter = 0
+                            except Exception as rc_err:
+                                print(
+                                    "⚠️ learning_worker.recalculate_stats/autopilot: "
+                                    f"{rc_err}"
+                                )
+                    finally:
+                        _release_heavy_analysis(maintenance_owner)
+
         except Exception as loop_err:
             print(f"❌ learning_worker: excepción en loop: {loop_err}")
-            import traceback; traceback.print_exc()
+            import traceback
+            traceback.print_exc()
 
-        finally:
-            if heavy_acquired:
-                _release_heavy_analysis(
-                    'reviewtrader-learning'
-                )
-        
-        # Liberar memoria acumulada tras procesar señales
+        # Liberar memoria acumulada después de cada turno cooperativo.
         try:
             gc.collect()
         except Exception:
             pass
-        
-        time.sleep(LEARNING_WORKER_INTERVAL)
+
+        time.sleep(next_sleep)
 
 # ============================================================================
 # COMMIT 36K — ALERTAS PERSONALIZADAS DE SCALPING FUTURES

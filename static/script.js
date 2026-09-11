@@ -2802,6 +2802,18 @@ window.runCompleteAnalysis = function() {
                 credentials: 'same-origin'
             };
 
+    // Hotfix 15.2: ningún request principal puede quedar esperando para
+    // siempre. Futures usa un endpoint liviano que puede responder BUSY; si
+    // aun así la conexión queda bloqueada, abortamos y entramos al polling
+    // acotado. Spot conserva un margen mayor.
+    const analysisAbortController = new AbortController();
+    const analysisHttpTimeoutMs = window.IS_FUTURES_PAGE ? 12000 : 60000;
+    const analysisHttpTimeoutId = window.setTimeout(
+        () => analysisAbortController.abort(),
+        analysisHttpTimeoutMs
+    );
+    fetchOpts.signal = analysisAbortController.signal;
+
     fetch(
         analysisRequest.url,
         fetchOpts
@@ -3357,12 +3369,27 @@ window.runCompleteAnalysis = function() {
         })
         .catch(error => {
 
+            // Un timeout HTTP en Futures se trata como servidor ocupado y
+            // reutiliza exactamente el mismo polling acotado de Hotfix 15.1.
+            // Así una conexión atascada tampoco puede dejar spinner infinito.
+            if (
+                window.IS_FUTURES_PAGE
+                && error?.name === 'AbortError'
+            ) {
+                error.busy = true;
+                error.serverData = {
+                    retry_after_ms: 1500,
+                    timeout: true
+                };
+                error.message = 'El servidor está terminando una tarea de mercado.';
+            }
+
             console.error(
                 '❌ Error en análisis:',
                 error
             );
 
-            // Hotfix 15.1: el análisis interactivo Futures se calcula fuera
+            // Hotfix 15.1/15.2: el análisis interactivo Futures se calcula fuera
             // del único hilo web de Gunicorn. Mientras termina, el endpoint
             // responde BUSY rápidamente y esta vista hace polling ACOTADO.
             // Nunca dejamos un spinner infinito.
@@ -3485,6 +3512,7 @@ window.runCompleteAnalysis = function() {
             );
         })
         .finally(() => {
+            clearTimeout(analysisHttpTimeoutId);
             window.__SMARTTRADING_ANALYSIS_RUNNING__ = false;
         });
 };
@@ -7697,9 +7725,6 @@ function _renderOrderFlowSnapshot(snapshot, symbol) {
     const imbalanceRaw = Number(book.imbalance);
     const buyShareRaw = Number(snapshot?.flow?.buy_share);
     const spreadRaw = Number(book.spread_pct);
-    const alignment = String(snapshot?.alignment || 'OBSERVANDO').toUpperCase();
-    const score = Number(snapshot?.alignment_score);
-
     const imbalanceEl = document.getElementById('order-flow-imbalance');
     const buyEl = document.getElementById('order-flow-buy-share');
     const spreadEl = document.getElementById('order-flow-spread');
@@ -7713,14 +7738,44 @@ function _renderOrderFlowSnapshot(snapshot, symbol) {
     if (buyEl) buyEl.textContent = Number.isFinite(buyShareRaw) ? `${(buyShareRaw * 100).toFixed(1)}%` : '--';
     if (spreadEl) spreadEl.textContent = Number.isFinite(spreadRaw) ? `${spreadRaw.toFixed(4)}%` : '--';
     if (alignmentEl) {
-        alignmentEl.textContent = `${alignment}${Number.isFinite(score) ? ` · ${score.toFixed(0)}/100` : ''}`;
-        alignmentEl.className = alignment === 'ALIGNED' ? 'text-success' : alignment === 'CONFLICT' ? 'text-danger' : 'text-warning';
+        // La interfaz muestra lectura de mercado, no códigos internos del motor.
+        let marketReading = 'EQUILIBRADA';
+        let readingClass = 'text-warning';
+        const bookBullish = Number.isFinite(imbalanceRaw) && imbalanceRaw > 0.10;
+        const bookBearish = Number.isFinite(imbalanceRaw) && imbalanceRaw < -0.10;
+        const flowBullish = Number.isFinite(buyShareRaw) && buyShareRaw >= 0.55;
+        const flowBearish = Number.isFinite(buyShareRaw) && buyShareRaw <= 0.45;
+
+        if (bookBullish && flowBullish) {
+            marketReading = 'COMPRADORA';
+            readingClass = 'text-success';
+        } else if (bookBearish && flowBearish) {
+            marketReading = 'VENDEDORA';
+            readingClass = 'text-danger';
+        } else if (bookBullish || bookBearish || flowBullish || flowBearish) {
+            marketReading = 'MIXTA';
+        }
+
+        alignmentEl.textContent = marketReading;
+        alignmentEl.className = readingClass;
     }
 
     if (interpretationEl) {
-        const bidPressure = Number.isFinite(imbalanceRaw) ? (imbalanceRaw > 0.10 ? 'profundidad compradora dominante' : imbalanceRaw < -0.10 ? 'profundidad vendedora dominante' : 'libro equilibrado') : 'imbalance no disponible';
-        const flowText = Number.isFinite(buyShareRaw) ? (buyShareRaw >= 0.55 ? 'trades recientes compradores' : buyShareRaw <= 0.45 ? 'trades recientes vendedores' : 'trades recientes equilibrados') : 'flujo de trades no disponible';
-        interpretationEl.textContent = `${bidPressure}; ${flowText}. La línea punteada es el precio medio BID/ASK. No es una señal autónoma.`;
+        const bidPressure = Number.isFinite(imbalanceRaw)
+            ? (imbalanceRaw > 0.10
+                ? 'Mayor profundidad compradora cerca del precio'
+                : imbalanceRaw < -0.10
+                    ? 'Mayor profundidad vendedora cerca del precio'
+                    : 'Profundidad compradora y vendedora equilibrada')
+            : 'Profundidad del libro no disponible';
+        const flowText = Number.isFinite(buyShareRaw)
+            ? (buyShareRaw >= 0.55
+                ? 'las operaciones recientes muestran presión compradora'
+                : buyShareRaw <= 0.45
+                    ? 'las operaciones recientes muestran presión vendedora'
+                    : 'las operaciones recientes están equilibradas')
+            : 'el flujo reciente no está disponible';
+        interpretationEl.textContent = `${bidPressure}; ${flowText}.`;
     }
 }
 

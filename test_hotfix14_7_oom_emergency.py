@@ -3,13 +3,13 @@ import unittest
 
 
 class Hotfix147EmergencyOOMTests(unittest.TestCase):
-    def test_render_uses_single_web_thread(self):
+    def test_render_uses_single_worker_and_bounded_web_threads(self):
         with open('Procfile', 'r', encoding='utf-8') as fh:
             proc = fh.read()
         with open('render.yaml', 'r', encoding='utf-8') as fh:
             render = fh.read()
-        self.assertIn('--workers 1 --threads 1', proc)
-        self.assertIn('--workers 1 --threads 1', render)
+        self.assertIn('--workers 1 --threads 2', proc)
+        self.assertIn('--workers 1 --threads 2', render)
 
     def test_low_memory_defaults_have_large_headroom(self):
         with open('.env.example', 'r', encoding='utf-8') as fh:

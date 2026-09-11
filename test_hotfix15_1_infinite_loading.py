@@ -40,16 +40,16 @@ class Hotfix151InfiniteLoadingTests(unittest.TestCase):
         self.assertIn('Reintentar análisis', source)
         self.assertNotIn('máximo cuatro veces', source)
 
-    def test_memory_safe_single_web_thread_is_preserved(self):
+    def test_memory_safe_single_worker_with_small_web_concurrency_is_preserved(self):
         proc = (ROOT / 'Procfile').read_text(encoding='utf-8')
-        self.assertIn('--workers 1 --threads 1', proc)
+        self.assertIn('--workers 1 --threads 2', proc)
         env = (ROOT / '.env.example').read_text(encoding='utf-8')
         self.assertIn('FUTURES_INTERACTIVE_PRIORITY_SECONDS=45', env)
         self.assertIn('FUTURES_UI_CACHE_TTL_SECONDS=90', env)
 
     def test_script_cache_bust_is_bumped(self):
         html = (ROOT / 'templates' / 'index.html').read_text(encoding='utf-8')
-        self.assertIn('20260911-H15-1-INTERACTIVE', html)
+        self.assertIn('20260911-H15-2-UI-PRIORITY', html)
 
 
 if __name__ == '__main__':

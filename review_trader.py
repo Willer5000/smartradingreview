@@ -4149,10 +4149,22 @@ class ReviewTrader:
             )
             return build_execution_forensics(signal, result)
     
-    def evaluate_pending_signals(self, price_fetcher) -> Dict:
+    def evaluate_pending_signals(
+        self,
+        price_fetcher,
+        max_rows: int = 4000,
+        budget_seconds: int = 60,
+        should_yield=None
+    ) -> Dict:
         """
-        Recorre todas las señales pendientes y verifica si alcanzaron TP, SL o expiraron.
-        
+        Recorre señales pendientes y verifica si alcanzaron TP, SL o expiraron.
+
+        Hotfix 15.2 añade ejecución cooperativa: el worker puede procesar
+        micro-lotes acotados y ceder inmediatamente cuando una vista Futures
+        interactiva necesita el único slot pesado del Render gratuito. El
+        comportamiento estadístico no cambia; sólo cambia cuánto trabajo se
+        procesa por turno.
+
         price_fetcher: proveedor Spot que recibe (symbol, timeframe). Las señales
                        Futures NO usan este proveedor: se consultan mediante el
                        motor de contratos perpetuos y se valida su procedencia.
@@ -4165,8 +4177,14 @@ class ReviewTrader:
         # Margen adicional para que una indisponibilidad temporal del proveedor
         # no haga desaparecer una señal justo al vencer la ventana más larga.
         oldest_pending_hours = max(SIGNAL_EXPIRATION.values()) + (14 * 24)
+        max_rows = max(1, int(max_rows or 1))
+        budget_seconds = max(1, int(budget_seconds or 1))
         pending = self.db.iter_pending_signals(
-            hours_old_max=oldest_pending_hours, directional=True
+            hours_old_max=oldest_pending_hours,
+            directional=True,
+            page_size=min(50, max_rows),
+            max_rows=max_rows,
+            budget_seconds=budget_seconds,
         )
         # Q6-E: local to this run. Never retains full candle sets across workers.
         from collections import OrderedDict
@@ -4178,7 +4196,10 @@ class ReviewTrader:
                 return market_frames[key]
             value = self._fetch_market_data_for_signal(signal, price_fetcher)
             market_frames[key] = value
-            if len(market_frames) > 12:
+            # Un micro-lote no necesita retener doce DataFrames de 200 velas.
+            # Cuatro combinaciones bastan para reutilización local y reducen el
+            # working set mientras el usuario navega Futures.
+            if len(market_frames) > 4:
                 market_frames.popitem(last=False)
             return value
         
@@ -4196,14 +4217,35 @@ class ReviewTrader:
             'spot_evaluated': 0,
             'futures_real_evaluated': 0,
             'legacy_futures_quarantined': 0,
-            'market_data_rejected': 0
+            'market_data_rejected': 0,
+            'scanned': 0,
+            'yielded_for_ui': False,
         }
         
         print(f"\n{'='*60}")
-        print("🔍 [REVIEW] Evaluando señales pendientes en lotes de hasta 200")
+        print(
+            "🔍 [REVIEW] Evaluando señales pendientes "
+            f"(micro-lote max={max_rows}, presupuesto={budget_seconds}s)"
+        )
         print(f"{'='*60}")
-        
-        for signal in pending:
+
+        pending_iter = iter(pending)
+        while True:
+            if callable(should_yield):
+                try:
+                    if should_yield():
+                        stats['yielded_for_ui'] = True
+                        print("⏸️ [REVIEW] Cediendo turno a la vista Futures.")
+                        break
+                except Exception:
+                    pass
+
+            try:
+                signal = next(pending_iter)
+            except StopIteration:
+                break
+
+            stats['scanned'] += 1
             try:
                 symbol = signal.get('symbol')
                 timeframe = signal.get('timeframe')
@@ -4387,6 +4429,10 @@ class ReviewTrader:
                 logger.error(f"Error evaluando señal {signal.get('id')}: {e}")
         
         print(f"\n📊 [REVIEW] Batch completado:")
+        print(
+            f"   Revisadas: {stats['scanned']} | "
+            f"cedió a UI: {'sí' if stats['yielded_for_ui'] else 'no'}"
+        )
         print(f"   TP alcanzado: {stats['tp_hit']}")
         print(f"   SL alcanzado: {stats['sl_hit']}")
         print(
