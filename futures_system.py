@@ -114,7 +114,9 @@ _futures_http_session_lock = threading.Lock()
 # inside one refresh but it must never grow without a bound.  Twelve entries
 # cover the hottest short timeframes while keeping the 30-symbol/TF sweep from
 # retaining every DataFrame at once.
-FUTURES_DATA_CACHE_MAX_ENTRIES = max(4, int(os.environ.get('FUTURES_DATA_CACHE_MAX_ENTRIES', '8') or 8))
+FUTURES_DATA_CACHE_MAX_ENTRIES = max(1, int(os.environ.get('FUTURES_DATA_CACHE_MAX_ENTRIES', '2') or 2))
+if str(os.environ.get('LOW_MEMORY_MODE', '1')).strip().lower() not in ('0', 'false', 'no', 'off'):
+    FUTURES_DATA_CACHE_MAX_ENTRIES = min(FUTURES_DATA_CACHE_MAX_ENTRIES, 2)
 
 # ============================================================================
 # QUALITY ENGINE Q3A — FUTURES MICROSTRUCTURE SHADOW
@@ -186,8 +188,8 @@ def _get_futures_http_session() -> requests.Session:
         if _futures_http_session is None:
             session = requests.Session()
             adapter = HTTPAdapter(
-                pool_connections=12,
-                pool_maxsize=12,
+                pool_connections=4,
+                pool_maxsize=4,
                 max_retries=0,
                 pool_block=False,
             )

@@ -449,14 +449,17 @@ def _analysis_cache_put(key, data):
             'ts':
                 now_ts
         }
-        # Límite MUY REDUCIDO para OOM en Render Free (512MB).
-        # 50→20 entradas. Cada entrada ~1-2 MB → máx 40MB de caché.
-        # Ya no hay margen para más porque el warm-up de futuros ocupa mucho.
-        if len(_ANALYSIS_CACHE) > 20:
-            # Purgar el 20% más antiguo de golpe (evita hacer sort N veces)
-            sorted_keys = sorted(_ANALYSIS_CACHE.keys(), key=lambda k: _ANALYSIS_CACHE[k]['ts'])
-            to_remove = sorted_keys[:5]  # los 5 más antiguos
-            for k in to_remove:
+        # Hotfix 14.7: the previous fixed limit of 20 retained full Spot
+        # results (including chart/layer payloads).  On 512 MB this turns a
+        # harmless sequence of analyses into a cumulative OOM.  Keep only the
+        # tiny configurable working set; durable state lives in Supabase.
+        max_entries = max(1, int(globals().get('_MEMORY_ANALYSIS_CACHE_KEEP', 2) or 2))
+        if len(_ANALYSIS_CACHE) > max_entries:
+            sorted_keys = sorted(
+                _ANALYSIS_CACHE.keys(),
+                key=lambda k: _ANALYSIS_CACHE[k]['ts']
+            )
+            for k in sorted_keys[: max(0, len(_ANALYSIS_CACHE) - max_entries)]:
                 _ANALYSIS_CACHE.pop(k, None)
 
 def get_analysis_cache_stats() -> dict:
@@ -26670,12 +26673,30 @@ def _env_mb(name, default):
         return float(default)
 
 
-_MEMORY_SOFT_LIMIT_MB = _env_mb('MEMORY_SOFT_LIMIT_MB', 325)
+_MEMORY_SOFT_LIMIT_MB = _env_mb('MEMORY_SOFT_LIMIT_MB', 250)
 _MEMORY_HARD_LIMIT_MB = max(
     _MEMORY_SOFT_LIMIT_MB + 16.0,
-    _env_mb('MEMORY_HARD_LIMIT_MB', 395),
+    _env_mb('MEMORY_HARD_LIMIT_MB', 340),
 )
-_MEMORY_ANALYSIS_CACHE_KEEP = max(2, int(os.environ.get('MEMORY_ANALYSIS_CACHE_KEEP', '5') or 5))
+# Hotfix 14.7: a heavy job is allowed to START only with substantially more
+# headroom than the hard-stop threshold.  One Futures analysis can allocate a
+# large temporary working set before the next guard check, so starting at
+# 330-390 MB is already too late on a 512 MB instance.
+_MEMORY_JOB_START_LIMIT_MB = min(
+    _MEMORY_SOFT_LIMIT_MB,
+    _env_mb('MEMORY_JOB_START_LIMIT_MB', 240),
+)
+_MEMORY_ANALYSIS_CACHE_KEEP = max(1, int(os.environ.get('MEMORY_ANALYSIS_CACHE_KEEP', '2') or 2))
+_LOW_MEMORY_MODE = str(os.environ.get('LOW_MEMORY_MODE', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
+
+# Existing Render dashboard variables may still contain Hotfix 14.6 values.
+# In low-memory mode, clamp them in code so an old env cannot silently restore
+# unsafe 325/395 MB thresholds before a 512 MB cgroup kill.
+if _LOW_MEMORY_MODE:
+    _MEMORY_SOFT_LIMIT_MB = min(_MEMORY_SOFT_LIMIT_MB, 250.0)
+    _MEMORY_HARD_LIMIT_MB = min(_MEMORY_HARD_LIMIT_MB, 340.0)
+    _MEMORY_JOB_START_LIMIT_MB = min(_MEMORY_JOB_START_LIMIT_MB, 240.0)
+    _MEMORY_ANALYSIS_CACHE_KEEP = min(_MEMORY_ANALYSIS_CACHE_KEEP, 2)
 
 
 def _process_rss_mb():
@@ -26832,6 +26853,8 @@ def _memory_runtime_state():
         'heavy_job': heavy_owner,
         'memory_soft_limit_mb': _MEMORY_SOFT_LIMIT_MB,
         'memory_hard_limit_mb': _MEMORY_HARD_LIMIT_MB,
+        'memory_job_start_limit_mb': _MEMORY_JOB_START_LIMIT_MB,
+        'low_memory_mode': _LOW_MEMORY_MODE,
     }
 
 
@@ -26872,9 +26895,23 @@ def _acquire_heavy_analysis(owner, timeout=None):
     with _HEAVY_ANALYSIS_STATE_LOCK:
         _HEAVY_ANALYSIS_OWNER = owner
 
-    # El lock evita concurrencia; este segundo guard evita que UN solo trabajo
-    # pesado comience cuando el proceso ya está demasiado cerca del OOM.
-    if not _memory_pressure_guard(owner):
+    # El lock evita concurrencia. Hotfix 14.7 además exige HEADROOM antes
+    # de iniciar: un análisis Futures puede crear temporalmente pandas/numpy
+    # + 9 traders + capas y saltar más de 100 MB antes del siguiente guard.
+    _shed_recreatable_memory(reason=f'{owner}:preflight', aggressive=True)
+    rss = _process_rss_mb()
+    if rss is not None and rss >= _MEMORY_JOB_START_LIMIT_MB:
+        print(
+            f"🛑 [MEM] {owner}: no inicia con RSS {rss:.1f}MB; "
+            f"límite seguro de arranque={_MEMORY_JOB_START_LIMIT_MB:.1f}MB. "
+            "Se conserva el último snapshot."
+        )
+        with _HEAVY_ANALYSIS_STATE_LOCK:
+            _HEAVY_ANALYSIS_OWNER = None
+        _HEAVY_ANALYSIS_LOCK.release()
+        return False
+
+    if not _memory_pressure_guard(owner, allow_soft=False):
         with _HEAVY_ANALYSIS_STATE_LOCK:
             _HEAVY_ANALYSIS_OWNER = None
         _HEAVY_ANALYSIS_LOCK.release()
@@ -26988,6 +27025,47 @@ def _compute_previous_signals():
                     print(f"      ✅ RATIO-{timeframe} obtenido")
             except Exception as e:
                 print(f"      ⚠️ Error en RATIO-{timeframe}: {e}")
+
+        # Hotfix 14.7: compactar y liberar CADA timeframe Spot ahora, en vez
+        # de retener 12 resultados completos hasta terminar los cuatro TF.
+        for _symbol, _current_analysis in list(analisis_correlacion[timeframe].items()):
+            try:
+                _decision = _current_analysis.get('decision', {}) or {}
+                _action = str(_decision.get('action') or '').upper()
+                _confidence = float(_decision.get('confidence') or 0)
+                if _action not in ('COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT') or _confidence < 60:
+                    continue
+                _levels = _current_analysis.get('levels', {}) or {}
+                _analysis_df = _current_analysis.get('df', {}) or {}
+                _candle_timestamp = None
+                if isinstance(_analysis_df, dict):
+                    _times = _analysis_df.get('time', []) or []
+                    if _times:
+                        _candle_timestamp = str(_times[-1])
+                _key = f"{_symbol}_{timeframe}"
+                active_results[_key] = {
+                    'symbol': str(_symbol),
+                    'timeframe': str(timeframe),
+                    'action': _action,
+                    'confidence': _confidence,
+                    'signal_id': (
+                        _current_analysis.get('signal_id')
+                        or _levels.get('signal_id')
+                    ),
+                    'entry': _levels.get('entry'),
+                    'stop_loss': _levels.get('stop_loss'),
+                    'take_profit': _levels.get('take_profit'),
+                    'current_price': _current_analysis.get('current_price'),
+                    'candle_timestamp': _candle_timestamp,
+                    'message': str(_current_analysis.get('message') or '')[:800],
+                }
+            except Exception as _compact_error:
+                print(f"      ⚠️ Compactación Spot {_symbol}-{timeframe}: {_compact_error}")
+
+        # The next timeframe does not depend on the previous timeframe's rich
+        # dicts, so drop them immediately and return pandas/numpy arenas.
+        analisis_correlacion[timeframe].clear()
+        _trim_process_heap()
 
     # ============ COMPACTAR SEÑALES ACTIVAS SPOT ============
     #
@@ -27415,6 +27493,7 @@ def api_spot_signals_active():
             if (
                 age > 600
                 and not _PREV_SIGNALS_COMPUTING['running']
+                and not _LOW_MEMORY_MODE
             ):
                 threading.Thread(
                     target=_run_previous_signals_background,
@@ -27436,7 +27515,10 @@ def api_spot_signals_active():
                 'timestamp': datetime.now(bolivia_tz).isoformat()
             })
 
-        if not _PREV_SIGNALS_COMPUTING['running']:
+        if (
+            not _LOW_MEMORY_MODE
+            and not _PREV_SIGNALS_COMPUTING['running']
+        ):
             threading.Thread(
                 target=_run_previous_signals_background,
                 daemon=True
@@ -27482,8 +27564,11 @@ def api_previous_signals():
         
         # Si hay caché aunque sea viejo, lo devolvemos + refresh en bg si toca
         if cache_data is not None:
-            if age > cache_duration and not _PREV_SIGNALS_COMPUTING['running']:
-                # Refresh silencioso en background — no bloqueamos al usuario
+            if (
+                age > cache_duration
+                and not _PREV_SIGNALS_COMPUTING['running']
+                and not _LOW_MEMORY_MODE
+            ):
                 threading.Thread(target=_run_previous_signals_background, daemon=True).start()
                 print(f"📦 Sirviendo caché stale ({int(age)}s), refresh en bg disparado")
             else:
@@ -27497,9 +27582,14 @@ def api_previous_signals():
             })
         
         # Sin caché: primer arranque. Disparar en bg y decir 'processing'.
-        if not _PREV_SIGNALS_COMPUTING['running']:
+        if (
+            not _LOW_MEMORY_MODE
+            and not _PREV_SIGNALS_COMPUTING['running']
+        ):
             threading.Thread(target=_run_previous_signals_background, daemon=True).start()
             print("🧮 Sin caché — cálculo disparado en background")
+        elif _LOW_MEMORY_MODE:
+            print("🛡️ [MEM] Sin caché Spot: se evita cálculo masivo desde request web")
         return jsonify({
             'success': True,
             'processing': True,
@@ -29359,10 +29449,53 @@ def api_futures_analyze():
         symbol = data.get('symbol', 'BTC-USDT')
         timeframe = data.get('timeframe', '1h')
         
-        result = futures.analyze_futures_market(
-            symbol,
-            timeframe
-        )
+        heavy_owner = f'futures-api:{symbol}:{timeframe}'
+        heavy_acquired = _acquire_heavy_analysis(heavy_owner, timeout=5)
+        if not heavy_acquired:
+            cached_result = None
+            try:
+                with _futures_analysis_cache['lock']:
+                    cached_result = ((_futures_analysis_cache.get('data') or {}).get('analysis') or {}).get((symbol, timeframe))
+            except Exception:
+                cached_result = None
+            if cached_result:
+                analysis_status = _classify_futures_analysis_result(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    result=cached_result,
+                    lifecycle={},
+                    min_confidence=0
+                )
+                return jsonify({
+                    'success': True,
+                    'data': cached_result,
+                    'analysis_status': analysis_status,
+                    'cached': True,
+                    'busy': True,
+                    'message': 'Servidor en modo memoria segura; se sirve el último snapshot.'
+                }), 200
+            return jsonify({
+                'success': False,
+                'busy': True,
+                'error': 'Análisis pesado ocupado o sin margen de memoria. Reintenta en unos segundos.'
+            }), 503
+
+        try:
+            result = futures.analyze_futures_market(
+                symbol,
+                timeframe
+            )
+
+            if result:
+                result = _apply_36s_futures_ai_control(
+                    result,
+                    symbol,
+                    timeframe
+                )
+                if _LOW_MEMORY_MODE:
+                    result = _compact_futures_runtime_result(result)
+        finally:
+            _release_heavy_analysis(heavy_owner)
 
         if not result:
 
@@ -29373,20 +29506,6 @@ def api_futures_analyze():
                 'error':
                     'Análisis vacío'
             }), 500
-
-
-        # ============================================================
-        # COMMIT 36S.1
-        # SEGUNDA PUERTA DE CALIDAD IA
-        # ============================================================
-
-        result = (
-            _apply_36s_futures_ai_control(
-                result,
-                symbol,
-                timeframe
-            )
-        )
 
         analysis_status = _classify_futures_analysis_result(
             symbol=symbol,
@@ -29424,7 +29543,39 @@ def api_futures_analyze_all(timeframe):
         if futures is None:
             return jsonify({'success': False, 'error': 'FuturesSystem no disponible'}), 503
         
-        results = futures.analyze_all_futures_pairs(timeframe)
+        if _LOW_MEMORY_MODE:
+            cache = _get_or_refresh_futures_analysis()
+            from futures_system import FUTURES_SYMBOLS
+            results = {
+                symbol: (cache.get('analysis') or {}).get((symbol, timeframe))
+                for symbol in FUTURES_SYMBOLS.keys()
+            }
+            if not cache.get('running'):
+                missing = [symbol for symbol, value in results.items() if not value]
+                if missing:
+                    _trigger_futures_combo_refresh_async(missing[0], timeframe)
+            return jsonify({
+                'success': True,
+                'timeframe': timeframe,
+                'data': results,
+                'cached': True,
+                'low_memory_mode': True,
+                'warming_up': bool(cache.get('warming_up')),
+                'timestamp': datetime.now(bolivia_tz).isoformat()
+            })
+
+        heavy_owner = f'futures-api-all:{timeframe}'
+        heavy_acquired = _acquire_heavy_analysis(heavy_owner, timeout=5)
+        if not heavy_acquired:
+            return jsonify({
+                'success': False,
+                'busy': True,
+                'error': 'Sin margen seguro para análisis masivo de Futures.'
+            }), 503
+        try:
+            results = futures.analyze_all_futures_pairs(timeframe)
+        finally:
+            _release_heavy_analysis(heavy_owner)
         
         return jsonify({
             'success': True,
@@ -29471,7 +29622,7 @@ _futures_analysis_cache = {
 }
 _futures_correlation_cache = {'data': None, 'ts': 0, 'key': None}
 
-_FUTURES_CACHE_SCHEMA_VERSION = 2
+_FUTURES_CACHE_SCHEMA_VERSION = 3
 _FUTURES_SIGNAL_MAX_WAIT_BARS = 6
 _FUTURES_TF_SECONDS = {
     '5m': 5 * 60,
@@ -29481,6 +29632,102 @@ _FUTURES_TF_SECONDS = {
     '2h': 2 * 60 * 60,
     '4h': 4 * 60 * 60,
 }
+
+
+def _compact_futures_runtime_result(result):
+    """Hotfix 14.7: keep only the Futures fields required by live UI/lifecycle.
+
+    The complete research/audit payload is already persisted by ReviewTrader.
+    Keeping 30 full ``analyze_full_market`` dictionaries in the Gunicorn heap
+    duplicated structure, strategy labs, trader votes and challenger data and
+    was enough to push the 512 MB Render instance over its limit.
+    """
+    if not isinstance(result, dict):
+        return result
+
+    if not result.get('success'):
+        return {
+            'success': False,
+            'symbol': result.get('symbol'),
+            'timeframe': result.get('timeframe'),
+            'error': str(result.get('error') or 'ANALYSIS_ERROR')[:320],
+        }
+
+    compact = {}
+    simple_keys = (
+        'success', 'symbol', 'timeframe', 'system_type', 'is_futures',
+        'signal_id', 'analysis_mode', 'analysis_version',
+        'source_candle_timestamp', 'source_candle_close_timestamp',
+        'source_candle_closed', 'analysis_price', 'current_price', 'live_price',
+        'live_candle_timestamp', 'open_candle_present',
+        'market_data_source', 'market_data_is_synthetic', 'contract_symbol',
+        'market_data_fetched_at', 'market_data_candles', 'publication_status',
+        'rejected_reason', 'timestamp',
+    )
+    for key in simple_keys:
+        if key in result:
+            compact[key] = result.get(key)
+
+    decision = result.get('decision') or {}
+    if isinstance(decision, dict):
+        compact_decision = {}
+        for key in (
+            'action', 'original_action', 'confidence', 'reason', 'conviction',
+            'audit', 'quantitative_observation', 'microstructure_observation',
+        ):
+            if key in decision:
+                compact_decision[key] = decision.get(key)
+        compact_decision['estrategias'] = list(decision.get('estrategias') or [])[:12]
+        compact_decision['razones'] = [str(x)[:260] for x in (decision.get('razones') or [])[:8]]
+        # Intentionally omit registro_votacion: full trader theses are durable in DB.
+        compact['decision'] = compact_decision
+
+    levels = result.get('levels') or {}
+    if isinstance(levels, dict):
+        # Levels are relatively small and are required by publication/manual-risk
+        # classification, so preserve them while dropping known research-only
+        # bulky diagnostics if present.
+        compact_levels = dict(levels)
+        for bulky_key in (
+            'challenger_candidates', 'execution_challengers',
+            'all_entry_candidates', 'all_sl_candidates', 'all_tp_candidates',
+            'debug_payload',
+        ):
+            compact_levels.pop(bulky_key, None)
+        compact['levels'] = compact_levels
+
+    trend = result.get('trend') or {}
+    if isinstance(trend, dict):
+        compact['trend'] = {
+            key: trend.get(key)
+            for key in (
+                'direction', 'confidence', 'strength', 'adx', 'score',
+                'plus_di', 'minus_di'
+            )
+            if key in trend
+        }
+
+    message = result.get('message')
+    if message is not None:
+        compact['message'] = str(message)[:1800]
+
+    # Micro/quant summaries are useful for lightweight diagnostics, but the
+    # complete research objects live in Supabase and need not remain in RAM.
+    for source_key in ('futures_quantitative_context', 'futures_microstructure_context'):
+        source = result.get(source_key) or {}
+        if isinstance(source, dict):
+            compact[source_key] = {
+                key: source.get(key)
+                for key in (
+                    'available', 'model_version', 'mode', 'regime', 'direction',
+                    'direction_alignment', 'entry_location', 'shadow_verdict',
+                    'quality_score', 'alignment', 'alignment_score',
+                    'affects_publication', 'affects_safety'
+                )
+                if key in source
+            }
+
+    return compact
 
 
 def _serialize_futures_cache(data):
@@ -29500,14 +29747,14 @@ def _serialize_futures_cache(data):
         try:
             import json
             json.dumps(v)
-            analysis_serial[key_str] = v
+            analysis_serial[key_str] = _compact_futures_runtime_result(v)
         except (TypeError, ValueError):
             # Contiene objetos no serializables (ej: pd.DataFrame residual)
             # Intentamos limpiar campos conocidos
             try:
                 v_clean = {kk: vv for kk, vv in v.items() if kk not in ('df',)}
                 json.dumps(v_clean)
-                analysis_serial[key_str] = v_clean
+                analysis_serial[key_str] = _compact_futures_runtime_result(v_clean)
             except Exception:
                 # Si aún así falla, saltar esta entrada
                 continue
@@ -29526,9 +29773,9 @@ def _deserialize_futures_cache(payload):
     for k_str, v in (payload.get('analysis_serial') or {}).items():
         if '|' in k_str:
             parts = k_str.split('|', 1)
-            analysis[(parts[0], parts[1])] = v
+            analysis[(parts[0], parts[1])] = _compact_futures_runtime_result(v)
         else:
-            analysis[k_str] = v
+            analysis[k_str] = _compact_futures_runtime_result(v)
     return {
         'analysis': analysis,
         'errors': payload.get('errors') or [],
@@ -30265,7 +30512,7 @@ def _apply_36s_futures_ai_control(
 
 
         return result
-def _analyze_futures_all_parallel():
+def _analyze_futures_all_parallel(combos_override=None):
     """
     Ejecuta los 30 análisis de Futuros de forma secuencial para limitar memoria,
     pero publica cada resultado en el caché inmediatamente.
@@ -30289,11 +30536,12 @@ def _analyze_futures_all_parallel():
 
     from futures_system import FUTURES_SYMBOLS, FUTURES_TIMEFRAMES
 
-    combos = [
+    all_combos = [
         (symbol, timeframe)
         for symbol in FUTURES_SYMBOLS.keys()
         for timeframe in FUTURES_TIMEFRAMES.keys()
     ]
+    combos = list(combos_override or all_combos)
 
     cache = _futures_analysis_cache
 
@@ -30474,13 +30722,10 @@ def _analyze_futures_all_parallel():
                 )
 
 
-            results[
-                (
-                    symbol,
-                    timeframe
-                )
-            ] = r
-
+            # Hotfix 14.7: ReviewTrader already persisted the rich research
+            # payload.  The live cache keeps only what UI/lifecycle needs.
+            runtime_r = _compact_futures_runtime_result(r)
+            results[(symbol, timeframe)] = runtime_r
 
             lifecycle = (
                 _refresh_futures_signal_lifecycle(
@@ -30495,9 +30740,9 @@ def _analyze_futures_all_parallel():
             # PUBLICAR EL RESULTADO INMEDIATAMENTE
             # ---------------------------------------------------------
             partial_data = {
-                'analysis': dict(results),
-                'errors': list(errors),
-                'lifecycle': dict(lifecycle)
+                'analysis': results,
+                'errors': errors,
+                'lifecycle': lifecycle
             }
 
             with cache['lock']:
@@ -30544,8 +30789,28 @@ def _analyze_futures_all_parallel():
         except Exception:
             pass
 
-        if index % 3 == 0:
-            _trim_process_heap()
+        # Hotfix 14.7: release raw OHLCV/microstructure after EVERY combo.
+        # The persisted/runtime result is already compact; retaining raw frames
+        # between symbols only increases peak RSS on the 512 MB instance.
+        try:
+            clear_fn = getattr(futures, 'clear_futures_runtime_caches', None)
+            if callable(clear_fn):
+                clear_fn(include_microstructure=True)
+        except Exception:
+            try:
+                from futures_system import clear_futures_runtime_caches
+                clear_futures_runtime_caches(include_microstructure=True)
+            except Exception:
+                pass
+        try:
+            del r
+        except Exception:
+            pass
+        try:
+            del runtime_r
+        except Exception:
+            pass
+        _trim_process_heap()
 
     _trim_process_heap()
 
@@ -30570,6 +30835,88 @@ def _analyze_futures_all_parallel():
         'completed_combinations': completed_count,
         'total_combinations': total,
     }
+
+
+_FUTURES_INCREMENTAL_CURSOR = 0
+_FUTURES_INCREMENTAL_CURSOR_LOCK = threading.Lock()
+_FUTURES_INCREMENTAL_INTERVAL_SECONDS = max(10, int(os.environ.get('FUTURES_INCREMENTAL_INTERVAL_SECONDS', '15') or 15))
+_FUTURES_INCREMENTAL_START_DELAY_SECONDS = max(60, int(os.environ.get('FUTURES_INCREMENTAL_START_DELAY_SECONDS', '180') or 180))
+
+
+def _next_futures_incremental_combo():
+    """Round-robin one symbol/timeframe at a time; no 30-combo heap spike."""
+    global _FUTURES_INCREMENTAL_CURSOR
+    from futures_system import FUTURES_SYMBOLS, FUTURES_TIMEFRAMES
+    # Refresh short TF first after a restart, then progress through the rest.
+    combos = [
+        (symbol, timeframe)
+        for timeframe in FUTURES_TIMEFRAMES.keys()
+        for symbol in FUTURES_SYMBOLS.keys()
+    ]
+    if not combos:
+        return None
+    with _FUTURES_INCREMENTAL_CURSOR_LOCK:
+        combo = combos[_FUTURES_INCREMENTAL_CURSOR % len(combos)]
+        _FUTURES_INCREMENTAL_CURSOR = (_FUTURES_INCREMENTAL_CURSOR + 1) % len(combos)
+    return combo
+
+
+def _trigger_futures_combo_refresh_async(symbol=None, timeframe=None):
+    """Refresh exactly one Futures combo in a background thread.
+
+    This is the Render-Free default.  A rich result is persisted by ReviewTrader,
+    while only a compact live snapshot remains in the Gunicorn process.
+    """
+    global _futures_analysis_cache
+    cache = _futures_analysis_cache
+    if not symbol or not timeframe:
+        combo = _next_futures_incremental_combo()
+        if not combo:
+            return False
+        symbol, timeframe = combo
+
+    with cache['lock']:
+        if cache['running']:
+            return False
+        cache['running'] = True
+        cache['progress']['current'] = f'{symbol} {timeframe}'
+
+    def _do_one():
+        heavy_acquired = False
+        try:
+            heavy_acquired = _acquire_heavy_analysis(
+                f'futures-incremental:{symbol}:{timeframe}',
+                timeout=5,
+            )
+            if not heavy_acquired:
+                return
+            _log_memory_runtime(f'futures-incremental:{symbol}:{timeframe}:before')
+            data = _analyze_futures_all_parallel(
+                combos_override=[(symbol, timeframe)]
+            )
+            if not data.get('memory_guard_abort'):
+                cache['ts'] = time.time()
+                try:
+                    _save_futures_cache_to_disk()
+                except Exception as save_err:
+                    print(f'⚠️ [FUT INC] Snapshot save falló: {save_err}')
+            _log_memory_runtime(f'futures-incremental:{symbol}:{timeframe}:after')
+        except Exception as exc:
+            print(f'❌ [FUT INC] {symbol} {timeframe}: {exc}')
+        finally:
+            if heavy_acquired:
+                _release_heavy_analysis(
+                    f'futures-incremental:{symbol}:{timeframe}'
+                )
+            with cache['lock']:
+                cache['running'] = False
+
+    threading.Thread(
+        target=_do_one,
+        daemon=True,
+        name=f'futures-inc-{symbol}-{timeframe}',
+    ).start()
+    return True
 
 
 def _get_or_refresh_futures_analysis(force_wait=False):
@@ -30611,7 +30958,10 @@ def _get_or_refresh_futures_analysis(force_wait=False):
     # Cache stale → refresh en background y devolver lo que haya
     if cache['data'] is not None:
         if not cache['running']:
-            _trigger_futures_refresh_async()
+            if _LOW_MEMORY_MODE:
+                _trigger_futures_combo_refresh_async()
+            else:
+                _trigger_futures_refresh_async()
         d = dict(cache['data'])
         d['warming_up'] = False
         d['cache_age'] = int(age)
@@ -30620,7 +30970,10 @@ def _get_or_refresh_futures_analysis(force_wait=False):
     
     # No hay caché aún → disparar refresh async y devolver vacío
     if not cache['running']:
-        _trigger_futures_refresh_async()
+        if _LOW_MEMORY_MODE:
+            _trigger_futures_combo_refresh_async()
+        else:
+            _trigger_futures_refresh_async()
     
     return {
         'analysis': {},
@@ -30632,8 +30985,10 @@ def _get_or_refresh_futures_analysis(force_wait=False):
 
 
 def _trigger_futures_refresh_async():
-    """Dispara un único refresh del caché en background."""
+    """Dispara refresh. Render Free redirects full sweeps to one combo."""
     global _futures_analysis_cache
+    if _LOW_MEMORY_MODE:
+        return _trigger_futures_combo_refresh_async()
     cache = _futures_analysis_cache
 
     # Reservar el refresh ANTES de crear el thread.
@@ -30753,32 +31108,65 @@ def _trigger_futures_refresh_async():
     t.start()
 
 def _start_futures_warmup():
-    """Al arrancar la app, disparar un análisis inicial en background."""
+    """Start Futures refresh without risking a 30-combo startup spike.
+
+    Render Free defaults to one combo at a time.  Existing persisted snapshots
+    are immediately readable; the incremental loop refreshes them progressively.
+    """
     import gc
+
+    if _LOW_MEMORY_MODE:
+        print(
+            "🛡️ [MEM] Futures LOW_MEMORY_MODE: "
+            "sin barrido 30/30 al arranque; refresh incremental activado."
+        )
+
+        def _incremental_loop():
+            # Give Gunicorn time to become reachable and restore snapshots.
+            time.sleep(_FUTURES_INCREMENTAL_START_DELAY_SECONDS)
+            while True:
+                try:
+                    if not _futures_analysis_cache['running']:
+                        _trigger_futures_combo_refresh_async()
+                except Exception as error:
+                    print(f"⚠️ [FUT INC] loop: {error}")
+                try:
+                    gc.collect()
+                except Exception:
+                    pass
+                time.sleep(_FUTURES_INCREMENTAL_INTERVAL_SECONDS)
+
+        threading.Thread(
+            target=_incremental_loop,
+            daemon=True,
+            name='futures-incremental-loop',
+        ).start()
+        return
+
     print("🔥 Iniciando warm-up de análisis futuros en background...")
-    # Dar prioridad al primer snapshot Spot tras un deploy.
-    # El lock global sigue impidiendo que Spot y Futures corran a la vez.
+
     def _delayed_first_warmup():
         time.sleep(45)
         _trigger_futures_refresh_async()
+
     threading.Thread(target=_delayed_first_warmup, daemon=True).start()
-    
-    # Programar refresh periódico cada 10 minutos (antes 5 min → menos carga)
-    # gc.collect() al final para forzar liberación de memoria acumulada
+
     def _periodic():
         while True:
-            time.sleep(600)  # 10 min (antes 5 min)
+            time.sleep(600)
             try:
                 if not _futures_analysis_cache['running']:
                     _trigger_futures_refresh_async()
-                    # Esperar a que termine antes de gc
                     time.sleep(60)
                     gc.collect()
             except Exception as e:
                 print(f"❌ Error en refresh periódico futuros: {e}")
-    
-    t = threading.Thread(target=_periodic, daemon=True, name='futures-periodic')
-    t.start()
+
+    threading.Thread(
+        target=_periodic,
+        daemon=True,
+        name='futures-periodic',
+    ).start()
 
 
 # ============================================================================
@@ -40218,20 +40606,49 @@ if not os.environ.get('DISABLE_WARMUP'):
     # Ahora: se calcula al arrancar en un hilo, y se refresca cada 15 min.
     def _start_previous_signals_warmup():
         import gc
+
+        # Hotfix 14.7: on 512 MB do not launch 12 Spot analyses during boot.
+        # The last compact snapshot was already restored from Supabase above.
+        if _LOW_MEMORY_MODE:
+            print(
+                "🛡️ [MEM] Spot previous_signals: sin warm-up masivo al arranque; "
+                "se conserva snapshot Supabase y se refresca diferido."
+            )
+
+            def _low_memory_periodic_prev():
+                # Main web app + incremental Futures get first priority.
+                time.sleep(15 * 60)
+                while True:
+                    try:
+                        if not _PREV_SIGNALS_COMPUTING['running']:
+                            _run_previous_signals_background()
+                    except Exception as error:
+                        print(f"⚠️ [MEM] previous_signals diferido: {error}")
+                    _trim_process_heap()
+                    time.sleep(60 * 60)
+
+            threading.Thread(
+                target=_low_memory_periodic_prev,
+                daemon=True,
+                name='prev-signals-low-memory',
+            ).start()
+            return
+
         def _delayed_first():
-            # Spot toma el primer turno pesado tras un arranque en frío.
-            # Futures comienza después y esperará el mismo lock global.
             time.sleep(5)
             try:
                 _run_previous_signals_background()
             except Exception as e:
                 print(f"⚠️ Warm-up previous_signals inicial: {e}")
-        threading.Thread(target=_delayed_first, daemon=True,
-                          name='prev-signals-warmup').start()
-        
+        threading.Thread(
+            target=_delayed_first,
+            daemon=True,
+            name='prev-signals-warmup'
+        ).start()
+
         def _periodic_prev():
             while True:
-                time.sleep(900)  # 15 min entre refreshes
+                time.sleep(900)
                 try:
                     if not _PREV_SIGNALS_COMPUTING['running']:
                         _run_previous_signals_background()
@@ -40239,8 +40656,11 @@ if not os.environ.get('DISABLE_WARMUP'):
                         gc.collect()
                 except Exception as e:
                     print(f"❌ Error refresh periódico previous_signals: {e}")
-        threading.Thread(target=_periodic_prev, daemon=True,
-                          name='prev-signals-periodic').start()
+        threading.Thread(
+            target=_periodic_prev,
+            daemon=True,
+            name='prev-signals-periodic'
+        ).start()
     try:
         _start_previous_signals_warmup()
     except Exception as _e:
@@ -40283,8 +40703,10 @@ def learning_worker_loop():
     print(f"🧠 LEARNING WORKER iniciado (cada {LEARNING_WORKER_INTERVAL//60} min)")
     print("=" * 60)
     
-    # Esperar 120s inicial para no competir con el warm-up de futuros
-    time.sleep(120)
+    # Hotfix 14.7: first priority after a restart is to make the web app
+    # reachable.  On Render Free defer learning so it cannot overlap bootstrap.
+    initial_learning_delay = 600 if _LOW_MEMORY_MODE else 120
+    time.sleep(initial_learning_delay)
     
     stats_counter = 0
     governance_bootstrapped = False

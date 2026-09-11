@@ -69,9 +69,9 @@ class Hotfix146MemoryStabilityTests(unittest.TestCase):
     def test_memory_defaults_leave_render_headroom(self):
         with open('.env.example', 'r', encoding='utf-8') as fh:
             source = fh.read()
-        self.assertIn('MEMORY_SOFT_LIMIT_MB=325', source)
-        self.assertIn('MEMORY_HARD_LIMIT_MB=395', source)
-        self.assertIn('MEMORY_ANALYSIS_CACHE_KEEP=5', source)
+        self.assertIn('MEMORY_SOFT_LIMIT_MB=250', source)
+        self.assertIn('MEMORY_HARD_LIMIT_MB=340', source)
+        self.assertIn('MEMORY_ANALYSIS_CACHE_KEEP=2', source)
         self.assertIn('ANALYTICS_SNAPSHOT_FRESH_SECONDS=1800', source)
 
 
