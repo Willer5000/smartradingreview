@@ -2151,8 +2151,13 @@ def get_gemini_activity_status():
             or ""
         )
 
+        provider_short = (
+            "Groq Learning"
+            if configured_provider == "GROQ_LEARNING"
+            else "Gemini"
+        )
         activity_summary = (
-            "✅ Gemini activo"
+            f"✅ {provider_short} activo"
             + (
                 f" · {total_tokens} tokens"
                 if total_tokens > 0
@@ -2180,7 +2185,7 @@ def get_gemini_activity_status():
             "reason"
         ] = (
             "El cintillo reutiliza la última respuesta Learning "
-            "persistida; no realiza llamadas adicionales a Gemini."
+            f"persistida; no realiza llamadas adicionales a {provider_short}."
         )
 
         return result
@@ -3087,7 +3092,16 @@ Una estrategia propuesta debe indicar:
 7. lógica de target;
 8. métrica principal de éxito;
 9. cantidad mínima de muestras;
-10. por qué merece ser probada.
+10. por qué merece ser probada;
+11. research_filters: filtros ESTRUCTURADOS que Research Federation pueda medir.
+
+research_filters sólo puede usar estas claves cuando exista evidencia para ellas:
+market_family, symbol, timeframe, direction, regime, micro_alignment,
+sl_quality_band, tp_quality_band, defensibility_band, reachability_band,
+has_order_block, has_sweep, has_pullback, component.
+
+No inventes un filtro si no aparece en el contexto. Una propuesta sin filtros
+medibles puede describirse, pero permanecerá no testeable y no será promovida.
 
 Para FUTURES prioriza como fuentes de mejora:
 
@@ -3330,6 +3344,83 @@ def _ai_clean_list(
 
     return cleaned
 
+_RESEARCH_PROPOSAL_FILTERS = {
+    "market_family",
+    "symbol",
+    "timeframe",
+    "direction",
+    "regime",
+    "micro_alignment",
+    "sl_quality_band",
+    "tp_quality_band",
+    "defensibility_band",
+    "reachability_band",
+    "has_order_block",
+    "has_sweep",
+    "has_pullback",
+    "component",
+}
+
+
+def _normalize_research_filters(value, market="FUTURES"):
+    """Normaliza el contrato que Research Federation puede medir.
+
+    No interpreta lenguaje libre.  Sólo acepta dimensiones que ya existen en
+    los snapshots V2; por eso una propuesta IA puede convertirse en hipótesis
+    medible sin darle autoridad operativa al LLM.
+    """
+    raw = value if isinstance(value, dict) else {}
+    out = {}
+
+    market_family = str(raw.get("market_family") or "").strip().upper()
+    if not market_family and str(market or "").upper() == "FUTURES":
+        market_family = "CRYPTO_FUTURES"
+    if market_family in {"CRYPTO_FUTURES", "CRYPTO_SPOT", "PAXG_USDT", "PAXG_BTC"}:
+        out["market_family"] = market_family
+
+    symbol = str(raw.get("symbol") or "").strip().upper().replace("/", "-")
+    if symbol and symbol not in {"ALL", "ANY", "TODOS"}:
+        out["symbol"] = symbol[:40]
+
+    timeframe = str(raw.get("timeframe") or "").strip().upper()
+    if timeframe in {"5M", "15M", "30M", "1H", "2H", "4H", "12H", "1D", "1W"}:
+        out["timeframe"] = timeframe
+
+    direction = str(raw.get("direction") or "").strip().upper()
+    if direction in {"LONG", "SHORT"}:
+        out["direction"] = direction
+
+    regime = str(raw.get("regime") or "").strip().upper()
+    if regime in {"BALANCE", "TREND_UP", "TREND_DOWN", "TRANSITION", "VOLATILITY_SHOCK"}:
+        out["regime"] = regime
+
+    micro = str(raw.get("micro_alignment") or "").strip().upper()
+    if micro in {"ALIGNED", "NEUTRAL", "CONFLICT"}:
+        out["micro_alignment"] = micro
+
+    for key in (
+        "sl_quality_band",
+        "tp_quality_band",
+        "defensibility_band",
+        "reachability_band",
+    ):
+        band = str(raw.get(key) or "").strip().upper()
+        if band in {"LOW", "MEDIUM", "HIGH", "VERY_HIGH"}:
+            out[key] = band
+
+    for key in ("has_order_block", "has_sweep", "has_pullback"):
+        flag = str(raw.get(key) or "").strip().upper()
+        if flag in {"YES", "NO"}:
+            out[key] = flag
+
+    component = str(raw.get("component") or "").strip().upper()
+    if component:
+        # El prefijo forma parte del token real persistido (STRATEGY:, RSI_...).
+        out["component"] = component[:180]
+
+    return {k: out[k] for k in _RESEARCH_PROPOSAL_FILTERS if k in out}
+
+
 def _normalize_strategy_proposals(
     value
 ):
@@ -3482,6 +3573,31 @@ def _normalize_strategy_proposals(
             "status":
                 "SHADOW_PROPOSAL"
         }
+
+        research_filters = _normalize_research_filters(
+            item.get("research_filters"),
+            market=market
+        )
+        proposal["research_filters"] = research_filters
+        # Testable significa únicamente que existe al menos una condición
+        # además de la familia de mercado. No implica edge ni aprobación.
+        discriminants = [
+            key for key in research_filters
+            if key != "market_family"
+        ]
+        proposal["runtime_testable"] = bool(discriminants)
+        proposal_seed = json.dumps(
+            {
+                "market": market,
+                "name": proposal["name"],
+                "filters": research_filters,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        proposal["proposal_id"] = (
+            "AI_" + hashlib.sha256(proposal_seed.encode("utf-8")).hexdigest()[:16]
+        )
 
         if (
             proposal[
@@ -3811,6 +3927,12 @@ deben ser listas de textos.
 
 strategy_proposals debe ser [] salvo que el contexto
 corresponda específicamente a LEARNING.
+
+Cuando incluyas strategy_proposals, cada propuesta debe contener además
+research_filters con únicamente dimensiones medibles del contexto:
+market_family, symbol, timeframe, direction, regime, micro_alignment,
+sl_quality_band, tp_quality_band, defensibility_band, reachability_band,
+has_order_block, has_sweep, has_pullback o component.
 
 Todos los textos visibles deben estar en español.
 
@@ -4152,6 +4274,16 @@ Si existe edge_discovery_v1 en el contexto:
 - usa MFE/MAE y Entry Defensibility para explicar por qué una combinación mejora o empeora;
 - nunca aumentes leverage ni bajes Safety por una hipótesis de este laboratorio.
 
+Si existe research_federation_v13 en el contexto:
+
+- úsalo como evidencia externa Research-only;
+- distingue Discovery, Holdout temporal y Shadow live;
+- NO interpretes PF degenerado ni Val.N pequeño como edge real;
+- prioriza hipótesis que sobrevivan Holdout, walk-forward, costes y varios activos;
+- usa las temporalidades estratégicas de Spot (4H/12H/1D/1W) sin mezclarlas con scalping;
+- si un candidato está SHADOW_READY, sólo significa que merece prueba live Shadow;
+- si está REJECTED_OOS, úsalo para evitar repetir esa hipótesis.
+
 Si existe learning_integrity_v1 en el contexto:
 
 - verifica que cada conclusión declare su scope de cohorte;
@@ -4228,7 +4360,13 @@ Usa exactamente esta estructura:
       "regime": "",
       "success_metric": "net_expectancy_R",
       "min_samples": 25,
-      "why_test": ""
+      "why_test": "",
+      "research_filters": {
+        "market_family": "CRYPTO_FUTURES",
+        "timeframe": "30M",
+        "direction": "SHORT",
+        "regime": "TREND_DOWN"
+      }
     }
   ],
   "system_alignment": "",

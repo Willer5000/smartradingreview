@@ -39652,6 +39652,37 @@ def _build_ai_learning_context():
             'reason': str(q7_learning_error)[:180]
         }
 
+    # ================================================================
+    # COMMIT E — RESEARCH FEDERATION → LEARNING SCIENTIST
+    # ================================================================
+    # El científico debe conocer qué hipótesis externas ya sobrevivieron
+    # Discovery/Holdout para no reinventar ideas descartadas ni proponer
+    # cambios basados sólo en Analytics local. Es lectura compacta/cacheada.
+    # Nunca concede autoridad productiva.
+    try:
+        from research_bridge import _compact as _research_compact
+
+        rf_candidates, rf_states, rf_shadow, rf_coverage = (
+            _research_compact(force=False)
+        )
+
+        research_federation_learning = {
+            'version': 'RF_LEARNING_BRIDGE_V1',
+            'authority': 'RESEARCH_ONLY',
+            'coverage': rf_coverage or {},
+            'candidates': (rf_candidates or [])[:30],
+            'shadow_live': (rf_shadow or [])[:20],
+            'engines': (rf_states or [])[:10],
+        }
+
+    except Exception as research_learning_error:
+        research_federation_learning = {
+            'version': 'RF_LEARNING_BRIDGE_V1',
+            'authority': 'RESEARCH_ONLY',
+            'status': 'UNAVAILABLE',
+            'reason': str(research_learning_error)[:180],
+        }
+
     return {
 
         'policy': {
@@ -39727,6 +39758,11 @@ def _build_ai_learning_context():
         # ReviewTrader. No puede promoverlas ni modificar producción.
         'edge_discovery_v1':
             edge_discovery_learning,
+
+        # COMMIT E: evidencia externa compacta para que el científico
+        # formule propuestas que Research Federation pueda comprobar.
+        'research_federation_v13':
+            research_federation_learning,
 
         # COMMIT 10: contrato explícito de cohortes y scorecard de
         # especialización por mercado/timeframe/régimen. Research-only.

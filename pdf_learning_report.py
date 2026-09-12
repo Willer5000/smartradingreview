@@ -2066,29 +2066,44 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
     }
 
     # ------------------------------------------------------------------
-    # SAFE SNAPSHOT v6
+    # COMMIT E — COUNT EXACTO LIVIANO + SAFE SNAPSHOT
     # ------------------------------------------------------------------
     #
-    # Omitimos deliberadamente COUNT exacto.
-    #
-    # Un COUNT de toda la ventana agrega otra consulta completa antes
-    # de empezar a recuperar las señales y no es necesario para que el
-    # PDF diagnóstico pueda existir.
-    #
-    # La integridad se determina así:
-    #
-    # - si una página devuelve menos de REPORT_SAFE_PAGE_SIZE,
-    #   sabemos que llegamos al final de la ventana;
-    #
-    # - si alcanzamos REPORT_SAFE_MAX_ROWS sin llegar al final,
-    #   la cohorte queda INCOMPLETA y Commit 37 se bloquea.
-    diagnostics[
-        'expected_rows'
-    ] = None
+    # El PDF necesita saber si realmente leyó toda la cohorte. Un COUNT
+    # exacto con proyección mínima no descarga las filas y permite declarar
+    # COMPLETE incluso si el presupuesto de tiempo impide hacer una página
+    # vacía adicional. Si el COUNT falla, conservamos el comportamiento
+    # fail-closed anterior y seguimos usando reached_window_end.
+    diagnostics['count_error'] = None
 
-    diagnostics[
-        'count_skipped'
-    ] = True
+    def _execute_exact_count():
+        query = (
+            db.client
+            .table('signals')
+            .select('id', count='exact')
+            .gte('created_at', cutoff)
+            .lt('created_at', snapshot_end)
+            .limit(1)
+        )
+        return query.execute()
+
+    try:
+        if hasattr(db, '_with_retry'):
+            count_response = db._with_retry(_execute_exact_count)
+        else:
+            count_response = _execute_exact_count()
+        expected_rows = int(getattr(count_response, 'count', 0) or 0)
+        diagnostics['expected_rows'] = expected_rows
+        diagnostics['count_skipped'] = False
+    except Exception as count_error:
+        diagnostics['expected_rows'] = None
+        diagnostics['count_skipped'] = True
+        diagnostics['count_error'] = str(count_error)[:180]
+        logger.warning(
+            '⚠️ Learning PDF: COUNT exacto no disponible; '
+            'se mantiene verificación fail-closed por paginación: %s',
+            count_error
+        )
 
     def _append_unique(target, seen_ids, batch):
         added = 0
@@ -2216,6 +2231,14 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
     reached_window_end = False
 
     for _ in range(max_pages):
+        expected_rows = diagnostics.get('expected_rows')
+        if (
+            expected_rows is not None
+            and len(all_data) >= int(expected_rows)
+        ):
+            reached_window_end = True
+            break
+
         elapsed = (
             time.monotonic()
             - started_at
@@ -2336,24 +2359,33 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
         'reached_window_end'
     ] = reached_window_end
 
+    expected_rows = diagnostics.get('expected_rows')
+    count_proves_complete = bool(
+        expected_rows is not None
+        and len(all_data) >= int(expected_rows)
+    )
+
     diagnostics[
         'complete'
     ] = bool(
-        reached_window_end
+        (reached_window_end or count_proves_complete)
         and not diagnostics[
             'errors'
         ]
     )
 
-    diagnostics[
-        'coverage_pct'
-    ] = (
-        100.0
-        if diagnostics[
-            'complete'
-        ]
-        else None
-    )
+    if expected_rows is not None:
+        if int(expected_rows) <= 0:
+            diagnostics['coverage_pct'] = 100.0
+        else:
+            diagnostics['coverage_pct'] = round(
+                min(100.0, (len(all_data) / int(expected_rows)) * 100.0),
+                2
+            )
+    else:
+        diagnostics['coverage_pct'] = (
+            100.0 if diagnostics['complete'] else None
+        )
 
     if not diagnostics[
         'complete'
