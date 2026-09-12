@@ -27003,6 +27003,13 @@ def _acquire_heavy_analysis(owner, timeout=None):
         except Exception:
             pass
 
+    # Hotfix 16.1: los jobs de fondo no pueden encadenarse sin pausa.
+    # La UI nunca queda bloqueada por este cooldown.
+    if (not interactive_owner) and _background_heavy_owner(owner):
+        if _background_heavy_cooldown_active():
+            print(f"⏸️ [BACKGROUND] {owner}: cooldown operativo; cede CPU/red a la UI.")
+            return False
+
     _log_memory_runtime(f'{owner}: esperando turno')
 
     acquired = _HEAVY_ANALYSIS_LOCK.acquire(timeout=timeout)
@@ -27069,6 +27076,12 @@ def _release_heavy_analysis(owner):
         _HEAVY_ANALYSIS_OWNER = None
 
     _HEAVY_ANALYSIS_LOCK.release()
+
+    # Hotfix 16.1: sólo los jobs de fondo generan una ventana de descanso.
+    # Spot/Futures solicitados por el usuario NO se demoran artificialmente.
+    if _background_heavy_owner(owner):
+        _mark_background_heavy_cooldown()
+
     _log_memory_runtime(f'{owner}: fin')
 
 
@@ -29975,6 +29988,43 @@ _SYSTEM_INTERACTIVE_PRIORITY_SECONDS = max(20, int(os.environ.get(
 _SYSTEM_INTERACTIVE_PRIORITY_UNTIL = 0.0
 _SYSTEM_INTERACTIVE_PRIORITY_LOCK = threading.Lock()
 
+# Hotfix 16.1 — dejar respiración real entre trabajos de fondo.
+# La carga infinita observada no es OOM (RSS ~150 MB), sino saturación por una
+# cadena casi continua de jobs incrementales. El cooldown sólo limita NUEVOS
+# trabajos de fondo; los análisis interactivos pueden entrar inmediatamente.
+_BACKGROUND_HEAVY_COOLDOWN_SECONDS = max(5, int(os.environ.get(
+    'BACKGROUND_HEAVY_COOLDOWN_SECONDS', '20'
+) or 20))
+_BACKGROUND_HEAVY_NOT_BEFORE = 0.0
+_BACKGROUND_HEAVY_COOLDOWN_LOCK = threading.Lock()
+_BACKGROUND_HEAVY_PREFIXES = (
+    'futures-incremental:',
+    'reviewtrader-learning:',
+    'historical-research:',
+    'analytics-quality-v2',
+    'governance-',
+    'ai-learning-',
+)
+
+
+def _background_heavy_owner(owner):
+    text = str(owner or '')
+    return text.startswith(_BACKGROUND_HEAVY_PREFIXES)
+
+
+def _background_heavy_cooldown_active():
+    with _BACKGROUND_HEAVY_COOLDOWN_LOCK:
+        return time.monotonic() < _BACKGROUND_HEAVY_NOT_BEFORE
+
+
+def _mark_background_heavy_cooldown(seconds=None):
+    global _BACKGROUND_HEAVY_NOT_BEFORE
+    hold = max(1, int(seconds or _BACKGROUND_HEAVY_COOLDOWN_SECONDS))
+    until = time.monotonic() + hold
+    with _BACKGROUND_HEAVY_COOLDOWN_LOCK:
+        _BACKGROUND_HEAVY_NOT_BEFORE = max(_BACKGROUND_HEAVY_NOT_BEFORE, until)
+    return _BACKGROUND_HEAVY_NOT_BEFORE
+
 
 def _mark_system_interactive_priority(seconds=None):
     global _SYSTEM_INTERACTIVE_PRIORITY_UNTIL
@@ -30017,6 +30067,30 @@ def _futures_interactive_priority_active():
     with _FUTURES_INTERACTIVE_PRIORITY_LOCK:
         futures_active = time.monotonic() < _FUTURES_INTERACTIVE_PRIORITY_UNTIL
     return futures_active or _system_interactive_priority_active()
+
+
+# Hotfix 16.1 — prioridad desde la NAVEGACIÓN, no sólo desde /api/analyze.
+# Antes, si el incremental ya estaba encadenando trabajos mientras el navegador
+# todavía cargaba HTML/auth/scripts, la llamada que marcaba prioridad podía
+# llegar demasiado tarde y la página parecía quedar en spinner infinito.
+_INTERACTIVE_PAGE_PATHS = {
+    '/',
+    '/futures',
+    '/analytics',
+    '/research-federation',
+}
+
+
+@app.before_request
+def _hotfix16_1_navigation_priority():
+    try:
+        path = str(request.path or '')
+        if path in _INTERACTIVE_PAGE_PATHS:
+            _mark_system_interactive_priority(seconds=90)
+            print(f"🖥️ [UI PRIORITY] navegación {path}: pausa background 90s")
+    except Exception:
+        # Fail-open: nunca romper una petición por el mecanismo de prioridad.
+        pass
 
 
 def _get_futures_ui_cached(symbol, timeframe):
@@ -31307,10 +31381,12 @@ _FUTURES_INCREMENTAL_CURSOR_LOCK = threading.Lock()
 _FUTURES_INCREMENTAL_INTERVAL_SECONDS = max(10, int(os.environ.get('FUTURES_INCREMENTAL_INTERVAL_SECONDS', '30') or 30))
 _FUTURES_INCREMENTAL_START_DELAY_SECONDS = max(60, int(os.environ.get('FUTURES_INCREMENTAL_START_DELAY_SECONDS', '180') or 180))
 if _LOW_MEMORY_MODE:
-    # 15s hacía 5.760 ciclos/día potenciales y escrituras/descargas innecesarias.
-    # 30s mantiene el Shadow vivo sin competir constantemente con la UI.
+    # Hotfix 16.1: 30s seguía encadenando análisis casi de forma continua en
+    # Render Free. 60s conserva actualización incremental sin monopolizar la
+    # instancia central. Los análisis elegidos por el usuario siguen siendo
+    # interactivos y no esperan este intervalo.
     _FUTURES_INCREMENTAL_INTERVAL_SECONDS = max(
-        30,
+        60,
         _FUTURES_INCREMENTAL_INTERVAL_SECONDS,
     )
 
