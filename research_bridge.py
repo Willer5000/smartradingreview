@@ -46,6 +46,71 @@ def _num(value):
     except Exception:
         return None
 
+_TF_ORDER = ('4H','12H','1D','1W','5M','15M','30M','1H','2H','ALL')
+
+def _tf(value):
+    return str(value or 'ALL').strip().upper() or 'ALL'
+
+def _balanced_candidates(rows, limit=240):
+    """Keep long and intraday timeframes visible even if one engine ran last."""
+    rows=list(rows or [])
+    limit=max(1,int(limit or 1))
+    if len(rows)<=limit:
+        return rows
+    picked=[]; seen=set()
+    def key(row): return str(row.get('candidate_key') or '')
+    def add(row):
+        k=key(row)
+        if not k or k in seen or len(picked)>=limit: return
+        seen.add(k); picked.append(row)
+    # Guarantee one row for every existing engine x timeframe first.
+    markers=set()
+    for tf in _TF_ORDER:
+        for row in rows:
+            scope=row.get('scope') or {}
+            if _tf(scope.get('timeframe')) != tf: continue
+            marker=(str(row.get('source_engine') or 'UNKNOWN'),tf)
+            if marker in markers: continue
+            markers.add(marker); add(row)
+            if len(picked)>=limit: return picked
+    # Round-robin by timeframe for the remaining space.
+    buckets={tf:[] for tf in _TF_ORDER}; other=[]
+    for row in rows:
+        tf=_tf((row.get('scope') or {}).get('timeframe'))
+        (buckets[tf] if tf in buckets else other).append(row)
+    active=[tf for tf in _TF_ORDER if buckets[tf]]; idx=0
+    while active and len(picked)<limit:
+        tf=active[idx % len(active)]; bucket=buckets[tf]
+        while bucket and key(bucket[0]) in seen: bucket.pop(0)
+        if bucket: add(bucket.pop(0))
+        if not bucket:
+            active.remove(tf); idx=0
+        else: idx += 1
+    for row in other + rows:
+        add(row)
+        if len(picked)>=limit: break
+    return picked
+
+def _coverage(rows):
+    by_tf={}; by_engine={}; by_market={}
+    for row in rows or []:
+        scope=row.get('scope') or {}
+        tf=_tf(scope.get('timeframe'))
+        eng=str(row.get('source_engine') or 'UNKNOWN')
+        market=str(scope.get('market_family') or 'UNKNOWN')
+        by_tf[tf]=by_tf.get(tf,0)+1
+        by_engine[eng]=by_engine.get(eng,0)+1
+        by_market[market]=by_market.get(market,0)+1
+    strategic={tf:int(by_tf.get(tf,0)) for tf in ('4H','12H','1D','1W')}
+    return {
+        'by_timeframe':dict(sorted(by_tf.items())),
+        'by_engine':dict(sorted(by_engine.items())),
+        'by_market':dict(sorted(by_market.items())),
+        'strategic_timeframes':strategic,
+        'missing_strategic_timeframes':[tf for tf,n in strategic.items() if n<=0],
+        'total_current':len(rows or []),
+    }
+
 def _compact_promotion(row):
     metrics = row.get('metrics') or {}
     allm = metrics.get('all') or {}
@@ -87,10 +152,12 @@ def _compact(force=False):
     raw_promotions=_get('research_promotions_v1',{
         'select':'candidate_key,source_engine,experiment,stage,reason,scope,metrics,meta,research_version,updated_at',
         'order':'updated_at.desc',
-        'limit':'120',
+        'limit':'1000',
     })
     raw_promotions=[x for x in raw_promotions if (x.get('meta') or {}).get('is_current') is not False and str(x.get('stage') or '') != 'STALE']
-    candidates=[_compact_promotion(x) for x in raw_promotions]
+    coverage=_coverage(raw_promotions)
+    visible=_balanced_candidates(raw_promotions,240)
+    candidates=[_compact_promotion(x) for x in visible]
     states=_get('research_engine_state_v1',{
         'select':'engine,status,last_seen_at,rss_mb,research_version,meta',
         'order':'engine.asc',
@@ -101,17 +168,18 @@ def _compact(force=False):
         'order':'updated_at.desc',
         'limit':'120',
     })
-    payload=(candidates,states,shadow)
+    payload=(candidates,states,shadow,coverage)
     with _CACHE_LOCK:
         _CACHE['ts']=now
         _CACHE['payload']=payload
     return payload
 
-def _report(candidates,states,shadow):
+def _report(candidates,states,shadow,coverage):
     lines=['# Research Federation · sistema central','','- Bridge V1.2.1: evidencia externa + Shadow central observado.','- Nunca concede autoridad productiva automáticamente.','','## Motores']
     for s in states:
         lines.append(f"- {s.get('engine')}: {s.get('status')} · RSS {s.get('rss_mb')} MB · {s.get('last_seen_at')}")
-    lines += ['','## Evidencia Discovery/Holdout temporal','- Research Federation V1.3 es atribución observacional; el replay causal separado continúa en laboratorio.']
+    strategic=(coverage or {}).get('strategic_timeframes') or {}
+    lines += ['','## Cobertura de temporalidades', f"- 4H={strategic.get('4H',0)} · 12H={strategic.get('12H',0)} · 1D={strategic.get('1D',0)} · 1W={strategic.get('1W',0)}", '', '## Evidencia Discovery/Holdout temporal','- Research Federation V1.3 es atribución observacional; el replay causal separado continúa en laboratorio.']
     for x in candidates[:35]:
         lines.append(f"- {x.get('stage')} | {x.get('source_engine')} | {x.get('experiment')} | {x.get('market_family')} {x.get('timeframe')} | Discovery.N={x.get('backtest_n')} | WR={x.get('backtest_wr')}% | Exp.R={x.get('backtest_exp_r')} | Holdout.N={x.get('oos_n')} | Holdout.WR={x.get('oos_wr')}% | Holdout.Exp.R={x.get('oos_exp_r')} | PF={x.get('oos_pf')}")
     lines += ['','## Shadow central live']
@@ -133,7 +201,7 @@ def register_research_bridge(app, auth_fn):
         if not isinstance(user,str):
             return user
         try:
-            c,s,l=_compact()
+            c,s,l,cov=_compact()
             return jsonify({
                 'success':True,
                 'connected':True,
@@ -142,6 +210,7 @@ def register_research_bridge(app, auth_fn):
                 'shadow_live':l,
                 'authority':'RESEARCH_SHADOW_BRIDGE_V1_2_1',
                 'visible_rows':len(c),
+                'coverage':cov,
             })
         except Exception as exc:
             return jsonify({
@@ -157,8 +226,8 @@ def register_research_bridge(app, auth_fn):
         if not isinstance(user,str):
             return user
         try:
-            c,s,l=_compact()
-            return Response(_report(c,s,l),mimetype='text/markdown; charset=utf-8')
+            c,s,l,cov=_compact()
+            return Response(_report(c,s,l,cov),mimetype='text/markdown; charset=utf-8')
         except Exception as exc:
             return Response(f'# Error\n\n{exc}',status=500,mimetype='text/plain; charset=utf-8')
 

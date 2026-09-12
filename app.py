@@ -34029,10 +34029,12 @@ def api_analytics_quality_v2():
                     'timestamp': datetime.now(bolivia_tz).isoformat()
                 })
             return jsonify({
-                'success': False,
+                'success': True,
                 'deferred': True,
-                'error': 'Analytics pospuesto para proteger la memoria; el trading sigue activo.'
-            }), 503
+                'data': None,
+                'retry_after_seconds': 15,
+                'note': 'Analytics está esperando un turno libre; el trading mantiene prioridad y la pantalla reintentará automáticamente.'
+            }), 202
 
         if not _memory_pressure_guard('analytics-quality-v2', allow_soft=False):
             if stored:
@@ -34041,7 +34043,13 @@ def api_analytics_quality_v2():
                     'note': 'Se muestra el último snapshot para proteger la memoria.',
                     'timestamp': datetime.now(bolivia_tz).isoformat()
                 })
-            return jsonify({'success': False, 'deferred': True, 'error': 'Memoria protegida; reintenta en unos minutos.'}), 503
+            return jsonify({
+                'success': True,
+                'deferred': True,
+                'data': None,
+                'retry_after_seconds': 20,
+                'note': 'Analytics espera memoria segura; se reintentará automáticamente sin bloquear Spot/Futures.'
+            }), 202
 
         data = svc.get_quality_v2_summary(**filters)
         _save_analytics_quality_snapshot(filters, data)

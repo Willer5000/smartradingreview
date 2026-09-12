@@ -1717,6 +1717,21 @@ async function loadQualityV2() {
             );
         }
 
+        // Hotfix 16.4: Analytics puede ceder el único slot pesado al trading.
+        // Eso no es un error. Conservamos la UI y reintentamos automáticamente.
+        if (json.deferred && !json.data) {
+            if (statusEl) {
+                statusEl.className = 'small text-info mb-3';
+                statusEl.textContent = json.note || 'Analytics preparando snapshot sin bloquear el trading...';
+            }
+            clearTimeout(window.__qualityV2DeferredRetry);
+            const retryMs = Math.max(10000, Number(json.retry_after_seconds || 15) * 1000);
+            window.__qualityV2DeferredRetry = setTimeout(() => loadQualityV2(), retryMs);
+            return;
+        }
+
+        clearTimeout(window.__qualityV2DeferredRetry);
+
         const data = (
             json.data
             || {}
@@ -2725,6 +2740,15 @@ async function loadResearchFederationAnalytics(){
         const data=await response.json();
         if(!response.ok || !data.success) throw new Error(data.error||'Research Federation no disponible');
         const candidates=data.candidates||[], shadow=data.shadow_live||[];
+        const coverage=data.coverage||{};
+        const strategic=coverage.strategic_timeframes||{};
+        const covEl=document.getElementById('rf-analytics-coverage');
+        if(covEl){
+            const parts=['4H','12H','1D','1W'].map(tf=>`${tf}: ${Number(strategic[tf]||0)}`);
+            const missing=(coverage.missing_strategic_timeframes||[]);
+            covEl.className=`small mb-2 ${missing.length?'text-warning':'text-success'}`;
+            covEl.textContent=`Cobertura estratégica · ${parts.join(' · ')}${missing.length?` · Sin evidencia actual: ${missing.join(', ')}`:''}`;
+        }
         const sm=new Map(shadow.map(x=>[x.candidate_key,x]));
         const actionable=candidates.filter(x=>['SHADOW_READY_FAST','SHADOW_READY','VALIDATED_SINGLE_ASSET','VALIDATION_REQUIRED','REJECTED_OOS','OBSERVE'].includes(String(x.stage||'')));
         const fmt=(v,d=2)=>Number.isFinite(Number(v))?Number(v).toFixed(d):'--';
