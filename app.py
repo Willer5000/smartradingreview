@@ -26654,6 +26654,17 @@ _PREV_SIGNALS_COMPUTING = {
 
 _SPOT_SIGNALS_CACHE_MAX_AGE = 24 * 60 * 60
 
+# HOTFIX 16.2 — FAST RESTORE SPOT
+# Después de un deploy el frontend no debe esperar minutos a que el bootstrap
+# general llegue a Spot. Esta restauración sólo lee un snapshot compacto de
+# Supabase; nunca ejecuta análisis de mercado dentro del request.
+_SPOT_FAST_RESTORE_LOCK = threading.Lock()
+_SPOT_FAST_RESTORE_STATE = {
+    'running': False,
+    'last_attempt': 0.0,
+}
+_SPOT_FAST_RESTORE_RETRY_SECONDS = 15
+
 
 def _save_spot_signals_cache_to_disk():
     """Compat name: persistence is Supabase, not Render disk."""
@@ -26707,6 +26718,61 @@ def _load_spot_signals_cache_from_disk():
     except Exception as cache_error:
         print(f"⚠️ [SPOT CACHE] No se pudo restaurar snapshot: {cache_error}")
         return False
+
+
+def _spot_previous_cache_present():
+    return getattr(expert_system, 'prev_signals_cache', None) is not None
+
+
+def _spot_active_cache_present():
+    return getattr(expert_system, 'spot_active_signals_cache', None) is not None
+
+
+def _spot_cache_present():
+    # Compat helper: existe al menos una parte del snapshot Spot. Para decidir
+    # si hay que construir previous_signals usamos _spot_previous_cache_present()
+    # para no confundir un caché activo existente con velas anteriores ausentes.
+    return _spot_previous_cache_present() or _spot_active_cache_present()
+
+
+def _trigger_spot_fast_restore():
+    """Restaura el último snapshot Spot sin bloquear el request web.
+
+    Throttled para que el polling del navegador no golpee Supabase cada pocos
+    segundos. Si no existe snapshot, el warm-up liviano programará un cálculo
+    real después del arranque.
+    """
+    now = time.monotonic()
+    with _SPOT_FAST_RESTORE_LOCK:
+        if _SPOT_FAST_RESTORE_STATE['running']:
+            return False
+        if (
+            now - float(_SPOT_FAST_RESTORE_STATE.get('last_attempt') or 0)
+            < _SPOT_FAST_RESTORE_RETRY_SECONDS
+        ):
+            return False
+        _SPOT_FAST_RESTORE_STATE['running'] = True
+        _SPOT_FAST_RESTORE_STATE['last_attempt'] = now
+
+    def _restore():
+        try:
+            restored = _load_spot_signals_cache_from_disk()
+            if restored:
+                print("⚡ [SPOT CACHE] Fast restore listo para la UI", flush=True)
+            else:
+                print("ℹ️ [SPOT CACHE] Fast restore sin snapshot utilizable", flush=True)
+        except Exception as exc:
+            print(f"⚠️ [SPOT CACHE] Fast restore: {exc}", flush=True)
+        finally:
+            with _SPOT_FAST_RESTORE_LOCK:
+                _SPOT_FAST_RESTORE_STATE['running'] = False
+
+    threading.Thread(
+        target=_restore,
+        daemon=True,
+        name='spot-fast-restore',
+    ).start()
+    return True
 
 
 # ============================================================================
@@ -27658,6 +27724,10 @@ def api_spot_signals_active():
                 'timestamp': datetime.now(bolivia_tz).isoformat()
             })
 
+        # Hotfix 16.2: primero intentar restaurar el snapshot compacto YA
+        # persistido. Es barato y funciona también en LOW_MEMORY_MODE.
+        _trigger_spot_fast_restore()
+
         if (
             not _LOW_MEMORY_MODE
             and not _PREV_SIGNALS_COMPUTING['running']
@@ -27724,7 +27794,10 @@ def api_previous_signals():
                 'timestamp': datetime.now(bolivia_tz).isoformat()
             })
         
-        # Sin caché: primer arranque. Disparar en bg y decir 'processing'.
+        # Sin caché: restaurar inmediatamente el último snapshot persistido.
+        # LOW_MEMORY_MODE ya no significa "esperar 20 minutos sin intentar
+        # nada": la lectura compacta de Supabase es segura y barata.
+        _trigger_spot_fast_restore()
         if (
             not _LOW_MEMORY_MODE
             and not _PREV_SIGNALS_COMPUTING['running']
@@ -27732,7 +27805,7 @@ def api_previous_signals():
             threading.Thread(target=_run_previous_signals_background, daemon=True).start()
             print("🧮 Sin caché — cálculo disparado en background")
         elif _LOW_MEMORY_MODE:
-            print("🛡️ [MEM] Sin caché Spot: se evita cálculo masivo desde request web")
+            print("🪶 [SPOT] Sin caché RAM: fast restore solicitado; cálculo completo queda fuera del request web")
         return jsonify({
             'success': True,
             'processing': True,
@@ -29666,20 +29739,29 @@ def api_futures_analyze():
                 'error': cached_ui.get('error'),
             })
 
+        # Si el incremental ya tiene una decisión compacta, entregarla YA para
+        # que el usuario vea dirección/Entry/SL/TP mientras se preparan gráficos.
+        partial_data = _get_futures_runtime_cached(symbol, timeframe)
+
         _mark_futures_interactive_priority()
         job_state = _start_futures_ui_analysis_async(symbol, timeframe)
 
+        # HTTP 202 = trabajo aceptado/en progreso. Un 503 era interpretado por
+        # navegador/monitoring como caída del servicio y llenaba la consola de
+        # errores aunque el backend estuviera funcionando correctamente.
         return jsonify({
             'success': False,
             'busy': True,
             'deferred': True,
+            'partial': bool(partial_data),
+            'data': partial_data,
             'job_state': job_state,
-            'retry_after_ms': 1800,
+            'retry_after_ms': 3000,
             'error': (
                 'Preparando gráficos Futures en segundo plano. '
                 'La página seguirá disponible mientras termina el análisis.'
             ),
-        }), 503
+        }), 202
 
     except Exception as e:
         import traceback
@@ -30106,6 +30188,23 @@ def _get_futures_ui_cached(symbol, timeframe):
             return None
         return item.get('data')
 
+
+
+
+def _get_futures_runtime_cached(symbol, timeframe):
+    """Último análisis compacto persistido/incremental para respuesta inmediata.
+
+    No contiene DataFrame de gráficos, pero sí decisión/niveles/contexto básico.
+    Permite mostrar la recomendación mientras el payload rico se prepara.
+    """
+    try:
+        key=(str(symbol or '').strip(), str(timeframe or '').strip())
+        with _futures_analysis_cache['lock']:
+            data=_futures_analysis_cache.get('data') or {}
+            item=(data.get('analysis') or {}).get(key)
+            return dict(item) if isinstance(item,dict) else None
+    except Exception:
+        return None
 
 def _store_futures_ui_cached(symbol, timeframe, payload):
     key = _futures_ui_key(symbol, timeframe)
@@ -34407,40 +34506,36 @@ def _get_signals_for_entry_monitor():
     """
     signals = []
     
-    # 1. Spot: pedir /api/previous_signals internamente (usa caché de 10 min)
+    # 1. Spot: leer DIRECTAMENTE el caché RAM. Antes se construía un
+    # app.test_client() en cada ciclo sólo para llamar a otro endpoint del mismo
+    # proceso. Eso añadía contexts/cookies/serialización sin aportar datos.
     try:
-        with app.test_client() as client:
-            r = client.get('/api/previous_signals')
-            if r.status_code == 200:
-                data = r.get_json() or {}
-                for _key, sig in (data.get('data') or {}).items():
-                    tf = sig.get('timeframe')
-                    if tf not in MONITOR_ENTRY_TIMEFRAMES:
-                        continue
-                    action = sig.get('decision', '')
-                    if action not in ('LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT'):
-                        continue
-                    # Solo alertar si la señal aún está activa
-                    if sig.get('activa') != 1:
-                        continue
-                    signals.append({
-                        'system': 'spot',
-                        'symbol': sig.get('symbol'),
-                        'timeframe': tf,
-                        'action': action,
-                        'entry': sig.get('entry'),
-                        'stop_loss': sig.get('stop_loss'),
-                        'take_profit': sig.get('take_profit'),
-                        'confidence': sig.get('confidence'),
-                        'current_price': sig.get('precio_actual'),
-                        # DEDUP FIX: usar el timestamp REAL de la vela cerrada (no el wall-clock del análisis).
-                        # Con esto solo se envía UNA alerta por formación de vela (regla del usuario).
-                        'candle_timestamp': sig.get('candle_timestamp') or sig.get('timestamp'),
-                        'message': sig.get('message', ''),
-                        'tiempo_restante': sig.get('tiempo_restante'),
-                    })
+        cached_previous = getattr(expert_system, 'prev_signals_cache', None) or {}
+        for _key, sig in cached_previous.items():
+            tf = sig.get('timeframe')
+            if tf not in MONITOR_ENTRY_TIMEFRAMES:
+                continue
+            action = sig.get('decision', '')
+            if action not in ('LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT'):
+                continue
+            if sig.get('activa') != 1:
+                continue
+            signals.append({
+                'system': 'spot',
+                'symbol': sig.get('symbol'),
+                'timeframe': tf,
+                'action': action,
+                'entry': sig.get('entry'),
+                'stop_loss': sig.get('stop_loss'),
+                'take_profit': sig.get('take_profit'),
+                'confidence': sig.get('confidence'),
+                'current_price': sig.get('precio_actual'),
+                'candle_timestamp': sig.get('candle_timestamp') or sig.get('timestamp'),
+                'message': sig.get('message', ''),
+                'tiempo_restante': sig.get('tiempo_restante'),
+            })
     except Exception as e:
-        print(f"⚠️ monitor_entries: error leyendo señales spot: {e}")
+        print(f"⚠️ monitor_entries: error leyendo caché Spot: {e}")
     
     # ================================================================
     # COMMIT 36N
@@ -34483,15 +34578,30 @@ def _mark_spot_preentry(signal):
     _save_entry_alerts_to_disk()
 
 
-def _spot_preentry_zone(signal,current):
+def _spot_setup_ready(signal,current):
+    """Spot: aviso al nacer la señal de VELA ANTERIOR, no sólo cerca del Entry.
+
+    La propia caché previous_signals ya exige que la señal siga activa. Aquí
+    sólo evitamos avisar si el precio ya tocó Entry (en ese caso corresponde
+    directamente la alerta ENTRY con imagen) o si ya cruzó SL/TP.
+    """
     try:
-        entry=float(signal.get('entry') or 0); sl=float(signal.get('stop_loss') or 0); current=float(current or 0)
-        if min(entry,sl,current)<=0: return False
-        dist=abs(current-entry)/entry*100.0
-        risk=abs(entry-sl)/entry*100.0
-        zone=max(0.30,min(1.75,risk*0.30))
-        return MONITOR_ENTRY_TOLERANCE_PCT < dist <= zone
-    except Exception: return False
+        entry=float(signal.get('entry') or 0)
+        sl=float(signal.get('stop_loss') or 0)
+        tp=float(signal.get('take_profit') or 0)
+        current=float(current or 0)
+        action=str(signal.get('action') or signal.get('decision') or '').upper()
+        if min(entry,sl,tp,current) <= 0:
+            return False
+        if _price_touches_entry(current, entry, action):
+            return False
+        if action in ('LONG','COMPRA_SPOT'):
+            return current > sl and current < tp
+        if action in ('SHORT','VENTA_SPOT'):
+            return current < sl and current > tp
+        return False
+    except Exception:
+        return False
 
 
 def _build_spot_preentry_message(signal):
@@ -34501,7 +34611,7 @@ def _build_spot_preentry_message(signal):
     base=(os.getenv('PUBLIC_APP_URL') or os.getenv('RENDER_EXTERNAL_URL') or 'https://smartradingreview.onrender.com').rstrip('/')
     from urllib.parse import urlencode
     link=f"{base}/?{urlencode({'symbol':symbol,'timeframe':tf})}"
-    return '\n'.join([f"⚡ <b>SPOT · SETUP CERCA DEL ENTRY</b>",f"{icon} <b>{symbol} · {tf} · {action}</b>",'',f"💰 Entry: <b>{entry:.8g}</b>",f"🎯 TP: {tp:.8g}",f"🛑 SL: {sl:.8g}",'',f"🔗 <a href=\"{link}\">Abrir análisis</a>"])
+    return '\n'.join([f"⚡ <b>SPOT · SEÑAL VIGENTE (VELA CERRADA)</b>",f"{icon} <b>{symbol} · {tf} · {action}</b>",'',f"💰 Entry: <b>{entry:.8g}</b>",f"🎯 TP: {tp:.8g}",f"🛑 SL: {sl:.8g}",'',f"🔗 <a href=\"{link}\">Abrir análisis</a>"])
 
 
 def monitor_entries_loop():
@@ -34540,16 +34650,18 @@ def monitor_entries_loop():
                 if not symbol or not tf or entry is None or current is None:
                     continue
                 
-                # PRE-ENTRY Spot: un aviso liviano y deduplicado, sin imagen.
-                # No sustituye el aviso ENTRY TOCADO con imagen.
-                if (not _spot_preentry_sent(sig)) and _spot_preentry_zone(sig, current):
+                # Spot SETUP: nace cuando la vela cerrada pasa a
+                # "Señal de la Vela Anterior". Se envía una sola vez por
+                # source candle, siempre que siga activa y todavía NO haya
+                # tocado Entry. ENTRY mantiene su alerta posterior con imagen.
+                if (not _spot_preentry_sent(sig)) and _spot_setup_ready(sig, current):
                     try:
                         pre_message = _build_spot_preentry_message(sig)
                         if expert_system.send_telegram_alert(pre_message, None):
                             _mark_spot_preentry(sig)
-                            print(f"   ⚡ PRE-ENTRY Spot enviado: {symbol} {tf}")
+                            print(f"   ⚡ SETUP Spot vela cerrada enviado: {symbol} {tf}")
                     except Exception as pre_err:
-                        print(f"   ⚠️ PRE-ENTRY Spot: {pre_err}")
+                        print(f"   ⚠️ SETUP Spot vela cerrada: {pre_err}")
 
                 # ¿Ya enviamos alerta ENTRY para esta señal/vela?
                 if _entry_alert_already_sent(symbol, tf, candle_ts):
@@ -36029,6 +36141,135 @@ def _tgp_telegram_operation_lines(tgp_result):
         lines.append(
             f"Valor aprox.: <b>${amount_usd:,.2f}</b>"
         )
+
+    return lines
+
+
+def _tgp_public_reason(reason):
+    """Traduce razones internas del Guardian a lenguaje de usuario.
+
+    Los códigos Q1/Q4B y nombres de fases siguen disponibles en logs/Analytics,
+    pero nunca deben aparecer en el Telegram compartido.
+    """
+    import re
+
+    text = str(reason or '').strip()
+    if not text:
+        return ''
+
+    text = re.sub(
+        r'Q4B:\s*todavía no existe evidencia Q1 suficiente;\s*se conserva la decisión previa del TGP\.?',
+        'La evidencia adicional todavía no es suficiente para cambiar la decisión principal del Guardián.',
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    text = re.sub(
+        r'Fase de retorno gradual BTC=\d+/3:\s*el tamaño original era\s*[0-9.]+%\s*del activo fuente y el límite actual\s*es\s*[0-9.]+%\.\s*Confirmación BTC=\d+/4 TF,\s*1D/1W directos=\d+/2,\s*edge=[0-9.]+\.\s*El retorno se hace por tramos para evitar\s*abandonar la defensa de una sola vez\.?',
+        'El Guardián mantiene un retorno gradual a BTC para preservar las reservas defensivas y exige confirmación multitemporal antes de aumentar más la exposición.',
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    text = re.sub(r'\bQ\d+[A-Z]*\b[:\-]?', 'validación interna', text)
+    text = text.replace('Best TF=', 'Mejor temporalidad=')
+    text = re.sub(r'\bTF\b', 'temporalidades', text)
+    text = text.replace('edge=', 'ventaja relativa=')
+    text = re.sub(r'\s{2,}', ' ', text).strip()
+    return text
+
+
+def _tgp_public_target_pct(tgp_result):
+    """Devuelve el porcentaje objetivo inmediato del activo destino."""
+    result = tgp_result or {}
+    target = str(result.get('target_asset') or '').upper()
+    after = result.get('portfolio_after') or {}
+    key = {
+        'BTC': 'pct_btc',
+        'PAXG': 'pct_paxg',
+        'USDT': 'pct_usdt',
+    }.get(target)
+    if not key:
+        return None
+    try:
+        return float(after.get(key) or 0)
+    except Exception:
+        return None
+
+
+def _tgp_public_alert_family(tgp_result):
+    """Agrupa BUY/SWAP equivalentes para evitar alertas duplicadas por fuente."""
+    result = tgp_result or {}
+    action = str(result.get('action') or '').upper()
+    target = str(result.get('target_asset') or '').upper()
+
+    if target == 'BTC' or action in ('BUY_BTC', 'SWAP_PAXG_TO_BTC'):
+        return 'ACCUMULATE_BTC'
+    if target == 'PAXG' or action in ('BUY_PAXG', 'SWAP_BTC_TO_PAXG'):
+        return 'ACCUMULATE_PAXG'
+    if action == 'SELL_BTC':
+        return 'REDUCE_BTC'
+    if action == 'SELL_PAXG':
+        return 'REDUCE_PAXG'
+    return action or 'HOLD'
+
+
+def _tgp_public_subject(tgp_result, state='', veto=False):
+    """Identidad anti-spam por objetivo económico, no por activo fuente.
+
+    Dos recomendaciones consecutivas PAXG→BTC y USDT→BTC dejan de ser dos
+    alertas distintas cuando persiguen prácticamente el mismo objetivo. Sólo
+    una variación material (~5 puntos porcentuales) abre un nuevo bucket.
+    """
+    target_pct = _tgp_public_target_pct(tgp_result)
+    if target_pct is None:
+        pct_bucket = 'NA'
+    else:
+        pct_bucket = str(int(round(target_pct * 20.0)) * 5)
+    return (
+        f"{state}|{_tgp_public_alert_family(tgp_result)}|"
+        f"TARGET_{pct_bucket}|{int(bool(veto))}"
+    )
+
+
+def _tgp_public_allocation_lines(tgp_result):
+    """Telegram compartido: sólo porcentajes; montos quedan en la web privada."""
+    result = tgp_result or {}
+    before = result.get('portfolio_before') or {}
+    after = result.get('portfolio_after') or {}
+    target = str(result.get('target_asset') or '').upper()
+
+    key = {
+        'BTC': 'pct_btc',
+        'PAXG': 'pct_paxg',
+        'USDT': 'pct_usdt',
+    }.get(target)
+
+    lines = []
+    if key:
+        try:
+            before_pct = float(before.get(key) or 0) * 100.0
+            after_pct = float(after.get(key) or 0) * 100.0
+            delta = after_pct - before_pct
+            sign = '+' if delta >= 0 else ''
+            lines.append(
+                f"{target}: <b>{before_pct:.1f}% → {after_pct:.1f}%</b> "
+                f"({sign}{delta:.1f} pp)"
+            )
+            if delta > 0:
+                lines.append(
+                    'Tomar el ajuste desde PAXG y/o USDT según corresponda, '
+                    'sin bajar las reservas mínimas definidas por el Guardián.'
+                )
+        except Exception:
+            pass
+
+    if not lines and after:
+        lines.extend([
+            f"BTC objetivo: <b>{float(after.get('pct_btc', 0) or 0) * 100:.1f}%</b>",
+            f"PAXG objetivo: <b>{float(after.get('pct_paxg', 0) or 0) * 100:.1f}%</b>",
+            f"USDT objetivo: <b>{float(after.get('pct_usdt', 0) or 0) * 100:.1f}%</b>",
+        ])
 
     return lines
 
@@ -40345,12 +40586,11 @@ def _build_proactive_spot_guardian_message(
         or 0
     )
 
-    reason = str(
+    reason = _tgp_public_reason(
         tgp_result.get(
             'reason',
             ''
         )
-        or ''
     )
 
     source = str(
@@ -40501,27 +40741,14 @@ def _build_proactive_spot_guardian_message(
         )
     ])
 
-    if (
-        source
-        and target
-        and amount_usd > 0
-    ):
-
+    allocation_lines = _tgp_public_allocation_lines(tgp_result)
+    if allocation_lines:
         lines.extend([
             '',
-            '💰 <b>Operación sugerida</b>',
-            (
-                f"{_telegram_escape(source)}"
-                " → "
-                f"{_telegram_escape(target)}"
-            )
+            '🎯 <b>Objetivo inmediato</b>',
+            *allocation_lines,
+            '<i>Los montos exactos permanecen sólo en la web privada.</i>'
         ])
-
-        lines.extend(
-            _tgp_telegram_operation_lines(
-                tgp_result
-            )
-        )
 
     if after:
 
@@ -41058,10 +41285,10 @@ def _run_proactive_spot_guardian(
                 )
             )
 
-            spot_subject = (
-                f"{state}|"
-                f"{source}|"
-                f"{target}|0"
+            spot_subject = _tgp_public_subject(
+                tgp_result,
+                state=state,
+                veto=False
             )
 
             reservation = (
@@ -41269,16 +41496,34 @@ def _start_previous_signals_warmup():
         )
 
         def _low_memory_periodic_prev():
-            # Primer cálculo real: 20 min después del boot. Luego cada 60 min.
-            time.sleep(20 * 60)
+            # El snapshot persistido se restaura en el bootstrap/fast-restore.
+            # Si NO existe, no dejar Spot vacío 20 minutos: intentar construirlo
+            # a partir de los 90 s. Si la UI tiene prioridad y el heavy lock
+            # rechaza el intento, reintentar pronto en vez de dormir una hora.
+            time.sleep(90)
             while True:
+                had_cache = _spot_previous_cache_present()
                 try:
-                    if not _PREV_SIGNALS_COMPUTING['running']:
+                    if (not had_cache) and (not _PREV_SIGNALS_COMPUTING['running']):
                         _run_previous_signals_background()
+                    elif had_cache:
+                        # Refresh normal de baja frecuencia; el snapshot viejo
+                        # sigue visible mientras se recalcula.
+                        cache_time = float(
+                            getattr(expert_system, 'prev_signals_cache_time', 0) or 0
+                        )
+                        if time.time() - cache_time > 60 * 60:
+                            _run_previous_signals_background()
                 except Exception as error:
                     print(f"⚠️ [MEM] previous_signals diferido: {error}", flush=True)
                 _trim_process_heap()
-                time.sleep(60 * 60)
+
+                # Si seguimos sin caché, reintentar en 30 s. Con caché,
+                # mantener refresh horario.
+                if not _spot_previous_cache_present():
+                    time.sleep(30)
+                else:
+                    time.sleep(60 * 60)
 
         threading.Thread(
             target=_low_memory_periodic_prev,
@@ -47203,7 +47448,7 @@ def send_tgp_telegram_alert(tgp_result, user, symbol, timeframe, prices):
 
             return        
         action = tgp_result.get('action', 'HOLD')
-        reason = tgp_result.get('reason', '')
+        reason = _tgp_public_reason(tgp_result.get('reason', ''))
         confidence = tgp_result.get('confidence', 0)
         amount_crypto = tgp_result.get('amount_crypto', 0)
         amount_usd = tgp_result.get('amount_usd', 0)
@@ -47238,11 +47483,10 @@ def send_tgp_telegram_alert(tgp_result, user, symbol, timeframe, prices):
             )
         )
 
-        spot_subject = (
-            f"{state}|"
-            f"{source}|"
-            f"{target}|"
-            f"{int(bool(veto))}"
+        spot_subject = _tgp_public_subject(
+            tgp_result,
+            state=state,
+            veto=veto
         )
 
         spot_reservation = (
@@ -47304,6 +47548,11 @@ def send_tgp_telegram_alert(tgp_result, user, symbol, timeframe, prices):
 ⏸️ Acción: NO OPERAR (protección de capital)
 """
         else:
+            allocation_lines = _tgp_public_allocation_lines(tgp_result)
+            allocation_text = chr(10).join(
+                '   • ' + line
+                for line in allocation_lines
+            ) or '   • Mantener la asignación indicada por el Guardián.'
             message = f"""📊 {user} — 🛡️ GUARDIÁN DE PORTAFOLIO
 
 {action_text} | Confianza: {confidence}%
@@ -47315,10 +47564,11 @@ def send_tgp_telegram_alert(tgp_result, user, symbol, timeframe, prices):
    • PAXG: {pct_paxg:.1f}%
    • USDT: {pct_usdt:.1f}%
 
-💰 Operación sugerida:
-{chr(10).join('   • ' + line for line in _tgp_telegram_operation_lines(tgp_result))}
+🎯 Objetivo inmediato:
+{allocation_text}
+   • Los montos exactos permanecen sólo en la web privada.
 
-📈 Después de la operación:
+📈 Distribución orientativa después del ajuste:
    • BTC:  {tgp_result.get('portfolio_after', {}).get('pct_btc', 0)*100:.1f}%
    • PAXG: {tgp_result.get('portfolio_after', {}).get('pct_paxg', 0)*100:.1f}%
    • USDT: {tgp_result.get('portfolio_after', {}).get('pct_usdt', 0)*100:.1f}%

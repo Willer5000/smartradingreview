@@ -2726,7 +2726,7 @@ async function loadResearchFederationAnalytics(){
         if(!response.ok || !data.success) throw new Error(data.error||'Research Federation no disponible');
         const candidates=data.candidates||[], shadow=data.shadow_live||[];
         const sm=new Map(shadow.map(x=>[x.candidate_key,x]));
-        const actionable=candidates.filter(x=>['SHADOW_READY_FAST','SHADOW_READY','VALIDATED_SINGLE_ASSET','VALIDATION_REQUIRED','REJECTED_OOS'].includes(String(x.stage||'')));
+        const actionable=candidates.filter(x=>['SHADOW_READY_FAST','SHADOW_READY','VALIDATED_SINGLE_ASSET','VALIDATION_REQUIRED','REJECTED_OOS','OBSERVE'].includes(String(x.stage||'')));
         const fmt=(v,d=2)=>Number.isFinite(Number(v))?Number(v).toFixed(d):'--';
         const pct=v=>Number.isFinite(Number(v))?`${Number(v).toFixed(1)}%`:'--';
         body.innerHTML=actionable.slice(0,80).map(x=>{const l=sm.get(x.candidate_key)||{};return `<tr>
@@ -2736,7 +2736,7 @@ async function loadResearchFederationAnalytics(){
           <td>${x.backtest_n??0} / ${pct(x.backtest_wr)} / ${fmt(x.backtest_exp_r,3)}R</td>
           <td>${x.oos_n??0} / ${pct(x.oos_wr)} / ${fmt(x.oos_exp_r,3)}R / ${fmt(x.oos_pf,2)}</td>
           <td>${l.resolved_n??0}/${l.signals_n??0} / ${pct(l.win_rate_pct)} / ${fmt(l.expectancy_r,3)}R / ${fmt(l.profit_factor,2)}</td>
-          <td>${fmt(l.avg_safety,1)}</td></tr>`}).join('') || '<tr><td colspan="7" class="text-muted text-center">Aún no hay candidatos con evidencia suficiente.</td></tr>';
+          <td>${fmt(l.avg_safety,1)}</td></tr>`}).join('') || `<tr><td colspan="7" class="text-muted text-center">${data.connected===false?'Research Bridge sin conexión':'Bridge conectado, pero todavía no hay filas visibles para esta cuenta/clave.'}</td></tr>`;
         const stages={}; candidates.forEach(x=>stages[x.stage]=(stages[x.stage]||0)+1);
         const kp=document.getElementById('rf-analytics-kpis');
         if(kp) kp.innerHTML=[['Hallazgos',candidates.length],['Shadow Ready',(stages.SHADOW_READY||0)+(stages.SHADOW_READY_FAST||0)],['Shadow live',shadow.reduce((a,x)=>a+Number(x.signals_n||0),0)],['Rechazados OOS',stages.REJECTED_OOS||0]].map(([k,v])=>`<div class="col-6 col-md-3"><div class="border rounded p-2 h-100"><div class="text-muted small">${k}</div><div class="h5 mb-0">${v}</div></div></div>`).join('');

@@ -12,7 +12,18 @@ _SESSION = requests.Session()
 
 
 def _cfg():
-    return str(os.getenv('SUPABASE_URL','')).rstrip('/'), str(os.getenv('SUPABASE_KEY','')).strip()
+    url = str(
+        os.getenv('CENTRAL_SUPABASE_URL')
+        or os.getenv('SUPABASE_URL')
+        or ''
+    ).rstrip('/')
+    key = str(
+        os.getenv('CENTRAL_SUPABASE_SERVICE_KEY')
+        or os.getenv('SUPABASE_SERVICE_ROLE_KEY')
+        or os.getenv('SUPABASE_KEY')
+        or ''
+    ).strip()
+    return url, key
 
 
 def _headers():

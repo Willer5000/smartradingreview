@@ -2711,14 +2711,16 @@ window.runCompleteAnalysis = function() {
     const symbol = document.getElementById('symbol-select')?.value || cfg.defaultSymbol;
     const interval = document.getElementById('interval-select')?.value || cfg.defaultTimeframe;
 
-    // Hotfix 15.3: retries belong to one exact interactive view, Spot o
-    // Futures. Cambiar mercado/par/TF nunca hereda el polling anterior.
-    const retryKey = `${window.IS_FUTURES_PAGE ? 'FUTURES' : 'SPOT'}|${symbol}|${interval}`;
-    if (window.__FUTURES_ANALYSIS_RETRY_KEY__ !== retryKey) {
-        window.__FUTURES_ANALYSIS_RETRY_KEY__ = retryKey;
-        window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = 0;
-        window.__FUTURES_ANALYSIS_RETRY_STARTED_AT__ = 0;
-        clearTimeout(window.__FUTURES_ANALYSIS_RETRY_TIMER__);
+    // Hotfix 15.1: retries belong to one exact Futures view. Changing pair/TF
+    // must never inherit an old busy loop.
+    if (window.IS_FUTURES_PAGE) {
+        const retryKey = `${symbol}|${interval}`;
+        if (window.__FUTURES_ANALYSIS_RETRY_KEY__ !== retryKey) {
+            window.__FUTURES_ANALYSIS_RETRY_KEY__ = retryKey;
+            window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = 0;
+            window.__FUTURES_ANALYSIS_RETRY_STARTED_AT__ = 0;
+            clearTimeout(window.__FUTURES_ANALYSIS_RETRY_TIMER__);
+        }
     }
     
     window.currentSymbol = symbol;
@@ -2805,7 +2807,7 @@ window.runCompleteAnalysis = function() {
     // aun así la conexión queda bloqueada, abortamos y entramos al polling
     // acotado. Spot conserva un margen mayor.
     const analysisAbortController = new AbortController();
-    const analysisHttpTimeoutMs = window.IS_FUTURES_PAGE ? 12000 : 45000;
+    const analysisHttpTimeoutMs = window.IS_FUTURES_PAGE ? 12000 : 60000;
     const analysisHttpTimeoutId = window.setTimeout(
         () => analysisAbortController.abort(),
         analysisHttpTimeoutMs
@@ -2855,6 +2857,81 @@ window.runCompleteAnalysis = function() {
             return data;
         })
         .then(data => {
+
+
+            // ============================================================
+            // HOTFIX 16.2 — FUTURES BUSY ES ESTADO NORMAL, NO ERROR HTTP
+            // ============================================================
+            // El backend responde 202 mientras el payload rico de gráficos
+            // se prepara. Si existe un snapshot compacto, mostramos de
+            // inmediato recomendación/Entry/SL/TP y sólo dejamos los gráficos
+            // en espera. Un único timer hace polling; no se apilan requests.
+            // ============================================================
+            if (window.IS_FUTURES_PAGE && data?.busy) {
+                const now = Date.now();
+                let startedAt = Number(window.__FUTURES_ANALYSIS_RETRY_STARTED_AT__ || 0);
+                if (!startedAt) {
+                    startedAt = now;
+                    window.__FUTURES_ANALYSIS_RETRY_STARTED_AT__ = startedAt;
+                }
+
+                const retryCount = Number(window.__FUTURES_ANALYSIS_BUSY_RETRIES__ || 0);
+                const elapsedMs = now - startedAt;
+                const retryAfterMs = Math.min(
+                    5000,
+                    Math.max(2500, Number(data.retry_after_ms || 3000))
+                );
+
+                if (data.partial && data.data?.decision) {
+                    window.currentAnalysis = data.data;
+                    try {
+                        updateInstantRecommendation(data.data);
+                    } catch (partialErr) {
+                        console.debug('Futures parcial: recomendación compacta no renderizada', partialErr);
+                    }
+                }
+
+                const recommendationEl = document.getElementById('system-recommendation');
+                if (recommendationEl && !(data.partial && data.data?.decision)) {
+                    recommendationEl.innerHTML = `
+                        <div class="alert alert-info mb-0">
+                            <strong>⏳ Preparando gráficos Futures.</strong>
+                            <div class="small mt-2">
+                                El último estado del mercado seguirá visible mientras termina el payload gráfico.
+                            </div>
+                        </div>
+                    `;
+                }
+
+                if (elapsedMs < 90000 && retryCount < 24) {
+                    window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = retryCount + 1;
+                    clearTimeout(window.__FUTURES_ANALYSIS_RETRY_TIMER__);
+                    window.__FUTURES_ANALYSIS_RETRY_TIMER__ = window.setTimeout(() => {
+                        if (typeof window.runCompleteAnalysis === 'function') {
+                            window.runCompleteAnalysis();
+                        }
+                    }, retryAfterMs);
+                } else {
+                    window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = 0;
+                    window.__FUTURES_ANALYSIS_RETRY_STARTED_AT__ = 0;
+                    clearTimeout(window.__FUTURES_ANALYSIS_RETRY_TIMER__);
+                    if (recommendationEl) {
+                        recommendationEl.innerHTML = `
+                            <div class="alert alert-warning mb-0">
+                                <strong>⚠️ Los gráficos tardaron más de lo esperado.</strong>
+                                <div class="small mt-2">
+                                    La página sigue disponible. Puedes reintentar sin recargarla.
+                                </div>
+                                <button type="button" class="btn btn-sm btn-outline-warning mt-2"
+                                    onclick="window.runCompleteAnalysis?.()">
+                                    Reintentar gráficos
+                                </button>
+                            </div>
+                        `;
+                    }
+                }
+                return;
+            }
         
             // ============================================================
             // NORMALIZAR RESPUESTA DEL BACKEND
@@ -2886,9 +2963,11 @@ window.runCompleteAnalysis = function() {
                 && data.success === true
                 && data.data
             ) {
-                window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = 0;
-                window.__FUTURES_ANALYSIS_RETRY_STARTED_AT__ = 0;
-                clearTimeout(window.__FUTURES_ANALYSIS_RETRY_TIMER__);
+                if (window.IS_FUTURES_PAGE) {
+                    window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = 0;
+                    window.__FUTURES_ANALYSIS_RETRY_STARTED_AT__ = 0;
+                    clearTimeout(window.__FUTURES_ANALYSIS_RETRY_TIMER__);
+                }
                 window.currentAnalysis = data.data;
                 // ============================================================
                 // MOSTRAR TGP
@@ -3094,19 +3173,144 @@ window.runCompleteAnalysis = function() {
                     return;
                 }
 
-                // ============ SPOT: CORRELACIÓN SIN ANÁLISIS EXTRA ============
-                // Hotfix 15.3: el análisis principal ya trae correlation y el
-                // TGP usa snapshots server-side. Lanzar otros 2 analyze en
-                // paralelo por cada apertura duplicaba CPU/red/RAM sin aportar
-                // una decisión nueva. La UI usa exclusivamente la correlación
-                // ya calculada por el backend.
-                if (typeof window.updateCorrelationInfo === 'function') {
-                    window.updateCorrelationInfo({
-                        correlation: data.data.correlation || {},
+                // ============ SPOT: VISTA GLOBAL DE CORRELACIÓN ============
+                console.log('📡 Obteniendo datos de los otros pares para vista global de correlación...');
+                
+                // Determinar qué otros pares necesitamos
+                const otrosPares = [];
+                if (symbol !== 'BTC-USDT') otrosPares.push('BTC-USDT');
+                if (symbol !== 'PAXG-USDT') otrosPares.push('PAXG-USDT');
+                if (symbol !== 'PAXG-BTC') otrosPares.push('PAXG-BTC');
+                
+                // Si no hay otros pares (imposible porque hay 3), igual actualizar con lo que tenemos
+                if (otrosPares.length === 0) {
+                    // Construir correlación solo con el par actual
+                    const correlationSolo = {
+                        correlation: {
+                            btc_analysis: symbol === 'BTC-USDT' ? {
+                                decision: { action: data.data.decision?.action || 'N/A', confidence: data.data.decision?.confidence || 0 },
+                                trend: {
+                                    direction: data.data.trend?.direction || 'neutral',
+                                    adx: data.data.trend?.adx || 0,
+                                    plus_di: data.data.trend?.plus_di || 0,
+                                    minus_di: data.data.trend?.minus_di || 0
+                                }
+                            } : null,
+                            paxg_analysis: symbol === 'PAXG-USDT' ? {
+                                trend: {
+                                    direction: data.data.trend?.direction || 'neutral',
+                                    adx: data.data.trend?.adx || 0
+                                }
+                            } : null,
+                            paxg_btc_analysis: symbol === 'PAXG-BTC' ? {
+                                decision: { action: data.data.decision?.action || 'N/A', confidence: data.data.decision?.confidence || 0 },
+                                trend: {
+                                    direction: data.data.trend?.direction || 'neutral',
+                                    adx: data.data.trend?.adx || 0
+                                }
+                            } : null,
+                            rotation_signal: data.data.correlation?.rotation_signal || 'NEUTRAL',
+                            weight_modifier: data.data.correlation?.weight_modifier || 1.0
+                        },
                         symbol: symbol,
                         timeframe: interval
-                    });
+                    };
+                    
+                    if (typeof window.updateCorrelationInfo === 'function') {
+                        window.updateCorrelationInfo(correlationSolo);
+                    }
+                    
+                    window.showToast('✅ Análisis completado', 'success');
+                    return;
                 }
+                
+                // Hacer fetch en paralelo para los otros pares
+                // Hacer fetch en paralelo para los otros pares (USAR ENDPOINT RÁPIDO, no el de TGP)
+                const promesas = otrosPares.map(par =>
+                    fetch(`/api/analyze?symbol=${encodeURIComponent(par)}&interval=${encodeURIComponent(interval)}`)
+                        .then(res => res.json())
+                        .then(res => {
+                            if (res.success && res.data) {
+                                return { par, data: res.data };
+                            }
+                            return { par, data: null };
+                        })
+                        .catch(err => {
+                            console.error(`Error obteniendo ${par}:`, err);
+                            return { par, data: null };
+                        })
+                );
+                
+                Promise.all(promesas).then(resultadosOtros => {
+                    // Construir objeto con datos de los 3 pares (SOLO LOS QUE TENEMOS)
+                    const datosGlobales = {
+                        // Datos del par actual (SIEMPRE existen)
+                        [symbol]: data.data,
+                    };
+                    
+                    // Agregar los otros pares SOLO si tenemos datos reales
+                    resultadosOtros.forEach(item => {
+                        if (item.data) {
+                            datosGlobales[item.par] = item.data;
+                        }
+                    });
+                    
+                    // Construir estructura de correlación global SOLO con datos reales
+                    const correlationGlobal = {
+                        correlation: {
+                            btc_analysis: datosGlobales['BTC-USDT'] ? {
+                                decision: { 
+                                    action: datosGlobales['BTC-USDT'].decision?.action || 'N/A', 
+                                    confidence: datosGlobales['BTC-USDT'].decision?.confidence || 0 
+                                },
+                                trend: {
+                                    direction: datosGlobales['BTC-USDT'].trend?.direction || 'neutral',
+                                    adx: datosGlobales['BTC-USDT'].trend?.adx || 0,
+                                    plus_di: datosGlobales['BTC-USDT'].trend?.plus_di || 0,
+                                    minus_di: datosGlobales['BTC-USDT'].trend?.minus_di || 0,
+                                    confidence: datosGlobales['BTC-USDT'].trend?.confidence || 50
+                                }
+                            } : null,  // ← null en lugar de objeto vacío
+                            
+                            paxg_analysis: datosGlobales['PAXG-USDT'] ? {
+                                trend: {
+                                    direction: datosGlobales['PAXG-USDT'].trend?.direction || 'neutral',
+                                    adx: datosGlobales['PAXG-USDT'].trend?.adx || 0,
+                                    plus_di: datosGlobales['PAXG-USDT'].trend?.plus_di || 0,
+                                    minus_di: datosGlobales['PAXG-USDT'].trend?.minus_di || 0,
+                                    confidence: datosGlobales['PAXG-USDT'].trend?.confidence || 50
+                                }
+                            } : null,
+                            
+                            paxg_btc_analysis: datosGlobales['PAXG-BTC'] ? {
+                                decision: { 
+                                    action: datosGlobales['PAXG-BTC'].decision?.action || 'N/A', 
+                                    confidence: datosGlobales['PAXG-BTC'].decision?.confidence || 0 
+                                },
+                                trend: {
+                                    direction: datosGlobales['PAXG-BTC'].trend?.direction || 'neutral',
+                                    adx: datosGlobales['PAXG-BTC'].trend?.adx || 0,
+                                    plus_di: datosGlobales['PAXG-BTC'].trend?.plus_di || 0,
+                                    minus_di: datosGlobales['PAXG-BTC'].trend?.minus_di || 0,
+                                    confidence: datosGlobales['PAXG-BTC'].trend?.confidence || 50
+                                }
+                            } : null,
+                            
+                            rotation_signal: data.data.correlation?.rotation_signal || 'NEUTRAL',
+                            weight_modifier: data.data.correlation?.weight_modifier || 1.0
+                        },
+                        symbol: symbol,
+                        timeframe: interval
+                    };
+                    
+                    // Actualizar SOLO la correlación con los datos globales
+                    if (typeof window.updateCorrelationInfo === 'function') {
+                        window.updateCorrelationInfo(correlationGlobal);
+                    }
+                    
+                    console.log('✅ Vista global de correlación actualizada con datos reales');
+                });
+                
                 window.showToast('✅ Análisis completado', 'success');
                 
             } else {
@@ -3243,7 +3447,10 @@ window.runCompleteAnalysis = function() {
             // Un timeout HTTP en Futures se trata como servidor ocupado y
             // reutiliza exactamente el mismo polling acotado de Hotfix 15.1.
             // Así una conexión atascada tampoco puede dejar spinner infinito.
-            if (error?.name === 'AbortError') {
+            if (
+                window.IS_FUTURES_PAGE
+                && error?.name === 'AbortError'
+            ) {
                 error.busy = true;
                 error.serverData = {
                     retry_after_ms: 1500,
@@ -3261,7 +3468,10 @@ window.runCompleteAnalysis = function() {
             // del único hilo web de Gunicorn. Mientras termina, el endpoint
             // responde BUSY rápidamente y esta vista hace polling ACOTADO.
             // Nunca dejamos un spinner infinito.
-            if (error?.busy) {
+            if (
+                window.IS_FUTURES_PAGE
+                && error?.busy
+            ) {
                 const now = Date.now();
                 let startedAt = Number(
                     window.__FUTURES_ANALYSIS_RETRY_STARTED_AT__ || 0
@@ -3295,9 +3505,9 @@ window.runCompleteAnalysis = function() {
                     if (recommendationEl) {
                         recommendationEl.innerHTML = `
                             <div class="alert alert-info mb-0">
-                                <strong>⏳ Preparando análisis.</strong>
+                                <strong>⏳ Preparando gráficos Futures.</strong>
                                 <div class="small mt-2">
-                                    La interfaz tiene prioridad; el sistema espera que termine la tarea en curso.
+                                    El análisis se ejecuta en segundo plano para mantener la página disponible.
                                     Intento ${retryCount + 1}.
                                 </div>
                             </div>
@@ -3314,9 +3524,11 @@ window.runCompleteAnalysis = function() {
                 }
             }
 
-            window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = 0;
-            window.__FUTURES_ANALYSIS_RETRY_STARTED_AT__ = 0;
-            clearTimeout(window.__FUTURES_ANALYSIS_RETRY_TIMER__);
+            if (window.IS_FUTURES_PAGE) {
+                window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = 0;
+                window.__FUTURES_ANALYSIS_RETRY_STARTED_AT__ = 0;
+                clearTimeout(window.__FUTURES_ANALYSIS_RETRY_TIMER__);
+            }
 
             // ============================================================
             // EVITAR CARGA INFINITA EN LA INTERFAZ
@@ -3330,7 +3542,7 @@ window.runCompleteAnalysis = function() {
             if (recommendationEl) {
                 recommendationEl.innerHTML = `
                     <div class="alert alert-warning mb-0">
-                        <strong>⚠️ El análisis tardó más de lo esperado.</strong>
+                        <strong>⚠️ El análisis Futures tardó más de lo esperado.</strong>
                         <div class="small mt-2">
                             ${error?.message || 'El servidor está ocupado temporalmente.'}
                         </div>
@@ -9257,7 +9469,7 @@ window.updateActiveSignals = function updateActiveSignals() {
                 clearTimeout(window.__spotActiveSignalsRetry);
                 window.__spotActiveSignalsRetry = setTimeout(() => {
                     window.updateActiveSignals();
-                }, 20000);
+                }, 5000);
                 return;
             }
 
@@ -9511,7 +9723,7 @@ window.updatePreviousSignals = function updatePreviousSignals() {
                 clearTimeout(window.__spotPreviousSignalsRetry);
                 window.__spotPreviousSignalsRetry = setTimeout(() => {
                     window.updatePreviousSignals();
-                }, 20000);
+                }, 5000);
                 return;
             }
 

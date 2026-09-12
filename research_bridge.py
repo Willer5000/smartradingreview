@@ -1,32 +1,113 @@
 from __future__ import annotations
 import os
+import time
+import threading
 import requests
 from flask import Blueprint, jsonify, render_template, Response
 
 _bp = Blueprint('research_federation_bridge', __name__)
 _session = requests.Session()
+_CACHE = {'ts': 0.0, 'payload': None}
+_CACHE_LOCK = threading.Lock()
+_CACHE_TTL = max(30, int(os.getenv('RESEARCH_BRIDGE_CACHE_SECONDS','60') or 60))
 
 def _cfg():
-    return str(os.getenv('SUPABASE_URL','')).rstrip('/'), str(os.getenv('SUPABASE_KEY','')).strip()
+    url = str(
+        os.getenv('CENTRAL_SUPABASE_URL')
+        or os.getenv('SUPABASE_URL')
+        or ''
+    ).rstrip('/')
+    key = str(
+        os.getenv('CENTRAL_SUPABASE_SERVICE_KEY')
+        or os.getenv('SUPABASE_SERVICE_ROLE_KEY')
+        or os.getenv('SUPABASE_KEY')
+        or ''
+    ).strip()
+    return url, key
 
 def _get(table, params):
     url,key=_cfg()
-    if not url or not key: raise RuntimeError('Supabase no configurado')
+    if not url or not key:
+        raise RuntimeError('Supabase Research Bridge no configurado')
     h={'apikey':key,'Authorization':f'Bearer {key}','Accept':'application/json'}
-    r=_session.get(f'{url}/rest/v1/{table}',params=params,headers=h,timeout=10)
-    r.raise_for_status(); data=r.json(); return data if isinstance(data,list) else []
+    r=_session.get(f'{url}/rest/v1/{table}',params=params,headers=h,timeout=8)
+    r.raise_for_status()
+    data=r.json()
+    return data if isinstance(data,list) else []
 
-def _auth_guard(auth_fn): return auth_fn()
+def _auth_guard(auth_fn):
+    return auth_fn()
 
-def _compact():
-    candidates=_get('research_analytics_compact_v1',{'select':'*','order':'updated_at.desc','limit':'120'})
-    states=_get('research_engine_state_v1',{'select':'engine,status,last_seen_at,rss_mb,research_version,meta','order':'engine.asc','limit':'10'})
-    shadow=_get('research_shadow_live_metrics_v1',{'select':'*','order':'updated_at.desc','limit':'120'})
-    return candidates,states,shadow
+def _num(value):
+    try:
+        return float(value) if value is not None else None
+    except Exception:
+        return None
+
+def _compact_promotion(row):
+    metrics = row.get('metrics') or {}
+    allm = metrics.get('all') or {}
+    val = metrics.get('validation') or {}
+    meta = row.get('meta') or {}
+    scope = row.get('scope') or {}
+    return {
+        'candidate_key': row.get('candidate_key'),
+        'source_engine': row.get('source_engine'),
+        'experiment': row.get('experiment'),
+        'stage': row.get('stage'),
+        'reason': row.get('reason'),
+        'market_family': scope.get('market_family') or '--',
+        'symbol': scope.get('symbol') or 'ALL',
+        'timeframe': scope.get('timeframe') or 'ALL',
+        'direction': scope.get('direction') or 'ALL',
+        'regime': scope.get('regime') or 'ALL',
+        'backtest_n': int(allm.get('resolved') or 0),
+        'backtest_wr': _num(allm.get('win_rate_pct')),
+        'backtest_exp_r': _num(allm.get('expectancy_r')),
+        'backtest_pf': _num(allm.get('profit_factor')),
+        'oos_n': int(val.get('resolved') or 0),
+        'oos_wr': _num(val.get('win_rate_pct')),
+        'oos_exp_r': _num(val.get('expectancy_r')),
+        'oos_pf': _num(val.get('profit_factor')),
+        'oos_max_dd_r': _num(val.get('max_drawdown_r')),
+        'shadow_target': int(meta.get('recommended_shadow_target') or 0),
+        'canary_target': int(meta.get('recommended_canary_target') or 0),
+        'research_version': row.get('research_version'),
+        'updated_at': row.get('updated_at'),
+    }
+
+def _compact(force=False):
+    now=time.monotonic()
+    with _CACHE_LOCK:
+        if (not force) and _CACHE['payload'] and (now-_CACHE['ts']) < _CACHE_TTL:
+            return _CACHE['payload']
+
+    raw_promotions=_get('research_promotions_v1',{
+        'select':'candidate_key,source_engine,experiment,stage,reason,scope,metrics,meta,research_version,updated_at',
+        'order':'updated_at.desc',
+        'limit':'120',
+    })
+    candidates=[_compact_promotion(x) for x in raw_promotions]
+    states=_get('research_engine_state_v1',{
+        'select':'engine,status,last_seen_at,rss_mb,research_version,meta',
+        'order':'engine.asc',
+        'limit':'10',
+    })
+    shadow=_get('research_shadow_live_metrics_v1',{
+        'select':'*',
+        'order':'updated_at.desc',
+        'limit':'120',
+    })
+    payload=(candidates,states,shadow)
+    with _CACHE_LOCK:
+        _CACHE['ts']=now
+        _CACHE['payload']=payload
+    return payload
 
 def _report(candidates,states,shadow):
-    lines=['# Research Federation · sistema central','','- Bridge V1.2: evidencia externa + Shadow central observado.','- Nunca concede autoridad productiva automáticamente.','','## Motores']
-    for s in states: lines.append(f"- {s.get('engine')}: {s.get('status')} · RSS {s.get('rss_mb')} MB · {s.get('last_seen_at')}")
+    lines=['# Research Federation · sistema central','','- Bridge V1.2.1: evidencia externa + Shadow central observado.','- Nunca concede autoridad productiva automáticamente.','','## Motores']
+    for s in states:
+        lines.append(f"- {s.get('engine')}: {s.get('status')} · RSS {s.get('rss_mb')} MB · {s.get('last_seen_at')}")
     lines += ['','## Evidencia Backtest/OOS']
     for x in candidates[:35]:
         lines.append(f"- {x.get('stage')} | {x.get('source_engine')} | {x.get('experiment')} | {x.get('market_family')} {x.get('timeframe')} | N={x.get('backtest_n')} | WR={x.get('backtest_wr')}% | Exp.R={x.get('backtest_exp_r')} | OOS.N={x.get('oos_n')} | OOS.WR={x.get('oos_wr')}% | OOS.Exp.R={x.get('oos_exp_r')} | PF={x.get('oos_pf')}")
@@ -39,20 +120,43 @@ def register_research_bridge(app, auth_fn):
     @_bp.get('/research-federation')
     def page():
         user=_auth_guard(auth_fn)
-        if not isinstance(user,str): return user
+        if not isinstance(user,str):
+            return user
         return render_template('research_federation.html')
+
     @_bp.get('/api/research-federation/summary')
     def summary():
         user=_auth_guard(auth_fn)
-        if not isinstance(user,str): return user
+        if not isinstance(user,str):
+            return user
         try:
-            c,s,l=_compact(); return jsonify({'success':True,'candidates':c,'engines':s,'shadow_live':l,'authority':'RESEARCH_SHADOW_BRIDGE_V1_2'})
-        except Exception as exc: return jsonify({'success':False,'error':str(exc)[:240]}),500
+            c,s,l=_compact()
+            return jsonify({
+                'success':True,
+                'connected':True,
+                'candidates':c,
+                'engines':s,
+                'shadow_live':l,
+                'authority':'RESEARCH_SHADOW_BRIDGE_V1_2_1',
+                'visible_rows':len(c),
+            })
+        except Exception as exc:
+            return jsonify({
+                'success':False,
+                'connected':False,
+                'error':str(exc)[:240],
+                'hint':'Verifica CENTRAL_SUPABASE_SERVICE_KEY en el Render central.',
+            }),500
+
     @_bp.get('/api/research-federation/export')
     def export():
         user=_auth_guard(auth_fn)
-        if not isinstance(user,str): return user
+        if not isinstance(user,str):
+            return user
         try:
-            c,s,l=_compact(); return Response(_report(c,s,l),mimetype='text/markdown; charset=utf-8')
-        except Exception as exc: return Response(f'# Error\n\n{exc}',status=500,mimetype='text/plain; charset=utf-8')
+            c,s,l=_compact()
+            return Response(_report(c,s,l),mimetype='text/markdown; charset=utf-8')
+        except Exception as exc:
+            return Response(f'# Error\n\n{exc}',status=500,mimetype='text/plain; charset=utf-8')
+
     app.register_blueprint(_bp)
