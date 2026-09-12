@@ -1,0 +1,9 @@
+[
+  "test_hotfix16_6_signal_revalidation.py::test_active_card_opens_snapshot_context_not_plain_pair_navigation",
+  "test_hotfix16_6_signal_revalidation.py::test_active_endpoint_exposes_origin_snapshot",
+  "test_hotfix16_6_signal_revalidation.py::test_current_market_is_secondary_and_does_not_replace_signal",
+  "test_hotfix16_6_signal_revalidation.py::test_f1_wrong_auto_invalidation_is_removed",
+  "test_hotfix16_6_signal_revalidation.py::test_f2_recovers_only_wrong_f1_invalidations_while_still_valid",
+  "test_hotfix16_6_signal_revalidation.py::test_manual_navigation_clears_pinned_snapshot",
+  "test_hotfix16_6_signal_revalidation.py::test_waiting_entry_keeps_original_lifecycle_policy"
+]

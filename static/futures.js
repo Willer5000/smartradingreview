@@ -1173,9 +1173,10 @@ window.updateActiveSignals = async function() {
                 <div
                     class="list-group-item bg-dark text-white border-secondary"
                     style="cursor:pointer;"
-                    onclick="window.changeToSignal(
-                        '${sig.symbol}',
-                        '${sig.timeframe}'
+                    data-signal="${_encodeFuturesSignal(sig)}"
+                    onclick="window.openFuturesActiveSignal(
+                        event,
+                        this.getAttribute('data-signal')
                     )"
                 >
 
@@ -1362,6 +1363,273 @@ function _encodeFuturesSignal(sig) {
 function _decodeFuturesSignal(encodedSignal) {
     return JSON.parse(decodeURIComponent(encodedSignal));
 }
+
+// ============================================================================
+// HOTFIX F.2 — CONTEXTO CANÓNICO DE UNA SEÑAL FUTURES ACTIVA
+// ============================================================================
+// Una señal activa conserva la recomendación que la originó. Un análisis
+// posterior del mismo par/TF puede describir el mercado ACTUAL, pero no debe
+// reescribir la recomendación, Entry, SL, TP, RR ni leverage de una señal
+// waiting_entry / entry_touched que todavía sigue vigente.
+// ============================================================================
+
+window._futuresPinnedSignalRecommendation = null;
+window._futuresLastFreshRecommendationData = null;
+window._futuresLifecycleNavigationInProgress = false;
+
+function _futuresSignalSnapshotToRecommendation(sig) {
+    sig = sig || {};
+
+    const originalMessage = String(
+        sig.message
+        || 'Señal Futures activa conservada desde su vela fuente.'
+    );
+
+    const sourceText = String(
+        sig.source_candle_close_timestamp
+        || sig.source_candle_timestamp
+        || sig.candle_timestamp
+        || ''
+    );
+
+    const lifecycleText = String(
+        sig.lifecycle_status
+        || ''
+    ).toUpperCase();
+
+    const prefix = [
+        '<div class="alert alert-info py-2 mb-2">',
+        '<strong>📌 RECOMENDACIÓN QUE ORIGINÓ ESTA SEÑAL</strong>',
+        sourceText
+            ? `<br><small>Vela fuente: ${futEscapeHtml(sourceText)}</small>`
+            : '',
+        lifecycleText
+            ? `<br><small>Estado: ${futEscapeHtml(lifecycleText)}</small>`
+            : '',
+        '</div>'
+    ].join('');
+
+    return {
+        symbol: sig.symbol,
+        timeframe: sig.timeframe,
+        decision: {
+            action: sig.action,
+            confidence: Number(sig.confidence || 0)
+        },
+        levels: {
+            entry: sig.entry,
+            stop_loss: sig.stop_loss,
+            take_profit: sig.take_profit,
+            leverage: sig.leverage,
+            risk_reward: sig.risk_reward
+        },
+        message: prefix + futEscapeHtml(originalMessage).replace(/\n/g, '<br>'),
+        source_candle_timestamp: sig.source_candle_timestamp,
+        source_candle_close_timestamp: sig.source_candle_close_timestamp,
+        recommendation_context: 'ACTIVE_SIGNAL_SNAPSHOT'
+    };
+}
+
+function _futuresSelectedPairMatchesSignal(sig) {
+    if (!sig) return false;
+
+    const symbol = String(
+        document.getElementById('symbol-select')?.value
+        || window.currentSymbol
+        || ''
+    );
+
+    const timeframe = String(
+        document.getElementById('interval-select')?.value
+        || window.currentInterval
+        || ''
+    );
+
+    return (
+        symbol === String(sig.symbol || '')
+        && timeframe === String(sig.timeframe || '')
+    );
+}
+
+function _futuresRenderCurrentMarketState(currentData, sig, loading = false) {
+    const container = document.getElementById('system-recommendation');
+    if (!container || !sig) return;
+
+    let block = document.getElementById('futures-current-market-state');
+    if (!block) {
+        block = document.createElement('div');
+        block.id = 'futures-current-market-state';
+        block.className = 'mt-3 p-3 border border-secondary rounded-3 bg-dark';
+        container.appendChild(block);
+    }
+
+    if (loading || !currentData || !currentData.decision) {
+        block.innerHTML = `
+            <div class="small text-muted">
+                <strong>🔎 Estado actual del mercado</strong><br>
+                Actualizando el análisis actual. Este dato NO reemplaza
+                la recomendación que originó la señal activa.
+            </div>
+        `;
+        return;
+    }
+
+    const currentAction = String(
+        currentData.decision.action
+        || 'NO_OPERAR'
+    ).toUpperCase();
+
+    const currentConfidence = Number(
+        currentData.decision.confidence
+        || 0
+    );
+
+    const currentMessage = String(
+        currentData.message
+        || 'Sin comentario adicional.'
+    );
+
+    const sameDirection = (
+        currentAction === String(sig.action || '').toUpperCase()
+    );
+
+    const note = sameDirection
+        ? 'El análisis actual coincide con la dirección de la señal.'
+        : (
+            'El análisis actual describe el mercado AHORA. '
+            + 'No invalida ni reescribe automáticamente una señal '
+            + 'activa que todavía conserva su propia vigencia.'
+        );
+
+    block.innerHTML = `
+        <div class="small">
+            <strong>🔎 Estado actual del mercado · no reemplaza la señal</strong>
+            <div class="mt-1">
+                Acción actual:
+                <strong>${futEscapeHtml(currentAction)}</strong>
+                · Confianza ${Math.max(0, Math.min(100, currentConfidence)).toFixed(0)}%
+            </div>
+            <div class="text-muted mt-1">
+                ${futEscapeHtml(note)}
+            </div>
+            <div class="text-secondary mt-2">
+                ${futEscapeHtml(currentMessage).replace(/\n/g, '<br>')}
+            </div>
+        </div>
+    `;
+}
+
+function _futuresClearPinnedSignalRecommendation(restoreCurrent = false) {
+    window._futuresPinnedSignalRecommendation = null;
+
+    const currentState = document.getElementById('futures-current-market-state');
+    if (currentState) currentState.remove();
+
+    if (
+        restoreCurrent
+        && window._futuresBaseUpdateRecommendation
+        && window._futuresLastFreshRecommendationData
+    ) {
+        window._futuresBaseUpdateRecommendation(
+            window._futuresLastFreshRecommendationData
+        );
+    }
+}
+
+(function _wrapFuturesRecommendationForActiveSignal() {
+    if (!window.IS_FUTURES_PAGE) return;
+    if (window._futuresRecommendationContextWrapped) return;
+    if (typeof window.updateRecommendation !== 'function') return;
+
+    window._futuresRecommendationContextWrapped = true;
+    window._futuresBaseUpdateRecommendation = window.updateRecommendation;
+
+    window.updateRecommendation = function(data) {
+        window._futuresLastFreshRecommendationData = data;
+
+        const sig = window._futuresPinnedSignalRecommendation;
+
+        if (!sig) {
+            return window._futuresBaseUpdateRecommendation(data);
+        }
+
+        if (!_futuresSelectedPairMatchesSignal(sig)) {
+            _futuresClearPinnedSignalRecommendation(false);
+            return window._futuresBaseUpdateRecommendation(data);
+        }
+
+        window._futuresBaseUpdateRecommendation(
+            _futuresSignalSnapshotToRecommendation(sig)
+        );
+
+        _futuresRenderCurrentMarketState(
+            data,
+            sig,
+            false
+        );
+    };
+})();
+
+(function _wrapFuturesChangeToSignalContext() {
+    if (!window.IS_FUTURES_PAGE) return;
+    if (window._futuresChangeToSignalContextWrapped) return;
+    if (typeof window.changeToSignal !== 'function') return;
+
+    window._futuresChangeToSignalContextWrapped = true;
+    window._futuresBaseChangeToSignal = window.changeToSignal;
+
+    window.changeToSignal = function(symbol, timeframe) {
+        if (!window._futuresLifecycleNavigationInProgress) {
+            _futuresClearPinnedSignalRecommendation(false);
+        }
+
+        return window._futuresBaseChangeToSignal(
+            symbol,
+            timeframe
+        );
+    };
+})();
+
+window.openFuturesActiveSignal = function(event, encodedSignal) {
+    if (event) event.stopPropagation();
+
+    const sig = _decodeFuturesSignal(encodedSignal);
+    if (!sig || !sig.symbol || !sig.timeframe) return;
+
+    // Guardamos el snapshot canónico ANTES de navegar. El análisis nuevo sólo
+    // servirá para gráficos y para el bloque secundario "Estado actual".
+    window._futuresPinnedSignalRecommendation = sig;
+    window._futuresLifecycleNavigationInProgress = true;
+
+    try {
+        window.changeToSignal(
+            sig.symbol,
+            sig.timeframe
+        );
+    } finally {
+        window._futuresLifecycleNavigationInProgress = false;
+    }
+
+    if (window._futuresBaseUpdateRecommendation) {
+        window._futuresBaseUpdateRecommendation(
+            _futuresSignalSnapshotToRecommendation(sig)
+        );
+        _futuresRenderCurrentMarketState(
+            null,
+            sig,
+            true
+        );
+    }
+};
+
+// Si el usuario cambia par/TF manualmente, deja de estar mirando el snapshot
+// de la señal activa y vuelve a la recomendación del análisis seleccionado.
+document.addEventListener('change', function(event) {
+    const id = String(event?.target?.id || '');
+    if (id === 'symbol-select' || id === 'interval-select') {
+        _futuresClearPinnedSignalRecommendation(false);
+    }
+});
 
 window.openSaveSignalFromCard = function(event, encodedSignal, alreadyInPosition) {
     if (event) event.stopPropagation();
