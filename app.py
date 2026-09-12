@@ -29688,6 +29688,8 @@ def api_futures_microstructure():
             },
             'funding': snapshot.get('funding') or {},
             'open_interest': snapshot.get('open_interest') or {},
+            'mark_index': snapshot.get('mark_index') or {},
+            'liquidity': snapshot.get('liquidity') or {},
         }
         return jsonify(payload), (200 if payload['success'] else 503)
     except Exception as exc:
@@ -30255,6 +30257,7 @@ def _start_futures_ui_analysis_async(symbol, timeframe):
             if not result:
                 raise RuntimeError('Análisis Futures vacío')
 
+            result = _apply_profitability_router(result, symbol, timeframe)
             result = _apply_36s_futures_ai_control(result, symbol, timeframe)
             ui_result = _compact_futures_ui_result(result)
             runtime_result = _compact_futures_runtime_result(result)
@@ -30775,6 +30778,51 @@ def _refresh_futures_signal_lifecycle(
             f"⚠️ [FUT] Lifecycle {symbol} {timeframe}: {e}"
         )
         return lifecycle
+
+# ============================================================================
+# COMMIT H — PROFITABILITY ROUTER (Safety != Edge)
+# ============================================================================
+
+def _apply_profitability_router(result, symbol, timeframe):
+    """Negative OOS evidence can veto earlier; positive evidence stays governed."""
+    if not isinstance(result, dict) or not result.get('success'):
+        return result
+    try:
+        from profitability_router import evaluate_profitability_route
+        route = evaluate_profitability_route(result, 'futures')
+        result['profitability_router'] = route
+        levels = result.get('levels') or {}
+        levels['edge_state'] = route.get('state')
+        levels['edge_reason'] = route.get('reason')
+        result['levels'] = levels
+
+        decision = result.get('decision') or {}
+        action = str(decision.get('action') or '').upper()
+        publication_status = str(
+            levels.get('publication_status')
+            or result.get('publication_status')
+            or ('ANALYSIS_ONLY' if levels.get('is_rejected') else 'EXECUTABLE_SIGNAL')
+        ).upper()
+
+        if (
+            route.get('block_new_signal')
+            and action in ('LONG', 'SHORT')
+            and publication_status == 'EXECUTABLE_SIGNAL'
+        ):
+            levels['publication_status'] = 'EDGE_BLOCKED'
+            levels['is_rejected'] = True
+            levels['edge_blocked'] = True
+            levels['edge_block_reason'] = route.get('reason')
+            result['publication_status'] = 'EDGE_BLOCKED'
+            result['publication_eligible'] = False
+            result['edge_blocked'] = True
+            result['levels'] = levels
+            print(f"📉🛡️ [EDGE] veto OOS {action} {symbol} {timeframe}: {route.get('reason')}")
+        return result
+    except Exception as exc:
+        print(f"⚠️ [EDGE] router fail-open {symbol} {timeframe}: {str(exc)[:160]}")
+        return result
+
 
 # ============================================================================
 # COMMIT 36S.1 — AI ACTIVE CONTROL PARA FUTURES
@@ -31394,6 +31442,7 @@ def _analyze_futures_all_parallel(combos_override=None):
                 '_reused_closed_candle'
             ):
 
+                r = _apply_profitability_router(r, symbol, timeframe)
                 r = (
                     _apply_36s_futures_ai_control(
                         r,
@@ -38018,6 +38067,35 @@ def _ai_compact_analysis(
             _ai_compact_technical_context(
                 result
             ),
+
+        # Commit H — Trader IA recibe contexto de derivados ya resumido.
+        # Nunca enviamos el libro completo ni series grandes al LLM.
+        'market_intelligence':
+            {
+                'regime': (result.get('futures_quantitative_context') or {}).get('regime'),
+                'micro_alignment': (result.get('futures_microstructure_context') or {}).get('alignment'),
+                'micro_score': (result.get('futures_microstructure_context') or {}).get('alignment_score'),
+                'metrics': {
+                    key: value
+                    for key, value in ((result.get('futures_microstructure_context') or {}).get('metrics') or {}).items()
+                    if key in (
+                        'orderbook_imbalance', 'spread_pct', 'recent_buy_share',
+                        'oi_change_pct', 'funding_rate', 'basis_pct',
+                        'liquidity_band', 'liquidity_score'
+                    )
+                },
+                'reasons': list((result.get('futures_microstructure_context') or {}).get('reasons') or [])[:6],
+            },
+
+        # Edge estadístico separado de Safety. La IA sólo lo interpreta;
+        # no puede promover una señal ni cambiar niveles por este dato.
+        'profitability_router':
+            {
+                'state': (result.get('profitability_router') or {}).get('state'),
+                'reason': (result.get('profitability_router') or {}).get('reason'),
+                'block_new_signal': bool((result.get('profitability_router') or {}).get('block_new_signal', False)),
+                'matched': int((result.get('profitability_router') or {}).get('matched', 0) or 0),
+            },
         # Q7D — evidencia experimental de timing.
         # Nunca es una orden para la IA.
 

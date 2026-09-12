@@ -2613,8 +2613,13 @@ FUTURES:
 respeta Liquidity -> Sweep -> MSS -> Displacement -> POI -> Entry.
 Comprueba Entry, invalidación, SL, TP, RR, Safety, estructura,
 régimen, multitemporalidad, leverage y riesgo monetario.
+Si market_intelligence está disponible, actúa como Trader IA de contexto:
+interpreta OI, funding, mark/index basis, order book, flujo reciente y
+liquidez EN CONJUNTO con el régimen. OI o una pared del libro aislados
+no definen dirección; considera crowding, desapalancamiento, absorción y
+si el contexto favorece continuación o reversión. Una pared puede desaparecer.
 No inventes Entry/SL/TP, no aumentes leverage y no conviertas
-NO_OPERAR en LONG/SHORT.
+NO_OPERAR en LONG/SHORT. Si contradices una señal, explica la evidencia.
 
 SPOT/TGP:
 Spot no es Futures. Considera BTC, PAXG y USDT, reservas,
@@ -3096,7 +3101,8 @@ Una estrategia propuesta debe indicar:
 11. research_filters: filtros ESTRUCTURADOS que Research Federation pueda medir.
 
 research_filters sólo puede usar estas claves cuando exista evidencia para ellas:
-market_family, symbol, timeframe, direction, regime, micro_alignment,
+market_family, symbol, timeframe, direction, regime, micro_alignment, orderbook_imbalance_band, recent_buy_share_band,
+oi_change_band, funding_band, basis_band, liquidity_band,
 sl_quality_band, tp_quality_band, defensibility_band, reachability_band,
 has_order_block, has_sweep, has_pullback, component.
 
@@ -3107,6 +3113,8 @@ Para FUTURES prioriza como fuentes de mejora:
 
 - calidad Entry SMC;
 - Liquidity -> Sweep -> MSS -> Displacement -> POI;
+- régimen + posicionamiento (OI/funding/basis) + order flow/liquidez cuando exista;
+- distinguir continuación de tendencia vs reversión en balance;
 - calidad del Stop Loss;
 - calidad/probabilidad del Take Profit;
 - régimen;
@@ -3358,6 +3366,12 @@ _RESEARCH_PROPOSAL_FILTERS = {
     "has_order_block",
     "has_sweep",
     "has_pullback",
+    "orderbook_imbalance_band",
+    "recent_buy_share_band",
+    "oi_change_band",
+    "funding_band",
+    "basis_band",
+    "liquidity_band",
     "component",
 }
 
@@ -3412,6 +3426,19 @@ def _normalize_research_filters(value, market="FUTURES"):
         flag = str(raw.get(key) or "").strip().upper()
         if flag in {"YES", "NO"}:
             out[key] = flag
+
+    enum_filters = {
+        "orderbook_imbalance_band": {"SELL_HEAVY", "BALANCED", "BUY_HEAVY"},
+        "recent_buy_share_band": {"SELL_HEAVY", "BALANCED", "BUY_HEAVY"},
+        "oi_change_band": {"DELEVERAGING", "STABLE", "BUILDING"},
+        "funding_band": {"SHORT_CROWDED", "NEUTRAL", "LONG_CROWDED"},
+        "basis_band": {"BACKWARDATION", "NEUTRAL", "CONTANGO"},
+        "liquidity_band": {"LOW", "NORMAL", "HIGH"},
+    }
+    for key, allowed in enum_filters.items():
+        value = str(raw.get(key) or "").strip().upper()
+        if value in allowed:
+            out[key] = value
 
     component = str(raw.get("component") or "").strip().upper()
     if component:

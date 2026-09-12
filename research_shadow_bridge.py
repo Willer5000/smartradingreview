@@ -102,6 +102,10 @@ def _runtime_features(result: Dict[str,Any], system_type: str) -> Dict[str,Any]:
         'reachability':_band(levels.get('entry_reachability_score'),[55,70,80],['LOW','MEDIUM','HIGH','VERY_HIGH']),
         'orderbook_imbalance_band':_band(micro_metrics.get('orderbook_imbalance'),[-0.25,0.25],['SELL_HEAVY','BALANCED','BUY_HEAVY']),
         'recent_buy_share_band':_band(micro_metrics.get('recent_buy_share'),[0.40,0.60],['SELL_HEAVY','BALANCED','BUY_HEAVY']),
+        'oi_change_band':_band(micro_metrics.get('oi_change_pct'),[-0.50,0.50],['DELEVERAGING','STABLE','BUILDING']),
+        'funding_band':_band(micro_metrics.get('funding_rate'),[-0.0005,0.0005],['SHORT_CROWDED','NEUTRAL','LONG_CROWDED']),
+        'basis_band':_band(micro_metrics.get('basis_pct'),[-0.05,0.05],['BACKWARDATION','NEUTRAL','CONTANGO']),
+        'liquidity_band':str(micro_metrics.get('liquidity_band') or ({'TIGHT':'HIGH','NORMAL':'NORMAL','WIDE':'LOW'}.get(_band(micro_metrics.get('spread_pct'),[0.03,0.10],['TIGHT','NORMAL','WIDE']),'NO_DATA'))).upper(),
         'has_order_block':'YES' if ('ORDER BLOCK' in strategy_blob or 'ORDER_BLOCK' in strategy_blob) else 'NO',
         'has_sweep':'YES' if ('SWEEP' in strategy_blob or 'LIQUIDITY' in strategy_blob) else 'NO',
         'has_pullback':'YES' if ('PULLBACK' in strategy_blob or 'RETEST' in strategy_blob) else 'NO',
@@ -133,6 +137,15 @@ def _matches(scope: Dict[str,Any], feat: Dict[str,Any]) -> bool:
         if target and actual != target:
             return False
     return True
+
+
+# Public read-only helpers shared with Profitability Router.
+def runtime_research_features(result: Dict[str,Any], system_type: str) -> Dict[str,Any]:
+    return _runtime_features(result, system_type)
+
+
+def matches_research_scope(scope: Dict[str,Any], feat: Dict[str,Any]) -> bool:
+    return _matches(scope, feat)
 
 
 def track_research_shadow_signal(signal_id: str, analysis_result: Dict[str,Any], system_type: str) -> int:

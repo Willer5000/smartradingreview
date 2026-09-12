@@ -2365,6 +2365,28 @@ class ReviewTrader:
                                     )
                                 ),
 
+                            'basis_pct':
+                                _micro_optional_float(
+                                    raw_micro_metrics.get(
+                                        'basis_pct'
+                                    )
+                                ),
+
+                            'liquidity_band':
+                                str(
+                                    raw_micro_metrics.get(
+                                        'liquidity_band'
+                                    )
+                                    or 'NO_DATA'
+                                )[:20],
+
+                            'liquidity_score':
+                                _micro_optional_float(
+                                    raw_micro_metrics.get(
+                                        'liquidity_score'
+                                    )
+                                ),
+
                             'source_count':
                                 _micro_optional_float(
                                     raw_micro_metrics.get(

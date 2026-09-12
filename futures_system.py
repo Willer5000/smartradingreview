@@ -159,7 +159,7 @@ if str(os.environ.get('LOW_MEMORY_MODE', '1')).strip().lower() not in ('0', 'fal
 # ============================================================================
 
 FUTURES_MICROSTRUCTURE_VERSION = (
-    'C15_KUCOIN_PUBLIC_MICROSTRUCTURE_V2'
+    'H_MARKET_INTELLIGENCE_V1'
 )
 
 FUTURES_MICROSTRUCTURE_TTL_SECONDS = max(20, int(os.environ.get('FUTURES_MICROSTRUCTURE_TTL_SECONDS', '30') or 30))
@@ -182,6 +182,11 @@ KUCOIN_FUTURES_FUNDING_URL = (
 KUCOIN_FUTURES_OPEN_INTEREST_URL = (
     'https://api.kucoin.com/'
     'api/ua/v2/market/open-interest'
+)
+
+KUCOIN_FUTURES_MARK_PRICE_URL = (
+    'https://api-futures.kucoin.com/'
+    'api/v1/mark-price/{symbol}/current'
 )
 
 _futures_microstructure_cache = {}
@@ -1039,7 +1044,36 @@ def _fetch_public_futures_microstructure(
         )
 
     # ====================================================================
-    # 4. OPEN INTEREST RECIENTE
+    # 4. MARK / INDEX BASIS
+    # ====================================================================
+
+    try:
+        response = session.get(
+            KUCOIN_FUTURES_MARK_PRICE_URL.format(symbol=contract_symbol),
+            timeout=4
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if str(payload.get('code')) != '200000':
+            raise ValueError('KuCoin mark price code ' + str(payload.get('code')))
+        mark_data = payload.get('data') or {}
+        mark_price = _safe_micro_float(mark_data.get('value'))
+        index_price = _safe_micro_float(mark_data.get('indexPrice'))
+        basis_pct = None
+        if mark_price is not None and index_price is not None and index_price > 0:
+            basis_pct = (mark_price - index_price) / index_price * 100.0
+        base['mark_index'] = {
+            'mark_price': mark_price,
+            'index_price': index_price,
+            'basis_pct': round(basis_pct, 6) if basis_pct is not None else None,
+            'time_point': mark_data.get('timePoint'),
+        }
+        base['sources_available'].append('MARK_INDEX_BASIS')
+    except Exception as exc:
+        base['source_errors'].append('MARK_INDEX: ' + str(exc)[:160])
+
+    # ====================================================================
+    # 5. OPEN INTEREST RECIENTE
     # ====================================================================
     #
     # Usamos siempre 5 minutos porque Q3 estudia TIMING de ejecución,
@@ -1205,30 +1239,16 @@ def _fetch_public_futures_microstructure(
         base[
             'open_interest'
         ] = {
-            'interval':
-                '5min',
-
-            'samples':
-                len(
-                    normalized_oi
-                ),
-
-            'oldest':
-                oldest_oi,
-
-            'latest':
-                newest_oi,
-
-            'change_pct':
-                (
-                    round(
-                        oi_change_pct,
-                        4
-                    )
-                    if oi_change_pct
-                    is not None
-                    else None
-                )
+            'interval': '5min',
+            'samples': len(normalized_oi),
+            'oldest': oldest_oi,
+            'latest': newest_oi,
+            'change_pct': (round(oi_change_pct, 4) if oi_change_pct is not None else None),
+            # Six points are enough for visual evidence and cost only a few bytes.
+            'series': [
+                {'ts': int(ts), 'value': round(value, 6)}
+                for ts, value in normalized_oi[-6:]
+            ],
         }
 
         base[
@@ -1249,6 +1269,26 @@ def _fetch_public_futures_microstructure(
                 )[:160]
             )
         )
+
+    # ====================================================================
+    # 6. LIQUIDEZ DE EJECUCIÓN (compacta, comparable dentro del símbolo)
+    # ====================================================================
+    _book = base.get('orderbook') or {}
+    _spread = _safe_micro_float(_book.get('spread_pct'))
+    if _spread is None:
+        _liq_band, _liq_score = 'NO_DATA', None
+    elif _spread <= 0.03:
+        _liq_band, _liq_score = 'HIGH', 90.0
+    elif _spread <= 0.10:
+        _liq_band, _liq_score = 'NORMAL', 65.0
+    else:
+        _liq_band, _liq_score = 'LOW', 35.0
+    base['liquidity'] = {
+        'band': _liq_band,
+        'score': _liq_score,
+        'basis': 'TOP20_SPREAD_EXECUTION_PROXY',
+        'note': 'Mide facilidad inmediata de ejecución; no confundir con pools SMC.',
+    }
 
     base[
         'available'
@@ -2787,8 +2827,13 @@ class FuturesAnalysis(TradingExpertSystem):
                 'oi_change_pct':
                     oi_change_pct,
 
-                'funding_rate':
-                    funding_rate,
+                'funding_rate': funding_rate,
+
+                'basis_pct': _safe_micro_float((snapshot.get('mark_index') or {}).get('basis_pct')),
+
+                'liquidity_band': str((snapshot.get('liquidity') or {}).get('band') or 'NO_DATA').upper(),
+
+                'liquidity_score': _safe_micro_float((snapshot.get('liquidity') or {}).get('score')),
 
                 'source_count':
                     int(
@@ -2817,7 +2862,11 @@ class FuturesAnalysis(TradingExpertSystem):
                     'trade_count': int(recent_trades.get('sample_size', 0) or 0),
                 },
                 'funding_rate': funding_rate,
+                'funding': snapshot.get('funding') or {},
+                'open_interest': snapshot.get('open_interest') or {},
                 'oi_change_pct': oi_change_pct,
+                'mark_index': snapshot.get('mark_index') or {},
+                'liquidity': snapshot.get('liquidity') or {},
             },
 
             'source_status': {

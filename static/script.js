@@ -7722,6 +7722,10 @@ function _orderFlowSnapshotFromAnalysis(data) {
             imbalance: ctx?.metrics?.orderbook_imbalance,
         },
         flow,
+        funding: display?.funding || {current_rate: display?.funding_rate},
+        open_interest: display?.open_interest || {change_pct: display?.oi_change_pct},
+        mark_index: display?.mark_index || {},
+        liquidity: display?.liquidity || {},
         alignment: ctx?.alignment,
         alignment_score: ctx?.alignment_score,
         reasons: Array.isArray(ctx?.reasons) ? ctx.reasons : [],
@@ -7835,6 +7839,66 @@ function _renderOrderFlowSnapshot(snapshot, symbol) {
         alignmentEl.className = readingClass;
     }
 
+    // Commit H — visual evidence for OI / funding / basis / execution liquidity.
+    const oi = snapshot?.open_interest || {};
+    const funding = snapshot?.funding || {};
+    const markIndex = snapshot?.mark_index || {};
+    const liquidity = snapshot?.liquidity || {};
+    const oiChange = Number(oi.change_pct);
+    const fundingRate = Number(funding.predicted_rate ?? funding.current_rate);
+    const basisPct = Number(markIndex.basis_pct);
+    const liquidityScore = Number(liquidity.score);
+
+    const oiEl = document.getElementById('fut-oi-change');
+    if (oiEl) {
+        oiEl.textContent = Number.isFinite(oiChange) ? `${oiChange >= 0 ? '+' : ''}${oiChange.toFixed(2)}%` : '--';
+        oiEl.className = Number.isFinite(oiChange) ? (oiChange > 0.5 ? 'text-info' : oiChange < -0.5 ? 'text-warning' : 'text-light') : '';
+    }
+    const spark = document.getElementById('fut-oi-spark');
+    if (spark) {
+        const series = Array.isArray(oi.series) ? oi.series.map(x => Number(x?.value)).filter(Number.isFinite) : [];
+        if (series.length >= 2) {
+            const lo = Math.min(...series);
+            const hi = Math.max(...series);
+            const span = Math.max(1e-12, hi - lo);
+            const pts = series.map((v, i) => `${(i/(series.length-1))*118+1},${32-((v-lo)/span)*28}`).join(' ');
+            spark.innerHTML = `<polyline points="${pts}" fill="none" stroke="currentColor" stroke-width="2" vector-effect="non-scaling-stroke"></polyline>`;
+            spark.className.baseVal = oiChange >= 0 ? 'text-info' : 'text-warning';
+        } else {
+            spark.innerHTML = '';
+        }
+    }
+
+    const fundingEl = document.getElementById('fut-funding-rate');
+    const fundingMeter = document.getElementById('fut-funding-meter');
+    if (fundingEl) fundingEl.textContent = Number.isFinite(fundingRate) ? `${(fundingRate*100).toFixed(4)}%` : '--';
+    if (fundingMeter) {
+        const width = Number.isFinite(fundingRate) ? Math.max(4, Math.min(100, 50 + fundingRate * 100000)) : 0;
+        fundingMeter.style.width = `${width}%`;
+        fundingMeter.className = `progress-bar ${fundingRate > 0.0005 ? 'bg-warning' : fundingRate < -0.0005 ? 'bg-info' : 'bg-secondary'}`;
+    }
+
+    const basisEl = document.getElementById('fut-basis-pct');
+    const basisMeter = document.getElementById('fut-basis-meter');
+    if (basisEl) basisEl.textContent = Number.isFinite(basisPct) ? `${basisPct >= 0 ? '+' : ''}${basisPct.toFixed(4)}%` : '--';
+    if (basisMeter) {
+        const width = Number.isFinite(basisPct) ? Math.max(4, Math.min(100, 50 + basisPct * 250)) : 0;
+        basisMeter.style.width = `${width}%`;
+        basisMeter.className = `progress-bar ${basisPct > 0.05 ? 'bg-success' : basisPct < -0.05 ? 'bg-danger' : 'bg-secondary'}`;
+    }
+
+    const liqEl = document.getElementById('fut-liquidity-band');
+    const liqMeter = document.getElementById('fut-liquidity-meter');
+    if (liqEl) {
+        const label = String(liquidity.band || 'NO_DATA').toUpperCase();
+        liqEl.textContent = ({HIGH:'ALTA', NORMAL:'NORMAL', LOW:'BAJA', NO_DATA:'--'})[label] || label;
+        liqEl.className = label === 'HIGH' ? 'text-success' : label === 'LOW' ? 'text-danger' : 'text-warning';
+    }
+    if (liqMeter) {
+        liqMeter.style.width = `${Number.isFinite(liquidityScore) ? Math.max(0, Math.min(100, liquidityScore)) : 0}%`;
+        liqMeter.className = `progress-bar ${liquidityScore >= 80 ? 'bg-success' : liquidityScore < 50 ? 'bg-danger' : 'bg-warning'}`;
+    }
+
     if (interpretationEl) {
         const bidPressure = Number.isFinite(imbalanceRaw)
             ? (imbalanceRaw > 0.10
@@ -7850,7 +7914,12 @@ function _renderOrderFlowSnapshot(snapshot, symbol) {
                     ? 'las operaciones recientes muestran presión vendedora'
                     : 'las operaciones recientes están equilibradas')
             : 'el flujo reciente no está disponible';
-        interpretationEl.textContent = `${bidPressure}; ${flowText}.`;
+        const derivatives = [];
+        if (Number.isFinite(oiChange)) derivatives.push(`OI ${oiChange >= 0 ? 'sube' : 'baja'} ${Math.abs(oiChange).toFixed(2)}%`);
+        if (Number.isFinite(fundingRate)) derivatives.push(`funding ${(fundingRate*100).toFixed(4)}%`);
+        if (Number.isFinite(basisPct)) derivatives.push(`basis ${basisPct >= 0 ? '+' : ''}${basisPct.toFixed(4)}%`);
+        if (liquidity?.band) derivatives.push(`liquidez ${String(liquidity.band).toLowerCase()}`);
+        interpretationEl.textContent = `${bidPressure}; ${flowText}.${derivatives.length ? ' ' + derivatives.join(' · ') + '.' : ''}`;
     }
 }
 
