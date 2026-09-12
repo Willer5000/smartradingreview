@@ -29,7 +29,9 @@ def _get(table, params):
     url,key=_cfg()
     if not url or not key:
         raise RuntimeError('Supabase Research Bridge no configurado')
-    h={'apikey':key,'Authorization':f'Bearer {key}','Accept':'application/json'}
+    h={'apikey':key,'Accept':'application/json'}
+    if key.count('.') == 2:
+        h['Authorization']=f'Bearer {key}'
     r=_session.get(f'{url}/rest/v1/{table}',params=params,headers=h,timeout=8)
     r.raise_for_status()
     data=r.json()
@@ -87,6 +89,7 @@ def _compact(force=False):
         'order':'updated_at.desc',
         'limit':'120',
     })
+    raw_promotions=[x for x in raw_promotions if (x.get('meta') or {}).get('is_current') is not False and str(x.get('stage') or '') != 'STALE']
     candidates=[_compact_promotion(x) for x in raw_promotions]
     states=_get('research_engine_state_v1',{
         'select':'engine,status,last_seen_at,rss_mb,research_version,meta',
@@ -108,9 +111,9 @@ def _report(candidates,states,shadow):
     lines=['# Research Federation · sistema central','','- Bridge V1.2.1: evidencia externa + Shadow central observado.','- Nunca concede autoridad productiva automáticamente.','','## Motores']
     for s in states:
         lines.append(f"- {s.get('engine')}: {s.get('status')} · RSS {s.get('rss_mb')} MB · {s.get('last_seen_at')}")
-    lines += ['','## Evidencia Backtest/OOS']
+    lines += ['','## Evidencia Discovery/Holdout temporal','- Research Federation V1.3 es atribución observacional; el replay causal separado continúa en laboratorio.']
     for x in candidates[:35]:
-        lines.append(f"- {x.get('stage')} | {x.get('source_engine')} | {x.get('experiment')} | {x.get('market_family')} {x.get('timeframe')} | N={x.get('backtest_n')} | WR={x.get('backtest_wr')}% | Exp.R={x.get('backtest_exp_r')} | OOS.N={x.get('oos_n')} | OOS.WR={x.get('oos_wr')}% | OOS.Exp.R={x.get('oos_exp_r')} | PF={x.get('oos_pf')}")
+        lines.append(f"- {x.get('stage')} | {x.get('source_engine')} | {x.get('experiment')} | {x.get('market_family')} {x.get('timeframe')} | Discovery.N={x.get('backtest_n')} | WR={x.get('backtest_wr')}% | Exp.R={x.get('backtest_exp_r')} | Holdout.N={x.get('oos_n')} | Holdout.WR={x.get('oos_wr')}% | Holdout.Exp.R={x.get('oos_exp_r')} | PF={x.get('oos_pf')}")
     lines += ['','## Shadow central live']
     for x in shadow[:35]:
         lines.append(f"- {x.get('research_stage')} | {x.get('source_engine')} | {x.get('experiment')} | {x.get('market_family')} {x.get('symbol')} {x.get('timeframe')} | señales={x.get('signals_n')} | resueltas={x.get('resolved_n')} | WR={x.get('win_rate_pct')}% | Exp.R={x.get('expectancy_r')} | PF={x.get('profit_factor')} | PnL={x.get('pnl_pct_sum')}% | Safety={x.get('avg_safety')}")

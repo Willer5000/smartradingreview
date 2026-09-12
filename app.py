@@ -24517,23 +24517,28 @@ class TraderSmartMoney(TraderBase):
                 val_price = volume_profile.get('val', 0)
                 poc_volume_pct = volume_profile.get('poc_volume_pct', 0)
                 
-                # ESTRATEGIA 9: HVN_SOPORTE (NUEVA)
-                if price_position == 'inside_value_area' and distance_to_poc < 2.0:
-                    if current_price < poc_price * 1.01:  # Precio cerca del POC por debajo
+                # ESTRATEGIAS 9/10: HVN SOPORTE / RESISTENCIA
+                # Antes ambas ramas repetían exactamente el mismo ``if`` y la
+                # rama de resistencia quedaba inalcanzable por el ``elif``.
+                # Ahora el lado del POC decide el rol del HVN y una pequeña
+                # zona central queda neutral para no fabricar una señal.
+                if (
+                    price_position == 'inside_value_area'
+                    and distance_to_poc < 2.0
+                    and poc_price > 0
+                ):
+                    hvn_neutral_band = 0.0025  # 0.25% alrededor del POC
+                    if current_price <= poc_price * (1 - hvn_neutral_band):
                         if accion == 'NO_OPERAR':
                             accion = 'COMPRA_SPOT'
                             confianza = 75
                             estrategias.append('HVN_SOPORTE')
                             razones.append(f"High Volume Node en ${poc_price:.2f} actuando como soporte")
                         else:
-                            # Si ya tenía otra señal, reforzar
                             confianza = min(100, confianza + 15)
                             estrategias.append('HVN_SOPORTE')
-                            razones.append(f"confluencia con HVN en ${poc_price:.2f}")
-                
-                # ESTRATEGIA 10: HVN_RESISTENCIA (NUEVA)
-                elif price_position == 'inside_value_area' and distance_to_poc < 2.0:
-                    if current_price > poc_price * 0.99:  # Precio cerca del POC por arriba
+                            razones.append(f"confluencia con HVN soporte en ${poc_price:.2f}")
+                    elif current_price >= poc_price * (1 + hvn_neutral_band):
                         if accion == 'NO_OPERAR':
                             accion = 'VENTA_SPOT'
                             confianza = 75
@@ -24542,7 +24547,7 @@ class TraderSmartMoney(TraderBase):
                         else:
                             confianza = min(100, confianza + 15)
                             estrategias.append('HVN_RESISTENCIA')
-                            razones.append(f"confluencia con HVN en ${poc_price:.2f}")
+                            razones.append(f"confluencia con HVN resistencia en ${poc_price:.2f}")
                 
                 # ESTRATEGIA 11: LVN_ROTURA (NUEVA)
                 if price_position == 'above_value_area' and volume_ratio > 1.5:
