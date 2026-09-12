@@ -1376,6 +1376,8 @@ function _decodeFuturesSignal(encodedSignal) {
 window._futuresPinnedSignalRecommendation = null;
 window._futuresLastFreshRecommendationData = null;
 window._futuresLifecycleNavigationInProgress = false;
+window.__FUTURES_SIGNAL_CONTEXT_VERSION__ = 'F3';
+console.log('🧭 Hotfix F.3 cargado: contexto canónico de señal Futures');
 
 function _futuresSignalSnapshotToRecommendation(sig) {
     sig = sig || {};
@@ -1536,29 +1538,41 @@ function _futuresClearPinnedSignalRecommendation(restoreCurrent = false) {
     }
 }
 
-(function _wrapFuturesRecommendationForActiveSignal() {
-    if (!window.IS_FUTURES_PAGE) return;
-    if (window._futuresRecommendationContextWrapped) return;
-    if (typeof window.updateRecommendation !== 'function') return;
+function _futuresInstallSignalRecommendationBridge() {
+    if (!window.IS_FUTURES_PAGE) return false;
 
-    window._futuresRecommendationContextWrapped = true;
-    window._futuresBaseUpdateRecommendation = window.updateRecommendation;
+    const currentRenderer = window.updateRecommendation;
+    if (typeof currentRenderer !== 'function') return false;
 
-    window.updateRecommendation = function(data) {
+    // F.3: no dependemos de que el wrapper se haya instalado una única vez
+    // durante la carga. Si otro script reemplazó updateRecommendation, lo
+    // volvemos a enlazar justo antes de abrir una señal activa.
+    if (currentRenderer.__futuresSignalContextF3 === true) {
+        return true;
+    }
+
+    const baseRenderer = (
+        currentRenderer.__futuresSignalContextBase
+        || currentRenderer
+    );
+
+    window._futuresBaseUpdateRecommendation = baseRenderer;
+
+    const signalAwareRenderer = function(data) {
         window._futuresLastFreshRecommendationData = data;
 
         const sig = window._futuresPinnedSignalRecommendation;
 
         if (!sig) {
-            return window._futuresBaseUpdateRecommendation(data);
+            return baseRenderer(data);
         }
 
         if (!_futuresSelectedPairMatchesSignal(sig)) {
             _futuresClearPinnedSignalRecommendation(false);
-            return window._futuresBaseUpdateRecommendation(data);
+            return baseRenderer(data);
         }
 
-        window._futuresBaseUpdateRecommendation(
+        baseRenderer(
             _futuresSignalSnapshotToRecommendation(sig)
         );
 
@@ -1568,7 +1582,23 @@ function _futuresClearPinnedSignalRecommendation(restoreCurrent = false) {
             false
         );
     };
-})();
+
+    signalAwareRenderer.__futuresSignalContextF3 = true;
+    signalAwareRenderer.__futuresSignalContextBase = baseRenderer;
+
+    window.updateRecommendation = signalAwareRenderer;
+    window._futuresRecommendationContextWrapped = true;
+
+    console.log(
+        '✅ F.3: recomendación de origen enlazada al contexto de señales activas'
+    );
+
+    return true;
+}
+
+// Intento normal al cargar. openFuturesActiveSignal() vuelve a instalarlo
+// de forma perezosa si fuese necesario.
+_futuresInstallSignalRecommendationBridge();
 
 (function _wrapFuturesChangeToSignalContext() {
     if (!window.IS_FUTURES_PAGE) return;
@@ -1596,10 +1626,36 @@ window.openFuturesActiveSignal = function(event, encodedSignal) {
     const sig = _decodeFuturesSignal(encodedSignal);
     if (!sig || !sig.symbol || !sig.timeframe) return;
 
+    // F.3: instalar/reinstalar el puente en el momento exacto del click.
+    // Así no dependemos del orden de carga de otros scripts ni de un wrapper
+    // que pudiera haber sido reemplazado después.
+    _futuresInstallSignalRecommendationBridge();
+
     // Guardamos el snapshot canónico ANTES de navegar. El análisis nuevo sólo
     // servirá para gráficos y para el bloque secundario "Estado actual".
     window._futuresPinnedSignalRecommendation = sig;
     window._futuresLifecycleNavigationInProgress = true;
+
+    const renderPinnedNow = function() {
+        if (window._futuresPinnedSignalRecommendation !== sig) return;
+
+        const renderer = (
+            window._futuresBaseUpdateRecommendation
+            || window.updateRecommendation
+        );
+
+        if (typeof renderer === 'function') {
+            renderer(
+                _futuresSignalSnapshotToRecommendation(sig)
+            );
+        }
+
+        _futuresRenderCurrentMarketState(
+            window._futuresLastFreshRecommendationData,
+            sig,
+            !window._futuresLastFreshRecommendationData
+        );
+    };
 
     try {
         window.changeToSignal(
@@ -1610,16 +1666,12 @@ window.openFuturesActiveSignal = function(event, encodedSignal) {
         window._futuresLifecycleNavigationInProgress = false;
     }
 
-    if (window._futuresBaseUpdateRecommendation) {
-        window._futuresBaseUpdateRecommendation(
-            _futuresSignalSnapshotToRecommendation(sig)
-        );
-        _futuresRenderCurrentMarketState(
-            null,
-            sig,
-            true
-        );
-    }
+    // Render inmediato y una segunda pasada después de que la navegación haya
+    // actualizado selects/DOM. Las respuestas asíncronas posteriores quedan
+    // protegidas por signalAwareRenderer.
+    renderPinnedNow();
+    window.setTimeout(renderPinnedNow, 0);
+    window.setTimeout(renderPinnedNow, 250);
 };
 
 // Si el usuario cambia par/TF manualmente, deja de estar mirando el snapshot
