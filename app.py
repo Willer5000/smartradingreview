@@ -30487,6 +30487,115 @@ def _futures_signal_public_url(symbol,timeframe,result):
     return f"{base}/futures?{q}"
 
 
+def _futures_current_entry_authority(result):
+    """
+    Resume si el análisis CLOSED_CANDLE vigente autoriza una NUEVA entrada.
+
+    No modifica ninguna decisión. Sólo traduce la recomendación actual a un
+    contrato compacto que puede usar el lifecycle y el endpoint de Activas.
+    """
+    if not isinstance(result, dict) or not result.get('success'):
+        return {
+            'known': False,
+            'action': 'NO_OPERAR',
+            'publication_status': 'UNKNOWN',
+            'executable': False,
+            'source_candle_close_timestamp': None,
+        }
+
+    decision = result.get('decision') or {}
+    levels = result.get('levels') or {}
+
+    action = str(decision.get('action') or 'NO_OPERAR').upper()
+    publication_status = str(
+        levels.get('publication_status')
+        or result.get('publication_status')
+        or (
+            'ANALYSIS_ONLY'
+            if levels.get('is_rejected')
+            else 'EXECUTABLE_SIGNAL'
+        )
+    ).upper()
+
+    try:
+        entry = float(levels.get('entry') or 0)
+        stop_loss = float(levels.get('stop_loss') or 0)
+        take_profit = float(levels.get('take_profit') or 0)
+    except (TypeError, ValueError):
+        entry = stop_loss = take_profit = 0.0
+
+    executable = bool(
+        action in ('LONG', 'SHORT')
+        and publication_status == 'EXECUTABLE_SIGNAL'
+        and entry > 0
+        and stop_loss > 0
+        and take_profit > 0
+    )
+
+    return {
+        'known': True,
+        'action': action,
+        'publication_status': publication_status,
+        'executable': executable,
+        'source_candle_close_timestamp': (
+            result.get('source_candle_close_timestamp')
+            or result.get('source_candle_timestamp')
+        ),
+    }
+
+
+def _futures_waiting_record_invalidation_reason(record, current_result):
+    """
+    Devuelve por qué una señal que TODAVÍA NO tocó Entry dejó de ser válida.
+
+    Política:
+    - si la recomendación CLOSED_CANDLE actual dice NO_OPERAR/ANALYSIS_ONLY,
+      una entrada pendiente se invalida;
+    - si cambió LONG <-> SHORT, se invalida;
+    - si cerró una vela más nueva y sigue existiendo una señal ejecutable,
+      la vieja queda supersedida por los niveles de la nueva señal;
+    - una operación con Entry ya tocado NO se cancela retroactivamente aquí.
+    """
+    if not isinstance(record, dict):
+        return None
+
+    if str(record.get('lifecycle_status') or '') != 'waiting_entry':
+        return None
+
+    authority = _futures_current_entry_authority(current_result)
+    if not authority.get('known'):
+        # Un fallo de datos no debe borrar una señal válida.
+        return None
+
+    current_action = str(authority.get('action') or 'NO_OPERAR').upper()
+    record_action = str(record.get('action') or '').upper()
+
+    if not authority.get('executable'):
+        return 'CURRENT_RECOMMENDATION_NOT_EXECUTABLE'
+
+    if current_action != record_action:
+        return 'CURRENT_RECOMMENDATION_DIRECTION_CHANGED'
+
+    current_close = authority.get('source_candle_close_timestamp')
+    record_close = (
+        record.get('source_candle_close_timestamp')
+        or record.get('source_candle_timestamp')
+    )
+
+    if current_close and record_close:
+        try:
+            import pandas as pd
+            current_ts = pd.Timestamp(current_close)
+            record_ts = pd.Timestamp(record_close)
+            if current_ts > record_ts:
+                return 'SUPERSEDED_BY_NEW_CLOSED_CANDLE'
+        except Exception:
+            # Si los timestamps no son comparables, no inventar invalidación.
+            pass
+
+    return None
+
+
 def _refresh_futures_signal_lifecycle(
     lifecycle,
     symbol,
@@ -30535,6 +30644,29 @@ def _refresh_futures_signal_lifecycle(
             status = str(record.get('lifecycle_status') or '')
 
             if status not in ('waiting_entry', 'entry_touched'):
+                return
+
+            # Hotfix 16.6 — una señal que aún NO entró debe seguir alineada
+            # con la recomendación CLOSED_CANDLE vigente. Si el sistema ahora
+            # dice NO_OPERAR, cambia de dirección o existe una vela cerrada
+            # más nueva con nuevos niveles, la vieja deja de ser ejecutable.
+            # Las operaciones con Entry ya tocado conservan su gestión original.
+            invalidation_reason = (
+                _futures_waiting_record_invalidation_reason(
+                    record,
+                    result
+                )
+            )
+            if invalidation_reason:
+                authority = _futures_current_entry_authority(result)
+                record['lifecycle_status'] = 'invalidated_before_entry'
+                record['close_reason'] = invalidation_reason
+                record['invalidated_at'] = now_iso
+                record['closed_at'] = now_iso
+                record['current_recommendation_action'] = authority.get('action')
+                record['current_recommendation_publication_status'] = (
+                    authority.get('publication_status')
+                )
                 return
 
             action = str(record.get('action') or '').upper()
@@ -32552,6 +32684,7 @@ def api_futures_signals_active():
             'low_confidence': 0,
             'invalid_levels': 0,
             'leverage_out_of_range': 0,
+            'recommendation_mismatch': 0,
             'accepted': 0
         }
 
@@ -32572,6 +32705,23 @@ def api_futures_signals_active():
             tf = record.get('timeframe')
             action = str(record.get('action') or '').upper()
             confidence = float(record.get('confidence') or 0)
+
+            # Segunda barrera fail-closed para la UI: aunque un snapshot viejo
+            # sobreviviera en lifecycle, una señal WAITING_ENTRY no se muestra
+            # si el análisis cerrado vigente ya no respalda esa entrada.
+            if lifecycle_status == 'waiting_entry':
+                current_result = (cache.get('analysis') or {}).get(
+                    (symbol, tf)
+                )
+                mismatch_reason = (
+                    _futures_waiting_record_invalidation_reason(
+                        record,
+                        current_result
+                    )
+                )
+                if mismatch_reason:
+                    filter_stats['recommendation_mismatch'] += 1
+                    continue
 
             if confidence < min_conf:
                 filter_stats['low_confidence'] += 1
