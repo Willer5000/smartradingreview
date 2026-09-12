@@ -2740,6 +2740,14 @@ class ReviewTrader:
                         f"{q7_rsi_learning.get('direction', 'NEUTRAL')} "
                         f"{q7_rsi_learning.get('alignment_with_system', 'NEUTRAL')}"
                     )
+            # COMMIT 16 — Shadow central real, fail-open. Sólo registra coincidencias
+            # con candidatos externos ya promovidos a SHADOW_READY/FAST.
+            if signal_id:
+                try:
+                    from research_shadow_bridge import track_research_shadow_signal
+                    track_research_shadow_signal(signal_id, analysis_result, system_type)
+                except Exception as _research_shadow_error:
+                    logger.warning('Research Shadow tracker no disponible: %s', _research_shadow_error)
             return signal_id
             
         except Exception as e:

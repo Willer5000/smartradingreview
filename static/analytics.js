@@ -2627,6 +2627,7 @@ window.loadAllAnalytics = async function() {
     const tasks = [
         () => loadQualityV2(),
         () => loadLearningGovernanceStatus(),
+        () => loadResearchFederationAnalytics(),
         () => loadSummary(),
         () => loadStrategiesRanking(),
         () => loadHeatmap(),
@@ -2665,6 +2666,9 @@ document.addEventListener('DOMContentLoaded', function() {
     if (governanceButton) governanceButton.addEventListener('click', refreshLearningGovernanceNow);
     const learningButton = document.getElementById('lo-test-learning');
     if (learningButton) learningButton.addEventListener('click', runLearningScientistTest);
+    const researchButton = document.getElementById('rf-analytics-refresh');
+    if (researchButton) researchButton.addEventListener('click', loadResearchFederationAnalytics);
+
     
     // ================================================================
     // AUTO-REFRESH LEGACY
@@ -2707,3 +2711,35 @@ document.addEventListener('DOMContentLoaded', function() {
     );
 
 });
+
+
+// ============================================================================
+// COMMIT 16 — RESEARCH FEDERATION: Backtest → OOS → Shadow live
+// Una sola respuesta compacta. No materializa señales históricas en Render.
+// ============================================================================
+async function loadResearchFederationAnalytics(){
+    const body=document.getElementById('rf-analytics-body');
+    if(!body) return;
+    try{
+        const response=await fetch('/api/research-federation/summary',{cache:'no-store'});
+        const data=await response.json();
+        if(!response.ok || !data.success) throw new Error(data.error||'Research Federation no disponible');
+        const candidates=data.candidates||[], shadow=data.shadow_live||[];
+        const sm=new Map(shadow.map(x=>[x.candidate_key,x]));
+        const actionable=candidates.filter(x=>['SHADOW_READY_FAST','SHADOW_READY','VALIDATED_SINGLE_ASSET','VALIDATION_REQUIRED','REJECTED_OOS'].includes(String(x.stage||'')));
+        const fmt=(v,d=2)=>Number.isFinite(Number(v))?Number(v).toFixed(d):'--';
+        const pct=v=>Number.isFinite(Number(v))?`${Number(v).toFixed(1)}%`:'--';
+        body.innerHTML=actionable.slice(0,80).map(x=>{const l=sm.get(x.candidate_key)||{};return `<tr>
+          <td><span class="badge bg-secondary">${x.stage||'--'}</span></td>
+          <td><b>${x.source_engine||'--'}</b><br><span class="text-muted small">${x.experiment||'--'}</span></td>
+          <td>${x.market_family||'--'} · ${x.timeframe||'--'}</td>
+          <td>${x.backtest_n??0} / ${pct(x.backtest_wr)} / ${fmt(x.backtest_exp_r,3)}R</td>
+          <td>${x.oos_n??0} / ${pct(x.oos_wr)} / ${fmt(x.oos_exp_r,3)}R / ${fmt(x.oos_pf,2)}</td>
+          <td>${l.resolved_n??0}/${l.signals_n??0} / ${pct(l.win_rate_pct)} / ${fmt(l.expectancy_r,3)}R / ${fmt(l.profit_factor,2)}</td>
+          <td>${fmt(l.avg_safety,1)}</td></tr>`}).join('') || '<tr><td colspan="7" class="text-muted text-center">Aún no hay candidatos con evidencia suficiente.</td></tr>';
+        const stages={}; candidates.forEach(x=>stages[x.stage]=(stages[x.stage]||0)+1);
+        const kp=document.getElementById('rf-analytics-kpis');
+        if(kp) kp.innerHTML=[['Hallazgos',candidates.length],['Shadow Ready',(stages.SHADOW_READY||0)+(stages.SHADOW_READY_FAST||0)],['Shadow live',shadow.reduce((a,x)=>a+Number(x.signals_n||0),0)],['Rechazados OOS',stages.REJECTED_OOS||0]].map(([k,v])=>`<div class="col-6 col-md-3"><div class="border rounded p-2 h-100"><div class="text-muted small">${k}</div><div class="h5 mb-0">${v}</div></div></div>`).join('');
+    }catch(err){body.innerHTML=`<tr><td colspan="7" class="text-warning">${err.message}</td></tr>`;}
+}
+window.loadResearchFederationAnalytics=loadResearchFederationAnalytics;

@@ -1448,6 +1448,25 @@
             </div>
         </div>
         
+
+        <!-- ============ COMMIT 16: RESEARCH FEDERATION / SHADOW LIVE ============ -->
+        <div class="chart-container" id="research-federation-analytics">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <div>
+                    <h5 class="mb-1"><i class="fas fa-flask me-2 text-info"></i>Evidencia externa · Research Federation</h5>
+                    <div class="text-muted small">Backtest → OOS → Shadow live. Datos compactos; los gráficos se dibujan en el navegador.</div>
+                </div>
+                <button class="btn btn-outline-info btn-sm" id="rf-analytics-refresh">Refrescar</button>
+            </div>
+            <div class="row g-2 mb-3" id="rf-analytics-kpis"></div>
+            <div class="table-responsive" style="max-height:420px;overflow:auto">
+                <table class="table table-dark table-sm table-hover align-middle">
+                    <thead><tr><th>Estado</th><th>Motor / experimento</th><th>Mercado · TF</th><th>Backtest N / WR / Exp.R</th><th>OOS N / WR / Exp.R / PF</th><th>Shadow live N / WR / Exp.R / PF</th><th>Safety</th></tr></thead>
+                    <tbody id="rf-analytics-body"><tr><td colspan="7" class="text-muted text-center">Cargando evidencia...</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+
         <!-- ============ LOGS DEL REVIEWTRADER ============ -->
         <div class="chart-container">
             <div class="d-flex justify-content-between align-items-center mb-3">
@@ -1497,6 +1516,6 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI"></script>
-    <script src="{{ url_for('static', filename='analytics.js') }}?v=20260911-C15-EXECUTION-INTELLIGENCE"></script>
+    <script src="{{ url_for('static', filename='analytics.js') }}?v=20260912-C16-RESEARCH-SHADOW"></script>
 </body>
 </html>

@@ -189,6 +189,17 @@ def _require_auth():
 
     return user
 # ============================================================================
+# COMMIT 16 — RESEARCH FEDERATION V1.2 / SHADOW BRIDGE
+# Sólo lectura para UI; el tracker live es fail-open y no modifica señales.
+# ============================================================================
+try:
+    from research_bridge import register_research_bridge
+    register_research_bridge(app, _require_auth)
+    print("✅ Research Federation V1.2 bridge registrado")
+except Exception as _research_bridge_error:
+    print(f"⚠️ Research Federation bridge deshabilitado: {_research_bridge_error}")
+
+# ============================================================================
 # COMPRESIÓN GZIP DE RESPUESTAS (reduce bandwidth ~70% en JSON grandes)
 # ============================================================================
 # Activa gzip automáticamente para respuestas JSON/HTML/JS/CSS >500 bytes.
@@ -26303,9 +26314,31 @@ def api_analyze():
             print(f"❌ Error 400: {error_response['error']}")
             return jsonify(error_response), 400
         
-        # Ejecutar análisis
+        # Hotfix 15.3 — la UI Spot tiene prioridad sobre research/learning.
+        # Si existe caché fresco no tomamos el slot pesado. En cache miss,
+        # serializamos el cálculo con Futures/Learning para evitar competencia.
+        _mark_system_interactive_priority()
         print(f"🔍 Ejecutando analyze_full_market...")
-        result = expert_system.analyze_full_market(symbol, interval)
+        cache_key = (symbol, interval)
+        result = _analysis_cache_get(cache_key)
+        if result is None:
+            ui_owner = f'spot-ui:analyze:{symbol}:{interval}'
+            ui_acquired = _acquire_heavy_analysis(ui_owner, timeout=20)
+            if not ui_acquired:
+                return jsonify({
+                    'success': False,
+                    'busy': True,
+                    'deferred': True,
+                    'retry_after_ms': 1500,
+                    'error': 'El sistema está terminando una tarea de mercado.'
+                }), 503
+            try:
+                result = expert_system.analyze_full_market(symbol, interval)
+            finally:
+                _release_heavy_analysis(ui_owner)
+                _mark_system_interactive_priority(seconds=8)
+        else:
+            print(f"⚡ CACHÉ UI: {symbol} {interval}")
         
         # Verificar resultado
         if result is None:
@@ -26952,12 +26985,19 @@ def _acquire_heavy_analysis(owner, timeout=None):
         else max(0, float(timeout))
     )
 
-    if not owner.startswith('futures-ui:'):
-        priority_fn = globals().get('_futures_interactive_priority_active')
+    interactive_owner = owner.startswith(('futures-ui:', 'spot-ui:'))
+    if not interactive_owner:
+        priority_fn = globals().get('_system_interactive_priority_active')
+        fallback_fn = globals().get('_futures_interactive_priority_active')
         try:
-            if callable(priority_fn) and priority_fn():
+            priority_active = (
+                bool(priority_fn()) if callable(priority_fn)
+                else bool(fallback_fn()) if callable(fallback_fn)
+                else False
+            )
+            if priority_active:
                 print(
-                    f"⏸️ [PRIORITY] {owner}: cede turno a Futures interactivo."
+                    f"⏸️ [PRIORITY] {owner}: cede turno a la interfaz activa."
                 )
                 return False
         except Exception:
@@ -26977,10 +27017,18 @@ def _acquire_heavy_analysis(owner, timeout=None):
     with _HEAVY_ANALYSIS_STATE_LOCK:
         _HEAVY_ANALYSIS_OWNER = owner
 
-    # El lock evita concurrencia. Hotfix 14.7 además exige HEADROOM antes
-    # de iniciar: un análisis Futures puede crear temporalmente pandas/numpy
-    # + 9 traders + capas y saltar más de 100 MB antes del siguiente guard.
-    _shed_recreatable_memory(reason=f'{owner}:preflight', aggressive=True)
+    # Hotfix 15.3 — no destruir caches pequeños en CADA trabajo.
+    # Con RSS normal (~130-170 MB) vaciar OHLCV/microestructura en cada vuelta
+    # obliga a descargar y reconstruir los mismos datos una y otra vez, lo que
+    # aumenta CPU/red y perjudica la UI. Sólo hacemos shed real bajo presión.
+    preflight_rss = _process_rss_mb()
+    if preflight_rss is not None and preflight_rss >= 210.0:
+        _shed_recreatable_memory(
+            reason=f'{owner}:preflight',
+            aggressive=preflight_rss >= 230.0,
+        )
+    else:
+        _trim_process_heap()
     rss = _process_rss_mb()
     if rss is not None and rss >= _MEMORY_JOB_START_LIMIT_MB:
         print(
@@ -29917,13 +29965,40 @@ _FUTURES_INTERACTIVE_PRIORITY_SECONDS = max(15, int(os.environ.get(
 _FUTURES_INTERACTIVE_PRIORITY_UNTIL = 0.0
 _FUTURES_INTERACTIVE_PRIORITY_LOCK = threading.Lock()
 
+# Hotfix 15.3 — prioridad interactiva GLOBAL. Antes sólo Futures podía hacer
+# ceder al research; la pantalla Spot podía competir con Futures incremental o
+# Learning y quedar aparentemente en carga infinita. Ahora cualquier análisis
+# solicitado por una persona obtiene una ventana corta sin nuevos jobs pesados.
+_SYSTEM_INTERACTIVE_PRIORITY_SECONDS = max(20, int(os.environ.get(
+    'SYSTEM_INTERACTIVE_PRIORITY_SECONDS', '60'
+) or 60))
+_SYSTEM_INTERACTIVE_PRIORITY_UNTIL = 0.0
+_SYSTEM_INTERACTIVE_PRIORITY_LOCK = threading.Lock()
+
+
+def _mark_system_interactive_priority(seconds=None):
+    global _SYSTEM_INTERACTIVE_PRIORITY_UNTIL
+    hold = max(5, int(seconds or _SYSTEM_INTERACTIVE_PRIORITY_SECONDS))
+    until = time.monotonic() + hold
+    with _SYSTEM_INTERACTIVE_PRIORITY_LOCK:
+        _SYSTEM_INTERACTIVE_PRIORITY_UNTIL = max(
+            _SYSTEM_INTERACTIVE_PRIORITY_UNTIL,
+            until,
+        )
+    return _SYSTEM_INTERACTIVE_PRIORITY_UNTIL
+
+
+def _system_interactive_priority_active():
+    with _SYSTEM_INTERACTIVE_PRIORITY_LOCK:
+        return time.monotonic() < _SYSTEM_INTERACTIVE_PRIORITY_UNTIL
+
 
 def _futures_ui_key(symbol, timeframe):
     return f"{str(symbol or '').strip()}|{str(timeframe or '').strip()}"
 
 
 def _mark_futures_interactive_priority(seconds=None):
-    """Pause NEW background research while a human waits for charts."""
+    """Compat: Futures marca la misma prioridad global de la interfaz."""
     global _FUTURES_INTERACTIVE_PRIORITY_UNTIL
     hold = max(5, int(seconds or _FUTURES_INTERACTIVE_PRIORITY_SECONDS))
     until = time.monotonic() + hold
@@ -29932,12 +30007,16 @@ def _mark_futures_interactive_priority(seconds=None):
             _FUTURES_INTERACTIVE_PRIORITY_UNTIL,
             until,
         )
+    _mark_system_interactive_priority(hold)
     return _FUTURES_INTERACTIVE_PRIORITY_UNTIL
 
 
 def _futures_interactive_priority_active():
+    # Learning/incremental existentes llaman esta función; devolver también la
+    # prioridad Spot hace que cedan ante cualquier análisis humano.
     with _FUTURES_INTERACTIVE_PRIORITY_LOCK:
-        return time.monotonic() < _FUTURES_INTERACTIVE_PRIORITY_UNTIL
+        futures_active = time.monotonic() < _FUTURES_INTERACTIVE_PRIORITY_UNTIL
+    return futures_active or _system_interactive_priority_active()
 
 
 def _get_futures_ui_cached(symbol, timeframe):
@@ -30126,9 +30205,26 @@ def _load_futures_cache_from_disk():
         print(f'⚠️ [FUT] No se pudo restaurar snapshot Supabase: {e}')
 
 
-def _save_futures_cache_to_disk():
-    """Compat name: persist one compact Futures snapshot in Supabase."""
+_FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS = max(30, int(os.environ.get(
+    'FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS', '120'
+) or 120))
+_FUTURES_LAST_SNAPSHOT_SAVE_AT = 0.0
+_FUTURES_SNAPSHOT_SAVE_LOCK = threading.Lock()
+
+
+def _save_futures_cache_to_disk(force=False):
+    """Persist compact Futures state without writing Supabase every 15s."""
+    global _FUTURES_LAST_SNAPSHOT_SAVE_AT
     try:
+        now_mono = time.monotonic()
+        if not force:
+            with _FUTURES_SNAPSHOT_SAVE_LOCK:
+                if (
+                    _FUTURES_LAST_SNAPSHOT_SAVE_AT > 0
+                    and now_mono - _FUTURES_LAST_SNAPSHOT_SAVE_AT
+                    < _FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS
+                ):
+                    return True
         from runtime_persistence import save_runtime_snapshot
         cache = _futures_analysis_cache
         if not cache.get('data'):
@@ -30145,6 +30241,8 @@ def _save_futures_cache_to_disk():
             'futures', 'analysis_cache', payload, ttl_seconds=24 * 3600
         )
         if ok:
+            with _FUTURES_SNAPSHOT_SAVE_LOCK:
+                _FUTURES_LAST_SNAPSHOT_SAVE_AT = now_mono
             print(f"💾 [FUT] Snapshot Supabase guardado ({len(serial_data.get('analysis_serial', {}))} pares)")
         return ok
     except Exception as e:
@@ -30154,6 +30252,61 @@ def _save_futures_cache_to_disk():
 
 # Hotfix 14.8: restauración diferida DESPUÉS de que Gunicorn abra el puerto.
 # No tocar Supabase durante import app.
+
+
+def _futures_entry_wait_bars(result, timeframe):
+    """Vigencia pre-entry: timeframe + alcanzabilidad técnica, sin cambiar Entry/SL/TP."""
+    levels=(result or {}).get('levels') or {}
+    raw=levels.get('entry_reachability_score')
+    try: score=float(raw)
+    except Exception: score=None
+    if score is None: bars=6
+    elif score >= 85: bars=4
+    elif score >= 70: bars=5
+    elif score >= 50: bars=6
+    else: bars=8
+    # Una señal publicada nunca queda abierta indefinidamente.
+    return max(4,min(8,int(bars)))
+
+
+def _human_duration(seconds):
+    try: seconds=max(0,int(seconds or 0))
+    except Exception: seconds=0
+    if seconds < 3600:
+        return f"{max(1,seconds//60)} min"
+    hours=seconds//3600; minutes=(seconds%3600)//60
+    if hours < 24:
+        return f"{hours} h" + (f" {minutes} min" if minutes else '')
+    days=hours//24; rem=hours%24
+    return f"{days} d" + (f" {rem} h" if rem else '')
+
+
+def _futures_signal_validity(result,timeframe,record=None):
+    import pandas as pd
+    now=pd.Timestamp.now(tz='UTC')
+    valid_until=None
+    if isinstance(record,dict) and record.get('valid_until'):
+        try:
+            valid_until=pd.Timestamp(record.get('valid_until'))
+            valid_until=valid_until.tz_localize('UTC') if valid_until.tz is None else valid_until.tz_convert('UTC')
+        except Exception: valid_until=None
+    if valid_until is None:
+        raw=(result or {}).get('source_candle_close_timestamp') or (result or {}).get('source_candle_timestamp')
+        try:
+            source=pd.Timestamp(raw); source=source.tz_localize('UTC') if source.tz is None else source.tz_convert('UTC')
+            tf_seconds=_FUTURES_TF_SECONDS.get(timeframe,1800)
+            valid_until=source+pd.Timedelta(seconds=tf_seconds*_futures_entry_wait_bars(result,timeframe))
+        except Exception:
+            valid_until=now+pd.Timedelta(seconds=_FUTURES_TF_SECONDS.get(timeframe,1800)*6)
+    remaining=max(0,int((valid_until-now).total_seconds()))
+    return {'valid_until':valid_until.isoformat(),'remaining_seconds':remaining,'duration_text':_human_duration(remaining),'expired':remaining<=0}
+
+
+def _futures_signal_public_url(symbol,timeframe,result):
+    from urllib.parse import urlencode
+    base=(os.getenv('PUBLIC_APP_URL') or os.getenv('RENDER_EXTERNAL_URL') or 'https://smartradingreview.onrender.com').rstrip('/')
+    q=urlencode({'symbol':symbol,'timeframe':timeframe,'signal_id':str((result or {}).get('signal_id') or '')})
+    return f"{base}/futures?{q}"
 
 
 def _refresh_futures_signal_lifecycle(
@@ -30338,7 +30491,7 @@ def _refresh_futures_signal_lifecycle(
             valid_until = source_close + pd.Timedelta(
                 seconds=(
                     tf_seconds
-                    * _FUTURES_SIGNAL_MAX_WAIT_BARS
+                    * _futures_entry_wait_bars(result, timeframe)
                 )
             )
 
@@ -31151,8 +31304,15 @@ def _analyze_futures_all_parallel(combos_override=None):
 
 _FUTURES_INCREMENTAL_CURSOR = 0
 _FUTURES_INCREMENTAL_CURSOR_LOCK = threading.Lock()
-_FUTURES_INCREMENTAL_INTERVAL_SECONDS = max(10, int(os.environ.get('FUTURES_INCREMENTAL_INTERVAL_SECONDS', '15') or 15))
+_FUTURES_INCREMENTAL_INTERVAL_SECONDS = max(10, int(os.environ.get('FUTURES_INCREMENTAL_INTERVAL_SECONDS', '30') or 30))
 _FUTURES_INCREMENTAL_START_DELAY_SECONDS = max(60, int(os.environ.get('FUTURES_INCREMENTAL_START_DELAY_SECONDS', '180') or 180))
+if _LOW_MEMORY_MODE:
+    # 15s hacía 5.760 ciclos/día potenciales y escrituras/descargas innecesarias.
+    # 30s mantiene el Shadow vivo sin competir constantemente con la UI.
+    _FUTURES_INCREMENTAL_INTERVAL_SECONDS = max(
+        30,
+        _FUTURES_INCREMENTAL_INTERVAL_SECONDS,
+    )
 
 
 def _next_futures_incremental_combo():
@@ -34201,6 +34361,7 @@ def _get_signals_for_entry_monitor():
                         # Con esto solo se envía UNA alerta por formación de vela (regla del usuario).
                         'candle_timestamp': sig.get('candle_timestamp') or sig.get('timestamp'),
                         'message': sig.get('message', ''),
+                        'tiempo_restante': sig.get('tiempo_restante'),
                     })
     except Exception as e:
         print(f"⚠️ monitor_entries: error leyendo señales spot: {e}")
@@ -34223,6 +34384,48 @@ def _get_signals_for_entry_monitor():
 
     
     return signals
+
+
+def _spot_preentry_key(signal):
+    return "PREENTRY|" + _entry_alert_key(
+        str(signal.get('symbol') or ''),
+        str(signal.get('timeframe') or ''),
+        str(signal.get('candle_timestamp') or 'unknown')
+    )
+
+
+def _spot_preentry_sent(signal):
+    key = _spot_preentry_key(signal)
+    with _entry_alerts_lock:
+        return key in _entry_alerts_sent
+
+
+def _mark_spot_preentry(signal):
+    key = _spot_preentry_key(signal)
+    with _entry_alerts_lock:
+        _entry_alerts_sent[key] = time.time()
+    _save_entry_alerts_to_disk()
+
+
+def _spot_preentry_zone(signal,current):
+    try:
+        entry=float(signal.get('entry') or 0); sl=float(signal.get('stop_loss') or 0); current=float(current or 0)
+        if min(entry,sl,current)<=0: return False
+        dist=abs(current-entry)/entry*100.0
+        risk=abs(entry-sl)/entry*100.0
+        zone=max(0.30,min(1.75,risk*0.30))
+        return MONITOR_ENTRY_TOLERANCE_PCT < dist <= zone
+    except Exception: return False
+
+
+def _build_spot_preentry_message(signal):
+    action=str(signal.get('action') or signal.get('decision') or '').upper(); icon='🟢' if action in ('LONG','COMPRA_SPOT') else '🔴'
+    symbol=str(signal.get('symbol') or '?'); tf=str(signal.get('timeframe') or '?')
+    entry=float(signal.get('entry') or 0); sl=float(signal.get('stop_loss') or 0); tp=float(signal.get('take_profit') or 0)
+    base=(os.getenv('PUBLIC_APP_URL') or os.getenv('RENDER_EXTERNAL_URL') or 'https://smartradingreview.onrender.com').rstrip('/')
+    from urllib.parse import urlencode
+    link=f"{base}/?{urlencode({'symbol':symbol,'timeframe':tf})}"
+    return '\n'.join([f"⚡ <b>SPOT · SETUP CERCA DEL ENTRY</b>",f"{icon} <b>{symbol} · {tf} · {action}</b>",'',f"💰 Entry: <b>{entry:.8g}</b>",f"🎯 TP: {tp:.8g}",f"🛑 SL: {sl:.8g}",'',f"🔗 <a href=\"{link}\">Abrir análisis</a>"])
 
 
 def monitor_entries_loop():
@@ -34261,7 +34464,18 @@ def monitor_entries_loop():
                 if not symbol or not tf or entry is None or current is None:
                     continue
                 
-                # ¿Ya enviamos alerta para esta señal/vela?
+                # PRE-ENTRY Spot: un aviso liviano y deduplicado, sin imagen.
+                # No sustituye el aviso ENTRY TOCADO con imagen.
+                if (not _spot_preentry_sent(sig)) and _spot_preentry_zone(sig, current):
+                    try:
+                        pre_message = _build_spot_preentry_message(sig)
+                        if expert_system.send_telegram_alert(pre_message, None):
+                            _mark_spot_preentry(sig)
+                            print(f"   ⚡ PRE-ENTRY Spot enviado: {symbol} {tf}")
+                    except Exception as pre_err:
+                        print(f"   ⚠️ PRE-ENTRY Spot: {pre_err}")
+
+                # ¿Ya enviamos alerta ENTRY para esta señal/vela?
                 if _entry_alert_already_sent(symbol, tf, candle_ts):
                     continue
                 
@@ -41117,16 +41331,21 @@ def learning_worker_loop():
 
     learning_batch_rows = max(
         4,
-        int(os.environ.get('LEARNING_MICROBATCH_ROWS', '16') or 16),
+        int(os.environ.get('LEARNING_MICROBATCH_ROWS', '8') or 8),
     )
     learning_batch_budget = max(
         4,
-        int(os.environ.get('LEARNING_MICROBATCH_BUDGET_SECONDS', '8') or 8),
+        int(os.environ.get('LEARNING_MICROBATCH_BUDGET_SECONDS', '6') or 6),
     )
     learning_batches_per_cycle = max(
         1,
-        int(os.environ.get('LEARNING_MICROBATCHES_PER_CYCLE', '4') or 4),
+        int(os.environ.get('LEARNING_MICROBATCHES_PER_CYCLE', '1') or 1),
     )
+    if _LOW_MEMORY_MODE:
+        # Blindaje ante variables antiguas del Dashboard de Render.
+        learning_batch_rows = min(learning_batch_rows, 8)
+        learning_batch_budget = min(learning_batch_budget, 6)
+        learning_batches_per_cycle = 1
     ui_retry_seconds = max(
         20,
         int(os.environ.get('LEARNING_UI_YIELD_RETRY_SECONDS', '60') or 60),
@@ -42091,218 +42310,26 @@ def _mark_futures_scalping_alert_sent(
         ] = time.time()
 
 
-def _build_futures_scalping_message(
-    user,
-    symbol,
-    timeframe,
-    result,
-    preferences,
-    window_state
-):
+def _build_futures_scalping_message(user, symbol, timeframe, result, preferences, window_state, lifecycle_record=None):
     from html import escape
-
-    decision = (
-        result.get(
-            'decision',
-            {}
-        )
-        or {}
-    )
-
-    levels = (
-        result.get(
-            'levels',
-            {}
-        )
-        or {}
-    )
-
-    action = str(
-        decision.get(
-            'action'
-        )
-        or ''
-    ).upper()
-
-    confidence = float(
-        decision.get(
-            'confidence',
-            0
-        )
-        or 0
-    )
-
-    entry = float(
-        levels.get(
-            'entry',
-            0
-        )
-        or 0
-    )
-
-    sl = float(
-        levels.get(
-            'stop_loss',
-            0
-        )
-        or 0
-    )
-
-    tp = float(
-        levels.get(
-            'take_profit',
-            0
-        )
-        or 0
-    )
-
-    safety = float(
-        levels.get(
-            'execution_safety',
-            0
-        )
-        or 0
-    )
-
-    rr = float(
-        levels.get(
-            'risk_reward',
-            0
-        )
-        or 0
-    )
-
-    leverage = int(
-        float(
-            levels.get(
-                'leverage',
-                1
-            )
-            or 1
-        )
-    )
-
-    icon = (
-        '🟢'
-        if action == 'LONG'
-        else '🔴'
-    )
-
-    timezone_name = str(
-        preferences.get(
-            'futures_scalping_timezone'
-        )
-        or 'UTC'
-    )
-
-    local_now = (
-        window_state.get(
-            'local_now'
-        )
-    )
-
-    local_text = (
-        local_now.strftime(
-            '%Y-%m-%d %H:%M'
-        )
-        if local_now is not None
-        else '--'
-    )
-
-    source_candle = str(
-        result.get(
-            'source_candle_timestamp'
-        )
-        or ''
-    )
-
-    lines = [
-        (
-            f"👤 <b>{escape(str(user))}</b>"
-        ),
-
-        (
-            "⚡ <b>SCALPING FUTURES · "
-            "SETUP LISTO</b>"
-        ),
-
-        '',
-
-        (
-            f"{icon} <b>"
-            f"{escape(symbol)} · "
-            f"{escape(timeframe)} · "
-            f"{escape(action)}"
-            f"</b>"
-        ),
-
-        (
-            f"🎯 Confianza comité: "
-            f"{confidence:.0f}%"
-        ),
-
-        (
-            f"🛡️ Execution Safety: "
-            f"{safety:.1f}"
-        ),
-
-        '',
-
-        (
-            f"💰 Entry: "
-            f"<b>{entry:.8g}</b>"
-        ),
-
-        (
-            f"🎯 TP: "
-            f"{tp:.8g}"
-        ),
-
-        (
-            f"🛑 SL: "
-            f"{sl:.8g}"
-        ),
-
-        (
-            f"⚖️ R/R: "
-            f"{rr:.2f}"
-        ),
-
-        (
-            f"⚡ Leverage técnico: "
-            f"x{leverage}"
-        ),
-
-        '',
-
-        (
-            "✅ Estado: "
-            "<b>EXECUTABLE_SIGNAL</b>"
-        ),
-
-        (
-            f"🕯️ Vela fuente cerrada: "
-            f"{escape(source_candle or '--')}"
-        ),
-
-        (
-            f"🕐 Ventana personal: "
-            f"{escape(local_text)} · "
-            f"{escape(timezone_name)}"
-        ),
-
-        '',
-
-        (
-            "ℹ️ Esta alerta respeta tu horario "
-            "personal. La preferencia de Telegram "
-            "NO modifica la decisión del motor."
-        )
+    decision=(result.get('decision') or {}); levels=(result.get('levels') or {})
+    action=str(decision.get('action') or '').upper()
+    entry=float(levels.get('entry') or 0); sl=float(levels.get('stop_loss') or 0); tp=float(levels.get('take_profit') or 0)
+    safety=float(levels.get('execution_safety') or 0); rr=float(levels.get('risk_reward') or 0)
+    leverage=int(float(levels.get('leverage') or 1)); icon='🟢' if action=='LONG' else '🔴'
+    validity=_futures_signal_validity(result,timeframe,lifecycle_record)
+    link=_futures_signal_public_url(symbol,timeframe,result)
+    lines=[
+        f"👤 <b>{escape(str(user))}</b>",
+        "⚡ <b>SCALPING FUTURES · SETUP LISTO</b>", '',
+        f"{icon} <b>{escape(symbol)} · {escape(timeframe)} · {escape(action)}</b>",
+        f"🛡️ Execution Safety: <b>{safety:.1f}</b>", '',
+        f"💰 Entry: <b>{entry:.8g}</b>", f"🎯 TP: {tp:.8g}", f"🛑 SL: {sl:.8g}",
+        f"⚖️ R/R: {rr:.2f}", f"⚡ Apalancamiento: <b>x{leverage}</b>",
+        f"⏳ Duración de la señal: <b>{escape(validity['duration_text'])}</b>", '',
+        f"🔗 <a href=\"{escape(link)}\">Abrir señal</a>",
     ]
-
-    return '\n'.join(
-        lines
-    )
+    return '\n'.join(lines)
 
 # ============================================================================
 # COMMIT 36P — PERFIL PERSONAL DE RIESGO FUTURES
@@ -43225,9 +43252,15 @@ def futures_scalping_alert_loop():
                         or {}
                     )
 
+                    lifecycle = dict(
+                        raw_data.get('lifecycle')
+                        or {}
+                    )
+
             except Exception:
 
                 analyses = {}
+                lifecycle = {}
 
             if not analyses:
 
@@ -43372,6 +43405,14 @@ def futures_scalping_alert_loop():
 
                     continue
 
+                # Sólo SETUP PRE-ENTRY: si ya tocó Entry o expiró, no enviar
+                signal_id = str(result.get('signal_id') or '')
+                lifecycle_record = lifecycle.get(signal_id) or {}
+                lifecycle_status = str(lifecycle_record.get('lifecycle_status') or 'waiting_entry')
+                validity = _futures_signal_validity(result, timeframe, lifecycle_record)
+                if lifecycle_status != 'waiting_entry' or validity.get('expired'):
+                    continue
+
                 # ------------------------------------------------------
                 # 4. Aplicar preferencias POR USUARIO
                 # ------------------------------------------------------
@@ -43419,7 +43460,8 @@ def futures_scalping_alert_loop():
                             timeframe,
                             result,
                             preferences,
-                            window_state
+                            window_state,
+                            lifecycle_record
                         )
                     )
 
@@ -45398,6 +45440,10 @@ def api_analyze_with_portfolio():
             )
         )
 
+        # El usuario que abrió Spot tiene prioridad sobre Futures incremental,
+        # ReviewTrader y research. Es una marca corta; no detiene lifecycle.
+        _mark_system_interactive_priority()
+
         # ==============================================================
         # IDENTIDAD Y PORTFOLIO SERVER-SIDE
         # ==============================================================
@@ -45975,32 +46021,31 @@ def api_analyze_with_portfolio():
             # 8. ANÁLISIS NORMAL DEL SISTEMA
             # ==========================================================
 
-            if not hasattr(
-                api_analyze_with_portfolio,
-                '_trading_system'
-            ):
-
-                api_analyze_with_portfolio._trading_system = (
-                    TradingExpertSystem()
-                )
-
-            trading_system = (
-                api_analyze_with_portfolio
-                ._trading_system
-            )
+            # Hotfix 15.3: reutilizar el ExpertSystem global. Mantener una
+            # segunda instancia completa dentro del endpoint duplicaba estado,
+            # caches y objetos que no aportan nada al análisis.
+            trading_system = expert_system
 
             print(
                 f"   🧠 Analizando "
                 f"{symbol} {timeframe}..."
             )
 
-            result = (
-                trading_system
-                .analyze_full_market(
-                    symbol,
-                    timeframe
-                )
-            )
+            ui_owner = f'spot-ui:tgp:{symbol}:{timeframe}'
+            ui_acquired = _acquire_heavy_analysis(ui_owner, timeout=20)
+            if not ui_acquired:
+                return jsonify({
+                    'success': False,
+                    'busy': True,
+                    'deferred': True,
+                    'retry_after_ms': 1500,
+                    'error': 'El sistema está terminando una tarea de mercado.'
+                }), 503
+            try:
+                result = trading_system.analyze_full_market(symbol, timeframe)
+            finally:
+                _release_heavy_analysis(ui_owner)
+                _mark_system_interactive_priority(seconds=8)
 
             if (
                 not result
@@ -46281,14 +46326,14 @@ def api_analyze_with_portfolio():
             result
         )
 
-        # Mantener como máximo cuatro análisis completos recientes.
+        # Hotfix 15.3: conservar sólo el análisis completo más reciente.
         # El caché global de analyze_full_market sigue siendo la capa
         # principal; éste sólo evita repetir la respuesta pesada del endpoint.
-        if len(cache_ts) > 4:
+        if len(cache_ts) > 1:
             oldest_keys = sorted(
                 cache_ts,
                 key=lambda item: cache_ts.get(item, 0)
-            )[:len(cache_ts) - 4]
+            )[:len(cache_ts) - 1]
 
             for oldest_key in oldest_keys:
                 cache_ts.pop(oldest_key, None)
