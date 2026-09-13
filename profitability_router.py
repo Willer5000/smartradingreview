@@ -125,9 +125,16 @@ def _negative_veto_eligible(candidate: Dict[str, Any]) -> bool:
     """
     engine = str(candidate.get("source_engine") or "").strip().lower()
     experiment = str(candidate.get("experiment") or "").strip().upper()
+    if experiment in {"CAUSAL_COVERAGE_STRATEGY", "CAUSAL_REGISTRY_RETEST"}:
+        return engine in {"execution", "risk", "strategy", "traders"}
     if engine != "strategy":
         return False
     return experiment in {"FACTORY_STRATEGY", "AI_STRATEGY_PROPOSAL"}
+
+
+def _negative_veto_min_oos(scope: Dict[str, Any]) -> int:
+    tf = str((scope or {}).get("timeframe") or "").upper()
+    return {"5M":10,"15M":8,"30M":6,"1H":5,"2H":4,"4H":4,"12H":3,"1D":3,"1W":2}.get(tf, 8)
 
 def _evidence_summary(candidate: Dict[str, Any], shadow: Dict[str, Any] | None = None) -> Dict[str, Any]:
     metrics = candidate.get("metrics") or {}
@@ -159,7 +166,7 @@ def _evidence_summary(candidate: Dict[str, Any], shadow: Dict[str, Any] | None =
 def evaluate_profitability_route(result: Dict[str, Any], system_type: str = "futures") -> Dict[str, Any]:
     """Read-only edge decision. Never creates LONG/SHORT or edits levels."""
     base = {
-        "version": "PROFITABILITY_ROUTER_V1",
+        "version": "PROFITABILITY_ROUTER_J_V2",
         "state": "UNKNOWN",
         "block_new_signal": False,
         "negative_veto_enabled": _NEGATIVE_VETO,
@@ -194,9 +201,9 @@ def evaluate_profitability_route(result: Dict[str, Any], system_type: str = "fut
             if stage == "REJECTED_OOS":
                 if (
                     _negative_veto_eligible(candidate)
-                    and summary["holdout_n"] >= 10
+                    and summary["holdout_n"] >= _negative_veto_min_oos(summary.get("scope") or {})
                     and summary["holdout_expectancy_r"] is not None
-                    and summary["holdout_expectancy_r"] <= -0.20
+                    and summary["holdout_expectancy_r"] <= -0.15
                 ):
                     summary["veto_eligible"] = True
                     negatives.append(summary)
@@ -238,11 +245,17 @@ def evaluate_profitability_route(result: Dict[str, Any], system_type: str = "fut
                 best_positive=best,
             )
         elif positives:
-            base.update(
-                state="SHADOW_READY",
-                reason="Existe candidato prometedor, pero todavía necesita completar Shadow live.",
-                best_positive=positives[0],
-            )
+            best = sorted(positives, key=lambda x: (x.get("holdout_expectancy_r") or -999, x.get("holdout_n") or 0), reverse=True)[0]
+            if str(best.get("experiment") or "").upper() == "CAUSAL_COVERAGE_STRATEGY":
+                state = "HISTORICAL_EDGE_VALIDATED"
+                reason = (
+                    "Replay causal + OOS muestran edge positivo. Se usa como prior de rentabilidad; "
+                    "Shadow live debe confirmar vigencia antes de Canary/Active."
+                )
+            else:
+                state = "SHADOW_READY"
+                reason = "Existe candidato prometedor, pero todavía necesita completar Shadow live."
+            base.update(state=state, reason=reason, best_positive=best)
         elif matched:
             base.update(
                 state="OBSERVE",

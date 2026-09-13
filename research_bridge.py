@@ -52,17 +52,24 @@ def _tf(value):
     return str(value or 'ALL').strip().upper() or 'ALL'
 
 def _balanced_candidates(rows, limit=240):
-    """Keep long and intraday timeframes visible even if one engine ran last."""
+    """Keep causal coverage + long/intraday timeframes visible in the central UI."""
     rows=list(rows or [])
     limit=max(1,int(limit or 1))
-    if len(rows)<=limit:
-        return rows
     picked=[]; seen=set()
     def key(row): return str(row.get('candidate_key') or '')
     def add(row):
         k=key(row)
         if not k or k in seen or len(picked)>=limit: return
         seen.add(k); picked.append(row)
+    # Commit J: the 18 causal cells are part of the product contract and must
+    # never disappear from Analytics because an observational engine has more rows.
+    for row in rows:
+        if str(row.get('experiment') or '') == 'CAUSAL_COVERAGE_STRATEGY':
+            add(row)
+            if len(picked)>=limit: return picked
+    if len(rows)<=limit:
+        for row in rows: add(row)
+        return picked
     # Guarantee one row for every existing engine x timeframe first.
     markers=set()
     for tf in _TF_ORDER:
@@ -141,6 +148,10 @@ def _compact_promotion(row):
         'canary_target': int(meta.get('recommended_canary_target') or 0),
         'research_version': row.get('research_version'),
         'updated_at': row.get('updated_at'),
+        'causal_strategy': bool(meta.get('causal_strategy') or meta.get('causal_candle_replay')),
+        'coverage_cell': meta.get('coverage_cell') or {},
+        'strategy_family': meta.get('causal_strategy_family') or meta.get('factory_family'),
+        'walk_forward_positive_ratio': _num(meta.get('walk_forward_positive_ratio')),
     }
 
 def _compact(force=False):
@@ -179,7 +190,7 @@ def _report(candidates,states,shadow,coverage):
     for s in states:
         lines.append(f"- {s.get('engine')}: {s.get('status')} · RSS {s.get('rss_mb')} MB · {s.get('last_seen_at')}")
     strategic=(coverage or {}).get('strategic_timeframes') or {}
-    lines += ['','## Cobertura de temporalidades', f"- 4H={strategic.get('4H',0)} · 12H={strategic.get('12H',0)} · 1D={strategic.get('1D',0)} · 1W={strategic.get('1W',0)}", '', '## Evidencia Discovery/Holdout temporal','- Research Federation V1.3 es atribución observacional; el replay causal separado continúa en laboratorio.']
+    lines += ['','## Cobertura de temporalidades', f"- 4H={strategic.get('4H',0)} · 12H={strategic.get('12H',0)} · 1D={strategic.get('1D',0)} · 1W={strategic.get('1W',0)}", '', '## Evidencia Discovery/Holdout temporal','- CAUSAL_COVERAGE_STRATEGY usa replay causal; el resto conserva evidencia observacional temporal.']
     for x in candidates[:35]:
         lines.append(f"- {x.get('stage')} | {x.get('source_engine')} | {x.get('experiment')} | {x.get('market_family')} {x.get('timeframe')} | Discovery.N={x.get('backtest_n')} | WR={x.get('backtest_wr')}% | Exp.R={x.get('backtest_exp_r')} | Holdout.N={x.get('oos_n')} | Holdout.WR={x.get('oos_wr')}% | Holdout.Exp.R={x.get('oos_exp_r')} | PF={x.get('oos_pf')}")
     lines += ['','## Shadow central live']
@@ -202,15 +213,21 @@ def register_research_bridge(app, auth_fn):
             return user
         try:
             c,s,l,cov=_compact()
+            try:
+                from research_evidence_fusion import profitability_snapshot
+                profitability = profitability_snapshot(force=False)
+            except Exception as _profit_error:
+                profitability = {'state':'UNAVAILABLE','error':str(_profit_error)[:160]}
             return jsonify({
                 'success':True,
                 'connected':True,
                 'candidates':c,
                 'engines':s,
                 'shadow_live':l,
-                'authority':'RESEARCH_SHADOW_BRIDGE_V1_2_1',
+                'authority':'RESEARCH_SHADOW_BRIDGE_J_V2',
                 'visible_rows':len(c),
                 'coverage':cov,
+                'profitability_evidence': profitability,
             })
         except Exception as exc:
             return jsonify({

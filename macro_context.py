@@ -1,7 +1,7 @@
 """
 macro_context.py
 ================
-V1.0 Macro Context Radar para TraderMacro.
+V1.1/J Macro Context + CEX Flow Radar para TraderMacro.
 
 Objetivo:
 - leer fuentes públicas/gratuitas de forma acotada;
@@ -656,6 +656,17 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
             item["age_hours"] = round(age_hours, 2)
             active_news.append(item)
 
+    # Commit J: current CEX reserve/flow context. It is a volatility/supply
+    # pressure input, never proof that an exchange itself bought or sold.
+    try:
+        from exchange_flow_context import get_exchange_flow_context
+        exchange_flow = get_exchange_flow_context(force=False) or {}
+    except Exception as exchange_error:
+        exchange_flow = {
+            "available": False, "state": "UNAVAILABLE",
+            "volatility_risk": "UNKNOWN", "error": str(exchange_error)[:160],
+        }
+
     top_score = max(
         [int(row.get("risk_score") or 0) for row in active_news[:10]]
         + [int(row.get("risk_score") or 0) for row in upcoming if 0 <= float(row.get("hours_until") or 9999) <= 24]
@@ -677,12 +688,23 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
     ), None)
 
     futures_posture = "CAUTION" if near_high_event or risk_level in {"HIGH", "CRITICAL"} else "NORMAL"
+    if str(exchange_flow.get("volatility_risk") or "").upper() in {"HIGH"}:
+        futures_posture = "CAUTION"
     if (
         near_high_event
         and str(near_high_event.get("time_precision") or "EXACT").upper() == "EXACT"
         and 0 <= float(near_high_event.get("hours_until") or 9999) <= 0.75
     ):
         futures_posture = "NO_NEW_TRADES"
+
+    risk_off_count=sum(1 for row in active_news[:10] if str(row.get("risk_bias") or "").upper()=="RISK_OFF")
+    risk_on_count=sum(1 for row in active_news[:10] if str(row.get("risk_bias") or "").upper()=="RISK_ON")
+    if risk_off_count > risk_on_count and risk_off_count > 0:
+        directional_bias="RISK_OFF"
+    elif risk_on_count > risk_off_count and risk_on_count > 0:
+        directional_bias="RISK_ON"
+    else:
+        directional_bias="NEUTRAL"
 
     ticker_items: List[Dict] = []
     for event in upcoming[:4]:
@@ -706,6 +728,15 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
             "age_hours": row.get("age_hours"),
             "published_at": row.get("published_at"),
         })
+    if exchange_flow.get("available"):
+        d24=float(exchange_flow.get("aggregate_inflow_24h_usd") or 0.0)
+        sign="+" if d24>=0 else "-"
+        ticker_items.insert(0,{
+            "id":"J-CEX-FLOW", "type":"CEX_FLOW",
+            "level": exchange_flow.get("volatility_risk") or "LOW",
+            "text": f"Flujo CEX 24h · {sign}${abs(d24)/1e6:.0f}M · {exchange_flow.get('label_es')}",
+            "url":"https://defillama.com/cexs", "source":"DefiLlama CEX",
+        })
     ticker_items = ticker_items[:10]
 
     return {
@@ -717,14 +748,22 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
         "risk_level": risk_level,
         "risk_score": top_score,
         "futures_posture": futures_posture,
-        "directional_bias": "NEUTRAL",
+        "directional_bias": directional_bias,
+        "exchange_flow": exchange_flow,
+        "fundamental_signal_context": {
+            "scheduled_event_risk": bool(near_high_event),
+            "news_bias": directional_bias,
+            "cex_flow_state": exchange_flow.get("state"),
+            "cex_volatility_risk": exchange_flow.get("volatility_risk"),
+            "policy": "CONFIRM_OR_VETO_ONLY_NEVER_CREATE_DIRECTION",
+        },
         "upcoming_events": upcoming[:10],
         "headlines": active_news[:12],
         "ticker_items": ticker_items,
         "telegram_alert_candidates": _build_alert_candidates(upcoming, active_news, now),
         "generated_at": _iso_utc(now),
         "display_timezone": DISPLAY_TZ_NAME,
-        "sources": ["GDELT", "BLS", "Federal Reserve"],
+        "sources": ["GDELT", "BLS", "Federal Reserve", "DefiLlama CEX"],
         "news_cache_age_seconds": round(max(0.0, time.monotonic() - news_fetched_at), 1) if news_fetched_at else None,
         "calendar_cache_age_seconds": round(max(0.0, time.monotonic() - calendar_fetched_at), 1) if calendar_fetched_at else None,
         "news_refresh_seconds": MACRO_NEWS_CACHE_SECONDS,

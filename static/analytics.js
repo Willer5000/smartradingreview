@@ -1590,8 +1590,15 @@ async function loadLearningGovernanceStatus() {
                 ? (last.created_at || last.timestamp || last.at || '--')
                 : (last || '--');
             q5SetText('lo-gemini-last', lastText === '--' ? '--' : formatDate(lastText));
+            const scheduler = data.scheduler && typeof data.scheduler === 'object' ? data.scheduler : {};
+            const schedulerAt = scheduler.last_attempt_at || '--';
+            q5SetText('lo-gemini-scheduler-last', schedulerAt === '--' ? '--' : formatDate(schedulerAt));
+            q5SetText('lo-gemini-scheduler-state', uiHumanLabel(scheduler.status || 'UNKNOWN'));
             q5SetText('lo-gemini-fallback', data.fallback_active ? 'Sí' : 'No');
-            q5SetText('lo-gemini-reason', data.reason ? uiHumanLabel(data.reason) : 'Actividad leída sin realizar llamadas adicionales.');
+            const schedulerDetail = schedulerAt !== '--'
+                ? ` Scheduler: ${uiHumanLabel(scheduler.status || 'UNKNOWN')}.`
+                : '';
+            q5SetText('lo-gemini-reason', (data.reason ? uiHumanLabel(data.reason) : 'Actividad leída sin realizar llamadas adicionales.') + schedulerDetail);
         }
     });
 }
@@ -2741,18 +2748,36 @@ async function loadResearchFederationAnalytics(){
         if(!response.ok || !data.success) throw new Error(data.error||'Research Federation no disponible');
         const candidates=data.candidates||[], shadow=data.shadow_live||[];
         const coverage=data.coverage||{};
+        const profitability=data.profitability_evidence||{};
         const strategic=coverage.strategic_timeframes||{};
         const covEl=document.getElementById('rf-analytics-coverage');
         if(covEl){
             const parts=['4H','12H','1D','1W'].map(tf=>`${tf}: ${Number(strategic[tf]||0)}`);
             const missing=(coverage.missing_strategic_timeframes||[]);
             covEl.className=`small mb-2 ${missing.length?'text-warning':'text-success'}`;
-            covEl.textContent=`Cobertura estratégica · ${parts.join(' · ')}${missing.length?` · Sin evidencia actual: ${missing.join(', ')}`:''}`;
+            const causalInfo=data.profitability_evidence||{};
+            const causal=`Causal ${Number(causalInfo.coverage_cells||0)}/${Number(causalInfo.coverage_target||18)}`;
+            covEl.textContent=`Cobertura estratégica · ${parts.join(' · ')} · ${causal}${missing.length?` · Sin evidencia actual: ${missing.join(', ')}`:''}`;
         }
         const sm=new Map(shadow.map(x=>[x.candidate_key,x]));
         const actionable=candidates.filter(x=>['SHADOW_READY_FAST','SHADOW_READY','VALIDATED_SINGLE_ASSET','VALIDATION_REQUIRED','REJECTED_OOS','OBSERVE'].includes(String(x.stage||'')));
         const fmt=(v,d=2)=>Number.isFinite(Number(v))?Number(v).toFixed(d):'--';
         const pct=v=>Number.isFinite(Number(v))?`${Number(v).toFixed(1)}%`:'--';
+        const renderBt=(bucket, emptyLabel='Sin estrategia OOS validada todavía')=>{
+            if(!bucket || bucket.state==='NO_EVIDENCE') return `<span class="text-muted">${emptyLabel}</span>`;
+            const best=bucket.best||{};
+            const state=bucket.state==='VALIDATED_OOS_POSITIVE'?'✅ OOS validado':'🟡 candidato';
+            return `${state} · Estrategias validadas ${Number(bucket.validated_strategies||0)} · OOS N ${Number(bucket.oos_n||0)} · Exp. ponderada ${fmt(bucket.oos_exp_r_weighted,3)}R`
+                + (best.oos_pf!=null?` · Mejor PF ${fmt(best.oos_pf,2)}`:'')
+                + (best.scope?.timeframe?` · Mejor TF ${best.scope.timeframe}`:'');
+        };
+        const spotBt=document.getElementById('q5-spot-backtest');
+        if(spotBt) spotBt.innerHTML=renderBt(profitability.spot);
+        const futBt=document.getElementById('q5-futures-backtest');
+        if(futBt) futBt.innerHTML=renderBt(profitability.futures_official,'Aún no hay Futures SHADOW_READY causal; no se fuerza rentabilidad.');
+        const shadowBt=document.getElementById('q5-shadow-backtest');
+        if(shadowBt) shadowBt.innerHTML=renderBt(profitability.futures_evaluation,'Sin challengers causales disponibles.');
+        const coverageLabel = profitability.coverage_target ? ` · Causal ${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||18)}` : '';
         body.innerHTML=actionable.slice(0,80).map(x=>{const l=sm.get(x.candidate_key)||{};return `<tr>
           <td><span class="badge bg-secondary">${x.stage||'--'}</span></td>
           <td><b>${x.source_engine||'--'}</b><br><span class="text-muted small">${x.experiment||'--'}</span></td>

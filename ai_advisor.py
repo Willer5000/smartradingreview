@@ -1571,6 +1571,17 @@ def get_gemini_activity_status():
         "last_run":
             None,
 
+        # Commit J separates scheduler health from the last successful LLM
+        # observation. A stale answer must not make an active watchdog look dead.
+        "scheduler": {
+            "last_attempt_at": None,
+            "status": "UNKNOWN",
+            "job_key": None,
+        },
+
+        "last_success":
+            None,
+
         "ticker_items":
             [],
 
@@ -1700,6 +1711,43 @@ def get_gemini_activity_status():
         return {}
 
     try:
+
+        # ================================================================
+        # COMMIT J — SALUD DEL SCHEDULER DEL CIENTÍFICO
+        # ================================================================
+        # q6_job_runs es la evidencia determinista de que el watchdog está
+        # intentando ejecutar el slot, aun si Groq/Gemini falla antes de
+        # producir una observación. No realiza llamadas LLM.
+        try:
+            scheduler_response = db._with_retry(
+                lambda: (
+                    db.client
+                    .table("q6_job_runs")
+                    .select("job_key,status,updated_at")
+                    .like("job_key", "AI_LEARNING_V2:%")
+                    .order("updated_at", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+            )
+            scheduler_row = (
+                dict(scheduler_response.data[0])
+                if scheduler_response and scheduler_response.data
+                else None
+            )
+            if scheduler_row:
+                result["scheduler"] = {
+                    "last_attempt_at": scheduler_row.get("updated_at"),
+                    "status": str(scheduler_row.get("status") or "UNKNOWN").upper(),
+                    "job_key": scheduler_row.get("job_key"),
+                }
+        except Exception as scheduler_error:
+            result["scheduler"] = {
+                "last_attempt_at": None,
+                "status": "UNAVAILABLE",
+                "job_key": None,
+                "error": str(scheduler_error)[:120],
+            }
 
         # ================================================================
         # ÚLTIMO INTENTO GEMINI LEARNING
@@ -1999,6 +2047,8 @@ def get_gemini_activity_status():
         result[
             "working"
         ] = True
+
+        result["last_success"] = dict(result.get("last_run") or {})
 
         response_json = _as_dict(
             (

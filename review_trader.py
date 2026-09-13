@@ -12516,12 +12516,46 @@ class ReviewTrader:
                 explicit_market
             )
             
-            # Evaluar coincidencia con ganadoras
+            # Evaluar coincidencia con ganadoras live/históricas del sistema.
             long_score = self._evaluate_match(active_strategies, rec_long)
             short_score = self._evaluate_match(active_strategies, rec_short)
-            
-            print(f"   📈 Score LONG: {long_score:.1f}")
-            print(f"   📉 Score SHORT: {short_score:.1f}")
+
+            # COMMIT J — Backtest causal/OOS como PRIOR, no como muestra live.
+            # Puede reforzar/atenuar un voto que ya tiene estrategias activas,
+            # pero jamás inventa LONG/SHORT por sí solo ni toca Entry/SL/TP.
+            research_long = {'state': 'UNAVAILABLE', 'support_score': 0.0, 'penalty_score': 0.0}
+            research_short = {'state': 'UNAVAILABLE', 'support_score': 0.0, 'penalty_score': 0.0}
+            try:
+                from research_evidence_fusion import edge_prior
+                regime = str(
+                    (capas.get('futures_quantitative_context') or {}).get('regime')
+                    or (capas.get('market_regime') or {}).get('regime')
+                    or ''
+                ).upper() or None
+                strategy_blob = ' | '.join(str(x).upper() for x in active_strategies)
+                runtime_features = {
+                    'has_pullback': 'YES' if ('PULLBACK' in strategy_blob or 'RETEST' in strategy_blob) else 'NO',
+                    'has_sweep': 'YES' if ('SWEEP' in strategy_blob or 'LIQUIDITY' in strategy_blob) else 'NO',
+                    'has_order_block': 'YES' if ('ORDER_BLOCK' in strategy_blob or 'ORDER BLOCK' in strategy_blob) else 'NO',
+                }
+                research_long = edge_prior(symbol, timeframe, 'LONG', explicit_market, regime=regime, runtime_features=runtime_features)
+                research_short = edge_prior(symbol, timeframe, 'SHORT', explicit_market, regime=regime, runtime_features=runtime_features)
+
+                def _fuse(existing, prior):
+                    support=float(prior.get('support_score') or 0.0)
+                    penalty=float(prior.get('penalty_score') or 0.0)
+                    # With no local score, causal evidence alone tops out below
+                    # the 60-point voting gate: evidence supports, never creates.
+                    fused=(0.65*float(existing) + 0.35*support) if existing > 0 else (0.35*support)
+                    return max(0.0, min(100.0, fused-penalty))
+
+                long_score = _fuse(long_score, research_long)
+                short_score = _fuse(short_score, research_short)
+            except Exception as research_error:
+                logger.debug('Research evidence prior no disponible: %s', research_error)
+
+            print(f"   📈 Score LONG fusionado: {long_score:.1f} | Research={research_long.get('state')}")
+            print(f"   📉 Score SHORT fusionado: {short_score:.1f} | Research={research_short.get('state')}")
             
             # Decisión
             if long_score > 60 and long_score > short_score + 15:
@@ -12534,7 +12568,14 @@ class ReviewTrader:
                 estrategias_detectadas.append('REVIEW_HISTORICO_GANADOR_LONG')
                 razones.append(f"Coincidencia con estrategias ganadoras históricas (score {long_score:.0f})")
                 if rec_long:
-                    razones.append(f"Basado en {rec_long.get('sample_size', 0)} señales")
+                    razones.append(f"Basado en {rec_long.get('sample_size', 0)} señales live/históricas")
+                if research_long.get('state') in ('OOS_VALIDATED','OOS_PLUS_SHADOW'):
+                    bp=research_long.get('best_positive') or {}
+                    razones.append(
+                        f"Research causal OOS apoya LONG: {bp.get('oos_exp_r')}R, "
+                        f"PF {bp.get('oos_pf')}, N={bp.get('oos_n')}"
+                    )
+                    estrategias_detectadas.append('RESEARCH_CAUSAL_OOS_LONG')
                     
             elif short_score > 60 and short_score > long_score + 15:
                 accion = (
@@ -12546,13 +12587,23 @@ class ReviewTrader:
                 estrategias_detectadas.append('REVIEW_HISTORICO_GANADOR_SHORT')
                 razones.append(f"Coincidencia con estrategias ganadoras históricas (score {short_score:.0f})")
                 if rec_short:
-                    razones.append(f"Basado en {rec_short.get('sample_size', 0)} señales")
+                    razones.append(f"Basado en {rec_short.get('sample_size', 0)} señales live/históricas")
+                if research_short.get('state') in ('OOS_VALIDATED','OOS_PLUS_SHADOW'):
+                    bp=research_short.get('best_positive') or {}
+                    razones.append(
+                        f"Research causal OOS apoya SHORT: {bp.get('oos_exp_r')}R, "
+                        f"PF {bp.get('oos_pf')}, N={bp.get('oos_n')}"
+                    )
+                    estrategias_detectadas.append('RESEARCH_CAUSAL_OOS_SHORT')
                     
-            elif self._detect_loser_pattern(active_strategies, rec_long, rec_short):
+            elif (
+                research_long.get('state') == 'NEGATIVE_OOS'
+                and research_short.get('state') == 'NEGATIVE_OOS'
+            ) or self._detect_loser_pattern(active_strategies, rec_long, rec_short):
                 accion = 'NO_OPERAR'
                 confianza = 75
                 estrategias_detectadas.append('REVIEW_PATRON_PERDEDOR')
-                razones.append("Estrategias activas coinciden con patrones históricamente perdedores")
+                razones.append("Estrategias activas coinciden con evidencia perdedora live y/o OOS causal")
                 
             else:
                 accion = 'NEUTRAL'

@@ -23863,30 +23863,45 @@ class TraderMacro(TraderBase):
             macro_posture = str(macro_context.get('futures_posture', 'NORMAL')).upper()
             upcoming_macro = macro_context.get('upcoming_events', []) or []
             macro_headlines = macro_context.get('headlines', []) or []
+            macro_bias = str(macro_context.get('directional_bias', 'NEUTRAL')).upper()
+            exchange_flow = macro_context.get('exchange_flow', {}) or {}
+            exchange_flow_state = str(exchange_flow.get('state', 'UNAVAILABLE')).upper()
+            exchange_flow_vol = str(exchange_flow.get('volatility_risk', 'UNKNOWN')).upper()
 
-            # V1.0: Futures ya puede LEER el contexto macro, pero permanece
-            # CONTEXT_ONLY. No convertimos una noticia en LONG/SHORT ni en veto.
+            # COMMIT J — Macro sólo puede confirmar o frenar; nunca crea LONG/SHORT.
+            # Compatibilidad conceptual del contrato anterior: el retorno legacy
+            # era `return accion, 0, estrategias, razones`. J conserva la dirección
+            # en NO_OPERAR pero permite una confianza de CAUTION para que el comité
+            # conozca el riesgo fundamental sin convertirlo en una señal direccional.
+            # Eventos de alto impacto muy próximos sí merecen un voto NO_OPERAR
+            # porque la incertidumbre de gap/slippage no está representada por el
+            # análisis técnico. Noticias/flujo CEX menos severos sólo añaden cautela.
             if system_type == 'futures':
                 if macro_posture == 'NO_NEW_TRADES':
                     estrategias.append('MACRO_EVENT_RISK')
                     razones.append(
-                        'Contexto macro: evento de alto impacto muy próximo; '
-                        'el radar recomienda máxima prudencia con riesgo nuevo'
+                        'Evento macro de alto impacto muy próximo: evitar riesgo nuevo '
+                        'hasta observar la reacción posterior del mercado'
                     )
-                elif macro_risk in ('HIGH', 'CRITICAL'):
+                    return 'NO_OPERAR', 85, estrategias, razones
+                if macro_risk == 'CRITICAL':
                     estrategias.append('MACRO_NEWS_RISK')
+                    razones.append('Contexto macro crítico: veto prudencial a nuevas entradas; no define dirección')
+                    return 'NO_OPERAR', 70, estrategias, razones
+                if macro_risk == 'HIGH':
+                    estrategias.append('MACRO_NEWS_RISK')
+                    razones.append('Contexto macro alto: cautela; se exige mayor confluencia técnica')
+                    confianza = max(confianza, 45)
+                if exchange_flow_vol == 'HIGH':
+                    estrategias.append('CEX_FLOW_VOLATILITY')
                     razones.append(
-                        f'Contexto macro {macro_risk.lower()}: prudencia adicional; '
-                        'sin sesgo direccional automático'
+                        f'Flujo CEX {exchange_flow_state.lower()}: posible expansión de volatilidad; '
+                        'no se interpreta como compra/venta propia del exchange'
                     )
-                else:
-                    razones.append(
-                        'Macro Futures en contexto: sin amenaza externa suficiente '
-                        'para alterar la operativa'
-                    )
-
-                # Abstención/contexto. No cambia el consenso productivo.
-                return accion, 0, estrategias, razones
+                    confianza = max(confianza, 45)
+                if not estrategias:
+                    razones.append('Macro Futures neutral: sin veto externo relevante')
+                return accion, confianza, estrategias, razones
 
             # ============ OBTENER ANÁLISIS DE BTC Y RATIO ============
             btc_analysis = capas.get('btc_analysis', {})
@@ -24144,21 +24159,39 @@ class TraderMacro(TraderBase):
                 confianza = max(0, confianza - 10)
                 razones.append(f"Sentimiento extremo ({classification}) sin dirección clara")
             
-            # ============ CONTEXTO MACRO EXTERNO (V1.0 READ-ONLY) ============
-            # Se conserva para atribución/aprendizaje, pero todavía NO modifica
-            # el voto Spot. La evidencia cuantitativa decidirá cualquier autoridad.
+            # ============ CONTEXTO FUNDAMENTAL MACRO (COMMIT J) ============
+            # Las noticias, riesgo bancario y flujos CEX confirman/penalizan una
+            # dirección que ya nació de rotación/técnica. Nunca originan una compra
+            # o venta por sí solos y jamás cambian Entry/SL/TP.
             if macro_risk in ('HIGH', 'CRITICAL'):
                 estrategias.append('MACRO_NEWS_RISK')
-                if upcoming_macro:
-                    razones.append(
-                        f'Radar macro {macro_risk.lower()}: evento relevante próximo; '
-                        'contexto de riesgo, no orden de trading'
-                    )
-                elif macro_headlines:
-                    razones.append(
-                        f'Radar macro {macro_risk.lower()}: titulares relevantes; '
-                        'sesgo direccional no confirmado'
-                    )
+                razones.append(
+                    f'Radar macro {macro_risk.lower()}: aumenta riesgo de volatilidad; '
+                    'se usa como confirmación/veto, no como señal independiente'
+                )
+            if macro_bias == 'RISK_OFF':
+                if symbol == 'BTC-USDT' and accion == 'COMPRA_SPOT':
+                    confianza = max(0, confianza - 8)
+                    razones.append('Noticias/fundamentales favorecen risk-off: penaliza compra BTC')
+                elif symbol in ('PAXG-USDT','PAXG-BTC') and accion == 'COMPRA_SPOT':
+                    confianza = min(100, confianza + 8)
+                    estrategias.append('MACRO_RISK_OFF_CONFIRMATION')
+                    razones.append('Noticias/fundamentales risk-off confirman refugio en oro/PAXG')
+            elif macro_bias == 'RISK_ON':
+                if symbol == 'BTC-USDT' and accion == 'COMPRA_SPOT':
+                    confianza = min(100, confianza + 6)
+                    estrategias.append('MACRO_RISK_ON_CONFIRMATION')
+                    razones.append('Noticias/fundamentales risk-on confirman apetito por BTC')
+                elif symbol in ('PAXG-USDT','PAXG-BTC') and accion == 'COMPRA_SPOT':
+                    confianza = max(0, confianza - 6)
+                    razones.append('Contexto risk-on reduce convicción de refugio')
+            if exchange_flow_vol == 'HIGH':
+                confianza = max(0, confianza - 5)
+                estrategias.append('CEX_FLOW_VOLATILITY')
+                razones.append(
+                    f'Flujo CEX {exchange_flow_state.lower()} con magnitud alta: '
+                    'reduce confianza por riesgo de volatilidad, sin asumir dirección'
+                )
 
             # v24: Super-peso en divergencia extrema
             if correlation.get('extreme_divergence', False):
@@ -36159,7 +36192,7 @@ _AI_LEARNING_SLOT_HOURS = max(
 )
 _AI_LEARNING_WATCHDOG_SECONDS = max(
     300,
-    int(os.getenv('AI_LEARNING_WATCHDOG_SECONDS', '1200') or 1200)
+    int(os.getenv('AI_LEARNING_WATCHDOG_SECONDS', '600') or 600)
 )
 
 
@@ -36203,8 +36236,8 @@ def _run_ai_learning_daily(q6_slot=None, trigger_source='daily'):
             'AI_LEARNING_V2',
             q6_slot,
             retry=True,
-            failed_retry_minutes=15,
-            abandoned_after_minutes=15
+            failed_retry_minutes=5,
+            abandoned_after_minutes=12
         )
         if not claimed:
             return False
@@ -36287,7 +36320,7 @@ def _q6_run_daily_review():
 def ai_learning_scientist_watchdog_loop():
     """Garantiza que el Científico no dependa del Review diario ni del heavy lock."""
     # Web + snapshots tienen prioridad tras un deploy.
-    time.sleep(120)
+    time.sleep(60)
     while True:
         try:
             _run_ai_learning_daily(
@@ -40276,13 +40309,28 @@ def _build_ai_learning_context():
             _research_compact(force=False)
         )
 
+        try:
+            from research_evidence_fusion import profitability_snapshot
+            rf_profitability = profitability_snapshot(force=False)
+        except Exception as _rf_profit_error:
+            rf_profitability = {
+                'state': 'UNAVAILABLE',
+                'error': str(_rf_profit_error)[:160],
+            }
+
         research_federation_learning = {
-            'version': 'RF_LEARNING_BRIDGE_V1',
+            'version': 'RF_LEARNING_BRIDGE_J_V2',
             'authority': 'RESEARCH_ONLY',
             'coverage': rf_coverage or {},
-            'candidates': (rf_candidates or [])[:30],
-            'shadow_live': (rf_shadow or [])[:20],
+            'profitability_evidence': rf_profitability,
+            'candidates': (rf_candidates or [])[:36],
+            'shadow_live': (rf_shadow or [])[:24],
             'engines': (rf_states or [])[:10],
+            'learning_rule': (
+                'Backtest/OOS is a historical profitability prior; Shadow/live is '
+                'current confirmation. Never sum both samples or manufacture a '
+                'positive strategy for a cell with no validated edge.'
+            ),
         }
 
     except Exception as research_learning_error:
