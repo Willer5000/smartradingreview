@@ -383,8 +383,13 @@ function futRenderAnalysisDiagnostics(json, context) {
         const classification = String(
             candidate.classification || 'ANALYSIS_ERROR'
         );
-        const meta = statusMeta[classification]
-            || statusMeta.ANALYSIS_ERROR;
+        const isResearchShadow = String(
+            candidate.engine_publication_status || ''
+        ).toUpperCase() === 'RESEARCH_ONLY_SHADOW';
+
+        const meta = isResearchShadow
+            ? {badge: 'info text-dark', label: 'RESEARCH / SHADOW'}
+            : (statusMeta[classification] || statusMeta.ANALYSIS_ERROR);
         const rawSymbol = String(
                     candidate.symbol || ''
                 );
@@ -410,8 +415,11 @@ function futRenderAnalysisDiagnostics(json, context) {
                 );
         const action = futEscapeHtml(candidate.action || 'NO_OPERAR');
         const confidence = fmtConfidence(candidate.confidence);
+        const baseReason = candidate.reason || candidate.active_reason || 'Sin motivo disponible';
         const reason = futEscapeHtml(
-            candidate.reason || candidate.active_reason || 'Sin motivo disponible'
+            isResearchShadow
+                ? `${baseReason} · Visible para investigación; no es señal ejecutable todavía.`
+                : baseReason
         );
         const safety = candidate.execution_safety;
         const safetyMinimum = candidate.execution_safety_minimum;
@@ -779,7 +787,7 @@ window.loadGlobalStats = async function() {
 // SOBREESCRIBIR: updateActiveSignals (vela ACTUAL — dinámica)
 // ============================================================================
 // Solo se ejecuta si estamos en /futures. Usa /api/futures/signals/active
-// que retorna SOLO las 5 cripto × 6 TF × LONG/SHORT
+// que retorna el universo productivo y expone Research/Shadow como diagnóstico
 
 window.updateActiveSignals = async function() {
 
@@ -938,6 +946,22 @@ window.updateActiveSignals = async function() {
             json.warming_up
         );
 
+        // HOTFIX H.1 — refrescar un combo en background no invalida el
+        // snapshot ya disponible. Sólo un warm-up SIN cache bloquea la lista.
+        const backgroundRefresh = Boolean(
+            json.background_refresh && json.cache_ready
+        );
+        const backgroundRefreshHtml = backgroundRefresh
+            ? `
+                <div class="list-group-item bg-dark border-info text-info py-2">
+                    <small>
+                        🔄 Actualizando ${futEscapeHtml(progress.current || 'otro mercado')} en segundo plano.
+                        Las señales actuales siguen visibles.
+                    </small>
+                </div>
+            `
+            : '';
+
         console.log(
             '📊 ACTIVE:',
             {
@@ -1026,7 +1050,7 @@ window.updateActiveSignals = async function() {
         // ------------------------------------------------------------
         if (signals.length === 0) {
 
-            signalsList.innerHTML = diagnosticsHtml + `
+            signalsList.innerHTML = backgroundRefreshHtml + diagnosticsHtml + `
                 <div class="list-group-item bg-dark text-warning text-center py-3">
 
                     <strong>
@@ -1253,7 +1277,7 @@ window.updateActiveSignals = async function() {
             `;
         });
 
-        signalsList.innerHTML = diagnosticsHtml + html;
+        signalsList.innerHTML = backgroundRefreshHtml + diagnosticsHtml + html;
 
     } catch (err) {
 
@@ -1899,6 +1923,22 @@ window.updatePreviousSignals = async function() {
                 json.warming_up
             );
 
+        // HOTFIX H.1 — la vela anterior ya calculada no desaparece mientras
+        // otro símbolo/TF se actualiza en el round-robin incremental.
+        const backgroundRefresh = Boolean(
+            json.background_refresh && json.cache_ready
+        );
+        const backgroundRefreshHtml = backgroundRefresh
+            ? `
+                <div class="list-group-item bg-dark border-info text-info py-2">
+                    <small>
+                        🔄 Actualizando ${futEscapeHtml(progress.current || 'otro mercado')} en segundo plano.
+                        La última vela cerrada disponible sigue siendo válida para visualización.
+                    </small>
+                </div>
+            `
+            : '';
+
         console.log(
             '📊 PREVIOUS:',
             {
@@ -2016,7 +2056,7 @@ window.updatePreviousSignals = async function() {
         // ------------------------------------------------------------
         if (signals.length === 0) {
 
-            signalsList.innerHTML = diagnosticsHtml + `
+            signalsList.innerHTML = backgroundRefreshHtml + diagnosticsHtml + `
                 <div class="list-group-item bg-dark text-warning text-center py-3">
 
                     <strong>
@@ -2238,7 +2278,7 @@ window.updatePreviousSignals = async function() {
         });
 
         signalsList.innerHTML =
-            diagnosticsHtml + html;
+            backgroundRefreshHtml + diagnosticsHtml + html;
 
     } catch (err) {
 

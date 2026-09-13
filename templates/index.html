@@ -142,7 +142,13 @@
                 'ETH-USDT': 'ETH/USDT',
                 'SOL-USDT': 'SOL/USDT',
                 'XRP-USDT': 'XRP/USDT',
-                'ADA-USDT': 'ADA/USDT'
+                'ADA-USDT': 'ADA/USDT',
+                'LINK-USDT': 'LINK/USDT · Research/Shadow',
+                'BNB-USDT': 'BNB/USDT · Research/Shadow'
+            },
+            researchOnlySymbols: {
+                'LINK-USDT': ['15m', '30m', '1h'],
+                'BNB-USDT': ['15m', '30m', '1h']
             },
             timeframes: {
                 '5m':  '5 Minutos',
@@ -2859,7 +2865,7 @@
     {% if is_futures %}
 
     <script
-        src="{{ url_for('static', filename='futures.js') }}?v=20260912-F3-SIGNAL-CONTEXT"
+        src="{{ url_for('static', filename='futures.js') }}?v=20260912-H1-NONBLOCKING-SHADOW"
     ></script>
 
     {% endif %}
@@ -4099,6 +4105,33 @@
                     console.error('Error reconfigurando selectores:', e);
                 }
             })();
+
+            // ============================================================
+            // HOTFIX H.1 — LINK/BNB visibles sin convertirlos en producción
+            // ============================================================
+            // Estos activos ya se calculan en Research/Shadow, pero sólo para
+            // 15m/30m/1h. Al mostrarlos en el selector evitamos combinaciones
+            // que el backend deliberadamente no investiga.
+            function applyFuturesResearchTimeframeGuard() {
+                if (!window.IS_FUTURES_PAGE || !window.PAGE_CONFIG) return;
+
+                const symbolSel = document.getElementById('symbol-select');
+                const intervalSel = document.getElementById('interval-select');
+                if (!symbolSel || !intervalSel) return;
+
+                const allowed = window.PAGE_CONFIG.researchOnlySymbols?.[symbolSel.value] || null;
+
+                Array.from(intervalSel.options).forEach(option => {
+                    option.disabled = Boolean(allowed && !allowed.includes(option.value));
+                });
+
+                if (allowed && !allowed.includes(intervalSel.value)) {
+                    intervalSel.value = allowed.includes('1h') ? '1h' : allowed[0];
+                    window.currentInterval = intervalSel.value;
+                }
+            }
+
+            applyFuturesResearchTimeframeGuard();
             
             // ============ CONFIGURAR EVENT LISTENERS ============
             const symbolSelect = document.getElementById('symbol-select');
@@ -4107,6 +4140,7 @@
             if (symbolSelect) {
                 symbolSelect.addEventListener('change', function() {
                     window.currentSymbol = this.value;
+                    applyFuturesResearchTimeframeGuard();
                     window.currentInterval = document.getElementById('interval-select')?.value || '1D';
                     window.runCompleteAnalysis();
                 });

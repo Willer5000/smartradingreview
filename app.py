@@ -31270,6 +31270,7 @@ def _analyze_futures_all_parallel(combos_override=None):
         for symbol in FUTURES_SYMBOLS.keys()
         for timeframe in FUTURES_TIMEFRAMES.keys()
     ]
+    incremental_mode = combos_override is not None
     combos = list(combos_override or all_combos)
 
     cache = _futures_analysis_cache
@@ -31304,7 +31305,9 @@ def _analyze_futures_all_parallel(combos_override=None):
             'current': None,
             'started_at': time.time(),
             'last_completed': None,
-            'errors': 0
+            'errors': 0,
+            'mode': 'incremental' if incremental_mode else 'full',
+            'snapshot_total': len(results),
         }
 
     import gc
@@ -31551,11 +31554,18 @@ def _analyze_futures_all_parallel(combos_override=None):
         cache['progress']['memory_guard_abort'] = bool(aborted_memory_pressure)
 
     status_word = 'detenido por Memory Guard' if aborted_memory_pressure else 'completo'
-    print(
-        f"🏁 [FUT] Análisis {status_word}: "
-        f"{len(results)}/{total} resultados disponibles, "
-        f"{len(errors)} errores."
-    )
+    if incremental_mode:
+        print(
+            f"🏁 [FUT] Refresco incremental {status_word}: "
+            f"{completed_count}/{total} combo(s) procesados; "
+            f"snapshot total={len(results)}; {len(errors)} errores."
+        )
+    else:
+        print(
+            f"🏁 [FUT] Análisis {status_word}: "
+            f"{len(results)}/{total} resultados disponibles, "
+            f"{len(errors)} errores."
+        )
 
     return {
         'analysis': results,
@@ -31696,20 +31706,27 @@ def _get_or_refresh_futures_analysis(force_wait=False):
     # TTL 15 min: el warm-up corre cada 10 min (v15), así que damos 5 min
     # de margen antes de considerar el caché stale (evita gaps de datos).
     if cache['data'] is not None and age < 900:
-    
+
         d = dict(cache['data'])
-    
-        d['warming_up'] = bool(
-            cache.get('running', False)
-        )
-    
+
+        # HOTFIX H.1 — un refresh incremental NO es un warm-up bloqueante.
+        #
+        # El cache puede contener 30/36 análisis perfectamente utilizables
+        # mientras un único combo se actualiza en background. Antes exponíamos
+        # warming_up=True siempre que cache['running'] era True; futures.js lo
+        # interpretaba como "no renderizar nada todavía" y reemplazaba señales
+        # válidas por un spinner durante casi todo el round-robin.
+        has_snapshot = bool(d.get('analysis'))
+        d['refreshing'] = bool(cache.get('running', False))
+        d['warming_up'] = bool(d['refreshing'] and not has_snapshot)
+
         d['cache_age'] = int(age)
-    
+
         with cache['lock']:
             d['progress'] = dict(
                 cache.get('progress', {})
             )
-    
+
         return d
     
     # Cache stale → refresh en background y devolver lo que haya
@@ -31720,6 +31737,8 @@ def _get_or_refresh_futures_analysis(force_wait=False):
             else:
                 _trigger_futures_refresh_async()
         d = dict(cache['data'])
+        d['refreshing'] = bool(cache.get('running', False))
+        # Snapshot stale sigue siendo visible mientras se refresca; no bloquear UI.
         d['warming_up'] = False
         d['cache_age'] = int(age)
         d['stale'] = True
@@ -31736,6 +31755,7 @@ def _get_or_refresh_futures_analysis(force_wait=False):
         'analysis': {},
         'errors': [],
         'lifecycle': {},
+        'refreshing': True,
         'warming_up': True,
         'cache_age': 0
     }
@@ -32082,6 +32102,18 @@ def _futures_manual_risk_profile(result):
     # Si el AI Control bloqueó una Premium,
     # NO puede reingresar por el guardado manual.
     # ================================================================
+
+    # HOTFIX H.1 — LINK/BNB pueden verse en frontend, pero siguen siendo
+    # Research/Shadow. La visibilidad no debe convertirse accidentalmente en
+    # una vía de guardado manual ni en autoridad productiva.
+    if engine_status == 'RESEARCH_ONLY_SHADOW':
+        research_blocked = dict(blocked)
+        research_blocked['reason'] = (
+            'Activo visible en Research/Shadow. Todavía no tiene autoridad '
+            'productiva ni guardado manual.'
+        )
+        return research_blocked
+
 
     if (
         engine_status
@@ -32758,13 +32790,17 @@ def api_futures_signals_active():
             'warming_up':
                 warming_up,
         
+            # H.1: `running` conserva compatibilidad con el frontend, pero
+            # ahora significa WARM-UP BLOQUEANTE, no "hay un combo incremental
+            # refrescándose". Un snapshot válido debe seguir renderizándose.
             'running':
-                bool(
-                    cache.get(
-                        'running',
-                        False
-                    )
-                ),
+                bool(warming_up),
+
+            'background_refresh':
+                bool(cache.get('refreshing', False)),
+
+            'cache_ready':
+                bool(cache.get('analysis')),
             'filter_stats':
                 filter_stats,        
             'analysis_summary':
@@ -33185,13 +33221,17 @@ def api_futures_signals_previous():
             'warming_up':
                 warming_up,
         
+            # H.1: `running` conserva compatibilidad con el frontend, pero
+            # ahora significa WARM-UP BLOQUEANTE, no "hay un combo incremental
+            # refrescándose". Un snapshot válido debe seguir renderizándose.
             'running':
-                bool(
-                    cache.get(
-                        'running',
-                        False
-                    )
-                ),
+                bool(warming_up),
+
+            'background_refresh':
+                bool(cache.get('refreshing', False)),
+
+            'cache_ready':
+                bool(cache.get('analysis')),
             'filter_stats':
                 filter_stats,        
             'analysis_summary':
@@ -38620,7 +38660,9 @@ def _resolve_ai_question_target(
             'ETH-USDT',
             'SOL-USDT',
             'XRP-USDT',
-            'ADA-USDT'
+            'ADA-USDT',
+            'LINK-USDT',
+            'BNB-USDT'
         )
 
 
