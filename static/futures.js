@@ -13,8 +13,66 @@ window._futuresSignalsState = {
     activeLoading: false,
     previousLoading: false,
     activeTimer: null,
-    previousTimer: null
+    previousTimer: null,
+    activeStartedAt: 0,
+    previousStartedAt: 0,
+    activeRetries: 0,
+    previousRetries: 0
 };
+
+// HOTFIX H.3 — ningún panel Futures puede esperar para siempre.
+function _futSignalReset(kind) {
+    const timerKey = kind === 'active' ? 'activeTimer' : 'previousTimer';
+    const startedKey = kind === 'active' ? 'activeStartedAt' : 'previousStartedAt';
+    const retriesKey = kind === 'active' ? 'activeRetries' : 'previousRetries';
+    clearTimeout(window._futuresSignalsState[timerKey]);
+    window._futuresSignalsState[timerKey] = null;
+    window._futuresSignalsState[startedKey] = 0;
+    window._futuresSignalsState[retriesKey] = 0;
+}
+
+function _futSignalSchedule(kind, callback, delayMs = 4000) {
+    const timerKey = kind === 'active' ? 'activeTimer' : 'previousTimer';
+    const startedKey = kind === 'active' ? 'activeStartedAt' : 'previousStartedAt';
+    const retriesKey = kind === 'active' ? 'activeRetries' : 'previousRetries';
+    const now = Date.now();
+    if (!window._futuresSignalsState[startedKey]) {
+        window._futuresSignalsState[startedKey] = now;
+    }
+    const elapsed = now - window._futuresSignalsState[startedKey];
+    const retries = Number(window._futuresSignalsState[retriesKey] || 0);
+    if (elapsed >= 30000 || retries >= 6) {
+        clearTimeout(window._futuresSignalsState[timerKey]);
+        window._futuresSignalsState[timerKey] = null;
+        return false;
+    }
+    window._futuresSignalsState[retriesKey] = retries + 1;
+    clearTimeout(window._futuresSignalsState[timerKey]);
+    window._futuresSignalsState[timerKey] = setTimeout(callback, delayMs);
+    return true;
+}
+
+async function _futFetchJsonTimeout(url, timeoutMs = 10000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const response = await fetch(url, {
+            method: 'GET',
+            cache: 'no-store',
+            headers: {'Cache-Control': 'no-cache'},
+            signal: controller.signal
+        });
+        const text = await response.text();
+        let json = {};
+        try { json = text ? JSON.parse(text) : {}; } catch (_) {}
+        if (!response.ok) {
+            throw new Error(json.error || json.message || `HTTP ${response.status}`);
+        }
+        return {response, json};
+    } finally {
+        clearTimeout(timer);
+    }
+}
 // Helper global: nunca mostrar confianza > 100% (defensa contra datos viejos).
 function fmtConfidence(c) {
     const n = Number(c) || 0;
@@ -802,7 +860,11 @@ window.updateActiveSignals = async function() {
             activeLoading: false,
             previousLoading: false,
             activeTimer: null,
-            previousTimer: null
+            previousTimer: null,
+            activeStartedAt: 0,
+            previousStartedAt: 0,
+            activeRetries: 0,
+            previousRetries: 0
         };
     }
 
@@ -828,15 +890,8 @@ window.updateActiveSignals = async function() {
 
     // Si ya hay una petición, no crear otra.
     if (window._futuresSignalsState.activeLoading) {
-        console.warn(
-            '⚠️ ACTIVE: petición anterior marcada como activa.'
-        );
-
-        // IMPORTANTE:
-        // No nos quedamos bloqueados para siempre.
-        // Como no tenemos referencia al fetch anterior,
-        // liberamos el estado y permitimos una nueva consulta.
-        window._futuresSignalsState.activeLoading = false;
+        console.warn('⚠️ ACTIVE: petición anterior todavía en curso; no se duplica.');
+        return;
     }
 
     window._futuresSignalsState.activeLoading = true;
@@ -844,51 +899,30 @@ window.updateActiveSignals = async function() {
     console.log(
         '🚀 ACTIVE: iniciando consulta...'
     );
-    signalsList.innerHTML = `
-        <div class="list-group-item bg-dark text-info text-center py-3">
-            <div class="spinner-border spinner-border-sm me-2"></div>
-            Consultando servidor de Futuros...
-        </div>
-    `;
-
-    if (signalsCount) {
-        signalsCount.textContent = '...';
-        signalsCount.className = 'badge bg-info';
+    if (!window.futuresActiveLoaded) {
+        signalsList.innerHTML = `
+            <div class="list-group-item bg-dark text-info text-center py-3">
+                <div class="spinner-border spinner-border-sm me-2"></div>
+                Consultando servidor de Futuros...
+            </div>
+        `;
+        if (signalsCount) {
+            signalsCount.textContent = '...';
+            signalsCount.className = 'badge bg-info';
+        }
     }
 
     const startedAt = performance.now();
 
     try {
 
-        const response = await fetch(
+        const {response, json} = await _futFetchJsonTimeout(
             '/api/futures/signals/active?min_confidence=55&_ts=' + Date.now(),
-            {
-                method: 'GET',
-                cache: 'no-store',
-                headers: {
-                    'Cache-Control': 'no-cache'
-                }
-            }
+            10000
         );
 
-        const elapsed = (
-            (performance.now() - startedAt) / 1000
-        ).toFixed(1);
-
-        console.log(
-            `📥 ACTIVE HTTP ${response.status} en ${elapsed}s`
-        );
-
-        if (!response.ok) {
-
-            const text = await response.text();
-
-            throw new Error(
-                `HTTP ${response.status}: ${text.substring(0, 500)}`
-            );
-        }
-
-        const json = await response.json();
+        const elapsed = ((performance.now() - startedAt) / 1000).toFixed(1);
+        console.log(`📥 ACTIVE HTTP ${response.status} en ${elapsed}s`);
 
         console.log('📦 ACTIVE JSON:', json);
 
@@ -972,60 +1006,31 @@ window.updateActiveSignals = async function() {
             }
         );
 
-        // ------------------------------------------------------------
-        // SERVIDOR TODAVÍA PROCESANDO
-        // ------------------------------------------------------------
-        if (running) {
-
-            const pct = total > 0
-                ? Math.min(
-                    100,
-                    (completed / total) * 100
-                )
-                : 0;
-
-            signalsList.innerHTML = `
-                <div class="list-group-item bg-dark text-info text-center py-3">
-
-                    <div class="spinner-border spinner-border-sm me-2"></div>
-
-                    <strong>
-                        Analizando Futuros: ${completed}/${total}
-                    </strong>
-
-                    <br>
-
-                    <small class="text-muted">
-                        ${progress.current || 'Preparando análisis...'}
-                    </small>
-
-                    <div class="progress mt-2"
-                         style="height: 6px;">
-
-                        <div
-                            class="progress-bar bg-info"
-                            style="width: ${pct}%;">
+        // H.3: sólo un warm-up SIN snapshot puede bloquear la primera vista.
+        // Si cache_ready o ya llegaron señales, se renderiza inmediatamente.
+        const blockingWarmup = Boolean(running && !json.cache_ready && signals.length === 0);
+        if (blockingWarmup) {
+            const scheduled = _futSignalSchedule('active', () => window.updateActiveSignals(), 4000);
+            const pct = total > 0 ? Math.min(100, (completed / total) * 100) : 0;
+            if (!window.futuresActiveLoaded) {
+                signalsList.innerHTML = scheduled ? `
+                    <div class="list-group-item bg-dark text-info text-center py-3">
+                        <div class="spinner-border spinner-border-sm me-2"></div>
+                        <strong>Preparando primer snapshot Futures: ${completed}/${total}</strong>
+                        <div class="progress mt-2" style="height:6px;">
+                            <div class="progress-bar bg-info" style="width:${pct}%;"></div>
                         </div>
-
                     </div>
-
-                    <small class="d-block mt-2 text-secondary">
-                        Resultado recibido del servidor en ${elapsed}s
-                    </small>
-
-                </div>
-            `;
-
-            if (signalsCount) {
-                signalsCount.textContent =
-                    `${completed}/${total}`;
-
-                signalsCount.className =
-                    'badge bg-info';
+                ` : `
+                    <div class="list-group-item bg-dark text-warning text-center py-3">
+                        ⚠️ El warm-up continúa, pero la espera automática terminó para evitar carga infinita.
+                        <button class="btn btn-sm btn-outline-warning ms-2" onclick="window.updateActiveSignals()">Reintentar</button>
+                    </div>
+                `;
             }
-
             return;
         }
+        _futSignalReset('active');
 
         // ------------------------------------------------------------
         // SERVIDOR TERMINÓ
@@ -1286,29 +1291,19 @@ window.updateActiveSignals = async function() {
             err
         );
 
-        signalsList.innerHTML = `
-            <div class="list-group-item bg-dark text-danger text-center py-3">
-
-                <strong>
-                    ❌ No se pudo consultar Futuros
-                </strong>
-
-                <br>
-
-                <small>
-                    ${err.message || 'Error de conexión'}
-                </small>
-
-            </div>
-        `;
-
-        if (signalsCount) {
-
-            signalsCount.textContent =
-                'ERR';
-
-            signalsCount.className =
-                'badge bg-danger';
+        const scheduled = _futSignalSchedule('active', () => window.updateActiveSignals(), 5000);
+        if (!window.futuresActiveLoaded) {
+            signalsList.innerHTML = `
+                <div class="list-group-item bg-dark text-warning text-center py-3">
+                    <strong>⚠️ No se pudo consultar Futuros</strong><br>
+                    <small>${err.message || 'Error de conexión'}${scheduled ? ' · reintentando' : ''}</small>
+                    ${scheduled ? '' : '<button class="btn btn-sm btn-outline-warning ms-2" onclick="window.updateActiveSignals()">Reintentar</button>'}
+                </div>
+            `;
+            if (signalsCount) {
+                signalsCount.textContent = '--';
+                signalsCount.className = 'badge bg-secondary';
+            }
         }
 
     } finally {
@@ -1737,7 +1732,11 @@ window.updatePreviousSignals = async function() {
             activeLoading: false,
             previousLoading: false,
             activeTimer: null,
-            previousTimer: null
+            previousTimer: null,
+            activeStartedAt: 0,
+            previousStartedAt: 0,
+            activeRetries: 0,
+            previousRetries: 0
         };
     }
 
@@ -1775,18 +1774,9 @@ window.updatePreviousSignals = async function() {
         return;
     }
 
-    if (
-        window._futuresSignalsState
-            .previousLoading
-    ) {
-
-        console.warn(
-            '⚠️ PREVIOUS: petición anterior marcada como activa.'
-        );
-
-        // Evitar bloqueo permanente.
-        window._futuresSignalsState
-            .previousLoading = false;
+    if (window._futuresSignalsState.previousLoading) {
+        console.warn('⚠️ PREVIOUS: petición anterior todavía en curso; no se duplica.');
+        return;
     }
 
     window._futuresSignalsState
@@ -1796,23 +1786,17 @@ window.updatePreviousSignals = async function() {
         '🚀 PREVIOUS: iniciando consulta...'
     );
 
-    signalsList.innerHTML = `
-        <div class="list-group-item bg-dark text-info text-center py-3">
-
-            <div class="spinner-border spinner-border-sm me-2"></div>
-
-            Consultando vela anterior...
-
-        </div>
-    `;
-
-    if (signalsCount) {
-
-        signalsCount.textContent =
-            '...';
-
-        signalsCount.className =
-            'badge bg-info';
+    if (!window.futuresPrevLoaded) {
+        signalsList.innerHTML = `
+            <div class="list-group-item bg-dark text-info text-center py-3">
+                <div class="spinner-border spinner-border-sm me-2"></div>
+                Consultando vela anterior...
+            </div>
+        `;
+        if (signalsCount) {
+            signalsCount.textContent = '...';
+            signalsCount.className = 'badge bg-info';
+        }
     }
 
     const startedAt =
@@ -1820,40 +1804,13 @@ window.updatePreviousSignals = async function() {
 
     try {
 
-        const response = await fetch(
-            '/api/futures/signals/previous?min_confidence=55&_ts='
-            + Date.now(),
-            {
-                method: 'GET',
-                cache: 'no-store',
-                headers: {
-                    'Cache-Control': 'no-cache'
-                }
-            }
+        const {response, json} = await _futFetchJsonTimeout(
+            '/api/futures/signals/previous?min_confidence=55&_ts=' + Date.now(),
+            10000
         );
 
-        const elapsed =
-            (
-                (performance.now() -
-                    startedAt) / 1000
-            ).toFixed(1);
-
-        console.log(
-            `📥 PREVIOUS HTTP ${response.status} en ${elapsed}s`
-        );
-
-        if (!response.ok) {
-
-            const text =
-                await response.text();
-
-            throw new Error(
-                `HTTP ${response.status}: ${text.substring(0, 500)}`
-            );
-        }
-
-        const json =
-            await response.json();
+        const elapsed = ((performance.now() - startedAt) / 1000).toFixed(1);
+        console.log(`📥 PREVIOUS HTTP ${response.status} en ${elapsed}s`);
 
         console.log(
             '📦 PREVIOUS JSON:',
@@ -1949,67 +1906,29 @@ window.updatePreviousSignals = async function() {
             }
         );
 
-        // ------------------------------------------------------------
-        // SERVIDOR TODAVÍA TRABAJANDO
-        // ------------------------------------------------------------
-        if (running) {
-
-            const pct =
-                total > 0
-                    ? Math.min(
-                        100,
-                        (completed / total) * 100
-                    )
-                    : 0;
-
-            signalsList.innerHTML = `
-                <div class="list-group-item bg-dark text-info text-center py-3">
-
-                    <div class="spinner-border spinner-border-sm me-2"></div>
-
-                    <strong>
-                        Analizando vela anterior:
-                        ${completed}/${total}
-                    </strong>
-
-                    <br>
-
-                    <small class="text-muted">
-                        ${progress.current || 'Preparando análisis...'}
-                    </small>
-
-                    <div
-                        class="progress mt-2"
-                        style="height:6px;"
-                    >
-
-                        <div
-                            class="progress-bar bg-warning"
-                            style="width:${pct}%;">
+        const blockingWarmup = Boolean(running && !json.cache_ready && signals.length === 0);
+        if (blockingWarmup) {
+            const scheduled = _futSignalSchedule('previous', () => window.updatePreviousSignals(), 4000);
+            const pct = total > 0 ? Math.min(100, (completed / total) * 100) : 0;
+            if (!window.futuresPrevLoaded) {
+                signalsList.innerHTML = scheduled ? `
+                    <div class="list-group-item bg-dark text-info text-center py-3">
+                        <div class="spinner-border spinner-border-sm me-2"></div>
+                        <strong>Preparando vela anterior: ${completed}/${total}</strong>
+                        <div class="progress mt-2" style="height:6px;">
+                            <div class="progress-bar bg-warning" style="width:${pct}%;"></div>
                         </div>
-
                     </div>
-
-                    <small
-                        class="d-block mt-2 text-secondary"
-                    >
-                        Respuesta recibida en ${elapsed}s
-                    </small>
-
-                </div>
-            `;
-
-            if (signalsCount) {
-
-                signalsCount.textContent =
-                    `${completed}/${total}`;
-
-                signalsCount.className =
-                    'badge bg-info';
+                ` : `
+                    <div class="list-group-item bg-dark text-warning text-center py-3">
+                        ⚠️ El warm-up continúa, pero la espera automática terminó para evitar carga infinita.
+                        <button class="btn btn-sm btn-outline-warning ms-2" onclick="window.updatePreviousSignals()">Reintentar</button>
+                    </div>
+                `;
             }
-
             return;
         }
+        _futSignalReset('previous');
 
         // ------------------------------------------------------------
         // SERVIDOR TERMINÓ
@@ -2287,29 +2206,19 @@ window.updatePreviousSignals = async function() {
             err
         );
 
-        signalsList.innerHTML = `
-            <div class="list-group-item bg-dark text-danger text-center py-3">
-
-                <strong>
-                    ❌ No se pudo consultar la vela anterior
-                </strong>
-
-                <br>
-
-                <small>
-                    ${err.message || 'Error de conexión'}
-                </small>
-
-            </div>
-        `;
-
-        if (signalsCount) {
-
-            signalsCount.textContent =
-                'ERR';
-
-            signalsCount.className =
-                'badge bg-danger';
+        const scheduled = _futSignalSchedule('previous', () => window.updatePreviousSignals(), 5000);
+        if (!window.futuresPrevLoaded) {
+            signalsList.innerHTML = `
+                <div class="list-group-item bg-dark text-warning text-center py-3">
+                    <strong>⚠️ No se pudo consultar la vela anterior</strong><br>
+                    <small>${err.message || 'Error de conexión'}${scheduled ? ' · reintentando' : ''}</small>
+                    ${scheduled ? '' : '<button class="btn btn-sm btn-outline-warning ms-2" onclick="window.updatePreviousSignals()">Reintentar</button>'}
+                </div>
+            `;
+            if (signalsCount) {
+                signalsCount.textContent = '--';
+                signalsCount.className = 'badge bg-secondary';
+            }
         }
 
     } finally {

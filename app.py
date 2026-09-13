@@ -26345,21 +26345,20 @@ def api_analyze():
         cache_key = (symbol, interval)
         result = _analysis_cache_get(cache_key)
         if result is None:
-            ui_owner = f'spot-ui:analyze:{symbol}:{interval}'
-            ui_acquired = _acquire_heavy_analysis(ui_owner, timeout=20)
-            if not ui_acquired:
+            result, result_source = _run_spot_analysis_singleflight(
+                symbol,
+                interval,
+                f'spot-ui:analyze:{symbol}:{interval}',
+            )
+            if result is None:
                 return jsonify({
                     'success': False,
                     'busy': True,
                     'deferred': True,
-                    'retry_after_ms': 1500,
-                    'error': 'El sistema está terminando una tarea de mercado.'
+                    'retry_after_ms': 1800,
+                    'error': 'El mismo análisis ya está en curso o el sistema está terminando una tarea de mercado.'
                 }), 503
-            try:
-                result = expert_system.analyze_full_market(symbol, interval)
-            finally:
-                _release_heavy_analysis(ui_owner)
-                _mark_system_interactive_priority(seconds=8)
+            print(f"♻️ [H3] Spot UI {symbol} {interval}: {result_source}", flush=True)
         else:
             print(f"⚡ CACHÉ UI: {symbol} {interval}")
         
@@ -26669,8 +26668,41 @@ def api_analyze():
 
 _PREV_SIGNALS_LOCK = threading.Lock()
 _PREV_SIGNALS_COMPUTING = {
-    'running': False
+    'running': False,
+    'started_at': 0.0,
+    'last_finished_at': 0.0,
+    'last_error': None,
 }
+
+# HOTFIX H.3 — Spot sólo necesita reconstruir el universo 4h/12h/1D/1W
+# cuando aparece una nueva vela cerrada del TF operativo más rápido (4h).
+# El endpoint puede seguir consultándose cada pocos minutos, pero devuelve el
+# último snapshot y NO dispara 12 análisis pesados cada 10/60 minutos.
+_SPOT_PREVIOUS_FASTEST_SECONDS = 4 * 60 * 60
+_SPOT_PREVIOUS_CLOSE_GRACE_SECONDS = 90
+
+def _spot_previous_refresh_due(cache_time, now_ts=None):
+    try:
+        cache_time = float(cache_time or 0.0)
+    except Exception:
+        cache_time = 0.0
+    if cache_time <= 0:
+        return True
+
+    now_ts = float(now_ts or time.time())
+    bucket = float(_SPOT_PREVIOUS_FASTEST_SECONDS)
+    current_bucket_start = int(now_ts // bucket) * bucket
+    if now_ts < current_bucket_start + _SPOT_PREVIOUS_CLOSE_GRACE_SECONDS:
+        return False
+    return cache_time < current_bucket_start
+
+def _spot_previous_processing_age():
+    if not _PREV_SIGNALS_COMPUTING.get('running'):
+        return 0
+    try:
+        return max(0, int(time.time() - float(_PREV_SIGNALS_COMPUTING.get('started_at') or 0)))
+    except Exception:
+        return 0
 
 # ============================================================================
 # SPOT SIGNALS CACHE — PERSISTENCIA EN SUPABASE (HOTFIX 14.6)
@@ -26704,10 +26736,24 @@ def _save_spot_signals_cache_to_disk():
         active = getattr(expert_system, 'spot_active_signals_cache', None)
         if previous is None and active is None:
             return False
+        now_ts = time.time()
+        previous_ts = float(
+            getattr(expert_system, 'prev_signals_cache_time', 0) or 0
+        )
+        active_ts = float(
+            getattr(expert_system, 'spot_active_signals_cache_time', 0) or 0
+        )
         payload = {
-            'ts': time.time(),
+            'ts': now_ts,
+            # H.3: timestamps separados. Una actualización interactiva del
+            # panel Activas no puede rejuvenecer artificialmente Vela Anterior.
+            'previous_ts': previous_ts,
+            'active_ts': active_ts,
             'previous': previous if isinstance(previous, dict) else None,
             'active': active if isinstance(active, dict) else None,
+            'active_complete': bool(
+                getattr(expert_system, 'spot_active_signals_cache_complete', False)
+            ),
         }
         return save_runtime_snapshot(
             'spot', 'signals_cache', payload, ttl_seconds=_SPOT_SIGNALS_CACHE_MAX_AGE
@@ -26731,16 +26777,23 @@ def _load_spot_signals_cache_from_disk():
         if cache_ts <= 0 or age > _SPOT_SIGNALS_CACHE_MAX_AGE:
             print('📂 [SPOT CACHE] Snapshot persistido viejo; se recalculará.')
             return False
+        previous_ts = float(payload.get('previous_ts') or cache_ts or 0)
+        active_ts = float(payload.get('active_ts') or cache_ts or 0)
         loaded_any = False
         previous = payload.get('previous')
         if isinstance(previous, dict):
             setattr(expert_system, 'prev_signals_cache', previous)
-            setattr(expert_system, 'prev_signals_cache_time', cache_ts)
+            setattr(expert_system, 'prev_signals_cache_time', previous_ts)
             loaded_any = True
         active = payload.get('active')
         if isinstance(active, dict):
             setattr(expert_system, 'spot_active_signals_cache', active)
-            setattr(expert_system, 'spot_active_signals_cache_time', cache_ts)
+            setattr(expert_system, 'spot_active_signals_cache_time', active_ts)
+            setattr(
+                expert_system,
+                'spot_active_signals_cache_complete',
+                bool(payload.get('active_complete', False)),
+            )
             loaded_any = True
         if loaded_any:
             print(f"📂 [SPOT CACHE] Snapshot Supabase restaurado ({int(age)}s).")
@@ -27302,6 +27355,76 @@ def _release_heavy_analysis(owner):
     _log_memory_runtime(f'{owner}: fin')
 
 
+# ============================================================================
+# HOTFIX H.3 — SINGLE ANALYSIS AUTHORITY (SPOT UI)
+# ============================================================================
+# /api/analyze y /api/analyze-with-portfolio pueden pedir la misma combinación
+# casi simultáneamente. El heavy lock serializa CPU, pero no evita que el segundo
+# request vuelva a calcular apenas termina el primero si el caché pesado fue
+# desplazado. Este single-flight comparte el resultado de una petición humana
+# concurrente sin modificar ninguna decisión de trading.
+_SPOT_ANALYSIS_SINGLEFLIGHT_LOCK = threading.Lock()
+_SPOT_ANALYSIS_SINGLEFLIGHT = {}
+_SPOT_ANALYSIS_SINGLEFLIGHT_STALE_SECONDS = 120.0
+
+def _run_spot_analysis_singleflight(symbol, timeframe, owner, wait_seconds=18.0):
+    key = (str(symbol), str(timeframe))
+
+    cached = _analysis_cache_get(key)
+    if cached is not None:
+        return cached, 'CACHE'
+
+    now = time.time()
+    is_owner = False
+    with _SPOT_ANALYSIS_SINGLEFLIGHT_LOCK:
+        slot = _SPOT_ANALYSIS_SINGLEFLIGHT.get(key)
+        if slot and (now - float(slot.get('started_at') or 0)) > _SPOT_ANALYSIS_SINGLEFLIGHT_STALE_SECONDS:
+            _SPOT_ANALYSIS_SINGLEFLIGHT.pop(key, None)
+            slot = None
+
+        if slot is None:
+            slot = {
+                'event': threading.Event(),
+                'started_at': now,
+                'owner': str(owner),
+            }
+            _SPOT_ANALYSIS_SINGLEFLIGHT[key] = slot
+            is_owner = True
+        else:
+            print(
+                f"♻️ [H3 SINGLEFLIGHT] {symbol} {timeframe}: "
+                f"reutilizando cálculo iniciado por {slot.get('owner')}",
+                flush=True,
+            )
+
+    if not is_owner:
+        slot['event'].wait(timeout=max(0.5, float(wait_seconds)))
+        shared = _analysis_cache_get(key)
+        if shared is not None:
+            return shared, 'SHARED'
+        return None, 'BUSY'
+
+    acquired = False
+    try:
+        acquired = _acquire_heavy_analysis(str(owner), timeout=20)
+        if not acquired:
+            return None, 'BUSY'
+        result = expert_system.analyze_full_market(symbol, timeframe)
+        return result, 'COMPUTED'
+    finally:
+        if acquired:
+            _release_heavy_analysis(str(owner))
+            _mark_system_interactive_priority(seconds=8)
+        with _SPOT_ANALYSIS_SINGLEFLIGHT_LOCK:
+            current = _SPOT_ANALYSIS_SINGLEFLIGHT.get(key)
+            if current is slot:
+                _SPOT_ANALYSIS_SINGLEFLIGHT.pop(key, None)
+            try:
+                slot['event'].set()
+            except Exception:
+                pass
+
+
 def _run_scheduled_spot_analysis(timeframe):
     """Scheduler Spot protegido por el mismo slot de memoria que Futures."""
     owner = f'spot-scheduled-{timeframe}'
@@ -27507,6 +27630,11 @@ def _compute_previous_signals():
         expert_system,
         'spot_active_signals_cache_time',
         time.time()
+    )
+    setattr(
+        expert_system,
+        'spot_active_signals_cache_complete',
+        True
     )
     _save_spot_signals_cache_to_disk()
 
@@ -27785,9 +27913,9 @@ def _run_previous_signals_background():
 
     with _PREV_SIGNALS_LOCK:
 
-        _PREV_SIGNALS_COMPUTING[
-            'running'
-        ] = True
+        _PREV_SIGNALS_COMPUTING['running'] = True
+        _PREV_SIGNALS_COMPUTING['started_at'] = time.time()
+        _PREV_SIGNALS_COMPUTING['last_error'] = None
 
         heavy_acquired = False
 
@@ -27811,6 +27939,7 @@ def _run_previous_signals_background():
 
         except Exception as e:
 
+            _PREV_SIGNALS_COMPUTING['last_error'] = str(e)[:240]
             print(
                 "❌ Error en "
                 "_compute_previous_signals background: "
@@ -27827,9 +27956,9 @@ def _run_previous_signals_background():
                     'spot-previous-signals'
                 )
 
-            _PREV_SIGNALS_COMPUTING[
-                'running'
-            ] = False
+            _PREV_SIGNALS_COMPUTING['running'] = False
+            _PREV_SIGNALS_COMPUTING['last_finished_at'] = time.time()
+            _PREV_SIGNALS_COMPUTING['started_at'] = 0.0
 
 
 @app.route('/api/spot/signals/active')
@@ -27851,7 +27980,7 @@ def api_spot_signals_active():
 
         if cache_data is not None:
             if (
-                age > 600
+                _spot_previous_refresh_due(cache_time, now)
                 and not _PREV_SIGNALS_COMPUTING['running']
                 and not _LOW_MEMORY_MODE
             ):
@@ -27870,6 +27999,9 @@ def api_spot_signals_active():
                 'processing': False,
                 'cached': True,
                 'cache_age_seconds': int(age),
+                'stale': bool(_spot_previous_refresh_due(cache_time, now)),
+                'background_refresh': bool(_PREV_SIGNALS_COMPUTING['running']),
+                'processing_age_seconds': _spot_previous_processing_age(),
                 'total': len(signals),
                 'signals': signals,
                 'timestamp': datetime.now(bolivia_tz).isoformat()
@@ -27891,6 +28023,7 @@ def api_spot_signals_active():
         return jsonify({
             'success': True,
             'processing': True,
+            'processing_age_seconds': _spot_previous_processing_age(),
             'total': 0,
             'signals': [],
             'message': (
@@ -27919,7 +28052,9 @@ def api_previous_signals():
     try:
         cache_key = "prev_signals_cache"
         cache_time_key = "prev_signals_cache_time"
-        cache_duration = 600  # 10 min: si es más viejo, dispara refresh en bg
+        # H.3: el TF Spot más rápido es 4h. La vela anterior sólo cambia
+        # cuando cierra un nuevo bloque 4h; una edad fija de 10 minutos
+        # provocaba 12 replays pesados innecesarios durante la misma vela.
         
         now = time.time()
         cache_data = getattr(expert_system, cache_key, None)
@@ -27929,7 +28064,7 @@ def api_previous_signals():
         # Si hay caché aunque sea viejo, lo devolvemos + refresh en bg si toca
         if cache_data is not None:
             if (
-                age > cache_duration
+                _spot_previous_refresh_due(cache_time, now)
                 and not _PREV_SIGNALS_COMPUTING['running']
                 and not _LOW_MEMORY_MODE
             ):
@@ -27942,6 +28077,9 @@ def api_previous_signals():
                 'data': cache_data,
                 'cached': True,
                 'cache_age_seconds': int(age),
+                'stale': bool(_spot_previous_refresh_due(cache_time, now)),
+                'background_refresh': bool(_PREV_SIGNALS_COMPUTING['running']),
+                'processing_age_seconds': _spot_previous_processing_age(),
                 'timestamp': datetime.now(bolivia_tz).isoformat()
             })
         
@@ -27960,8 +28098,9 @@ def api_previous_signals():
         return jsonify({
             'success': True,
             'processing': True,
+            'processing_age_seconds': _spot_previous_processing_age(),
             'data': {},
-            'message': 'Analizando señales por primera vez. Espere 30-60s y recargue.',
+            'message': 'Preparando el primer snapshot Spot en segundo plano.',
             'timestamp': datetime.now(bolivia_tz).isoformat()
         })
     except Exception as e:
@@ -42027,23 +42166,23 @@ def _start_previous_signals_warmup():
                     if (not had_cache) and (not _PREV_SIGNALS_COMPUTING['running']):
                         _run_previous_signals_background()
                     elif had_cache:
-                        # Refresh normal de baja frecuencia; el snapshot viejo
-                        # sigue visible mientras se recalcula.
+                        # H.3: previous_signals sólo cambia cuando cierra una
+                        # nueva vela 4h (TF Spot operativo más rápido).
                         cache_time = float(
                             getattr(expert_system, 'prev_signals_cache_time', 0) or 0
                         )
-                        if time.time() - cache_time > 60 * 60:
+                        if _spot_previous_refresh_due(cache_time):
                             _run_previous_signals_background()
                 except Exception as error:
                     print(f"⚠️ [MEM] previous_signals diferido: {error}", flush=True)
                 _trim_process_heap()
 
-                # Si seguimos sin caché, reintentar en 30 s. Con caché,
-                # mantener refresh horario.
+                # Si seguimos sin caché, reintentar pronto. Con caché,
+                # sólo revisar livianamente cada 5 min si cerró una nueva 4h.
                 if not _spot_previous_cache_present():
                     time.sleep(30)
                 else:
-                    time.sleep(60 * 60)
+                    time.sleep(5 * 60)
 
         threading.Thread(
             target=_low_memory_periodic_prev,
@@ -42055,7 +42194,13 @@ def _start_previous_signals_warmup():
     def _delayed_first():
         time.sleep(30)
         try:
-            _run_previous_signals_background()
+            cache_time = float(
+                getattr(expert_system, 'prev_signals_cache_time', 0) or 0
+            )
+            if (not _spot_previous_cache_present()) or _spot_previous_refresh_due(cache_time):
+                _run_previous_signals_background()
+            else:
+                print('♻️ [H3] previous_signals restaurado y vigente; warm-up omitido.', flush=True)
         except Exception as error:
             print(f"⚠️ Warm-up previous_signals inicial: {error}", flush=True)
 
@@ -46888,21 +47033,20 @@ def api_analyze_with_portfolio():
                 f"{symbol} {timeframe}..."
             )
 
-            ui_owner = f'spot-ui:tgp:{symbol}:{timeframe}'
-            ui_acquired = _acquire_heavy_analysis(ui_owner, timeout=20)
-            if not ui_acquired:
+            result, result_source = _run_spot_analysis_singleflight(
+                symbol,
+                timeframe,
+                f'spot-ui:tgp:{symbol}:{timeframe}',
+            )
+            if result is None:
                 return jsonify({
                     'success': False,
                     'busy': True,
                     'deferred': True,
-                    'retry_after_ms': 1500,
-                    'error': 'El sistema está terminando una tarea de mercado.'
+                    'retry_after_ms': 1800,
+                    'error': 'El mismo análisis ya está en curso o el sistema está terminando una tarea de mercado.'
                 }), 503
-            try:
-                result = trading_system.analyze_full_market(symbol, timeframe)
-            finally:
-                _release_heavy_analysis(ui_owner)
-                _mark_system_interactive_priority(seconds=8)
+            print(f"♻️ [H3] Spot TGP {symbol} {timeframe}: {result_source}", flush=True)
 
             if (
                 not result

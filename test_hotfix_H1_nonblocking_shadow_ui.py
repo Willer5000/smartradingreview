@@ -29,4 +29,4 @@ def test_link_bnb_are_visible_but_stay_research_shadow():
 
 
 def test_cache_bust_for_futures_js():
-    assert '20260913-H2B-INTEGRITY-LOOP' in INDEX
+    assert '20260913-H3-NO-INFINITE-LOADING' in INDEX

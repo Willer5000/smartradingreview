@@ -43,4 +43,4 @@ def test_bank_justifications_do_not_claim_zero_squeeze_or_value_area_confirmatio
 
 
 def test_cache_bust_for_updated_h2_bundle():
-    assert '20260913-H2B-INTEGRITY-LOOP' in INDEX
+    assert '20260913-H3-NO-INFINITE-LOADING' in INDEX

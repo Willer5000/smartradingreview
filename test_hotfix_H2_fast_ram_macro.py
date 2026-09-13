@@ -31,7 +31,7 @@ def test_microstructure_cache_is_bounded_and_visual_is_compact():
     assert 'fast-futures-memory-badge' in INDEX
     assert "const depthRows = fastTradeUi ? 6 : 10" in SCRIPT
     assert 'height: fastTradeUi ? 270 : 360' in SCRIPT
-    assert '20260913-H2B-INTEGRITY-LOOP' in INDEX
+    assert '20260913-H3-NO-INFINITE-LOADING' in INDEX
 
 
 def test_macro_hides_undated_and_over_24h_headlines():

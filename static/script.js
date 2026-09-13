@@ -2684,16 +2684,50 @@ window.buildAnalyzeURL = function(symbol, timeframe) {
    
 // ============ FUNCIÓN PRINCIPAL - ANÁLISIS COMPLETO CON VISTA GLOBAL ============
 
-window.runCompleteAnalysis = function() {
-    if (window.__SMARTTRADING_ANALYSIS_RUNNING__) {
-        console.log(
-            '⏳ Análisis ya en ejecución. Se evita duplicar la petición.'
-        );
+// ============================================================================
+// HOTFIX H.3 — NO INFINITE LOADING / SINGLE FRONTEND ANALYSIS LOCK
+// ============================================================================
+window.__SMARTTRADING_ANALYSIS_STARTED_AT__ = Number(
+    window.__SMARTTRADING_ANALYSIS_STARTED_AT__ || 0
+);
 
-        return;
+function _h3AcquireAnalysisLock(label) {
+    const now = Date.now();
+    const startedAt = Number(window.__SMARTTRADING_ANALYSIS_STARTED_AT__ || 0);
+    const stale = Boolean(
+        window.__SMARTTRADING_ANALYSIS_RUNNING__
+        && startedAt
+        && (now - startedAt) > 90000
+    );
+
+    if (stale) {
+        console.warn(`⚠️ [H3] Liberando lock frontend vencido (${label}).`);
+        window.__SMARTTRADING_ANALYSIS_RUNNING__ = false;
+        window.__SMARTTRADING_ANALYSIS_STARTED_AT__ = 0;
+    }
+
+    if (window.__SMARTTRADING_ANALYSIS_RUNNING__) {
+        return false;
     }
 
     window.__SMARTTRADING_ANALYSIS_RUNNING__ = true;
+    window.__SMARTTRADING_ANALYSIS_STARTED_AT__ = now;
+    window.__SMARTTRADING_ANALYSIS_LABEL__ = String(label || 'analysis');
+    return true;
+}
+
+function _h3ReleaseAnalysisLock(label) {
+    window.__SMARTTRADING_ANALYSIS_RUNNING__ = false;
+    window.__SMARTTRADING_ANALYSIS_STARTED_AT__ = 0;
+    window.__SMARTTRADING_ANALYSIS_LABEL__ = '';
+    console.debug(`🏁 [H3] Lock frontend liberado (${label || 'analysis'}).`);
+}
+
+window.runCompleteAnalysis = function() {
+    if (!_h3AcquireAnalysisLock('runCompleteAnalysis')) {
+        console.log('⏳ Análisis ya en ejecución. H.3 evita duplicar la petición.');
+        return;
+    }
 
     const cfg =
         window.PAGE_CONFIG
@@ -3595,25 +3629,20 @@ window.runCompleteAnalysis = function() {
         })
         .finally(() => {
             clearTimeout(analysisHttpTimeoutId);
-            window.__SMARTTRADING_ANALYSIS_RUNNING__ = false;
+            _h3ReleaseAnalysisLock('runCompleteAnalysis');
         });
 };
 
 function getInstantRecommendation(attempt = 1) {
-    if (window.__SMARTTRADING_ANALYSIS_RUNNING__) {
-        console.log(
-            '⏳ Análisis principal en ejecución. Se omite recomendación duplicada.'
-        );
-
-        return;
-    }
-
-    window.__SMARTTRADING_ANALYSIS_RUNNING__ = true;
     if (!isAuthenticated()) {
         console.log(
             '🔒 Recomendación instantánea no ejecutada: usuario no autenticado.'
         );
+        return;
+    }
 
+    if (!_h3AcquireAnalysisLock('getInstantRecommendation')) {
+        console.log('⏳ Análisis principal en ejecución. Se omite recomendación instantánea duplicada.');
         return;
     }
     const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
@@ -3882,25 +3911,19 @@ function getInstantRecommendation(attempt = 1) {
         clearTimeout(timeoutId);
         if (error.name === 'AbortError') {
             console.warn('⏱️ TGP timeout (45s) - intento', attempt);
-            // Retry automático hasta 2 veces
             if (attempt < 2) {
-                console.log(
-                    '🔄 Reintentando TGP una sola vez en 10 segundos...'
-                );
-
-                setTimeout(
-                    () => getInstantRecommendation(attempt + 1),
-                    10000
-                );
-
+                console.log('🔄 Reintentando TGP una sola vez en 10 segundos...');
+                setTimeout(() => getInstantRecommendation(attempt + 1), 10000);
             } else {
-                console.error(
-                    '❌ TGP falló después de 2 intentos.'
-                );
+                console.error('❌ TGP falló después de 2 intentos.');
             }
         } else {
             console.error('❌ Error TGP:', error);
         }
+    })
+    .finally(() => {
+        clearTimeout(timeoutId);
+        _h3ReleaseAnalysisLock('getInstantRecommendation');
     });
 }
 
@@ -9505,6 +9528,53 @@ function updateConfirmedSignals(data) {
 // "calculando" y se vuelve a consultar. Un caché vacío ya terminado sí significa
 // realmente que no existen señales activas en ese ciclo.
 // ============================================================================
+// HOTFIX H.3 — polling acotado para paneles Spot.
+window.__H3_SPOT_SIGNAL_POLL__ = window.__H3_SPOT_SIGNAL_POLL__ || {
+    active: {startedAt: 0, retries: 0, timer: null},
+    previous: {startedAt: 0, retries: 0, timer: null}
+};
+
+function _h3SpotPollReset(kind) {
+    const state = window.__H3_SPOT_SIGNAL_POLL__[kind];
+    if (!state) return;
+    clearTimeout(state.timer);
+    state.startedAt = 0;
+    state.retries = 0;
+    state.timer = null;
+}
+
+function _h3SpotPollSchedule(kind, callback, delayMs = 5000) {
+    const state = window.__H3_SPOT_SIGNAL_POLL__[kind];
+    const now = Date.now();
+    if (!state.startedAt) state.startedAt = now;
+    const elapsed = now - state.startedAt;
+    if (elapsed >= 30000 || state.retries >= 6) {
+        clearTimeout(state.timer);
+        state.timer = null;
+        return false;
+    }
+    state.retries += 1;
+    clearTimeout(state.timer);
+    state.timer = setTimeout(callback, delayMs);
+    return true;
+}
+
+function _h3FetchJson(url, timeoutMs = 10000, options = {}) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    return fetch(url, {...options, signal: controller.signal})
+        .then(async response => {
+            const text = await response.text();
+            let data = {};
+            try { data = text ? JSON.parse(text) : {}; } catch (_) {}
+            if (!response.ok) {
+                throw new Error(data.error || data.message || `HTTP ${response.status}`);
+            }
+            return data;
+        })
+        .finally(() => clearTimeout(timer));
+}
+
 window.updateActiveSignals = function updateActiveSignals() {
     if (window.IS_FUTURES_PAGE || !isAuthenticated()) {
         return;
@@ -9528,38 +9598,47 @@ window.updateActiveSignals = function updateActiveSignals() {
         `;
     }
 
-    fetch('/api/spot/signals/active', { cache: 'no-store' })
-        .then(response => {
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}`);
-            }
-            return response.json();
-        })
+    _h3FetchJson('/api/spot/signals/active', 10000, {cache: 'no-store'})
         .then(data => {
             if (!data.success) {
                 throw new Error(data.error || 'No se pudieron cargar las señales');
             }
 
             if (data.processing) {
-                if (signalsCount) {
-                    signalsCount.textContent = '0';
-                    signalsCount.className = 'badge bg-secondary';
+                const scheduled = _h3SpotPollSchedule(
+                    'active',
+                    () => window.updateActiveSignals(),
+                    5000
+                );
+
+                // Si ya existe un snapshot visible, jamás borrarlo por un refresh.
+                if (!window.spotActiveSignalsLoaded) {
+                    if (scheduled) {
+                        signalsList.innerHTML = `
+                            <div class="list-group-item bg-dark text-muted text-center py-3">
+                                <div class="spinner-border spinner-border-sm text-success me-2"></div>
+                                Preparando el primer snapshot Spot...
+                            </div>
+                        `;
+                    } else {
+                        signalsList.innerHTML = `
+                            <div class="list-group-item bg-dark text-warning text-center py-3">
+                                ⚠️ El snapshot sigue preparándose. La espera automática terminó para evitar carga infinita.
+                                <button class="btn btn-sm btn-outline-warning ms-2" onclick="window.updateActiveSignals()">Reintentar</button>
+                            </div>
+                        `;
+                        window.spotActiveSignalsLoaded = true;
+                    }
                 }
 
-                signalsList.innerHTML = `
-                    <div class="list-group-item bg-dark text-muted text-center py-3">
-                        <div class="spinner-border spinner-border-sm text-success me-2"></div>
-                        El servidor está preparando Spot. Volveré a comprobar automáticamente.
-                    </div>
-                `;
-
-                clearTimeout(window.__spotActiveSignalsRetry);
-                window.__spotActiveSignalsRetry = setTimeout(() => {
-                    window.updateActiveSignals();
-                }, 5000);
+                if (signalsCount && !window.spotActiveSignalsLoaded) {
+                    signalsCount.textContent = scheduled ? '...' : '--';
+                    signalsCount.className = 'badge bg-secondary';
+                }
                 return;
             }
 
+            _h3SpotPollReset('active');
             clearTimeout(window.__spotActiveSignalsRetry);
 
             const signalColors = {
@@ -9637,16 +9716,15 @@ window.updateActiveSignals = function updateActiveSignals() {
         })
         .catch(error => {
             console.error('Error cargando señales activas:', error);
-            signalsList.innerHTML = `
-                <div class="list-group-item bg-dark text-warning text-center py-3">
-                    ⚠️ Señales activas temporalmente no disponibles. Se reintentará.
-                </div>
-            `;
-
-            clearTimeout(window.__spotActiveSignalsRetry);
-            window.__spotActiveSignalsRetry = setTimeout(() => {
-                window.updateActiveSignals();
-            }, 30000);
+            const scheduled = _h3SpotPollSchedule('active', () => window.updateActiveSignals(), 8000);
+            if (!window.spotActiveSignalsLoaded) {
+                signalsList.innerHTML = `
+                    <div class="list-group-item bg-dark text-warning text-center py-3">
+                        ⚠️ Señales activas temporalmente no disponibles.${scheduled ? ' Reintentando...' : ''}
+                        ${scheduled ? '' : '<button class="btn btn-sm btn-outline-warning ms-2" onclick="window.updateActiveSignals()">Reintentar</button>'}
+                    </div>
+                `;
+            }
         })
         .finally(() => {
             window.__spotActiveSignalsLoading = false;
@@ -9780,8 +9858,7 @@ window.updatePreviousSignals = function updatePreviousSignals() {
         signalsList.innerHTML = '<div class="list-group-item bg-dark text-muted text-center py-3"><div class="spinner-border spinner-border-sm text-warning me-2"></div>Cargando señales anteriores...</div>';
     }
     
-    fetch('/api/previous_signals')
-        .then(response => response.json())
+    _h3FetchJson('/api/previous_signals', 10000, {cache: 'no-store'})
         .then(data => {
             // Actualizar contador siempre
             if (signalsCount) {
@@ -9796,24 +9873,35 @@ window.updatePreviousSignals = function updatePreviousSignals() {
                 return;
             }
 
-            // El backend todavía está calculando. Esto NO significa que el
-            // resultado final esté vacío: mantener el spinner y reintentar.
             if (data.processing) {
-                signalsList.innerHTML = `
-                    <div class="list-group-item bg-dark text-muted text-center py-3">
-                        <div class="spinner-border spinner-border-sm text-warning me-2"></div>
-                        El servidor está preparando las velas anteriores. Volveré a comprobar automáticamente.
-                    </div>
-                `;
-                window.prevSignalsLoaded = false;
+                const scheduled = _h3SpotPollSchedule(
+                    'previous',
+                    () => window.updatePreviousSignals(),
+                    5000
+                );
 
-                clearTimeout(window.__spotPreviousSignalsRetry);
-                window.__spotPreviousSignalsRetry = setTimeout(() => {
-                    window.updatePreviousSignals();
-                }, 5000);
+                if (!window.prevSignalsLoaded) {
+                    if (scheduled) {
+                        signalsList.innerHTML = `
+                            <div class="list-group-item bg-dark text-muted text-center py-3">
+                                <div class="spinner-border spinner-border-sm text-warning me-2"></div>
+                                Preparando el primer snapshot de vela anterior...
+                            </div>
+                        `;
+                    } else {
+                        signalsList.innerHTML = `
+                            <div class="list-group-item bg-dark text-warning text-center py-3">
+                                ⚠️ La vela anterior sigue preparándose. La espera automática terminó para evitar carga infinita.
+                                <button class="btn btn-sm btn-outline-warning ms-2" onclick="window.updatePreviousSignals()">Reintentar</button>
+                            </div>
+                        `;
+                        window.prevSignalsLoaded = true;
+                    }
+                }
                 return;
             }
 
+            _h3SpotPollReset('previous');
             clearTimeout(window.__spotPreviousSignalsRetry);
             
             // Si no hay datos
@@ -9916,10 +10004,18 @@ window.updatePreviousSignals = function updatePreviousSignals() {
         })
         .catch(error => {
             console.error('Error en updatePreviousSignals:', error);
-            signalsList.innerHTML = '<div class="list-group-item bg-dark text-danger text-center py-3">Error de conexión</div>';
-            if (signalsCount) {
-                signalsCount.textContent = '0';
-                signalsCount.className = 'badge bg-secondary';
+            const scheduled = _h3SpotPollSchedule('previous', () => window.updatePreviousSignals(), 8000);
+            if (!window.prevSignalsLoaded) {
+                signalsList.innerHTML = `
+                    <div class="list-group-item bg-dark text-warning text-center py-3">
+                        ⚠️ Vela anterior temporalmente no disponible.${scheduled ? ' Reintentando...' : ''}
+                        ${scheduled ? '' : '<button class="btn btn-sm btn-outline-warning ms-2" onclick="window.updatePreviousSignals()">Reintentar</button>'}
+                    </div>
+                `;
+                if (signalsCount) {
+                    signalsCount.textContent = '--';
+                    signalsCount.className = 'badge bg-secondary';
+                }
             }
         });
 };
