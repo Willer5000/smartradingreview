@@ -1510,7 +1510,7 @@ def _record_usage(
 
 def get_gemini_activity_status():
     """
-    Estado observable del Learning Scientist Gemini.
+    Estado observable del Learning Scientist IA.
 
     READ-ONLY.
 
@@ -1719,22 +1719,23 @@ def get_gemini_activity_status():
         # intentando ejecutar el slot, aun si Groq/Gemini falla antes de
         # producir una observación. No realiza llamadas LLM.
         try:
+            # J.1: avoid relying on PostgREST LIKE support in older wrappers.
+            # q6_job_runs is tiny; read the most recent rows and filter locally.
             scheduler_response = db._with_retry(
                 lambda: (
                     db.client
                     .table("q6_job_runs")
                     .select("job_key,status,updated_at")
-                    .like("job_key", "AI_LEARNING_V2:%")
                     .order("updated_at", desc=True)
-                    .limit(1)
+                    .limit(30)
                     .execute()
                 )
             )
-            scheduler_row = (
-                dict(scheduler_response.data[0])
-                if scheduler_response and scheduler_response.data
-                else None
-            )
+            scheduler_row = None
+            for _row in ((scheduler_response.data or []) if scheduler_response else []):
+                if str((_row or {}).get("job_key") or "").startswith("AI_LEARNING_V2:"):
+                    scheduler_row = dict(_row)
+                    break
             if scheduler_row:
                 result["scheduler"] = {
                     "last_attempt_at": scheduler_row.get("updated_at"),

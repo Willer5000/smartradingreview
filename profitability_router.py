@@ -125,7 +125,7 @@ def _negative_veto_eligible(candidate: Dict[str, Any]) -> bool:
     """
     engine = str(candidate.get("source_engine") or "").strip().lower()
     experiment = str(candidate.get("experiment") or "").strip().upper()
-    if experiment in {"CAUSAL_COVERAGE_STRATEGY", "CAUSAL_REGISTRY_RETEST"}:
+    if experiment in {"CAUSAL_COVERAGE_STRATEGY", "CAUSAL_REGISTRY_RETEST", "CAUSAL_SHADOW_RECYCLE"}:
         return engine in {"execution", "risk", "strategy", "traders"}
     if engine != "strategy":
         return False
@@ -158,9 +158,26 @@ def _evidence_summary(candidate: Dict[str, Any], shadow: Dict[str, Any] | None =
         "shadow_resolved": int((shadow or {}).get("resolved_n") or 0),
         "shadow_expectancy_r": _num((shadow or {}).get("expectancy_r")),
         "shadow_pf": _num((shadow or {}).get("profit_factor")),
+        "shadow_updated_at": (shadow or {}).get("updated_at"),
         "factory_family": meta.get("factory_family"),
         "factory_strategy_id": meta.get("factory_strategy_id"),
     }
+
+
+def _shadow_confirmation_state(summary: Dict[str, Any]) -> str:
+    target=max(1,int(summary.get("shadow_target") or 0) or 1)
+    n=int(summary.get("shadow_resolved") or 0)
+    exp=summary.get("shadow_expectancy_r")
+    pf=summary.get("shadow_pf")
+    if n>=target:
+        if exp is not None and float(exp)>0.10 and (pf is None or float(pf)>1.15):
+            return "CONFIRMED"
+        return "DIVERGED"
+    if n>=max(3,(target+1)//2) and exp is not None and float(exp)<=-0.25:
+        return "EARLY_DIVERGENCE"
+    if n>0:
+        return "OBSERVING"
+    return "WAITING"
 
 
 def evaluate_profitability_route(result: Dict[str, Any], system_type: str = "futures") -> Dict[str, Any]:
@@ -194,9 +211,11 @@ def evaluate_profitability_route(result: Dict[str, Any], system_type: str = "fut
         negatives = []
         positives = []
         confirmed = []
+        diverged = []
         for candidate in matched:
             key = str(candidate.get("candidate_key") or "")
             summary = _evidence_summary(candidate, shadow_map.get(key))
+            summary["shadow_state"]=_shadow_confirmation_state(summary)
             stage = str(candidate.get("stage") or "").upper()
             if stage == "REJECTED_OOS":
                 if (
@@ -208,23 +227,33 @@ def evaluate_profitability_route(result: Dict[str, Any], system_type: str = "fut
                     summary["veto_eligible"] = True
                     negatives.append(summary)
             elif stage in {"SHADOW_READY", "SHADOW_READY_FAST"}:
-                positives.append(summary)
-                target = max(1, summary.get("shadow_target") or 1)
-                s_exp = summary.get("shadow_expectancy_r")
-                s_pf = summary.get("shadow_pf")
-                if (
-                    summary.get("shadow_resolved", 0) >= target
-                    and s_exp is not None and s_exp > 0.10
-                    and s_pf is not None and s_pf > 1.15
-                ):
-                    confirmed.append(summary)
+                if summary.get("shadow_state") in {"DIVERGED","EARLY_DIVERGENCE"}:
+                    diverged.append(summary)
+                else:
+                    positives.append(summary)
+                    if summary.get("shadow_state") == "CONFIRMED":
+                        confirmed.append(summary)
 
         # Keep payload compact for UI/LLM.
         base["negative_matches"] = negatives[:3]
         base["positive_matches"] = positives[:3]
         base["shadow_confirmed_matches"] = confirmed[:3]
+        base["shadow_diverged_matches"] = diverged[:3]
 
-        if negatives and _NEGATIVE_VETO:
+        if diverged:
+            worst_live = sorted(diverged, key=lambda x: x.get("shadow_expectancy_r") if x.get("shadow_expectancy_r") is not None else -999)[0]
+            hard = str(worst_live.get("shadow_state")) == "DIVERGED"
+            base.update(
+                state="SHADOW_DIVERGED_RETEST",
+                block_new_signal=bool(hard),
+                reason=(
+                    "El edge histórico no está siendo confirmado por Shadow/live; "
+                    "la estrategia vuelve a rebacktest/Validation antes de recuperar apoyo."
+                ),
+                best_diverged=worst_live,
+                recycle_required=True,
+            )
+        elif negatives and _NEGATIVE_VETO:
             worst = sorted(negatives, key=lambda x: x.get("holdout_expectancy_r") or 0.0)[0]
             base.update(
                 state="NEGATIVE_EDGE_VETO",
@@ -246,7 +275,7 @@ def evaluate_profitability_route(result: Dict[str, Any], system_type: str = "fut
             )
         elif positives:
             best = sorted(positives, key=lambda x: (x.get("holdout_expectancy_r") or -999, x.get("holdout_n") or 0), reverse=True)[0]
-            if str(best.get("experiment") or "").upper() == "CAUSAL_COVERAGE_STRATEGY":
+            if str(best.get("experiment") or "").upper() in {"CAUSAL_COVERAGE_STRATEGY","CAUSAL_REGISTRY_RETEST","CAUSAL_SHADOW_RECYCLE"}:
                 state = "HISTORICAL_EDGE_VALIDATED"
                 reason = (
                     "Replay causal + OOS muestran edge positivo. Se usa como prior de rentabilidad; "

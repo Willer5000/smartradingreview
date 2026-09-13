@@ -12556,6 +12556,10 @@ class ReviewTrader:
 
             print(f"   📈 Score LONG fusionado: {long_score:.1f} | Research={research_long.get('state')}")
             print(f"   📉 Score SHORT fusionado: {short_score:.1f} | Research={research_short.get('state')}")
+            if research_long.get('state') == 'SHADOW_DIVERGED':
+                razones.append('Research LONG: Shadow/live diverge del backtest; estrategia enviada a reciclaje/retest')
+            if research_short.get('state') == 'SHADOW_DIVERGED':
+                razones.append('Research SHORT: Shadow/live diverge del backtest; estrategia enviada a reciclaje/retest')
             
             # Decisión
             if long_score > 60 and long_score > short_score + 15:
@@ -12597,8 +12601,8 @@ class ReviewTrader:
                     estrategias_detectadas.append('RESEARCH_CAUSAL_OOS_SHORT')
                     
             elif (
-                research_long.get('state') == 'NEGATIVE_OOS'
-                and research_short.get('state') == 'NEGATIVE_OOS'
+                research_long.get('state') in ('NEGATIVE_OOS','SHADOW_DIVERGED')
+                and research_short.get('state') in ('NEGATIVE_OOS','SHADOW_DIVERGED')
             ) or self._detect_loser_pattern(active_strategies, rec_long, rec_short):
                 accion = 'NO_OPERAR'
                 confianza = 75

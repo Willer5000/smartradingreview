@@ -11071,6 +11071,34 @@ function _macroRenderBadge(snapshot) {
     badge.innerHTML = `<i class="fas fa-globe-americas" aria-hidden="true"></i> MACRO · ${_macroRiskLabel(level)}`;
 }
 
+function _macroMoney(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '--';
+    const sign = n >= 0 ? '+' : '-';
+    const a = Math.abs(n);
+    if (a >= 1e9) return `${sign}$${(a/1e9).toFixed(a >= 10e9 ? 0 : 1)}B`;
+    if (a >= 1e6) return `${sign}$${(a/1e6).toFixed(a >= 10e6 ? 0 : 1)}M`;
+    if (a >= 1e3) return `${sign}$${(a/1e3).toFixed(0)}K`;
+    return `${sign}$${a.toFixed(0)}`;
+}
+
+function _macroRenderFlow(snapshot) {
+    const el = document.getElementById('macro-flow-meta');
+    if (!el) return;
+    const flow = snapshot?.exchange_flow || {};
+    if (!flow.available) {
+        el.textContent = 'CEX · sin dato';
+        el.title = flow.error ? `Flujo CEX no disponible: ${String(flow.error).slice(0,120)}` : 'Flujo CEX no disponible';
+        return;
+    }
+    const d24 = _macroMoney(flow.aggregate_inflow_24h_usd);
+    const d7 = _macroMoney(flow.aggregate_inflow_7d_usd);
+    const vol = String(flow.volatility_risk || 'UNKNOWN').toUpperCase();
+    const volEs = {LOW:'BAJO',MEDIUM:'MEDIO',HIGH:'ALTO',UNKNOWN:'SIN DATO'}[vol] || vol;
+    el.textContent = `CEX 24h ${d24} · 7d ${d7} · VOL ${volEs}`;
+    el.title = `${flow.label_es || 'Flujo CEX'} · ${flow.note_es || 'Contexto de reservas/flujo; no equivale a compra/venta propia del exchange.'}`;
+}
+
 function _macroRenderItem(item, immediate = false) {
     const message = document.getElementById('macro-ticker-message');
     const meta = document.getElementById('macro-ticker-meta');
@@ -11141,6 +11169,7 @@ function _macroApplySnapshot(snapshot) {
     state.items = _macroNormalizeItems(snapshot || {});
     state.index = 0;
     _macroRenderBadge(snapshot || {});
+    _macroRenderFlow(snapshot || {});
     _macroRenderItem(state.items[0], true);
     if (typeof window.refreshActionNowPanel === 'function') {
         window.refreshActionNowPanel(false);

@@ -36195,6 +36195,31 @@ _AI_LEARNING_WATCHDOG_SECONDS = max(
     int(os.getenv('AI_LEARNING_WATCHDOG_SECONDS', '600') or 600)
 )
 
+# J.1: in-process heartbeat makes the scheduler observable even before/if the
+# q6_job_runs read path is temporarily unavailable. It does not call the LLM.
+_AI_LEARNING_RUNTIME_LOCK = threading.Lock()
+_AI_LEARNING_RUNTIME_STATE = {
+    'thread_started': False,
+    'last_attempt_at': None,
+    'last_slot': None,
+    'status': 'NOT_STARTED',
+    'last_error': None,
+    'last_success_at': None,
+}
+_AI_SCIENTIST_THREAD_LOCK = threading.Lock()
+_AI_SCIENTIST_THREAD_STARTED = False
+
+
+def _ai_learning_runtime_update(**kwargs):
+    with _AI_LEARNING_RUNTIME_LOCK:
+        _AI_LEARNING_RUNTIME_STATE.update(kwargs)
+        return dict(_AI_LEARNING_RUNTIME_STATE)
+
+
+def _ai_learning_runtime_snapshot():
+    with _AI_LEARNING_RUNTIME_LOCK:
+        return dict(_AI_LEARNING_RUNTIME_STATE)
+
 
 def _ai_learning_slot(now=None):
     now = now or datetime.now(bolivia_tz)
@@ -36217,17 +36242,25 @@ def _run_ai_learning_daily(q6_slot=None, trigger_source='daily'):
     dentro del mismo slot y permite recuperar FAILED/RUNNING abandonados.
     """
     claimed = False
+    attempt_utc = datetime.now(timezone.utc).isoformat()
+    _ai_learning_runtime_update(
+        last_attempt_at=attempt_utc,
+        status='CHECKING_SLOT',
+        last_error=None,
+    )
     try:
         from review_trader import review_trader
         from q6_integrity import claim_daily_job, finish_daily_job
         from ai_advisor import run_ai_advisor
 
         if not review_trader.db.enabled:
+            _ai_learning_runtime_update(status='DB_DISABLED', last_error='ReviewTrader DB no disponible')
             return False
 
         # El Review diario puede pasar su fecha legacy, pero Learning usa
         # un slot propio de 6 h para aprendizaje continuo y recuperable.
         q6_slot = _ai_learning_slot(datetime.now(bolivia_tz))
+        _ai_learning_runtime_update(last_slot=q6_slot, status='CLAIMING_SLOT')
 
         # retry=True recupera FAILED después de 15 min y leases RUNNING
         # abandonados tras un reinicio. DONE sigue siendo idempotente.
@@ -36240,8 +36273,12 @@ def _run_ai_learning_daily(q6_slot=None, trigger_source='daily'):
             abandoned_after_minutes=12
         )
         if not claimed:
+            # Usually means this 6h slot is already DONE or another worker owns
+            # a still-valid lease. It proves the watchdog is alive.
+            _ai_learning_runtime_update(status='SLOT_ALREADY_CLAIMED_OR_DONE')
             return False
 
+        _ai_learning_runtime_update(status='RUNNING_LLM')
         learning_context = _build_ai_learning_context()
         ai_learning_result = run_ai_advisor(
             user_name='SYSTEM',
@@ -36254,6 +36291,14 @@ def _run_ai_learning_daily(q6_slot=None, trigger_source='daily'):
 
         success = bool(ai_learning_result.get('success'))
         finish_daily_job(review_trader.db, 'AI_LEARNING_V2', q6_slot, success)
+        if success:
+            _ai_learning_runtime_update(
+                status='DONE', last_success_at=datetime.now(timezone.utc).isoformat(), last_error=None
+            )
+        else:
+            _ai_learning_runtime_update(
+                status='FAILED', last_error=str(ai_learning_result.get('reason') or 'sin detalle')[:180]
+            )
 
         if success:
             data = ai_learning_result.get('data', {}) or {}
@@ -36277,6 +36322,7 @@ def _run_ai_learning_daily(q6_slot=None, trigger_source='daily'):
                 finish_daily_job(review_trader.db, 'AI_LEARNING_V2', q6_slot, False)
             except Exception:
                 pass
+        _ai_learning_runtime_update(status='ERROR', last_error=f'{type(exc).__name__}: {str(exc)[:160]}')
         print(f"⚠️ [C10] AI Learning Scientist recovery: {type(exc).__name__}: {exc}")
         return False
 
@@ -36318,22 +36364,46 @@ def _q6_run_daily_review():
 
 
 def ai_learning_scientist_watchdog_loop():
-    """Garantiza que el Científico no dependa del Review diario ni del heavy lock."""
-    # Web + snapshots tienen prioridad tras un deploy.
+    """Independent Scientist watchdog; never depends on the heavy analysis lock."""
+    _ai_learning_runtime_update(thread_started=True, status='WATCHDOG_STARTED')
+    # Give Gunicorn time to bind, but do not wait for all other daemons.
     time.sleep(60)
     while True:
         try:
-            _run_ai_learning_daily(
-                q6_slot=None,
-                trigger_source='watchdog-6h'
-            )
+            _run_ai_learning_daily(q6_slot=None, trigger_source='watchdog-6h')
         except Exception as exc:
+            _ai_learning_runtime_update(status='WATCHDOG_ERROR', last_error=f'{type(exc).__name__}: {str(exc)[:160]}')
             print(
-                f"⚠️ [H.2] Learning Scientist watchdog: "
+                f"⚠️ [J.1] Learning Scientist watchdog: "
                 f"{type(exc).__name__}: {exc}",
                 flush=True,
             )
         time.sleep(_AI_LEARNING_WATCHDOG_SECONDS)
+
+
+def _ensure_ai_learning_scientist_thread():
+    """Start the Scientist exactly once, independently of the bulk bootstrap."""
+    global _AI_SCIENTIST_THREAD_STARTED
+    if os.environ.get('DISABLE_SCHEDULER'):
+        _ai_learning_runtime_update(status='DISABLED_BY_ENV')
+        return False
+    with _AI_SCIENTIST_THREAD_LOCK:
+        if _AI_SCIENTIST_THREAD_STARTED:
+            return True
+        t=threading.Thread(
+            target=ai_learning_scientist_watchdog_loop,
+            name='ai-learning-scientist',
+            daemon=True,
+        )
+        t.start()
+        _AI_SCIENTIST_THREAD_STARTED=True
+        _ai_learning_runtime_update(thread_started=True, status='THREAD_STARTED')
+        print(
+            "✅ Thread AI Learning Scientist independiente iniciado "
+            f"(slot {_AI_LEARNING_SLOT_HOURS}h; watchdog {_AI_LEARNING_WATCHDOG_SECONDS}s)",
+            flush=True,
+        )
+        return True
 
 
 def verificar_y_ejecutar():
@@ -42321,6 +42391,12 @@ def _schedule_deferred_runtime_bootstrap():
     global _RUNTIME_BOOTSTRAP_STARTED
     if os.environ.get('DISABLE_SCHEDULER') and os.environ.get('DISABLE_WARMUP'):
         return
+    # Scientist is cheap and must remain observable even if snapshot restoration
+    # or another daemon later fails during the bulk bootstrap.
+    try:
+        _ensure_ai_learning_scientist_thread()
+    except Exception as _scientist_start_error:
+        _ai_learning_runtime_update(status='START_ERROR', last_error=str(_scientist_start_error)[:180])
     with _RUNTIME_BOOTSTRAP_LOCK:
         if _RUNTIME_BOOTSTRAP_STARTED:
             return
@@ -44701,19 +44777,10 @@ def _start_background_threads():
     except Exception as e:
         print(f"⚠️ Error iniciando learning_worker: {e}")
 
-    # H.2: watchdog independiente del Científico. El claim por slot evita
-    # duplicar llamadas aunque este hilo compruebe periódicamente.
+    # J.1: Scientist has its own idempotent starter and does not depend on
+    # the rest of the background bundle.
     try:
-        t_learning_ai = threading.Thread(
-            target=ai_learning_scientist_watchdog_loop,
-            name='ai-learning-scientist',
-            daemon=True
-        )
-        t_learning_ai.start()
-        print(
-            "✅ Thread AI Learning Scientist iniciado "
-            f"(slot {_AI_LEARNING_SLOT_HOURS}h; watchdog {_AI_LEARNING_WATCHDOG_SECONDS}s)"
-        )
+        _ensure_ai_learning_scientist_thread()
     except Exception as e:
         print(f"⚠️ Error iniciando AI Learning Scientist: {e}")
 
@@ -46205,10 +46272,24 @@ def api_ai_gemini_activity():
             get_gemini_activity_status
         )
 
-        data = (
-            get_gemini_activity_status()
-            or {}
-        )
+        # J.1 self-healing observability: the read endpoint never calls the LLM,
+        # but it ensures the independent watchdog thread exists.
+        try:
+            _ensure_ai_learning_scientist_thread()
+        except Exception:
+            pass
+        data = (get_gemini_activity_status() or {})
+        runtime = _ai_learning_runtime_snapshot()
+        scheduler = dict(data.get('scheduler') or {})
+        if not scheduler.get('last_attempt_at') and runtime.get('last_attempt_at'):
+            scheduler['last_attempt_at'] = runtime.get('last_attempt_at')
+        if str(scheduler.get('status') or 'UNKNOWN').upper() in ('UNKNOWN','UNAVAILABLE') and runtime.get('status'):
+            scheduler['status'] = runtime.get('status')
+        scheduler['runtime_thread_started'] = bool(runtime.get('thread_started'))
+        scheduler['runtime_slot'] = runtime.get('last_slot')
+        scheduler['runtime_error'] = runtime.get('last_error')
+        data['scheduler'] = scheduler
+        data['scheduler_runtime'] = runtime
 
         return jsonify({
             'success':

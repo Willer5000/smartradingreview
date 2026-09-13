@@ -46,13 +46,57 @@ def _num(value):
     except Exception:
         return None
 
-_TF_ORDER = ('4H','12H','1D','1W','5M','15M','30M','1H','2H','ALL')
+_TF_ORDER = ('5M','15M','30M','1H','2H','4H','12H','1D','1W','ALL')
+_CAUSAL_EXPERIMENTS = {'CAUSAL_COVERAGE_STRATEGY','CAUSAL_REGISTRY_RETEST','CAUSAL_SHADOW_RECYCLE'}
 
 def _tf(value):
     return str(value or 'ALL').strip().upper() or 'ALL'
 
+def _stage_priority(stage):
+    return {
+        'SHADOW_READY_FAST': 60, 'SHADOW_READY': 55,
+        'VALIDATION_REQUIRED': 40, 'VALIDATED_SINGLE_ASSET': 38,
+        'OBSERVE': 25, 'REJECTED_OOS': 10,
+    }.get(str(stage or '').upper(), 20)
+
+def _causal_cell_id(row):
+    meta=row.get('meta') or {}; scope=row.get('scope') or {}
+    cid=str(meta.get('coverage_cell_id') or '').strip()
+    if cid:
+        return cid.upper()
+    market=str(scope.get('market_family') or 'UNKNOWN').upper()
+    symbol=str(scope.get('symbol') or 'ALL').upper()
+    tf=_tf(scope.get('timeframe'))
+    return f'{market}|{symbol}|{tf}'
+
+def _best_causal_per_cell(rows):
+    """One representative per specialist cell for Analytics visibility.
+
+    I.2 persists several pre-declared finalists per cell so Validation can test
+    alternatives without touching Final OOS.  The central UI must not let those
+    finalists consume all 240 visible slots.  This selector is display-only;
+    Research evidence fusion still reads every finalist directly from Supabase.
+    """
+    best={}; scores={}
+    for row in rows or []:
+        if str(row.get('experiment') or '') not in _CAUSAL_EXPERIMENTS:
+            continue
+        cid=_causal_cell_id(row)
+        metrics=row.get('metrics') or {}; val=metrics.get('validation') or {}
+        exp=_num(val.get('expectancy_r')); pf=_num(val.get('profit_factor'))
+        score=(
+            _stage_priority(row.get('stage')),
+            exp if exp is not None else -999.0,
+            pf if pf is not None else -999.0,
+            int(val.get('resolved') or 0),
+            -int((row.get('meta') or {}).get('finalist_rank_selection_only') or 999),
+        )
+        if cid not in best or score > scores[cid]:
+            best[cid]=row; scores[cid]=score
+    return list(best.values())
+
 def _balanced_candidates(rows, limit=240):
-    """Keep causal coverage + long/intraday timeframes visible in the central UI."""
+    """Keep all 54 specialist cells visible without crowding out diagnostics."""
     rows=list(rows or [])
     limit=max(1,int(limit or 1))
     picked=[]; seen=set()
@@ -61,28 +105,33 @@ def _balanced_candidates(rows, limit=240):
         k=key(row)
         if not k or k in seen or len(picked)>=limit: return
         seen.add(k); picked.append(row)
-    # Commit J: the 18 causal cells are part of the product contract and must
-    # never disappear from Analytics because an observational engine has more rows.
-    for row in rows:
-        if str(row.get('experiment') or '') == 'CAUSAL_COVERAGE_STRATEGY':
-            add(row)
-            if len(picked)>=limit: return picked
-    if len(rows)<=limit:
-        for row in rows: add(row)
+
+    # J.1: one best representative for each exact symbol×TF causal cell.
+    causal=_best_causal_per_cell(rows)
+    causal.sort(key=lambda r: _causal_cell_id(r))
+    for row in causal:
+        add(row)
+        if len(picked)>=limit: return picked
+
+    causal_keys={key(x) for x in rows if str(x.get('experiment') or '') in _CAUSAL_EXPERIMENTS}
+    noncausal=[x for x in rows if key(x) not in causal_keys]
+    if len(picked)+len(noncausal)<=limit:
+        for row in noncausal: add(row)
         return picked
-    # Guarantee one row for every existing engine x timeframe first.
+
+    # Guarantee one observational row for every existing engine x timeframe.
     markers=set()
     for tf in _TF_ORDER:
-        for row in rows:
+        for row in noncausal:
             scope=row.get('scope') or {}
             if _tf(scope.get('timeframe')) != tf: continue
             marker=(str(row.get('source_engine') or 'UNKNOWN'),tf)
             if marker in markers: continue
             markers.add(marker); add(row)
             if len(picked)>=limit: return picked
-    # Round-robin by timeframe for the remaining space.
+
     buckets={tf:[] for tf in _TF_ORDER}; other=[]
-    for row in rows:
+    for row in noncausal:
         tf=_tf((row.get('scope') or {}).get('timeframe'))
         (buckets[tf] if tf in buckets else other).append(row)
     active=[tf for tf in _TF_ORDER if buckets[tf]]; idx=0
@@ -92,8 +141,9 @@ def _balanced_candidates(rows, limit=240):
         if bucket: add(bucket.pop(0))
         if not bucket:
             active.remove(tf); idx=0
-        else: idx += 1
-    for row in other + rows:
+        else:
+            idx += 1
+    for row in other + noncausal:
         add(row)
         if len(picked)>=limit: break
     return picked
@@ -150,6 +200,8 @@ def _compact_promotion(row):
         'updated_at': row.get('updated_at'),
         'causal_strategy': bool(meta.get('causal_strategy') or meta.get('causal_candle_replay')),
         'coverage_cell': meta.get('coverage_cell') or {},
+        'coverage_cell_id': meta.get('coverage_cell_id') or _causal_cell_id(row),
+        'finalist_rank': meta.get('finalist_rank_selection_only'),
         'strategy_family': meta.get('causal_strategy_family') or meta.get('factory_family'),
         'walk_forward_positive_ratio': _num(meta.get('walk_forward_positive_ratio')),
     }
@@ -163,7 +215,7 @@ def _compact(force=False):
     raw_promotions=_get('research_promotions_v1',{
         'select':'candidate_key,source_engine,experiment,stage,reason,scope,metrics,meta,research_version,updated_at',
         'order':'updated_at.desc',
-        'limit':'1000',
+        'limit':'1800',
     })
     raw_promotions=[x for x in raw_promotions if (x.get('meta') or {}).get('is_current') is not False and str(x.get('stage') or '') != 'STALE']
     coverage=_coverage(raw_promotions)
@@ -177,7 +229,7 @@ def _compact(force=False):
     shadow=_get('research_shadow_live_metrics_v1',{
         'select':'*',
         'order':'updated_at.desc',
-        'limit':'120',
+        'limit':'600',
     })
     payload=(candidates,states,shadow,coverage)
     with _CACHE_LOCK:
@@ -190,7 +242,7 @@ def _report(candidates,states,shadow,coverage):
     for s in states:
         lines.append(f"- {s.get('engine')}: {s.get('status')} · RSS {s.get('rss_mb')} MB · {s.get('last_seen_at')}")
     strategic=(coverage or {}).get('strategic_timeframes') or {}
-    lines += ['','## Cobertura de temporalidades', f"- 4H={strategic.get('4H',0)} · 12H={strategic.get('12H',0)} · 1D={strategic.get('1D',0)} · 1W={strategic.get('1W',0)}", '', '## Evidencia Discovery/Holdout temporal','- CAUSAL_COVERAGE_STRATEGY usa replay causal; el resto conserva evidencia observacional temporal.']
+    lines += ['','## Cobertura de temporalidades', f"- 4H={strategic.get('4H',0)} · 12H={strategic.get('12H',0)} · 1D={strategic.get('1D',0)} · 1W={strategic.get('1W',0)}", '', '## Evidencia Discovery/Holdout temporal','- CAUSAL_COVERAGE_STRATEGY/RETEST/RECYCLE usan replay causal; el resto conserva evidencia observacional temporal. I.2/J.1 muestran una fila por celda de 54 en Analytics.']
     for x in candidates[:35]:
         lines.append(f"- {x.get('stage')} | {x.get('source_engine')} | {x.get('experiment')} | {x.get('market_family')} {x.get('timeframe')} | Discovery.N={x.get('backtest_n')} | WR={x.get('backtest_wr')}% | Exp.R={x.get('backtest_exp_r')} | Holdout.N={x.get('oos_n')} | Holdout.WR={x.get('oos_wr')}% | Holdout.Exp.R={x.get('oos_exp_r')} | PF={x.get('oos_pf')}")
     lines += ['','## Shadow central live']
