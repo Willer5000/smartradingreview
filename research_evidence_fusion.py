@@ -26,6 +26,26 @@ _POSITIVE = {"SHADOW_READY", "SHADOW_READY_FAST"}
 _VISIBLE = _POSITIVE | {"OBSERVE", "VALIDATION_REQUIRED", "REJECTED_OOS", "VALIDATED_SINGLE_ASSET"}
 _EXPERIMENTS = {"CAUSAL_COVERAGE_STRATEGY", "CAUSAL_REGISTRY_RETEST", "CAUSAL_SHADOW_RECYCLE"}
 _COVERAGE_TARGET = 54
+_FUTURES_SYMBOLS = ("BTC-USDT","ETH-USDT","SOL-USDT","XRP-USDT","ADA-USDT","LINK-USDT","BNB-USDT")
+_FUTURES_TFS = ("5M","15M","30M","1H","2H","4H")
+_SPOT_SYMBOLS = ("BTC-USDT","PAXG-USDT","PAXG-BTC")
+_SPOT_TFS = ("4H","12H","1D","1W")
+
+
+def _canonical_cell_key(row: Dict[str, Any]) -> Optional[str]:
+    """Return one of the 54 contractual symbol×TF cells, otherwise None."""
+    scope = row.get("scope") or {}
+    fam = str(scope.get("market_family") or "")
+    sym = str(scope.get("symbol") or "").upper().replace("/", "-")
+    tf = _norm_tf(scope.get("timeframe"))
+    if fam == "CRYPTO_FUTURES":
+        if sym in _FUTURES_SYMBOLS and tf in _FUTURES_TFS:
+            return f"FUTURES|{sym}|{tf}"
+        return None
+    if fam in {"CRYPTO_SPOT","PAXG_USDT","PAXG_BTC"}:
+        if sym in _SPOT_SYMBOLS and tf in _SPOT_TFS:
+            return f"SPOT|{sym}|{tf}"
+    return None
 
 
 def _cfg():
@@ -174,6 +194,7 @@ def _summary(p: Dict[str, Any], shadow_map: Dict[str, Dict[str, Any]]) -> Dict[s
         "scope": p.get("scope") or {},
         "reason": p.get("reason"),
         "backtest_n": int(allm.get("resolved") or 0),
+        "backtest_wr": _num(allm.get("win_rate_pct")),
         "backtest_exp_r": _num(allm.get("expectancy_r")),
         "backtest_pf": _num(allm.get("profit_factor")),
         "oos_n": int(val.get("resolved") or 0),
@@ -303,8 +324,10 @@ def _bucket(rows: List[Dict[str, Any]], name: str) -> Dict[str, Any]:
     if not rows:
         return {
             "name": name, "state": "NO_EVIDENCE", "strategies": 0,
-            "validated_strategies": 0, "oos_n": 0, "oos_exp_r_weighted": None,
-            "oos_total_r": None, "best": None, "cells": 0,
+            "validated_strategies": 0, "oos_n": 0, "oos_wr_weighted": None,
+            "oos_exp_r_weighted": None, "oos_total_r": None,
+            "best": None, "cells": 0, "shadow_ready": 0,
+            "shadow_observed": 0, "shadow_signals": 0, "shadow_resolved": 0,
         }
     ready = [r for r in rows if str(r.get("stage")) in _POSITIVE and not r.get("recycle_required")]
     validation = [r for r in rows if str(r.get("stage")) == "VALIDATION_REQUIRED"]
@@ -314,6 +337,10 @@ def _bucket(rows: List[Dict[str, Any]], name: str) -> Dict[str, Any]:
     denom = sum(int(r.get("oos_n") or 0) for r in vals)
     total_r = sum(float(r.get("oos_exp_r"))*int(r.get("oos_n") or 0) for r in vals)
     weighted = total_r / denom if denom else None
+    wr_rows = [r for r in vals if r.get("oos_wr") is not None]
+    wr_den = sum(int(r.get("oos_n") or 0) for r in wr_rows)
+    wr_num = sum(float(r.get("oos_wr"))*int(r.get("oos_n") or 0) for r in wr_rows)
+    wr_weighted = wr_num / wr_den if wr_den else None
     best = max(source, key=lambda r: (float(r.get("oos_exp_r") or -999), int(r.get("oos_n") or 0))) if source else None
     return {
         "name": name,
@@ -322,10 +349,15 @@ def _bucket(rows: List[Dict[str, Any]], name: str) -> Dict[str, Any]:
         "validated_strategies": len(ready),
         "cells": len(rows),
         "oos_n": denom,
+        "oos_wr_weighted": round(wr_weighted, 2) if wr_weighted is not None else None,
         "oos_exp_r_weighted": round(weighted, 4) if weighted is not None else None,
         "oos_total_r": round(total_r, 3) if denom else None,
         "best": best,
         "recycle_required": sum(1 for r in rows if r.get("recycle_required")),
+        "shadow_ready": len(ready),
+        "shadow_observed": sum(1 for r in ready if int(r.get("shadow_signals_n") or 0) > 0),
+        "shadow_signals": sum(int(r.get("shadow_signals_n") or 0) for r in ready),
+        "shadow_resolved": sum(int(r.get("shadow_n") or 0) for r in ready),
         "note": "Backtest/OOS y live se muestran separados; no se suman como una sola muestra.",
     }
 
@@ -336,7 +368,16 @@ def profitability_snapshot(force: bool = False) -> Dict[str, Any]:
         smap = {str(x.get("candidate_key") or ""): x for x in shadow}
         all_rows = [_summary(p, smap) for p in promotions]
         rows = _latest_by_lineage(all_rows)
-        cell_rows = _best_per_cell(rows)
+        contract_rows = []
+        for row in rows:
+            canonical = _canonical_cell_key(row)
+            if not canonical:
+                continue
+            item = dict(row)
+            item["canonical_cell_key"] = canonical
+            item["coverage_cell_id"] = canonical
+            contract_rows.append(item)
+        cell_rows = _best_per_cell(contract_rows)
         cells = {str(r.get("coverage_cell_id") or "").upper() for r in cell_rows if r.get("coverage_cell_id")}
         validated_cells = [r for r in cell_rows if str(r.get("stage")) in _POSITIVE and not r.get("recycle_required")]
         oos_positive_cells = [
@@ -344,8 +385,8 @@ def profitability_snapshot(force: bool = False) -> Dict[str, Any]:
             if r.get("oos_exp_r") is not None and float(r.get("oos_exp_r")) > 0
             and r.get("oos_pf") is not None and float(r.get("oos_pf")) > 1.0
         ]
-        spot = [r for r in rows if str((r.get("scope") or {}).get("market_family") or "") in {"CRYPTO_SPOT","PAXG_USDT","PAXG_BTC"}]
-        fut = [r for r in rows if str((r.get("scope") or {}).get("market_family") or "") == "CRYPTO_FUTURES"]
+        spot = [r for r in contract_rows if str((r.get("scope") or {}).get("market_family") or "") in {"CRYPTO_SPOT","PAXG_USDT","PAXG_BTC"}]
+        fut = [r for r in contract_rows if str((r.get("scope") or {}).get("market_family") or "") == "CRYPTO_FUTURES"]
         by_market = {}
         for fam in ("CRYPTO_SPOT","PAXG_USDT","PAXG_BTC"):
             by_market[fam] = _bucket([r for r in spot if str((r.get("scope") or {}).get("market_family") or "") == fam], fam)
@@ -359,7 +400,7 @@ def profitability_snapshot(force: bool = False) -> Dict[str, Any]:
         for r in sorted(cell_rows, key=lambda x: str(x.get("coverage_cell_id") or "")):
             scope = r.get("scope") or {}
             matrix.append({
-                "cell": r.get("coverage_cell_id"),
+                "cell": r.get("canonical_cell_key") or r.get("coverage_cell_id"),
                 "market_family": scope.get("market_family"),
                 "symbol": scope.get("symbol"),
                 "timeframe": scope.get("timeframe"),
@@ -386,8 +427,11 @@ def profitability_snapshot(force: bool = False) -> Dict[str, Any]:
             "futures_by_symbol": by_symbol,
             "futures_by_timeframe": by_tf,
             "coverage_matrix": matrix,
-            "shadow_live_candidates": sum(1 for r in rows if int(r.get("shadow_n") or 0) > 0),
-            "causal_candidates": len(rows),
+            "shadow_ready_cells": len(validated_cells),
+            "shadow_live_candidates": sum(1 for r in validated_cells if int(r.get("shadow_signals_n") or 0) > 0),
+            "shadow_live_signals": sum(int(r.get("shadow_signals_n") or 0) for r in validated_cells),
+            "shadow_live_resolved": sum(int(r.get("shadow_n") or 0) for r in validated_cells),
+            "causal_candidates": len(contract_rows),
         }
     except Exception as exc:
         return {

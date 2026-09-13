@@ -427,7 +427,10 @@ def _fetch_fomc_calendar(now: Optional[datetime] = None) -> List[Dict]:
         end = text.find(next_marker, start + len(marker))
         section = text[start:end if end >= 0 else None]
     else:
-        section = text
+        # Final V1 RC1: never parse another year's dates and relabel them as
+        # the current year. Missing official year block is safer as NO_DATA.
+        logger.warning("FOMC current-year block not found for %s; skipping calendar parse", year)
+        return []
 
     events: List[Dict] = []
     month_pattern = "|".join(month_names)
@@ -482,7 +485,14 @@ def _hydrate_cache_from_db_once() -> None:
     if not rows:
         return
     news = [r for r in rows if str(r.get("kind") or "").upper() == "HEADLINE"][:MACRO_NEWS_MAX_ARTICLES]
-    events = [r for r in rows if str(r.get("kind") or "").upper() == "SCHEDULED_EVENT"][:16]
+    # Final V1 RC1: Federal Reserve dates are refreshed from the official
+    # current-year calendar. Persisted FOMC rows are not hydrated because an
+    # older parser may have cached a previous-year date under the current year.
+    events = [
+        r for r in rows
+        if str(r.get("kind") or "").upper() == "SCHEDULED_EVENT"
+        and str(r.get("source") or "") != "Federal Reserve"
+    ][:16]
     with _LOCK:
         if news and not _CACHE.get("news"):
             _CACHE["news"] = news
@@ -687,6 +697,14 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
         and event.get("risk_level") in {"HIGH", "CRITICAL"}
     ), None)
 
+    # Separate current macro risk from the next scheduled high-impact event.
+    # This avoids UI contradictions such as "MACRO LOW" beside "FOMC HIGH".
+    next_high_event = next((
+        event for event in upcoming
+        if float(event.get("hours_until") or 9999) >= 0
+        and event.get("risk_level") in {"HIGH", "CRITICAL"}
+    ), None)
+
     futures_posture = "CAUTION" if near_high_event or risk_level in {"HIGH", "CRITICAL"} else "NORMAL"
     if str(exchange_flow.get("volatility_risk") or "").upper() in {"HIGH"}:
         futures_posture = "CAUTION"
@@ -746,8 +764,12 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
         "trader_macro_reads_context": True,
         "production_change": False,
         "risk_level": risk_level,
+        "current_risk_level": risk_level,
         "risk_score": top_score,
         "futures_posture": futures_posture,
+        "next_high_impact_event": next_high_event,
+        "next_event_risk_level": (next_high_event or {}).get("risk_level"),
+        "next_event_hours": (next_high_event or {}).get("hours_until"),
         "directional_bias": directional_bias,
         "exchange_flow": exchange_flow,
         "fundamental_signal_context": {

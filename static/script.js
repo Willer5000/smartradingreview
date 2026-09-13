@@ -11066,9 +11066,17 @@ function _macroRiskClass(level) {
 function _macroRenderBadge(snapshot) {
     const badge = document.getElementById('macro-risk-badge');
     if (!badge) return;
-    const level = String(snapshot?.risk_level || 'UNKNOWN').toUpperCase();
-    badge.className = `macro-risk-badge ${_macroRiskClass(level)}`;
-    badge.innerHTML = `<i class="fas fa-globe-americas" aria-hidden="true"></i> MACRO · ${_macroRiskLabel(level)}`;
+    const current = String(snapshot?.current_risk_level || snapshot?.risk_level || 'UNKNOWN').toUpperCase();
+    const next = String(snapshot?.next_event_risk_level || '').toUpperCase();
+    const hours = Number(snapshot?.next_event_hours);
+    badge.className = `macro-risk-badge ${_macroRiskClass(current)}`;
+    let label = `<i class="fas fa-globe-americas" aria-hidden="true"></i> MACRO AHORA · ${_macroRiskLabel(current)}`;
+    if (next && next !== 'UNKNOWN') label += ` <span class="opacity-75">| PRÓXIMO · ${_macroRiskLabel(next)}</span>`;
+    badge.innerHTML = label;
+    const nextEvent = snapshot?.next_high_impact_event || {};
+    badge.title = nextEvent?.title_es
+        ? `Riesgo actual: ${_macroRiskLabel(current)}. Próximo evento: ${nextEvent.title_es}${Number.isFinite(hours) ? ` en ${Math.max(0, hours).toFixed(hours < 24 ? 1 : 0)} h` : ''}.`
+        : `Riesgo macro actual: ${_macroRiskLabel(current)}.`;
 }
 
 function _macroMoney(value) {

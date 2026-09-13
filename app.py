@@ -36200,6 +36200,8 @@ _AI_LEARNING_WATCHDOG_SECONDS = max(
 _AI_LEARNING_RUNTIME_LOCK = threading.Lock()
 _AI_LEARNING_RUNTIME_STATE = {
     'thread_started': False,
+    'thread_started_at': None,
+    'last_watchdog_heartbeat_at': None,
     'last_attempt_at': None,
     'last_slot': None,
     'status': 'NOT_STARTED',
@@ -36365,11 +36367,14 @@ def _q6_run_daily_review():
 
 def ai_learning_scientist_watchdog_loop():
     """Independent Scientist watchdog; never depends on the heavy analysis lock."""
-    _ai_learning_runtime_update(thread_started=True, status='WATCHDOG_STARTED')
-    # Give Gunicorn time to bind, but do not wait for all other daemons.
-    time.sleep(60)
+    now_utc = datetime.now(timezone.utc).isoformat()
+    _ai_learning_runtime_update(thread_started=True, thread_started_at=now_utc, status='WATCHDOG_STARTED')
+    # RC1: first persisted attempt must appear quickly after a deploy. The slot
+    # claim remains idempotent, so this does not duplicate LLM calls.
+    time.sleep(8)
     while True:
         try:
+            _ai_learning_runtime_update(last_watchdog_heartbeat_at=datetime.now(timezone.utc).isoformat())
             _run_ai_learning_daily(q6_slot=None, trigger_source='watchdog-6h')
         except Exception as exc:
             _ai_learning_runtime_update(status='WATCHDOG_ERROR', last_error=f'{type(exc).__name__}: {str(exc)[:160]}')
@@ -36397,12 +36402,39 @@ def _ensure_ai_learning_scientist_thread():
         )
         t.start()
         _AI_SCIENTIST_THREAD_STARTED=True
-        _ai_learning_runtime_update(thread_started=True, status='THREAD_STARTED')
+        _ai_learning_runtime_update(
+            thread_started=True,
+            thread_started_at=datetime.now(timezone.utc).isoformat(),
+            status='THREAD_STARTED'
+        )
         print(
             "✅ Thread AI Learning Scientist independiente iniciado "
             f"(slot {_AI_LEARNING_SLOT_HOURS}h; watchdog {_AI_LEARNING_WATCHDOG_SECONDS}s)",
             flush=True,
         )
+        return True
+
+
+def _kick_ai_learning_scientist_async(trigger_source='status-self-heal'):
+    """Best-effort one-shot wake-up. claim_daily_job guarantees idempotency."""
+    def _runner():
+        try:
+            _run_ai_learning_daily(q6_slot=None, trigger_source=trigger_source)
+        except Exception as exc:
+            _ai_learning_runtime_update(status='ASYNC_KICK_ERROR', last_error=f'{type(exc).__name__}: {str(exc)[:160]}')
+    threading.Thread(target=_runner, daemon=True, name='ai-learning-kick').start()
+
+
+def _ai_learning_attempt_is_stale(runtime, max_age_seconds=1200):
+    raw = (runtime or {}).get('last_attempt_at')
+    if not raw:
+        return True
+    try:
+        dt = datetime.fromisoformat(str(raw).replace('Z', '+00:00'))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds() > max_age_seconds
+    except Exception:
         return True
 
 
@@ -46280,6 +46312,11 @@ def api_ai_gemini_activity():
             pass
         data = (get_gemini_activity_status() or {})
         runtime = _ai_learning_runtime_snapshot()
+        # RC1: if a worker thread exists but no persisted attempt is visible,
+        # wake one idempotent slot check in the background. The GET itself never
+        # waits for Groq and never grants trading authority.
+        if _ai_learning_attempt_is_stale(runtime):
+            _kick_ai_learning_scientist_async('status-self-heal')
         scheduler = dict(data.get('scheduler') or {})
         if not scheduler.get('last_attempt_at') and runtime.get('last_attempt_at'):
             scheduler['last_attempt_at'] = runtime.get('last_attempt_at')

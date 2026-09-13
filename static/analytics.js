@@ -1599,6 +1599,14 @@ async function loadLearningGovernanceStatus() {
                 ? ` Scheduler: ${uiHumanLabel(scheduler.status || 'UNKNOWN')}.`
                 : '';
             q5SetText('lo-gemini-reason', (data.reason ? uiHumanLabel(data.reason) : 'Actividad leída sin realizar llamadas adicionales.') + schedulerDetail);
+            const simpleScientist = document.getElementById('v1-scientist');
+            const simpleScientistNote = document.getElementById('v1-scientist-note');
+            if (simpleScientist) {
+                const schedState = String(scheduler.status || 'UNKNOWN').toUpperCase();
+                simpleScientist.textContent = schedulerAt === '--' ? `⚠️ ${uiHumanLabel(schedState)}` : `✅ ${uiHumanLabel(schedState)}`;
+                simpleScientist.className = `v1-simple-value ${schedulerAt === '--' ? 'text-warning' : (['DONE','SUCCESS','RUNNING_LLM','CHECKING_SLOT','CLAIMING_SLOT'].includes(schedState) ? 'text-success' : 'text-warning')}`;
+            }
+            if (simpleScientistNote) simpleScientistNote.textContent = schedulerAt === '--' ? 'Sin intento persistido todavía.' : `Último intento: ${formatDate(schedulerAt)}${lastText !== '--' ? ` · último éxito: ${formatDate(lastText)}` : ''}`;
         }
     });
 }
@@ -1795,6 +1803,23 @@ async function loadQualityV2() {
                     true
             }
         );
+
+        // Final V1 RC1 — lectura simple para un usuario no cuantitativo.
+        const renderSimpleLive = (id, noteId, cohort) => {
+            const el = document.getElementById(id);
+            const note = document.getElementById(noteId);
+            if (!el) return;
+            const resolved = Number((cohort || {}).resolved || 0);
+            if (resolved <= 0) {
+                el.textContent = 'Sin cierres todavía';
+                if (note) note.textContent = `N ${Number((cohort || {}).total_directional || 0)} · esperando resultados`;
+                return;
+            }
+            el.textContent = `WR ${q5FormatUnsignedPct(cohort.win_rate,1)} · PnL ${q5FormatSignedPct(cohort.pnl_total_pct,2)}`;
+            if (note) note.textContent = `Resueltas ${resolved} · Exp ${q5FormatSignedR(cohort.expectancy_r,3)} · PF ${q5FormatNumber(cohort.profit_factor,2)}`;
+        };
+        renderSimpleLive('v1-spot-live','v1-spot-live-note',spot);
+        renderSimpleLive('v1-futures-live','v1-futures-live-note',futures);
 
         // ============================================================
         // SAFETY -> PERFORMANCE
@@ -2631,58 +2656,62 @@ window.runReviewManually = async function() {
 
 
 // ============================================================================
+// FASE FINAL V1 — VISTA SIMPLE / DIAGNÓSTICO AVANZADO
+// ============================================================================
+window.__V1_ADVANCED_ANALYTICS__ = false;
+window.setAdvancedAnalytics = async function(enabled) {
+    window.__V1_ADVANCED_ANALYTICS__ = Boolean(enabled);
+    document.body.classList.toggle('analytics-advanced', window.__V1_ADVANCED_ANALYTICS__);
+    const button = document.getElementById('v1-toggle-advanced');
+    if (button) button.textContent = window.__V1_ADVANCED_ANALYTICS__ ? 'Ocultar diagnóstico avanzado' : 'Ver diagnóstico avanzado';
+    if (window.__V1_ADVANCED_ANALYTICS__) {
+        const tasks = [
+            () => loadSummary(), () => loadStrategiesRanking(), () => loadHeatmap(),
+            () => loadTimeline(), () => loadPnLDistribution(),
+            () => loadTopOperations('best'), () => loadTopOperations('worst'),
+            () => window.loadLogs()
+        ];
+        for (const task of tasks) {
+            try { await task(); } catch (err) { console.warn('Diagnóstico avanzado parcial:', err); }
+            await new Promise(resolve => setTimeout(resolve, 70));
+        }
+    }
+};
+
+// ============================================================================
 // CARGAR TODO
 // ============================================================================
 
 window.loadAllAnalytics = async function() {
-
-    showToast(
-        '🔄 Actualizando estadísticas...',
-        'info'
-    );
-
-    // HOTFIX 14.6: no lanzar 9 lecturas estadísticas simultáneas.
-    // En Render Free, cada respuesta puede materializar cientos/miles de filas
-    // y los picos concurrentes eran capaces de superar 512 MB. El usuario ve
-    // la misma información, pero se carga secuencialmente y cede el event loop
-    // entre paneles.
-    const tasks = [
+    showToast('🔄 Actualizando estado V1...', 'info');
+    // Vista simple: sólo las tres fuentes que realmente gobiernan V1.
+    const coreTasks = [
         () => loadQualityV2(),
         () => loadLearningGovernanceStatus(),
-        () => loadResearchFederationAnalytics(),
-        () => loadSummary(),
-        () => loadStrategiesRanking(),
-        () => loadHeatmap(),
-        () => loadTimeline(),
-        () => loadPnLDistribution(),
-        () => loadTopOperations('best'),
-        () => loadTopOperations('worst')
+        () => loadResearchFederationAnalytics()
     ];
-    for (const task of tasks) {
-        try {
-            await task();
-        } catch (err) {
-            console.warn('Analytics parcial:', err);
-        }
+    for (const task of coreTasks) {
+        try { await task(); } catch (err) { console.warn('Estado V1 parcial:', err); }
         await new Promise(resolve => setTimeout(resolve, 80));
     }
-
-    showToast(
-        '✅ Estadísticas actualizadas',
-        'success'
-    );
+    if (window.__V1_ADVANCED_ANALYTICS__) {
+        await window.setAdvancedAnalytics(true);
+    }
+    showToast('✅ Estado V1 actualizado', 'success');
 };
+
 
 // ============================================================================
 // INICIALIZACIÓN
 // ============================================================================
 
 document.addEventListener('DOMContentLoaded', function() {
-    console.log('📈 Página Analytics inicializada');
-    
-    // Carga inicial
+    console.log('📈 Página Analytics V1 RC inicializada');
+    document.body.classList.remove('analytics-advanced');
+    const toggle = document.getElementById('v1-toggle-advanced');
+    if (toggle) toggle.addEventListener('click', () => window.setAdvancedAnalytics(!window.__V1_ADVANCED_ANALYTICS__));
+
     window.loadAllAnalytics();
-    window.loadLogs();
 
     const governanceButton = document.getElementById('lo-refresh-governance');
     if (governanceButton) governanceButton.addEventListener('click', refreshLearningGovernanceNow);
@@ -2691,47 +2720,12 @@ document.addEventListener('DOMContentLoaded', function() {
     const researchButton = document.getElementById('rf-analytics-refresh');
     if (researchButton) researchButton.addEventListener('click', loadResearchFederationAnalytics);
 
-    
-    // ================================================================
-    // AUTO-REFRESH LEGACY
-    // ================================================================
-    //
-    // Mantiene exactamente la frecuencia existente.
-    // ================================================================
-
-    setInterval(
-        () => {
-
-            loadSummary();
-
-            window.loadLogs();
-
-        },
-        300000
-    );
-
-
-    // ================================================================
-    // QUALITY ENGINE Q5
-    // ================================================================
-    //
-    // Q5 lee context JSON de la cohorte nueva.
-    //
-    // No tiene sentido ejecutarlo cada minuto ni cada 5 minutos.
-    //
-    // El learning worker ya trabaja en ciclos de aproximadamente
-    // 15 minutos y este intervalo protege los 512 MB de Render.
-    // ================================================================
-
-    setInterval(
-        () => {
-
-            loadQualityV2();
-
-        },
-        900000
-    );
-
+    // Estado operativo: refresco liviano. Legacy/gráficos se cargan sólo a pedido.
+    setInterval(() => {
+        loadResearchFederationAnalytics();
+        loadLearningGovernanceStatus();
+    }, 300000);
+    setInterval(() => loadQualityV2(), 900000);
 });
 
 
@@ -2768,7 +2762,8 @@ async function loadResearchFederationAnalytics(){
             const best=bucket.best||{};
             const state=bucket.state==='VALIDATED_OOS_POSITIVE'?'✅ RENTABILIDAD OOS VALIDADA':'🟡 EN BÚSQUEDA / VALIDACIÓN';
             const totalR = bucket.oos_total_r===null || bucket.oos_total_r===undefined ? '--' : `${Number(bucket.oos_total_r)>=0?'+':''}${fmt(bucket.oos_total_r,2)}R`;
-            return `${state} · Celdas ${Number(bucket.cells||0)} · Validadas ${Number(bucket.validated_strategies||0)} · OOS N ${Number(bucket.oos_n||0)} · Exp. ${fmt(bucket.oos_exp_r_weighted,3)}R/trade · Resultado OOS ≈ ${totalR}`
+            const wr = bucket.oos_wr_weighted===null || bucket.oos_wr_weighted===undefined ? '--' : `${fmt(bucket.oos_wr_weighted,1)}%`;
+            return `${state} · WR ${wr} · Resultado OOS / PnL ${totalR} · Trades ${Number(bucket.oos_n||0)} · Exp. ${fmt(bucket.oos_exp_r_weighted,3)}R/trade · Validadas ${Number(bucket.validated_strategies||0)}/${Number(bucket.cells||0)}`
                 + (best.oos_pf!=null?` · Mejor PF ${fmt(best.oos_pf,2)}`:'')
                 + (best.scope?.symbol?` · ${best.scope.symbol}`:'')
                 + (best.scope?.timeframe?` ${best.scope.timeframe}`:'')
@@ -2780,18 +2775,36 @@ async function loadResearchFederationAnalytics(){
         if(futBt) futBt.innerHTML=renderBt(profitability.futures_official,'Aún no hay Futures SHADOW_READY causal; no se fuerza rentabilidad.');
         const shadowBt=document.getElementById('q5-shadow-backtest');
         if(shadowBt) shadowBt.innerHTML=renderBt(profitability.futures_evaluation,'Sin challengers causales disponibles.');
+        const simpleCoverage=document.getElementById('v1-coverage');
+        const simpleCoverageNote=document.getElementById('v1-coverage-note');
+        if(simpleCoverage) simpleCoverage.textContent=`${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||54)} investigadas · ${Number(profitability.validated_cells||0)} validadas`;
+        if(simpleCoverageNote) simpleCoverageNote.textContent=`OOS positivo ${Number(profitability.oos_positive_cells||0)} · buscando ${Number(profitability.searching_cells||0)}`;
+        const simpleBucket=(id,noteId,bucket)=>{
+            const el=document.getElementById(id), note=document.getElementById(noteId);
+            if(!el) return;
+            if(!bucket || bucket.state==='NO_EVIDENCE'){ el.textContent='Sin evidencia'; if(note) note.textContent='Research continúa buscando edge.'; return; }
+            const wr=bucket.oos_wr_weighted==null?'--':`${fmt(bucket.oos_wr_weighted,1)}%`;
+            const pnl=bucket.oos_total_r==null?'--':`${Number(bucket.oos_total_r)>=0?'+':''}${fmt(bucket.oos_total_r,2)}R`;
+            el.textContent=`WR ${wr} · PnL ${pnl}`;
+            if(note) note.textContent=`${Number(bucket.validated_strategies||0)}/${Number(bucket.cells||0)} validadas · OOS N ${Number(bucket.oos_n||0)} · Exp ${fmt(bucket.oos_exp_r_weighted,3)}R`;
+        };
+        simpleBucket('v1-spot-oos','v1-spot-oos-note',profitability.spot);
+        simpleBucket('v1-futures-oos','v1-futures-oos-note',profitability.futures_official);
+        const simpleShadow=document.getElementById('v1-shadow'), simpleShadowNote=document.getElementById('v1-shadow-note');
+        if(simpleShadow) simpleShadow.textContent=`${Number(profitability.shadow_live_candidates||0)}/${Number(profitability.shadow_ready_cells||profitability.validated_cells||0)} con actividad`;
+        if(simpleShadowNote) simpleShadowNote.textContent=`Señales ${Number(profitability.shadow_live_signals||0)} · resueltas ${Number(profitability.shadow_live_resolved||0)} · reciclar ${Number(profitability.recycle_required_cells||0)}`;
         const coverageLabel = profitability.coverage_target ? ` · Causal ${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||54)} · Validadas ${Number(profitability.validated_cells||0)} · Reciclar ${Number(profitability.recycle_required_cells||0)}` : '';
         body.innerHTML=actionable.slice(0,80).map(x=>{const l=sm.get(x.candidate_key)||{};return `<tr>
           <td><span class="badge bg-secondary">${x.stage||'--'}</span></td>
           <td><b>${x.source_engine||'--'}</b><br><span class="text-muted small">${x.experiment||'--'}</span></td>
-          <td>${x.market_family||'--'} · ${x.timeframe||'--'}</td>
+          <td>${x.symbol&&x.symbol!=='ALL'?`${x.symbol} · `:''}${x.market_family||'--'} · ${x.timeframe||'--'}</td>
           <td>${x.backtest_n??0} / ${pct(x.backtest_wr)} / ${fmt(x.backtest_exp_r,3)}R</td>
           <td>${x.oos_n??0} / ${pct(x.oos_wr)} / ${fmt(x.oos_exp_r,3)}R / ${fmt(x.oos_pf,2)}</td>
           <td>${l.resolved_n??0}/${l.signals_n??0} / ${pct(l.win_rate_pct)} / ${fmt(l.expectancy_r,3)}R / ${fmt(l.profit_factor,2)}</td>
           <td>${fmt(l.avg_safety,1)}</td></tr>`}).join('') || `<tr><td colspan="7" class="text-muted text-center">${data.connected===false?'Research Bridge sin conexión':'Bridge conectado, pero todavía no hay filas visibles para esta cuenta/clave.'}</td></tr>`;
         const stages={}; candidates.forEach(x=>stages[x.stage]=(stages[x.stage]||0)+1);
         const kp=document.getElementById('rf-analytics-kpis');
-        if(kp) kp.innerHTML=[['Cobertura causal',`${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||54)}`],['Celdas validadas',Number(profitability.validated_cells||0)],['Shadow live',shadow.reduce((a,x)=>a+Number(x.signals_n||0),0)],['♻️ Reciclar',Number(profitability.recycle_required_cells||0)]].map(([k,v])=>`<div class="col-6 col-md-3"><div class="border rounded p-2 h-100"><div class="text-muted small">${k}</div><div class="h5 mb-0">${v}</div></div></div>`).join('');
+        if(kp) kp.innerHTML=[['Cobertura causal',`${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||54)}`],['Celdas validadas',Number(profitability.validated_cells||0)],['Shadow con actividad',`${Number(profitability.shadow_live_candidates||0)}/${Number(profitability.shadow_ready_cells||profitability.validated_cells||0)}`],['♻️ Reciclar',Number(profitability.recycle_required_cells||0)]].map(([k,v])=>`<div class="col-6 col-md-3"><div class="border rounded p-2 h-100"><div class="text-muted small">${k}</div><div class="h5 mb-0">${v}</div></div></div>`).join('');
     }catch(err){body.innerHTML=`<tr><td colspan="7" class="text-warning">${err.message}</td></tr>`;}
 }
 window.loadResearchFederationAnalytics=loadResearchFederationAnalytics;
