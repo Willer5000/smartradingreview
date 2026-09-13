@@ -69,8 +69,8 @@ REPORT_STRATEGY_SOFT_BUDGET_SECONDS = 20.0
 #
 # Esto NO redefine la cohorte oficial ni reduce el requisito de
 # validación. Sólo garantiza una ruta de diagnóstico liviana.
-REPORT_SAFE_PAGE_SIZE = 250
-REPORT_SAFE_MAX_ROWS = 4000  # Q6-F: compact projection, same bounded time budget.
+REPORT_SAFE_PAGE_SIZE = 500
+REPORT_SAFE_MAX_ROWS = 5000  # H.2: sólo cohortes estadísticas relevantes; RAM acotada.
 
 LEARNING_CONTRACT_VERSION = 'market_separated_v1'
 FUTURES_REAL_DATA_SOURCE = 'KUCOIN_FUTURES_PERPETUAL_REST'
@@ -1972,40 +1972,37 @@ def _compact_signal_for_learning_report(row: Dict) -> Dict:
 # ============================================================================
 
 def _fetch_all_signals_with_indicators(db, days_back: int = 90):
-    """
-    Trae una cohorte temporal coherente, incluyendo pendientes y resultados.
+    """Lee la cohorte estadística RELEVANTE, no todo el inventario de signals.
 
-    COMMIT 36I
+    HOTFIX H.2
     -----------
-    La versión anterior paginaba de 1000 en 1000 y cortaba ante el primer
-    error. Si Supabase/PostgREST devolvía una segunda página vacía o fallaba
-    transitoriamente, el PDF podía quedar exactamente con los 1000 registros
-    más recientes aunque el count histórico demostrara que existían más.
+    El informe anterior hacía COUNT de *todas* las filas de 90 días y luego
+    intentaba descargarlas para recién después separar Q6/Futures limpio. Con
+    ~19k filas, Render agotaba el presupuesto temporal aunque la evidencia que
+    realmente usa el informe era <3k.
 
-    Esta versión:
-    - congela una ventana temporal [cutoff, snapshot_end);
-    - obtiene count exacto de esa MISMA ventana;
-    - pagina en bloques de 1000 con proyección JSON mínima y reintentos;
-    - NO asume que un batch parcial sea necesariamente el último;
-    - deduplica por id;
-    - si la paginación queda incompleta, conserva el diagnóstico y bloquea
-      cualquier promoción en lugar de ejecutar una segunda descarga masiva;
-    - devuelve diagnóstico de cobertura para que el PDF nunca presente una
-      muestra truncada como si fuera completa.
+    Esta versión hace push-down de los contratos ya existentes:
+      * Spot: sólo SPOT_REAL_CLOSED_Q6 + statistically_eligible=true.
+      * Futures: sólo FUTURES_PERPETUAL_REAL_CLOSED_V1 real/closed/no synthetic
+        (incluye executable + shadow porque ambos alimentan el diagnóstico).
 
-    No modifica señales ni aprendizaje. Sólo mejora la lectura del informe.
+    El inventario bruto se cuenta por separado, sin descargarlo. Así "100% de
+    cobertura" significa 100% de la cohorte estadística necesaria, NO que se
+    hayan cargado decenas de miles de filas irrelevantes. Si cualquiera de los
+    dos scopes queda truncado, el gate sigue fail-closed / NOT_READY.
     """
     from datetime import timedelta
     import time
+    from q6_integrity import (
+        SPOT_SOURCE,
+        SPOT_COHORT,
+        SPOT_VERSION,
+    )
 
-    started_at = time.monotonic()  
-  
+    started_at = time.monotonic()
     now = datetime.utcnow()
     cutoff_dt = now - timedelta(days=days_back)
-    # Congela el límite superior para que el count y las páginas midan el
-    # mismo snapshot lógico aunque entren nuevas señales mientras se genera.
     snapshot_end_dt = now + timedelta(seconds=2)
-
     cutoff = cutoff_dt.isoformat()
     snapshot_end = snapshot_end_dt.isoformat()
 
@@ -2040,7 +2037,8 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
         'window_days': int(days_back),
         'cutoff': cutoff,
         'snapshot_end': snapshot_end,
-        'expected_rows': None,
+        'expected_rows': 0,              # cohorte relevante
+        'inventory_expected_rows': None, # inventario bruto, count-only
         'fetched_rows': 0,
         'coverage_pct': None,
         'complete': False,
@@ -2053,579 +2051,295 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
         'strategy_hydration_skipped': False,
         'time_budget_exhausted': False,
         'fetch_elapsed_seconds': 0.0,
-
         'safe_snapshot_mode': True,
         'safe_max_rows': REPORT_SAFE_MAX_ROWS,
         'safe_page_size': REPORT_SAFE_PAGE_SIZE,
         'reached_window_end': False,
-        'count_skipped': True,
-
-        'result_mode': 'PERSISTED_RESULTS_JOIN_Q6',
+        'count_skipped': False,
+        'result_mode': 'SCOPED_STATISTICAL_COHORT_H2',
+        'scope_counts': {},
         'errors': [],
-        'model_version': 'report_fetch_safe_v6'
+        'model_version': 'report_fetch_scoped_h2',
     }
 
-    # ------------------------------------------------------------------
-    # COMMIT E — COUNT EXACTO LIVIANO + SAFE SNAPSHOT
-    # ------------------------------------------------------------------
-    #
-    # El PDF necesita saber si realmente leyó toda la cohorte. Un COUNT
-    # exacto con proyección mínima no descarga las filas y permite declarar
-    # COMPLETE incluso si el presupuesto de tiempo impide hacer una página
-    # vacía adicional. Si el COUNT falla, conservamos el comportamiento
-    # fail-closed anterior y seguimos usando reached_window_end.
-    diagnostics['count_error'] = None
+    scopes = {
+        'spot_verified': {
+            'system_type': 'spot',
+            'eq': [
+                ('context->learning->>cohort', SPOT_COHORT),
+                ('context->learning->>market_data_source', SPOT_SOURCE),
+                ('context->learning->>market_data_is_synthetic', 'false'),
+                ('context->learning->>source_candle_closed', 'true'),
+                ('context->learning->>analysis_version', SPOT_VERSION),
+                ('context->learning->>statistically_eligible', 'true'),
+            ],
+            'not_null': [
+                'context->learning->>source_candle_timestamp',
+                'context->learning->>source_candle_close_timestamp',
+            ],
+        },
+        'futures_clean': {
+            'system_type': 'futures',
+            'eq': [
+                ('context->learning->>contract_version', LEARNING_CONTRACT_VERSION),
+                ('context->learning->>cohort', FUTURES_REAL_COHORT),
+                ('context->learning->>market_data_source', FUTURES_REAL_DATA_SOURCE),
+                ('context->learning->>market_data_is_synthetic', 'false'),
+                ('context->learning->>source_candle_closed', 'true'),
+            ],
+            'not_null': [],
+        },
+    }
 
-    def _execute_exact_count():
-        query = (
-            db.client
-            .table('signals')
-            .select('id', count='exact')
-            .gte('created_at', cutoff)
-            .lt('created_at', snapshot_end)
-            .limit(1)
-        )
-        return query.execute()
+    def _apply_window(query):
+        return query.gte('created_at', cutoff).lt('created_at', snapshot_end)
 
+    def _apply_scope(query, config):
+        query = query.eq('system_type', config['system_type'])
+        for column, value in config.get('eq', []):
+            query = query.eq(column, value)
+        for column in config.get('not_null', []):
+            query = query.not_.is_(column, 'null')
+        return query
+
+    def _count_query(config=None, system_type=None):
+        query = db.client.table('signals').select('id', count='exact')
+        query = _apply_window(query)
+        if config is not None:
+            query = _apply_scope(query, config)
+        elif system_type is not None:
+            query = query.eq('system_type', system_type)
+        return query.limit(1)
+
+    def _run_count(config=None, system_type=None):
+        def _execute():
+            return _count_query(config=config, system_type=system_type).execute()
+        response = db._with_retry(_execute) if hasattr(db, '_with_retry') else _execute()
+        return int(getattr(response, 'count', 0) or 0)
+
+    # Counts son livianos y permiten reportar lo excluido sin descargarlo.
     try:
-        if hasattr(db, '_with_retry'):
-            count_response = db._with_retry(_execute_exact_count)
-        else:
-            count_response = _execute_exact_count()
-        expected_rows = int(getattr(count_response, 'count', 0) or 0)
-        diagnostics['expected_rows'] = expected_rows
-        diagnostics['count_skipped'] = False
+        inventory_total = _run_count()
+        spot_inventory = _run_count(system_type='spot')
+        futures_inventory = _run_count(system_type='futures')
+        spot_expected = _run_count(config=scopes['spot_verified'])
+        futures_expected = _run_count(config=scopes['futures_clean'])
+
+        diagnostics['inventory_expected_rows'] = inventory_total
+        diagnostics['expected_rows'] = spot_expected + futures_expected
+        diagnostics['scope_counts'].update({
+            'spot_inventory': spot_inventory,
+            'futures_inventory': futures_inventory,
+            'spot_verified_expected': spot_expected,
+            'futures_clean_expected': futures_expected,
+            'spot_legacy_count': max(0, spot_inventory - spot_expected),
+            'futures_legacy_count': max(0, futures_inventory - futures_expected),
+            'unscoped_count': max(0, inventory_total - spot_inventory - futures_inventory),
+        })
     except Exception as count_error:
-        diagnostics['expected_rows'] = None
         diagnostics['count_skipped'] = True
-        diagnostics['count_error'] = str(count_error)[:180]
-        logger.warning(
-            '⚠️ Learning PDF: COUNT exacto no disponible; '
-            'se mantiene verificación fail-closed por paginación: %s',
-            count_error
-        )
+        diagnostics['expected_rows'] = None
+        diagnostics['errors'].append(f'scoped_count_error:{str(count_error)[:160]}')
+        logger.warning('⚠️ Learning PDF H.2: COUNT scoped falló: %s', count_error)
 
-    def _append_unique(target, seen_ids, batch):
-        added = 0
-
-        for row in batch or []:
-            if not isinstance(row, dict):
-                continue
-
-            compacted = _compact_signal_for_learning_report(
-                row
-            )
-
-            if not compacted:
-                continue
-
-            row_id = str(
-                compacted.get('id') or ''
-            ).strip()
-
-            # Signals debería tener id. Si faltara por un problema
-            # de select, usamos una clave compuesta para no perder
-            # silenciosamente la fila.
-            dedupe_key = row_id or '|'.join([
-                str(
-                    compacted.get('created_at') or ''
-                ),
-                str(
-                    compacted.get('symbol') or ''
-                ),
-                str(
-                    compacted.get('timeframe') or ''
-                ),
-                str(
-                    compacted.get(
-                        'action_normalized'
-                    ) or ''
-                )
-            ])
-
-            if dedupe_key in seen_ids:
-                continue
-
-            seen_ids.add(
-                dedupe_key
-            )
-
-            target.append(
-                compacted
-            )
-
-            added += 1
-
-        return added
-
-    def _execute_page(
-        start_iso,
-        end_iso,
-        offset,
-        page_size
-    ):
-        last_error = None
-
-        for attempt in range(3):
-            try:
-                response = (
-                    db.client
-                    .table('signals')
-                    .select(select_fields)
-                    .gte('created_at', start_iso)
-                    .lt('created_at', end_iso)
-                    .order('created_at', desc=True)
-                    .order('id', desc=True)
-                    .range(
-                        offset,
-                        offset + page_size - 1
-                    )
-                    .execute()
-                )
-
-                return (
-                    response,
-                    None
-                )
-
-            except Exception as exc:
-                last_error = exc
-
-                if attempt < 2:
-                    time.sleep(
-                        0.20 * (attempt + 1)
-                    )
-
-        return (
-            None,
-            last_error
-        )
-    # ------------------------------------------------------------------
-    # PASO A: paginación normal de toda la ventana.
-    # ------------------------------------------------------------------
     all_data = []
     seen_ids = set()
 
-    # ================================================================
-    # SAFE SNAPSHOT v6
-    # ================================================================
-    #
-    # La finalidad inmediata es que el informe sea descargable sin
-    # monopolizar el worker.
-    #
-    # No asumimos que 1.000 filas representen toda la ventana de 90d.
-    # Sólo declaramos COMPLETE si demostrablemente llegamos al final.
-    page_size = REPORT_SAFE_PAGE_SIZE
-    offset = 0
+    def _append_unique(batch):
+        added = 0
+        for row in batch or []:
+            if not isinstance(row, dict):
+                continue
+            compacted = _compact_signal_for_learning_report(row)
+            if not compacted:
+                continue
+            row_id = str(compacted.get('id') or '').strip()
+            dedupe_key = row_id or '|'.join([
+                str(compacted.get('created_at') or ''),
+                str(compacted.get('symbol') or ''),
+                str(compacted.get('timeframe') or ''),
+                str(compacted.get('action_normalized') or ''),
+            ])
+            if dedupe_key in seen_ids:
+                continue
+            seen_ids.add(dedupe_key)
+            all_data.append(compacted)
+            added += 1
+        return added
 
-    max_pages = max(
-        1,
-        (
-            REPORT_SAFE_MAX_ROWS
-            + page_size
-            - 1
+    def _execute_page(config, offset, size):
+        last_error = None
+        for attempt in range(3):
+            try:
+                query = db.client.table('signals').select(select_fields)
+                query = _apply_window(query)
+                query = _apply_scope(query, config)
+                response = (
+                    query
+                    .order('created_at', desc=True)
+                    .order('id', desc=True)
+                    .range(offset, offset + size - 1)
+                    .execute()
+                )
+                return response, None
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(0.15 * (attempt + 1))
+        return None, last_error
+
+    fetched_by_scope = {}
+    complete_by_scope = {}
+
+    for scope_name, config in scopes.items():
+        offset = 0
+        scope_fetched = 0
+        scope_complete = False
+        expected_key = (
+            'spot_verified_expected'
+            if scope_name == 'spot_verified'
+            else 'futures_clean_expected'
         )
-        // page_size
-    ) + 1  # one final probe distinguishes exact cap from truncation
+        scope_expected = diagnostics['scope_counts'].get(expected_key)
 
-    reached_window_end = False
+        while True:
+            if time.monotonic() - started_at >= REPORT_FETCH_SOFT_BUDGET_SECONDS:
+                diagnostics['time_budget_exhausted'] = True
+                diagnostics['errors'].append(f'{scope_name}:time_budget_exhausted')
+                break
 
-    for _ in range(max_pages):
-        expected_rows = diagnostics.get('expected_rows')
-        if (
-            expected_rows is not None
-            and len(all_data) >= int(expected_rows)
-        ):
-            reached_window_end = True
-            break
+            if scope_expected is not None and scope_fetched >= int(scope_expected):
+                scope_complete = True
+                break
 
-        elapsed = (
-            time.monotonic()
-            - started_at
-        )
+            if len(all_data) >= REPORT_SAFE_MAX_ROWS:
+                diagnostics['errors'].append('safe_snapshot_relevant_row_cap')
+                break
 
-        if (
-            elapsed
-            >= REPORT_FETCH_SOFT_BUDGET_SECONDS
-        ):
-            diagnostics[
-                'time_budget_exhausted'
-            ] = True
-
-            diagnostics[
-                'errors'
-            ].append(
-                'safe_snapshot_time_budget_exhausted'
+            size = min(
+                REPORT_SAFE_PAGE_SIZE,
+                max(1, REPORT_SAFE_MAX_ROWS - len(all_data))
             )
+            response, error = _execute_page(config, offset, size)
+            if error is not None:
+                diagnostics['errors'].append(f'{scope_name}:offset_{offset}:{str(error)[:150]}')
+                break
 
-            logger.warning(
-                '⚠️ Learning PDF SAFE: '
-                'presupuesto de lectura agotado '
-                f'({elapsed:.1f}s). '
-                'El PDF continuará como NOT_READY.'
-            )
+            batch = response.data or []
+            diagnostics['primary_pages'] += 1
+            if not batch:
+                scope_complete = True
+                break
 
-            break
+            _append_unique(batch)
+            scope_fetched += len(batch)
+            offset += len(batch)
 
-        response, error = _execute_page(
-            cutoff,
-            snapshot_end,
-            offset,
-            min(page_size, max(1, REPORT_SAFE_MAX_ROWS - len(all_data)))
-        )
+            # Con count exacto, no necesitamos una página vacía extra.
+            if scope_expected is not None and scope_fetched >= int(scope_expected):
+                scope_complete = True
+                break
 
-        if error is not None:
-            diagnostics[
-                'errors'
-            ].append(
-                'safe_snapshot_offset_'
-                f'{offset}: '
-                f'{str(error)[:180]}'
-            )
+        fetched_by_scope[scope_name] = scope_fetched
+        complete_by_scope[scope_name] = scope_complete
 
-            logger.warning(
-                '⚠️ Learning PDF SAFE: '
-                f'falló offset={offset}: '
-                f'{error}'
-            )
+    diagnostics['scope_counts'].update({
+        'spot_verified_fetched': fetched_by_scope.get('spot_verified', 0),
+        'futures_clean_fetched': fetched_by_scope.get('futures_clean', 0),
+    })
 
-            break
-
-        batch = (
-            response.data
-            or []
-        )
-
-        diagnostics[
-            'primary_pages'
-        ] += 1
-
-        if not batch:
-            reached_window_end = True
-            break
-
-        if len(all_data) >= REPORT_SAFE_MAX_ROWS:
-            break  # non-empty probe: the 90-day window is truncated
-        added = _append_unique(
-            all_data,
-            seen_ids,
-            batch
-        )
-
-        offset += len(
-            batch
-        )
-
-        if added == 0:
-            diagnostics[
-                'errors'
-            ].append(
-                'safe_snapshot_no_progress_'
-                f'offset_{offset}'
-            )
-
-            logger.warning(
-                '⚠️ Learning PDF SAFE: '
-                'paginación sin progreso.'
-            )
-
-            break
-
-        # Si el servidor devolvió menos filas que las pedidas,
-        # llegamos al final real de la ventana.
-        # Q6-F: a server cap can return a short page before the real end.
-        # Offset advanced by actual rows; continue until an empty page.
-
-        # Q6-F: allow a final one-row probe at the cap.
-
-    # Orden temporal determinista.
-    all_data.sort(
-        key=lambda row: str(
-            row.get(
-                'created_at'
-            )
-            or ''
-        ),
-        reverse=True
-    )
-
-    diagnostics[
-        'fetched_rows'
-    ] = len(
-        all_data
-    )
-
-    diagnostics[
-        'reached_window_end'
-    ] = reached_window_end
+    all_data.sort(key=lambda row: str(row.get('created_at') or ''), reverse=True)
+    diagnostics['fetched_rows'] = len(all_data)
+    diagnostics['reached_window_end'] = all(complete_by_scope.values()) if complete_by_scope else False
 
     expected_rows = diagnostics.get('expected_rows')
+    # Compatibilidad con los tests/diagnósticos de Commit E: ahora el COUNT
+    # prueba completitud sobre la cohorte scoped, no sobre todo el inventario.
+    diagnostics['expected_rows'] = expected_rows
     count_proves_complete = bool(
         expected_rows is not None
-        and len(all_data) >= int(expected_rows)
+        and len(all_data) == int(expected_rows)
     )
-
-    diagnostics[
-        'complete'
-    ] = bool(
-        (reached_window_end or count_proves_complete)
-        and not diagnostics[
-            'errors'
-        ]
+    counts_match = count_proves_complete
+    diagnostics['complete'] = bool(
+        counts_match
+        and all(complete_by_scope.values())
+        and not diagnostics['errors']
     )
 
     if expected_rows is not None:
-        if int(expected_rows) <= 0:
-            diagnostics['coverage_pct'] = 100.0
-        else:
-            diagnostics['coverage_pct'] = round(
-                min(100.0, (len(all_data) / int(expected_rows)) * 100.0),
-                2
-            )
-    else:
         diagnostics['coverage_pct'] = (
-            100.0 if diagnostics['complete'] else None
+            100.0 if int(expected_rows) <= 0
+            else round(min(100.0, len(all_data) / int(expected_rows) * 100.0), 2)
         )
 
-    if not diagnostics[
-        'complete'
-    ]:
-        diagnostics[
-            'errors'
-        ].append(
-            'safe_snapshot_not_full_90d_cohort'
-        )
-
+    if not diagnostics['complete']:
+        diagnostics['errors'].append('scoped_statistical_cohort_incomplete')
         logger.warning(
-            '⚠️ Learning PDF SAFE: '
-            f'{len(all_data)} señales recuperadas. '
-            'No se demostró cobertura completa de '
-            f'{days_back} días. '
-            'Commit 37 queda bloqueado.'
+            '⚠️ Learning PDF H.2: cohorte estadística scoped incompleta %s/%s.',
+            len(all_data), expected_rows
         )
-    # ------------------------------------------------------------------
-    # v4: hidratar estrategias FUERA de la consulta principal.
-    # ------------------------------------------------------------------
-    # Sólo se necesitan para las tablas de estrategia/trader.
-    # El gate Futures, Safety, Shadow y walk-forward no dependen de este join.
+
+    # Hidratar estrategias sólo para resultados elegibles resueltos. Ya no se
+    # salta por estar en SAFE MODE: con el scope H.2 son muy pocos IDs y el coste
+    # es acotado. Si falla, las tablas auxiliares quedan incompletas pero el gate
+    # principal conserva su cobertura estadística.
     signal_by_id = {
         str(row.get('id')): row
         for row in all_data
         if row.get('id')
     }
-
     strategy_ids = []
-
     for row in all_data:
-        status = str(
-            row.get('status') or ''
-        ).strip().lower()
-
-        if status not in (
-            'tp_hit',
-            'sl_hit',
-            'expired',
-            'missed_opportunity'
-        ):
+        status = str(row.get('status') or '').strip().lower()
+        if status not in ('tp_hit', 'sl_hit', 'expired', 'missed_opportunity'):
             continue
-
         market = _normalize_market(row)
-
-        if (
-            market != 'spot'
-            and not _is_verified_futures_trade(row)
-        ):
+        if market != 'spot' and not _is_verified_futures_trade(row):
             continue
-
-        row_id = str(
-            row.get('id') or ''
-        ).strip()
-
+        row_id = str(row.get('id') or '').strip()
         if row_id:
             strategy_ids.append(row_id)
-    # ================================================================
-    # FAIL-OPEN DE TABLAS AUXILIARES
-    # ================================================================
-    #
-    # Si la cohorte principal ya quedó incompleta, las estadísticas
-    # por estrategia tampoco serían completas.
-    #
-    # No tiene sentido gastar más segundos hidratando estrategias
-    # cuando el gate ya debe quedar NOT_READY.
-    if (
-        diagnostics.get(
-            'safe_snapshot_mode',
-            False
-        )
-        or not diagnostics.get(
-            'complete',
-            False
-        )
-    ):
+
+    if not diagnostics.get('complete', False):
         strategy_ids = []
+        diagnostics['strategy_hydration_complete'] = False
+        diagnostics['strategy_hydration_skipped'] = True
 
-        diagnostics[
-            'strategy_hydration_complete'
-        ] = False
-
-        diagnostics[
-            'strategy_hydration_skipped'
-        ] = True
-  
     relation_batch_size = 300
-
-    for start in range(
-        0,
-        len(strategy_ids),
-        relation_batch_size
-    ):
-        elapsed = (
-            time.monotonic()
-            - started_at
-        )
-
-        if (
-            elapsed
-            >= REPORT_STRATEGY_SOFT_BUDGET_SECONDS
-        ):
-            diagnostics[
-                'time_budget_exhausted'
-            ] = True
-
-            diagnostics[
-                'strategy_hydration_complete'
-            ] = False
-
-            diagnostics[
-                'strategy_hydration_skipped'
-            ] = True
-
-            diagnostics[
-                'errors'
-            ].append(
-                'strategy_soft_time_budget_exhausted'
-            )
-
-            logger.warning(
-                '⚠️ Learning PDF: presupuesto '
-                'de estrategias agotado '
-                f'({elapsed:.1f}s). '
-                'El PDF continúa sin completar '
-                'las tablas auxiliares.'
-            )
-
+    for batch_start in range(0, len(strategy_ids), relation_batch_size):
+        if time.monotonic() - started_at >= REPORT_STRATEGY_SOFT_BUDGET_SECONDS:
+            diagnostics['strategy_hydration_complete'] = False
+            diagnostics['strategy_hydration_skipped'] = True
+            diagnostics['errors'].append('strategy_soft_time_budget_exhausted')
             break
 
-        id_batch = strategy_ids[
-            start:start + relation_batch_size
-        ]
-
+        id_batch = strategy_ids[batch_start:batch_start + relation_batch_size]
         try:
             relation_response = (
-                db.client
-                .table(
-                    'signal_indicators'
-                )
-                .select(
-                    'signal_id, strategy_name'
-                )
-                .in_(
-                    'signal_id',
-                    id_batch
-                )
+                db.client.table('signal_indicators')
+                .select('signal_id, strategy_name')
+                .in_('signal_id', id_batch)
                 .execute()
             )
-
-            diagnostics[
-                'strategy_batches'
-            ] += 1
-
-            for item in (
-                relation_response.data
-                or []
-            ):
-                if not isinstance(
-                    item,
-                    dict
-                ):
+            diagnostics['strategy_batches'] += 1
+            for item in relation_response.data or []:
+                if not isinstance(item, dict):
                     continue
-
-                signal_id = str(
-                    item.get(
-                        'signal_id'
-                    )
-                    or ''
-                ).strip()
-
-                strategy_name = (
-                    item.get(
-                        'strategy_name'
-                    )
-                )
-
-                target = (
-                    signal_by_id.get(
-                        signal_id
-                    )
-                )
-
-                if (
-                    target is None
-                    or not strategy_name
-                ):
+                signal_id = str(item.get('signal_id') or '').strip()
+                strategy_name = item.get('strategy_name')
+                target = signal_by_id.get(signal_id)
+                if target is None or not strategy_name:
                     continue
-
-                target.setdefault(
-                    'signal_indicators',
-                    []
-                ).append({
-                    'strategy_name':
-                        strategy_name
+                target.setdefault('signal_indicators', []).append({
+                    'strategy_name': strategy_name
                 })
-
-                diagnostics[
-                    'strategy_rows'
-                ] += 1
-
+                diagnostics['strategy_rows'] += 1
         except Exception as exc:
-            diagnostics[
-                'strategy_hydration_complete'
-            ] = False
+            diagnostics['strategy_hydration_complete'] = False
+            diagnostics['errors'].append(f'strategy_hydration_{batch_start}:{str(exc)[:160]}')
 
-            diagnostics[
-                'errors'
-            ].append(
-                'strategy_hydration_'
-                f'{start}: '
-                f'{str(exc)[:180]}'
-            )
-
-            logger.warning(
-                '⚠️ No se pudieron hidratar '
-                'estrategias '
-                f'[{start}:'
-                f'{start + len(id_batch)}]: '
-                f'{exc}'
-            )
-
-            # Fail-open:
-            # las tablas auxiliares pueden quedar
-            # incompletas, pero el PDF principal
-            # y su gate deben continuar.
-            continue
-    if not diagnostics['complete']:
-        logger.warning(
-            '⚠️ Cohorte PDF incompleta: '
-            f"{diagnostics['fetched_rows']}/"
-            f"{diagnostics.get('expected_rows')} filas."
-        )
-    diagnostics[
-        'fetch_elapsed_seconds'
-    ] = round(
-        time.monotonic()
-        - started_at,
-        2
-    )
+    diagnostics['fetch_elapsed_seconds'] = round(time.monotonic() - started_at, 2)
     return all_data, diagnostics
 
 
@@ -3143,6 +2857,7 @@ def _fetch_learning_data() -> Dict:
             days_back=REPORT_DAYS_BACK
         )
         data['fetch_diagnostics'] = fetch_diagnostics
+        data['all_time_signals'] = fetch_diagnostics.get('inventory_expected_rows')
 
         if not fetch_diagnostics.get('complete', False):
             logger.warning(
@@ -3161,11 +2876,12 @@ def _fetch_learning_data() -> Dict:
             'spot': spot_metrics,
             'futures': futures_metrics
         }
+        scope_counts = fetch_diagnostics.get('scope_counts', {}) or {}
         data['quarantine_counts'] = {
-            'futures_legacy': len(cohorts['futures_legacy']),
-            'spot_legacy': len(cohorts['spot_legacy']),
+            'futures_legacy': int(scope_counts.get('futures_legacy_count', len(cohorts['futures_legacy'])) or 0),
+            'spot_legacy': int(scope_counts.get('spot_legacy_count', len(cohorts['spot_legacy'])) or 0),
             'futures_shadow': len(cohorts['futures_shadow']),
-            'unscoped': len(cohorts['unscoped'])
+            'unscoped': int(scope_counts.get('unscoped_count', len(cohorts['unscoped'])) or 0)
         }
         data['futures_shadow_analysis'] = _calc_shadow_futures_analysis(
             cohorts['futures_shadow']
@@ -3358,7 +3074,7 @@ def generate_learning_pdf() -> bytes:
                     'fetch_learning_data_invalid_return'
                 ],
                 'model_version':
-                    'report_fetch_safe_v6'
+                    'report_fetch_scoped_h2'
             },
 
             'metrics_by_market': {
@@ -3550,7 +3266,7 @@ def generate_learning_pdf() -> bytes:
     metrics_data = [
         ['Métrica', 'Valor'],
         [
-            'Inventario histórico total (no usado como cohorte)',
+            f'Inventario bruto signals ({REPORT_DAYS_BACK} días; count-only)',
             (
                 str(
                     data[
@@ -3565,7 +3281,7 @@ def generate_learning_pdf() -> bytes:
         ],
         [f'Cohorte estadística verificable ({REPORT_DAYS_BACK} días)', str(data['total_signals'])],
         [
-            f'Cobertura lectura Supabase ({REPORT_DAYS_BACK} días)',
+            f'Cobertura cohorte estadística relevante ({REPORT_DAYS_BACK} días)',
             (
                 f"{int((data.get('fetch_diagnostics') or {}).get('fetched_rows') or 0)} / "
                 f"{int((data.get('fetch_diagnostics') or {}).get('expected_rows') or 0)} "
@@ -3579,7 +3295,7 @@ def generate_learning_pdf() -> bytes:
             (
                 'FALLBACK TEMPORAL'
                 if (data.get('fetch_diagnostics') or {}).get('fallback_used')
-                else 'PAGINACIÓN NORMAL'
+                else 'PAGINACIÓN SCOPED (Spot Q6 + Futures real)'
             )
         ],
         [

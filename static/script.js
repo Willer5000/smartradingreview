@@ -3126,6 +3126,13 @@ window.runCompleteAnalysis = function() {
                 if (typeof window.updateRecommendation === 'function') {
                     window.updateRecommendation(data.data);
                 }
+
+                // H.2: el backend ya sincronizó esta recomendación con el
+                // snapshot compacto de Señales Activas. Refrescar sólo el panel
+                // evita esperar el polling de 2 minutos y no recalcula mercado.
+                if (typeof window.updateActiveSignals === 'function') {
+                    setTimeout(() => window.updateActiveSignals(), 50);
+                }
                 if (typeof window.updateAnalysisSummary === 'function') {
                     window.updateAnalysisSummary(data.data);
                 }
@@ -7738,8 +7745,17 @@ function _renderOrderFlowSnapshot(snapshot, symbol) {
     if (!chartDiv || typeof Plotly === 'undefined') return;
 
     const book = snapshot?.orderbook || {};
-    const bids = Array.isArray(book.bid_profile) ? book.bid_profile : [];
-    const asks = Array.isArray(book.ask_profile) ? book.ask_profile : [];
+    const selectedTf = String(
+        document.getElementById('timeframe-select')?.value
+        || window.currentInterval
+        || ''
+    );
+    const fastTradeUi = ['5m', '15m', '30m'].includes(selectedTf);
+    const depthRows = fastTradeUi ? 6 : 10;
+    const bids = Array.isArray(book.bid_profile) ? book.bid_profile.slice(0, depthRows) : [];
+    const asks = Array.isArray(book.ask_profile) ? book.ask_profile.slice(0, depthRows) : [];
+    const memoryBadge = document.getElementById('fast-futures-memory-badge');
+    if (memoryBadge) memoryBadge.classList.toggle('d-none', !fastTradeUi);
     if (!bids.length && !asks.length) {
         chartDiv.innerHTML = '<div class="text-muted text-center py-5">Microestructura no disponible en este momento.</div>';
         return;
@@ -7771,8 +7787,10 @@ function _renderOrderFlowSnapshot(snapshot, symbol) {
     const midpoint = Number(book.midpoint || ((Number(book.best_bid || 0) + Number(book.best_ask || 0)) / 2));
     const layoutBase = {
         barmode: 'overlay',
-        height: 360,
-        margin: {l: 74, r: 34, t: 48, b: 50},
+        height: fastTradeUi ? 270 : 360,
+        margin: fastTradeUi
+            ? {l: 66, r: 24, t: 42, b: 44}
+            : {l: 74, r: 34, t: 48, b: 50},
         xaxis: {
             title: 'Profundidad relativa · BID ← 0 → ASK',
             zeroline: true,
@@ -10978,7 +10996,13 @@ function _macroRenderItem(item, immediate = false) {
         }
         if (meta) {
             const src = String(item?.source || '').trim();
-            meta.textContent = src ? `${src} · Contexto` : 'Contexto';
+            const ageHours = Number(item?.age_hours);
+            let freshness = 'Contexto';
+            if (String(item?.type || '').toUpperCase() === 'NEWS' && Number.isFinite(ageHours)) {
+                if (ageHours < 1) freshness = `hace ${Math.max(1, Math.round(ageHours * 60))} min`;
+                else freshness = `hace ${Math.round(ageHours)} h`;
+            }
+            meta.textContent = src ? `${src} · ${freshness}` : freshness;
         }
         window.requestAnimationFrame(() => message.classList.remove('is-entering'));
     };

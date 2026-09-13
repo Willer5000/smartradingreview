@@ -1587,6 +1587,9 @@
                             <h5 class="mb-0"><i class="fas fa-layer-group me-2"></i>Order Book / Order Flow</h5>
                             <small class="text-muted">Profundidad y presión compradora/vendedora alrededor del precio</small>
                         </div>
+                        <span id="fast-futures-memory-badge" class="badge bg-info bg-opacity-10 text-info border border-info border-opacity-25 d-none">
+                            ⚡ FAST · UI ligera
+                        </span>
                     </div>
                     <div class="card-body indicator-content">
                         <div id="order-flow-chart" style="height: 360px;"></div>
@@ -2854,7 +2857,7 @@
 
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI-2"></script>
     <script
-        src="{{ url_for('static', filename='script.js') }}?v=20260912-H-MARKET-INTEL"
+        src="{{ url_for('static', filename='script.js') }}?v=20260913-H2B-INTEGRITY-LOOP"
     ></script>
 
 
@@ -2865,7 +2868,7 @@
     {% if is_futures %}
 
     <script
-        src="{{ url_for('static', filename='futures.js') }}?v=20260912-H1-NONBLOCKING-SHADOW"
+        src="{{ url_for('static', filename='futures.js') }}?v=20260913-H2B-INTEGRITY-LOOP"
     ></script>
 
     {% endif %}

@@ -193,6 +193,9 @@ _futures_microstructure_cache = {}
 _futures_microstructure_cache_lock = (
     threading.Lock()
 )
+FUTURES_MICROSTRUCTURE_CACHE_MAX_ENTRIES = max(4, min(12, int(
+    os.environ.get('FUTURES_MICROSTRUCTURE_CACHE_MAX_ENTRIES', '8') or 8
+)))
 
 def _get_futures_http_session() -> requests.Session:
     """Crea una sesión HTTP reutilizable exclusivamente para Futures."""
@@ -335,20 +338,28 @@ def _store_futures_microstructure(
     data: Dict
 ) -> None:
 
+    now = time.monotonic()
     with _futures_microstructure_cache_lock:
+        # H.2 — cache acotado. Con BTC/ETH/SOL/XRP/ADA/LINK/BNB cabemos
+        # normalmente en 7 snapshots compactos; el límite evita crecimiento
+        # accidental si mañana se amplía el universo.
+        for key, cached in list(_futures_microstructure_cache.items()):
+            if now - float((cached or {}).get('stored_at') or 0) >= FUTURES_MICROSTRUCTURE_TTL_SECONDS:
+                _futures_microstructure_cache.pop(key, None)
 
-        _futures_microstructure_cache[
-            symbol
-        ] = {
-            'stored_at':
-                time.monotonic(),
-
-            'data':
-                dict(
-                    data
-                    or {}
-                )
+        _futures_microstructure_cache[symbol] = {
+            'stored_at': now,
+            'data': dict(data or {}),
         }
+
+        if len(_futures_microstructure_cache) > FUTURES_MICROSTRUCTURE_CACHE_MAX_ENTRIES:
+            oldest = sorted(
+                _futures_microstructure_cache.items(),
+                key=lambda item: float((item[1] or {}).get('stored_at') or 0),
+            )
+            excess = len(_futures_microstructure_cache) - FUTURES_MICROSTRUCTURE_CACHE_MAX_ENTRIES
+            for key, _ in oldest[:excess]:
+                _futures_microstructure_cache.pop(key, None)
 
 
 def _safe_micro_float(

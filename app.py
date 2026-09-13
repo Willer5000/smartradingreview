@@ -6330,7 +6330,7 @@ class TradingExpertSystem:
                 'condition': 'perfil_dentro_valor'
             },
             'value_area_ruptura': {
-                'template': 'Precio fuera de Value Area ({price_position}) con volumen creciente, confirmando dirección. ',
+                'template': 'Precio fuera de Value Area ({price_position}) con volumen creciente. La ubicación por sí sola no confirma dirección: requiere aceptación, reclaim o rechazo coherente con el setup. ',
                 'type': 'perfil_volumen',
                 'order': 23,
                 'condition': 'fuera_de_valor'
@@ -6707,13 +6707,13 @@ class TradingExpertSystem:
             
             # ============ NUEVAS PLANTILLAS PARA BOLLINGER (CATEGORÍA 36) ============
             'bollinger_squeeze_alcista': {
-                'template': 'Bandas de Bollinger en máxima contracción (squeeze) de {squeeze_length} velas con ruptura alcista, anticipando expansión de volatilidad. ',
+                'template': 'Momentum de Bollinger con sesgo alcista y expansión potencial de volatilidad. Si existe squeeze real, su duración es {squeeze_length} velas; la dirección requiere confirmación por precio y volumen. ',
                 'type': 'bollinger',
                 'order': 36,
                 'condition': 'squeeze_alcista'
             },
             'bollinger_squeeze_bajista': {
-                'template': 'Bandas de Bollinger en squeeze de {squeeze_length} velas con ruptura bajista, anticipando expansión a la baja. ',
+                'template': 'Momentum de Bollinger con sesgo bajista y expansión potencial de volatilidad. Si existe squeeze real, su duración es {squeeze_length} velas; la dirección requiere confirmación por precio y volumen. ',
                 'type': 'bollinger',
                 'order': 36,
                 'condition': 'squeeze_bajista'
@@ -19400,13 +19400,31 @@ class TradingExpertSystem:
             # ============ DATAFRAME PARA GRÁFICOS ============
             print(f"📊 Preparando DataFrame para gráficos...")
             try:
+                # H.2 — FAST TRADE MEMORY PROFILE.
+                #
+                # El motor SIEMPRE calcula indicadores/SMC/patrones con el DataFrame
+                # completo. Sólo reducimos la copia destinada al navegador después
+                # de que la decisión ya fue tomada. Así 5m/15m/30m siguen siendo
+                # plenamente funcionales, pero no serializamos/retendremos 200+
+                # velas por cada payload visual si no hacen falta para leer un trade
+                # rápido. 1h+ conserva la ventana visual histórica completa.
+                df_for_ui = df
+                if str(analysis_system_type).lower() == 'futures':
+                    fast_ui_points = {
+                        '5m': 96,
+                        '15m': 112,
+                        '30m': 128,
+                    }.get(str(timeframe))
+                    if fast_ui_points and len(df) > fast_ui_points:
+                        df_for_ui = df.tail(fast_ui_points)
+
                 df_dict = {
-                    'time': [str(t) for t in df['time'].dt.strftime('%Y-%m-%d %H:%M:%S').tolist()],
-                    'open': [float(x) for x in df['open'].tolist()],
-                    'high': [float(x) for x in df['high'].tolist()],
-                    'low': [float(x) for x in df['low'].tolist()],
-                    'close': [float(x) for x in df['close'].tolist()],
-                    'volume': [float(x) for x in df['volume'].tolist()]
+                    'time': [str(t) for t in df_for_ui['time'].dt.strftime('%Y-%m-%d %H:%M:%S').tolist()],
+                    'open': [float(x) for x in df_for_ui['open'].tolist()],
+                    'high': [float(x) for x in df_for_ui['high'].tolist()],
+                    'low': [float(x) for x in df_for_ui['low'].tolist()],
+                    'close': [float(x) for x in df_for_ui['close'].tolist()],
+                    'volume': [float(x) for x in df_for_ui['volume'].tolist()]
                 }
             except Exception as e:
                 print(f"❌ ERROR preparando DataFrame: {e}")
@@ -26370,7 +26388,14 @@ def api_analyze():
             }
             print(f"❌ Error 400: {error_response['error']}")
             return jsonify(error_response), 400
-        
+
+        # H.2: la recomendación actual debe reflejarse inmediatamente en
+        # Señales Activas sin lanzar los otros 11 análisis Spot.
+        try:
+            _sync_spot_active_signal_from_result(result)
+        except Exception as spot_sync_error:
+            print(f"⚠️ [SPOT ACTIVE] sync interactivo: {spot_sync_error}", flush=True)
+
         # ============ EXTRACCIÓN SEGURA DE DATOS ============
         decision = result.get('decision')
         if decision is None:
@@ -26738,6 +26763,127 @@ def _spot_cache_present():
     # si hay que construir previous_signals usamos _spot_previous_cache_present()
     # para no confundir un caché activo existente con velas anteriores ausentes.
     return _spot_previous_cache_present() or _spot_active_cache_present()
+
+
+# ============================================================================
+# HOTFIX H.2 — COHERENCIA RECOMENDACIÓN ACTUAL ↔ SEÑALES ACTIVAS SPOT
+# ============================================================================
+#
+# El panel "Señales Activas" se construye con un snapshot compacto. En modo de
+# memoria baja ese snapshot se refresca con baja frecuencia para proteger Render,
+# por lo que una recomendación interactiva recién calculada (p.ej. BTC 4h BUY)
+# podía tardar hasta el siguiente ciclo background en aparecer en el panel.
+#
+# Esta sincronización NO ejecuta análisis extra: reutiliza el resultado que la UI
+# acaba de obtener y actualiza sólo esa combinación symbol/TF. Si la recomendación
+# actual deja de ser direccional, elimina esa combinación del panel actual.
+# ============================================================================
+
+_SPOT_ACTIVE_SYNC_LOCK = threading.Lock()
+_SPOT_ACTIVE_PERSIST_LOCK = threading.Lock()
+_SPOT_ACTIVE_PERSIST_PENDING = False
+
+
+def _spot_active_snapshot_from_result(result):
+    if not isinstance(result, dict) or not result.get('success'):
+        return None
+
+    symbol = str(result.get('symbol') or '').upper()
+    timeframe = str(result.get('timeframe') or '')
+    if symbol not in ('BTC-USDT', 'PAXG-USDT', 'PAXG-BTC'):
+        return None
+    if timeframe not in ('4h', '12h', '1D', '1W'):
+        return None
+
+    decision = result.get('decision') or {}
+    levels = result.get('levels') or {}
+    action = str(decision.get('action') or 'NO_OPERAR').upper()
+    try:
+        confidence = float(decision.get('confidence') or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+
+    directional = action in ('COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT')
+    if not directional or confidence < 60.0:
+        return {
+            'symbol': symbol,
+            'timeframe': timeframe,
+            'remove': True,
+        }
+
+    candle_timestamp = (
+        result.get('source_candle_timestamp')
+        or result.get('previous_candle_timestamp')
+    )
+    if not candle_timestamp:
+        df_payload = result.get('df') or {}
+        if isinstance(df_payload, dict):
+            times = df_payload.get('time') or []
+            if times:
+                candle_timestamp = str(times[-1])
+
+    return {
+        'symbol': symbol,
+        'timeframe': timeframe,
+        'action': action,
+        'confidence': confidence,
+        'signal_id': result.get('signal_id') or levels.get('signal_id'),
+        'entry': levels.get('entry'),
+        'stop_loss': levels.get('stop_loss'),
+        'take_profit': levels.get('take_profit'),
+        'current_price': result.get('current_price'),
+        'candle_timestamp': candle_timestamp,
+        'message': str(result.get('message') or '')[:800],
+        'snapshot_origin': 'INTERACTIVE_CURRENT_ANALYSIS',
+        'synced_at': datetime.now(bolivia_tz).isoformat(),
+    }
+
+
+def _persist_spot_active_cache_async():
+    """Persistencia desacoplada; nunca retrasa la respuesta de la UI."""
+    global _SPOT_ACTIVE_PERSIST_PENDING
+    with _SPOT_ACTIVE_PERSIST_LOCK:
+        if _SPOT_ACTIVE_PERSIST_PENDING:
+            return
+        _SPOT_ACTIVE_PERSIST_PENDING = True
+
+    def _worker():
+        global _SPOT_ACTIVE_PERSIST_PENDING
+        try:
+            _save_spot_signals_cache_to_disk()
+        except Exception as exc:
+            print(f"⚠️ [SPOT ACTIVE] persistencia compacta: {exc}", flush=True)
+        finally:
+            with _SPOT_ACTIVE_PERSIST_LOCK:
+                _SPOT_ACTIVE_PERSIST_PENDING = False
+
+    threading.Thread(
+        target=_worker,
+        daemon=True,
+        name='spot-active-persist',
+    ).start()
+
+
+def _sync_spot_active_signal_from_result(result):
+    snapshot = _spot_active_snapshot_from_result(result)
+    if not snapshot:
+        return False
+
+    key = f"{snapshot['symbol']}_{snapshot['timeframe']}"
+    with _SPOT_ACTIVE_SYNC_LOCK:
+        existing = getattr(expert_system, 'spot_active_signals_cache', None)
+        cache = dict(existing) if isinstance(existing, dict) else {}
+
+        if snapshot.get('remove'):
+            cache.pop(key, None)
+        else:
+            cache[key] = snapshot
+
+        setattr(expert_system, 'spot_active_signals_cache', cache)
+        setattr(expert_system, 'spot_active_signals_cache_time', time.time())
+
+    _persist_spot_active_cache_async()
+    return True
 
 
 def _trigger_spot_fast_restore():
@@ -29990,6 +30136,18 @@ def _compact_futures_runtime_result(result):
     return compact
 
 
+# H.2 — perfiles visuales de trade rápido. El cálculo técnico no cambia;
+# sólo se limita la copia rica que queda unos segundos en RAM para la UI.
+_FAST_FUTURES_UI_POINTS = {
+    '5m': 96,
+    '15m': 112,
+    '30m': 128,
+}
+_FAST_FUTURES_UI_CACHE_TTL_SECONDS = max(20, int(os.environ.get(
+    'FAST_FUTURES_UI_CACHE_TTL_SECONDS', '45'
+) or 45))
+
+
 def _compact_futures_ui_result(result):
     """Return the chart-capable Futures payload without research-only bulk.
 
@@ -30036,6 +30194,40 @@ def _compact_futures_ui_result(result):
         ui['decision'] = decision
 
     return ui
+
+
+def _compact_fast_futures_ui_result(result, timeframe):
+    """Reduce sólo series VISUALES para 5m/15m/30m.
+
+    El análisis, Strategy Factory, ReviewTrader, Safety, Entry, SL, TP,
+    leverage y publicación ya fueron calculados con toda la historia. Este
+    paso ocurre al final y sólo evita retener listas largas en el caché UI.
+    """
+    limit = _FAST_FUTURES_UI_POINTS.get(str(timeframe or ''))
+    if not limit or not isinstance(result, dict):
+        return result
+
+    def _trim_visual(value, depth=0):
+        if depth > 6:
+            return value
+        if isinstance(value, dict):
+            return {k: _trim_visual(v, depth + 1) for k, v in value.items()}
+        if isinstance(value, list):
+            # Sólo listas largas pueden representar una retención relevante.
+            # Razones, estrategias, patrones y auditorías son listas pequeñas y
+            # permanecen intactas.
+            items = value[-limit:] if len(value) > limit else value
+            return [_trim_visual(v, depth + 1) for v in items]
+        if isinstance(value, tuple):
+            items = list(value[-limit:] if len(value) > limit else value)
+            return [_trim_visual(v, depth + 1) for v in items]
+        return value
+
+    compact = _trim_visual(result)
+    compact['runtime_memory_profile'] = 'FAST_LIGHT'
+    compact['runtime_ui_points'] = int(limit)
+    compact['runtime_full_analysis'] = True
+    return compact
 
 
 # ============================================================================
@@ -30190,7 +30382,13 @@ def _get_futures_ui_cached(symbol, timeframe):
         if not item:
             return None
         age = now - float(item.get('ts') or 0)
-        if age > _FUTURES_UI_CACHE_TTL_SECONDS:
+        item_tf = str(item.get('timeframe') or str(key).split('|')[-1])
+        ttl = (
+            _FAST_FUTURES_UI_CACHE_TTL_SECONDS
+            if item_tf in _FAST_FUTURES_UI_POINTS
+            else _FUTURES_UI_CACHE_TTL_SECONDS
+        )
+        if age > ttl:
             _FUTURES_UI_CACHE['items'].pop(key, None)
             return None
         return item.get('data')
@@ -30217,7 +30415,11 @@ def _store_futures_ui_cached(symbol, timeframe, payload):
     key = _futures_ui_key(symbol, timeframe)
     with _FUTURES_UI_CACHE['lock']:
         items = _FUTURES_UI_CACHE['items']
-        items[key] = {'ts': time.time(), 'data': payload}
+        items[key] = {
+            'ts': time.time(),
+            'timeframe': str(timeframe or ''),
+            'data': payload,
+        }
         if len(items) > _FUTURES_UI_CACHE_MAX_ITEMS:
             ordered = sorted(
                 items.items(),
@@ -30260,6 +30462,10 @@ def _start_futures_ui_analysis_async(symbol, timeframe):
             result = _apply_profitability_router(result, symbol, timeframe)
             result = _apply_36s_futures_ai_control(result, symbol, timeframe)
             ui_result = _compact_futures_ui_result(result)
+            ui_result = _compact_fast_futures_ui_result(
+                ui_result,
+                timeframe,
+            )
             runtime_result = _compact_futures_runtime_result(result)
 
             # Only the small 30-combo summary stays in the normal runtime cache.
@@ -30290,6 +30496,11 @@ def _start_futures_ui_analysis_async(symbol, timeframe):
                 _release_heavy_analysis(owner)
             with _FUTURES_UI_CACHE['lock']:
                 _FUTURES_UI_CACHE['running'].discard(key)
+            if str(timeframe) in _FAST_FUTURES_UI_POINTS:
+                # Pandas/numpy pueden dejar arenas reservadas incluso después
+                # de liberar el DataFrame. En trade rápido devolvemos esas
+                # páginas al SO de forma best-effort.
+                _trim_process_heap()
             # Small grace window so the polling request can consume the result
             # before the incremental researcher starts the next heavy combo.
             _mark_futures_interactive_priority(seconds=6)
@@ -31592,6 +31803,40 @@ if _LOW_MEMORY_MODE:
     )
 
 
+def _futures_combo_due_for_closed_candle(symbol, timeframe, now_ts=None):
+    """Evita recalcular la MISMA vela cerrada en background.
+
+    La UI interactiva puede pedir un refresco cuando quiera. El round-robin de
+    investigación, en cambio, sólo necesita volver a ejecutar una combinación
+    cuando ya debería existir una nueva vela cerrada. Esto reduce CPU/RAM
+    transitorios sin perder ninguna decisión nueva por vela.
+    """
+    tf_seconds = _FUTURES_TF_SECONDS.get(str(timeframe or ''))
+    if not tf_seconds:
+        return True
+    now_ts = float(now_ts or time.time())
+    try:
+        with _futures_analysis_cache['lock']:
+            data = _futures_analysis_cache.get('data') or {}
+            existing = (data.get('analysis') or {}).get((symbol, timeframe))
+        if not isinstance(existing, dict) or not existing.get('success'):
+            return True
+        close_raw = existing.get('source_candle_close_timestamp')
+        if not close_raw:
+            # Sin cierre canónico verificable preferimos recalcular.
+            return True
+        close_ts = pd.Timestamp(close_raw)
+        if close_ts.tzinfo is None:
+            close_ts = close_ts.tz_localize('UTC')
+        else:
+            close_ts = close_ts.tz_convert('UTC')
+        # Pequeña gracia para que el exchange publique la nueva vela cerrada.
+        next_due = close_ts.timestamp() + float(tf_seconds) + 8.0
+        return now_ts >= next_due
+    except Exception:
+        return True
+
+
 def _next_futures_incremental_combo():
     """Round-robin one symbol/timeframe at a time; bounded for 512 MB RAM."""
     global _FUTURES_INCREMENTAL_CURSOR
@@ -31617,10 +31862,21 @@ def _next_futures_incremental_combo():
         )
     if not combos:
         return None
+
+    # H.2: saltar combinaciones cuya última vela cerrada ya fue analizada.
+    # No se reduce la cobertura: cada nueva vela vuelve a quedar elegible.
+    now_ts = time.time()
     with _FUTURES_INCREMENTAL_CURSOR_LOCK:
-        combo = combos[_FUTURES_INCREMENTAL_CURSOR % len(combos)]
-        _FUTURES_INCREMENTAL_CURSOR = (_FUTURES_INCREMENTAL_CURSOR + 1) % len(combos)
-    return combo
+        for _ in range(len(combos)):
+            combo = combos[_FUTURES_INCREMENTAL_CURSOR % len(combos)]
+            _FUTURES_INCREMENTAL_CURSOR = (
+                _FUTURES_INCREMENTAL_CURSOR + 1
+            ) % len(combos)
+            if _futures_combo_due_for_closed_candle(
+                combo[0], combo[1], now_ts=now_ts
+            ):
+                return combo
+    return None
 
 
 def _trigger_futures_combo_refresh_async(symbol=None, timeframe=None):
@@ -31677,6 +31933,8 @@ def _trigger_futures_combo_refresh_async(symbol=None, timeframe=None):
                 )
             with cache['lock']:
                 cache['running'] = False
+            if str(timeframe) in _FAST_FUTURES_UI_POINTS:
+                _trim_process_heap()
 
     threading.Thread(
         target=_do_one,
@@ -35747,32 +36005,63 @@ def saved_futures_lifecycle_loop():
 
 _Q6_DAILY_LOCK = threading.Lock()
 
+# ============================================================================
+# HOTFIX H.2 — LEARNING SCIENTIST 6H + WATCHDOG DE RECUPERACIÓN
+# ============================================================================
+# Groq Learning admite hasta 6 llamadas/día por configuración. El científico
+# se programa en 4 slots/día (cada 6 h), manteniéndose por debajo de ese límite.
+# q6_job_runs hace la ejecución idempotente: el watchdog puede comprobar cada
+# pocos minutos sin duplicar llamadas externas dentro del mismo slot.
+# ============================================================================
+
+_AI_LEARNING_SLOT_HOURS = max(
+    4,
+    min(12, int(os.getenv('AI_LEARNING_SLOT_HOURS', '6') or 6))
+)
+_AI_LEARNING_WATCHDOG_SECONDS = max(
+    300,
+    int(os.getenv('AI_LEARNING_WATCHDOG_SECONDS', '1200') or 1200)
+)
+
+
+def _ai_learning_slot(now=None):
+    now = now or datetime.now(bolivia_tz)
+    if getattr(now, 'tzinfo', None) is None:
+        try:
+            now = bolivia_tz.localize(now)
+        except Exception:
+            pass
+    hour = int(now.hour)
+    bucket = (hour // _AI_LEARNING_SLOT_HOURS) * _AI_LEARNING_SLOT_HOURS
+    return f"{now.strftime('%Y-%m-%d')}T{bucket:02d}"
+
 
 def _run_ai_learning_daily(q6_slot=None, trigger_source='daily'):
     """
-    COMMIT 7 — Gemini recovery-safe daily learning.
+    H.2 — Learning Scientist continuo y recuperable.
 
-    AI_LEARNING has its own Q6 job key.  It can therefore recover after a
-    Render restart even when the REVIEW job for the same day is already DONE.
-    A failed attempt is marked FAILED and may retry later; a successful job is
-    never duplicated.
+    Usa cuatro slots diarios de 6 h (configurable), por debajo del límite
+    gratuito configurado de 6 usos/día. q6_job_runs evita duplicar llamadas
+    dentro del mismo slot y permite recuperar FAILED/RUNNING abandonados.
     """
     claimed = False
     try:
         from review_trader import review_trader
-        from q6_integrity import claim_daily_job, finish_daily_job, daily_slot
+        from q6_integrity import claim_daily_job, finish_daily_job
         from ai_advisor import run_ai_advisor
 
         if not review_trader.db.enabled:
             return False
 
-        q6_slot = q6_slot or daily_slot(datetime.now(bolivia_tz))
+        # El Review diario puede pasar su fecha legacy, pero Learning usa
+        # un slot propio de 6 h para aprendizaje continuo y recuperable.
+        q6_slot = _ai_learning_slot(datetime.now(bolivia_tz))
 
         # retry=True recupera FAILED después de 15 min y leases RUNNING
         # abandonados tras un reinicio. DONE sigue siendo idempotente.
         claimed = claim_daily_job(
             review_trader.db,
-            'AI_LEARNING',
+            'AI_LEARNING_V2',
             q6_slot,
             retry=True,
             failed_retry_minutes=15,
@@ -35786,13 +36075,13 @@ def _run_ai_learning_daily(q6_slot=None, trigger_source='daily'):
             user_name='SYSTEM',
             usage_type='LEARNING',
             context_type='LEARNING',
-            event_type='DAILY_REVIEW',
+            event_type='RESEARCH_CYCLE_6H',
             market='SYSTEM',
             context=learning_context
         )
 
         success = bool(ai_learning_result.get('success'))
-        finish_daily_job(review_trader.db, 'AI_LEARNING', q6_slot, success)
+        finish_daily_job(review_trader.db, 'AI_LEARNING_V2', q6_slot, success)
 
         if success:
             data = ai_learning_result.get('data', {}) or {}
@@ -35813,7 +36102,7 @@ def _run_ai_learning_daily(q6_slot=None, trigger_source='daily'):
             try:
                 from review_trader import review_trader
                 from q6_integrity import finish_daily_job
-                finish_daily_job(review_trader.db, 'AI_LEARNING', q6_slot, False)
+                finish_daily_job(review_trader.db, 'AI_LEARNING_V2', q6_slot, False)
             except Exception:
                 pass
         print(f"⚠️ [C10] AI Learning Scientist recovery: {type(exc).__name__}: {exc}")
@@ -35854,6 +36143,25 @@ def _q6_run_daily_review():
             )
 
         _Q6_DAILY_LOCK.release()
+
+
+def ai_learning_scientist_watchdog_loop():
+    """Garantiza que el Científico no dependa del Review diario ni del heavy lock."""
+    # Web + snapshots tienen prioridad tras un deploy.
+    time.sleep(120)
+    while True:
+        try:
+            _run_ai_learning_daily(
+                q6_slot=None,
+                trigger_source='watchdog-6h'
+            )
+        except Exception as exc:
+            print(
+                f"⚠️ [H.2] Learning Scientist watchdog: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+        time.sleep(_AI_LEARNING_WATCHDOG_SECONDS)
 
 
 def verificar_y_ejecutar():
@@ -44200,6 +44508,22 @@ def _start_background_threads():
     except Exception as e:
         print(f"⚠️ Error iniciando learning_worker: {e}")
 
+    # H.2: watchdog independiente del Científico. El claim por slot evita
+    # duplicar llamadas aunque este hilo compruebe periódicamente.
+    try:
+        t_learning_ai = threading.Thread(
+            target=ai_learning_scientist_watchdog_loop,
+            name='ai-learning-scientist',
+            daemon=True
+        )
+        t_learning_ai.start()
+        print(
+            "✅ Thread AI Learning Scientist iniciado "
+            f"(slot {_AI_LEARNING_SLOT_HOURS}h; watchdog {_AI_LEARNING_WATCHDOG_SECONDS}s)"
+        )
+    except Exception as e:
+        print(f"⚠️ Error iniciando AI Learning Scientist: {e}")
+
     # ==============================================================
     # 36N — SAVED FUTURES LIFECYCLE
     # ==============================================================
@@ -46598,6 +46922,13 @@ def api_analyze_with_portfolio():
         # ==============================================================
         # 9. ACTUALIZAR SNAPSHOT DEL ANÁLISIS ACTUAL
         # ==============================================================
+
+        # H.2: mantener coherencia inmediata entre la recomendación que el
+        # usuario está viendo y el panel Spot de Señales Activas.
+        try:
+            _sync_spot_active_signal_from_result(result)
+        except Exception as spot_sync_error:
+            print(f"⚠️ [SPOT ACTIVE] sync TGP: {spot_sync_error}", flush=True)
 
         current_compact = (
             _compact_tgp_snapshot(

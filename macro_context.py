@@ -44,6 +44,7 @@ MACRO_CONTEXT_ENABLED = str(os.getenv("MACRO_CONTEXT_ENABLED", "true")).strip().
 MACRO_NEWS_CACHE_SECONDS = max(300, min(3600, int(os.getenv("MACRO_NEWS_CACHE_SECONDS", "900"))))
 MACRO_CALENDAR_CACHE_SECONDS = max(1800, min(43200, int(os.getenv("MACRO_CALENDAR_CACHE_SECONDS", "21600"))))
 MACRO_NEWS_MAX_ARTICLES = max(5, min(24, int(os.getenv("MACRO_NEWS_MAX_ARTICLES", "12"))))
+MACRO_HEADLINE_MAX_AGE_HOURS = max(6, min(48, int(os.getenv("MACRO_HEADLINE_MAX_AGE_HOURS", "24"))))
 MACRO_HTTP_TIMEOUT = max(3, min(15, int(os.getenv("MACRO_HTTP_TIMEOUT", "7"))))
 
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
@@ -67,6 +68,7 @@ _CACHE: Dict[str, object] = {
     "news": [],
     "calendar": [],
     "errors": [],
+    "news_last_success_utc": None,
 }
 
 
@@ -515,6 +517,7 @@ def _refresh_news_if_needed(force: bool = False) -> None:
     with _LOCK:
         if rows:
             _CACHE["news"] = rows[:MACRO_NEWS_MAX_ARTICLES]
+            _CACHE["news_last_success_utc"] = _iso_utc(_utc_now())
         _CACHE["news_fetched_at"] = now_monotonic
         _CACHE["errors"] = (list(_CACHE.get("errors") or []) + errors)[-8:]
     if rows:
@@ -626,6 +629,7 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
         errors = list(_CACHE.get("errors") or [])[-4:]
         news_fetched_at = float(_CACHE.get("news_fetched_at") or 0.0)
         calendar_fetched_at = float(_CACHE.get("calendar_fetched_at") or 0.0)
+        news_last_success_utc = _CACHE.get("news_last_success_utc")
 
     upcoming = []
     for event in calendar_rows:
@@ -641,10 +645,15 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
     active_news = []
     for row in news:
         published = _safe_dt(row.get("published_at"))
-        age_hours = ((now - published).total_seconds() / 3600.0) if published else None
-        if age_hours is None or age_hours <= 24:
+        # H.2: un titular sin fecha verificable no puede quedarse para siempre
+        # en el ticker. Conservamos el cache durable, pero sólo mostramos como
+        # noticia ACTIVA filas con timestamp real y dentro de la ventana máxima.
+        if not published:
+            continue
+        age_hours = (now - published).total_seconds() / 3600.0
+        if 0 <= age_hours <= float(MACRO_HEADLINE_MAX_AGE_HOURS):
             item = dict(row)
-            item["age_hours"] = round(age_hours, 2) if age_hours is not None else None
+            item["age_hours"] = round(age_hours, 2)
             active_news.append(item)
 
     top_score = max(
@@ -694,6 +703,8 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
             "text": f"{category} · {row.get('title_es')}",
             "url": row.get("url"),
             "source": row.get("source"),
+            "age_hours": row.get("age_hours"),
+            "published_at": row.get("published_at"),
         })
     ticker_items = ticker_items[:10]
 
@@ -716,5 +727,13 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
         "sources": ["GDELT", "BLS", "Federal Reserve"],
         "news_cache_age_seconds": round(max(0.0, time.monotonic() - news_fetched_at), 1) if news_fetched_at else None,
         "calendar_cache_age_seconds": round(max(0.0, time.monotonic() - calendar_fetched_at), 1) if calendar_fetched_at else None,
+        "news_refresh_seconds": MACRO_NEWS_CACHE_SECONDS,
+        "calendar_refresh_seconds": MACRO_CALENDAR_CACHE_SECONDS,
+        "headline_max_age_hours": MACRO_HEADLINE_MAX_AGE_HOURS,
+        "fresh_headlines": len(active_news),
+        "freshest_headline_age_hours": (
+            min((float(row.get("age_hours")) for row in active_news if row.get("age_hours") is not None), default=None)
+        ),
+        "news_last_success_utc": news_last_success_utc,
         "errors": errors,
     }
