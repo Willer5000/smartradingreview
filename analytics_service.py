@@ -9,6 +9,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from collections import defaultdict
+from cohort_integrity import classify_quality_signal, summarize_cohorts
 
 from supabase_client import supabase_db
 from edge_discovery import build_edge_discovery_summary
@@ -2184,11 +2185,12 @@ class AnalyticsService:
             if market != 'futures':
                 continue
 
-            # FINAL V1 RC2: 5m/15m are retired from the active product.
-            # Historical rows remain in Supabase for audit/learning, but they do
-            # not participate in current V1 LIVE KPIs or promotion decisions.
-            active_tf = str(signal.get('timeframe') or signal.get('interval') or '').strip().lower()
-            if active_tf not in {'30m', '1h', '2h', '4h'}:
+            # RC4 cohort integrity: preserve every row, but only active
+            # market×symbol×TF cells with verifiable provenance can calibrate
+            # official profitability. 12H/1D exist only for BTC/ETH/SOL.
+            cohort_info = classify_quality_signal(signal, spot_verified=False)
+            if cohort_info.get('cohort') == 'LEGACY_ARCHIVE':
+                futures_other.append(signal)
                 continue
 
             learning = (
@@ -2279,6 +2281,20 @@ class AnalyticsService:
             }
 
         coverage = getattr(signals, 'coverage', {'complete': False}) or {'complete': False}
+
+        # RC4 visible audit: old/pre-audit rows remain queryable but are
+        # explicitly separated from the official current cohort.
+        try:
+            from q6_integrity import verified_spot as _verified_spot_rc4
+            cohort_integrity = summarize_cohorts(
+                signals,
+                lambda row: classify_quality_signal(
+                    row,
+                    spot_verified=(str(row.get('system_type') or '').lower() == 'spot' and _verified_spot_rc4(row))
+                )
+            )
+        except Exception as cohort_error:
+            cohort_integrity = {'version': 'RC4_COHORT_INTEGRITY_V1', 'state': 'UNAVAILABLE', 'error': str(cohort_error)[:160]}
 
         resolved_futures = sum(
             1 for signal in futures_official
@@ -2402,6 +2418,8 @@ class AnalyticsService:
             # ignorarlos sin romper compatibilidad. Gemini/ReviewTrader
             # pueden utilizarlos como evidencia SHADOW/observacional.
             # ==========================================================
+            'cohort_integrity_v1': cohort_integrity,
+
             'execution_forensics_v2': {
                 'spot': forensics_spot,
                 'futures_official': forensics_futures,

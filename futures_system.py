@@ -4,7 +4,7 @@
 #
 # CARACTERÍSTICAS:
 # - 5 criptomonedas oficiales + LINK/BNB en research Shadow (contra USDT)
-# - 4 temporalidades V1: 30m, 1h, 2h, 4h
+# - RC4: 30m, 1h, 2h, 4h + 12h/1D sólo para BTC/ETH/SOL
 # - Solo acciones LONG y SHORT (nunca COMPRA_SPOT/VENTA_SPOT)
 # - Apalancamiento dinámico sin mínimo forzado y limitado por riesgo/ATR
 # - Hereda TODA la lógica del sistema principal (traders, indicadores, patrones)
@@ -50,17 +50,32 @@ FUTURES_RESEARCH_SYMBOLS = {
     'LINK-USDT': {'name': 'LINK/USDT', 'type': 'crypto_alt', 'decimals': 3},
     'BNB-USDT': {'name': 'BNB/USDT', 'type': 'crypto_major', 'decimals': 2},
 }
-FUTURES_RESEARCH_TIMEFRAMES = ('30m', '1h')
+FUTURES_RESEARCH_TIMEFRAMES = ('30m', '1h', '2h', '4h')
+FUTURES_HIGH_TIMEFRAME_SYMBOLS = ('BTC-USDT', 'ETH-USDT', 'SOL-USDT')
+FUTURES_HIGH_TIMEFRAMES = ('12h', '1D')
 FUTURES_RESEARCH_ENABLED = str(os.environ.get('C15_RESEARCH_SHADOW_ENABLED', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
 FUTURES_ALL_SYMBOLS = {**FUTURES_SYMBOLS, **FUTURES_RESEARCH_SYMBOLS}
 
 # Temporalidades para futuros (TF cortas)
 FUTURES_TIMEFRAMES = {
-    '30m': {'name': '30 Minutos', 'type': 'intraday',   'kucoin': '30min'},
-    '1h':  {'name': '1 Hora',     'type': 'intraday',   'kucoin': '1hour'},
-    '2h':  {'name': '2 Horas',    'type': 'intraday',   'kucoin': '2hour'},
-    '4h':  {'name': '4 Horas',    'type': 'intraday',   'kucoin': '4hour'}
+    '30m': {'name': '30 Minutos', 'type': 'intraday', 'kucoin': '30min'},
+    '1h':  {'name': '1 Hora', 'type': 'intraday', 'kucoin': '1hour'},
+    '2h':  {'name': '2 Horas', 'type': 'intraday', 'kucoin': '2hour'},
+    '4h':  {'name': '4 Horas', 'type': 'swing', 'kucoin': '4hour'},
+    '12h': {'name': '12 Horas', 'type': 'swing_context', 'kucoin': '12hour'},
+    '1D':  {'name': '1 Día', 'type': 'macro_swing', 'kucoin': '1day'},
 }
+
+def futures_timeframe_allowed(symbol: str, timeframe: str) -> bool:
+    symbol = str(symbol or '').upper().replace('/', '-')
+    timeframe = str(timeframe or '').strip()
+    if timeframe not in FUTURES_TIMEFRAMES:
+        return False
+    if timeframe in FUTURES_HIGH_TIMEFRAMES:
+        return symbol in FUTURES_HIGH_TIMEFRAME_SYMBOLS
+    if symbol in FUTURES_RESEARCH_SYMBOLS:
+        return timeframe in FUTURES_RESEARCH_TIMEFRAMES
+    return symbol in FUTURES_SYMBOLS
 
 # Contratos perpetuos USDT-M reales de KuCoin Futures.
 # BTC se llama XBT dentro de la API de derivados de KuCoin.
@@ -81,6 +96,8 @@ FUTURES_TIMEFRAME_SECONDS = {
     '1h': 60 * 60,
     '2h': 2 * 60 * 60,
     '4h': 4 * 60 * 60,
+    '12h': 12 * 60 * 60,
+    '1D': 24 * 60 * 60,
 }
 
 # La API de Futures recibe la granularidad como minutos, no con los textos
@@ -90,6 +107,8 @@ FUTURES_GRANULARITY_MINUTES = {
     '1h': 60,
     '2h': 120,
     '4h': 240,
+    '12h': 720,
+    '1D': 1440,
 }
 
 KUCOIN_FUTURES_KLINES_URL = (
@@ -106,6 +125,8 @@ FUTURES_DATA_TTL_SECONDS = {
     '1h': 120,
     '2h': 240,
     '4h': 300,
+    '12h': 600,
+    '1D': 900,
 }
 _futures_data_cache = {}
 _futures_data_cache_lock = threading.Lock()
@@ -1360,7 +1381,9 @@ FUTURES_KUCOIN_INTERVALS = {
     '30m': '30min',
     '1h': '1hour',
     '2h': '2hour',
-    '4h': '4hour'
+    '4h': '4hour',
+    '12h': '12hour',
+    '1D': '1day',
 }
 
 # ============================================================================
@@ -1387,6 +1410,8 @@ LEVERAGE_RANGES = {
     '1h':  (1, 20),
     '2h':  (1, 15),
     '4h':  (1, 10),
+    '12h': (1, 7),
+    '1D':  (1, 5),
 }
 
 # Banda preferida para operaciones con margen pequeño. No es un mínimo ciego:
@@ -1397,6 +1422,8 @@ PREFERRED_LEVERAGE_RANGES = {
     '1h':  (10, 20),
     '2h':  (8, 15),
     '4h':  (5, 10),
+    '12h': (3, 7),
+    '1D':  (2, 5),
 }
 # ============================================================================
 # ECONOMÍA DE FUTUROS — CONFIGURACIÓN
@@ -1480,8 +1507,8 @@ FUTURES_RISK_CONFIG = {
 FUTURES_QUANT_MODEL_VERSION = 'closed_returns_regime_v1'
 
 FUTURES_QUANT_CONFIG = {
-    # V1 RC2 trabaja sólo con 30m/1h/2h/4h. Los TF retirados 5m/15m
-    # permanecen únicamente como evidencia histórica, no como análisis activo.
+    # RC4 mantiene 30m/1h/2h/4h y añade 12h/1D para BTC/ETH/SOL.
+    # 5m/15m permanecen sólo como evidencia histórica, no como análisis activo.
     '30m': {
         'trend_window': 28,
         'volatility_fast_window': 10,
@@ -1516,15 +1543,24 @@ FUTURES_QUANT_CONFIG = {
         'max_pullback_atr': 1.80,
     },
     '4h': {
-        'trend_window': 18,
-        'volatility_fast_window': 6,
-        'volatility_slow_window': 36,
-        'trend_efficiency_min': 0.20,
-        'balance_efficiency_max': 0.20,
-        'drift_strength_min': 0.85,
-        'return_shock_z': 3.25,
-        'volatility_shock_ratio': 2.00,
-        'max_pullback_atr': 2.00,
+        'trend_window': 18, 'volatility_fast_window': 6, 'volatility_slow_window': 36,
+        'trend_efficiency_min': 0.20, 'balance_efficiency_max': 0.20,
+        'drift_strength_min': 0.85, 'return_shock_z': 3.25,
+        'volatility_shock_ratio': 2.00, 'max_pullback_atr': 2.00,
+    },
+    # RC4 high-TF context is intentionally slower and less reactive. These
+    # settings describe regime; they do not make leverage more aggressive.
+    '12h': {
+        'trend_window': 16, 'volatility_fast_window': 5, 'volatility_slow_window': 30,
+        'trend_efficiency_min': 0.18, 'balance_efficiency_max': 0.21,
+        'drift_strength_min': 0.80, 'return_shock_z': 3.10,
+        'volatility_shock_ratio': 1.95, 'max_pullback_atr': 2.20,
+    },
+    '1D': {
+        'trend_window': 14, 'volatility_fast_window': 5, 'volatility_slow_window': 28,
+        'trend_efficiency_min': 0.17, 'balance_efficiency_max': 0.22,
+        'drift_strength_min': 0.75, 'return_shock_z': 3.00,
+        'volatility_shock_ratio': 1.90, 'max_pullback_atr': 2.40,
     },
 }
 # ============================================================================
@@ -5406,6 +5442,50 @@ class FuturesAnalysis(TradingExpertSystem):
         )
         levels['active_strategy_registry'] = strategy_registry_diag
 
+        # ==============================================================
+        # FINAL V1 RC4 — ENTRY REACTION ENGINE
+        # ==============================================================
+        # Q1 found the POI; Q2 refined SL/TP. RC4 now asks whether the
+        # selected Futures entry is a defensible reaction zone with enough
+        # independent evidence (liquidity/sweep/MSS/displacement). It never
+        # flips direction and never raises leverage. High TF keeps the zone
+        # but explicitly requires lower-TF timing for a precise fill.
+        try:
+            from entry_reaction_engine import evaluate_entry_reaction
+            entry_reaction = evaluate_entry_reaction(
+                levels, structure=structure, volatility=volatility,
+                timeframe=timeframe, market_type='futures'
+            )
+        except Exception as rc4_entry_error:
+            entry_reaction = {
+                'version': 'RC4_ENTRY_REACTION_V1',
+                'passed': False, 'hard_block': False,
+                'status': 'ENTRY_REACTION_DIAGNOSTIC_UNAVAILABLE',
+                'error': str(rc4_entry_error)[:160],
+            }
+        levels['entry_reaction_rc4'] = entry_reaction
+        levels['entry_reaction_score'] = entry_reaction.get('score')
+        levels['entry_reaction_status'] = entry_reaction.get('status')
+        levels['entry_lower_tf_confirmation_required'] = bool(
+            entry_reaction.get('lower_tf_confirmation_required', False)
+        )
+        if entry_reaction.get('hard_block') and levels.get('is_executable', True):
+            reason = (
+                f"RC4 Entry reaction {entry_reaction.get('score', 0)}/"
+                f"{entry_reaction.get('threshold', 0)}: "
+                f"{entry_reaction.get('status')}"
+            )
+            levels = self._stamp_futures_filter_trace(
+                levels, stage='PRE_GATE',
+                reason_codes=['RC4_ENTRY_REACTION_NOT_CONFIRMED'],
+                reason=reason, reached_publication_gate=False,
+                outcome='ANALYSIS_ONLY'
+            )
+            levels['is_executable'] = False
+            levels['is_rejected'] = True
+            levels['publication_status'] = 'ANALYSIS_ONLY'
+            levels['rejected_reason'] = reason
+
         if (
             adaptive_profile.get('production_authority', False)
             and entry_min_defensibility > 0
@@ -6700,24 +6780,14 @@ class FuturesAnalysis(TradingExpertSystem):
                 'timeframe': timeframe
             }
         research_only_symbol = symbol in FUTURES_RESEARCH_SYMBOLS
-        if research_only_symbol and timeframe not in FUTURES_RESEARCH_TIMEFRAMES:
+        if not futures_timeframe_allowed(symbol, timeframe):
+            allowed = [tf for tf in FUTURES_TIMEFRAMES if futures_timeframe_allowed(symbol, tf)]
             return {
                 'success': False,
-                'error': (
-                    f'{symbol} es research-only en Commit 15 y sólo usa '
-                    f'{list(FUTURES_RESEARCH_TIMEFRAMES)}'
-                ),
-                'symbol': symbol,
-                'timeframe': timeframe,
-                'research_only': True,
-            }
-        
-        if timeframe not in FUTURES_TIMEFRAMES:
-            return {
-                'success': False,
-                'error': f'Timeframe {timeframe} no permitido en futuros. Válidos: {list(FUTURES_TIMEFRAMES.keys())}',
-                'symbol': symbol,
-                'timeframe': timeframe
+                'error': f'{symbol} no usa {timeframe} en RC4. Temporalidades permitidas: {allowed}',
+                'symbol': symbol, 'timeframe': timeframe,
+                'research_only': bool(research_only_symbol),
+                'rc4_cell_contract': True,
             }
         
         print(f"\n{'='*60}")

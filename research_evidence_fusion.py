@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""V1 RC2 — profitability evidence fusion for 40 active specialist cells.
+"""V1 RC4 — profitability evidence fusion for 46 active specialist cells.
 
 Rules:
 - causal OOS is a historical prior, never a live trade;
@@ -25,9 +25,13 @@ _TTL = max(45, int(os.getenv("RESEARCH_EVIDENCE_CACHE_SECONDS", "90") or 90))
 _POSITIVE = {"SHADOW_READY", "SHADOW_READY_FAST"}
 _VISIBLE = _POSITIVE | {"OBSERVE", "VALIDATION_REQUIRED", "REJECTED_OOS", "VALIDATED_SINGLE_ASSET"}
 _EXPERIMENTS = {"CAUSAL_COVERAGE_STRATEGY", "CAUSAL_REGISTRY_RETEST", "CAUSAL_SHADOW_RECYCLE"}
-_COVERAGE_TARGET = 40
+_COVERAGE_TARGET = 46
+_RESEARCH_VERSION_PREFIX = "RFV1_10_RC4_46CELL"
 _FUTURES_SYMBOLS = ("BTC-USDT","ETH-USDT","SOL-USDT","XRP-USDT","ADA-USDT","LINK-USDT","BNB-USDT")
-_FUTURES_TFS = ("30M","1H","2H","4H")
+_FUTURES_CORE_TFS = ("30M","1H","2H","4H")
+_FUTURES_HIGH_TFS = ("12H","1D")
+_FUTURES_HIGH_TF_SYMBOLS = ("BTC-USDT","ETH-USDT","SOL-USDT")
+_FUTURES_TFS = _FUTURES_CORE_TFS + _FUTURES_HIGH_TFS
 _SPOT_SYMBOLS = ("BTC-USDT","PAXG-USDT","PAXG-BTC")
 _SPOT_TFS = ("4H","12H","1D","1W")
 
@@ -39,7 +43,11 @@ def _canonical_cell_key(row: Dict[str, Any]) -> Optional[str]:
     sym = str(scope.get("symbol") or "").upper().replace("/", "-")
     tf = _norm_tf(scope.get("timeframe"))
     if fam == "CRYPTO_FUTURES":
-        if sym in _FUTURES_SYMBOLS and tf in _FUTURES_TFS:
+        if sym not in _FUTURES_SYMBOLS:
+            return None
+        if tf in _FUTURES_CORE_TFS:
+            return f"FUTURES|{sym}|{tf}"
+        if tf in _FUTURES_HIGH_TFS and sym in _FUTURES_HIGH_TF_SYMBOLS:
             return f"FUTURES|{sym}|{tf}"
         return None
     if fam in {"CRYPTO_SPOT","PAXG_USDT","PAXG_BTC"}:
@@ -100,6 +108,7 @@ def _load(force: bool = False):
         if str(p.get("experiment") or "") in _EXPERIMENTS
         and str(p.get("stage") or "") in _VISIBLE
         and (p.get("meta") or {}).get("is_current") is not False
+        and str(p.get("research_version") or "").startswith(_RESEARCH_VERSION_PREFIX)
     ]
     shadow: List[Dict[str, Any]] = []
     try:
@@ -206,6 +215,9 @@ def _summary(p: Dict[str, Any], shadow_map: Dict[str, Dict[str, Any]]) -> Dict[s
             val.get("guardian_operational_replay")
             or (p.get("meta") or {}).get("guardian_operational_replay")
             or {}
+        ),
+        "full_stack_profitability_certification": (
+            (p.get("meta") or {}).get("full_stack_profitability_certification") or {}
         ),
         "shadow_target": int((p.get("meta") or {}).get("recommended_shadow_target") or 0),
         "shadow_n": int(live.get("resolved_n") or 0),
@@ -419,7 +431,7 @@ def profitability_snapshot(force: bool = False) -> Dict[str, Any]:
         for sym in ("BTC-USDT","ETH-USDT","SOL-USDT","XRP-USDT","ADA-USDT","LINK-USDT","BNB-USDT"):
             by_symbol[sym] = _bucket([r for r in fut if str((r.get("scope") or {}).get("symbol") or "").upper() == sym], sym)
         by_tf = {}
-        for tf in ("30M","1H","2H","4H"):
+        for tf in ("30M","1H","2H","4H","12H","1D"):
             by_tf[tf] = _bucket([r for r in fut if _norm_tf((r.get("scope") or {}).get("timeframe")) == tf], tf)
         matrix = []
         for r in sorted(cell_rows, key=lambda x: str(x.get("coverage_cell_id") or "")):
@@ -435,13 +447,14 @@ def profitability_snapshot(force: bool = False) -> Dict[str, Any]:
                 "oos_n": r.get("oos_n"), "oos_wr": r.get("oos_wr"),
                 "oos_exp_r": r.get("oos_exp_r"), "oos_pf": r.get("oos_pf"),
                 "guardian_operational_replay": r.get("guardian_operational_replay") or {},
+                "full_stack_profitability_certification": r.get("full_stack_profitability_certification") or {},
                 "shadow_signals_n": r.get("shadow_signals_n"), "shadow_n": r.get("shadow_n"),
                 "shadow_exp_r": r.get("shadow_exp_r"), "shadow_pf": r.get("shadow_pf"),
                 "shadow_target": r.get("shadow_target"), "shadow_state": r.get("shadow_state"),
                 "recycle_required": r.get("recycle_required"),
             })
         return {
-            "version": "V1_RC3_RESEARCH_EVIDENCE_FUSION_V4",
+            "version": "V1_RC4_RESEARCH_EVIDENCE_FUSION_V5",
             "authority": "EVIDENCE_PRIOR_ONLY",
             "coverage_cells": len(cells),
             "coverage_target": _COVERAGE_TARGET,
@@ -470,7 +483,7 @@ def profitability_snapshot(force: bool = False) -> Dict[str, Any]:
         }
     except Exception as exc:
         return {
-            "version": "V1_RC3_RESEARCH_EVIDENCE_FUSION_V4", "authority": "EVIDENCE_PRIOR_ONLY",
+            "version": "V1_RC4_RESEARCH_EVIDENCE_FUSION_V5", "authority": "EVIDENCE_PRIOR_ONLY",
             "state": "UNAVAILABLE", "error": str(exc)[:180], "coverage_cells": 0,
             "coverage_target": _COVERAGE_TARGET, "coverage_complete": False,
             "validated_cells": 0, "oos_positive_cells": 0, "searching_cells": _COVERAGE_TARGET,

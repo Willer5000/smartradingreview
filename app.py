@@ -14891,9 +14891,13 @@ class TradingExpertSystem:
                 'max_atr': 2.25
             },
             '4h': {
-                'ideal_min_atr': 0.40,
-                'ideal_max_atr': 1.60,
-                'max_atr': 2.50
+                'ideal_min_atr': 0.40, 'ideal_max_atr': 1.60, 'max_atr': 2.50
+            },
+            '12h': {
+                'ideal_min_atr': 0.45, 'ideal_max_atr': 1.80, 'max_atr': 2.80
+            },
+            '1D': {
+                'ideal_min_atr': 0.50, 'ideal_max_atr': 2.00, 'max_atr': 3.00
             }
         }
 
@@ -15669,13 +15673,16 @@ class TradingExpertSystem:
             # una mala zona en un Entry Premium.
             # ======================================================
 
+            # RC4: Futures exige algo más de precisión/alcanzabilidad que
+            # Spot, pero la estructura sigue siendo dominante para no perseguir
+            # precio. Spot privilegia la zona; Futures equilibra zona + fill.
+            if normalized_market_type == 'futures':
+                smc_weight, reach_weight = 0.80, 0.20
+            else:
+                smc_weight, reach_weight = 0.88, 0.12
             entry_quality_score = (
-                candidate[
-                    '_smc_score'
-                ]
-                * 0.85
-                + reachability_score
-                * 0.15
+                candidate['_smc_score'] * smc_weight
+                + reachability_score * reach_weight
             )
 
             candidate[
@@ -15887,8 +15894,16 @@ class TradingExpertSystem:
             'max_reach_atr':
                 max_reach_atr,
 
-            'label':
-                reachability_label
+            'label': reachability_label,
+            'smc_weight': smc_weight,
+            'reachability_weight': reach_weight,
+            # RC4 exposes the same SMC reaction facts used during selection so
+            # Futures can demand a more precise reaction without recomputing
+            # or inventing another Entry.
+            'liquidity_pool_near': bool(smc.get('liquidity_pool_near')),
+            'sweep': bool(smc.get('sweep')),
+            'mss': bool(smc.get('mss')),
+            'displacement': bool(smc.get('displacement')),
         }
 
         return (
@@ -16309,6 +16324,11 @@ class TradingExpertSystem:
                             'N/A'
                         )
                     ),
+
+                'entry_liquidity_pool_near': bool(entry_quality.get('liquidity_pool_near')),
+                'entry_sweep_confirmed': bool(entry_quality.get('sweep')),
+                'entry_mss_bos_confirmed': bool(entry_quality.get('mss')),
+                'entry_displacement_confirmed': bool(entry_quality.get('displacement')),
 
                 'stop_loss':
                     self._round_price(
@@ -21529,7 +21549,7 @@ class TradingExpertSystem:
     def _safe_timeframe_name(self, timeframe):
         """
         Devuelve un nombre legible del timeframe.
-        Compatible con TFs spot (4h, 12h, 1D, 1W) y futuros V1 (30m, 1h, 2h, 4h).
+        Compatible con TFs spot (4h, 12h, 1D, 1W) y futuros RC4 (30m, 1h, 2h, 4h; 12h/1D en BTC/ETH/SOL).
         """
         if timeframe in TIMEFRAMES:
             return TIMEFRAMES[timeframe].get('name', timeframe)
@@ -26039,6 +26059,77 @@ class Moderador:
                 razones_consolidadas = ["Sin consenso claro entre los traders"]
                 print(f"\n🤷 Sin consenso - Decisión: NO_OPERAR")
         
+        # ================================================================
+        # FINAL V1 RC4 — COMITÉ JERÁRQUICO / FAMILIAS DE EVIDENCIA
+        # ================================================================
+        # Los 10 traders se mantienen. RC4 no suma opiniones correlacionadas como
+        # si fueran pruebas independientes: organiza CONTEXTO → SETUP → EJECUCIÓN
+        # → CONTROL/APRENDIZAJE. La jerarquía es un gate de calidad:
+        # - nunca reabre NO_OPERAR/ESPERAR;
+        # - nunca invierte LONG↔SHORT;
+        # - sí puede retrasar/vetar una señal direccional débil o conflictiva.
+        try:
+            from hierarchical_committee import build_hierarchical_assessment
+            hierarchical_committee = build_hierarchical_assessment(
+                votos,
+                baseline_action=accion_ganadora,
+                market=system_type,
+                timeframe=timeframe,
+                symbol=symbol,
+                regime=regime,
+            )
+            hierarchy_action = str(
+                hierarchical_committee.get('recommended_action')
+                or accion_ganadora
+            ).upper()
+            baseline_before_hierarchy = str(accion_ganadora or 'NO_OPERAR').upper()
+
+            if baseline_before_hierarchy in ('LONG','SHORT','COMPRA_SPOT','VENTA_SPOT'):
+                if hierarchy_action in ('NO_OPERAR','ESPERAR'):
+                    accion_ganadora = hierarchy_action
+                    confianza_final = max(
+                        0.0,
+                        min(
+                            100.0,
+                            float(confianza_final or 0)
+                            * float(hierarchical_committee.get('confidence_multiplier') or 1.0)
+                        )
+                    )
+                    razones_consolidadas = list(razones_consolidadas or [])
+                    razones_consolidadas.insert(
+                        0,
+                        'RC4 jerárquico: ' + str(hierarchical_committee.get('reason') or 'quality gate')
+                    )
+                    print(
+                        f"🧠 [RC4 HIERARCHY] {baseline_before_hierarchy} → "
+                        f"{accion_ganadora}: {hierarchical_committee.get('reason')}"
+                    )
+                elif hierarchy_action == baseline_before_hierarchy:
+                    confianza_final = max(
+                        0.0,
+                        min(
+                            100.0,
+                            float(confianza_final or 0)
+                            * float(hierarchical_committee.get('confidence_multiplier') or 1.0)
+                        )
+                    )
+                    print(
+                        f"🧠 [RC4 HIERARCHY] confirma {accion_ganadora} | "
+                        f"familias={hierarchical_committee.get('independent_support_families')} | "
+                        f"score={hierarchical_committee.get('support_score')}"
+                    )
+        except Exception as hierarchy_error:
+            hierarchical_committee = {
+                'version': 'RC4_HIERARCHICAL_TRADING_INTELLIGENCE_V1',
+                'authority': 'PRODUCTION_QUALITY_GATE',
+                'status': 'UNAVAILABLE',
+                'error': str(hierarchy_error)[:180],
+                'baseline_action': str(accion_ganadora or 'NO_OPERAR').upper(),
+                'recommended_action': str(accion_ganadora or 'NO_OPERAR').upper(),
+                'quality_gate_passed': None,
+            }
+            print(f"⚠️ [RC4 HIERARCHY] no disponible: {hierarchy_error}")
+
         # Commit 12 — simulación paralela del comité experto. Se calcula
         # después de la decisión baseline y nunca reemplaza accion_ganadora.
         try:
@@ -26068,6 +26159,7 @@ class Moderador:
             'confianza_regimen': regime_conf,
             'penalizacion_neutral_review': review_neutral_penalty,
             'veto_estado': veto_estado,
+            'hierarchical_committee_rc4': hierarchical_committee,
             'dynamic_expert_committee_shadow': dynamic_committee_shadow,
             'todos_los_votos': [
                 {
@@ -31677,12 +31769,13 @@ def _analyze_futures_all_parallel(combos_override=None):
             'lifecycle': {}
         }
 
-    from futures_system import FUTURES_SYMBOLS, FUTURES_TIMEFRAMES
+    from futures_system import FUTURES_SYMBOLS, FUTURES_TIMEFRAMES, futures_timeframe_allowed
 
     all_combos = [
         (symbol, timeframe)
         for symbol in FUTURES_SYMBOLS.keys()
         for timeframe in FUTURES_TIMEFRAMES.keys()
+        if futures_timeframe_allowed(symbol, timeframe)
     ]
     incremental_mode = combos_override is not None
     combos = list(combos_override or all_combos)
@@ -32049,6 +32142,7 @@ def _next_futures_incremental_combo():
         FUTURES_RESEARCH_SYMBOLS,
         FUTURES_RESEARCH_TIMEFRAMES,
         FUTURES_RESEARCH_ENABLED,
+        futures_timeframe_allowed,
     )
     # Production universe keeps all six TF. Commit 15 adds only six research
     # combinations (LINK/BNB × 30m/1h), bounded for the V1 active universe.
@@ -32056,6 +32150,7 @@ def _next_futures_incremental_combo():
         (symbol, timeframe)
         for timeframe in FUTURES_TIMEFRAMES.keys()
         for symbol in FUTURES_SYMBOLS.keys()
+        if futures_timeframe_allowed(symbol, timeframe)
     ]
     if FUTURES_RESEARCH_ENABLED:
         combos.extend(
