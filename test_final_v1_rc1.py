@@ -7,9 +7,9 @@ def txt(name):
     return (ROOT / name).read_text(encoding='utf-8')
 
 
-def test_canonical_54_cell_contract_and_no_pooled_counting():
+def test_canonical_40_cell_contract_and_no_pooled_counting():
     src = txt('research_evidence_fusion.py')
-    assert '_COVERAGE_TARGET = 54' in src
+    assert '_COVERAGE_TARGET = 40' in src
     assert '_canonical_cell_key' in src
     assert 'if sym in _FUTURES_SYMBOLS and tf in _FUTURES_TFS' in src
     assert 'return None' in src
@@ -43,9 +43,10 @@ def test_macro_current_vs_next_event_and_cex_context_preserved():
     assert 'MACRO AHORA' in script and 'PRÓXIMO' in script
 
 
-def test_scientist_has_observable_attempt_and_self_heal_path():
+def test_scientist_has_observable_attempt_and_read_only_status_path():
     app = txt('app.py')
     assert 'thread_started_at' in app and 'last_watchdog_heartbeat_at' in app
-    assert '_kick_ai_learning_scientist_async' in app
-    assert '_ai_learning_attempt_is_stale' in app
-    assert "status-self-heal" in app
+    assert '_ensure_ai_learning_scientist_thread' in app
+    start=app.index('def api_ai_gemini_activity')
+    endpoint=app[start:start+4200]
+    assert "_kick_ai_learning_scientist_async('status-self-heal')" not in endpoint

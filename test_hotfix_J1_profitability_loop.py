@@ -8,9 +8,9 @@ def _txt(path):
     return (ROOT/path).read_text(encoding='utf-8')
 
 
-def test_j1_contract_tracks_54_cells_and_recycles_shadow_divergence():
+def test_final_v1_contract_tracks_40_cells_and_recycles_shadow_divergence():
     txt=_txt('research_evidence_fusion.py')
-    assert '_COVERAGE_TARGET = 54' in txt
+    assert '_COVERAGE_TARGET = 40' in txt
     assert 'SHADOW_DIVERGED' in txt
     assert 'recycle_required' in txt
     assert 'EARLY_DIVERGENCE' in txt
@@ -61,7 +61,7 @@ def test_analytics_explicitly_displays_oos_profitability_and_recycle_count():
     assert 'Resultado OOS' in js
     assert 'Celdas validadas' in js
     assert 'Reciclar' in js
-    assert '20260913-J1-PROFIT-LOOP' in html
+    assert '20260914-FINAL-V1-RC2' in html
 
 
 def test_research_bridge_shows_one_causal_representative_per_cell():

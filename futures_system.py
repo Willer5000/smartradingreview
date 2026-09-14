@@ -4,7 +4,7 @@
 #
 # CARACTERÍSTICAS:
 # - 5 criptomonedas oficiales + LINK/BNB en research Shadow (contra USDT)
-# - 6 temporalidades: 5m, 15m, 30m, 1h, 2h, 4h
+# - 4 temporalidades V1: 30m, 1h, 2h, 4h
 # - Solo acciones LONG y SHORT (nunca COMPRA_SPOT/VENTA_SPOT)
 # - Apalancamiento dinámico sin mínimo forzado y limitado por riesgo/ATR
 # - Hereda TODA la lógica del sistema principal (traders, indicadores, patrones)
@@ -50,14 +50,12 @@ FUTURES_RESEARCH_SYMBOLS = {
     'LINK-USDT': {'name': 'LINK/USDT', 'type': 'crypto_alt', 'decimals': 3},
     'BNB-USDT': {'name': 'BNB/USDT', 'type': 'crypto_major', 'decimals': 2},
 }
-FUTURES_RESEARCH_TIMEFRAMES = ('15m', '30m', '1h')
+FUTURES_RESEARCH_TIMEFRAMES = ('30m', '1h')
 FUTURES_RESEARCH_ENABLED = str(os.environ.get('C15_RESEARCH_SHADOW_ENABLED', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
 FUTURES_ALL_SYMBOLS = {**FUTURES_SYMBOLS, **FUTURES_RESEARCH_SYMBOLS}
 
 # Temporalidades para futuros (TF cortas)
 FUTURES_TIMEFRAMES = {
-    '5m':  {'name': '5 Minutos',  'type': 'scalping',   'kucoin': '5min'},
-    '15m': {'name': '15 Minutos', 'type': 'scalping',   'kucoin': '15min'},
     '30m': {'name': '30 Minutos', 'type': 'intraday',   'kucoin': '30min'},
     '1h':  {'name': '1 Hora',     'type': 'intraday',   'kucoin': '1hour'},
     '2h':  {'name': '2 Horas',    'type': 'intraday',   'kucoin': '2hour'},
@@ -79,8 +77,6 @@ FUTURES_CONTRACT_SYMBOLS = {
 # Duración real de cada temporalidad. Se usa únicamente para comprobar
 # si la última fila OHLCV ya cerró; no modifica indicadores ni niveles.
 FUTURES_TIMEFRAME_SECONDS = {
-    '5m': 5 * 60,
-    '15m': 15 * 60,
     '30m': 30 * 60,
     '1h': 60 * 60,
     '2h': 2 * 60 * 60,
@@ -90,8 +86,6 @@ FUTURES_TIMEFRAME_SECONDS = {
 # La API de Futures recibe la granularidad como minutos, no con los textos
 # ("5min", "1hour", etc.) utilizados por la API Spot.
 FUTURES_GRANULARITY_MINUTES = {
-    '5m': 5,
-    '15m': 15,
     '30m': 30,
     '1h': 60,
     '2h': 120,
@@ -108,8 +102,6 @@ FUTURES_MIN_REAL_CANDLES = 100
 # un mismo refresco sin permitir que una respuesta vieja se convierta en una
 # señal nueva.
 FUTURES_DATA_TTL_SECONDS = {
-    '5m': 15,
-    '15m': 30,
     '30m': 60,
     '1h': 120,
     '2h': 240,
@@ -1365,8 +1357,6 @@ def get_futures_microstructure_snapshot(symbol: str) -> Dict:
 
 # Extender el mapeo de intervalos KuCoin
 FUTURES_KUCOIN_INTERVALS = {
-    '5m': '5min',
-    '15m': '15min',
     '30m': '30min',
     '1h': '1hour',
     '2h': '2hour',
@@ -1393,8 +1383,6 @@ FUTURES_KUCOIN_INTERVALS = {
 # El mínimo operativo siempre puede ser 1x.
 #
 LEVERAGE_RANGES = {
-    '5m':  (1, 50),
-    '15m': (1, 40),
     '30m': (1, 30),
     '1h':  (1, 20),
     '2h':  (1, 15),
@@ -1405,8 +1393,6 @@ LEVERAGE_RANGES = {
 # una señal por debajo de la banda puede publicarse si un TP amplio produce
 # suficiente ROI y beneficio neto sin romper los límites de riesgo.
 PREFERRED_LEVERAGE_RANGES = {
-    '5m':  (25, 50),
-    '15m': (20, 40),
     '30m': (15, 30),
     '1h':  (10, 20),
     '2h':  (8, 15),
@@ -1494,31 +1480,8 @@ FUTURES_RISK_CONFIG = {
 FUTURES_QUANT_MODEL_VERSION = 'closed_returns_regime_v1'
 
 FUTURES_QUANT_CONFIG = {
-    # Los TF cortos exigen mayor eficiencia direccional porque contienen más
-    # ruido. Los lookbacks se expresan en velas y siempre caben dentro de las
-    # 100 velas reales mínimas exigidas al proveedor.
-    '5m': {
-        'trend_window': 36,
-        'volatility_fast_window': 12,
-        'volatility_slow_window': 72,
-        'trend_efficiency_min': 0.30,
-        'balance_efficiency_max': 0.16,
-        'drift_strength_min': 1.10,
-        'return_shock_z': 3.75,
-        'volatility_shock_ratio': 2.25,
-        'max_pullback_atr': 1.50,
-    },
-    '15m': {
-        'trend_window': 32,
-        'volatility_fast_window': 12,
-        'volatility_slow_window': 64,
-        'trend_efficiency_min': 0.28,
-        'balance_efficiency_max': 0.17,
-        'drift_strength_min': 1.05,
-        'return_shock_z': 3.75,
-        'volatility_shock_ratio': 2.20,
-        'max_pullback_atr': 1.55,
-    },
+    # V1 RC2 trabaja sólo con 30m/1h/2h/4h. Los TF retirados 5m/15m
+    # permanecen únicamente como evidencia histórica, no como análisis activo.
     '30m': {
         'trend_window': 28,
         'volatility_fast_window': 10,
@@ -1651,7 +1614,7 @@ class FuturesAnalysis(TradingExpertSystem):
     (indicadores, traders, moderador, votación) y sobreescribe solo lo específico
     de futuros:
     - Símbolos permitidos (5 cripto sin PAXG)
-    - Temporalidades permitidas (5m-4h)
+    - Temporalidades permitidas V1 (30m-4h)
     - Cálculo de apalancamiento óptimo
     - Traducción de acciones (COMPRA_SPOT → LONG, VENTA_SPOT → SHORT)
     - Correlación (BTC dominancia + BTC vs alts)

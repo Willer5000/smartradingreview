@@ -11,7 +11,7 @@ import base64
 import requests
 import importlib
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from io import BytesIO, StringIO
 import pytz
 from flask import Flask, render_template, jsonify, request, send_file, session
@@ -315,7 +315,7 @@ FEAR_GREED_CACHE = {
 # 9 traders ni las 10 capas de indicadores.
 #
 # TTL por timeframe (proporcional a la ventana de la vela):
-#   5m -> 5s   / 15m -> 15s / 30m -> 30s / 1h -> 60s
+#   V1 RC2 active Futures starts at 30m; short-TF legacy mappings below are historical-only
 #   2h -> 120s / 4h -> 240s / 12h -> 600s / 1D -> 900s / 1W -> 1800s
 import threading as _threading_analysis_cache
 
@@ -21529,7 +21529,7 @@ class TradingExpertSystem:
     def _safe_timeframe_name(self, timeframe):
         """
         Devuelve un nombre legible del timeframe.
-        Compatible con TFs spot (4h, 12h, 1D, 1W) y futuros (5m, 15m, 30m, 1h, 2h, 4h).
+        Compatible con TFs spot (4h, 12h, 1D, 1W) y futuros V1 (30m, 1h, 2h, 4h).
         """
         if timeframe in TIMEFRAMES:
             return TIMEFRAMES[timeframe].get('name', timeframe)
@@ -26146,7 +26146,7 @@ def api_strategy_lab_research():
     symbol = str(payload.get('symbol') or 'BTC-USDT').upper()
     timeframe = str(payload.get('timeframe') or '1h')
     allowed_symbols = {'BTC-USDT','ETH-USDT','SOL-USDT','XRP-USDT','ADA-USDT'}
-    allowed_timeframes = {'5m','15m','30m','1h','2h','4h'}
+    allowed_timeframes = {'30m','1h','2h','4h'}
     if symbol not in allowed_symbols or timeframe not in allowed_timeframes:
         return jsonify({'success': False, 'error': 'Símbolo/timeframe fuera del laboratorio'}), 400
 
@@ -27260,15 +27260,30 @@ def _memory_runtime_state():
 
 
 def _log_memory_runtime(label):
+    """Low-noise memory telemetry. The log itself is not a memory consumer.
+
+    RC2 keeps the measurements but prints them only when MEMORY_DEBUG_LOGS=1
+    or RSS is already near the soft guard. This reduces Render log noise and
+    makes real pressure events visible without hiding the guard.
+    """
     state = _memory_runtime_state()
-    print(
-        "🧠 [MEM] "
-        f"{label} | rss={state.get('rss_mb')}MB "
-        f"threads={state.get('threads')} "
-        f"analysis_cache={state.get('analysis_cache_entries')} "
-        f"portfolio_cache={state.get('portfolio_cache_entries')} "
-        f"heavy={state.get('heavy_job') or '-'}"
-    )
+    verbose = str(os.environ.get('MEMORY_DEBUG_LOGS', '0')).strip().lower() in ('1','true','yes','on')
+    rss = state.get('rss_mb')
+    under_pressure = False
+    try:
+        under_pressure = rss is not None and float(rss) >= float(_MEMORY_SOFT_LIMIT_MB)
+    except Exception:
+        under_pressure = False
+    if verbose or under_pressure:
+        print(
+            "🧠 [MEM] "
+            f"{label} | rss={rss}MB "
+            f"threads={state.get('threads')} "
+            f"analysis_cache={state.get('analysis_cache_entries')} "
+            f"portfolio_cache={state.get('portfolio_cache_entries')} "
+            f"heavy={state.get('heavy_job') or '-'}"
+        )
+    return state
 
 
 def _acquire_heavy_analysis(owner, timeout=None):
@@ -30190,8 +30205,6 @@ _futures_correlation_cache = {'data': None, 'ts': 0, 'key': None}
 _FUTURES_CACHE_SCHEMA_VERSION = 4
 _FUTURES_SIGNAL_MAX_WAIT_BARS = 6
 _FUTURES_TF_SECONDS = {
-    '5m': 5 * 60,
-    '15m': 15 * 60,
     '30m': 30 * 60,
     '1h': 60 * 60,
     '2h': 2 * 60 * 60,
@@ -30311,8 +30324,6 @@ def _compact_futures_runtime_result(result):
 # H.2 — perfiles visuales de trade rápido. El cálculo técnico no cambia;
 # sólo se limita la copia rica que queda unos segundos en RAM para la UI.
 _FAST_FUTURES_UI_POINTS = {
-    '5m': 96,
-    '15m': 112,
     '30m': 128,
 }
 _FAST_FUTURES_UI_CACHE_TTL_SECONDS = max(20, int(os.environ.get(
@@ -30369,7 +30380,7 @@ def _compact_futures_ui_result(result):
 
 
 def _compact_fast_futures_ui_result(result, timeframe):
-    """Reduce sólo series VISUALES para 5m/15m/30m.
+    """Reduce sólo series VISUALES para 30m.
 
     El análisis, Strategy Factory, ReviewTrader, Safety, Entry, SL, TP,
     leverage y publicación ya fueron calculados con toda la historia. Este
@@ -31970,7 +31981,7 @@ if _LOW_MEMORY_MODE:
     # instancia central. Los análisis elegidos por el usuario siguen siendo
     # interactivos y no esperan este intervalo.
     _FUTURES_INCREMENTAL_INTERVAL_SECONDS = max(
-        60,
+        120,
         _FUTURES_INCREMENTAL_INTERVAL_SECONDS,
     )
 
@@ -32020,7 +32031,7 @@ def _next_futures_incremental_combo():
         FUTURES_RESEARCH_ENABLED,
     )
     # Production universe keeps all six TF. Commit 15 adds only six research
-    # combinations (LINK/BNB × 15m/30m/1h), never 12 extra combinations.
+    # combinations (LINK/BNB × 30m/1h), bounded for the V1 active universe.
     combos = [
         (symbol, timeframe)
         for timeframe in FUTURES_TIMEFRAMES.keys()
@@ -36355,7 +36366,12 @@ def _q6_run_daily_review():
             # por un reinicio/error previo. Recuperamos sólo AI_LEARNING.
             _run_ai_learning_daily(q6_slot=slot, trigger_source='recovery')
     except Exception as exc:
-        print(f"Q6 ciclo diario pendiente: {type(exc).__name__}")
+        print(f"Q6 ciclo diario pendiente: {type(exc).__name__}: {exc}", flush=True)
+        try:
+            import traceback
+            traceback.print_exc()
+        except Exception:
+            pass
     finally:
         if heavy_acquired:
             _release_heavy_analysis(
@@ -36371,7 +36387,7 @@ def ai_learning_scientist_watchdog_loop():
     _ai_learning_runtime_update(thread_started=True, thread_started_at=now_utc, status='WATCHDOG_STARTED')
     # RC1: first persisted attempt must appear quickly after a deploy. The slot
     # claim remains idempotent, so this does not duplicate LLM calls.
-    time.sleep(8)
+    time.sleep(45)
     while True:
         try:
             _ai_learning_runtime_update(last_watchdog_heartbeat_at=datetime.now(timezone.utc).isoformat())
@@ -36522,7 +36538,7 @@ def verificar_y_ejecutar():
             # Ejecuta: evaluar pendientes + detectar oportunidades perdidas + recalcular stats
             # Q6-D: recover the most recent daily slot after sleep/restart.
             # DB primary key prevents duplicate jobs across process restarts.
-            if minuto % 5 == 0:
+            if minuto % 15 == 0:
                 threading.Thread(target=_q6_run_daily_review,
                                  daemon=True, name='q6-daily-review').start()
             
@@ -39172,16 +39188,6 @@ def _resolve_ai_question_target(
         ),
 
         (
-            r'\b15\s*m(?:in(?:utos?)?)?\b',
-            '15m'
-        ),
-
-        (
-            r'\b5\s*m(?:in(?:utos?)?)?\b',
-            '5m'
-        ),
-
-        (
             r'\b12\s*h(?:oras?)?\b',
             '12h'
         ),
@@ -39249,8 +39255,6 @@ def _resolve_ai_question_target(
 
 
         allowed_timeframes = (
-            '5m',
-            '15m',
             '30m',
             '1h',
             '2h',
@@ -42720,7 +42724,7 @@ def learning_worker_loop():
 #
 # REGLAS:
 # - sólo EXECUTABLE_SIGNAL;
-# - sólo 5m / 15m / 30m;
+# - sólo 30m en V1 RC2; 5m/15m retirados por costo operativo;
 # - sólo usuarios que lo activaron explícitamente;
 # - respeta timezone, días y ventana horaria del usuario;
 # - usa el caché Futures existente: NO dispara análisis;
@@ -42728,9 +42732,7 @@ def learning_worker_loop():
 # ============================================================================
 
 _FUTURES_SCALPING_TFS = (
-    '5m',
-    '15m',
-    '30m'
+    '30m',
 )
 
 _FUTURES_SCALPING_PREF_CACHE = {}
@@ -44190,8 +44192,7 @@ def api_user_futures_scalping_preferences():
 
                     'error':
                         (
-                            'Debes seleccionar al menos '
-                            '5m, 15m o 30m.'
+                            'Debes seleccionar 30m.'
                         )
                 }), 400
 
@@ -46312,11 +46313,10 @@ def api_ai_gemini_activity():
             pass
         data = (get_gemini_activity_status() or {})
         runtime = _ai_learning_runtime_snapshot()
-        # RC1: if a worker thread exists but no persisted attempt is visible,
-        # wake one idempotent slot check in the background. The GET itself never
-        # waits for Groq and never grants trading authority.
-        if _ai_learning_attempt_is_stale(runtime):
-            _kick_ai_learning_scientist_async('status-self-heal')
+        # RC2: this status endpoint is strictly READ ONLY.
+        # The independent watchdog owns Scientist execution. Analytics must never
+        # spawn Groq work because a slow/erroring LLM call can make a monitoring
+        # page look stuck even though trading itself is healthy.
         scheduler = dict(data.get('scheduler') or {})
         if not scheduler.get('last_attempt_at') and runtime.get('last_attempt_at'):
             scheduler['last_attempt_at'] = runtime.get('last_attempt_at')

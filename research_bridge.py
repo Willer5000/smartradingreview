@@ -46,7 +46,7 @@ def _num(value):
     except Exception:
         return None
 
-_TF_ORDER = ('5M','15M','30M','1H','2H','4H','12H','1D','1W','ALL')
+_TF_ORDER = ('30M','1H','2H','4H','12H','1D','1W','ALL')
 _CAUSAL_EXPERIMENTS = {'CAUSAL_COVERAGE_STRATEGY','CAUSAL_REGISTRY_RETEST','CAUSAL_SHADOW_RECYCLE'}
 
 def _tf(value):
@@ -96,7 +96,7 @@ def _best_causal_per_cell(rows):
     return list(best.values())
 
 def _balanced_candidates(rows, limit=240):
-    """Keep all 54 specialist cells visible without crowding out diagnostics."""
+    """Keep all 40 active V1 specialist cells visible without crowding out diagnostics."""
     rows=list(rows or [])
     limit=max(1,int(limit or 1))
     picked=[]; seen=set()
@@ -106,7 +106,7 @@ def _balanced_candidates(rows, limit=240):
         if not k or k in seen or len(picked)>=limit: return
         seen.add(k); picked.append(row)
 
-    # J.1: one best representative for each exact symbol×TF causal cell.
+    # J.1: one best representative for each active V1 symbol×TF causal cell.
     causal=_best_causal_per_cell(rows)
     causal.sort(key=lambda r: _causal_cell_id(r))
     for row in causal:

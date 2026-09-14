@@ -3,7 +3,7 @@ import research_evidence_fusion as ref
 ROOT = Path(__file__).resolve().parent
 
 FUTURES_SYMBOLS=['BTC-USDT','ETH-USDT','SOL-USDT','XRP-USDT','ADA-USDT','LINK-USDT','BNB-USDT']
-FUTURES_TFS=['5M','15M','30M','1H','2H','4H']
+FUTURES_TFS=['30M','1H','2H','4H']
 SPOT=[('CRYPTO_SPOT','BTC-USDT'),('PAXG_USDT','PAXG-USDT'),('PAXG_BTC','PAXG-BTC')]
 SPOT_TFS=['4H','12H','1D','1W']
 
@@ -14,7 +14,7 @@ def _promotion(*, key, family, symbol, tf, stage='OBSERVE', exp=0.2, pf=1.3, n=2
     if meta_extra: meta.update(meta_extra)
     return {'candidate_key':key,'source_engine':'strategy','experiment':experiment,'stage':stage,'scope':scope,'metrics':{'all':{'resolved':n,'expectancy_r':exp,'profit_factor':pf},'validation':{'resolved':vn,'expectancy_r':exp,'profit_factor':pf,'win_rate_pct':55.0}},'meta':meta,'updated_at':updated}
 
-def test_commit_j1_counts_54_exact_symbol_timeframe_cells(monkeypatch):
+def test_final_v1_counts_40_exact_symbol_timeframe_cells(monkeypatch):
     rows=[]
     for symbol in FUTURES_SYMBOLS:
         for tf in FUTURES_TFS:
@@ -22,13 +22,13 @@ def test_commit_j1_counts_54_exact_symbol_timeframe_cells(monkeypatch):
     for family,symbol in SPOT:
         for tf in SPOT_TFS:
             rows.append(_promotion(key=f's-{symbol}-{tf}',family=family,symbol=symbol,tf=tf))
-    assert len(rows)==54
+    assert len(rows)==40
     monkeypatch.setattr(ref,'_load',lambda force=False:(rows,[]))
     snap=ref.profitability_snapshot(force=True)
-    assert snap['coverage_cells']==54
-    assert snap['coverage_target']==54
+    assert snap['coverage_cells']==40
+    assert snap['coverage_target']==40
     assert snap['coverage_complete'] is True
-    assert len(snap['coverage_matrix'])==54
+    assert len(snap['coverage_matrix'])==40
 
 def test_commit_j1_runtime_predicate_prevents_wrong_prior(monkeypatch):
     row=_promotion(key='ready',family='PAXG_USDT',symbol='PAXG-USDT',tf='1D',stage='SHADOW_READY_FAST',exp=0.45,pf=1.8,n=60,vn=12,scope_extra={'has_pullback':'YES'})
@@ -54,7 +54,7 @@ def test_commit_j1_contracts_visible_and_bounded():
     assert 'SHADOW_DIVERGED' in review
     assert 'SHADOW_DIVERGED_RETEST' in router
     assert 'q5-spot-backtest' in analytics and 'q5-futures-backtest' in analytics
-    assert '_COVERAGE_TARGET = 54' in fusion
+    assert '_COVERAGE_TARGET = 40' in fusion
     assert 'RENTABILIDAD OOS VALIDADA' in analytics_js
     assert 'exchange_flow' in macro and 'fundamental_signal_context' in macro
     assert 'Flujo CEX 24h' in macro

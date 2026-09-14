@@ -2715,7 +2715,7 @@ function _futScalpingApplyPreferences(
 
     _futScalpingSetMessage(
         enabled
-            ? 'Alertas de scalping activadas con tu horario personal.'
+            ? 'Alertas Futures 30m activadas con tu horario personal.'
             : 'Alertas de scalping desactivadas.',
         enabled
             ? 'success'
@@ -2920,7 +2920,7 @@ function _futScalpingValidateForm(
         )
         || payload.futures_scalping_timeframes.length === 0
     ) {
-        return 'Selecciona al menos 5m, 15m o 30m.';
+        return 'Selecciona 30m.';
     }
 
     if (

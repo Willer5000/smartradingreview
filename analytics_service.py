@@ -2184,6 +2184,13 @@ class AnalyticsService:
             if market != 'futures':
                 continue
 
+            # FINAL V1 RC2: 5m/15m are retired from the active product.
+            # Historical rows remain in Supabase for audit/learning, but they do
+            # not participate in current V1 LIVE KPIs or promotion decisions.
+            active_tf = str(signal.get('timeframe') or signal.get('interval') or '').strip().lower()
+            if active_tf not in {'30m', '1h', '2h', '4h'}:
+                continue
+
             learning = (
                 self._q5_learning(
                     signal

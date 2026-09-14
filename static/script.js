@@ -5946,9 +5946,7 @@ function updateRSIChart(data) {
     let periods = [14];
     let profileLabel = 'RSI tradicional';
     if (systemType === 'futures') {
-        if (timeframe === '5m' || timeframe === '15m') {
-            periods = [3, 7, 14]; profileLabel = 'Perfil rápido · estrategia en evaluación';
-        } else if (timeframe === '30m' || timeframe === '1h') {
+        if (timeframe === '30m' || timeframe === '1h') {
             periods = [7, 14, 21]; profileLabel = 'Perfil equilibrado · estrategia en evaluación';
         } else if (timeframe === '2h') {
             periods = [7, 14, 21]; profileLabel = 'Perfil estructural · estrategia en evaluación';
@@ -7773,7 +7771,7 @@ function _renderOrderFlowSnapshot(snapshot, symbol) {
         || window.currentInterval
         || ''
     );
-    const fastTradeUi = ['5m', '15m', '30m'].includes(selectedTf);
+    const fastTradeUi = ['30m'].includes(selectedTf);
     const depthRows = fastTradeUi ? 6 : 10;
     const bids = Array.isArray(book.bid_profile) ? book.bid_profile.slice(0, depthRows) : [];
     const asks = Array.isArray(book.ask_profile) ? book.ask_profile.slice(0, depthRows) : [];

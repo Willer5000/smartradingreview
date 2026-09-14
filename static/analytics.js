@@ -1,3 +1,31 @@
+
+// ============================================================================
+// V1 RC2 — FETCH ACOTADO: ninguna fuente de monitoreo puede dejar la página
+// cargando indefinidamente. Un timeout degrada sólo ese bloque y no el trading.
+// ============================================================================
+async function v1FetchJson(url, options = {}, timeoutMs = 10000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const response = await fetch(url, { ...options, signal: controller.signal });
+        const raw = await response.text();
+        let json = {};
+        try { json = raw ? JSON.parse(raw) : {}; }
+        catch (_) { throw new Error(`Respuesta no JSON (HTTP ${response.status})`); }
+        return { response, json };
+    } catch (error) {
+        if (error?.name === 'AbortError') throw new Error(`Timeout ${Math.round(timeoutMs/1000)}s: ${url}`);
+        throw error;
+    } finally { clearTimeout(timer); }
+}
+
+function v1Set(id, value, className = null) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = value;
+    if (className) el.className = className;
+}
+
 // analytics.js - Lógica de la página /analytics
 // Consume /api/analytics/* y /api/review/logs
 
@@ -1517,8 +1545,8 @@ async function runLearningScientistTest() {
 
 async function loadLearningGovernanceStatus() {
     const requests = [
-        fetch('/api/review/autopilot/status').then(async response => ({ kind: 'autopilot', response, json: await response.json() })),
-        fetch('/api/ai/gemini-activity').then(async response => ({ kind: 'gemini', response, json: await response.json() }))
+        v1FetchJson('/api/review/autopilot/status', {cache:'no-store'}, 9000).then(({response,json}) => ({ kind: 'autopilot', response, json })),
+        v1FetchJson('/api/ai/gemini-activity', {cache:'no-store'}, 9000).then(({response,json}) => ({ kind: 'gemini', response, json }))
     ];
 
     const results = await Promise.allSettled(requests);
@@ -1541,6 +1569,8 @@ async function loadLearningGovernanceStatus() {
             const activeStrategies = strategies.filter(row => String(row.state || '').toUpperCase() === 'ACTIVE').length;
             const productionAuthority = state === 'PROTECT' || (state === 'ACTIVE' && positiveAuthority);
             q5SetText('lo-autopilot-state', state === 'PROTECT' ? 'Protección' : state === 'ACTIVE' ? 'Perfil de calidad validado' : 'Observación');
+            v1Set('v1-reviewtrader-health', state === 'PROTECT' ? 'PROTEGIENDO' : state === 'ACTIVE' ? 'ACTIVO' : 'APRENDIENDO', `v1-simple-value ${state === 'ACTIVE' ? 'text-success' : 'text-info'}`);
+            v1Set('v1-reviewtrader-note', `${Number((evidence.total || {}).resolved || 0)} resultados en gobernanza · autoridad positiva ${positiveAuthority ? 'habilitada' : 'bloqueada'}`);
             q5SetText('lo-autopilot-authority', productionAuthority ? 'Habilitada bajo evidencia' : 'Bloqueada');
             q5SetText('lo-strategy-veto-authority', strategyVeto ? `${activeStrategies} activas · veto solamente` : 'Bloqueado');
             q5SetText('lo-leverage-growth', governance.risk_growth_allowed ? 'Habilitado por edge neto' : 'Bloqueado');
@@ -1606,7 +1636,12 @@ async function loadLearningGovernanceStatus() {
                 simpleScientist.textContent = schedulerAt === '--' ? `⚠️ ${uiHumanLabel(schedState)}` : `✅ ${uiHumanLabel(schedState)}`;
                 simpleScientist.className = `v1-simple-value ${schedulerAt === '--' ? 'text-warning' : (['DONE','SUCCESS','RUNNING_LLM','CHECKING_SLOT','CLAIMING_SLOT'].includes(schedState) ? 'text-success' : 'text-warning')}`;
             }
-            if (simpleScientistNote) simpleScientistNote.textContent = schedulerAt === '--' ? 'Sin intento persistido todavía.' : `Último intento: ${formatDate(schedulerAt)}${lastText !== '--' ? ` · último éxito: ${formatDate(lastText)}` : ''}`;
+            if (simpleScientistNote) {
+                const runtimeError = String(scheduler.runtime_error || json.data?.scheduler_runtime?.last_error || '').trim();
+                simpleScientistNote.textContent = schedulerAt === '--'
+                    ? (runtimeError ? `Error: ${runtimeError}` : 'Sin intento persistido todavía; watchdog independiente en espera.')
+                    : `Último intento: ${formatDate(schedulerAt)}${lastText !== '--' ? ` · último éxito: ${formatDate(lastText)}` : ''}${runtimeError ? ` · ${runtimeError}` : ''}`;
+            }
         }
     });
 }
@@ -1690,36 +1725,13 @@ async function loadQualityV2() {
             getFilters()
         );
 
-        const response = await fetch(
-            '/api/analytics/quality-v2?'
-            + qs
+        const q5Payload = await v1FetchJson(
+            '/api/analytics/quality-v2?' + qs,
+            { cache: 'no-store' },
+            12000
         );
-
-        // ============================================================
-        // PARSEO ROBUSTO
-        // ============================================================
-        //
-        // Si Render devuelve HTML 502/504 no dejamos caer todo
-        // analytics.js con "Unexpected token <".
-        // ============================================================
-
-        const rawText = await response.text();
-
-        let json;
-
-        try {
-
-            json = JSON.parse(
-                rawText
-            );
-
-        } catch (parseError) {
-
-            throw new Error(
-                `Respuesta no JSON de Q5 V2 `
-                + `(HTTP ${response.status})`
-            );
-        }
+        const response = q5Payload.response;
+        const json = q5Payload.json;
 
         if (
             !response.ok
@@ -1820,6 +1832,12 @@ async function loadQualityV2() {
         };
         renderSimpleLive('v1-spot-live','v1-spot-live-note',spot);
         renderSimpleLive('v1-futures-live','v1-futures-live-note',futures);
+        v1Set('v1-op-spot-live-n', Number(spot.resolved || 0).toLocaleString());
+        v1Set('v1-op-spot-live-wr', Number(spot.resolved || 0) > 0 ? q5FormatUnsignedPct(spot.win_rate,1) : '--');
+        v1Set('v1-op-spot-live-pnl', Number(spot.resolved || 0) > 0 ? q5FormatSignedPct(spot.pnl_total_pct,2) : '--');
+        v1Set('v1-op-fut-live-n', Number(futures.resolved || 0).toLocaleString());
+        v1Set('v1-op-fut-live-wr', Number(futures.resolved || 0) > 0 ? q5FormatUnsignedPct(futures.win_rate,1) : '--');
+        v1Set('v1-op-fut-live-pnl', Number(futures.resolved || 0) > 0 ? q5FormatSignedPct(futures.pnl_total_pct,2) : '--');
 
         // ============================================================
         // SAFETY -> PERFORMANCE
@@ -2678,6 +2696,25 @@ window.setAdvancedAnalytics = async function(enabled) {
     }
 };
 
+
+async function loadV1MacroStatus(){
+    try{
+        const {response,json}=await v1FetchJson('/api/macro/context',{cache:'no-store'},7000);
+        if(!response.ok || !json?.success) throw new Error(json?.error||`HTTP ${response.status}`);
+        const data=json.data||{};
+        const current=String(data.current_risk_level||data.risk_level||'UNKNOWN').toUpperCase();
+        const next=String(data.next_event_risk_level||'NONE').toUpperCase();
+        const event=data.next_high_event||{};
+        v1Set('v1-macro-health', `Ahora ${uiHumanLabel(current)} · Próximo ${uiHumanLabel(next)}`, `v1-simple-value ${current==='HIGH'||current==='CRITICAL'?'text-warning':'text-info'}`);
+        const flow=data.exchange_flow||{};
+        const flowText=flow.available?`CEX ${uiHumanLabel(flow.state||'neutral')} · volatilidad ${uiHumanLabel(flow.volatility_risk||'--')}`:'CEX sin dato actual';
+        v1Set('v1-macro-note', `${event.title_es||'Sin evento crítico inmediato'} · ${flowText}`);
+    }catch(error){
+        v1Set('v1-macro-health','NO DISPONIBLE','v1-simple-value text-warning');
+        v1Set('v1-macro-note', error.message||'Macro temporalmente no disponible');
+    }
+}
+
 // ============================================================================
 // CARGAR TODO
 // ============================================================================
@@ -2686,14 +2723,13 @@ window.loadAllAnalytics = async function() {
     showToast('🔄 Actualizando estado V1...', 'info');
     // Vista simple: sólo las tres fuentes que realmente gobiernan V1.
     const coreTasks = [
-        () => loadQualityV2(),
-        () => loadLearningGovernanceStatus(),
-        () => loadResearchFederationAnalytics()
+        loadQualityV2(),
+        loadLearningGovernanceStatus(),
+        loadResearchFederationAnalytics(),
+        loadV1MacroStatus()
     ];
-    for (const task of coreTasks) {
-        try { await task(); } catch (err) { console.warn('Estado V1 parcial:', err); }
-        await new Promise(resolve => setTimeout(resolve, 80));
-    }
+    const results = await Promise.allSettled(coreTasks);
+    results.forEach(result => { if (result.status === 'rejected') console.warn('Estado V1 parcial:', result.reason); });
     if (window.__V1_ADVANCED_ANALYTICS__) {
         await window.setAdvancedAnalytics(true);
     }
@@ -2724,6 +2760,7 @@ document.addEventListener('DOMContentLoaded', function() {
     setInterval(() => {
         loadResearchFederationAnalytics();
         loadLearningGovernanceStatus();
+        loadV1MacroStatus();
     }, 300000);
     setInterval(() => loadQualityV2(), 900000);
 });
@@ -2737,8 +2774,9 @@ async function loadResearchFederationAnalytics(){
     const body=document.getElementById('rf-analytics-body');
     if(!body) return;
     try{
-        const response=await fetch('/api/research-federation/summary',{cache:'no-store'});
-        const data=await response.json();
+        const rfPayload=await v1FetchJson('/api/research-federation/summary',{cache:'no-store'},10000);
+        const response=rfPayload.response;
+        const data=rfPayload.json;
         if(!response.ok || !data.success) throw new Error(data.error||'Research Federation no disponible');
         const candidates=data.candidates||[], shadow=data.shadow_live||[];
         const coverage=data.coverage||{};
@@ -2750,7 +2788,7 @@ async function loadResearchFederationAnalytics(){
             const missing=(coverage.missing_strategic_timeframes||[]);
             covEl.className=`small mb-2 ${missing.length?'text-warning':'text-success'}`;
             const causalInfo=data.profitability_evidence||{};
-            const causal=`Causal ${Number(causalInfo.coverage_cells||0)}/${Number(causalInfo.coverage_target||54)} · Validadas ${Number(causalInfo.validated_cells||0)}/${Number(causalInfo.coverage_target||54)} · OOS+ ${Number(causalInfo.oos_positive_cells||0)}`;
+            const causal=`Causal ${Number(causalInfo.coverage_cells||0)}/${Number(causalInfo.coverage_target||40)} · Validadas ${Number(causalInfo.validated_cells||0)}/${Number(causalInfo.coverage_target||40)} · OOS+ ${Number(causalInfo.oos_positive_cells||0)}`;
             covEl.textContent=`Cobertura estratégica · ${parts.join(' · ')} · ${causal}${missing.length?` · Sin evidencia actual: ${missing.join(', ')}`:''}`;
         }
         const sm=new Map(shadow.map(x=>[x.candidate_key,x]));
@@ -2777,7 +2815,7 @@ async function loadResearchFederationAnalytics(){
         if(shadowBt) shadowBt.innerHTML=renderBt(profitability.futures_evaluation,'Sin challengers causales disponibles.');
         const simpleCoverage=document.getElementById('v1-coverage');
         const simpleCoverageNote=document.getElementById('v1-coverage-note');
-        if(simpleCoverage) simpleCoverage.textContent=`${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||54)} investigadas · ${Number(profitability.validated_cells||0)} validadas`;
+        if(simpleCoverage) simpleCoverage.textContent=`${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||40)} investigadas · ${Number(profitability.validated_cells||0)} validadas`;
         if(simpleCoverageNote) simpleCoverageNote.textContent=`OOS positivo ${Number(profitability.oos_positive_cells||0)} · buscando ${Number(profitability.searching_cells||0)}`;
         const simpleBucket=(id,noteId,bucket)=>{
             const el=document.getElementById(id), note=document.getElementById(noteId);
@@ -2793,7 +2831,48 @@ async function loadResearchFederationAnalytics(){
         const simpleShadow=document.getElementById('v1-shadow'), simpleShadowNote=document.getElementById('v1-shadow-note');
         if(simpleShadow) simpleShadow.textContent=`${Number(profitability.shadow_live_candidates||0)}/${Number(profitability.shadow_ready_cells||profitability.validated_cells||0)} con actividad`;
         if(simpleShadowNote) simpleShadowNote.textContent=`Señales ${Number(profitability.shadow_live_signals||0)} · resueltas ${Number(profitability.shadow_live_resolved||0)} · reciclar ${Number(profitability.recycle_required_cells||0)}`;
-        const coverageLabel = profitability.coverage_target ? ` · Causal ${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||54)} · Validadas ${Number(profitability.validated_cells||0)} · Reciclar ${Number(profitability.recycle_required_cells||0)}` : '';
+        // RC2: tabla comprensible de continuidad LIVE/OOS.
+        const setOosRow=(prefix,bucket)=>{
+            v1Set(`v1-op-${prefix}-oos-n`, Number(bucket?.oos_n||0).toLocaleString());
+            v1Set(`v1-op-${prefix}-oos-wr`, bucket?.oos_wr_weighted==null?'--':`${fmt(bucket.oos_wr_weighted,1)}%`);
+            v1Set(`v1-op-${prefix}-oos-pnl`, bucket?.oos_total_r==null?'--':`${Number(bucket.oos_total_r)>=0?'+':''}${fmt(bucket.oos_total_r,2)}R`);
+            const validated=Number(bucket?.validated_strategies||0);
+            const liveResolved=Number(bucket?.shadow_resolved||0);
+            const recycle=Number(bucket?.recycle_required||0);
+            const state = recycle>0 ? '♻️ RECICLAR' : liveResolved>0 ? '🟢 LIVE EN CURSO' : validated>0 ? '⏳ ESPERANDO LIVE' : '🔎 BUSCANDO EDGE';
+            v1Set(`v1-op-${prefix}-state`, state, `small ${recycle>0?'text-warning':validated>0?'text-info':'text-muted'}`);
+        };
+        setOosRow('spot', profitability.spot||{});
+        setOosRow('fut', profitability.futures_official||{});
+
+        const matrix=Array.isArray(profitability.coverage_matrix)?profitability.coverage_matrix:[];
+        const validatedRows=matrix.filter(row=>['SHADOW_READY','SHADOW_READY_FAST'].includes(String(row.stage||'')) && !row.recycle_required);
+        const liveBody=document.getElementById('v1-validated-live-body');
+        if(liveBody){
+            liveBody.innerHTML=validatedRows.length?validatedRows.map(row=>{
+                const smRow = shadow.find(x=>String(x.candidate_key||'')===String(row.candidate_key||'')) || {};
+                const oosN=Number(row.oos_n||0);
+                const oosPnl=(Number.isFinite(Number(row.oos_exp_r))&&oosN>0)?Number(row.oos_exp_r)*oosN:null;
+                const signals=Number(row.shadow_signals_n ?? smRow.signals_n ?? 0);
+                const resolved=Number(row.shadow_n ?? smRow.resolved_n ?? 0);
+                const shadowState=String(row.shadow_state||'WAITING');
+                const status=row.recycle_required?'♻️ RECICLAR':shadowState==='CONFIRMED'?'✅ CONFIRMANDO':shadowState==='DIVERGED'||shadowState==='EARLY_DIVERGENCE'?'⚠️ DIVERGIENDO':signals>0?'👀 OBSERVANDO':'⏳ ESPERANDO SETUP';
+                return `<tr><td>${row.symbol||'--'}</td><td>${row.timeframe||'--'}</td><td>${uiHumanLabel(row.strategy_family||'Especialista causal')}</td><td>${row.oos_wr==null?'--':fmt(row.oos_wr,1)+'%'}</td><td>${oosPnl==null?'--':(oosPnl>=0?'+':'')+fmt(oosPnl,2)+'R'}</td><td>${row.oos_pf==null?'--':fmt(row.oos_pf,2)}</td><td>${resolved}/${signals}</td><td>${status}</td></tr>`;
+            }).join(''):'<tr><td colspan="8" class="text-muted text-center">Aún no hay especialistas que hayan superado el OOS Guard.</td></tr>';
+        }
+        const covBody=document.getElementById('v1-coverage-matrix-body');
+        if(covBody){
+            const groups=[
+                ['Futures 30m','30M',7,'CRYPTO_FUTURES'],['Futures 1h','1H',7,'CRYPTO_FUTURES'],['Futures 2h','2H',7,'CRYPTO_FUTURES'],['Futures 4h','4H',7,'CRYPTO_FUTURES'],
+                ['Spot 4h','4H',3,'SPOT'],['Spot 12h','12H',3,'SPOT'],['Spot 1D','1D',3,'SPOT'],['Spot 1W','1W',3,'SPOT']
+            ];
+            covBody.innerHTML=groups.map(([label,tf,target,fam])=>{
+                const rows=matrix.filter(r=>String(r.timeframe||'').toUpperCase()===tf && (fam==='SPOT'?String(r.market_family||'')!=='CRYPTO_FUTURES':String(r.market_family||'')==='CRYPTO_FUTURES'));
+                const ok=rows.filter(r=>['SHADOW_READY','SHADOW_READY_FAST'].includes(String(r.stage||''))&&!r.recycle_required).length;
+                return `<tr><td>${label}</td><td>${ok}/${target}</td><td class="${ok===target?'text-success':ok>0?'text-info':'text-muted'}">${ok===target?'✅ Completa':ok>0?'🟡 Parcial':'🔎 Buscando'}</td></tr>`;
+            }).join('');
+        }
+        const coverageLabel = profitability.coverage_target ? ` · Causal ${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||40)} · Validadas ${Number(profitability.validated_cells||0)} · Reciclar ${Number(profitability.recycle_required_cells||0)}` : '';
         body.innerHTML=actionable.slice(0,80).map(x=>{const l=sm.get(x.candidate_key)||{};return `<tr>
           <td><span class="badge bg-secondary">${x.stage||'--'}</span></td>
           <td><b>${x.source_engine||'--'}</b><br><span class="text-muted small">${x.experiment||'--'}</span></td>
@@ -2804,7 +2883,7 @@ async function loadResearchFederationAnalytics(){
           <td>${fmt(l.avg_safety,1)}</td></tr>`}).join('') || `<tr><td colspan="7" class="text-muted text-center">${data.connected===false?'Research Bridge sin conexión':'Bridge conectado, pero todavía no hay filas visibles para esta cuenta/clave.'}</td></tr>`;
         const stages={}; candidates.forEach(x=>stages[x.stage]=(stages[x.stage]||0)+1);
         const kp=document.getElementById('rf-analytics-kpis');
-        if(kp) kp.innerHTML=[['Cobertura causal',`${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||54)}`],['Celdas validadas',Number(profitability.validated_cells||0)],['Shadow con actividad',`${Number(profitability.shadow_live_candidates||0)}/${Number(profitability.shadow_ready_cells||profitability.validated_cells||0)}`],['♻️ Reciclar',Number(profitability.recycle_required_cells||0)]].map(([k,v])=>`<div class="col-6 col-md-3"><div class="border rounded p-2 h-100"><div class="text-muted small">${k}</div><div class="h5 mb-0">${v}</div></div></div>`).join('');
+        if(kp) kp.innerHTML=[['Cobertura causal',`${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||40)}`],['Celdas validadas',Number(profitability.validated_cells||0)],['Shadow con actividad',`${Number(profitability.shadow_live_candidates||0)}/${Number(profitability.shadow_ready_cells||profitability.validated_cells||0)}`],['♻️ Reciclar',Number(profitability.recycle_required_cells||0)]].map(([k,v])=>`<div class="col-6 col-md-3"><div class="border rounded p-2 h-100"><div class="text-muted small">${k}</div><div class="h5 mb-0">${v}</div></div></div>`).join('');
     }catch(err){body.innerHTML=`<tr><td colspan="7" class="text-warning">${err.message}</td></tr>`;}
 }
 window.loadResearchFederationAnalytics=loadResearchFederationAnalytics;
