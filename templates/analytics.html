@@ -1,3 +1,4 @@
+<!-- compatibility lineage: 20260914-FINAL-V1-RC2 -->
 <!-- compatibility lineage: 20260913-J1-PROFIT-LOOP -->
 <!DOCTYPE html>
 <html lang="es" data-bs-theme="dark">
@@ -168,7 +169,7 @@
                     <h5 class="mb-1"><i class="fas fa-chart-line me-2 text-info"></i>Monitoreo de rentabilidad y continuidad</h5>
                     <div class="small text-muted">Live dice qué ocurre hoy; OOS dice qué demostró la estrategia fuera de entrenamiento. No se mezclan.</div>
                 </div>
-                <span class="badge bg-dark border border-info text-info">V1 RC2 · 40 celdas activas</span>
+                <span class="badge bg-dark border border-info text-info">V1 RC3 · 40 celdas activas</span>
             </div>
             <div class="table-responsive mb-3">
                 <table class="table table-dark table-sm align-middle mb-0">
@@ -184,8 +185,8 @@
                     <div class="small fw-semibold mb-2">Estrategias validadas que deben comprobarse en Shadow/live</div>
                     <div class="table-responsive" style="max-height:360px;overflow:auto">
                         <table class="table table-dark table-sm align-middle mb-0">
-                            <thead class="sticky-top"><tr><th>Mercado</th><th>TF</th><th>Estrategia</th><th>WR OOS</th><th>PnL OOS</th><th>PF</th><th>Shadow</th><th>Estado</th></tr></thead>
-                            <tbody id="v1-validated-live-body"><tr><td colspan="8" class="text-muted text-center">Cargando estrategias validadas…</td></tr></tbody>
+                            <thead class="sticky-top"><tr><th>Mercado</th><th>TF</th><th>Estrategia</th><th>WR OOS</th><th>PnL OOS</th><th>PF</th><th>Guardian ΔExp</th><th>Shadow</th><th>Estado</th></tr></thead>
+                            <tbody id="v1-validated-live-body"><tr><td colspan="9" class="text-muted text-center">Cargando estrategias validadas…</td></tr></tbody>
                         </table>
                     </div>
                 </div>
@@ -201,6 +202,48 @@
                     <div class="v1-simple-card mb-2"><div class="small text-muted">ReviewTrader</div><div class="v1-simple-value" id="v1-reviewtrader-health">--</div><div class="small text-muted" id="v1-reviewtrader-note">Esperando scheduler.</div></div>
                     <div class="v1-simple-card mb-2"><div class="small text-muted">Macro</div><div class="v1-simple-value" id="v1-macro-health">--</div><div class="small text-muted" id="v1-macro-note">Contexto actual y próximo evento.</div></div>
                     <div class="v1-simple-card"><div class="small text-muted">Carga de página</div><div class="v1-simple-value text-success">Acotada</div><div class="small text-muted">Cada consulta crítica vence por timeout; diagnóstico pesado sólo a pedido.</div></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ============ FINAL V1 RC3 · AUDITORÍA COMPACTA DE ENTRY ============ -->
+        <div class="chart-container mb-3" id="v1-entry-audit" style="border-color: rgba(32,201,151,.42);">
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                <div>
+                    <h5 class="mb-1"><i class="fas fa-crosshairs me-2 text-success"></i>Auditoría de Entry</h5>
+                    <div class="small text-muted">El Entry se juzga por mercado y muestra verificable. Futures usa una vara más estricta que Spot.</div>
+                </div>
+                <span class="badge bg-dark border border-success text-success">RC3 · Entry ≠ señal</span>
+            </div>
+            <div class="row g-2">
+                <div class="col-xl-6">
+                    <div class="v1-simple-card h-100">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <div class="fw-semibold">Futures · Entry operativo</div>
+                            <span class="badge bg-warning text-dark">mayor precisión</span>
+                        </div>
+                        <div class="row g-2 small">
+                            <div class="col-4"><span class="text-muted">Muestra</span><div class="fw-semibold" id="v1-entry-fut-n">--</div></div>
+                            <div class="col-4"><span class="text-muted">Entry tocado</span><div class="fw-semibold" id="v1-entry-fut-reach">--</div></div>
+                            <div class="col-4"><span class="text-muted">SL inmediato</span><div class="fw-semibold" id="v1-entry-fut-direct-stop">--</div></div>
+                            <div class="col-6"><span class="text-muted">MFE medio</span><div class="fw-semibold" id="v1-entry-fut-mfe">--</div></div>
+                            <div class="col-6"><span class="text-muted">MAE medio</span><div class="fw-semibold" id="v1-entry-fut-mae">--</div></div>
+                        </div>
+                        <div class="small text-muted mt-2" id="v1-entry-fut-note">Esperando evidencia verificable.</div>
+                    </div>
+                </div>
+                <div class="col-xl-6">
+                    <div class="v1-simple-card h-100">
+                        <div class="fw-semibold mb-2">Spot · Entry operativo</div>
+                        <div class="row g-2 small">
+                            <div class="col-4"><span class="text-muted">Muestra</span><div class="fw-semibold" id="v1-entry-spot-n">--</div></div>
+                            <div class="col-4"><span class="text-muted">Entry tocado</span><div class="fw-semibold" id="v1-entry-spot-reach">--</div></div>
+                            <div class="col-4"><span class="text-muted">SL inmediato</span><div class="fw-semibold" id="v1-entry-spot-direct-stop">--</div></div>
+                            <div class="col-6"><span class="text-muted">MFE medio</span><div class="fw-semibold" id="v1-entry-spot-mfe">--</div></div>
+                            <div class="col-6"><span class="text-muted">MAE medio</span><div class="fw-semibold" id="v1-entry-spot-mae">--</div></div>
+                        </div>
+                        <div class="small text-muted mt-2" id="v1-entry-spot-note">Spot se audita por separado.</div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -1601,6 +1644,6 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI"></script>
-    <script src="{{ url_for('static', filename='analytics.js') }}?v=20260914-FINAL-V1-RC2"></script>
+    <script src="{{ url_for('static', filename='analytics.js') }}?v=20260914-FINAL-V1-RC3-PROFITABILITY-GUARDIAN"></script>
 </body>
 </html>

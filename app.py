@@ -25723,6 +25723,7 @@ class Moderador:
                             direction=accion,
                             regime=regime,
                             relation='SUPPORT',
+                            symbol=symbol,
                         )
                         expert_governed_mult, expert_governed_state = get_governed_multiplier(
                             trader=trader.nombre,
@@ -25731,6 +25732,7 @@ class Moderador:
                             direction=accion,
                             regime=regime,
                             relation='SUPPORT',
+                            symbol=symbol,
                         )
                     except Exception:
                         expert_shadow_mult = 1.0
@@ -28884,6 +28886,61 @@ def api_saved_signals_delete(signal_id):
         return jsonify({'success': False, 'error': str(e)[:200]}), 200
 
 # ============================================================================
+# FINAL V1 RC3 — MARKET DATA PARA FUTURES GUARDIAN
+# ============================================================================
+
+def _guardian_prepare_futures_market_data(futures_market, symbol, timeframe):
+    """Devuelve precio live + velas CERRADAS con timestamp para el Guardian.
+
+    El precio live sirve para seguimiento. Momentum, estructura, MFE/MAE y
+    deterioro usan únicamente velas cerradas; evaluate_futures_position filtra
+    además cualquier vela anterior al ``entry_touched_at`` de cada operación.
+    """
+    prepared = futures_market._prepare_closed_candle_analysis_data(
+        symbol,
+        timeframe,
+    )
+    if not isinstance(prepared, dict) or not prepared.get('success'):
+        return None
+
+    closed_df = prepared.get('closed_df')
+    if closed_df is None or len(closed_df) < 2:
+        return None
+
+    recent = closed_df.tail(32).copy()
+    return {
+        'current_price': float(prepared.get('live_price') or recent['close'].iloc[-1]),
+        'candles': {
+            'time': [str(v) for v in recent['time'].tolist()],
+            'close': [float(v) for v in recent['close'].tolist()],
+            'high': [float(v) for v in recent['high'].tolist()],
+            'low': [float(v) for v in recent['low'].tolist()],
+        },
+        'source_candle_timestamp': prepared.get('source_candle_timestamp'),
+        'open_candle_present': bool(prepared.get('open_candle_present')),
+        'market_data_source': prepared.get('market_data_source'),
+    }
+
+
+def _guardian_telegram_cooldown(timeframe, action):
+    """Anti-spam RC3: una operación 4H no debe generar lluvia de mensajes."""
+    action = str(action or '').upper()
+    if action == 'EXIT':
+        return 0
+    if action == 'REDUCE':
+        return 30 * 60
+    base = {
+        '30m': 45 * 60,
+        '1h': 60 * 60,
+        '2h': 90 * 60,
+        '4h': 120 * 60,
+        '12h': 4 * 60 * 60,
+        '1D': 8 * 60 * 60,
+    }.get(str(timeframe or ''), GUARDIAN_TELEGRAM_MIN_INTERVAL)
+    return max(GUARDIAN_TELEGRAM_MIN_INTERVAL, base)
+
+
+# ============================================================================
 # FUTURES POSITION GUARDIAN
 # ============================================================================
 @app.route(
@@ -29010,54 +29067,17 @@ def api_futures_position_guardian():
 
             try:
 
-                df = futures_market.get_kucoin_data(
+                market_snapshot = _guardian_prepare_futures_market_data(
+                    futures_market,
                     symbol,
-                    timeframe
+                    timeframe,
                 )
 
-                if (
-                    df is None
-                    or len(df) < 8
-                ):
+                if not market_snapshot:
                     continue
 
-                # Sólo las últimas 20 velas.
-                # No necesitamos más.
-                recent = (
-                    df.tail(
-                        20
-                    )
-                    .copy()
-                )
-
-                candles = {
-                    'close': [
-                        float(v)
-                        for v in recent[
-                            'close'
-                        ].tolist()
-                    ],
-                
-                    'high': [
-                        float(v)
-                        for v in recent[
-                            'high'
-                        ].tolist()
-                    ],
-                
-                    'low': [
-                        float(v)
-                        for v in recent[
-                            'low'
-                        ].tolist()
-                    ]
-                }
-
-                current_price = float(
-                    recent[
-                        'close'
-                    ].iloc[-1]
-                )
+                candles = market_snapshot['candles']
+                current_price = market_snapshot['current_price']
 
                 for sig in group:
 
@@ -37360,7 +37380,9 @@ def _guardian_futures_level_bucket(
 
         if action in (
             'PROTECT',
-            'PROTECT_AND_EXTEND'
+            'PROTECT_AND_EXTEND',
+            'PROTECT_AND_ADD',
+            'PROTECT_ADD_AND_EXTEND'
         ):
 
             suggested_sl = advice.get(
@@ -37388,7 +37410,9 @@ def _guardian_futures_level_bucket(
 
         if action in (
             'EXTEND',
-            'PROTECT_AND_EXTEND'
+            'PROTECT_AND_EXTEND',
+            'ADD_AND_EXTEND',
+            'PROTECT_ADD_AND_EXTEND'
         ):
 
             suggested_tp = advice.get(
@@ -37413,6 +37437,31 @@ def _guardian_futures_level_bucket(
                 parts.append(
                     f"TP{step}"
                 )
+
+        if action in (
+            'ADD_POSITION',
+            'PROTECT_AND_ADD',
+            'ADD_AND_EXTEND',
+            'PROTECT_ADD_AND_EXTEND',
+        ):
+            add_pct = advice.get('suggested_add_position_pct')
+            add_entry = advice.get('suggested_add_entry')
+            try:
+                pct_step = int(round(float(add_pct or 0) / 5.0) * 5)
+                entry_step = int(
+                    abs(float(add_entry or entry) - entry)
+                    / risk_abs / 0.10
+                )
+                parts.append(f"ADD{pct_step}-E{entry_step}")
+            except Exception:
+                parts.append('ADD')
+
+        if action == 'REDUCE':
+            try:
+                reduce_pct = int(round(float(advice.get('suggested_reduce_pct') or 0)))
+                parts.append(f"REDUCE{reduce_pct}")
+            except Exception:
+                parts.append('REDUCE')
 
         return (
             '-'.join(
@@ -37479,6 +37528,13 @@ def _build_futures_guardian_telegram_message(
         'suggested_take_profit'
     )
 
+    suggested_add_entry = advice.get('suggested_add_entry')
+    suggested_add_pct = advice.get('suggested_add_position_pct')
+    suggested_add_usdt = advice.get('suggested_add_position_usdt')
+    suggested_reduce_pct = advice.get('suggested_reduce_pct')
+    scale_in_rr = advice.get('scale_in_rr')
+    trade_state = str(advice.get('trade_state') or 'HEALTHY').upper()
+
     progress_r = advice.get(
         'progress_r'
     )
@@ -37508,6 +37564,18 @@ def _build_futures_guardian_telegram_message(
 
         'PROTECT_AND_EXTEND':
             '🛡️🎯 <b>PROTEGER + EXTENDER</b>',
+
+        'ADD_POSITION':
+            '➕ <b>AUMENTAR POSICIÓN</b>',
+
+        'PROTECT_AND_ADD':
+            '🛡️➕ <b>PROTEGER + AUMENTAR</b>',
+
+        'ADD_AND_EXTEND':
+            '➕🎯 <b>AUMENTAR + EXTENDER</b>',
+
+        'PROTECT_ADD_AND_EXTEND':
+            '🛡️➕🎯 <b>PROTEGER + AUMENTAR + EXTENDER</b>',
 
         'REDUCE':
             '🟡 <b>REDUCIR / PROTEGER</b>',
@@ -37555,7 +37623,9 @@ def _build_futures_guardian_telegram_message(
 
     if management_action in (
         'PROTECT',
-        'PROTECT_AND_EXTEND'
+        'PROTECT_AND_EXTEND',
+        'PROTECT_AND_ADD',
+        'PROTECT_ADD_AND_EXTEND'
     ):
 
         lines.extend([
@@ -37573,7 +37643,9 @@ def _build_futures_guardian_telegram_message(
 
     if management_action in (
         'EXTEND',
-        'PROTECT_AND_EXTEND'
+        'PROTECT_AND_EXTEND',
+        'ADD_AND_EXTEND',
+        'PROTECT_ADD_AND_EXTEND'
     ):
 
         lines.extend([
@@ -37588,6 +37660,54 @@ def _build_futures_guardian_telegram_message(
                 f"<b>{_telegram_price(suggested_tp)}</b>"
             )
         ])
+
+    if management_action in (
+        'ADD_POSITION',
+        'PROTECT_AND_ADD',
+        'ADD_AND_EXTEND',
+        'PROTECT_ADD_AND_EXTEND',
+    ):
+        lines.extend([
+            '',
+            '➕ <b>Aumento de posición · sólo confirmación</b>',
+            (
+                'Entrada adicional sugerida: '
+                f'<b>{_telegram_price(suggested_add_entry)}</b>'
+            ),
+            (
+                'Tamaño adicional máximo: '
+                f'<b>{float(suggested_add_pct or 0):.0f}%</b> de la posición original'
+            ),
+        ])
+        if suggested_add_usdt is not None:
+            try:
+                lines.append(
+                    f'Margen orientativo: <b>{float(suggested_add_usdt):.2f} USDT</b>'
+                )
+            except Exception:
+                pass
+        if scale_in_rr is not None:
+            try:
+                lines.append(
+                    f'RR incremental estimado: <b>{float(scale_in_rr):.2f}</b>'
+                )
+            except Exception:
+                pass
+        lines.append('No promediar pérdida: añadir sólo si el retest/confirmación se mantiene.')
+
+    if management_action == 'REDUCE' and suggested_reduce_pct is not None:
+        try:
+            lines.extend([
+                '',
+                f'📉 Reducción sugerida: <b>{float(suggested_reduce_pct):.0f}%</b> de la exposición.'
+            ])
+        except Exception:
+            pass
+
+    lines.extend([
+        '',
+        f'🧭 Estado técnico: <b>{_telegram_escape(trade_state)}</b>'
+    ])
 
     if progress_r is not None:
 
@@ -40692,62 +40812,17 @@ def monitor_guardian_telegram_loop():
 
                     try:
 
-                        # Commit 27:
-                        # SIEMPRE Futures Perpetual.
-                        df = (
-                            futures_market
-                            .get_kucoin_data(
-                                symbol,
-                                timeframe
-                            )
+                        market_snapshot = _guardian_prepare_futures_market_data(
+                            futures_market,
+                            symbol,
+                            timeframe,
                         )
 
-                        if (
-                            df is None
-                            or len(df) < 8
-                        ):
-
+                        if not market_snapshot:
                             continue
 
-                        recent = (
-                            df.tail(
-                                20
-                            )
-                            .copy()
-                        )
-
-                        current_price = float(
-                            recent[
-                                'close'
-                            ].iloc[-1]
-                        )
-
-                        candles = {
-
-                            'close': [
-                                float(v)
-                                for v
-                                in recent[
-                                    'close'
-                                ].tolist()
-                            ],
-
-                            'high': [
-                                float(v)
-                                for v
-                                in recent[
-                                    'high'
-                                ].tolist()
-                            ],
-
-                            'low': [
-                                float(v)
-                                for v
-                                in recent[
-                                    'low'
-                                ].tolist()
-                            ]
-                        }
+                        current_price = market_snapshot['current_price']
+                        candles = market_snapshot['candles']
 
                         for sig in group:
 
@@ -40803,6 +40878,10 @@ def monitor_guardian_telegram_loop():
                                 'PROTECT',
                                 'EXTEND',
                                 'PROTECT_AND_EXTEND',
+                                'ADD_POSITION',
+                                'PROTECT_AND_ADD',
+                                'ADD_AND_EXTEND',
+                                'PROTECT_ADD_AND_EXTEND',
                                 'REDUCE',
                                 'EXIT'
                             ):
@@ -40957,6 +41036,12 @@ def monitor_guardian_telegram_loop():
 
 
                             try:
+
+                                # RC3: Groq no puede autorizar ni alterar SCALE-IN.
+                                # La recomendación de aumentar posición queda en la
+                                # lógica determinística y conservadora del Guardian.
+                                if event_action not in ('EXTEND', 'PROTECT_AND_EXTEND'):
+                                    raise RuntimeError('RC3_AI_CONTROL_NOT_APPLICABLE')
 
                                 from ai_advisor import (
                                     run_ai_advisor,
@@ -41212,6 +41297,9 @@ def monitor_guardian_telegram_loop():
 
                             except Exception as ai_guardian_err:
 
+                                if str(ai_guardian_err) == 'RC3_AI_CONTROL_NOT_APPLICABLE':
+                                    ai_guardian_err = None
+
                                 # ======================================
                                 # FAIL OPEN
                                 # ======================================
@@ -41220,12 +41308,13 @@ def monitor_guardian_telegram_loop():
                                 # Guardian original sigue funcionando.
                                 # ======================================
 
-                                print(
-                                    "⚠️ [36S.1] "
-                                    "AI Guardian Control "
-                                    "no disponible: "
-                                    f"{ai_guardian_err}"
-                                )
+                                if ai_guardian_err is not None:
+                                    print(
+                                        "⚠️ [36S.1] "
+                                        "AI Guardian Control "
+                                        "no disponible: "
+                                        f"{ai_guardian_err}"
+                                    )
 
 
                             event_action = (
@@ -41260,7 +41349,10 @@ def monitor_guardian_telegram_loop():
                                     action=event_action,
                                     bucket=bucket,
                                     min_interval=(
-                                        GUARDIAN_TELEGRAM_MIN_INTERVAL
+                                        _guardian_telegram_cooldown(
+                                            timeframe,
+                                            event_action,
+                                        )
                                     )
                                 )
                             )
@@ -46244,7 +46336,7 @@ def api_macro_context():
         data = (
             refresh_macro_context(force=True)
             if force
-            else get_macro_context_snapshot(fetch_if_stale=True)
+            else get_macro_context_snapshot(fetch_if_stale=False)
         )
         return jsonify({'success': True, 'data': data}), 200
     except Exception as error:

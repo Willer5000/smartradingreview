@@ -1274,7 +1274,50 @@ function renderSelfCalibrationV1(data) {
     }
 }
 
+function updateV1ReviewTraderNote() {
+    const observatory = (window.__v1LastAnalytics || {}).learning_observatory_v1 || {};
+    const learnedResolved = observatory.resolved || {};
+    const governance = window.__v1LastGovernance || {};
+    const spotResolved = Number(learnedResolved.spot || 0);
+    const futuresResolved = Number(
+        governance.futuresResolved ?? learnedResolved.futures_official ?? 0
+    );
+    const authorityText = governance.positiveAuthority ? 'habilitada' : 'bloqueada';
+    v1Set(
+        'v1-reviewtrader-note',
+        `Spot: ${spotResolved} resueltas · Futures gobernables: ${futuresResolved}/25 · autoridad positiva ${authorityText}`
+    );
+}
+
+function renderV1EntryAudit(data) {
+    const observatory = data?.learning_observatory_v1 || {};
+    const execution = observatory?.execution_forensics || data?.execution_forensics_v2 || {};
+    const futures = execution.futures_official || {};
+    const spot = execution.spot || {};
+
+    const renderMarket = (prefix, row, stricter=false) => {
+        const n = Number(row?.n_with_forensics || 0);
+        q5SetText(`${prefix}-n`, n ? n.toLocaleString() : 'SIN MUESTRA');
+        q5SetText(`${prefix}-reach`, n ? loPct(row?.entry_reach_rate_pct) : '--');
+        q5SetText(`${prefix}-direct-stop`, n ? loPct(row?.direct_stop_rate_pct) : '--');
+        q5SetText(`${prefix}-mfe`, n ? loR(row?.avg_mfe_r) : '--');
+        q5SetText(`${prefix}-mae`, n ? loR(row?.avg_mae_r) : '--');
+        const note = document.getElementById(`${prefix}-note`);
+        if (note) {
+            note.textContent = stricter
+                ? 'Futures exige más precisión: vela cerrada, Entry real, MAE/MFE y estructura; no se mezcla entre símbolos ni TF.'
+                : 'Spot se evalúa aparte; el aprendizaje no concede autoridad a Futures ni a otra celda.';
+        }
+    };
+
+    renderMarket('v1-entry-fut', futures, true);
+    renderMarket('v1-entry-spot', spot, false);
+}
+
 function renderLearningObservatory(data) {
+    window.__v1LastAnalytics = data || {};
+    updateV1ReviewTraderNote();
+    renderV1EntryAudit(data || {});
     const observatory = data?.learning_observatory_v1 || {};
     const forensics = observatory?.execution_forensics?.futures_official
         || data?.execution_forensics_v2?.futures_official
@@ -1570,7 +1613,15 @@ async function loadLearningGovernanceStatus() {
             const productionAuthority = state === 'PROTECT' || (state === 'ACTIVE' && positiveAuthority);
             q5SetText('lo-autopilot-state', state === 'PROTECT' ? 'Protección' : state === 'ACTIVE' ? 'Perfil de calidad validado' : 'Observación');
             v1Set('v1-reviewtrader-health', state === 'PROTECT' ? 'PROTEGIENDO' : state === 'ACTIVE' ? 'ACTIVO' : 'APRENDIENDO', `v1-simple-value ${state === 'ACTIVE' ? 'text-success' : 'text-info'}`);
-            v1Set('v1-reviewtrader-note', `${Number((evidence.total || {}).resolved || 0)} resultados en gobernanza · autoridad positiva ${positiveAuthority ? 'habilitada' : 'bloqueada'}`);
+            const futuresResolved = Number((evidence.total || {}).resolved || 0);
+            window.__v1LastGovernance = {
+                positiveAuthority,
+                futuresResolved,
+                state,
+                strategyVeto,
+                riskGrowthAllowed: Boolean(governance.risk_growth_allowed)
+            };
+            updateV1ReviewTraderNote();
             q5SetText('lo-autopilot-authority', productionAuthority ? 'Habilitada bajo evidencia' : 'Bloqueada');
             q5SetText('lo-strategy-veto-authority', strategyVeto ? `${activeStrategies} activas · veto solamente` : 'Bloqueado');
             q5SetText('lo-leverage-growth', governance.risk_growth_allowed ? 'Habilitado por edge neto' : 'Bloqueado');
@@ -2788,7 +2839,7 @@ async function loadResearchFederationAnalytics(){
             const missing=(coverage.missing_strategic_timeframes||[]);
             covEl.className=`small mb-2 ${missing.length?'text-warning':'text-success'}`;
             const causalInfo=data.profitability_evidence||{};
-            const causal=`Causal ${Number(causalInfo.coverage_cells||0)}/${Number(causalInfo.coverage_target||40)} · Validadas ${Number(causalInfo.validated_cells||0)}/${Number(causalInfo.coverage_target||40)} · OOS+ ${Number(causalInfo.oos_positive_cells||0)}`;
+            const causal=`Causal ${Number(causalInfo.coverage_cells||0)}/${Number(causalInfo.coverage_target||40)} · Validadas ${Number(causalInfo.validated_cells||0)}/${Number(causalInfo.coverage_target||40)} · OOS+ vigente ${Number(causalInfo.oos_positive_cells||0)} · OOS+ evidencia ${Number(causalInfo.oos_positive_evidence_cells ?? causalInfo.oos_positive_cells ?? 0)}`;
             covEl.textContent=`Cobertura estratégica · ${parts.join(' · ')} · ${causal}${missing.length?` · Sin evidencia actual: ${missing.join(', ')}`:''}`;
         }
         const sm=new Map(shadow.map(x=>[x.candidate_key,x]));
@@ -2816,7 +2867,7 @@ async function loadResearchFederationAnalytics(){
         const simpleCoverage=document.getElementById('v1-coverage');
         const simpleCoverageNote=document.getElementById('v1-coverage-note');
         if(simpleCoverage) simpleCoverage.textContent=`${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||40)} investigadas · ${Number(profitability.validated_cells||0)} validadas`;
-        if(simpleCoverageNote) simpleCoverageNote.textContent=`OOS positivo ${Number(profitability.oos_positive_cells||0)} · buscando ${Number(profitability.searching_cells||0)}`;
+        if(simpleCoverageNote) simpleCoverageNote.textContent=`OOS+ vigente ${Number(profitability.oos_positive_cells||0)} · evidencia OOS+ ${Number(profitability.oos_positive_evidence_cells ?? profitability.oos_positive_cells ?? 0)} · buscando ${Number(profitability.searching_cells||0)}`;
         const simpleBucket=(id,noteId,bucket)=>{
             const el=document.getElementById(id), note=document.getElementById(noteId);
             if(!el) return;
@@ -2855,10 +2906,13 @@ async function loadResearchFederationAnalytics(){
                 const oosPnl=(Number.isFinite(Number(row.oos_exp_r))&&oosN>0)?Number(row.oos_exp_r)*oosN:null;
                 const signals=Number(row.shadow_signals_n ?? smRow.signals_n ?? 0);
                 const resolved=Number(row.shadow_n ?? smRow.resolved_n ?? 0);
+                const guardianReplay=row.guardian_operational_replay||{};
+                const guardianDelta=guardianReplay.delta_expectancy_r_vs_original;
+                const guardianDeltaText=guardianDelta===null||guardianDelta===undefined?'--':`${Number(guardianDelta)>=0?'+':''}${fmt(guardianDelta,3)}R`;
                 const shadowState=String(row.shadow_state||'WAITING');
                 const status=row.recycle_required?'♻️ RECICLAR':shadowState==='CONFIRMED'?'✅ CONFIRMANDO':shadowState==='DIVERGED'||shadowState==='EARLY_DIVERGENCE'?'⚠️ DIVERGIENDO':signals>0?'👀 OBSERVANDO':'⏳ ESPERANDO SETUP';
-                return `<tr><td>${row.symbol||'--'}</td><td>${row.timeframe||'--'}</td><td>${uiHumanLabel(row.strategy_family||'Especialista causal')}</td><td>${row.oos_wr==null?'--':fmt(row.oos_wr,1)+'%'}</td><td>${oosPnl==null?'--':(oosPnl>=0?'+':'')+fmt(oosPnl,2)+'R'}</td><td>${row.oos_pf==null?'--':fmt(row.oos_pf,2)}</td><td>${resolved}/${signals}</td><td>${status}</td></tr>`;
-            }).join(''):'<tr><td colspan="8" class="text-muted text-center">Aún no hay especialistas que hayan superado el OOS Guard.</td></tr>';
+                return `<tr><td>${row.symbol||'--'}</td><td>${row.timeframe||'--'}</td><td>${uiHumanLabel(row.strategy_family||'Especialista causal')}</td><td>${row.oos_wr==null?'--':fmt(row.oos_wr,1)+'%'}</td><td>${oosPnl==null?'--':(oosPnl>=0?'+':'')+fmt(oosPnl,2)+'R'}</td><td>${row.oos_pf==null?'--':fmt(row.oos_pf,2)}</td><td class="${guardianDelta==null?'text-muted':Number(guardianDelta)>=0?'text-success':'text-warning'}">${guardianDeltaText}</td><td>${resolved}/${signals}</td><td>${status}</td></tr>`;
+            }).join(''):'<tr><td colspan="9" class="text-muted text-center">Aún no hay especialistas que hayan superado el OOS Guard.</td></tr>';
         }
         const covBody=document.getElementById('v1-coverage-matrix-body');
         if(covBody){

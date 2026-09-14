@@ -212,6 +212,7 @@ def build_trader_scorecard(scoped_rows: Dict[str, Iterable[Dict[str, Any]]], *, 
                 continue
             with_attribution += 1
             market = normalize_market(row).upper() or "UNKNOWN"
+            symbol = str(row.get("symbol") or "UNKNOWN").upper()
             timeframe = str(row.get("timeframe") or "UNKNOWN").upper()
             direction = normalize_action(row.get("action_normalized") or row.get("action"))
             regime = _regime(row)
@@ -454,7 +455,7 @@ def build_trader_intelligence_v2_summary(
     counted once per signal/relation, even when it emitted multiple strategies.
     """
     baseline = build_trader_scorecard(scoped_rows, top_n=top_n)
-    groups: Dict[Tuple[str, str, str, str, str, str], List[Tuple[str, float]]] = defaultdict(list)
+    groups: Dict[Tuple[str, str, str, str, str, str, str], List[Tuple[str, float]]] = defaultdict(list)
     thesis_snapshots = 0
     thesis_signals = 0
     total_rows = 0
@@ -472,6 +473,7 @@ def build_trader_intelligence_v2_summary(
             if final_r is None:
                 continue
             market = normalize_market(row).upper() or "UNKNOWN"
+            symbol = str(row.get("symbol") or "UNKNOWN").upper()
             timeframe = str(row.get("timeframe") or "UNKNOWN").upper()
             direction = normalize_action(row.get("action_normalized") or row.get("action"))
             regime = canonical_regime(_regime(row))
@@ -488,9 +490,11 @@ def build_trader_intelligence_v2_summary(
                 judged = _judge_r(relation, final_r)
                 if judged is None:
                     continue
-                # Market, TF and regime rows. Direction is always kept separate.
-                for tf, rg in (("ALL", "ALL"), (timeframe, "ALL"), (timeframe, regime)):
-                    key = (trader, market, tf, direction, rg, relation)
+                # RC3: la autoridad de rentabilidad NO mezcla símbolos.
+                # Cada trader aprende por mercado × símbolo × TF × dirección × régimen.
+                # Los agregados globales permanecen en el scorecard V1 sólo como diagnóstico.
+                for tf, rg in ((timeframe, "ALL"), (timeframe, regime)):
+                    key = (trader, market, symbol, tf, direction, rg, relation)
                     groups[key].append((_created_key(row), judged))
 
     validation_rows: List[Dict[str, Any]] = []
@@ -504,7 +508,7 @@ def build_trader_intelligence_v2_summary(
         validation = [v for _, v in observations[cut:]]
         discovery_exp = sum(discovery) / len(discovery) if discovery else None
         validation_exp = sum(validation) / len(validation) if validation else None
-        trader, market, tf, direction, regime, relation = key
+        trader, market, symbol, tf, direction, regime, relation = key
 
         if n < 25:
             state = "INSUFFICIENT"
@@ -520,6 +524,7 @@ def build_trader_intelligence_v2_summary(
         validation_rows.append({
             "trader": trader,
             "market": market,
+            "symbol": symbol,
             "timeframe": tf,
             "direction": direction,
             "regime": regime,
@@ -550,6 +555,8 @@ def build_trader_intelligence_v2_summary(
             "min_total_resolved_for_weight_review": 25,
             "min_validation_resolved_for_weight_review": 10,
             "validation_split": "70_30_CHRONOLOGICAL",
+            "symbol_specific": True,
+            "cell_identity": "MARKET_SYMBOL_TIMEFRAME",
             "confidence_is_diagnostic_only": True,
             "abstention_is_measured": True,
             "weights_changed": False,

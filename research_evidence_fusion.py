@@ -202,6 +202,11 @@ def _summary(p: Dict[str, Any], shadow_map: Dict[str, Dict[str, Any]]) -> Dict[s
         "oos_exp_r": _num(val.get("expectancy_r")),
         "oos_pf": _num(val.get("profit_factor")),
         "oos_dd_r": _num(val.get("max_drawdown_r")),
+        "guardian_operational_replay": (
+            val.get("guardian_operational_replay")
+            or (p.get("meta") or {}).get("guardian_operational_replay")
+            or {}
+        ),
         "shadow_target": int((p.get("meta") or {}).get("recommended_shadow_target") or 0),
         "shadow_n": int(live.get("resolved_n") or 0),
         "shadow_signals_n": int(live.get("signals_n") or 0),
@@ -385,11 +390,26 @@ def profitability_snapshot(force: bool = False) -> Dict[str, Any]:
         cell_rows = _best_per_cell(contract_rows)
         cells = {str(r.get("coverage_cell_id") or "").upper() for r in cell_rows if r.get("coverage_cell_id")}
         validated_cells = [r for r in cell_rows if str(r.get("stage")) in _POSITIVE and not r.get("recycle_required")]
+        # RC3 distingue dos conceptos para no mostrar dos verdades distintas:
+        # - vigente: representante actual de la celda (puede haber degradado/retest);
+        # - evidencia final positiva: existe al menos un linaje OOS+ vigente en
+        #   Research para esa misma celda, aunque todavía no sea SHADOW_READY.
         oos_positive_cells = [
             r for r in cell_rows
             if r.get("oos_exp_r") is not None and float(r.get("oos_exp_r")) > 0
             and r.get("oos_pf") is not None and float(r.get("oos_pf")) > 1.0
         ]
+        oos_positive_evidence_cell_ids = {
+            str(r.get("coverage_cell_id") or "").upper()
+            for r in contract_rows
+            if r.get("coverage_cell_id")
+            and str(r.get("stage") or "").upper() != "REJECTED_OOS"
+            and r.get("oos_exp_r") is not None and float(r.get("oos_exp_r")) > 0
+            and (
+                r.get("oos_pf") is None
+                or float(r.get("oos_pf")) > 1.0
+            )
+        }
         spot = [r for r in contract_rows if str((r.get("scope") or {}).get("market_family") or "") in {"CRYPTO_SPOT","PAXG_USDT","PAXG_BTC"}]
         fut = [r for r in contract_rows if str((r.get("scope") or {}).get("market_family") or "") == "CRYPTO_FUTURES"]
         by_market = {}
@@ -414,19 +434,25 @@ def profitability_snapshot(force: bool = False) -> Dict[str, Any]:
                 "strategy_family": r.get("strategy_family"),
                 "oos_n": r.get("oos_n"), "oos_wr": r.get("oos_wr"),
                 "oos_exp_r": r.get("oos_exp_r"), "oos_pf": r.get("oos_pf"),
+                "guardian_operational_replay": r.get("guardian_operational_replay") or {},
                 "shadow_signals_n": r.get("shadow_signals_n"), "shadow_n": r.get("shadow_n"),
                 "shadow_exp_r": r.get("shadow_exp_r"), "shadow_pf": r.get("shadow_pf"),
                 "shadow_target": r.get("shadow_target"), "shadow_state": r.get("shadow_state"),
                 "recycle_required": r.get("recycle_required"),
             })
         return {
-            "version": "V1_RC2_RESEARCH_EVIDENCE_FUSION_V3",
+            "version": "V1_RC3_RESEARCH_EVIDENCE_FUSION_V4",
             "authority": "EVIDENCE_PRIOR_ONLY",
             "coverage_cells": len(cells),
             "coverage_target": _COVERAGE_TARGET,
             "coverage_complete": len(cells) >= _COVERAGE_TARGET,
             "validated_cells": len(validated_cells),
             "oos_positive_cells": len(oos_positive_cells),
+            "oos_positive_evidence_cells": len(oos_positive_evidence_cell_ids),
+            "oos_positive_semantics": {
+                "current_representative": len(oos_positive_cells),
+                "research_evidence_any_current_lineage": len(oos_positive_evidence_cell_ids),
+            },
             "searching_cells": max(0, _COVERAGE_TARGET - len(validated_cells)),
             "recycle_required_cells": sum(1 for r in cell_rows if r.get("recycle_required")),
             "spot": _bucket(spot, "SPOT"),
@@ -444,7 +470,7 @@ def profitability_snapshot(force: bool = False) -> Dict[str, Any]:
         }
     except Exception as exc:
         return {
-            "version": "V1_RC2_RESEARCH_EVIDENCE_FUSION_V3", "authority": "EVIDENCE_PRIOR_ONLY",
+            "version": "V1_RC3_RESEARCH_EVIDENCE_FUSION_V4", "authority": "EVIDENCE_PRIOR_ONLY",
             "state": "UNAVAILABLE", "error": str(exc)[:180], "coverage_cells": 0,
             "coverage_target": _COVERAGE_TARGET, "coverage_complete": False,
             "validated_cells": 0, "oos_positive_cells": 0, "searching_cells": _COVERAGE_TARGET,

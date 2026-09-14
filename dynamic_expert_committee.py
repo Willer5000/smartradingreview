@@ -38,10 +38,11 @@ def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, float(value)))
 
 
-def _key(row: Dict[str, Any]) -> Tuple[str, str, str, str, str, str]:
+def _key(row: Dict[str, Any]) -> Tuple[str, str, str, str, str, str, str]:
     return (
         str(row.get("trader") or "UNKNOWN"),
         str(row.get("market") or "UNKNOWN").upper(),
+        str(row.get("symbol") or "UNKNOWN").upper(),
         str(row.get("timeframe") or "ALL").upper(),
         normalize_action(row.get("direction")),
         canonical_regime(row.get("regime")),
@@ -112,8 +113,8 @@ def build_shadow_profile(
         multiplier = _clamp(multiplier * redundancy_mult, MIN_MULTIPLIER, MAX_MULTIPLIER)
         key = _key(row)
         weights.append({
-            "trader": key[0], "market": key[1], "timeframe": key[2],
-            "direction": key[3], "regime": key[4], "relation": key[5],
+            "trader": key[0], "market": key[1], "symbol": key[2], "timeframe": key[3],
+            "direction": key[4], "regime": key[5], "relation": key[6],
             "multiplier": round(multiplier, 4),
             "validation_expectancy_r": round(val_r, 4),
             "discovery_expectancy_r": round(disc_r, 4) if disc_r is not None else None,
@@ -129,7 +130,7 @@ def build_shadow_profile(
     coverage_complete = bool((governance.get("coverage") or {}).get("complete", False))
     ready_for_canary = bool(governance_quality and coverage_complete and positive_ready >= 2)
 
-    weights.sort(key=lambda r: (r["market"], r["timeframe"], r["trader"], r["direction"], r["regime"]))
+    weights.sort(key=lambda r: (r["market"], r.get("symbol", "UNKNOWN"), r["timeframe"], r["trader"], r["direction"], r["regime"]))
     return {
         "version": DYNAMIC_COMMITTEE_VERSION,
         "authority": "SHADOW_ONLY",
@@ -147,6 +148,8 @@ def build_shadow_profile(
             "min_validation_resolved": MIN_VALIDATION_RESOLVED,
             "redundancy_penalized": True,
             "oos_required": True,
+            "symbol_specific": True,
+            "cell_identity": "MARKET_SYMBOL_TIMEFRAME",
             "cost_governance_required_for_positive_authority": True,
             "cannot_reopen_no_trade_in_production": True,
             "rollback_required_before_future_activation": True,
@@ -176,6 +179,7 @@ def get_shadow_multiplier(
     direction: str,
     regime: str,
     relation: str = "SUPPORT",
+    symbol: str = "ALL",
 ) -> float:
     """Most-specific lookup with safe fallbacks; always research-only."""
     trader = str(trader or "UNKNOWN")
@@ -184,6 +188,7 @@ def get_shadow_multiplier(
     direction = normalize_action(direction)
     regime = canonical_regime(regime)
     relation = str(relation or "SUPPORT").upper()
+    symbol = str(symbol or "ALL").upper()
     profile = get_shadow_profile()
     rows = profile.get("weights") or []
 
@@ -192,6 +197,9 @@ def get_shadow_multiplier(
         if not isinstance(row, dict) or str(row.get("trader")) != trader:
             continue
         if str(row.get("market") or "").upper() != market:
+            continue
+        row_symbol = str(row.get("symbol") or "ALL").upper()
+        if symbol != "ALL" and row_symbol != symbol:
             continue
         if normalize_action(row.get("direction")) != direction:
             continue
@@ -203,7 +211,7 @@ def get_shadow_multiplier(
             continue
         if rg not in {"ALL", "UNKNOWN", regime}:
             continue
-        specificity = int(tf == timeframe) + int(rg == regime)
+        specificity = int(row_symbol == symbol and symbol != 'ALL') + int(tf == timeframe) + int(rg == regime)
         candidates.append((specificity, int(row.get("validation_n") or 0), row))
     if not candidates:
         return 1.0
@@ -271,6 +279,7 @@ def get_governed_multiplier(
     direction: str,
     regime: str,
     relation: str = "SUPPORT",
+    symbol: str = "ALL",
 ) -> Tuple[float, str]:
     """Return the most-specific bounded production multiplier and state.
 
@@ -284,6 +293,7 @@ def get_governed_multiplier(
     direction = normalize_action(direction)
     regime = canonical_regime(regime)
     relation = str(relation or "SUPPORT").upper()
+    symbol = str(symbol or "ALL").upper()
     profile = get_governed_profile()
     rows = profile.get("rows") or []
 
@@ -292,6 +302,9 @@ def get_governed_multiplier(
         if not isinstance(row, dict) or str(row.get("trader")) != trader:
             continue
         if str(row.get("market") or "").upper() != market:
+            continue
+        row_symbol = str(row.get("symbol") or "ALL").upper()
+        if symbol != "ALL" and row_symbol != symbol:
             continue
         if normalize_action(row.get("direction")) != direction:
             continue
@@ -306,7 +319,7 @@ def get_governed_multiplier(
         state = str(row.get("state") or "OBSERVE").upper()
         if state not in {"PROTECT", "CANARY", "ACTIVE"}:
             continue
-        specificity = int(tf == timeframe) + int(rg == regime)
+        specificity = int(row_symbol == symbol and symbol != 'ALL') + int(tf == timeframe) + int(rg == regime)
         candidates.append((specificity, int(row.get("validation_n") or 0), row))
 
     if not candidates:

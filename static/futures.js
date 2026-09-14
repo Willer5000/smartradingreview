@@ -5596,17 +5596,42 @@ window.updateSavedSignalsList = async function() {
                 || guardian.reason
                 || '';
 
-            const guardianProtects = (
-                managementAction === 'PROTECT'
-                || managementAction
-                    === 'PROTECT_AND_EXTEND'
-            );
+            const guardianProtects = [
+                'PROTECT',
+                'PROTECT_AND_EXTEND',
+                'PROTECT_AND_ADD',
+                'PROTECT_ADD_AND_EXTEND'
+            ].includes(managementAction);
 
-            const guardianExtends = (
-                managementAction === 'EXTEND'
-                || managementAction
-                    === 'PROTECT_AND_EXTEND'
-            );        
+            const guardianExtends = [
+                'EXTEND',
+                'PROTECT_AND_EXTEND',
+                'ADD_AND_EXTEND',
+                'PROTECT_ADD_AND_EXTEND'
+            ].includes(managementAction);
+
+            const guardianAdds = [
+                'ADD_POSITION',
+                'PROTECT_AND_ADD',
+                'ADD_AND_EXTEND',
+                'PROTECT_ADD_AND_EXTEND'
+            ].includes(managementAction);
+
+            const suggestedGuardianAddEntry = guardianNumberOrNull(
+                guardian.suggested_add_entry
+            );
+            const suggestedGuardianAddPct = guardianNumberOrNull(
+                guardian.suggested_add_position_pct
+            );
+            const suggestedGuardianAddUsdt = guardianNumberOrNull(
+                guardian.suggested_add_position_usdt
+            );
+            const guardianScaleInRr = guardianNumberOrNull(
+                guardian.scale_in_rr
+            );
+            const guardianTradeState = String(
+                guardian.trade_state || 'HEALTHY'
+            ).toUpperCase();
             if (
                 guardian.action
             ) {
@@ -5617,6 +5642,7 @@ window.updateSavedSignalsList = async function() {
                 if (
                     guardianProtects
                     || guardianExtends
+                    || guardianAdds
                 ) {
 
                     let managementLabel =
@@ -5628,45 +5654,34 @@ window.updateSavedSignalsList = async function() {
                     let managementIcon =
                         '🛡️';
 
-                    if (
-                        guardianProtects
-                        && guardianExtends
-                    ) {
-
-                        managementLabel =
-                            'PROTEGER + EXTENDER';
-
-                        managementBadge =
-                            'info text-dark';
-
-                        managementIcon =
-                            '🛡️🎯';
-
-                    } else if (
-                        guardianProtects
-                    ) {
-
-                        managementLabel =
-                            'PROTEGER';
-
-                        managementBadge =
-                            'primary';
-
-                        managementIcon =
-                            '🛡️';
-
-                    } else if (
-                        guardianExtends
-                    ) {
-
-                        managementLabel =
-                            'EXTENDER OBJETIVO';
-
-                        managementBadge =
-                            'success';
-
-                        managementIcon =
-                            '🎯';
+                    if (guardianProtects && guardianAdds && guardianExtends) {
+                        managementLabel = 'PROTEGER + AUMENTAR + EXTENDER';
+                        managementBadge = 'info text-dark';
+                        managementIcon = '🛡️➕🎯';
+                    } else if (guardianProtects && guardianAdds) {
+                        managementLabel = 'PROTEGER + AUMENTAR';
+                        managementBadge = 'info text-dark';
+                        managementIcon = '🛡️➕';
+                    } else if (guardianAdds && guardianExtends) {
+                        managementLabel = 'AUMENTAR + EXTENDER';
+                        managementBadge = 'success';
+                        managementIcon = '➕🎯';
+                    } else if (guardianProtects && guardianExtends) {
+                        managementLabel = 'PROTEGER + EXTENDER';
+                        managementBadge = 'info text-dark';
+                        managementIcon = '🛡️🎯';
+                    } else if (guardianAdds) {
+                        managementLabel = 'AUMENTAR POSICIÓN';
+                        managementBadge = 'success';
+                        managementIcon = '➕';
+                    } else if (guardianProtects) {
+                        managementLabel = 'PROTEGER';
+                        managementBadge = 'primary';
+                        managementIcon = '🛡️';
+                    } else if (guardianExtends) {
+                        managementLabel = 'EXTENDER OBJETIVO';
+                        managementBadge = 'success';
+                        managementIcon = '🎯';
                     }
 
                     // =============================================
@@ -5928,6 +5943,49 @@ window.updateSavedSignalsList = async function() {
                     }
 
                     // =============================================
+                    // BLOQUE DE AUMENTO DE POSICIÓN
+                    // =============================================
+                    // El Guardian sólo propone piramidar una GANADORA
+                    // protegida. Nunca promedia una pérdida y nunca aplica
+                    // ADD_POSITION a HIGH/VERY_HIGH risk.
+
+                    let addHtml = '';
+
+                    if (guardianAdds) {
+                        addHtml = `
+                            <div class="mt-2 p-2 rounded bg-dark"
+                                 style="border-left:3px solid #20c997;">
+                                <div class="small text-success mb-1">
+                                    <strong>➕ Aumento de posición · sólo confirmación</strong>
+                                </div>
+                                ${suggestedGuardianAddEntry !== null ? `
+                                    <div class="d-flex justify-content-between small">
+                                        <span class="text-muted">Entrada adicional</span>
+                                        <strong class="text-success">${futFormatPrice(suggestedGuardianAddEntry, s.symbol)}</strong>
+                                    </div>` : ''}
+                                ${suggestedGuardianAddPct !== null ? `
+                                    <div class="d-flex justify-content-between small mt-1">
+                                        <span class="text-muted">Máximo adicional</span>
+                                        <strong>${suggestedGuardianAddPct.toFixed(0)}% de la posición original</strong>
+                                    </div>` : ''}
+                                ${suggestedGuardianAddUsdt !== null ? `
+                                    <div class="d-flex justify-content-between small mt-1">
+                                        <span class="text-muted">Margen orientativo</span>
+                                        <strong>${suggestedGuardianAddUsdt.toFixed(2)} USDT</strong>
+                                    </div>` : ''}
+                                ${guardianScaleInRr !== null ? `
+                                    <div class="d-flex justify-content-between small mt-1">
+                                        <span class="text-muted">RR incremental</span>
+                                        <strong>${guardianScaleInRr.toFixed(2)}</strong>
+                                    </div>` : ''}
+                                <div class="small text-muted mt-1">
+                                    Sólo aparece si la operación ya está ganando, el riesgo original puede protegerse y la estructura sigue confirmada.
+                                </div>
+                            </div>
+                        `;
+                    }
+
+                    // =============================================
                     // PROGRESO DE LA POSICIÓN
                     // =============================================
 
@@ -6058,11 +6116,17 @@ window.updateSavedSignalsList = async function() {
                                     }/100
                                 </span>
 
+                                <span class="badge bg-secondary">
+                                    Estado: ${futEscapeHtml(guardianTradeState)}
+                                </span>
+
                             </div>
 
                             ${progressHtml}
 
                             ${protectHtml}
+
+                            ${addHtml}
 
                             ${extendHtml}
 

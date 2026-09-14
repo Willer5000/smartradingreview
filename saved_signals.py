@@ -2620,6 +2620,10 @@ _GUARDIAN_LEARNING_ACTIONS = {
     'PROTECT',
     'EXTEND',
     'PROTECT_AND_EXTEND',
+    'ADD_POSITION',
+    'PROTECT_AND_ADD',
+    'ADD_AND_EXTEND',
+    'PROTECT_ADD_AND_EXTEND',
     'REDUCE',
     'EXIT',
 }
@@ -3453,6 +3457,177 @@ def _guardian_protect_counterfactual(
 
 
 # ============================================================================
+# FINAL V1 RC3 — CONTRAFACTUAL EXIT VS HOLD ORIGINAL
+# ============================================================================
+
+def _guardian_exit_hold_counterfactual(
+    event: Dict,
+    signal: Dict,
+    price_fetcher=None
+) -> Dict:
+    """Compara el EXIT del Guardian contra mantener el plan original.
+
+    Resuelve el problema más importante de 36Q: si el usuario obedece EXIT y
+    cierra manualmente, el aprendizaje NO termina ahí. Se sigue virtualmente
+    Entry/SL/TP originales hasta TP, SL o expiración. Así un EXIT que corta un
+    ganador queda registrado como perjudicial y uno que evita un SL como útil.
+
+    No modifica ``saved_signals`` ni reabre la operación real.
+    """
+    if price_fetcher is None:
+        return {
+            'counterfactual_status': 'PENDING',
+            'evaluation_note': 'Esperando camino Futures para comparar EXIT vs HOLD.'
+        }
+
+    try:
+        import pandas as pd
+        from datetime import timedelta
+
+        direction = str(signal.get('action') or event.get('direction') or '').upper()
+        if direction not in {'LONG', 'SHORT'}:
+            return {
+                'counterfactual_status': 'NOT_QUANTIFIABLE_DIRECTION',
+                'evaluation_note': 'Dirección LONG/SHORT inválida.'
+            }
+
+        original_sl = float(event.get('original_stop_loss') or signal.get('stop_loss') or 0)
+        original_tp = float(event.get('original_take_profit') or signal.get('take_profit') or 0)
+        if original_sl <= 0 or original_tp <= 0:
+            return {
+                'counterfactual_status': 'NOT_QUANTIFIABLE_LEVELS',
+                'evaluation_note': 'Faltan SL/TP originales para reconstruir HOLD.'
+            }
+
+        df = price_fetcher(signal.get('symbol'), signal.get('timeframe'))
+        if df is None or len(df) == 0 or 'time' not in df:
+            return {
+                'counterfactual_status': 'PENDING',
+                'evaluation_note': 'Todavía no existe camino Futures suficiente.'
+            }
+
+        observed_at = pd.Timestamp(event.get('observed_at'))
+        if observed_at.tz is None:
+            observed_at = observed_at.tz_localize('UTC')
+        else:
+            observed_at = observed_at.tz_convert('UTC')
+
+        entry_touch_raw = (
+            signal.get('entry_touched_at')
+            or signal.get('entry_at')
+            or signal.get('created_at')
+        )
+        entry_touch = pd.Timestamp(entry_touch_raw) if entry_touch_raw else observed_at
+        if entry_touch.tz is None:
+            entry_touch = entry_touch.tz_localize('UTC')
+        else:
+            entry_touch = entry_touch.tz_convert('UTC')
+
+        tf = str(signal.get('timeframe') or '')
+        tf_minutes = {
+            '5m': 5, '15m': 15, '30m': 30, '1h': 60, '2h': 120,
+            '4h': 240, '12h': 720, '1D': 1440, '1W': 10080,
+        }.get(tf, 60)
+        expiration_hours = {
+            '5m': 2, '15m': 6, '30m': 12, '1h': 24, '2h': 48,
+            '4h': 96, '12h': 168, '1D': 336, '1W': 1680,
+        }.get(tf, 24)
+        evaluation_end = entry_touch + timedelta(hours=expiration_hours)
+        now = pd.Timestamp.now(tz='UTC')
+
+        df_time = pd.to_datetime(df['time'], utc=True, errors='coerce')
+        candle_close = df_time + pd.to_timedelta(tf_minutes, unit='m')
+        # Sólo velas completamente cerradas después del evento.
+        path = df[
+            (df_time > observed_at)
+            & (candle_close <= min(now, evaluation_end))
+        ].copy()
+        if len(path) == 0:
+            return {
+                'counterfactual_status': 'PENDING',
+                'evaluation_note': 'Esperando al menos una vela cerrada posterior al EXIT.'
+            }
+
+        for _, bar in path.iterrows():
+            high = float(bar['high'])
+            low = float(bar['low'])
+            if direction == 'LONG':
+                sl_hit = low <= original_sl
+                tp_hit = high >= original_tp
+            else:
+                sl_hit = high >= original_sl
+                tp_hit = low <= original_tp
+
+            if sl_hit and tp_hit:
+                return {
+                    'counterfactual_status': 'NOT_QUANTIFIABLE_SAME_CANDLE_ORDER',
+                    'evaluation_note': (
+                        'El plan HOLD habría tocado TP y SL en la misma vela; '
+                        'no se inventa el orden intrabar.'
+                    )
+                }
+            if not sl_hit and not tp_hit:
+                continue
+
+            hold_exit = original_tp if tp_hit else original_sl
+            hold_r = _calculate_trade_r(signal, hold_exit)
+            guardian_r = float(
+                event.get('observed_r')
+                if event.get('observed_r') is not None
+                else _calculate_trade_r(signal, float(event.get('observed_price') or 0))
+            )
+            delta_r = guardian_r - hold_r
+            return {
+                'counterfactual_status': (
+                    'EVALUATED_HOLD_TP' if tp_hit else 'EVALUATED_HOLD_SL'
+                ),
+                'counterfactual_exit_price': round(hold_exit, 8),
+                # En RC3 counterfactual_r representa el resultado del HOLD
+                # original; actual_close_r conserva el cierre real del usuario.
+                'counterfactual_r': round(hold_r, 6),
+                'delta_r': round(delta_r, 6),
+                'would_help': bool(delta_r > 0),
+                'evaluation_note': (
+                    'EXIT Guardian comparado contra HOLD original: '
+                    + ('el plan original alcanzó TP.' if tp_hit else 'el plan original alcanzó SL.')
+                ),
+            }
+
+        # Si todavía no venció el horizonte original, seguimos observando aun
+        # cuando el usuario ya haya cerrado manualmente.
+        if now < evaluation_end:
+            return {
+                'counterfactual_status': 'PENDING',
+                'evaluation_note': 'EXIT real cerrado; HOLD original continúa en shadow hasta TP/SL/expiración.'
+            }
+
+        # Expiró sin TP/SL: usamos el último cierre cerrado dentro del horizonte.
+        last_close = float(path['close'].iloc[-1])
+        hold_r = _calculate_trade_r(signal, last_close)
+        guardian_r = float(
+            event.get('observed_r')
+            if event.get('observed_r') is not None
+            else _calculate_trade_r(signal, float(event.get('observed_price') or 0))
+        )
+        delta_r = guardian_r - hold_r
+        return {
+            'counterfactual_status': 'EVALUATED_HOLD_EXPIRED',
+            'counterfactual_exit_price': round(last_close, 8),
+            'counterfactual_r': round(hold_r, 6),
+            'delta_r': round(delta_r, 6),
+            'would_help': bool(delta_r > 0),
+            'evaluation_note': 'HOLD original expiró sin TP/SL; comparación a cierre del horizonte.'
+        }
+
+    except Exception as e:
+        logger.warning(f'_guardian_exit_hold_counterfactual: {e}')
+        return {
+            'counterfactual_status': 'PENDING',
+            'evaluation_note': 'No se pudo reconstruir todavía el HOLD original.'
+        }
+
+
+# ============================================================================
 # 36Q.2 + 36Q.3
 # CERRAR EL CONTRAFACTUAL CUANDO TERMINA LA OPERACIÓN REAL
 # ============================================================================
@@ -3723,76 +3898,17 @@ def settle_pending_guardian_learning_events(
 
                 if action == 'EXIT':
 
-                    observed_price = float(
-                        event.get(
-                            'observed_price',
-                            0
-                        )
-                        or 0
-                    )
-
-
-                    event_r_raw = (
-                        event.get(
-                            'observed_r'
+                    # RC3: aunque el usuario haya obedecido el EXIT y cerrado
+                    # manualmente, seguimos el plan original en SHADOW hasta
+                    # TP/SL/expiración. Así medimos si Guardian salvó R o cortó
+                    # un ganador.
+                    result.update(
+                        _guardian_exit_hold_counterfactual(
+                            event=event,
+                            signal=signal,
+                            price_fetcher=price_fetcher,
                         )
                     )
-
-
-                    event_r = (
-                        float(
-                            event_r_raw
-                        )
-                        if event_r_raw
-                        is not None
-                        else _calculate_trade_r(
-                            signal,
-                            observed_price
-                        )
-                    )
-
-
-                    delta_r = (
-                        event_r
-                        - actual_r
-                    )
-
-
-                    result.update({
-
-                        'counterfactual_status':
-                            'EVALUATED',
-
-                        'counterfactual_exit_price':
-                            round(
-                                observed_price,
-                                8
-                            ),
-
-                        'counterfactual_r':
-                            round(
-                                event_r,
-                                6
-                            ),
-
-                        'delta_r':
-                            round(
-                                delta_r,
-                                6
-                            ),
-
-                        'would_help':
-                            bool(
-                                delta_r > 0
-                            ),
-
-                        'evaluation_note':
-                            (
-                                'EXIT se compara como cierre '
-                                'total en el precio observado '
-                                'por Guardian.'
-                            )
-                    })
 
 
                 # ====================================================
@@ -3888,6 +4004,24 @@ def settle_pending_guardian_learning_events(
                                 'produciría un delta-R '
                                 'incompleto.'
                             )
+                    })
+
+
+                elif action in (
+                    'ADD_POSITION',
+                    'PROTECT_AND_ADD',
+                    'ADD_AND_EXTEND',
+                    'PROTECT_ADD_AND_EXTEND',
+                ):
+
+                    result.update({
+                        'counterfactual_status':
+                            'NOT_QUANTIFIABLE_SCALE_IN_SIZE',
+                        'evaluation_note': (
+                            'RC3 registra la recomendación de aumentar posición, '
+                            'pero no inventa fills ni tamaño ejecutado. La '
+                            'autoridad sigue siendo recomendación manual.'
+                        )
                     })
 
 
