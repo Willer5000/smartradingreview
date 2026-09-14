@@ -1292,10 +1292,11 @@ function updateV1ReviewTraderNote() {
 function renderV1EntryAudit(data) {
     const cohort = data?.cohort_integrity_v1 || {};
     const counts = cohort?.counts || {};
-    const official = Number(counts.OFFICIAL_CURRENT_SPOT || 0) + Number(counts.OFFICIAL_CURRENT_FUTURES || 0);
-    const excluded = Number(counts.LEGACY_ARCHIVE || 0) + Number(counts.LEGACY_OR_UNVERIFIED_SPOT || 0) + Number(counts.LEGACY_OR_UNVERIFIED_FUTURES || 0);
+    const officialSpot = Number(counts.OFFICIAL_CURRENT_SPOT || 0);
+    const officialFutures = Number(counts.OFFICIAL_CURRENT_FUTURES || 0);
+    const excluded = Number(counts.LEGACY_RESEARCH_OR_UNVERIFIED || 0) + Number(counts.LEGACY_ARCHIVE || 0) + Number(counts.LEGACY_OR_UNVERIFIED_SPOT || 0) + Number(counts.LEGACY_OR_UNVERIFIED_FUTURES || 0);
     q5SetText('v1-cohort-health', cohort?.state === 'UNAVAILABLE' ? 'REVISAR' : 'ESTANDARIZADA');
-    q5SetText('v1-cohort-note', `Oficial actual: ${official} · legado/no verificable separado: ${excluded}. No se borra historial.`);
+    q5SetText('v1-cohort-note', `Spot ${officialSpot} · Futures ${officialFutures} · fuera de cohorte ${excluded}. Historial preservado.`);
     const observatory = data?.learning_observatory_v1 || {};
     const execution = observatory?.execution_forensics || data?.execution_forensics_v2 || {};
     const futures = execution.futures_official || {};
@@ -1595,7 +1596,9 @@ async function runLearningScientistTest() {
 async function loadLearningGovernanceStatus() {
     const requests = [
         v1FetchJson('/api/review/autopilot/status', {cache:'no-store'}, 9000).then(({response,json}) => ({ kind: 'autopilot', response, json })),
-        v1FetchJson('/api/ai/gemini-activity', {cache:'no-store'}, 9000).then(({response,json}) => ({ kind: 'gemini', response, json }))
+        v1FetchJson('/api/ai/gemini-activity', {cache:'no-store'}, 9000).then(({response,json}) => ({ kind: 'gemini', response, json })),
+        v1FetchJson('/api/ai/control-activity', {cache:'no-store'}, 7000).then(({response,json}) => ({ kind: 'ai_control', response, json })),
+        v1FetchJson('/api/telegram/status', {cache:'no-store'}, 7000).then(({response,json}) => ({ kind: 'telegram', response, json }))
     ];
 
     const results = await Promise.allSettled(requests);
@@ -1691,7 +1694,7 @@ async function loadLearningGovernanceStatus() {
             if (simpleScientist) {
                 const schedState = String(scheduler.status || 'UNKNOWN').toUpperCase();
                 simpleScientist.textContent = schedulerAt === '--' ? `⚠️ ${uiHumanLabel(schedState)}` : `✅ ${uiHumanLabel(schedState)}`;
-                simpleScientist.className = `v1-simple-value ${schedulerAt === '--' ? 'text-warning' : (['DONE','SUCCESS','RUNNING_LLM','CHECKING_SLOT','CLAIMING_SLOT'].includes(schedState) ? 'text-success' : 'text-warning')}`;
+                simpleScientist.className = `v1-simple-value ${schedulerAt === '--' ? 'text-warning' : (['DONE','SUCCESS','RUNNING_LLM','CHECKING_SLOT','CLAIMING_SLOT','SLOT_ALREADY_DONE'].includes(schedState) ? 'text-success' : (schedState === 'SLOT_CLAIMED_BY_OTHER_WORKER' ? 'text-info' : 'text-warning'))}`;
             }
             if (simpleScientistNote) {
                 const runtimeError = String(scheduler.runtime_error || json.data?.scheduler_runtime?.last_error || '').trim();
@@ -1699,6 +1702,21 @@ async function loadLearningGovernanceStatus() {
                     ? (runtimeError ? `Error: ${runtimeError}` : 'Sin intento persistido todavía; watchdog independiente en espera.')
                     : `Último intento: ${formatDate(schedulerAt)}${lastText !== '--' ? ` · último éxito: ${formatDate(lastText)}` : ''}${runtimeError ? ` · ${runtimeError}` : ''}`;
             }
+        }
+
+        if (kind === 'ai_control' && json.success) {
+            const d = json.data || {};
+            const state = String(d.status || 'NO_DATA').toUpperCase();
+            q5SetText('v1-trader-ai-health', state === 'ACTIVE' ? 'ACTIVO' : state === 'WAITING_EVENT' ? 'ESPERANDO' : uiHumanLabel(state));
+            const last = d.last_event || {};
+            q5SetText('v1-trader-ai-note', `24h: ${Number(d.total_recent||0)} revisiones · ${Number(d.blocked_signals_recent||0)} bloqueos · ${Number(d.guardian_interventions_recent||0)} Guardian${last.updated_at ? ` · último ${formatDate(last.updated_at)}` : ''}`);
+        }
+
+        if (kind === 'telegram' && json.success) {
+            const d = json.data || {};
+            const state = String(d.status || 'UNKNOWN').toUpperCase();
+            q5SetText('v1-telegram-health', state === 'ACTIVE' ? 'ACTIVO' : uiHumanLabel(state));
+            q5SetText('v1-telegram-note', d.configured ? `OK ${Number(d.successes||0)} · fallos ${Number(d.failures||0)}${d.last_success_at ? ` · último ${formatDate(d.last_success_at)}` : ''}` : 'Credenciales no configuradas');
         }
     });
 }

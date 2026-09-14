@@ -260,6 +260,35 @@ else:
         "⚠️ Telegram no configurado: "
         "faltan TELEGRAM_BOT_TOKEN y/o TELEGRAM_CHAT_ID"
     )
+
+# RC4.1 — salud de transporte Telegram. No contiene secretos y no hace polling.
+_TELEGRAM_HEALTH_LOCK = threading.Lock()
+_TELEGRAM_HEALTH = {
+    'configured': bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+    'attempts': 0, 'successes': 0, 'failures': 0,
+    'last_attempt_at': None, 'last_success_at': None, 'last_failure_at': None,
+    'last_category': None, 'last_error': None,
+}
+
+def _telegram_health_update(success=None, category='GENERIC', error=None):
+    with _TELEGRAM_HEALTH_LOCK:
+        now = datetime.now(timezone.utc).isoformat()
+        _TELEGRAM_HEALTH['attempts'] += 1
+        _TELEGRAM_HEALTH['last_attempt_at'] = now
+        _TELEGRAM_HEALTH['last_category'] = str(category or 'GENERIC')[:40]
+        if success is True:
+            _TELEGRAM_HEALTH['successes'] += 1
+            _TELEGRAM_HEALTH['last_success_at'] = now
+            _TELEGRAM_HEALTH['last_error'] = None
+        elif success is False:
+            _TELEGRAM_HEALTH['failures'] += 1
+            _TELEGRAM_HEALTH['last_failure_at'] = now
+            _TELEGRAM_HEALTH['last_error'] = str(error or 'UNKNOWN')[:180]
+        return dict(_TELEGRAM_HEALTH)
+
+def _telegram_health_snapshot():
+    with _TELEGRAM_HEALTH_LOCK:
+        return dict(_TELEGRAM_HEALTH)
 # Configuración de pares
 SYMBOLS = {
     'BTC-USDT': {'name': 'BTC/USDT', 'type': 'crypto', 'decimals': 2},
@@ -11075,139 +11104,61 @@ class TradingExpertSystem:
 
     
     def calculate_correlation_from_results(self, results, current_symbol):
-        """Calcula la correlación directamente desde los resultados de analyze_all_pairs"""
+        """RC4.1 — rotación Spot con calidad de datos explícita.
+
+        Reutiliza la capa canónica (que incluye señales unilaterales) y nunca
+        convierte una rama ausente en "NEUTRAL ADX 0" silenciosamente.
+        """
         try:
-            print(f"\n{'='*60}")
-            print(f"📊 [CORRELACIÓN RADICAL] Procesando para {current_symbol}")
-            print(f"{'='*60}")
-            
-            # Obtener análisis de los 3 pares
-            btc_result = results.get('BTC-USDT', {})
-            paxg_result = results.get('PAXG-USDT', {})
-            ratio_result = results.get('PAXG-BTC', {})
-            
-            # Extraer datos de BTC
-            btc_trend = btc_result.get('trend', {})
-            btc_decision = btc_result.get('decision', {})
-            
-            btc_action = btc_decision.get('action', 'NO_OPERAR')
-            btc_confidence = btc_decision.get('confidence', 0)
-            btc_direction = btc_trend.get('direction', 'neutral')
-            btc_adx = float(btc_trend.get('adx', 0))
-            btc_plus_di = float(btc_trend.get('plus_di', 0))
-            btc_minus_di = float(btc_trend.get('minus_di', 0))
-            
-            # Extraer datos de PAXG
-            paxg_trend = paxg_result.get('trend', {})
-            paxg_direction = paxg_trend.get('direction', 'neutral')
-            paxg_adx = float(paxg_trend.get('adx', 0))
-            
-            # Extraer datos del RATIO
-            ratio_trend = ratio_result.get('trend', {})
-            ratio_decision = ratio_result.get('decision', {})
-            
-            ratio_action = ratio_decision.get('action', 'NO_OPERAR')
-            ratio_confidence = ratio_decision.get('confidence', 0)
-            ratio_direction = ratio_trend.get('direction', 'neutral')
-            ratio_adx = float(ratio_trend.get('adx', 0))
-            
-            print(f"\n📊 Datos extraídos:")
-            print(f"   BTC: acción={btc_action} (conf {btc_confidence:.0f}%), tendencia={btc_direction}, ADX={btc_adx:.1f}")
-            print(f"   RATIO: acción={ratio_action} (conf {ratio_confidence:.0f}%), tendencia={ratio_direction}, ADX={ratio_adx:.1f}")
-            print(f"   PAXG: tendencia={paxg_direction}, ADX={paxg_adx:.1f}")
-            
-            # ============ LÓGICA DE ROTACIÓN (IGUAL QUE ANTES) ============
-            rotation_signal = 'NEUTRAL'
-            weight_modifier = 1.0
-            
-            # RISK_ON: BTC compra/alcista + ratio venta/bajista
-            if (btc_action in ['COMPRA_SPOT', 'LONG'] or btc_direction == 'bullish') and \
-               (ratio_action in ['VENTA_SPOT', 'SHORT'] or ratio_direction == 'bearish'):
-                rotation_signal = 'RISK_ON'
-                weight_modifier = 1.3 if current_symbol == 'BTC-USDT' else 1.2
-            
-            # RISK_OFF: BTC venta/bajista + ratio compra/alcista
-            elif (btc_action in ['VENTA_SPOT', 'SHORT'] or btc_direction == 'bearish') and \
-                 (ratio_action in ['COMPRA_SPOT', 'LONG'] or ratio_direction == 'bullish'):
-                rotation_signal = 'RISK_OFF'
-                weight_modifier = 1.3 if current_symbol == 'PAXG-USDT' else 1.2
-            
-            # POSITIVE_CORRELATION
-            elif btc_direction == 'bullish' and ratio_direction == 'bullish':
-                rotation_signal = 'POSITIVE_CORRELATION'
-                weight_modifier = 1.1
-            
-            # NEGATIVE_CORRELATION
-            elif btc_direction == 'bearish' and ratio_direction == 'bearish':
-                rotation_signal = 'NEGATIVE_CORRELATION'
-                weight_modifier = 0.9
-            
-            # BTC_STRONGER
-            elif btc_direction == 'bullish' and paxg_direction == 'bearish':
-                rotation_signal = 'BTC_STRONGER'
-                weight_modifier = 1.15 if current_symbol == 'BTC-USDT' else 1.0
-            
-            # PAXG_STRONGER
-            elif paxg_direction == 'bullish' and btc_direction == 'bearish':
-                rotation_signal = 'PAXG_STRONGER'
-                weight_modifier = 1.15 if current_symbol == 'PAXG-USDT' else 1.0
-            
-            print(f"\n📊 RESULTADO RADICAL:")
-            print(f"   Señal: {rotation_signal}")
-            print(f"   Weight modifier: {weight_modifier}")
-            print(f"{'='*60}\n")
-            
-            return {
-                'rotation_signal': rotation_signal,
-                'weight_modifier': weight_modifier,
-                'btc_analysis': {
-                    'decision': {'action': btc_action, 'confidence': btc_confidence},
-                    'trend': {
-                        'direction': btc_direction,
-                        'adx': btc_adx,
-                        'plus_di': btc_plus_di,
-                        'minus_di': btc_minus_di
-                    }
-                },
-                'paxg_analysis': {
-                    'trend': {
-                        'direction': paxg_direction,
-                        'adx': paxg_adx
-                    }
-                },
-                'paxg_btc_analysis': {
-                    'decision': {'action': ratio_action, 'confidence': ratio_confidence},
-                    'trend': {
-                        'direction': ratio_direction,
-                        'adx': ratio_adx
-                    }
-                }
+            keys = ('BTC-USDT', 'PAXG-USDT', 'PAXG-BTC')
+            clean = {}
+            available = []
+            missing = []
+            for key in keys:
+                row = (results or {}).get(key)
+                ok = isinstance(row, dict) and bool(row.get('success', True)) and bool(row.get('trend') or row.get('decision'))
+                if ok:
+                    clean[key] = row
+                    available.append(key)
+                else:
+                    clean[key] = None
+                    missing.append(key)
+
+            out = self.analyze_correlation_layer(
+                clean.get('BTC-USDT'),
+                clean.get('PAXG-USDT'),
+                clean.get('PAXG-BTC'),
+                current_symbol,
+            ) or {}
+            out['data_quality'] = {
+                'available': available,
+                'missing': missing,
+                'coverage_pct': round(100.0 * len(available) / len(keys), 1),
+                'complete': not missing,
             }
-            
-        except Exception as e:
-            print(f"❌ Error en calculate_correlation_from_results: {e}")
-            import traceback
-            traceback.print_exc()
+            for key, api_key in (
+                ('BTC-USDT', 'btc_analysis'),
+                ('PAXG-USDT', 'paxg_analysis'),
+                ('PAXG-BTC', 'paxg_btc_analysis'),
+            ):
+                if key in missing:
+                    out[api_key] = None
+                elif isinstance(out.get(api_key), dict):
+                    out[api_key]['available'] = True
+            return out
+        except Exception as exc:
+            print(f"❌ Error en calculate_correlation_from_results RC4.1: {exc}")
             return {
-                'rotation_signal': 'NEUTRAL',
+                'rotation_signal': 'DATA_UNAVAILABLE',
+                'correlation_score': 0,
                 'weight_modifier': 1.0,
-                'btc_analysis': {
-                    'decision': {'action': 'N/A'},
-                    'trend': {'direction': 'neutral', 'adx': 0}
-                },
-                'paxg_analysis': {
-                    'trend': {'direction': 'neutral', 'adx': 0}
-                },
-                'paxg_btc_analysis': {
-                    'decision': {'action': 'N/A'},
-                    'trend': {'direction': 'neutral', 'adx': 0}
-                }
-            }   
-    
-    
-    
-    
-    
+                'btc_analysis': None,
+                'paxg_analysis': None,
+                'paxg_btc_analysis': None,
+                'data_quality': {'available': [], 'missing': ['BTC-USDT','PAXG-USDT','PAXG-BTC'], 'coverage_pct': 0.0, 'complete': False},
+            }
+
+
     # ========================================================================
     # ANALISIS DEL HORARIO DEL MERCADO
     # ========================================================================
@@ -21181,53 +21132,48 @@ class TradingExpertSystem:
     # === FUNCIÓN COMPLETA: send_telegram_alert ===
     # Ubicación: Reemplazar entre línea 1780 y línea 1805 aproximadamente
     
-    def send_telegram_alert(self, message, image_bytes=None):
-        """Enviar alerta a Telegram con imagen adjunta (ahora con todos los gráficos)"""
+    def send_telegram_alert(self, message, image_bytes=None, category=None):
+        """Envía Telegram y registra salud de transporte sin lluvia de polling."""
+        category = category or (
+            'FUTURES_GUARDIAN' if 'GUARDIAN' in str(message).upper() else
+            'ENTRY' if 'ENTRY' in str(message).upper() else
+            'SPOT_OR_SYSTEM'
+        )
         try:
             if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+                _telegram_health_update(False, category, 'NOT_CONFIGURED')
                 print("❌ Error: Credenciales de Telegram no configuradas")
                 return False
-            
             print(f"      📤 Telegram: Enviando mensaje ({len(message)} chars)")
-            
-            # Enviar mensaje de texto
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            
             if len(message) > 4000:
                 message = message[:4000] + "...\n\n[Mensaje truncado]"
-            
-            payload = {
-                'chat_id': TELEGRAM_CHAT_ID,
-                'text': message,
-                'parse_mode': 'HTML',
-                'disable_web_page_preview': True
-            }
-            
+            payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'HTML', 'disable_web_page_preview': True}
             response = requests.post(url, json=payload, timeout=15)
-            
-            if response.status_code != 200:
-                print(f"      ❌ Error HTTP {response.status_code}")
+            try:
+                body = response.json()
+            except Exception:
+                body = {}
+            if response.status_code != 200 or body.get('ok') is not True:
+                error = body.get('description') or f'HTTP {response.status_code}'
+                _telegram_health_update(False, category, error)
+                print(f"      ❌ Telegram no confirmó envío: {error}")
                 return False
-            
-            # Enviar imagen si existe
             if image_bytes:
-                print(f"      📤 Enviando imagen ({len(image_bytes)} bytes)")
                 url_photo = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-                
                 files = {'photo': ('chart.png', image_bytes, 'image/png')}
                 data = {'chat_id': TELEGRAM_CHAT_ID}
-                
                 response_photo = requests.post(url_photo, files=files, data=data, timeout=30)
-                
-                if response_photo.status_code == 200:
-                    print(f"      ✅ Imagen enviada")
-                else:
-                    print(f"      ⚠️ Error imagen: {response_photo.status_code}")
-                    print(f"      {response_photo.text[:200]}")
-            
+                try:
+                    photo_body = response_photo.json()
+                except Exception:
+                    photo_body = {}
+                if response_photo.status_code != 200 or photo_body.get('ok') is not True:
+                    print(f"      ⚠️ Imagen Telegram no confirmada: {photo_body.get('description') or response_photo.status_code}")
+            _telegram_health_update(True, category)
             return True
-            
         except Exception as e:
+            _telegram_health_update(False, category, f'{type(e).__name__}: {str(e)[:120]}')
             print(f"      ❌ Error crítico: {e}")
             return False
     # === FIN FUNCIÓN COMPLETA ===
@@ -29709,6 +29655,18 @@ def api_kpis_frontend_signals():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/telegram/status', methods=['GET'])
+def api_telegram_status():
+    """RC4.1 read-only: salud de envíos, sin llamar a Telegram."""
+    if not _authenticated_user():
+        return jsonify({'success': False, 'error': 'Debes iniciar sesión.'}), 401
+    data = _telegram_health_snapshot()
+    data['configured'] = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+    data['status'] = ('NOT_CONFIGURED' if not data['configured'] else
+                      'ERROR' if data.get('last_failure_at') and not data.get('last_success_at') else
+                      'ACTIVE' if data.get('last_success_at') else 'WAITING_FIRST_DELIVERY')
+    return jsonify({'success': True, 'data': data}), 200
+
 @app.route('/api/telegram/test', methods=['POST'])
 def api_telegram_test():
     """Prueba liviana y explícita de TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID.
@@ -29753,12 +29711,14 @@ def api_telegram_test():
                 payload.get('description')
                 or f'HTTP {response.status_code}'
             )[:240]
+            _telegram_health_update(False, 'MANUAL_TEST', description)
             print(f"❌ Telegram test falló: {description}")
             return jsonify({
                 'success': False,
                 'error': f'Telegram no confirmó la prueba: {description}',
             }), 502
 
+        _telegram_health_update(True, 'MANUAL_TEST')
         print('✅ Telegram test: mensaje entregado correctamente')
         return jsonify({
             'success': True,
@@ -29766,6 +29726,7 @@ def api_telegram_test():
             'message': 'Telegram respondió correctamente. Revisa el chat configurado.',
         })
     except requests.RequestException as exc:
+        _telegram_health_update(False, 'MANUAL_TEST', str(exc))
         print(f"❌ Telegram test error de red: {exc}")
         return jsonify({
             'success': False,
@@ -33124,6 +33085,7 @@ def _classify_futures_analysis_result(
 def _build_futures_analysis_visibility(cache, min_confidence):
     """Construye el resumen compacto de todas las combinaciones analizadas."""
     cache = cache or {}
+    from futures_system import futures_timeframe_allowed
     lifecycle = cache.get('lifecycle') or {}
     candidates = []
 
@@ -33145,6 +33107,11 @@ def _build_futures_analysis_visibility(cache, min_confidence):
                     if isinstance(result, dict)
                     else ''
                 )
+
+        # RC4.1: cachés Legacy 5m/15m permanecen como historia, nunca como
+        # señal/diagnóstico operativo de la matriz activa.
+        if not futures_timeframe_allowed(symbol, timeframe):
+            continue
 
         candidates.append(
             _classify_futures_analysis_result(
@@ -33224,6 +33191,7 @@ def api_futures_signals_active():
         filter_stats = {
             'total_processed': 0,
             'not_active': 0,
+            'outside_active_contract': 0,
             'low_confidence': 0,
             'invalid_levels': 0,
             'leverage_out_of_range': 0,
@@ -33245,6 +33213,10 @@ def api_futures_signals_active():
 
             symbol = record.get('symbol')
             tf = record.get('timeframe')
+            from futures_system import futures_timeframe_allowed
+            if not futures_timeframe_allowed(symbol, tf):
+                filter_stats['outside_active_contract'] += 1
+                continue
             action = str(record.get('action') or '').upper()
             confidence = float(record.get('confidence') or 0)
 
@@ -33562,6 +33534,7 @@ def api_futures_signals_previous():
         previous_signals = []
         filter_stats = {
             'total_processed': 0,
+            'outside_active_contract': 0,
             'non_directional': 0,
             'non_executable': 0,
             'low_confidence': 0,
@@ -33570,9 +33543,11 @@ def api_futures_signals_previous():
             'accepted': 0
         }        
         for (symbol, tf), result in cache['analysis'].items(): 
-            filter_stats[
-                'total_processed'
-            ] += 1
+            filter_stats['total_processed'] += 1
+            from futures_system import futures_timeframe_allowed
+            if not futures_timeframe_allowed(symbol, tf):
+                filter_stats['outside_active_contract'] += 1
+                continue
             if not result or not result.get('success'):
                 continue
             
@@ -33877,11 +33852,12 @@ def api_futures_correlation():
     """Correlación intra-cripto: qué cripto tendrá más fuerza direccional en el TF."""
     try:
         timeframe = request.args.get('timeframe', '1h')
+        selected_symbol = str(request.args.get('symbol') or 'BTC-USDT').upper().replace('/', '-')
         
         global _futures_correlation_cache
         now_ts = time.time()
         cache = _futures_correlation_cache
-        if (cache.get('data') is not None and cache.get('key') == timeframe
+        if (cache.get('data') is not None and cache.get('key') == (timeframe, selected_symbol)
             and (now_ts - cache['ts']) < 180):
             return jsonify(cache['data'])
         
@@ -33939,6 +33915,37 @@ def api_futures_correlation():
         
         top_long = [r for r in ranking if r['direction'] == 'bullish' and r['adx'] >= 20][:3]
         top_short = [r for r in ranking if r['direction'] == 'bearish' and r['adx'] >= 20][:3]
+
+        # RC4.1: contexto intermercado Futures usa sólo datos ya calculados.
+        # No llama a APIs nuevas ni reutiliza semántica de rotación BTC/PAXG.
+        selected_result = analysis_cache['analysis'].get((selected_symbol, timeframe), {}) or {}
+        micro = selected_result.get('futures_microstructure_context') or {}
+        micro_metrics = micro.get('metrics') or {} if isinstance(micro, dict) else {}
+        quant = selected_result.get('futures_quantitative_context') or {}
+        def _htf_snapshot(tf):
+            row = analysis_cache['analysis'].get(('BTC-USDT', tf), {}) or {}
+            tr = row.get('trend') or {}
+            dec = row.get('decision') or {}
+            return {
+                'available': bool(row.get('success')),
+                'direction': tr.get('direction'),
+                'adx': tr.get('adx'),
+                'action': dec.get('action'),
+                'confidence': dec.get('confidence'),
+            }
+        breadth_bull = sum(1 for d in pairs_data.values() if d.get('available') and d.get('direction') == 'bullish')
+        breadth_bear = sum(1 for d in pairs_data.values() if d.get('available') and d.get('direction') == 'bearish')
+        intermarket_context = {
+            'selected_symbol': selected_symbol,
+            'btc_12h': _htf_snapshot('12h'),
+            'btc_1d': _htf_snapshot('1D'),
+            'breadth': {'bullish': breadth_bull, 'bearish': breadth_bear, 'available': sum(1 for d in pairs_data.values() if d.get('available'))},
+            'regime': quant.get('regime') if isinstance(quant, dict) else None,
+            'funding_rate': micro_metrics.get('funding_rate'),
+            'oi_change_pct': micro_metrics.get('oi_change_pct'),
+            'orderbook_imbalance': micro_metrics.get('orderbook_imbalance'),
+            'liquidity_band': micro_metrics.get('liquidity_band'),
+        }
         
         response_data = {
             'success': True,
@@ -33950,10 +33957,11 @@ def api_futures_correlation():
             'ranking': ranking,
             'top_long_candidates': top_long,
             'top_short_candidates': top_short,
+            'intermarket_context': intermarket_context,
             'timestamp': datetime.now(bolivia_tz).isoformat()
         }
         
-        _futures_correlation_cache = {'data': response_data, 'ts': now_ts, 'key': timeframe}
+        _futures_correlation_cache = {'data': response_data, 'ts': now_ts, 'key': (timeframe, selected_symbol)}
         return jsonify(response_data)
     except Exception as e:
         import traceback
@@ -34970,24 +34978,28 @@ mensajes_enviados_hoy = {}
 # MONITOR DE ENTRIES — Alerta Telegram cuando precio toca entry de señal previa
 # ============================================================================
 # Reglas:
-# - Solo TFs útiles: 1h, 2h, 4h, 12h, 1D (los cortos generan ruido)
+# - Spot: 4h/12h/1D/1W · Futures: contrato activo 30m/1h/2h/4h/12h/1D
 # - Solo acciones direccionales: LONG, SHORT, COMPRA_SPOT, VENTA_SPOT
 # - Máximo 1 alerta por (símbolo, timeframe, timestamp_vela) — nunca duplica
 # - Tolerancia: precio toca entry si |precio - entry| / entry <= 0.15%
 
-MONITOR_ENTRY_TIMEFRAMES = ('1h', '2h', '4h', '12h', '1D')
+SPOT_ENTRY_MONITOR_TIMEFRAMES = ('4h', '12h', '1D', '1W')
+FUTURES_ENTRY_MONITOR_TIMEFRAMES = ('30m', '1h', '2h', '4h', '12h', '1D')
 MONITOR_ENTRY_TOLERANCE_PCT = 0.15  # 0.15% de tolerancia para "tocar" entry
 MONITOR_CHECK_INTERVAL = 180        # 3 minutos entre chequeos (antes 60s, reduce carga)
 
 # Duración de cada TF en segundos (para normalizar candle_start)
 _TF_SECONDS = {
+    '30m': 1800,
     '1h':  3600,
     '2h':  7200,
     '4h':  14400,
     '12h': 43200,
     '1D':  86400,
     '1d':  86400,
+    '1W':  604800,
 }
+
 
 
 def _normalize_candle_start(timeframe, candle_ts):
@@ -35199,7 +35211,7 @@ def _build_entry_alert_message(signal, current_price):
 def _get_signals_for_entry_monitor():
     """
     Obtiene todas las señales activas (spot + futures) elegibles para monitor:
-    - TF en MONITOR_ENTRY_TIMEFRAMES
+    - TF dentro del contrato activo Spot/Futures RC4.1
     - Acción direccional (LONG, SHORT, COMPRA_SPOT, VENTA_SPOT)
     - Debe incluir entry, tp, sl y candle_timestamp
     
@@ -35214,7 +35226,12 @@ def _get_signals_for_entry_monitor():
         cached_previous = getattr(expert_system, 'prev_signals_cache', None) or {}
         for _key, sig in cached_previous.items():
             tf = sig.get('timeframe')
-            if tf not in MONITOR_ENTRY_TIMEFRAMES:
+            system_type = str(sig.get('system_type') or 'spot').lower()
+            if system_type == 'futures':
+                from futures_system import futures_timeframe_allowed
+                if tf not in FUTURES_ENTRY_MONITOR_TIMEFRAMES or not futures_timeframe_allowed(symbol, tf):
+                    continue
+            elif tf not in SPOT_ENTRY_MONITOR_TIMEFRAMES:
                 continue
             action = sig.get('decision', '')
             if action not in ('LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT'):
@@ -35326,7 +35343,8 @@ def monitor_entries_loop():
     """
     print("=" * 60)
     print("🔔 MONITOR DE ENTRIES iniciado")
-    print(f"   TFs monitorizadas: {', '.join(MONITOR_ENTRY_TIMEFRAMES)}")
+    print(f"   TF Spot: {', '.join(SPOT_ENTRY_MONITOR_TIMEFRAMES)}")
+    print(f"   TF Futures: {', '.join(FUTURES_ENTRY_MONITOR_TIMEFRAMES)}")
     print(f"   Tolerancia: ±{MONITOR_ENTRY_TOLERANCE_PCT}%")
     print(f"   Chequeo cada: {MONITOR_CHECK_INTERVAL}s")
     print("=" * 60)
@@ -36333,6 +36351,8 @@ _AI_LEARNING_RUNTIME_STATE = {
     'status': 'NOT_STARTED',
     'last_error': None,
     'last_success_at': None,
+    'slot_db_status': None,
+    'slot_updated_at': None,
 }
 _AI_SCIENTIST_THREAD_LOCK = threading.Lock()
 _AI_SCIENTIST_THREAD_STARTED = False
@@ -36401,9 +36421,22 @@ def _run_ai_learning_daily(q6_slot=None, trigger_source='daily'):
             abandoned_after_minutes=12
         )
         if not claimed:
-            # Usually means this 6h slot is already DONE or another worker owns
-            # a still-valid lease. It proves the watchdog is alive.
-            _ai_learning_runtime_update(status='SLOT_ALREADY_CLAIMED_OR_DONE')
+            # RC4.1: distinguir DONE real de un lease de otro worker.
+            from q6_integrity import read_job_status
+            slot_state = read_job_status(review_trader.db, 'AI_LEARNING_V2', q6_slot)
+            db_status = str(slot_state.get('status') or 'UNKNOWN').upper()
+            mapped = {
+                'DONE': 'SLOT_ALREADY_DONE',
+                'RUNNING': 'SLOT_CLAIMED_BY_OTHER_WORKER',
+                'FAILED': 'SLOT_RETRY_PENDING',
+                'MISSING': 'SLOT_NOT_CLAIMED',
+            }.get(db_status, f'SLOT_{db_status}')
+            _ai_learning_runtime_update(
+                status=mapped,
+                slot_db_status=db_status,
+                slot_updated_at=slot_state.get('updated_at'),
+                last_error=slot_state.get('error'),
+            )
             return False
 
         _ai_learning_runtime_update(status='RUNNING_LLM')
@@ -46569,6 +46602,19 @@ def api_ai_gemini_activity():
                 )[:180]
 
         }), 200
+# ============================================================================
+# FINAL V1 RC4.1 — TRADER IA / AI CONTROL ACTIVITY (READ ONLY)
+# ============================================================================
+@app.route('/api/ai/control-activity', methods=['GET'])
+def api_ai_control_activity():
+    if not _authenticated_user():
+        return jsonify({'success': False, 'error': 'Debes iniciar sesión.'}), 401
+    try:
+        from ai_advisor import get_ai_control_activity_status
+        return jsonify({'success': True, 'data': get_ai_control_activity_status(hours=24)}), 200
+    except Exception as exc:
+        return jsonify({'success': False, 'data': {'status': 'UNAVAILABLE'}, 'error': str(exc)[:180]}), 200
+
 # ============================================================================
 # COMMIT 10 — MANUAL LEARNING / GOVERNANCE DIAGNOSTICS
 # ============================================================================

@@ -169,7 +169,7 @@
                     <h5 class="mb-1"><i class="fas fa-chart-line me-2 text-info"></i>Monitoreo de rentabilidad y continuidad</h5>
                     <div class="small text-muted">Live dice qué ocurre hoy; OOS dice qué demostró la estrategia fuera de entrenamiento. No se mezclan.</div>
                 </div>
-                <span class="badge bg-dark border border-info text-info">V1 RC4 · 46 celdas activas</span>
+                <span class="badge bg-dark border border-info text-info">V1 RC4.1 · 46 celdas activas</span>
             </div>
             <div class="table-responsive mb-3">
                 <table class="table table-dark table-sm align-middle mb-0">
@@ -203,10 +203,12 @@
             <!-- RC4: salud fuera de la columna lateral. Evita superposición con tablas. -->
             <div class="small fw-semibold mt-3 mb-2">Salud del aprendizaje e integridad</div>
             <div class="row g-2">
-                <div class="col-xl-3 col-md-6"><div class="v1-simple-card h-100"><div class="small text-muted">ReviewTrader</div><div class="v1-simple-value" id="v1-reviewtrader-health">--</div><div class="small text-muted" id="v1-reviewtrader-note">Esperando scheduler.</div></div></div>
-                <div class="col-xl-3 col-md-6"><div class="v1-simple-card h-100"><div class="small text-muted">Macro</div><div class="v1-simple-value" id="v1-macro-health">--</div><div class="small text-muted" id="v1-macro-note">Contexto actual y próximo evento.</div></div></div>
-                <div class="col-xl-3 col-md-6"><div class="v1-simple-card h-100"><div class="small text-muted">Cohorte estadística</div><div class="v1-simple-value" id="v1-cohort-health">--</div><div class="small text-muted" id="v1-cohort-note">Legacy se conserva pero no calibra V2/RC4.</div></div></div>
-                <div class="col-xl-3 col-md-6"><div class="v1-simple-card h-100"><div class="small text-muted">Carga de página</div><div class="v1-simple-value text-success">Acotada</div><div class="small text-muted">Cada consulta crítica vence por timeout; diagnóstico pesado sólo a pedido.</div></div></div>
+                <div class="col-xl-2 col-md-4"><div class="v1-simple-card h-100"><div class="small text-muted">ReviewTrader</div><div class="v1-simple-value" id="v1-reviewtrader-health">--</div><div class="small text-muted" id="v1-reviewtrader-note">Esperando scheduler.</div></div></div>
+                <div class="col-xl-2 col-md-4"><div class="v1-simple-card h-100"><div class="small text-muted">Macro</div><div class="v1-simple-value" id="v1-macro-health">--</div><div class="small text-muted" id="v1-macro-note">Contexto actual y próximo evento.</div></div></div>
+                <div class="col-xl-2 col-md-4"><div class="v1-simple-card h-100"><div class="small text-muted">Cohorte estadística</div><div class="v1-simple-value" id="v1-cohort-health">--</div><div class="small text-muted" id="v1-cohort-note">Sólo celdas activas verificadas calibran.</div></div></div>
+                <div class="col-xl-2 col-md-4"><div class="v1-simple-card h-100"><div class="small text-muted">Trader IA</div><div class="v1-simple-value" id="v1-trader-ai-health">--</div><div class="small text-muted" id="v1-trader-ai-note">Decision Control read-only.</div></div></div>
+                <div class="col-xl-2 col-md-4"><div class="v1-simple-card h-100"><div class="small text-muted">Telegram</div><div class="v1-simple-value" id="v1-telegram-health">--</div><div class="small text-muted" id="v1-telegram-note">Sin llamadas de prueba automáticas.</div></div></div>
+                <div class="col-xl-2 col-md-4"><div class="v1-simple-card h-100"><div class="small text-muted">Carga de página</div><div class="v1-simple-value text-success">Acotada</div><div class="small text-muted">Timeouts independientes; diagnóstico pesado a pedido.</div></div></div>
             </div>
         </div>
 

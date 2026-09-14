@@ -10717,6 +10717,8 @@ window.updateMarketSessionInfo = function() {
 window.updateCorrelationInfo = function(data) {
     try {
         console.log('📊 updateCorrelationInfo llamado con datos globales:', data);
+        const panelTitle = document.getElementById('correlation-panel-title');
+        if (panelTitle) panelTitle.innerHTML = '<i class="fas fa-arrows-rotate me-2"></i>Correlación y rotación Spot';
         
         // Obtener elementos del DOM
         const btcStatusEl = document.getElementById('btc-correlation-status');
@@ -10755,9 +10757,9 @@ window.updateCorrelationInfo = function(data) {
         const actualizarPar = (elementoStatus, elementoAdx, dataPar, nombrePar) => {
             if (!elementoStatus || !elementoAdx) return;
             
-            if (!dataPar) {
-                // No hay datos para este par - mostrar vacío
-                elementoStatus.innerHTML = '<span class="badge bg-secondary">---</span>';
+            if (!dataPar || dataPar.available === false) {
+                // RC4.1: dato ausente no equivale a neutral
+                elementoStatus.innerHTML = '<span class="badge bg-secondary">SIN DATOS</span>';
                 elementoAdx.textContent = 'ADX: --';
                 return;
             }
@@ -10809,7 +10811,7 @@ window.updateCorrelationInfo = function(data) {
         // ============ OBTENER SEÑAL DE ROTACIÓN ============
         let rotationSignal = correlation.rotation_signal || 'NEUTRAL';
         let weightModifier = correlation.weight_modifier || 1.0;
-        let weightPercent = ((weightModifier - 1.0) * 100).toFixed(0);
+        let weightPercent = (correlation.correlation_score !== undefined ? Number(correlation.correlation_score) : ((weightModifier - 1.0) * 100)).toFixed(0);
         if (weightPercent === '-100') weightPercent = '0';
         
         // Extraer datos para la explicación (usando valores reales o por defecto)
@@ -10863,6 +10865,26 @@ window.updateCorrelationInfo = function(data) {
                     rotationDesc = 'BTC y Oro se mueven en direcciones opuestas';
                     explanation = '🔴 Los activos muestran comportamientos opuestos.';
                     break;
+                case 'BTC_BULLISH':
+                    rotationBadge = 'bg-success'; rotationText = 'BTC ALCISTA 🟢';
+                    rotationDesc = 'Señal unilateral fuerte en BTC';
+                    explanation = '🟢 BTC tiene señal fuerte; faltan o no confirman aún las otras ramas.'; break;
+                case 'BTC_BEARISH':
+                    rotationBadge = 'bg-warning'; rotationText = 'BTC BAJISTA 🟡';
+                    rotationDesc = 'Señal unilateral fuerte en BTC';
+                    explanation = '🟡 BTC muestra presión bajista fuerte; la rotación completa requiere confirmar PAXG/BTC.'; break;
+                case 'RATIO_BULLISH':
+                    rotationBadge = 'bg-warning'; rotationText = 'PAXG/BTC ALCISTA 🟡';
+                    rotationDesc = 'El ratio favorece oro frente a BTC';
+                    explanation = '🟡 El ratio PAXG/BTC tiene señal alcista fuerte.'; break;
+                case 'RATIO_BEARISH':
+                    rotationBadge = 'bg-success'; rotationText = 'PAXG/BTC BAJISTA 🟢';
+                    rotationDesc = 'El ratio favorece BTC frente a oro';
+                    explanation = '🟢 El ratio PAXG/BTC tiene señal bajista fuerte.'; break;
+                case 'DATA_UNAVAILABLE':
+                    rotationBadge = 'bg-secondary'; rotationText = 'SIN DATOS';
+                    rotationDesc = 'No hay cobertura suficiente para calcular rotación';
+                    explanation = '⚪ Falta información real; no se interpreta como neutral.'; break;
                 default:
                     rotationBadge = 'bg-secondary';
                     rotationText = 'NEUTRAL ⚪';

@@ -10417,3 +10417,53 @@ def get_spot_tgp_portfolio_evidence(
         )
 
         return result
+
+# ============================================================================
+# FINAL V1 RC4.1 — TELEMETRÍA READ-ONLY DEL TRADER IA / AI CONTROL
+# ============================================================================
+def get_ai_control_activity_status(hours: int = 24):
+    """Resumen del Decision Control sin consumir tokens ni cambiar trading."""
+    db = _db()
+    base = {
+        'enabled': bool(AI_ENABLED),
+        'provider': AI_PROVIDER,
+        'model': AI_MODEL,
+        'window_hours': int(hours or 24),
+        'total_recent': 0,
+        'applied_recent': 0,
+        'blocked_signals_recent': 0,
+        'guardian_interventions_recent': 0,
+        'last_event': None,
+        'status': 'NO_DATA',
+    }
+    if db is None or not getattr(db, 'enabled', False):
+        base['status'] = 'DB_DISABLED'
+        return base
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(1, int(hours or 24)))).isoformat()
+        rows = (db.client.table('ai_control_events')
+                .select('context_type,market,symbol,timeframe,ai_verdict,ai_confidence,control_action,final_action,final_publication_status,applied,reason,updated_at')
+                .gte('updated_at', cutoff)
+                .order('updated_at', desc=True)
+                .limit(100)
+                .execute().data or [])
+        base['total_recent'] = len(rows)
+        base['applied_recent'] = sum(1 for r in rows if bool(r.get('applied')))
+        base['blocked_signals_recent'] = sum(
+            1 for r in rows
+            if str(r.get('final_publication_status') or '').upper() == 'AI_BLOCKED'
+        )
+        base['guardian_interventions_recent'] = sum(
+            1 for r in rows
+            if 'GUARDIAN' in str(r.get('context_type') or '').upper() and bool(r.get('applied'))
+        )
+        if rows:
+            base['last_event'] = rows[0]
+            base['status'] = 'ACTIVE'
+        else:
+            base['status'] = 'WAITING_EVENT'
+        return base
+    except Exception as exc:
+        base['status'] = 'UNAVAILABLE'
+        base['error'] = f'{type(exc).__name__}: {str(exc)[:160]}'
+        return base

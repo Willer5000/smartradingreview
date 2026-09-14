@@ -912,76 +912,52 @@ class SupabaseClient:
     # OPTIMIZACIONES DE VOLUMEN (FASE 2.5)
     # ========================================================================
     
-    def delete_old_signals_by_tf(self, timeframe: str, days_retention: int) -> int:
-        """
-        Borra señales de un timeframe específico que sean más antiguas que N días.
-        Se usa para el TTL diferenciado por temporalidad.
-        
-        IMPORTANTE: NO borra las señales con status='tp_hit' (son valiosas).
-        
-        Retorna: número de señales borradas.
-        """
+    def preview_old_signals_by_tf(self, timeframe: str, days_retention: int) -> int:
+        """RC4.1: cuenta candidatos TTL sin borrar ninguna evidencia."""
         if not self.enabled:
             return 0
-        
         try:
             cutoff = (datetime.utcnow() - timedelta(days=days_retention)).isoformat()
-            
-            # Obtener IDs de señales antiguas que NO sean tp_hit
             response = (self.client.table('signals')
-                        .select('id')
+                        .select('id', count='exact')
                         .eq('timeframe', timeframe)
-                        .neq('status', 'tp_hit')
                         .lt('created_at', cutoff)
+                        .limit(1)
                         .execute())
-            
-            if not response.data:
-                return 0
-            
-            ids_to_delete = [s['id'] for s in response.data]
-            
-            # Borrar en batches de 100
-            deleted = 0
-            for i in range(0, len(ids_to_delete), 100):
-                batch = ids_to_delete[i:i+100]
-                self.client.table('signals').delete().in_('id', batch).execute()
-                deleted += len(batch)
-            
-            logger.info(f"TTL {timeframe}: eliminadas {deleted} señales con más de {days_retention} días")
-            return deleted
-            
+            return int(getattr(response, 'count', None) or len(response.data or []))
         except Exception as e:
-            logger.error(f"Error en delete_old_signals_by_tf({timeframe}): {e}")
+            logger.error(f"Error en preview_old_signals_by_tf({timeframe}): {e}")
             return 0
-    
+
+    def delete_old_signals_by_tf(self, timeframe: str, days_retention: int, *, allow_destructive: bool = False) -> int:
+        """Compatibilidad: RC4.1 bloquea borrado automático de señales.
+
+        El antiguo TTL borraba pérdidas/expiraciones y podía sesgar la muestra.
+        Para una limpieza física futura se requiere una migración/auditoría explícita;
+        el runtime de producción nunca la ejecuta.
+        """
+        if not allow_destructive:
+            logger.warning('RC4.1 DATA HYGIENE: borrado TTL bloqueado; sólo auditoría read-only')
+            return 0
+        # Incluso con flag explícito no borramos desde el runtime: fail-closed.
+        logger.error('RC4.1 DATA HYGIENE: destructive cleanup requires an offline reviewed migration')
+        return 0
+
     def apply_ttl_cleanup(self) -> Dict:
-        """
-        Aplica el TTL (time-to-live) diferenciado por temporalidad.
-        Cada TF tiene su propio tiempo de retención.
-        """
+        """RC4.1: auditoría TTL no destructiva para evitar survivorship bias."""
         ttl_config = {
-            '5m': 7,      # 7 días
-            '15m': 14,    # 14 días
-            '30m': 21,    # 21 días
-            '1h': 30,     # 30 días
-            '2h': 45,
-            '4h': 60,
-            '12h': 90,
-            '1D': 180,
-            '1W': 365
+            '5m': 7, '15m': 14, '30m': 21, '1h': 30, '2h': 45,
+            '4h': 60, '12h': 90, '1D': 180, '1W': 365
         }
-        
-        results = {}
-        for tf, days in ttl_config.items():
-            deleted = self.delete_old_signals_by_tf(tf, days)
-            results[tf] = deleted
-        
-        total = sum(results.values())
-        if total > 0:
-            logger.info(f"TTL cleanup total: {total} señales eliminadas")
-        
-        return results
-    
+        candidates = {tf: self.preview_old_signals_by_tf(tf, days) for tf, days in ttl_config.items()}
+        return {
+            'policy': 'NON_DESTRUCTIVE_AUDIT_ONLY',
+            'deleted': 0,
+            'candidates_by_tf': candidates,
+            'candidate_total': sum(candidates.values()),
+            'reason': 'Preserve TP/SL/expired/legacy evidence; physical cleanup only after reviewed backup and cohort audit.',
+        }
+
     def delete_low_sample_stats(self, min_sample: int = 5) -> int:
         """
         Borra filas de strategy_stats_specific con menos de N muestras.

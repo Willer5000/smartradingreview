@@ -7,6 +7,13 @@ SPOT_SOURCE = 'KUCOIN_SPOT_REST'
 SPOT_COHORT = 'SPOT_REAL_CLOSED_Q6'
 SPOT_LEGACY = 'SPOT_LEGACY_UNVERIFIED'
 SPOT_VERSION = 'spot_closed_q6_v1'
+
+# FINAL V1 RC4.1 — contrato Spot operativo actual.
+# Las filas Q6 antiguas de otros TF se conservan como Legacy/Research, pero
+# ya no pueden entrar a WR/PF/Expectancy oficiales de la generación actual.
+SPOT_ACTIVE_SYMBOLS = {'BTC-USDT', 'PAXG-USDT', 'PAXG-BTC'}
+SPOT_ACTIVE_TIMEFRAMES = {'4h', '12h', '1D', '1W'}
+
 TIMEFRAME_SECONDS = {
     '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800,
     '1h': 3600, '2h': 7200, '4h': 14400, '6h': 21600,
@@ -43,10 +50,30 @@ def clean_spot_learning(learning):
 
 
 def verified_spot(row):
+    """Compatibilidad histórica Q6: procedencia Spot real/cerrada.
+
+    No implica que la fila pertenezca al contrato operativo RC4.1. Para KPIs
+    oficiales usar verified_spot_current().
+    """
     learning = learning_context(row)
     return bool(str(row.get('system_type', '')).lower() == 'spot'
                 and clean_spot_learning(learning)
                 and as_bool(learning.get('statistically_eligible', False)))
+
+
+def spot_cell_active(symbol, timeframe):
+    symbol = str(symbol or '').upper().replace('/', '-')
+    raw = str(timeframe or '').strip()
+    tf = '1D' if raw.upper() == '1D' else ('1W' if raw.upper() == '1W' else raw.lower())
+    return symbol in SPOT_ACTIVE_SYMBOLS and tf in SPOT_ACTIVE_TIMEFRAMES
+
+
+def verified_spot_current(row):
+    """Única puerta Spot para estadísticas operables RC4.1."""
+    return bool(
+        verified_spot(row)
+        and spot_cell_active(row.get('symbol'), row.get('timeframe') or row.get('interval'))
+    )
 
 
 def prepare_spot_frame(df, timeframe, previous=False, now=None, check_fresh=True):
@@ -208,6 +235,31 @@ def claim_daily_job(
             return bool(claimed.data)
         except Exception:
             return False
+
+
+def read_job_status(db, job_name, slot):
+    """Read-only status for an idempotent q6_job_runs slot.
+
+    Lets Analytics distinguish DONE from a lease owned by another worker,
+    without triggering a new LLM call.
+    """
+    if not getattr(db, 'enabled', False):
+        return {'status': 'DB_DISABLED', 'updated_at': None}
+    key = f'{job_name}:{slot}'
+    try:
+        rows = (db.client.table('q6_job_runs')
+                .select('status,updated_at')
+                .eq('job_key', key)
+                .limit(1)
+                .execute().data or [])
+        if not rows:
+            return {'status': 'MISSING', 'updated_at': None}
+        return {
+            'status': str(rows[0].get('status') or 'UNKNOWN').upper(),
+            'updated_at': rows[0].get('updated_at'),
+        }
+    except Exception as exc:
+        return {'status': 'UNAVAILABLE', 'updated_at': None, 'error': type(exc).__name__}
 
 
 def finish_daily_job(db, job_name, slot, success):

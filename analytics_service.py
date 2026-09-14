@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from collections import defaultdict
-from cohort_integrity import classify_quality_signal, summarize_cohorts
+from cohort_integrity import classify_quality_signal
 
 from supabase_client import supabase_db
 from edge_discovery import build_edge_discovery_summary
@@ -2177,8 +2177,8 @@ class AnalyticsService:
             ).strip().lower()
 
             if market == 'spot':
-                from q6_integrity import verified_spot
-                if verified_spot(signal):
+                from q6_integrity import verified_spot_current
+                if verified_spot_current(signal):
                     spot.append(signal)
                 continue
 
@@ -2282,19 +2282,41 @@ class AnalyticsService:
 
         coverage = getattr(signals, 'coverage', {'complete': False}) or {'complete': False}
 
-        # RC4 visible audit: old/pre-audit rows remain queryable but are
-        # explicitly separated from the official current cohort.
+        # RC4.1 visible audit: derive the headline counts from the SAME
+        # partition that feeds WR/PF/Expectancy. This removes the RC4 mismatch
+        # where the card could say "official 0" while the live cohort below
+        # was already populated. Raw history is preserved separately.
         try:
-            from q6_integrity import verified_spot as _verified_spot_rc4
-            cohort_integrity = summarize_cohorts(
-                signals,
-                lambda row: classify_quality_signal(
-                    row,
-                    spot_verified=(str(row.get('system_type') or '').lower() == 'spot' and _verified_spot_rc4(row))
-                )
-            )
+            raw_legacy_or_other = max(0, len(signals) - len(spot) - len(futures_official) - len(futures_shadow))
+            cohort_integrity = {
+                'version': 'RC4_1_COHORT_INTEGRITY_V2',
+                'state': 'STANDARDIZED',
+                'rows_seen': len(signals),
+                'coverage_complete': bool((coverage or {}).get('complete')),
+                'counts': {
+                    'OFFICIAL_CURRENT_SPOT': len(spot),
+                    'OFFICIAL_CURRENT_FUTURES': len(futures_official),
+                    'SHADOW_CURRENT_FUTURES': len(futures_shadow),
+                    'LEGACY_RESEARCH_OR_UNVERIFIED': raw_legacy_or_other,
+                },
+                'directional_counts': {
+                    'spot': len(spot),
+                    'futures': len(futures_official),
+                    'shadow': len(futures_shadow),
+                },
+                'resolved_counts': {
+                    'spot': sum(1 for row in spot if str(row.get('status') or '').lower() in ('tp_hit','sl_hit')),
+                    'futures': sum(1 for row in futures_official if str(row.get('status') or '').lower() in ('tp_hit','sl_hit')),
+                },
+                'policy': 'KEEP_HISTORY; ONLY_ACTIVE_VERIFIED_CELLS_CALIBRATE_PROFITABILITY',
+                'retired_timeframes': ['5m', '15m'],
+            }
         except Exception as cohort_error:
-            cohort_integrity = {'version': 'RC4_COHORT_INTEGRITY_V1', 'state': 'UNAVAILABLE', 'error': str(cohort_error)[:160]}
+            cohort_integrity = {
+                'version': 'RC4_1_COHORT_INTEGRITY_V2',
+                'state': 'UNAVAILABLE',
+                'error': str(cohort_error)[:160],
+            }
 
         resolved_futures = sum(
             1 for signal in futures_official

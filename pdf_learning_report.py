@@ -75,7 +75,7 @@ REPORT_SAFE_MAX_ROWS = 5000  # H.2: sólo cohortes estadísticas relevantes; RAM
 LEARNING_CONTRACT_VERSION = 'market_separated_v1'
 FUTURES_REAL_DATA_SOURCE = 'KUCOIN_FUTURES_PERPETUAL_REST'
 FUTURES_REAL_COHORT = 'FUTURES_PERPETUAL_REAL_CLOSED_V1'
-from q6_integrity import verified_spot
+from q6_integrity import verified_spot, verified_spot_current
 
 # ============================================================================
 # v26: BANDAS DE DIAGNÓSTICO SHADOW FUTURES
@@ -252,7 +252,7 @@ def _split_learning_cohorts(signals: List[Dict]) -> Dict[str, List[Dict]]:
     for signal in signals:
         market = _normalize_market(signal)
         if market == 'spot':
-            if verified_spot(signal):
+            if verified_spot_current(signal):
                 cohorts['spot'].append(signal)
             else:
                 cohorts['spot_legacy'].append(signal)
@@ -2752,7 +2752,7 @@ def _build_human_summary(metrics: Dict, top_general: List[Dict],
 
     quarantine = metrics.get('quarantine_counts') or {}
     lines.append(
-        f"<br/><br/>Spot sin elegibilidad Q6: {int(quarantine.get('spot_legacy') or 0)} "
+        f"<br/><br/>Spot fuera de la cohorte operativa RC4.1: {int(quarantine.get('spot_legacy') or 0)} "
         f"registros conservados fuera de las métricas verificadas."
         f"<br/><br/>Cuarentena informativa: "
         f"{int(quarantine.get('futures_legacy') or 0)} Futuros antiguos/no "
@@ -3295,7 +3295,7 @@ def generate_learning_pdf() -> bytes:
             (
                 'FALLBACK TEMPORAL'
                 if (data.get('fetch_diagnostics') or {}).get('fallback_used')
-                else 'PAGINACIÓN SCOPED (Spot Q6 + Futures real)'
+                else 'PAGINACIÓN SCOPED (Spot RC4.1 + Futures real)'
             )
         ],
         [
@@ -3331,7 +3331,7 @@ def generate_learning_pdf() -> bytes:
             f"{futures_metrics.get('ambiguous', 0)}"
         )],
         ['Futuros antiguos/no verificables en cuarentena', str(quarantine.get('futures_legacy', 0))],
-        ['Spot antiguo/replay sin elegibilidad Q6 (conservado)', str(quarantine.get('spot_legacy', 0))],
+        ['Spot Legacy/replay/TF retirado fuera de RC4.1 (conservado)', str(quarantine.get('spot_legacy', 0))],
         ['Análisis Futures shadow (no publicados)', str(quarantine.get('futures_shadow', 0))],
         ['Registros sin mercado en cuarentena', str(quarantine.get('unscoped', 0))],
         [

@@ -133,7 +133,7 @@ FUTURES_REAL_DATA_SOURCE = 'KUCOIN_FUTURES_PERPETUAL_REST'
 FUTURES_REAL_ANALYSIS_VERSION = 'closed_v1'
 FUTURES_REAL_COHORT = 'FUTURES_PERPETUAL_REAL_CLOSED_V1'
 FUTURES_LEGACY_COHORT = 'FUTURES_LEGACY_UNVERIFIED'
-from q6_integrity import SPOT_COHORT, SPOT_LEGACY, clean_spot_learning, verified_spot
+from q6_integrity import SPOT_COHORT, SPOT_LEGACY, clean_spot_learning, verified_spot, verified_spot_current
 SPOT_LEARNING_COHORT = SPOT_COHORT
 CAUTIOUS_SHADOW_MODEL_VERSION = 'cautious_shadow_v1'
 CAUTIOUS_SHADOW_NEAR_MISS_RATIO = 0.80
@@ -1498,7 +1498,7 @@ class ReviewTrader:
     def _is_signal_eligible_for_profit_stats(self, signal: Dict) -> bool:
         market = self._normalize_system_type(signal.get('system_type'))
         if market == 'spot':
-            return verified_spot(signal)
+            return verified_spot_current(signal)
 
         if not self._is_clean_futures_signal(signal):
             return False
@@ -1546,8 +1546,8 @@ class ReviewTrader:
         market = self._normalize_system_type(signal.get('system_type'))
 
         if market == 'spot':
-            if not verified_spot(signal):
-                return None, 'SPOT_LEGACY_QUARANTINED'
+            if not verified_spot_current(signal):
+                return None, 'SPOT_LEGACY_OR_RETIRED_QUARANTINED'
             try:
                 from q6_integrity import prepare_spot_frame, SPOT_SOURCE
                 df = prepare_spot_frame(price_fetcher(symbol, timeframe),
@@ -4300,7 +4300,7 @@ class ReviewTrader:
                     stats['legacy_futures_quarantined'] += 1
                     continue
                 
-                if system_type == 'spot' and not verified_spot(signal):
+                if system_type == 'spot' and not verified_spot_current(signal):
                     stats.setdefault('legacy_spot_quarantined', 0)
                     stats['legacy_spot_quarantined'] += 1
                     continue
@@ -13027,17 +13027,16 @@ class ReviewTrader:
         
         results = {}
         
-        # 1. TTL cleanup
+        # 1. RC4.1 — TTL convertido en auditoría NO destructiva.
+        # No se eliminan TP/SL/expired ni evidencia Legacy/Research porque
+        # hacerlo puede introducir survivorship bias en WR/PF/Expectancy.
         try:
             results['ttl'] = self.db.apply_ttl_cleanup()
-            total_ttl = sum(results['ttl'].values())
-            print(f"   ✅ TTL cleanup: {total_ttl} señales antiguas eliminadas")
-            for tf, count in results['ttl'].items():
-                if count > 0:
-                    print(f"      • {tf}: {count} señales")
+            preview_total = sum(int(v or 0) for v in (results['ttl'].get('candidates_by_tf') or {}).values())
+            print(f"   🧾 TTL RC4.1: auditoría no destructiva · {preview_total} candidatos detectados · 0 filas borradas")
         except Exception as e:
-            logger.error(f"Error en TTL cleanup: {e}")
-            results['ttl'] = {}
+            logger.error(f"Error en auditoría TTL: {e}")
+            results['ttl'] = {'policy': 'NON_DESTRUCTIVE', 'deleted': 0, 'candidates_by_tf': {}}
         
         # 2. Compresión de stats con muestra baja
         # DESACTIVADO: en sistemas jóvenes, borrar stats con <5 muestras impide
@@ -13265,7 +13264,7 @@ class ReviewTrader:
                 'stats_specific_updated': stats.get('specific', 0),
                 'stats_general_updated': stats.get('general', 0),
                 'recommendations_updated': 0,  # se calcula dentro de recalculate_stats
-                'ttl_deleted': sum(ttl.values()) if isinstance(ttl, dict) else 0,
+                'ttl_deleted': int((ttl or {}).get('deleted', 0)) if isinstance(ttl, dict) else 0,
                 'low_sample_deleted': optimization.get('compression', 0),
                 'storage_stats': storage,
                 'errors': errors,
