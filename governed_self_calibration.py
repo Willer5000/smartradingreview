@@ -154,6 +154,7 @@ def _build_execution_profile(
     challenger_summary: Dict[str, Any],
     governance: Dict[str, Any],
 ) -> Dict[str, Any]:
+    """Select at most one governed execution champion per Futures symbol×TF cell."""
     economics_ready = _governance_economics_ready(governance)
     candidates: List[Dict[str, Any]] = []
     for row in (challenger_summary or {}).get("rows") or []:
@@ -194,39 +195,43 @@ def _build_execution_profile(
             reason = "NET_OOS_CHALLENGER_CANARY"
         candidates.append({**row, "state": state, "reason": reason})
 
-    # Exactly one execution champion per market.  This keeps multiple testing
-    # from turning several simultaneous experiments into production changes.
-    eligible = [r for r in candidates if r.get("state") in {"CANARY", "ACTIVE"}]
-    eligible.sort(
-        key=lambda r: (
+    by_cell: Dict[tuple, List[Dict[str, Any]]] = {}
+    for row in candidates:
+        key = (str(row.get("market") or ""), str(row.get("symbol") or ""), str(row.get("timeframe") or ""))
+        by_cell.setdefault(key, []).append(row)
+
+    selected_rows: List[Dict[str, Any]] = []
+    rows: List[Dict[str, Any]] = []
+    for key, cell_rows in by_cell.items():
+        eligible = [r for r in cell_rows if r.get("state") in {"CANARY", "ACTIVE"}]
+        eligible.sort(key=lambda r: (
             1 if r.get("state") == "ACTIVE" else 0,
             safe_float(r.get("validation_net_expectancy_r"), -999.0) or -999.0,
             int(r.get("validation_resolved") or 0),
-        ),
-        reverse=True,
-    )
-    winner = eligible[0] if eligible else None
-    rows = []
-    for row in candidates:
-        out = dict(row)
-        if winner and row.get("candidate") == winner.get("candidate") and row.get("market") == winner.get("market"):
-            out["selected"] = True
-        else:
-            out["selected"] = False
-            if out.get("state") in {"CANARY", "ACTIVE"}:
-                out["state"] = "OBSERVE"
-                out["reason"] = "BETTER_CHALLENGER_SELECTED"
-        rows.append(out)
+        ), reverse=True)
+        winner = eligible[0] if eligible else None
+        if winner:
+            selected_rows.append(dict(winner))
+        for row in cell_rows:
+            out = dict(row)
+            if winner and row.get("candidate") == winner.get("candidate"):
+                out["selected"] = True
+            else:
+                out["selected"] = False
+                if out.get("state") in {"CANARY", "ACTIVE"}:
+                    out["state"] = "OBSERVE"
+                    out["reason"] = "BETTER_CHALLENGER_SELECTED_FOR_CELL"
+            rows.append(out)
 
     return {
         "version": SELF_CALIBRATION_VERSION,
         "authority": "GOVERNED_BOUNDED",
         "economics_ready": economics_ready,
         "rows": rows,
-        "selected": deepcopy(winner) if winner else None,
+        "selected": selected_rows,
         "canary_fraction": CANARY_FRACTION,
+        "policy": {"selection_scope": "MARKET_SYMBOL_TIMEFRAME", "one_champion_per_cell": True},
     }
-
 
 def build_self_calibration_state(
     trader_intelligence_v2: Dict[str, Any],
@@ -236,10 +241,12 @@ def build_self_calibration_state(
 ) -> Dict[str, Any]:
     expert = _build_expert_profile(dynamic_shadow, governance)
     execution = _build_execution_profile(challenger_summary, governance)
-    execution_selected = execution.get("selected") or {}
+    execution_selected = execution.get("selected") or []
+    if isinstance(execution_selected, dict):
+        execution_selected = [execution_selected]
 
-    active_n = int(expert.get("active") or 0) + int(str(execution_selected.get("state") or "") == "ACTIVE")
-    canary_n = int(expert.get("canary") or 0) + int(str(execution_selected.get("state") or "") == "CANARY")
+    active_n = int(expert.get("active") or 0) + sum(1 for r in execution_selected if str(r.get("state") or "") == "ACTIVE")
+    canary_n = int(expert.get("canary") or 0) + sum(1 for r in execution_selected if str(r.get("state") or "") == "CANARY")
     protect_n = int(expert.get("protect") or 0)
     if active_n:
         state = "ACTIVE"

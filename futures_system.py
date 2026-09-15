@@ -44,8 +44,8 @@ FUTURES_SYMBOLS = {
     'ADA-USDT': {'name': 'ADA/USDT', 'type': 'crypto_alt', 'decimals': 4}
 }
 
-# Commit 15A — two extra contracts are deliberately RESEARCH/SHADOW only.
-# They expand cross-asset validation without increasing the production universe.
+# FINAL V1 RC4.2 — LINK/BNB completed the same Research→OOS→Shadow path.
+# They are part of the governed 30m–4h universe; no symbol bypasses Safety/publication gates.
 FUTURES_RESEARCH_SYMBOLS = {
     'LINK-USDT': {'name': 'LINK/USDT', 'type': 'crypto_alt', 'decimals': 3},
     'BNB-USDT': {'name': 'BNB/USDT', 'type': 'crypto_major', 'decimals': 2},
@@ -1855,6 +1855,75 @@ class FuturesAnalysis(TradingExpertSystem):
         self._futures_data_errors[error_key] = error
         logger.warning(f'{symbol} {interval}: {error}')
         return None
+
+    def _confirm_high_tf_entry_trigger(self, symbol: str, timeframe: str, action: str, entry_price: float) -> Dict:
+        """Require a closed lower-TF reaction before 12H/1D Futures becomes executable.
+
+        12H uses 2H; 1D uses 4H.  This is a timing confirmation only: it never
+        changes direction, Entry, SL, TP or leverage.  Missing data fails closed.
+        """
+        lower_map = {'12h': '2h', '1D': '4h'}
+        lower_tf = lower_map.get(str(timeframe))
+        out = {
+            'required': bool(lower_tf), 'passed': False, 'lower_timeframe': lower_tf,
+            'reason': 'NOT_REQUIRED' if not lower_tf else 'LOWER_TF_DATA_UNAVAILABLE',
+            'score': 0, 'evidence': [],
+        }
+        if not lower_tf:
+            out['passed'] = True
+            return out
+        try:
+            df = self.get_kucoin_data(symbol, lower_tf)
+            if df is None or len(df) < 20 or not entry_price or entry_price <= 0:
+                return out
+            work = df.copy()
+            seconds = FUTURES_TIMEFRAME_SECONDS.get(lower_tf, 0)
+            if seconds and 'time' in work.columns:
+                now = pd.Timestamp.utcnow().tz_localize(None)
+                times = pd.to_datetime(work['time'], errors='coerce')
+                work = work.loc[(times + pd.Timedelta(seconds=seconds)) <= now].copy()
+            if len(work) < 20:
+                out['reason'] = 'LOWER_TF_NO_CLOSED_CANDLES'
+                return out
+            for c in ('open','high','low','close'):
+                work[c] = pd.to_numeric(work[c], errors='coerce')
+            work = work.dropna(subset=['open','high','low','close']).tail(20)
+            if len(work) < 5:
+                return out
+            prev_close = work['close'].shift(1)
+            tr = pd.concat([(work['high']-work['low']).abs(), (work['high']-prev_close).abs(), (work['low']-prev_close).abs()], axis=1).max(axis=1)
+            atr = float(tr.tail(14).mean()) if len(tr) else 0.0
+            tol = max(float(entry_price) * 0.001, atr * 0.25 if atr > 0 else 0.0)
+            recent = work.tail(4)
+            latest = recent.iloc[-1]
+            prior = recent.iloc[:-1]
+            action_u = str(action or '').upper()
+            touched = bool((recent['low'] <= entry_price + tol).any() and (recent['high'] >= entry_price - tol).any())
+            if action_u in {'LONG','COMPRA_SPOT'}:
+                close_reaction = bool(latest['close'] > entry_price and latest['close'] > latest['open'])
+                reclaim = bool(float(recent['low'].min()) < entry_price and latest['close'] > entry_price)
+                structure = bool(len(prior) and latest['close'] > float(prior['high'].max()))
+            else:
+                close_reaction = bool(latest['close'] < entry_price and latest['close'] < latest['open'])
+                reclaim = bool(float(recent['high'].max()) > entry_price and latest['close'] < entry_price)
+                structure = bool(len(prior) and latest['close'] < float(prior['low'].min()))
+            evidence = []
+            if touched: evidence.append('ENTRY_ZONE_TOUCHED')
+            if close_reaction: evidence.append('DIRECTIONAL_CLOSE_REACTION')
+            if reclaim: evidence.append('SWEEP_RECLAIM')
+            if structure: evidence.append('LOWER_TF_STRUCTURE_BREAK')
+            score = int(touched) + int(close_reaction) + int(reclaim or structure)
+            passed = bool(touched and close_reaction and (reclaim or structure) and score >= 3)
+            out.update({
+                'passed': passed, 'score': score, 'evidence': evidence,
+                'reason': 'LOWER_TF_TRIGGER_CONFIRMED' if passed else 'WAITING_LOWER_TF_REACTION',
+                'atr': round(atr, 10) if atr > 0 else None,
+                'entry_tolerance': round(tol, 10),
+            })
+            return out
+        except Exception as exc:
+            out['reason'] = f'LOWER_TF_TRIGGER_ERROR:{type(exc).__name__}'
+            return out
 
     def _analyze_quantitative_futures_context(
         self,
@@ -5469,6 +5538,27 @@ class FuturesAnalysis(TradingExpertSystem):
         levels['entry_lower_tf_confirmation_required'] = bool(
             entry_reaction.get('lower_tf_confirmation_required', False)
         )
+        lower_tf_trigger = self._confirm_high_tf_entry_trigger(
+            symbol, timeframe, decision.get('action'), float(levels.get('entry') or 0)
+        ) if levels['entry_lower_tf_confirmation_required'] else {
+            'required': False, 'passed': True, 'reason': 'NOT_REQUIRED'
+        }
+        levels['entry_lower_tf_confirmation'] = lower_tf_trigger
+        if levels['entry_lower_tf_confirmation_required'] and not lower_tf_trigger.get('passed'):
+            reason = (
+                f"Entry {timeframe} espera confirmación {lower_tf_trigger.get('lower_timeframe')}: "
+                f"{lower_tf_trigger.get('reason')}"
+            )
+            levels = self._stamp_futures_filter_trace(
+                levels, stage='PRE_GATE',
+                reason_codes=['HIGH_TF_LOWER_TRIGGER_REQUIRED'],
+                reason=reason, reached_publication_gate=False,
+                outcome='ANALYSIS_ONLY'
+            )
+            levels['is_executable'] = False
+            levels['is_rejected'] = True
+            levels['publication_status'] = 'ANALYSIS_ONLY'
+            levels['rejected_reason'] = reason
         if entry_reaction.get('hard_block') and levels.get('is_executable', True):
             reason = (
                 f"RC4 Entry reaction {entry_reaction.get('score', 0)}/"
@@ -6779,7 +6869,7 @@ class FuturesAnalysis(TradingExpertSystem):
                 'symbol': symbol,
                 'timeframe': timeframe
             }
-        research_only_symbol = symbol in FUTURES_RESEARCH_SYMBOLS
+        research_only_symbol = False
         if not futures_timeframe_allowed(symbol, timeframe):
             allowed = [tf for tf in FUTURES_TIMEFRAMES if futures_timeframe_allowed(symbol, tf)]
             return {
@@ -6869,7 +6959,7 @@ class FuturesAnalysis(TradingExpertSystem):
         result['is_futures'] = True
         result['research_only'] = bool(research_only_symbol)
         result['research_universe'] = (
-            'C15_LINK_BNB_SHADOW' if research_only_symbol else 'PRODUCTION_UNIVERSE'
+            'PRODUCTION_UNIVERSE'
         )
         result['market_data_source'] = KUCOIN_FUTURES_DATA_SOURCE
         result['market_data_is_synthetic'] = False
@@ -7290,7 +7380,7 @@ class FuturesAnalysis(TradingExpertSystem):
         # Preserve the full deterministic analysis for learning, but force the
         # publication contract closed so these two new assets cannot enter V1.0
         # official KPIs or user-executable signals before validation.
-        if research_only_symbol:
+        if False and research_only_symbol:
             result['publication_status'] = 'RESEARCH_ONLY_SHADOW'
             result['publication_eligible'] = False
             result['is_executable'] = False

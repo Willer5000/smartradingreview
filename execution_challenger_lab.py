@@ -418,6 +418,8 @@ def summarize_execution_challenger_evidence(scoped_rows: Dict[str, Iterable[Dict
     for rows in (scoped_rows or {}).values():
         for row in rows or []:
             market = normalize_market(row).upper() or 'UNKNOWN'
+            symbol = str(row.get('symbol') or 'ALL').upper().replace('/', '-')
+            timeframe = str(row.get('timeframe') or 'ALL').upper()
             result = latest_result(row)
             evaluation = _candidate_evaluation_from_result(result)
             items = evaluation.get('results') if isinstance(evaluation, dict) else []
@@ -427,7 +429,7 @@ def summarize_execution_challenger_evidence(scoped_rows: Dict[str, Iterable[Dict
                 if not isinstance(item, dict):
                     continue
                 name = str(item.get('name') or 'UNKNOWN').upper()
-                key = (market, name)
+                key = (market, symbol, timeframe, name)
                 c = counters[key]
                 c['n'] += 1
                 c['entry'] += int(bool(item.get('entry_reached')))
@@ -454,17 +456,17 @@ def summarize_execution_challenger_evidence(scoped_rows: Dict[str, Iterable[Dict
 
     metrics_by_key = {key: _evidence_metrics(obs) for key, obs in groups.items()}
     baseline_by_market = {
-        market: metrics
-        for (market, candidate), metrics in metrics_by_key.items()
+        (market, symbol, timeframe): metrics
+        for (market, symbol, timeframe, candidate), metrics in metrics_by_key.items()
         if candidate == 'BASELINE'
     }
 
     rows_out = []
     for key, observations in groups.items():
-        market, name = key
+        market, symbol, timeframe, name = key
         c = counters[key]
         m = metrics_by_key[key]
-        baseline = baseline_by_market.get(market) or {}
+        baseline = baseline_by_market.get((market, symbol, timeframe)) or {}
         val_net = safe_float(m.get('validation_net_expectancy_r'))
         base_val_net = safe_float(baseline.get('validation_net_expectancy_r'))
         improvement = None
@@ -495,6 +497,8 @@ def summarize_execution_challenger_evidence(scoped_rows: Dict[str, Iterable[Dict
 
         rows_out.append({
             'market': market,
+            'symbol': symbol,
+            'timeframe': timeframe,
             'candidate': name,
             'n_evaluated': c['n'],
             'entry_reached_pct': round(c['entry'] / c['n'] * 100.0, 2) if c['n'] else None,
@@ -508,13 +512,14 @@ def summarize_execution_challenger_evidence(scoped_rows: Dict[str, Iterable[Dict
             'economics_basis': 'MODELED_SIGNAL_COST_R_PROXY',
         })
 
-    rows_out.sort(key=lambda r: (r['market'], -(r['resolved'] or 0), -(safe_float(r.get('validation_net_expectancy_r'), -999) or -999), r['candidate']))
+    rows_out.sort(key=lambda r: (r['market'], r.get('symbol') or '', r.get('timeframe') or '', -(r['resolved'] or 0), -(safe_float(r.get('validation_net_expectancy_r'), -999) or -999), r['candidate']))
     return {
         'version': CHALLENGER_LAB_VERSION,
         'authority': 'SHADOW_ONLY', 'production_change': False,
         'rows': rows_out,
         'policy': {
             'spot_futures_separate': True,
+            'symbol_timeframe_specific': True,
             'min_resolved_before_review': 25,
             'oos_required_before_promotion': True,
             'costs_required_before_promotion': True,
@@ -527,7 +532,7 @@ def summarize_execution_challenger_evidence(scoped_rows: Dict[str, Iterable[Dict
 # COMMIT 14 — GOVERNED EXECUTION CHAMPION
 # ============================================================================
 _GOVERNED_EXECUTION_LOCK = threading.Lock()
-_GOVERNED_EXECUTION_PROFILE: Dict[str, Any] = {'rows': [], 'selected': None}
+_GOVERNED_EXECUTION_PROFILE: Dict[str, Any] = {'rows': [], 'selected': []}
 
 
 def install_governed_execution_profile(profile: Dict[str, Any]) -> None:
@@ -577,8 +582,17 @@ def apply_governed_execution_calibration(analysis: Dict[str, Any], lab: Dict[str
         return audit
 
     profile = get_governed_execution_profile()
-    selected = profile.get('selected') or {}
-    if not isinstance(selected, dict) or str(selected.get('market') or '').upper() != 'FUTURES':
+    selected_rows = profile.get('selected') or []
+    if isinstance(selected_rows, dict):
+        selected_rows = [selected_rows]
+    symbol = str(analysis.get('symbol') or '').upper().replace('/', '-')
+    timeframe = str(analysis.get('timeframe') or '').upper()
+    selected = next((r for r in selected_rows if isinstance(r, dict)
+                     and str(r.get('market') or '').upper() == 'FUTURES'
+                     and str(r.get('symbol') or 'ALL').upper().replace('/', '-') in {'ALL', symbol}
+                     and str(r.get('timeframe') or 'ALL').upper() in {'ALL', timeframe}), None)
+    if not selected:
+        audit['reason'] = 'NO_GOVERNED_CHAMPION_FOR_CELL'
         return audit
     state = str(selected.get('state') or 'OBSERVE').upper()
     if state not in {'CANARY', 'ACTIVE'}:

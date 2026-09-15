@@ -145,7 +145,7 @@
         <div class="chart-container mb-3" id="v1-operator-summary" style="border-color: rgba(0,192,118,.45);">
             <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
                 <div>
-                    <h5 class="mb-1"><i class="fas fa-gauge-high me-2 text-success"></i>Estado V1 · lectura rápida</h5>
+                    <h5 class="mb-1"><i class="fas fa-gauge-high me-2 text-success"></i>Estado del sistema · lectura rápida</h5>
                     <div class="small text-muted">Lo necesario para saber si el sistema está aprendiendo, si tiene edge histórico y si ese edge continúa vivo.</div>
                 </div>
                 <button class="btn btn-outline-secondary btn-sm" id="v1-toggle-advanced" type="button">Ver diagnóstico avanzado</button>
@@ -158,7 +158,7 @@
                 <div class="col-lg-3 col-md-4 col-6"><div class="v1-simple-card"><div class="small text-muted">Futures · Backtest/OOS</div><div class="v1-simple-value" id="v1-futures-oos">--</div><div class="small text-muted" id="v1-futures-oos-note">WR y PnL histórico</div></div></div>
                 <div class="col-lg-3 col-md-4 col-6"><div class="v1-simple-card"><div class="small text-muted">Shadow live</div><div class="v1-simple-value" id="v1-shadow">--</div><div class="small text-muted" id="v1-shadow-note">Confirma continuidad del edge</div></div></div>
                 <div class="col-lg-3 col-md-6"><div class="v1-simple-card"><div class="small text-muted">Científico IA</div><div class="v1-simple-value" id="v1-scientist">--</div><div class="small text-muted" id="v1-scientist-note">Debe mostrar intento reciente, éxito o error.</div></div></div>
-                <div class="col-lg-3 col-md-6"><div class="v1-simple-card"><div class="small text-muted">Política V1</div><div class="v1-simple-value text-success">Safety protegido</div><div class="small text-muted">Backtest demuestra edge; Shadow/live decide continuidad; leverage no rescata estrategias malas.</div></div></div>
+                <div class="col-lg-3 col-md-6"><div class="v1-simple-card"><div class="small text-muted">Política del sistema</div><div class="v1-simple-value text-success">Safety protegido</div><div class="small text-muted">Backtest demuestra edge; Shadow/live decide continuidad; leverage no rescata estrategias malas.</div></div></div>
             </div>
         </div>
 
@@ -169,7 +169,7 @@
                     <h5 class="mb-1"><i class="fas fa-chart-line me-2 text-info"></i>Monitoreo de rentabilidad y continuidad</h5>
                     <div class="small text-muted">Live dice qué ocurre hoy; OOS dice qué demostró la estrategia fuera de entrenamiento. No se mezclan.</div>
                 </div>
-                <span class="badge bg-dark border border-info text-info">V1 RC4.1 · 46 celdas activas</span>
+                <span class="badge bg-dark border border-info text-info">Cobertura de mercados y temporalidades</span>
             </div>
             <div class="table-responsive mb-3">
                 <table class="table table-dark table-sm align-middle mb-0">
@@ -219,7 +219,7 @@
                     <h5 class="mb-1"><i class="fas fa-crosshairs me-2 text-success"></i>Auditoría de Entry</h5>
                     <div class="small text-muted">El Entry se juzga por mercado y muestra verificable. Futures usa una vara más estricta que Spot.</div>
                 </div>
-                <span class="badge bg-dark border border-success text-success">RC4 · Entry Reaction</span>
+                <span class="badge bg-dark border border-success text-success">Calidad y precisión del Entry</span>
             </div>
             <div class="row g-2">
                 <div class="col-xl-6">
@@ -303,7 +303,7 @@
                     class="badge bg-info text-dark"
                     id="q5-v2-version"
                 >
-                    Cargando V2...
+                    Cargando...
                 </span>
 
             </div>
@@ -336,7 +336,7 @@
                 id="q5-v2-status"
                 class="small text-muted mb-3"
             >
-                Cargando cohorte V2...
+                Cargando cohorte...
             </div>
 
 
@@ -360,7 +360,7 @@
                         >
 
                             <strong>
-                                🟢 SPOT V2 ACTUAL
+                                🟢 SPOT · RENDIMIENTO ACTUAL
                             </strong>
 
                             <span
@@ -487,7 +487,7 @@
                         >
 
                             <strong>
-                                🔵 FUTURES V2 OFICIAL
+                                🔵 FUTURES · RENDIMIENTO ACTUAL
                             </strong>
 
                             <span
@@ -733,7 +733,7 @@
                 <div class="col-xl-6">
 
                     <h6 class="mb-2">
-                        🟢 Spot V2 · Safety → Resultado
+                        🟢 Spot · Safety → Resultado
                     </h6>
 
                     <div class="table-responsive">
@@ -913,7 +913,7 @@
             <div class="card bg-dark border-primary mb-3 v1-advanced" id="c15-execution-intelligence">
                 <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
                     <div>
-                        <strong>Execution Intelligence V2 · Observación</strong>
+                        <strong>Inteligencia de ejecución · Observación</strong>
                         <div class="small text-muted">Order Flow, incertidumbre y resiliencia a barridos. No modifica producción.</div>
                     </div>
                     <span class="badge bg-secondary">Investigación</span>
@@ -1293,7 +1293,7 @@
             <div class="card bg-dark border-secondary mb-3 v1-advanced" id="self-calibration-section">
                 <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
                     <div>
-                        <strong>Mejora automática · V1.0</strong>
+                        <strong>Mejora automática</strong>
                         <div class="small text-muted">El sistema aprende, valida y sólo entonces ajusta especialistas o geometría. Safety y leverage permanecen protegidos por sus propios controles.</div>
                     </div>
                     <span class="badge bg-secondary" id="sc-state">Observación</span>
@@ -1401,7 +1401,7 @@
                 class="small text-muted"
                 id="q5-coverage"
             >
-                Cobertura V2: --
+                Cobertura actual: --
             </div>
 
         </div>
@@ -1426,7 +1426,7 @@
 
             <span class="badge bg-secondary">
 
-                Referencia histórica · no calibra V2
+                Referencia histórica · no calibra el sistema actual
 
             </span>
 
@@ -1436,7 +1436,7 @@
 
             Esta sección conserva el comportamiento histórico de Analytics.
             Puede incluir datos de versiones anteriores y no debe utilizarse para
-            juzgar de forma aislada la calidad de la generación V2 actual.
+            juzgar de forma aislada la calidad de la generación actual.
 
         </div>        
         <!-- ============ KPIs GLOBALES (fila 1: básicos) ============ -->
@@ -1650,6 +1650,6 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI"></script>
-    <script src="{{ url_for('static', filename='analytics.js') }}?v=20260914-FINAL-V1-RC4-DATA-HIERARCHY-ENTRY"></script>
+    <script src="{{ url_for('static', filename='analytics.js') }}?v=20260914-FINAL-V1-RC42"></script>
 </body>
 </html>

@@ -212,7 +212,7 @@ def build_trader_scorecard(scoped_rows: Dict[str, Iterable[Dict[str, Any]]], *, 
                 continue
             with_attribution += 1
             market = normalize_market(row).upper() or "UNKNOWN"
-            symbol = str(row.get("symbol") or "UNKNOWN").upper()
+            symbol = str(row.get("symbol") or "UNKNOWN").upper().replace("/", "-")
             timeframe = str(row.get("timeframe") or "UNKNOWN").upper()
             direction = normalize_action(row.get("action_normalized") or row.get("action"))
             regime = _regime(row)
@@ -278,6 +278,7 @@ def build_trader_scorecard(scoped_rows: Dict[str, Iterable[Dict[str, Any]]], *, 
         "pairwise_redundancy": redundancy[:30],
         "policy": {
             "market_specific": True,
+            "symbol_specific": True,
             "timeframe_specific": True,
             "regime_specific": True,
             "direction_specific": True,
@@ -432,6 +433,7 @@ def build_runtime_trader_theses(analysis: Dict[str, Any]) -> Dict[str, Any]:
         },
         "policy": {
             "market_specific": True,
+            "symbol_specific": True,
             "timeframe_specific": True,
             "direction_specific": True,
             "regime_specific": True,
@@ -473,8 +475,8 @@ def build_trader_intelligence_v2_summary(
             if final_r is None:
                 continue
             market = normalize_market(row).upper() or "UNKNOWN"
-            symbol = str(row.get("symbol") or "UNKNOWN").upper()
-            timeframe = str(row.get("timeframe") or "UNKNOWN").upper()
+            symbol = str(row.get("symbol") or "ALL").upper().replace("/", "-")
+            timeframe = str(row.get("timeframe") or "ALL").upper()
             direction = normalize_action(row.get("action_normalized") or row.get("action"))
             regime = canonical_regime(_regime(row))
             seen = set()
@@ -490,10 +492,8 @@ def build_trader_intelligence_v2_summary(
                 judged = _judge_r(relation, final_r)
                 if judged is None:
                     continue
-                # RC3: la autoridad de rentabilidad NO mezcla símbolos.
-                # Cada trader aprende por mercado × símbolo × TF × dirección × régimen.
-                # Los agregados globales permanecen en el scorecard V1 sólo como diagnóstico.
-                for tf, rg in ((timeframe, "ALL"), (timeframe, regime)):
+                # Market, TF and regime rows. Direction is always kept separate.
+                for tf, rg in (("ALL", "ALL"), (timeframe, "ALL"), (timeframe, regime)):
                     key = (trader, market, symbol, tf, direction, rg, relation)
                     groups[key].append((_created_key(row), judged))
 
@@ -555,8 +555,6 @@ def build_trader_intelligence_v2_summary(
             "min_total_resolved_for_weight_review": 25,
             "min_validation_resolved_for_weight_review": 10,
             "validation_split": "70_30_CHRONOLOGICAL",
-            "symbol_specific": True,
-            "cell_identity": "MARKET_SYMBOL_TIMEFRAME",
             "confidence_is_diagnostic_only": True,
             "abstention_is_measured": True,
             "weights_changed": False,

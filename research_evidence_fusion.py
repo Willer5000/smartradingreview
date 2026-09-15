@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""V1 RC4 — profitability evidence fusion for 46 active specialist cells.
+"""FINAL V1 — profitability evidence fusion for 46 active specialist cells.
 
 Rules:
 - causal OOS is a historical prior, never a live trade;
@@ -26,7 +26,7 @@ _POSITIVE = {"SHADOW_READY", "SHADOW_READY_FAST"}
 _VISIBLE = _POSITIVE | {"OBSERVE", "VALIDATION_REQUIRED", "REJECTED_OOS", "VALIDATED_SINGLE_ASSET"}
 _EXPERIMENTS = {"CAUSAL_COVERAGE_STRATEGY", "CAUSAL_REGISTRY_RETEST", "CAUSAL_SHADOW_RECYCLE"}
 _COVERAGE_TARGET = 46
-_RESEARCH_VERSION_PREFIX = "RFV1_10_RC4_46CELL"
+_RESEARCH_VERSION_PREFIX = "RFV1_11_FINAL_RC42_46CELL"
 _FUTURES_SYMBOLS = ("BTC-USDT","ETH-USDT","SOL-USDT","XRP-USDT","ADA-USDT","LINK-USDT","BNB-USDT")
 _FUTURES_CORE_TFS = ("30M","1H","2H","4H")
 _FUTURES_HIGH_TFS = ("12H","1D")
@@ -37,7 +37,7 @@ _SPOT_TFS = ("4H","12H","1D","1W")
 
 
 def _canonical_cell_key(row: Dict[str, Any]) -> Optional[str]:
-    """Return one of the 40 active V1 symbol×TF cells, otherwise None."""
+    """Return one of the 46 active V1 symbol×TF cells, otherwise None."""
     scope = row.get("scope") or {}
     fam = str(scope.get("market_family") or "")
     sym = str(scope.get("symbol") or "").upper().replace("/", "-")

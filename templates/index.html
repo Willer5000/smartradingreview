@@ -2770,11 +2770,18 @@
 <!-- V1.0 UX — CORRELACIÓN / ROTACIÓN COMPACTA -->
 <div class="card bg-dark border-secondary mt-3 correlation-compact">
     <div class="card-header correlation-compact-header">
-        <h6 class="mb-0" id="correlation-panel-title"><i class="fas fa-arrows-rotate me-2" aria-hidden="true"></i>Correlación y rotación Spot</h6>
+        <h6 class="mb-0" id="correlation-panel-title">{% if is_futures %}<i class="fas fa-network-wired me-2" aria-hidden="true"></i>Contexto intermercado Futures{% else %}<i class="fas fa-arrows-rotate me-2" aria-hidden="true"></i>Correlación y rotación Spot{% endif %}</h6>
         <span class="badge bg-info" id="correlation-timeframe">1D</span>
     </div>
     <div class="card-body correlation-compact-body">
         <div id="correlation-info">
+            {% if is_futures %}
+            <div class="small text-muted mb-2">Contexto de BTC, amplitud del mercado, derivados y liquidez. No representa una rotación BTC/PAXG.</div>
+            <div class="correlation-chip-row">
+                <div class="correlation-chip"><strong>BTC 12H / 1D</strong><span class="badge bg-secondary">Esperando contexto…</span></div>
+                <div class="correlation-chip"><strong>Mercado Futures</strong><span class="badge bg-secondary">Esperando amplitud…</span></div>
+            </div>
+            {% else %}
             <div class="correlation-chip-row">
                 <div class="correlation-chip">
                     <strong class="correlation-symbol btc">BTC/USDT</strong>
@@ -2805,6 +2812,7 @@
 
             <div id="rotation-description" class="small text-muted correlation-rotation-description"></div>
             <div id="correlation-weight-explanation" class="visually-hidden">Modificador de confianza</div>
+            {% endif %}
 
             <details class="correlation-details mt-1">
                 <summary>
@@ -2834,7 +2842,7 @@
 
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI-2"></script>
     <script
-        src="{{ url_for('static', filename='script.js') }}?v=20260914-FINAL-V1-RC4-DATA-HIERARCHY-ENTRY"
+        src="{{ url_for('static', filename='script.js') }}?v=20260914-FINAL-V1-RC42"
     ></script>
 
 
@@ -2845,7 +2853,7 @@
     {% if is_futures %}
 
     <script
-        src="{{ url_for('static', filename='futures.js') }}?v=20260914-FINAL-V1-RC4-DATA-HIERARCHY-ENTRY"
+        src="{{ url_for('static', filename='futures.js') }}?v=20260914-FINAL-V1-RC42"
     ></script>
 
     {% endif %}

@@ -10718,7 +10718,7 @@ window.updateCorrelationInfo = function(data) {
     try {
         console.log('📊 updateCorrelationInfo llamado con datos globales:', data);
         const panelTitle = document.getElementById('correlation-panel-title');
-        if (panelTitle) panelTitle.innerHTML = '<i class="fas fa-arrows-rotate me-2"></i>Correlación y rotación Spot';
+        if (panelTitle && !window.IS_FUTURES_PAGE) panelTitle.innerHTML = '<i class="fas fa-arrows-rotate me-2"></i>Correlación y rotación Spot';
         
         // Obtener elementos del DOM
         const btcStatusEl = document.getElementById('btc-correlation-status');

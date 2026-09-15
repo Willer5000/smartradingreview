@@ -2007,7 +2007,7 @@ async function loadQualityV2() {
         q5SetText(
             'q5-coverage',
             (
-                'Cobertura V2 · '
+                'Cobertura actual · '
                 + `Total direccionales: ${
                     Number(
                         coverage.v2_directional_total
@@ -2047,7 +2047,7 @@ async function loadQualityV2() {
 
             statusEl.textContent = (
                 (coverage.complete === true
-                    ? '✅ Lectura V2 completa. '
+                    ? '✅ Lectura actual completa. '
                     : '⚠️ Lectura parcial: no calibrar con esta muestra. ')
                 + 'PnL bruto observado; costes no descontados. '
                 + 'Spot sin procedencia y Legacy excluidos.'
@@ -2057,7 +2057,7 @@ async function loadQualityV2() {
     } catch (error) {
 
         console.error(
-            'Error Q5 Analytics V2:',
+            'Error cargando Analytics:',
             error
         );
 
@@ -2068,7 +2068,7 @@ async function loadQualityV2() {
             );
 
             statusEl.textContent = (
-                '❌ No se pudo cargar Analytics V2: '
+                '❌ No se pudo cargar Analytics: '
                 + error.message
             );
         }
@@ -2086,7 +2086,7 @@ async function loadQualityV2() {
             spotBody.innerHTML = `
                 <tr>
                     <td colspan="8" class="text-center text-danger">
-                        Analytics V2 no disponible
+                        Analytics no disponible
                     </td>
                 </tr>
             `;
@@ -2097,7 +2097,7 @@ async function loadQualityV2() {
             futuresBody.innerHTML = `
                 <tr>
                     <td colspan="8" class="text-center text-danger">
-                        Analytics V2 no disponible
+                        Analytics no disponible
                     </td>
                 </tr>
             `;
@@ -2795,7 +2795,7 @@ async function loadV1MacroStatus(){
 // ============================================================================
 
 window.loadAllAnalytics = async function() {
-    showToast('🔄 Actualizando estado V1...', 'info');
+    showToast('🔄 Actualizando estado del sistema...', 'info');
     // Vista simple: sólo las tres fuentes que realmente gobiernan V1.
     const coreTasks = [
         loadQualityV2(),
@@ -2804,11 +2804,11 @@ window.loadAllAnalytics = async function() {
         loadV1MacroStatus()
     ];
     const results = await Promise.allSettled(coreTasks);
-    results.forEach(result => { if (result.status === 'rejected') console.warn('Estado V1 parcial:', result.reason); });
+    results.forEach(result => { if (result.status === 'rejected') console.warn('Estado del sistema parcial:', result.reason); });
     if (window.__V1_ADVANCED_ANALYTICS__) {
         await window.setAdvancedAnalytics(true);
     }
-    showToast('✅ Estado V1 actualizado', 'success');
+    showToast('✅ Estado del sistema actualizado', 'success');
 };
 
 
@@ -2935,7 +2935,7 @@ async function loadResearchFederationAnalytics(){
                 const guardianDeltaText=guardianDelta===null||guardianDelta===undefined?'--':`${Number(guardianDelta)>=0?'+':''}${fmt(guardianDelta,3)}R`;
                 const cert=row.full_stack_profitability_certification||{};
                 const certState=String(cert.certification_state||'SIN CERTIFICAR');
-                const certText=certState.includes('POSITIVE')?'🧩 OOS operativo +':certState.includes('INCOMPLETE')?'🟡 Entry incompleto':'🔎 Pendiente';
+                const certText=certState.includes('POSITIVE')?'🧩 Backtest histórico positivo · confirmar ejecución real':certState.includes('INCOMPLETE')?'🟡 Ejecución incompleta':'🔎 Pendiente';
                 const shadowState=String(row.shadow_state||'WAITING');
                 const status=row.recycle_required?'♻️ RECICLAR':shadowState==='CONFIRMED'?'✅ CONFIRMANDO':shadowState==='DIVERGED'||shadowState==='EARLY_DIVERGENCE'?'⚠️ DIVERGIENDO':signals>0?'👀 OBSERVANDO':'⏳ ESPERANDO SETUP';
                 return `<tr><td>${row.symbol||'--'}</td><td>${row.timeframe||'--'}</td><td>${uiHumanLabel(row.strategy_family||'Especialista causal')}</td><td>${row.oos_wr==null?'--':fmt(row.oos_wr,1)+'%'}</td><td>${oosPnl==null?'--':(oosPnl>=0?'+':'')+fmt(oosPnl,2)+'R'}</td><td>${row.oos_pf==null?'--':fmt(row.oos_pf,2)}</td><td class="${guardianDelta==null?'text-muted':Number(guardianDelta)>=0?'text-success':'text-warning'}">${guardianDeltaText}</td><td class="small">${certText}</td><td>${resolved}/${signals}</td><td>${status}</td></tr>`;

@@ -244,7 +244,10 @@ def build_hierarchical_assessment(
     enough_families = independent_support >= requirements["min_families"]
     thesis_ok = max(setup_support, execution_support) >= 45.0
     context_available = bool(role_support.get("CONTEXT") or role_oppose.get("CONTEXT"))
-    context_ok = (not requirements["needs_context"]) or (not context_available) or context_support >= 40.0
+    context_ok = (
+        (not requirements["needs_context"])
+        or (context_available and context_support >= 40.0)
+    )
     opposition_dominates = independent_oppose >= 2 and oppose_score >= max(55.0, support_score + 8.0)
     hard_veto = bool(hard_vetoes)
 
@@ -333,6 +336,7 @@ def build_hierarchical_assessment(
             "baseline_no_trade_cannot_be_reopened": True,
             "spot_futures_separate": True,
             "timeframe_sensitive": True,
+            "required_context_fails_closed": True,
             "leverage_unchanged": True,
             "safety_unchanged": True,
         },
