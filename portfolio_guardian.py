@@ -250,6 +250,21 @@ class PortfolioGuardian:
     MIN_TRADE_PCT = 0.08   # Mínimo 8% del activo fuente
     MAX_TRADE_PCT = 0.35   # Máximo 35% del activo fuente (nunca quedarse sin nada)
 
+    # ========================================================================
+    # RC6 · MARKET RISK WATCH — PROTECCIÓN SPOT
+    # ========================================================================
+    # No es un trader y NO genera dirección por un titular. Su misión es
+    # detectar deterioro material del activo que YA está en el portfolio.
+    # Sólo puede recomendar defensa parcial cuando existe confirmación técnica
+    # de vela cerrada. Se conserva siempre un core de BTC.
+    SPOT_RISK_WATCH_VERSION = 'RC6_SPOT_MARKET_RISK_V1'
+    SPOT_DEFENSE_NORMAL_PCT = 0.10
+    SPOT_DEFENSE_HIGH_PCT = 0.15
+    SPOT_DEFENSE_MAX_PCT = 0.20
+    SPOT_RISK_ALERT_SCORE = 42.0
+    SPOT_RISK_HIGH_SCORE = 58.0
+    SPOT_RISK_CRITICAL_SCORE = 78.0
+
     def __init__(self):
         self.bolivia_tz = (
             __import__('pytz')
@@ -3045,29 +3060,55 @@ class PortfolioGuardian:
         # ==============================================================
         # DIRECCIÓN
         # ==============================================================
+        # RC6: Guardian Spot NO puede depender exclusivamente de que Main
+        # publique COMPRA/VENTA. Su misión es proteger un portfolio ya
+        # existente. Si Main está en NO_OPERAR, usa una lectura técnica
+        # secundaria y ACOTADA de tendencia/momentum/cierre.
     
         direct_sign = 0.0
+        decision_directional = False
     
         if action in (
             'COMPRA_SPOT',
             'LONG'
         ):
-    
             direct_sign = 1.0
+            decision_directional = True
     
         elif action in (
             'VENTA_SPOT',
             'SHORT'
         ):
-    
             direct_sign = -1.0
-    
+            decision_directional = True
         else:
-    
-            return 0.0
+            technical_bias = 0.0
+            if trend_direction in ('bullish', 'alcista'):
+                technical_bias += 1.0
+            elif trend_direction in ('bearish', 'bajista'):
+                technical_bias -= 1.0
+            if momentum_direction in ('bullish', 'alcista'):
+                technical_bias += 0.45
+            elif momentum_direction in ('bearish', 'bajista'):
+                technical_bias -= 0.45
+            candle = analysis.get('closed_candle', {}) or {}
+            try:
+                close_change = float(candle.get('close_change_pct') or 0.0)
+            except Exception:
+                close_change = 0.0
+            if close_change >= 0.65:
+                technical_bias += 0.35
+            elif close_change <= -0.65:
+                technical_bias -= 0.35
+            if technical_bias >= 0.75:
+                direct_sign = 1.0
+            elif technical_bias <= -0.75:
+                direct_sign = -1.0
+            else:
+                return 0.0
     
         # ==============================================================
-        # FUERZA DE LA SEÑAL
+        # FUERZA DE LA SEÑAL / CONTEXTO
         # ==============================================================
     
         confidence_score = max(
@@ -3078,12 +3119,21 @@ class PortfolioGuardian:
             )
         )
     
-        # No dejamos que confidence domine.
-        base_strength = (
-            confidence_score * 0.45
-            +
-            execution_safety * 0.30
-        )
+        # Si existe señal direccional, confidence aporta. Si Main decidió
+        # NO_OPERAR, la lectura protectora queda deliberadamente capada y
+        # se apoya más en Safety/ADX para no crear una señal de trading.
+        if decision_directional:
+            base_strength = (
+                confidence_score * 0.45
+                + execution_safety * 0.30
+            )
+        else:
+            base_strength = min(
+                55.0,
+                execution_safety * 0.28
+                + min(35.0, adx) * 0.55
+                + 12.0
+            )
     
         # ==============================================================
         # TENDENCIA
@@ -3199,6 +3249,8 @@ class PortfolioGuardian:
         score *= adx_factor
     
         score *= direct_sign
+        if not decision_directional:
+            score = max(-62.0, min(62.0, score))
     
         return max(
             -100.0,
@@ -4334,8 +4386,31 @@ class PortfolioGuardian:
                 -100,
                 -strength
             )
-    
-        return 0.0
+
+        # RC6: si el ratio no publica señal, usar tendencia/ADX como contexto
+        # relativo acotado. Nunca crea una operación por sí solo.
+        trend = analysis.get('trend', {}) or {}
+        momentum = analysis.get('momentum', {}) or {}
+        trend_direction = str(trend.get('direction', 'neutral')).lower()
+        momentum_direction = str(momentum.get('direction', 'neutral')).lower()
+        try:
+            adx = float(trend.get('adx', 0) or 0)
+        except Exception:
+            adx = 0.0
+        bias = 0.0
+        # PAXG/BTC alcista favorece PAXG => score BTC negativo.
+        if trend_direction in ('bullish', 'alcista'):
+            bias -= 1.0
+        elif trend_direction in ('bearish', 'bajista'):
+            bias += 1.0
+        if momentum_direction in ('bullish', 'alcista'):
+            bias -= 0.35
+        elif momentum_direction in ('bearish', 'bajista'):
+            bias += 0.35
+        if abs(bias) < 0.75:
+            return 0.0
+        fallback_strength = min(55.0, 18.0 + min(35.0, adx) * 0.8)
+        return fallback_strength if bias > 0 else -fallback_strength
 
     def _tactical_target_allocation_pct(
         self,
@@ -4434,12 +4509,195 @@ class PortfolioGuardian:
             round(target_pct, 4)
         )
 
+    @staticmethod
+    def _rc6_direction(value):
+        text = str(value or '').strip().lower()
+        if text in ('bullish', 'alcista', 'up', 'long'):
+            return 1
+        if text in ('bearish', 'bajista', 'down', 'short'):
+            return -1
+        return 0
+
+    def _build_spot_market_risk_watch(
+        self,
+        market_snapshots,
+        macro_context=None,
+        pct_btc=0.0,
+        pct_paxg=0.0,
+        pct_usdt=0.0,
+    ):
+        """
+        RC6: vigilancia de riesgo para un portfolio Spot existente.
+
+        Principios:
+        - usa velas CERRADAS para no vender por un mechazo intrabar;
+        - macro solo eleva vigilancia, nunca crea una venta por sí solo;
+        - defensa real requiere deterioro técnico + exposición BTC disponible;
+        - nunca autoriza vaciar BTC/PAXG/USDT por debajo de reservas.
+        """
+        market_snapshots = market_snapshots or {}
+        macro_context = macro_context or {}
+        btc = {}
+        paxg = {}
+        ratio = {}
+        for tf in ('4h', '12h', '1D', '1W'):
+            tf_data = market_snapshots.get(tf, {}) or {}
+            btc[tf] = tf_data.get('BTC-USDT', {}) or {}
+            paxg[tf] = tf_data.get('PAXG-USDT', {}) or {}
+            ratio[tf] = tf_data.get('PAXG-BTC', {}) or {}
+
+        btc4 = btc.get('4h') or {}
+        candle = btc4.get('closed_candle', {}) or {}
+        vol = btc4.get('volatility', {}) or {}
+        try:
+            body = float(candle.get('body_change_pct') or 0.0)
+            close_change = float(candle.get('close_change_pct') or 0.0)
+            two_bar = float(candle.get('two_bar_change_pct') or 0.0)
+        except Exception:
+            body = close_change = two_bar = 0.0
+        try:
+            atr_pct = abs(float(vol.get('atr_pct') or 0.0))
+            vol_ratio = float(vol.get('volatility_ratio') or 1.0)
+            vol_percentile = float(vol.get('volatility_percentile') or 50.0)
+        except Exception:
+            atr_pct, vol_ratio, vol_percentile = 0.0, 1.0, 50.0
+
+        # Umbral adaptativo. Una mecha aislada no entra aquí: body/close son
+        # cierres, no high/low intrabar.
+        one_bar_threshold = max(0.85, atr_pct * 0.72 if atr_pct > 0 else 0.85)
+        two_bar_threshold = max(1.25, atr_pct * 1.10 if atr_pct > 0 else 1.25)
+        closed_shock = (
+            body <= -one_bar_threshold
+            or close_change <= -one_bar_threshold
+            or two_bar <= -two_bar_threshold
+        )
+
+        bearish_tfs = 0
+        bullish_tfs = 0
+        details = {}
+        for tf in ('4h', '12h', '1D'):
+            snap = btc.get(tf) or {}
+            trend = snap.get('trend', {}) or {}
+            momentum = snap.get('momentum', {}) or {}
+            td = self._rc6_direction(trend.get('direction'))
+            md = self._rc6_direction(momentum.get('direction'))
+            try:
+                adx = float(trend.get('adx', 0) or 0)
+            except Exception:
+                adx = 0.0
+            if td < 0 and (md <= 0 or adx >= 22):
+                bearish_tfs += 1
+            if td > 0 and (md >= 0 or adx >= 22):
+                bullish_tfs += 1
+            details[tf] = {'trend': td, 'momentum': md, 'adx': round(adx, 1)}
+
+        macro_level = str(
+            macro_context.get('current_risk_level', macro_context.get('risk_level', 'LOW'))
+            or 'LOW'
+        ).upper()
+        macro_bias = str(macro_context.get('directional_bias', 'NEUTRAL') or 'NEUTRAL').upper()
+        macro_points = {'LOW': 0, 'MEDIUM': 8, 'HIGH': 16, 'CRITICAL': 24}.get(macro_level, 0)
+        if macro_bias == 'RISK_OFF':
+            macro_points += 8
+
+        score = 0.0
+        if closed_shock:
+            score += 32.0
+        score += min(30.0, bearish_tfs * 10.0)
+        score += float(macro_points)
+        if vol_ratio >= 1.45 or vol_percentile >= 90:
+            score += 8.0
+        if bullish_tfs >= 2 and not closed_shock:
+            score -= 12.0
+        score = max(0.0, min(100.0, score))
+
+        # Macro por sí solo nunca activa defensa. Para vender/rotar BTC hace
+        # falta cierre adverso y confirmación estructural suficiente.
+        technical_confirmed = bool(
+            closed_shock
+            and (
+                bearish_tfs >= 2
+                or (bearish_tfs >= 1 and macro_bias == 'RISK_OFF' and macro_level in {'HIGH', 'CRITICAL'})
+            )
+        )
+
+        if score >= self.SPOT_RISK_CRITICAL_SCORE:
+            level = 'CRITICAL'
+        elif score >= self.SPOT_RISK_HIGH_SCORE:
+            level = 'HIGH'
+        elif score >= self.SPOT_RISK_ALERT_SCORE:
+            level = 'WATCH'
+        elif macro_level in {'HIGH', 'CRITICAL'} and macro_bias == 'RISK_OFF':
+            # Aviso preventivo solamente. Sin confirmación técnica NO habilita
+            # venta/rotación, pero el usuario sí debe saber que el entorno cambió.
+            level = 'WATCH'
+        else:
+            level = 'NONE'
+
+        # Elegir refugio sólo con evidencia relativa, no por dogma.
+        paxg_support = 0
+        for tf in ('4h', '12h', '1D'):
+            p = paxg.get(tf) or {}
+            r = ratio.get(tf) or {}
+            p_trend = self._rc6_direction((p.get('trend', {}) or {}).get('direction'))
+            r_trend = self._rc6_direction((r.get('trend', {}) or {}).get('direction'))
+            # PAXG-USDT alcista o PAXG/BTC alcista favorece PAXG.
+            if p_trend > 0:
+                paxg_support += 1
+            if r_trend > 0:
+                paxg_support += 1
+
+        preferred_refuge = 'PAXG' if paxg_support >= 2 else 'USDT'
+        alert = bool(level in {'WATCH', 'HIGH', 'CRITICAL'})
+        defensive_action_eligible = bool(
+            level in {'HIGH', 'CRITICAL'}
+            and technical_confirmed
+            and float(pct_btc or 0.0) > float(self.MIN_RESERVE_PCTS['BTC']) + 0.02
+        )
+
+        reason_parts = []
+        if closed_shock:
+            reason_parts.append(
+                f'BTC 4h cerró con deterioro material (cuerpo {body:+.2f}%, cierre {close_change:+.2f}%, 2 velas {two_bar:+.2f}%).'
+            )
+        if bearish_tfs:
+            reason_parts.append(f'{bearish_tfs}/3 TF BTC 4h/12h/1D muestran sesgo bajista confirmado.')
+        if macro_level in {'HIGH', 'CRITICAL'} or macro_bias == 'RISK_OFF':
+            reason_parts.append(f'Macro {macro_level} · {macro_bias}; se usa como contexto, no como orden.')
+        if not reason_parts:
+            reason_parts.append('No existe deterioro cerrado suficiente para activar defensa del portfolio.')
+
+        return {
+            'version': self.SPOT_RISK_WATCH_VERSION,
+            'level': level,
+            'score': round(score, 1),
+            'alert': alert,
+            'technical_confirmed': technical_confirmed,
+            'defensive_action_eligible': defensive_action_eligible,
+            'preferred_refuge': preferred_refuge,
+            'paxg_support': paxg_support,
+            'macro_level': macro_level,
+            'macro_bias': macro_bias,
+            'closed_shock': closed_shock,
+            'btc_4h_body_change_pct': round(body, 3),
+            'btc_4h_close_change_pct': round(close_change, 3),
+            'btc_4h_two_bar_change_pct': round(two_bar, 3),
+            'btc_4h_atr_pct': round(atr_pct, 3),
+            'btc_4h_volatility_ratio': round(vol_ratio, 3),
+            'bearish_timeframes': bearish_tfs,
+            'bullish_timeframes': bullish_tfs,
+            'timeframe_detail': details,
+            'reason': ' '.join(reason_parts),
+            'policy': 'CLOSED_CANDLE_CONFIRMATION_NO_NEWS_ONLY_SELL',
+        }
+
     def analyze_multi_timeframe(
         self,
         user,
         portfolio,
         prices,
-        market_snapshots
+        market_snapshots,
+        macro_context=None
     ):
         """
         TGP MULTI-TIMEFRAME.
@@ -5321,6 +5579,89 @@ class PortfolioGuardian:
             # hasta disponer de un Entry superior?
             # ==========================================================
 
+            # ==========================================================
+            # RC6 · MARKET RISK WATCH / DEFENSA SPOT
+            # ==========================================================
+            market_risk_watch = self._build_spot_market_risk_watch(
+                market_snapshots=market_snapshots,
+                macro_context=macro_context,
+                pct_btc=pct_btc,
+                pct_paxg=pct_paxg,
+                pct_usdt=pct_usdt,
+            )
+
+            risk_level = str(market_risk_watch.get('level', 'NONE')).upper()
+            risk_confirmed = bool(market_risk_watch.get('technical_confirmed', False))
+
+            # Un régimen de riesgo elevado nunca permite AUMENTAR BTC mientras
+            # el deterioro siga vigente. Macro solo no vende: exige confirmación
+            # técnica de cierre para activar una defensa real.
+            if risk_level in {'HIGH', 'CRITICAL'} and action in {
+                'BUY_BTC', 'SWAP_PAXG_TO_BTC'
+            }:
+                action = 'HOLD'
+                trade_size = 0
+                amount_crypto = 0
+                amount_usd = 0
+                source_asset = None
+                target_asset = None
+                confidence = max(confidence, 72)
+                reason = (
+                    f'RC6 Market Risk Watch bloquea aumentar BTC temporalmente. '
+                    f'{market_risk_watch.get("reason", "")} '
+                    'Se espera confirmación de recuperación en vela cerrada.'
+                )
+
+            # Defensa parcial del BTC YA poseído. No vende por titular ni por
+            # mecha: requiere cierre adverso + confirmación multitemporal.
+            if (
+                market_risk_watch.get('defensive_action_eligible', False)
+                and btc_available > 0
+            ):
+                desired_size = (
+                    self.SPOT_DEFENSE_HIGH_PCT
+                    if risk_level == 'CRITICAL'
+                    else self.SPOT_DEFENSE_NORMAL_PCT
+                )
+                if float(pct_btc or 0.0) > 0:
+                    max_by_reserve = max(
+                        0.0,
+                        1.0 - float(self.MIN_RESERVE_PCTS['BTC']) / float(pct_btc)
+                    )
+                else:
+                    max_by_reserve = 0.0
+                defense_size = min(
+                    float(self.SPOT_DEFENSE_MAX_PCT),
+                    float(desired_size),
+                    float(max_by_reserve),
+                )
+                if defense_size >= 0.05:
+                    btc_price_defense = float(valuation.get('btc_price', 0) or 0)
+                    amount_crypto = btc_available * defense_size
+                    amount_usd = amount_crypto * btc_price_defense
+                    trade_size = defense_size
+                    source_asset = 'BTC'
+
+                    # En CRITICAL preferimos liquidez salvo que PAXG tenga
+                    # evidencia relativa especialmente fuerte. En HIGH puede
+                    # usarse PAXG como refugio si el propio mercado lo confirma.
+                    refuge = str(market_risk_watch.get('preferred_refuge', 'USDT')).upper()
+                    paxg_support = int(market_risk_watch.get('paxg_support', 0) or 0)
+                    if refuge == 'PAXG' and (risk_level != 'CRITICAL' or paxg_support >= 3):
+                        action = 'SWAP_BTC_TO_PAXG'
+                        target_asset = 'PAXG'
+                    else:
+                        action = 'SELL_BTC'
+                        target_asset = 'USDT'
+
+                    confidence = max(confidence, 82 if risk_level == 'CRITICAL' else 76)
+                    reason = (
+                        f'RC6 recomienda defensa PARCIAL de BTC ({defense_size * 100:.0f}% de la posición, '
+                        f'nunca el core). {market_risk_watch.get("reason", "")} '
+                        f'Refugio elegido: {target_asset}. La defensa es gradual para reducir riesgo de '
+                        'vender un mechazo fundamental y permitir reentrada posterior si BTC recupera estructura.'
+                    )
+
             spot_entry_quality_guard = (
                 self._apply_spot_entry_quality_guard(
                     action=
@@ -5657,6 +5998,12 @@ class PortfolioGuardian:
                 portfolio=portfolio,
                 valuation=valuation
             )
+            rec['market_risk_watch'] = market_risk_watch
+            rec['macro_context_guardian'] = {
+                'current_risk_level': str((macro_context or {}).get('current_risk_level', (macro_context or {}).get('risk_level', 'UNKNOWN'))),
+                'directional_bias': str((macro_context or {}).get('directional_bias', 'NEUTRAL')),
+                'futures_posture': str((macro_context or {}).get('futures_posture', 'NORMAL')),
+            }
 
             # ==============================================================
             # FASE 7F.1
@@ -6653,7 +7000,8 @@ class PortfolioGuardian:
         self,
         signal,
         current_price,
-        candles
+        candles,
+        macro_context=None
     ):
         """
         FINAL V1 RC3 — Futures Position Guardian / Trader Evaluator.
@@ -6939,7 +7287,36 @@ class PortfolioGuardian:
                 context_lows=context_lows,
             )
 
+            # RC6 · Macro es contexto de RIESGO para una posición ya abierta.
+            # Nunca crea EXIT/REDUCE ni cambia Entry/SL/TP original por un titular.
+            # En riesgo HIGH/CRITICAL impide aumentar exposición (ADD) o alejar el
+            # objetivo (EXTEND). Si ya había una protección de SL técnicamente
+            # válida, la conserva.
+            macro_context = macro_context or {}
+            macro_level = str(
+                macro_context.get('current_risk_level', macro_context.get('risk_level', 'LOW'))
+                or 'LOW'
+            ).upper()
+            macro_bias = str(macro_context.get('directional_bias', 'NEUTRAL') or 'NEUTRAL').upper()
             management_action = str(management.get('management_action', 'HOLD')).upper()
+            macro_overlay_applied = False
+            if macro_level in {'HIGH', 'CRITICAL'} and management_action not in {'EXIT', 'REDUCE'}:
+                had_protect = 'PROTECT' in management_action
+                had_add_or_extend = ('ADD' in management_action or 'EXTEND' in management_action)
+                if had_add_or_extend:
+                    macro_overlay_applied = True
+                    management['suggested_take_profit'] = None
+                    management['suggested_add_entry'] = None
+                    management['suggested_add_position_pct'] = None
+                    management['suggested_add_position_usdt'] = None
+                    management['scale_in_rr'] = None
+                    management_action = 'PROTECT' if had_protect else 'HOLD'
+                    management['management_action'] = management_action
+                    management['management_reason'] = (
+                        str(management.get('management_reason', '') or '')
+                        + f' RC6 Macro {macro_level}/{macro_bias}: se bloquea ADD/EXTEND hasta que el riesgo macro se normalice; no se fuerza salida por noticias.'
+                    ).strip()
+
             if management_action == 'EXIT':
                 base_action, severity = 'EXIT', 'HIGH'
             elif management_action == 'REDUCE':
@@ -6991,6 +7368,9 @@ class PortfolioGuardian:
                 'tp_progress_ratio': management.get('tp_progress_ratio', 0.0),
                 'momentum_with_position': management.get('momentum_with_position', False),
                 'management_reason': management.get('management_reason', ''),
+                'macro_risk_level': macro_level,
+                'macro_risk_bias': macro_bias,
+                'macro_overlay_applied': bool(macro_overlay_applied),
             }
 
             if base_action == 'EXIT':

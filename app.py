@@ -712,6 +712,51 @@ def _compact_tgp_analysis(result):
         or {}
     )
 
+    volatility = (
+        result.get(
+            'volatility',
+            {}
+        )
+        or {}
+    )
+
+    # RC6 · Guardian Spot necesita observar deterioro de mercado aunque Main
+    # decida NO_OPERAR. Guardamos sólo métricas de VELAS CERRADAS y volatilidad;
+    # nunca el DataFrame completo. Esto evita reaccionar a un simple mechazo.
+    closed_candle = {
+        'body_change_pct': None,
+        'close_change_pct': None,
+        'two_bar_change_pct': None,
+        'closed': True,
+    }
+
+    try:
+        raw_df = result.get('df')
+        opens = closes = None
+        if isinstance(raw_df, dict):
+            opens = list(raw_df.get('open', []) or [])
+            closes = list(raw_df.get('close', []) or [])
+        elif raw_df is not None and hasattr(raw_df, '__getitem__'):
+            try:
+                opens = list(raw_df['open'])
+                closes = list(raw_df['close'])
+            except Exception:
+                opens = closes = None
+        if opens and closes and len(closes) >= 2:
+            last_open = float(opens[-1])
+            last_close = float(closes[-1])
+            prev_close = float(closes[-2])
+            if last_open:
+                closed_candle['body_change_pct'] = (last_close - last_open) / last_open * 100.0
+            if prev_close:
+                closed_candle['close_change_pct'] = (last_close - prev_close) / prev_close * 100.0
+            if len(closes) >= 3:
+                prev2 = float(closes[-3])
+                if prev2:
+                    closed_candle['two_bar_change_pct'] = (last_close - prev2) / prev2 * 100.0
+    except Exception:
+        pass
+
     def _count(value):
         return (
             len(value)
@@ -1025,6 +1070,21 @@ def _compact_tgp_analysis(result):
                     'NEUTRAL'
                 )
             )
+        },
+
+        'volatility': {
+            'atr_pct': _optional_float(volatility.get('atr_pct')),
+            'atr_baseline_pct': _optional_float(volatility.get('atr_baseline_pct')),
+            'volatility_ratio': _optional_float(volatility.get('volatility_ratio')),
+            'volatility_percentile': _optional_float(volatility.get('volatility_percentile')),
+            'level': str(volatility.get('level', volatility.get('volatility_level', 'UNKNOWN')) or 'UNKNOWN'),
+        },
+
+        'closed_candle': {
+            'body_change_pct': _optional_float(closed_candle.get('body_change_pct')),
+            'close_change_pct': _optional_float(closed_candle.get('close_change_pct')),
+            'two_bar_change_pct': _optional_float(closed_candle.get('two_bar_change_pct')),
+            'closed': bool(closed_candle.get('closed', True)),
         },
 
         # ==============================================================
@@ -29086,6 +29146,12 @@ def api_futures_position_guardian():
 
         futures_market = _get_futures_system()
 
+        try:
+            from macro_context import get_macro_context_snapshot
+            futures_guardian_macro = get_macro_context_snapshot(fetch_if_stale=False) or {}
+        except Exception:
+            futures_guardian_macro = {}
+
         if futures_market is None:
             return jsonify({
                 'success': False,
@@ -29133,7 +29199,8 @@ def api_futures_position_guardian():
                             .evaluate_futures_position(
                                 signal=sig,
                                 current_price=current_price,
-                                candles=candles
+                                candles=candles,
+                                macro_context=futures_guardian_macro
                             )
                         )
                     
@@ -40804,6 +40871,12 @@ def monitor_guardian_telegram_loop():
 
                 continue
 
+            try:
+                from macro_context import get_macro_context_snapshot
+                futures_guardian_macro = get_macro_context_snapshot(fetch_if_stale=False) or {}
+            except Exception:
+                futures_guardian_macro = {}
+
             for user in sorted(
                 _telegram_market_users(
                     'futures'
@@ -40917,7 +40990,8 @@ def monitor_guardian_telegram_loop():
                                     current_price=(
                                         current_price
                                     ),
-                                    candles=candles
+                                    candles=candles,
+                                    macro_context=futures_guardian_macro
                                 )
                             )
 
@@ -41575,6 +41649,10 @@ def _build_proactive_spot_guardian_message(
         or 0
     )
 
+    market_risk_watch = tgp_result.get('market_risk_watch', {}) or {}
+    market_risk_level = str(market_risk_watch.get('level', 'NONE') or 'NONE').upper()
+    market_risk_alert = bool(market_risk_watch.get('alert', False))
+
     reason = _tgp_public_reason(
         tgp_result.get(
             'reason',
@@ -41675,14 +41753,17 @@ def _build_proactive_spot_guardian_message(
             '🔄 <b>ROTAR BTC → PAXG</b>'
     }
 
-    action_text = (
-        action_labels.get(
-            action,
-            _telegram_escape(
-                action
+    if action == 'HOLD' and market_risk_alert:
+        action_text = f"⚠️ <b>RIESGO DE PORTAFOLIO · {_telegram_escape(market_risk_level)}</b>"
+    else:
+        action_text = (
+            action_labels.get(
+                action,
+                _telegram_escape(
+                    action
+                )
             )
         )
-    )
 
     lines = [
 
@@ -41755,6 +41836,19 @@ def _build_proactive_spot_guardian_message(
             (
                 "USDT: "
                 f"{float(after.get('pct_usdt', 0) or 0) * 100:.1f}%"
+            )
+        ])
+
+    if market_risk_alert:
+        lines.extend([
+            '',
+            f'⚠️ <b>Market Risk Watch: {_telegram_escape(market_risk_level)}</b>',
+            _telegram_escape(str(market_risk_watch.get('reason', '') or 'Riesgo material en observación.')),
+            (
+                'BTC 4h cierre: '
+                f"{float(market_risk_watch.get('btc_4h_close_change_pct', 0) or 0):+.2f}% · "
+                f"Macro: {_telegram_escape(str(market_risk_watch.get('macro_level', 'UNKNOWN')))} "
+                f"({_telegram_escape(str(market_risk_watch.get('macro_bias', 'NEUTRAL')))})"
             )
         ])
 
@@ -41865,6 +41959,13 @@ def _run_proactive_spot_guardian(
         market_snapshots = (
             _get_tgp_market_snapshots()
         )
+
+        try:
+            from macro_context import get_macro_context_snapshot
+            guardian_macro_context = get_macro_context_snapshot(fetch_if_stale=False) or {}
+        except Exception as macro_error:
+            print(f"⚠️ TGP proactivo: macro no disponible: {macro_error}")
+            guardian_macro_context = {}
 
         # ==============================================================
         # 3. EXIGIR CONTEXTO MULTITEMPORAL REAL
@@ -42131,7 +42232,8 @@ def _run_proactive_spot_guardian(
                         prices=prices,
                         market_snapshots=(
                             market_snapshots
-                        )
+                        ),
+                        macro_context=guardian_macro_context
                     )
                 )
 
@@ -42167,12 +42269,15 @@ def _run_proactive_spot_guardian(
             )
 
             # ==========================================================
-            # HOLD = SILENCIO
+            # RC6: HOLD sigue siendo silencioso SALVO riesgo material.
             # ==========================================================
+            risk_watch = tgp_result.get('market_risk_watch', {}) or {}
+            risk_alert = bool(risk_watch.get('alert', False))
+            risk_level = str(risk_watch.get('level', 'NONE') or 'NONE').upper()
 
             if (
-                action == 'HOLD'
-                or confidence < 70
+                (action == 'HOLD' and not risk_alert)
+                or (confidence < 70 and not risk_alert)
             ):
 
                 print(
@@ -42265,20 +42370,20 @@ def _run_proactive_spot_guardian(
             #     abrir la página no la duplica.
             # ==============================================================
 
-            spot_window = int(
-                time.time()
-                // (
-                    6
-                    * 60
-                    * 60
-                )
-            )
+            risk_notice = bool((tgp_result.get('market_risk_watch', {}) or {}).get('alert', False))
+            # Una advertencia de riesgo necesita cadencia más corta que una
+            # recomendación estratégica normal, pero no debe spamear.
+            spot_interval = (90 * 60) if risk_notice else (6 * 60 * 60)
+            spot_window = int(time.time() // spot_interval)
 
-            spot_subject = _tgp_public_subject(
-                tgp_result,
-                state=state,
-                veto=False
-            )
+            if risk_notice and action == 'HOLD':
+                spot_subject = f"SPOT_RISK_{str((tgp_result.get('market_risk_watch', {}) or {}).get('level', 'WATCH')).upper()}"
+            else:
+                spot_subject = _tgp_public_subject(
+                    tgp_result,
+                    state=state,
+                    veto=False
+                )
 
             reservation = (
                 _guardian_alert_can_send(
@@ -42286,14 +42391,8 @@ def _run_proactive_spot_guardian(
                     market='spot',
                     subject=spot_subject,
                     action=action,
-                    bucket=str(
-                        spot_window
-                    ),
-                    min_interval=(
-                        6
-                        * 60
-                        * 60
-                    )
+                    bucket=str(spot_window),
+                    min_interval=spot_interval
                 )
             )
 
@@ -47002,277 +47101,11 @@ def api_analyze_with_portfolio():
         # ==============================================================
         # ==============================================================
 
-        def _compact_tgp_snapshot(
-            analysis_result
-        ):
-
-            if not isinstance(
-                analysis_result,
-                dict
-            ):
-                return None
-
-            if not analysis_result.get(
-                'success'
-            ):
-                return None
-
-            snap_symbol = (
-                analysis_result.get(
-                    'symbol'
-                )
-            )
-
-            snap_tf = (
-                analysis_result.get(
-                    'timeframe'
-                )
-            )
-
-            if snap_symbol not in (
-                'BTC-USDT',
-                'PAXG-USDT',
-                'PAXG-BTC'
-            ):
-                return None
-
-            if snap_tf not in (
-                '4h',
-                '12h',
-                '1D',
-                '1W'
-            ):
-                return None
-
-            decision = (
-                analysis_result.get(
-                    'decision',
-                    {}
-                )
-                or {}
-            )
-
-            levels = (
-                analysis_result.get(
-                    'levels',
-                    {}
-                )
-                or {}
-            )
-
-            trend = (
-                analysis_result.get(
-                    'trend',
-                    {}
-                )
-                or {}
-            )
-
-            momentum = (
-                analysis_result.get(
-                    'momentum',
-                    {}
-                )
-                or {}
-            )
-
-            structure = (
-                analysis_result.get(
-                    'structure',
-                    {}
-                )
-                or {}
-            )
-
-            correlation = (
-                analysis_result.get(
-                    'correlation',
-                    {}
-                )
-                or {}
-            )
-
-            def _num(
-                value,
-                default=0.0
-            ):
-
-                try:
-
-                    return float(
-                        value
-                        if value is not None
-                        else default
-                    )
-
-                except (
-                    TypeError,
-                    ValueError
-                ):
-
-                    return default
-
-            def _count(
-                value
-            ):
-
-                if isinstance(
-                    value,
-                    (list, tuple)
-                ):
-                    return len(
-                        value
-                    )
-
-                return 0
-
-            return {
-
-                'success': True,
-
-                'symbol':
-                    snap_symbol,
-
-                'timeframe':
-                    snap_tf,
-
-                'decision': {
-
-                    'action': str(
-                        decision.get(
-                            'action',
-                            'NO_OPERAR'
-                        )
-                    ),
-
-                    'confidence':
-                        _num(
-                            decision.get(
-                                'confidence',
-                                0
-                            )
-                        )
-                },
-
-                'levels': {
-
-                    'execution_safety':
-                        _num(
-                            levels.get(
-                                'execution_safety',
-                                0
-                            )
-                        ),
-
-                    'entry_score':
-                        _num(
-                            levels.get(
-                                'entry_score',
-                                0
-                            )
-                        ),
-
-                    'tp_quality_score':
-                        _num(
-                            levels.get(
-                                'tp_quality_score',
-                                0
-                            )
-                        ),
-
-                    'sl_reliability':
-                        _num(
-                            levels.get(
-                                'sl_reliability',
-                                0
-                            )
-                        ),
-
-                    'risk_reward':
-                        _num(
-                            levels.get(
-                                'risk_reward',
-                                0
-                            )
-                        )
-                },
-
-                'trend': {
-
-                    'direction':
-                        str(
-                            trend.get(
-                                'direction',
-                                'neutral'
-                            )
-                        ),
-
-                    'adx':
-                        _num(
-                            trend.get(
-                                'adx',
-                                0
-                            )
-                        )
-                },
-
-                'momentum': {
-
-                    'direction':
-                        str(
-                            momentum.get(
-                                'direction',
-                                'neutral'
-                            )
-                        )
-                },
-
-                'structure': {
-
-                    'order_blocks_count':
-                        _count(
-                            structure.get(
-                                'order_blocks',
-                                []
-                            )
-                        ),
-
-                    'fair_value_gaps_count':
-                        _count(
-                            structure.get(
-                                'fair_value_gaps',
-                                []
-                            )
-                        ),
-
-                    'liquidity_sweeps_count':
-                        _count(
-                            structure.get(
-                                'liquidity_sweeps',
-                                []
-                            )
-                        )
-                },
-
-                'correlation': {
-
-                    'rotation_signal':
-                        str(
-                            correlation.get(
-                                'rotation_signal',
-                                'NEUTRAL'
-                            )
-                        )
-                },
-
-                'current_price':
-                    _num(
-                        analysis_result.get(
-                            'current_price',
-                            0
-                        )
-                    )
-            }
+        def _compact_tgp_snapshot(analysis_result):
+            # RC6: una única definición canónica de snapshot TGP. La función
+            # global conserva volatilidad + movimiento de velas cerradas sin
+            # copiar OHLCV pesado.
+            return _compact_tgp_analysis(analysis_result)
 
         # ==============================================================
         # 6. CONSTRUIR SNAPSHOTS MULTI-TIMEFRAME
@@ -47545,6 +47378,12 @@ def api_analyze_with_portfolio():
         )
         
         tgp_result = None
+
+        try:
+            from macro_context import get_macro_context_snapshot
+            guardian_macro_context = get_macro_context_snapshot(fetch_if_stale=False) or {}
+        except Exception:
+            guardian_macro_context = {}
         
         try:
         
@@ -47556,7 +47395,8 @@ def api_analyze_with_portfolio():
                     prices=prices,
                     market_snapshots=(
                         market_snapshots
-                    )
+                    ),
+                    macro_context=guardian_macro_context
                 )
             )
         

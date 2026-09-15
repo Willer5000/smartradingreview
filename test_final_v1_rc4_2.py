@@ -7,7 +7,7 @@ from execution_challenger_lab import summarize_execution_challenger_evidence
 
 def test_research_fusion_reads_only_final_rc42_generation():
     src = Path('research_evidence_fusion.py').read_text(encoding='utf-8')
-    assert 'RFV1_11_FINAL_RC42_46CELL' in src
+    assert 'RFV1_12_RC5_ITERATIVE_EDGE_46CELL' in src
     assert 'RFV1_10_RC4_46CELL' not in src
 
 
@@ -66,7 +66,7 @@ def test_futures_ui_uses_intermarket_context_not_spot_rotation_placeholder():
     html = Path('templates/index.html').read_text(encoding='utf-8')
     assert 'Contexto intermercado Futures' in html
     assert 'No representa una rotación BTC/PAXG' in html
-    assert '20260914-FINAL-V1-RC42' in html
+    assert '20260915-RC6-GUARDIAN-MACRO' in html
 
 
 def test_link_bnb_and_high_tf_entry_contract_are_final_v1():

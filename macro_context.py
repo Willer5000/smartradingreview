@@ -29,7 +29,9 @@ import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
+from xml.etree import ElementTree as ET
 from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
@@ -50,6 +52,12 @@ MACRO_HTTP_TIMEOUT = max(3, min(15, int(os.getenv("MACRO_HTTP_TIMEOUT", "7"))))
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 BLS_ICS_URL = "https://www.bls.gov/schedule/news_release/bls.ics"
 FOMC_CALENDAR_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
+
+# RC6 · fuentes oficiales adicionales. No requieren API key y se consumen
+# como contexto; nunca convierten un titular en una orden de trading.
+FED_MONETARY_RSS_URL = "https://www.federalreserve.gov/feeds/press_monetary.xml"
+CFTC_GENERAL_RSS_URL = "https://www.cftc.gov/RSS/RSSGP/rssgp.xml"
+SEC_PRESS_RSS_URL = "https://www.sec.gov/news/pressreleases.rss"
 
 UTC = timezone.utc
 try:
@@ -160,6 +168,19 @@ _CATEGORY_RULES: List[Tuple[str, str, Tuple[str, ...], int]] = [
         "tariff", "arancel", "trade war", "guerra comercial", "export ban",
         "prohibición de export", "import ban",
     ), 18),
+    ("ENERGY_INFLATION", "Energía e inflación", (
+        "oil", "crude", "brent", "wti", "petróleo", "petroleo", "energy prices",
+        "precio del crudo", "oil prices", "oil spike", "oil surge",
+    ), 22),
+    ("RATES_BONDS", "Tasas y bonos", (
+        "treasury yield", "treasury yields", "bond yield", "bond yields",
+        "10-year yield", "10 year yield", "rendimiento del treasury",
+        "rendimiento de bonos", "bonos del tesoro",
+    ), 24),
+    ("CRYPTO_LEGISLATION", "Legislación cripto", (
+        "clarity act", "crypto bill", "digital asset bill", "senate crypto",
+        "senado", "cftc", "sec ", "stablecoin bill", "market structure bill",
+    ), 18),
     ("GOLD", "Oro y refugio", (
         "gold", "oro ", "bullion", "safe haven", "refugio",
     ), 10),
@@ -173,6 +194,9 @@ _CRITICAL_TERMS = (
 _HIGH_TERMS = (
     "fomc", "federal reserve", "cpi", "inflación", "inflation", "nonfarm", "payroll",
     "sanctions", "sanciones", "tariff", "arancel", "war", "guerra", "sec bitcoin",
+    "oil spike", "oil surge", "crude jumps", "brent above", "wti above",
+    "treasury yields breach", "treasury yields rise", "10-year yields",
+    "rate hike", "rates hike", "clarity act", "crypto bill",
 )
 
 
@@ -210,20 +234,34 @@ def classify_macro_headline(title: str, source: str = "") -> Dict:
     else:
         level = "LOW"
 
-    # Direccionalidad intencionalmente conservadora.
+    # RC6: direccionalidad de RIESGO, no dirección de una operación.
+    # Se amplía para capturar shocks que sí afectan BTC/PAXG aunque el titular
+    # no contenga literalmente "risk-off". Esto sólo modifica contexto Macro.
     risk_bias = "NEUTRAL"
-    if _contains_any(lower, ("risk-off", "aversión al riesgo", "safe haven", "refugio")):
+    risk_off_terms = (
+        "risk-off", "aversión al riesgo", "safe haven", "refugio",
+        "oil spike", "oil surge", "oil jumps", "crude jumps", "crude surges",
+        "petróleo sube", "petroleo sube", "treasury yields rise",
+        "treasury yields breach", "bond yields rise", "10-year yields",
+        "rate hike", "hike bets", "hawkish", "liquidity stress",
+        "market selloff", "markets fall", "shares fall", "stocks fall",
+    )
+    risk_on_terms = (
+        "risk-on", "apetito por riesgo", "rate cut", "cuts rates",
+        "inflation cools", "inflación baja", "yields fall", "bond yields fall",
+    )
+    if _contains_any(lower, risk_off_terms):
         risk_bias = "RISK_OFF"
-    elif _contains_any(lower, ("risk-on", "apetito por riesgo")):
+    elif _contains_any(lower, risk_on_terms):
         risk_bias = "RISK_ON"
 
     category_codes = {item["code"] for item in categories}
-    if category_codes & {"GEOPOLITICAL", "MARKET_STRESS", "GOLD"}:
-        opportunity_note = "Vigilar refugio en oro/PAXG y confirmar con PAXG/BTC; no asumir dirección por titular."
+    if category_codes & {"GEOPOLITICAL", "MARKET_STRESS", "ENERGY_INFLATION", "RATES_BONDS", "GOLD"}:
+        opportunity_note = "Aumentar vigilancia de BTC/PAXG y volatilidad. El contexto puede justificar defensa, pero sólo con confirmación técnica de vela cerrada."
     elif category_codes & {"MONETARY_POLICY", "INFLATION", "LABOR"}:
         opportunity_note = "Vigilar reacción posterior de BTC, oro y volatilidad; el evento no define dirección por sí solo."
-    elif "CRYPTO_POLICY" in category_codes:
-        opportunity_note = "Vigilar reacción de BTC y liquidez; regulación/noticia no equivale automáticamente a LONG o SHORT."
+    elif category_codes & {"CRYPTO_POLICY", "CRYPTO_LEGISLATION"}:
+        opportunity_note = "Vigilar reacción de BTC y liquidez; regulación o legislación no equivale automáticamente a LONG o SHORT."
     else:
         opportunity_note = "Contexto para vigilancia; sin oportunidad direccional confirmada."
 
@@ -242,12 +280,15 @@ def classify_macro_headline(title: str, source: str = "") -> Dict:
 
 
 def _fetch_gdelt_news() -> List[Dict]:
-    # GDELT permite consultar noticias globales sin API key. Limitamos a fuentes
-    # en español para que el cintillo sea comprensible sin gastar LLM/traducción.
+    # RC6: GDELT sigue siendo el radar amplio, pero ya no limita la búsqueda a
+    # titulares en español. Los shocks relevantes para BTC (petróleo, yields,
+    # regulación estadounidense) suelen aparecer primero en inglés.
     query = (
-        '(bitcoin OR criptomonedas OR "Federal Reserve" OR FOMC OR inflación OR CPI '
-        'OR "tasas de interés" OR oro OR sanciones OR aranceles OR guerra OR "crisis bancaria") '
-        'sourcelang:spanish'
+        '(bitcoin OR crypto OR criptomonedas OR "Federal Reserve" OR FOMC OR inflation OR inflación '
+        'OR CPI OR "interest rates" OR "tasas de interés" OR gold OR oro OR sanctions OR sanciones '
+        'OR tariffs OR aranceles OR war OR guerra OR "banking crisis" OR "crisis bancaria" '
+        'OR oil OR crude OR Brent OR WTI OR "Treasury yields" OR "bond yields" '
+        'OR Senate OR "Clarity Act" OR SEC OR CFTC OR regulation OR legislación)'
     )
     params = {
         "query": query,
@@ -293,6 +334,83 @@ def _fetch_gdelt_news() -> List[Dict]:
 
     rows.sort(key=lambda item: (item.get("risk_score", 0), item.get("published_at") or ""), reverse=True)
     return rows[:MACRO_NEWS_MAX_ARTICLES]
+
+
+def _rss_published_dt(value: object) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = parsedate_to_datetime(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+    except Exception:
+        return _safe_dt(raw)
+
+
+def _fetch_rss_feed(url: str, source: str, limit: int = 8) -> List[Dict]:
+    """Lee RSS/Atom oficial sin dependencia adicional. Contexto solamente."""
+    response = requests.get(
+        url,
+        timeout=MACRO_HTTP_TIMEOUT,
+        headers={
+            "User-Agent": "CryptoTraderAnalystPro/1.0 macro-context",
+            "Accept": "application/rss+xml, application/atom+xml, text/xml, application/xml,*/*",
+        },
+    )
+    response.raise_for_status()
+    root = ET.fromstring(response.content)
+    rows: List[Dict] = []
+
+    # RSS 2.0 + Atom. Namespace agnostic by stripping the prefix.
+    for item in root.iter():
+        if str(item.tag).split('}')[-1].lower() not in {"item", "entry"}:
+            continue
+        values = {}
+        link = ""
+        for child in list(item):
+            tag = str(child.tag).split('}')[-1].lower()
+            text = (child.text or "").strip()
+            if tag == "link":
+                link = text or str(child.attrib.get("href") or "").strip() or link
+            elif text:
+                values[tag] = text
+        title = _normalize_title(values.get("title"))
+        url_value = link or str(values.get("guid") or "").strip()
+        if not title:
+            continue
+        published = _rss_published_dt(
+            values.get("pubdate") or values.get("published") or values.get("updated")
+        )
+        classification = classify_macro_headline(title, source)
+        rows.append({
+            "id": _stable_id(source, title, url_value),
+            "kind": "HEADLINE",
+            "title_es": title,
+            "source": source,
+            "url": url_value,
+            "published_at": _iso_utc(published) if published else None,
+            **classification,
+        })
+        if len(rows) >= max(1, int(limit or 8)):
+            break
+    return rows
+
+
+def _fetch_official_policy_news() -> List[Dict]:
+    rows: List[Dict] = []
+    feeds = (
+        (FED_MONETARY_RSS_URL, "Federal Reserve RSS"),
+        (CFTC_GENERAL_RSS_URL, "CFTC RSS"),
+        (SEC_PRESS_RSS_URL, "SEC RSS"),
+    )
+    for url, source in feeds:
+        try:
+            rows.extend(_fetch_rss_feed(url, source, limit=6))
+        except Exception as exc:
+            logger.warning("Macro RSS %s no disponible: %s", source, exc)
+    return rows
 
 
 def _unfold_ics(text: str) -> List[str]:
@@ -520,10 +638,31 @@ def _refresh_news_if_needed(force: bool = False) -> None:
     errors = []
     rows: List[Dict] = []
     try:
-        rows = _fetch_gdelt_news()
+        rows.extend(_fetch_gdelt_news())
     except Exception as exc:
         errors.append(f"GDELT: {type(exc).__name__}: {str(exc)[:120]}")
         logger.warning("Macro GDELT no disponible: %s", exc)
+    try:
+        rows.extend(_fetch_official_policy_news())
+    except Exception as exc:
+        errors.append(f"RSS oficiales: {type(exc).__name__}: {str(exc)[:120]}")
+        logger.warning("Macro RSS oficiales no disponibles: %s", exc)
+
+    # Deduplicar y priorizar riesgo + frescura sin depender de una sola fuente.
+    unique = {}
+    for row in rows:
+        key = re.sub(r"\W+", "", str(row.get("title_es") or "").lower())[:180]
+        if not key:
+            continue
+        previous = unique.get(key)
+        if previous is None or int(row.get("risk_score") or 0) > int(previous.get("risk_score") or 0):
+            unique[key] = row
+    rows = sorted(
+        unique.values(),
+        key=lambda item: (int(item.get("risk_score") or 0), item.get("published_at") or ""),
+        reverse=True,
+    )[:MACRO_NEWS_MAX_ARTICLES]
+
     with _LOCK:
         if rows:
             _CACHE["news"] = rows[:MACRO_NEWS_MAX_ARTICLES]
@@ -615,11 +754,17 @@ def _build_alert_candidates(events: List[Dict], news: List[Dict], now: datetime)
     for item in news[:8]:
         published = _safe_dt(item.get("published_at"))
         age_minutes = ((now - published).total_seconds() / 60.0) if published else 9999
-        if item.get("risk_level") == "CRITICAL" and 0 <= age_minutes <= 45:
+        level = str(item.get("risk_level") or "LOW").upper()
+        bias = str(item.get("risk_bias") or "NEUTRAL").upper()
+        is_material = level == "CRITICAL" or (level == "HIGH" and bias == "RISK_OFF")
+        if is_material and 0 <= age_minutes <= 45:
             alerts.append({
                 "key": f"{item.get('id')}:BREAKING",
-                "level": "CRITICAL",
-                "text": f"Noticia macro crítica · {item.get('title_es')}",
+                "level": level,
+                "text": (
+                    "Noticia macro crítica" if level == "CRITICAL"
+                    else "Riesgo macro elevado"
+                ) + f" · {item.get('title_es')}",
                 "source": item.get("source"),
                 "url": item.get("url"),
             })
@@ -789,7 +934,10 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
         "telegram_alert_candidates": _build_alert_candidates(upcoming, active_news, now),
         "generated_at": _iso_utc(now),
         "display_timezone": DISPLAY_TZ_NAME,
-        "sources": ["GDELT", "BLS", "Federal Reserve", "DefiLlama CEX"],
+        "sources": [
+            "GDELT", "BLS", "Federal Reserve Calendar", "Federal Reserve RSS",
+            "CFTC RSS", "SEC RSS", "DefiLlama CEX"
+        ],
         "news_cache_age_seconds": round(max(0.0, time.monotonic() - news_fetched_at), 1) if news_fetched_at else None,
         "calendar_cache_age_seconds": round(max(0.0, time.monotonic() - calendar_fetched_at), 1) if calendar_fetched_at else None,
         "news_refresh_seconds": MACRO_NEWS_CACHE_SECONDS,

@@ -1924,9 +1924,21 @@ function displayTGPResult(tgp) {
     if (reasonEl) reasonEl.textContent = tgp.reason;
     
     if (tgp.action === 'HOLD') {
-        banner.className = 'alert alert-secondary mt-3';
+        const riskWatch = tgp.market_risk_watch || {};
+        const riskLevel = String(riskWatch.level || 'NONE').toUpperCase();
+        const hasRiskAlert = Boolean(riskWatch.alert);
+        banner.className = hasRiskAlert
+            ? 'alert alert-warning mt-3'
+            : 'alert alert-secondary mt-3';
         const titleEl = document.getElementById('tgp-title');
-        if (titleEl) titleEl.textContent = '🛡️ Guardián: MANTENER';
+        if (titleEl) {
+            titleEl.textContent = hasRiskAlert
+                ? `🛡️ Guardián: RIESGO DE PORTAFOLIO · ${riskLevel}`
+                : '🛡️ Guardián: MANTENER';
+        }
+        if (reasonEl && hasRiskAlert && riskWatch.reason) {
+            reasonEl.textContent = `${riskWatch.reason} El Guardián espera confirmación cerrada antes de rotar capital.`;
+        }
         if (tradeDetails) tradeDetails.classList.add('d-none');
         if (vetoBadge) vetoBadge.classList.add('d-none');
     } else if (tgp.veto) {
