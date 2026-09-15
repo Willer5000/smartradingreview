@@ -2176,74 +2176,23 @@ class AnalyticsService:
                 or ''
             ).strip().lower()
 
+            # RC5: one canonical classifier is shared by Analytics, PDF and
+            # governance-facing summaries. No endpoint gets to invent its own
+            # definition of "current" evidence.
             if market == 'spot':
                 from q6_integrity import verified_spot_current
-                if verified_spot_current(signal):
-                    spot.append(signal)
-                continue
-
-            if market != 'futures':
-                continue
-
-            # RC4 cohort integrity: preserve every row, but only active
-            # market×symbol×TF cells with verifiable provenance can calibrate
-            # official profitability. 12H/1D exist only for BTC/ETH/SOL.
-            cohort_info = classify_quality_signal(signal, spot_verified=False)
-            if cohort_info.get('cohort') == 'LEGACY_ARCHIVE':
-                futures_other.append(signal)
-                continue
-
-            learning = (
-                self._q5_learning(
-                    signal
-                )
-            )
-
-            evaluation_role = str(
-                learning.get(
-                    'evaluation_role',
-                    ''
-                )
-                or ''
-            ).strip().upper()
-
-            statistically_eligible = (
-                self._q5_bool(
-                    learning.get(
-                        'statistically_eligible',
-                        False
-                    )
-                )
-            )
-
-            clean_futures = (
-                learning.get('cohort') == 'FUTURES_PERPETUAL_REAL_CLOSED_V1'
-                and learning.get('market_data_source') == 'KUCOIN_FUTURES_PERPETUAL_REST'
-                and not self._q5_bool(learning.get('market_data_is_synthetic', True))
-                and self._q5_bool(learning.get('source_candle_closed', False))
-            )
-            if (
-                clean_futures and statistically_eligible
-                and evaluation_role == 'EXECUTABLE_SIGNAL'
-            ):
-
-                futures_official.append(
-                    signal
-                )
-
-            elif (
-                clean_futures and evaluation_role == 'SHADOW_ANALYSIS'
-            ):
-
-                futures_shadow.append(
-                    signal
-                )
-
+                info = classify_quality_signal(signal, spot_verified=bool(verified_spot_current(signal)))
             else:
-
-                futures_other.append(
-                    signal
-                )
+                info = classify_quality_signal(signal, spot_verified=False)
+            cohort = str(info.get('cohort') or '')
+            if cohort == 'OFFICIAL_CURRENT_SPOT':
+                spot.append(signal)
+            elif cohort == 'OFFICIAL_CURRENT_FUTURES':
+                futures_official.append(signal)
+            elif cohort == 'SHADOW_CURRENT_FUTURES':
+                futures_shadow.append(signal)
+            elif market == 'futures':
+                futures_other.append(signal)
 
         official_combined = (
             spot
@@ -2289,7 +2238,7 @@ class AnalyticsService:
         try:
             raw_legacy_or_other = max(0, len(signals) - len(spot) - len(futures_official) - len(futures_shadow))
             cohort_integrity = {
-                'version': 'RC4_1_COHORT_INTEGRITY_V2',
+                'version': 'CURRENT_COHORT_INTEGRITY_V3',
                 'state': 'STANDARDIZED',
                 'rows_seen': len(signals),
                 'coverage_complete': bool((coverage or {}).get('complete')),
@@ -2313,7 +2262,7 @@ class AnalyticsService:
             }
         except Exception as cohort_error:
             cohort_integrity = {
-                'version': 'RC4_1_COHORT_INTEGRITY_V2',
+                'version': 'CURRENT_COHORT_INTEGRITY_V3',
                 'state': 'UNAVAILABLE',
                 'error': str(cohort_error)[:160],
             }

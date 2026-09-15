@@ -10,7 +10,7 @@ from typing import Any, Dict
 
 from q6_integrity import spot_cell_active
 
-VERSION = "RC4_1_COHORT_INTEGRITY_V2"
+VERSION = "CURRENT_COHORT_INTEGRITY_V3"
 CORE_FUTURES_TFS = {"30m", "1h", "2h", "4h"}
 HIGH_FUTURES_TFS = {"12h", "1D"}
 HIGH_FUTURES_SYMBOLS = {"BTC-USDT", "ETH-USDT", "SOL-USDT"}
@@ -47,7 +47,7 @@ def classify_quality_signal(signal: Dict[str, Any], *, spot_verified: bool = Fal
                 "version": VERSION,
                 "cohort": "LEGACY_ARCHIVE",
                 "official": False,
-                "reason": "OUTSIDE_RC4_1_SPOT_ACTIVE_CELL_CONTRACT",
+                "reason": "OUTSIDE_CURRENT_SPOT_ACTIVE_CELL_CONTRACT",
             }
         cohort = "OFFICIAL_CURRENT_SPOT" if spot_verified else "LEGACY_OR_UNVERIFIED_SPOT"
         return {
@@ -61,7 +61,7 @@ def classify_quality_signal(signal: Dict[str, Any], *, spot_verified: bool = Fal
         return {"version": VERSION, "cohort": "NON_TRADING_OR_UNKNOWN", "official": False, "reason": "UNKNOWN_MARKET"}
 
     if not futures_cell_active(signal.get("symbol"), signal.get("timeframe") or signal.get("interval")):
-        return {"version": VERSION, "cohort": "LEGACY_ARCHIVE", "official": False, "reason": "OUTSIDE_RC4_ACTIVE_CELL_CONTRACT"}
+        return {"version": VERSION, "cohort": "LEGACY_ARCHIVE", "official": False, "reason": "OUTSIDE_CURRENT_FUTURES_ACTIVE_CELL_CONTRACT"}
 
     clean = (
         learning.get("cohort") == "FUTURES_PERPETUAL_REAL_CLOSED_V1"

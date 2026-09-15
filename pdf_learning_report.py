@@ -8,7 +8,7 @@ Estructura del informe:
   2. QUÉ HA APRENDIDO EL SISTEMA (resumen humano automático)
   3. Métricas separadas Spot/Futuros
   4. Futures Shadow: Safety, resultados y contexto cuantitativo
-  5. Futures: anatomía diagnóstica de Execution Safety (Commit 36G)
+  5. Futures: anatomía diagnóstica de Execution Safety
   6. Mejores/peores estrategias operables y combinaciones por mercado
   7. ESTRATEGIAS POR TRADER (cobertura del comité) — v22
   8. Aprendizaje por PAR (win rate por símbolo)
@@ -30,6 +30,9 @@ import logging
 from typing import Optional, Dict, List, Tuple
 from datetime import datetime
 from collections import defaultdict
+
+from cohort_integrity import classify_quality_signal
+from q6_integrity import verified_spot_current
 
 logger = logging.getLogger('LEARNING_REPORT')
 
@@ -241,30 +244,21 @@ def _market_metrics(signals: List[Dict]) -> Dict:
 
 
 def _split_learning_cohorts(signals: List[Dict]) -> Dict[str, List[Dict]]:
-    cohorts = {
-        'spot': [],
-        'spot_legacy': [],
-        'futures_verified': [],
-        'futures_shadow': [],
-        'futures_legacy': [],
-        'unscoped': []
-    }
+    """RC5 canonical cohort partition shared with Analytics."""
+    cohorts={'spot':[],'spot_legacy':[],'futures_verified':[],'futures_shadow':[],'futures_legacy':[],'unscoped':[]}
     for signal in signals:
-        market = _normalize_market(signal)
-        if market == 'spot':
-            if verified_spot_current(signal):
-                cohorts['spot'].append(signal)
-            else:
-                cohorts['spot_legacy'].append(signal)
-        elif market == 'futures':
-            if _is_verified_futures_trade(signal):
-                cohorts['futures_verified'].append(signal)
-            elif _is_clean_futures_observation(signal):
-                cohorts['futures_shadow'].append(signal)
-            else:
-                cohorts['futures_legacy'].append(signal)
+        market=_normalize_market(signal)
+        if market=='spot':
+            info=classify_quality_signal(signal,spot_verified=bool(verified_spot_current(signal)))
         else:
-            cohorts['unscoped'].append(signal)
+            info=classify_quality_signal(signal,spot_verified=False)
+        cohort=str(info.get('cohort') or '')
+        if cohort=='OFFICIAL_CURRENT_SPOT': cohorts['spot'].append(signal)
+        elif cohort=='OFFICIAL_CURRENT_FUTURES': cohorts['futures_verified'].append(signal)
+        elif cohort=='SHADOW_CURRENT_FUTURES': cohorts['futures_shadow'].append(signal)
+        elif market=='spot': cohorts['spot_legacy'].append(signal)
+        elif market=='futures': cohorts['futures_legacy'].append(signal)
+        else: cohorts['unscoped'].append(signal)
     return cohorts
 
 
@@ -2752,7 +2746,7 @@ def _build_human_summary(metrics: Dict, top_general: List[Dict],
 
     quarantine = metrics.get('quarantine_counts') or {}
     lines.append(
-        f"<br/><br/>Spot fuera de la cohorte operativa RC4.1: {int(quarantine.get('spot_legacy') or 0)} "
+        f"<br/><br/>Spot fuera de la cohorte operativa actual: {int(quarantine.get('spot_legacy') or 0)} "
         f"registros conservados fuera de las métricas verificadas."
         f"<br/><br/>Cuarentena informativa: "
         f"{int(quarantine.get('futures_legacy') or 0)} Futuros antiguos/no "
@@ -3105,7 +3099,7 @@ def generate_learning_pdf() -> bytes:
 
             'error': (
                 'Snapshot de aprendizaje inválido. '
-                'Commit 37 permanece bloqueado.'
+                'La promoción productiva permanece bloqueada.'
             )
         }
 
@@ -3295,7 +3289,7 @@ def generate_learning_pdf() -> bytes:
             (
                 'FALLBACK TEMPORAL'
                 if (data.get('fetch_diagnostics') or {}).get('fallback_used')
-                else 'PAGINACIÓN SCOPED (Spot RC4.1 + Futures real)'
+                else 'PAGINACIÓN ACOTADA (Spot verificado + Futures real)'
             )
         ],
         [
@@ -3331,7 +3325,7 @@ def generate_learning_pdf() -> bytes:
             f"{futures_metrics.get('ambiguous', 0)}"
         )],
         ['Futuros antiguos/no verificables en cuarentena', str(quarantine.get('futures_legacy', 0))],
-        ['Spot Legacy/replay/TF retirado fuera de RC4.1 (conservado)', str(quarantine.get('spot_legacy', 0))],
+        ['Spot histórico/replay/TF retirado fuera de la cohorte actual (conservado)', str(quarantine.get('spot_legacy', 0))],
         ['Análisis Futures shadow (no publicados)', str(quarantine.get('futures_shadow', 0))],
         ['Registros sin mercado en cuarentena', str(quarantine.get('unscoped', 0))],
         [
@@ -3394,7 +3388,7 @@ def generate_learning_pdf() -> bytes:
              str(shadow_summary.get('directional', 0))],
             ['Con Entry + SL + TP geométricamente válidos',
              str(shadow_summary.get('valid_geometry', 0))],
-            ['Con causa EXACTA de publicación (Commit 32)', (
+            ['Con causa exacta de publicación', (
                 f"{int(shadow.get('publication_exact_available') or 0)} / "
                 f"{int(shadow_summary.get('valid_geometry') or 0)} "
                 f"({_shadow_metric_text(shadow.get('publication_exact_coverage_pct'), '%')})"
@@ -3478,7 +3472,7 @@ def generate_learning_pdf() -> bytes:
         )
 
         story.append(Paragraph(
-            "Causas exactas del publication gate (Commit 32)",
+            "Causas exactas del filtro de publicación",
             style_h3
         ))
 
@@ -3489,7 +3483,7 @@ def generate_learning_pdf() -> bytes:
             story.append(Paragraph(
                 f"{exact_available} candidatos con geometría válida ya conservan la "
                 f"decisión exacta del publication gate ({coverage_text} de cobertura "
-                f"en esta cohorte). Otros {exact_missing} son anteriores al Commit 32 "
+                f"en esta cohorte). Otros {exact_missing} son anteriores a la instrumentación exacta "
                 "o todavía no contienen ese snapshot. <b>Las causas pueden solaparse</b>: "
                 "una misma señal puede fallar Safety y TP Quality al mismo tiempo, por "
                 "lo que los N por causa no deben sumarse entre sí.",
@@ -3579,7 +3573,7 @@ def generate_learning_pdf() -> bytes:
 
         else:
             story.append(Paragraph(
-                "La cohorte visible todavía no contiene snapshots exactos del Commit 32. "
+                "La cohorte visible todavía no contiene snapshots exactos del filtro de publicación. "
                 "Esto es esperable inmediatamente después del despliegue: no se hace "
                 "backfill inventado de señales históricas. Las nuevas observaciones irán "
                 "aumentando esta cobertura de forma natural.",
@@ -3598,7 +3592,7 @@ def generate_learning_pdf() -> bytes:
                 "Estas banderas se calculan <b>sólo para candidatos que todavía no "
                 "tienen el publication gate exacto</b>. Son una aproximación útil para "
                 "el legado reciente, pero no deben mezclarse ni sumarse con las causas "
-                "exactas del Commit 32.",
+                "exactas del filtro de publicación.",
                 style_note
             ))
             rows = [['Banda reconstruida', 'Casos sin gate exacto']]
@@ -3619,7 +3613,7 @@ def generate_learning_pdf() -> bytes:
             story.append(Paragraph("Contexto cuantitativo Shadow", style_h3))
             story.append(Paragraph(
                 f"{int(shadow.get('quant_available') or 0)} candidatos ya contienen "
-                "el snapshot cuantitativo del Commit 22. Sigue en modo observación: "
+                "el snapshot cuantitativo histórico. Sigue en modo observación: "
                 "ninguna fila de esta tabla puede aprobar o rechazar una operación.",
                 style_note
             ))
@@ -3668,7 +3662,7 @@ def generate_learning_pdf() -> bytes:
         style_h2
     ))
     story.append(Paragraph(
-        "Commit 36 <b>no modifica ninguna decisión</b>. Las reglas de "
+        "Esta validación <b>no modifica ninguna decisión</b>. Las reglas de "
         "CAUTIOUS_SHADOW quedaron fijadas antes de observar esta validación. "
         "El informe separa cronológicamente una zona inicial de calibración "
         "(70%) y una zona posterior de validación (30%). Cautious conserva "
@@ -3691,7 +3685,7 @@ def generate_learning_pdf() -> bytes:
     )
 
     overview_rows = [
-        ['Validación Commit 36', 'Valor'],
+        ['Validación temporal', 'Valor'],
         ['Snapshots Cautious disponibles', str(profile_available)],
         ['Candidatos CAUTIOUS_SHADOW', str(cautious_candidates)],
         ['Futures Premium verificables', str(premium_candidates)],
@@ -3799,10 +3793,10 @@ def generate_learning_pdf() -> bytes:
         ]))
         story.append(tcov)
 
-    story.append(Paragraph("Gate de promoción al Commit 37", style_h3))
+    story.append(Paragraph("Gate de promoción a producción", style_h3))
     if walk.get('promotion_ready'):
         story.append(Paragraph(
-            "<b>READY_FOR_COMMIT_37_REVIEW</b>: la cohorte supera los guardrails "
+            "<b>LISTO PARA REVISIÓN DE PROMOCIÓN</b>: la cohorte supera los guardrails "
             "estadísticos de este informe. Esto NO la publica automáticamente; "
             "sólo habilita una revisión explícita antes de tocar producción.",
             style_note
@@ -3830,7 +3824,7 @@ def generate_learning_pdf() -> bytes:
     ))
 
     story.append(Paragraph(
-        "<b>MISSING_PUBLICATION_GATE:</b> desde Commit 36C un rechazo nuevo que "
+        "<b>MISSING_PUBLICATION_GATE:</b> en la instrumentación actual un rechazo nuevo que "
         "ocurra antes del gate Premium se clasifica como PRE_GATE_REJECTION. Por "
         "tanto, los MISSING históricos no se reinterpretan ni se convierten "
         "retroactivamente en una causa que nunca fue persistida.",
@@ -3846,7 +3840,7 @@ def generate_learning_pdf() -> bytes:
         style_h2
     ))
     story.append(Paragraph(
-        "Commit 36D separa por primera vez los rechazos que ocurren "
+        "La instrumentación separa los rechazos que ocurren "
         "<b>antes</b> del publication gate Premium de los rechazos que sí llegan "
         "al gate. La tabla usa sólo snapshots instrumentados por los commits "
         "recientes; el Shadow histórico sin snapshot permanece fuera del funnel "
@@ -4030,8 +4024,8 @@ def generate_learning_pdf() -> bytes:
         style_h2
     ))
     story.append(Paragraph(
-        "Commit 36G estudia los componentes que <b>ya calculó</b> el motor en "
-        "Commit 36F. No recalcula Safety, no cambia pesos y no baja el mínimo "
+        "Esta sección estudia los componentes que <b>ya calculó</b> el motor de ejecución. "
+        "No recalcula Safety, no cambia pesos y no baja el mínimo "
         "operativo. El objetivo es explicar por qué una oportunidad termina en "
         "<b>HARD_SAFETY</b> antes de llegar al Publication Gate.",
         style_body
@@ -4174,7 +4168,7 @@ def generate_learning_pdf() -> bytes:
     else:
         story.append(Paragraph(
             "<i>Todavía no hay rechazos HARD_SAFETY nuevos con el breakdown del "
-            "Commit 36F. Es esperable justo después del despliegue: no se hace "
+            "la instrumentación actual. Es esperable justo después del despliegue: no se hace "
             "backfill de los 16 rechazos anteriores.</i>",
             style_note
         ))
@@ -4258,12 +4252,12 @@ def generate_learning_pdf() -> bytes:
     else:
         policy_note = (
             "La muestra aún es insuficiente. Deben acumularse nuevos HARD_SAFETY "
-            "instrumentados por Commit 36F antes de inferir qué componente está "
+            "instrumentados por el motor actual antes de inferir qué componente está "
             "causando la timidez."
         )
 
     story.append(Paragraph(
-        "<b>Decisión del Commit 36G:</b> " + policy_note,
+        "<b>Decisión de la auditoría:</b> " + policy_note,
         style_note
     ))
 

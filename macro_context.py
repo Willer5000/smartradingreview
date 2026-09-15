@@ -677,9 +677,13 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
             "volatility_risk": "UNKNOWN", "error": str(exchange_error)[:160],
         }
 
+    # RC5: CURRENT risk is not the same as NEXT scheduled event risk.
+    # A high-impact event tomorrow puts Futures in CAUTION, but it must not make
+    # the UI claim that macro risk is CRITICAL *now*.
+    immediate_events=[row for row in upcoming if -0.25 <= float(row.get("hours_until") or 9999) <= 3.0]
     top_score = max(
         [int(row.get("risk_score") or 0) for row in active_news[:10]]
-        + [int(row.get("risk_score") or 0) for row in upcoming if 0 <= float(row.get("hours_until") or 9999) <= 24]
+        + [int(row.get("risk_score") or 0) for row in immediate_events]
         + [0]
     )
     if top_score >= 88:

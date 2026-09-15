@@ -34549,6 +34549,40 @@ def _parse_analytics_filters():
 # HOTFIX 14.6 — Analytics must never become an OOM trigger.
 _ANALYTICS_SNAPSHOT_FRESH_SECONDS = max(300, int(os.getenv('ANALYTICS_SNAPSHOT_FRESH_SECONDS', '1800') or 1800))
 
+_ANALYTICS_REFRESH_LOCK = threading.Lock()
+_ANALYTICS_REFRESHING = set()
+
+
+def _schedule_analytics_quality_refresh(filters):
+    """RC5 stale-while-revalidate refresh; never block the dashboard request."""
+    key=_analytics_snapshot_key(filters)
+    with _ANALYTICS_REFRESH_LOCK:
+        if key in _ANALYTICS_REFRESHING:
+            return False
+        _ANALYTICS_REFRESHING.add(key)
+    safe_filters=dict(filters)
+    def worker():
+        acquired=False
+        try:
+            acquired=_acquire_heavy_analysis('analytics-quality-v2-bg',timeout=1)
+            if not acquired or not _memory_pressure_guard('analytics-quality-v2-bg',allow_soft=False):
+                return
+            svc=_get_analytics_service()
+            if svc is None: return
+            data=svc.get_quality_v2_summary(**safe_filters)
+            _save_analytics_quality_snapshot(safe_filters,data)
+        except Exception as exc:
+            print(f'⚠️ [ANALYTICS] refresh background: {type(exc).__name__}: {exc}',flush=True)
+        finally:
+            if acquired:
+                _release_heavy_analysis('analytics-quality-v2-bg')
+            with _ANALYTICS_REFRESH_LOCK:
+                _ANALYTICS_REFRESHING.discard(key)
+            try: _trim_process_heap()
+            except Exception: pass
+    threading.Thread(target=worker,name=f'analytics-qv2-{key[-6:]}',daemon=True).start()
+    return True
+
 
 def _analytics_quality_snapshot_usable(data):
     """Reject fake-empty snapshots produced by an incomplete DB read.
@@ -34685,99 +34719,21 @@ def api_analytics_summary():
 
 @app.route('/api/analytics/quality-v2')
 def api_analytics_quality_v2():
-    """Memory-safe current-quality Analytics.
-
-    A fresh compact snapshot is served directly from Supabase. Recalculation is
-    serialized through the global heavy-job slot and refuses to start near the
-    hard RSS guard. If another heavy job is running, the last snapshot is shown
-    instead of killing the Render instance.
-    """
-    acquired = False
-    data = None
+    """RC5 snapshot-first Analytics. Heavy work is always background."""
     try:
-        svc = _get_analytics_service()
-        if svc is None:
-            return jsonify({'success': False, 'error': 'AnalyticsService no disponible'}), 503
-        filters = _parse_analytics_filters()
-        try:
-            requested_days = int(filters.get('days_back', 90) or 90)
-        except (TypeError, ValueError):
-            requested_days = 90
-        filters['days_back'] = max(1, min(365, requested_days))
-
-        stored = _load_analytics_quality_snapshot(filters, allow_expired=True)
-        if stored and stored.get('age_seconds') is not None and stored['age_seconds'] <= _ANALYTICS_SNAPSHOT_FRESH_SECONDS:
-            return jsonify({
-                'success': True, 'data': stored['data'],
-                'cached': True, 'cache_age_seconds': stored['age_seconds'],
-                'timestamp': datetime.now(bolivia_tz).isoformat()
-            })
-
-        # Analytics gets at most a short opportunity to compute. Trading and
-        # lifecycle workers always have priority over a dashboard refresh.
-        acquired = _acquire_heavy_analysis('analytics-quality-v2', timeout=2)
-        if not acquired:
-            if stored:
-                return jsonify({
-                    'success': True, 'data': stored['data'], 'cached': True,
-                    'stale': True, 'cache_age_seconds': stored.get('age_seconds'),
-                    'note': 'Snapshot conservado mientras el motor realiza otro trabajo pesado.',
-                    'timestamp': datetime.now(bolivia_tz).isoformat()
-                })
-            return jsonify({
-                'success': True,
-                'deferred': True,
-                'data': None,
-                'retry_after_seconds': 15,
-                'note': 'Analytics está esperando un turno libre; el trading mantiene prioridad y la pantalla reintentará automáticamente.'
-            }), 202
-
-        if not _memory_pressure_guard('analytics-quality-v2', allow_soft=False):
-            if stored:
-                return jsonify({
-                    'success': True, 'data': stored['data'], 'cached': True, 'stale': True,
-                    'note': 'Se muestra el último snapshot para proteger la memoria.',
-                    'timestamp': datetime.now(bolivia_tz).isoformat()
-                })
-            return jsonify({
-                'success': True,
-                'deferred': True,
-                'data': None,
-                'retry_after_seconds': 20,
-                'note': 'Analytics espera memoria segura; se reintentará automáticamente sin bloquear Spot/Futures.'
-            }), 202
-
-        data = svc.get_quality_v2_summary(**filters)
-        _save_analytics_quality_snapshot(filters, data)
-        return jsonify({
-            'success': True, 'data': data, 'cached': False,
-            'timestamp': datetime.now(bolivia_tz).isoformat()
-        })
+        filters=_parse_analytics_filters()
+        try: filters['days_back']=max(1,min(365,int(filters.get('days_back',90) or 90)))
+        except Exception: filters['days_back']=90
+        stored=_load_analytics_quality_snapshot(filters,allow_expired=True)
+        if stored:
+            age=stored.get('age_seconds')
+            stale=age is None or age>_ANALYTICS_SNAPSHOT_FRESH_SECONDS
+            if stale: _schedule_analytics_quality_refresh(filters)
+            return jsonify({'success':True,'data':stored['data'],'cached':True,'stale':bool(stale),'refreshing':bool(stale),'cache_age_seconds':age,'timestamp':datetime.now(bolivia_tz).isoformat()})
+        _schedule_analytics_quality_refresh(filters)
+        return jsonify({'success':True,'deferred':True,'data':None,'retry_after_seconds':8,'note':'Preparando snapshot analítico en segundo plano; Spot/Futures no se bloquean.'}),202
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        try:
-            filters = filters if 'filters' in locals() else {'days_back': 90}
-            stored = _load_analytics_quality_snapshot(filters, allow_expired=True)
-            if stored:
-                return jsonify({
-                    'success': True, 'data': stored['data'], 'cached': True, 'stale': True,
-                    'note': f'Fallback snapshot: {type(e).__name__}',
-                    'timestamp': datetime.now(bolivia_tz).isoformat()
-                })
-        except Exception:
-            pass
-        return jsonify({'success': False, 'error': str(e)}), 500
-    finally:
-        data = None
-        if acquired:
-            _release_heavy_analysis('analytics-quality-v2')
-        else:
-            # Cheap best-effort cleanup after dashboard access.
-            try:
-                _trim_process_heap()
-            except Exception:
-                pass
+        return jsonify({'success':False,'error':str(e)}),500
 
 
 @app.route('/api/analytics/strategies')

@@ -57,11 +57,10 @@ _RESEARCH_TO_REGISTRY = {
     "Q7_BREAKOUT_RETEST_V1": "Q7_BREAKOUT_RETEST_V1",
 }
 
-AUTO_RESEARCH_UNIVERSE = [
-    (symbol, timeframe)
-    for symbol in ("BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "ADA-USDT")
-    for timeframe in ("5m", "15m", "30m", "1h", "2h", "4h")
-]
+AUTO_RESEARCH_UNIVERSE = (
+    [(symbol, timeframe) for symbol in ("BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "ADA-USDT", "LINK-USDT", "BNB-USDT") for timeframe in ("30m", "1h", "2h", "4h")]
+    + [(symbol, timeframe) for symbol in ("BTC-USDT", "ETH-USDT", "SOL-USDT") for timeframe in ("12h", "1D")]
+)
 
 _cache_lock = threading.Lock()
 _profile_cache: Dict[Tuple[str, str, str, str], Tuple[float, Dict[str, Any]]] = {}
