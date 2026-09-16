@@ -7,10 +7,10 @@ from flask import Blueprint, jsonify, render_template, Response
 
 _bp = Blueprint('research_federation_bridge', __name__)
 _session = requests.Session()
-_CACHE = {'ts': 0.0, 'payload': None, 'error': None, 'watermark': None}
+_CACHE = {'ts': 0.0, 'payload': None, 'error': None}
 _PROFIT_CACHE = {'ts': 0.0, 'payload': None}
 _CACHE_LOCK = threading.Lock()
-_CACHE_TTL = max(300, int(os.getenv('RESEARCH_BRIDGE_CACHE_SECONDS','900') or 900))
+_CACHE_TTL = max(30, int(os.getenv('RESEARCH_BRIDGE_CACHE_SECONDS','60') or 60))
 _BRIDGE_FAILURES = 0
 _BRIDGE_CIRCUIT_UNTIL = 0.0
 _BRIDGE_STATE_LOCK = threading.Lock()
@@ -256,81 +256,21 @@ def _compact_promotion(row):
         'causal_dataset_signature': meta.get('causal_dataset_signature'),
     }
 
-def _bridge_watermark():
-    """Two tiny rows tell us whether a heavy Research snapshot actually changed."""
-    latest_p=_get('research_promotions_v1',{
-        'select':'candidate_key,updated_at',
-        'order':'updated_at.desc',
-        'limit':'1',
-    })
-    latest_s=_get('research_shadow_live_metrics_v1',{
-        'select':'candidate_key,updated_at',
-        'order':'updated_at.desc',
-        'limit':'1',
-    })
-    p=latest_p[0] if latest_p else {}
-    s=latest_s[0] if latest_s else {}
-    return (
-        str(p.get('candidate_key') or ''), str(p.get('updated_at') or ''),
-        str(s.get('candidate_key') or ''), str(s.get('updated_at') or ''),
-    )
-
-
 def _compact(force=False):
     now=time.monotonic()
     with _CACHE_LOCK:
-        cached=_CACHE.get('payload')
-        cached_ts=float(_CACHE.get('ts') or 0.0)
-        cached_wm=_CACHE.get('watermark')
-        if (not force) and cached and (now-cached_ts) < _CACHE_TTL:
-            return cached
-
-    # After the local TTL, spend only a tiny watermark request first. If
-    # Validation/Shadow did not change, extend the cache without downloading
-    # hundreds of StrategySpec/metrics JSON rows again.
-    if (not force) and cached:
-        try:
-            wm=_bridge_watermark()
-            if cached_wm == wm:
-                _bridge_success()
-                with _CACHE_LOCK:
-                    _CACHE['ts']=now
-                    _CACHE['error']=None
-                return cached
-        except Exception as exc:
-            with _CACHE_LOCK:
-                _CACHE['error']=f'{type(exc).__name__}: {str(exc)[:180]}'
-            return cached
-    else:
-        wm=None
+        if (not force) and _CACHE['payload'] and (now-_CACHE['ts']) < _CACHE_TTL:
+            return _CACHE['payload']
 
     try:
-        fields='candidate_key,source_engine,experiment,stage,reason,scope,metrics,meta,research_version,updated_at'
-        causal=_get('research_promotions_v1',{
-            'select':fields,
-            'experiment':'in.(CAUSAL_COVERAGE_STRATEGY,CAUSAL_REGISTRY_RETEST,CAUSAL_SHADOW_RECYCLE)',
-            'stage':'in.(SHADOW_READY,SHADOW_READY_FAST,VALIDATION_REQUIRED,REJECTED_OOS,OBSERVE)',
+        raw_promotions=_get('research_promotions_v1',{
+            'select':'candidate_key,source_engine,experiment,stage,reason,scope,metrics,meta,research_version,updated_at',
             'order':'updated_at.desc',
-            'limit':'280',
+            'limit':'1800',
         })
-        diagnostics=_get('research_promotions_v1',{
-            'select':fields,
-            'stage':'in.(OBSERVE,VALIDATION_REQUIRED,REJECTED_OOS,VALIDATED_SINGLE_ASSET)',
-            'order':'updated_at.desc',
-            'limit':'80',
-        })
-        merged={}
-        for x in (causal or []) + (diagnostics or []):
-            key=str(x.get('candidate_key') or '')
-            if key and key not in merged:
-                merged[key]=x
-        raw_promotions=[
-            x for x in merged.values()
-            if (x.get('meta') or {}).get('is_current') is not False
-            and str(x.get('stage') or '') != 'STALE'
-        ]
+        raw_promotions=[x for x in raw_promotions if (x.get('meta') or {}).get('is_current') is not False and str(x.get('stage') or '') != 'STALE']
         coverage=_coverage(raw_promotions)
-        visible=_balanced_candidates(raw_promotions,120)
+        visible=_balanced_candidates(raw_promotions,240)
         candidates=[_compact_promotion(x) for x in visible]
         states=_get('research_engine_state_v1',{
             'select':'engine,status,last_seen_at,rss_mb,research_version,meta',
@@ -338,22 +278,10 @@ def _compact(force=False):
             'limit':'10',
         })
         shadow=_get('research_shadow_live_metrics_v1',{
-            'select':(
-                'candidate_key,source_engine,experiment,research_stage,market_family,symbol,timeframe,'
-                'signals_n,resolved_n,win_rate_pct,expectancy_r,profit_factor,pnl_pct_sum,avg_safety,'
-                'recent8_n,recent8_expectancy_r,recent8_profit_factor,recent8_trade_sharpe,'
-                'previous8_n,previous8_expectancy_r,previous8_trade_sharpe,current_loss_streak,updated_at'
-            ),
+            'select':'*',
             'order':'updated_at.desc',
-            'limit':'140',
+            'limit':'600',
         })
-        if wm is None:
-            wm=(
-                str((causal[0] if causal else {}).get('candidate_key') or ''),
-                str((causal[0] if causal else {}).get('updated_at') or ''),
-                str((shadow[0] if shadow else {}).get('candidate_key') or ''),
-                str((shadow[0] if shadow else {}).get('updated_at') or ''),
-            )
         payload=(candidates,states,shadow,coverage)
     except Exception as exc:
         with _CACHE_LOCK:
@@ -366,10 +294,8 @@ def _compact(force=False):
     with _CACHE_LOCK:
         _CACHE['ts']=now
         _CACHE['payload']=payload
-        _CACHE['watermark']=wm
         _CACHE['error']=None
     return payload
-
 
 def _report(candidates,states,shadow,coverage):
     lines=['# Research Federation · sistema central','','- Bridge V1.2.1: evidencia externa + Shadow central observado.','- Nunca concede autoridad productiva automáticamente.','','## Motores']

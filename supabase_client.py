@@ -21,8 +21,6 @@ import json
 import logging
 import time
 import threading
-import uuid
-import requests
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any
 
@@ -102,15 +100,6 @@ class SupabaseClient:
         self._transient_failures = 0
         self._read_circuit_until = 0.0
         self._preferences_cache = {}
-        self._rest_session = requests.Session()
-        self._rotation_lock = threading.Lock()
-        self._rotation_last_check = {}
-        # FREE-PLAN: las estadísticas de 90 días se hidratan una vez por proceso
-        # y después sólo incorporan nuevas señales cerradas. Evita descargar
-        # repetidamente decenas de MB de JSON histórico cada cuatro horas.
-        self._stats_signals_cache = []
-        self._stats_closed_watermark = ''
-        self._stats_cache_days = None
         
         if not self.url or not self.key:
             print("⚠️ SUPABASE no configurado (URL o KEY vacíos)")
@@ -186,9 +175,6 @@ class SupabaseClient:
             'bad record mac',
             '<!DOCTYPE html>',
             'Cloudflare',
-            '57014',
-            'statement timeout',
-            'canceling statement',
         )
         return any(m in msg for m in markers)
     
@@ -247,69 +233,6 @@ class SupabaseClient:
                     self._mark_transient_failure()
                 logger.warning(f"Error de conexión Supabase persistió tras retry: {e2}")
                 raise
-
-    def _rest_headers(self, prefer: str = "return=minimal") -> Dict[str, str]:
-        headers = {
-            "apikey": self.key,
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Prefer": prefer,
-        }
-        if str(self.key or "").count(".") == 2:
-            headers["Authorization"] = f"Bearer {self.key}"
-        return headers
-
-    def _rest_minimal(self, method: str, table: str, *, payload=None,
-                      params=None, timeout=(1.5, 2.5), prefer="return=minimal"):
-        """Write through PostgREST without echoing large JSON rows."""
-        if not self.enabled:
-            return None
-        if self.read_circuit_open():
-            raise RuntimeError("SUPABASE_CIRCUIT_OPEN")
-        url=f"{self.url.rstrip('/')}/rest/v1/{table}"
-        try:
-            r=self._rest_session.request(
-                method.upper(), url, params=params or {}, json=payload,
-                headers=self._rest_headers(prefer), timeout=timeout,
-            )
-            if r.status_code >= 400:
-                body=(r.text or "")[:500]
-                err=requests.HTTPError(
-                    f"Supabase HTTP {r.status_code}: {body}",
-                    response=r,
-                )
-                if self._is_connection_error(err) or r.status_code in {500,502,503,504,520,521,522,523,524}:
-                    self._mark_transient_failure()
-                raise err
-            self._mark_transport_success()
-            return r
-        except (requests.RequestException, RuntimeError) as exc:
-            if self._is_connection_error(exc) or "SUPABASE_CIRCUIT_OPEN" in str(exc):
-                self._mark_transient_failure()
-            raise
-
-    @staticmethod
-    def _deterministic_signal_id(payload: Dict[str, Any]) -> str:
-        parts=(
-            str(payload.get("symbol") or ""),
-            str(payload.get("timeframe") or ""),
-            str(payload.get("system_type") or ""),
-            str(payload.get("action_normalized") or ""),
-            str(payload.get("candle_timestamp") or ""),
-        )
-        return str(uuid.uuid5(uuid.NAMESPACE_URL, "smartradingreview|" + "|".join(parts)))
-
-    def _schedule_rotation(self, table_name: str) -> None:
-        def worker():
-            try:
-                self._check_rotation(table_name)
-            except Exception:
-                pass
-        threading.Thread(
-            target=worker,
-            daemon=True,
-            name=f"supabase-rotation-{table_name}",
-        ).start()
 
     # ========================================================================
     # NORMALIZACIÓN DE ACCIONES
@@ -405,63 +328,53 @@ class SupabaseClient:
                 'created_at': datetime.utcnow().isoformat()
             }
             
-            # RC8 FREE-PLAN — una sola escritura mínima.
-            #
-            # La BD ya tiene UNIQUE por mercado×TF×vela×acción. Hacer un SELECT
-            # previo duplicaba requests y egress. Generamos un UUID determinista,
-            # pedimos return=minimal y sólo consultamos el ID canónico si la BD
-            # informa que la fila ya existía.
-            signal_id = self._deterministic_signal_id(payload)
-            payload['id'] = signal_id
-
+            # ============ DEDUP CHECK ============
+            # Verifica si ya existe una señal para el mismo (symbol, timeframe,
+            # candle_timestamp, action_normalized, system_type). Si existe, no
+            # inserta. Evita duplicados sin depender de UNIQUE constraint en BD.
+            # 
+            # Corrige el problema de "8 señales ADA/USDT 2h LONG idénticas en 35
+            # min" causado por el warm-up paralelo de futuros que ejecutaba
+            # register_signal múltiples veces por vela.
             try:
-                self._rest_minimal(
-                    'POST',
-                    'signals',
-                    payload=payload,
-                    timeout=(1.25, 2.25),
-                    prefer='return=minimal',
-                )
-            except requests.HTTPError as write_error:
-                status = int(getattr(getattr(write_error, 'response', None), 'status_code', 0) or 0)
-                msg = str(write_error).lower()
-                if status == 409 or 'duplicate key' in msg or '23505' in msg or 'unique constraint' in msg:
-                    # Legacy rows may have a random UUID. Recover only the tiny ID.
-                    try:
-                        existing = (
-                            self.client.table('signals')
-                            .select('id')
-                            .eq('symbol', payload['symbol'])
-                            .eq('timeframe', payload['timeframe'])
-                            .eq('action_normalized', payload['action_normalized'])
-                            .eq('system_type', payload['system_type'])
-                            .eq('candle_timestamp', payload['candle_timestamp'])
-                            .limit(1)
-                            .execute()
-                        )
-                        if existing.data:
-                            signal_id = existing.data[0].get('id') or signal_id
-                        else:
-                            return None
-                    except Exception:
-                        return None
-                else:
-                    raise
-
-            # La geometría/estrategias no deben retrasar la respuesta interactiva.
-            strategies = signal_data.get('strategies', [])
-            if strategies and signal_id:
-                snapshot = signal_data.get('indicators_snapshot', {})
-                threading.Thread(
-                    target=self._insert_signal_indicators,
-                    args=(signal_id, strategies, snapshot),
-                    daemon=True,
-                    name='signal-indicators-write',
-                ).start()
-
-            self._schedule_rotation('signals')
-            return signal_id
-
+                if payload.get('candle_timestamp'):
+                    existing = self._with_retry(
+                        lambda: self.client.table('signals')
+                                .select('id')
+                                .eq('symbol', payload['symbol'])
+                                .eq('timeframe', payload['timeframe'])
+                                .eq('action_normalized', payload['action_normalized'])
+                                .eq('system_type', payload['system_type'])
+                                .eq('candle_timestamp', payload['candle_timestamp'])
+                                .limit(1)
+                                .execute()
+                    )
+                    if existing.data and len(existing.data) > 0:
+                        # Ya existe → devolver el ID existente (comportamiento idempotente)
+                        return existing.data[0].get('id')
+            except Exception as _dedup_err:
+                # Si la verificación de dedup falla por conectividad, seguimos
+                # con el INSERT (se guardará; peor caso duplicado ocasional).
+                logger.debug(f"dedup check falló, continuando con INSERT: {_dedup_err}")
+            
+            response = self._with_retry(
+                lambda: self.client.table('signals').insert(payload).execute()
+            )
+            
+            if response.data and len(response.data) > 0:
+                signal_id = response.data[0].get('id')
+                
+                # Insertar estrategias asociadas
+                strategies = signal_data.get('strategies', [])
+                if strategies and signal_id:
+                    self._insert_signal_indicators(signal_id, strategies, signal_data.get('indicators_snapshot', {}))
+                
+                # Rotación FIFO si es necesario
+                self._check_rotation('signals')
+                
+                return signal_id
+            return None
+            
         except Exception as e:
             # RC8: the database also enforces one signal per market×cell×closed
             # candle×direction. If two workers race, the loser receives a UNIQUE
@@ -503,19 +416,10 @@ class SupabaseClient:
                 })
             
             if rows:
-                self._rest_minimal(
-                    'POST',
-                    'signal_indicators',
-                    payload=rows,
-                    timeout=(1.25, 2.5),
-                    prefer='return=minimal',
-                )
-                self._schedule_rotation('signal_indicators')
+                self.client.table('signal_indicators').insert(rows).execute()
+                self._check_rotation('signal_indicators')
         except Exception as e:
-            if self._is_connection_error(e):
-                logger.debug("Indicadores de señal diferidos: Supabase temporalmente no disponible")
-            else:
-                logger.error(f"Error insertando indicadores de señal: {e}")
+            logger.error(f"Error insertando indicadores de señal: {e}")
     
     # ========================================================================
     # ACTUALIZACIÓN DE RESULTADOS (TP/SL/EXPIRED)
@@ -745,23 +649,9 @@ class SupabaseClient:
             from uuid import uuid5, NAMESPACE_URL
             payload['id'] = str(uuid5(NAMESPACE_URL,
                 f"q6:{signal_id}:{payload['status']}:{payload['exit_timestamp']}"))
-            self._rest_minimal(
-                'POST',
-                'signal_results',
-                payload=payload,
-                params={'on_conflict':'id'},
-                timeout=(1.25, 2.5),
-                prefer='resolution=merge-duplicates,return=minimal',
-            )
-            self._rest_minimal(
-                'PATCH',
-                'signals',
-                payload=update_signal,
-                params={'id':f'eq.{signal_id}'},
-                timeout=(1.25, 2.5),
-                prefer='return=minimal',
-            )
-            self._schedule_rotation('signal_results')
+            self.client.table('signal_results').upsert(payload, on_conflict='id').execute()
+            self.client.table('signals').update(update_signal).eq('id', signal_id).execute()
+            self._check_rotation('signal_results')
             return True
             
         except Exception as e:
@@ -796,33 +686,12 @@ class SupabaseClient:
                 'created_at': datetime.utcnow().isoformat()
             }
             
-            # FREE-PLAN: no necesitamos que PostgREST nos devuelva el JSON
-            # completo de la oportunidad. Un UUID determinista permite
-            # idempotencia sin SELECT previo y `return=minimal` evita egress.
-            missed_id = str(uuid.uuid5(
-                uuid.NAMESPACE_URL,
-                'missed|' + '|'.join((
-                    str(payload.get('symbol') or ''),
-                    str(payload.get('timeframe') or ''),
-                    str(payload.get('action_that_should_have_been') or ''),
-                    str(payload.get('candle_timestamp') or ''),
-                )),
-            ))
-            payload['id'] = missed_id
-            try:
-                self._rest_minimal(
-                    'POST',
-                    'missed_opportunities',
-                    payload=payload,
-                    timeout=(1.25, 2.25),
-                    prefer='return=minimal',
-                )
-            except requests.HTTPError as write_error:
-                status = int(getattr(getattr(write_error, 'response', None), 'status_code', 0) or 0)
-                if status != 409:
-                    raise
-            self._schedule_rotation('missed_opportunities')
-            return missed_id
+            response = self.client.table('missed_opportunities').insert(payload).execute()
+            self._check_rotation('missed_opportunities')
+            
+            if response.data:
+                return response.data[0].get('id')
+            return None
         except Exception as e:
             logger.error(f"Error insertando oportunidad perdida: {e}")
             return None
@@ -987,28 +856,13 @@ class SupabaseClient:
                 'created_at': datetime.utcnow().isoformat()
             }
             
-            # FREE-PLAN: estas recomendaciones son caché derivable. No descargar
-            # la fila eliminada ni la recién insertada.
-            filters = {
-                'symbol': f"eq.{payload['symbol']}",
-                'timeframe': f"eq.{payload['timeframe']}",
-                'action': f"eq.{payload['action']}",
-            }
-            self._rest_minimal(
-                'DELETE',
-                'review_recommendations',
-                params=filters,
-                timeout=(1.25, 2.25),
-                prefer='return=minimal',
-            )
-            self._rest_minimal(
-                'POST',
-                'review_recommendations',
-                payload=payload,
-                timeout=(1.25, 2.25),
-                prefer='return=minimal',
-            )
-            self._schedule_rotation('review_recommendations')
+            # Elimina la recomendación anterior (mismo par/TF/acción) e inserta la nueva
+            self.client.table('review_recommendations').delete().eq(
+                'symbol', payload['symbol']
+            ).eq('timeframe', payload['timeframe']).eq('action', payload['action']).execute()
+            
+            self.client.table('review_recommendations').insert(payload).execute()
+            self._check_rotation('review_recommendations')
             return True
         except Exception as e:
             logger.error(f"Error guardando recomendación: {e}")
@@ -1060,93 +914,45 @@ class SupabaseClient:
             return False
     
     def get_signals_for_stats(self, days_back: int = 90) -> List[Dict]:
-        """Devuelve señales resueltas con caché incremental de bajo egress.
-
-        FREE-PLAN: la versión histórica descargaba ``SELECT *`` hasta 50k filas
-        cada cuatro horas. Ahora la primera hidratación usa sólo las columnas
-        necesarias y, mientras viva el proceso, los siguientes ciclos piden
-        únicamente filas cuyo ``closed_at`` sea posterior al watermark.
+        """
+        Obtiene todas las señales con resultado (no pending) de los últimos N días
+        para recalcular estadísticas.
+        
+        FIX: PostgREST limita a 1000 rows por request. Antes solo se leían las
+        primeras 1000, dejando afuera señales resueltas → stats vacías. Ahora
+        paginamos manualmente con .range() hasta traer todas.
         """
         if not self.enabled:
             return []
-
+        
         try:
-            days_back = max(7, min(int(days_back or 90), 180))
             cutoff = (datetime.utcnow() - timedelta(days=days_back)).isoformat()
-            select_cols = (
-                'id,symbol,timeframe,system_type,action_normalized,status,'
-                'entry_price,stop_loss,take_profit,leverage,context,'
-                'created_at,closed_at,signal_indicators(strategy_name)'
-            )
-
-            # Si cambió la ventana solicitada, rehacer una única hidratación.
-            if self._stats_cache_days != days_back:
-                self._stats_signals_cache = []
-                self._stats_closed_watermark = ''
-                self._stats_cache_days = days_back
-
-            def _fetch(after_closed=''):
-                all_data = []
-                offset = 0
-                page_size = 500
-                # 8k filas compactas es un techo defensivo muy por debajo de
-                # las 50k antiguas y suficiente para el ReviewTrader actual.
-                max_rows = 8000
-                while len(all_data) < max_rows:
-                    query = (
-                        self.client.table('signals')
-                        .select(select_cols)
-                        .neq('status', 'pending')
-                        .gte('created_at', cutoff)
-                    )
-                    if after_closed:
-                        query = query.gt('closed_at', after_closed)
-                    response = (
-                        query.order('closed_at', desc=False)
-                        .range(offset, min(offset + page_size - 1, max_rows - 1))
-                        .execute()
-                    )
-                    batch = response.data or []
-                    if not batch:
-                        break
-                    all_data.extend(batch)
-                    if len(batch) < page_size:
-                        break
-                    offset += page_size
-                return all_data[:max_rows]
-
-            if not self._stats_signals_cache:
-                self._stats_signals_cache = _fetch()
-            else:
-                # Sólo filas que cambiaron de pending -> resultado desde el
-                # último ciclo. No hay re-descarga del histórico completo.
-                delta = _fetch(self._stats_closed_watermark)
-                if delta:
-                    by_id = {str(row.get('id')): row for row in self._stats_signals_cache}
-                    for row in delta:
-                        by_id[str(row.get('id'))] = row
-                    self._stats_signals_cache = list(by_id.values())
-
-            # Poda local por antigüedad; no genera ninguna consulta adicional.
-            self._stats_signals_cache = [
-                row for row in self._stats_signals_cache
-                if str(row.get('created_at') or '') >= cutoff
-            ]
-            closed_values = [
-                str(row.get('closed_at') or '')
-                for row in self._stats_signals_cache
-                if row.get('closed_at')
-            ]
-            if closed_values:
-                self._stats_closed_watermark = max(closed_values)
-
-            return list(self._stats_signals_cache)
+            all_data = []
+            offset = 0
+            page_size = 1000
+            max_pages = 50  # safety cap (50k signals máx)
+            
+            for _ in range(max_pages):
+                response = (self.client.table('signals')
+                            .select('*, signal_indicators(strategy_name)')
+                            .neq('status', 'pending')
+                            .gte('created_at', cutoff)
+                            .order('created_at', desc=True)
+                            .range(offset, offset + page_size - 1)
+                            .execute())
+                batch = response.data or []
+                if not batch:
+                    break
+                all_data.extend(batch)
+                if len(batch) < page_size:
+                    break
+                offset += page_size
+            
+            return all_data
         except Exception as e:
             logger.error(f"Error obteniendo señales para stats: {e}")
-            # Si Supabase cae después de haber hidratado el caché, conservar la
-            # evidencia local en vez de devolver vacío y romper aprendizaje.
-            return list(self._stats_signals_cache or [])
-
+            return []
+    
     def get_missed_opportunities_by_context(self, symbol: str = None, 
                                             timeframe: str = None) -> List[Dict]:
         """Retorna oportunidades perdidas filtradas por contexto"""
@@ -1383,16 +1189,10 @@ class SupabaseClient:
         if not self.enabled:
             return
 
-        # FREE-PLAN: una rotación por tabla cada 6 horas como máximo.
-        # Antes el chequeo probabilístico podía ejecutar COUNTs repetidamente
-        # durante ráfagas de señales. La limpieza no necesita frecuencia por
-        # inserción y el GC de Supabase ya cubre Research/runtime.
-        now_mono = time.monotonic()
-        with self._rotation_lock:
-            last = float(self._rotation_last_check.get(table_name, 0.0) or 0.0)
-            if last and (now_mono - last) < 6 * 3600:
-                return
-            self._rotation_last_check[table_name] = now_mono
+        # Chequeo probabilístico: solo 10% de las veces.
+        import random
+        if random.random() > 0.1:
+            return
 
         # Mantener cada filtro .in_() en un tamaño razonable.
         delete_batch_size = 100
@@ -1419,13 +1219,15 @@ class SupabaseClient:
                 if not batch:
                     continue
 
-                ids_csv = ','.join(str(x) for x in batch)
-                self._rest_minimal(
-                    'DELETE',
-                    table_name,
-                    params={'id': f'in.({ids_csv})'},
-                    timeout=(1.25, 3.0),
-                    prefer='return=minimal',
+                (
+                    self.client
+                    .table(table_name)
+                    .delete()
+                    .in_(
+                        'id',
+                        batch
+                    )
+                    .execute()
                 )
 
                 deleted += len(
