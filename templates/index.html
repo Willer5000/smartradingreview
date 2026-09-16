@@ -2842,7 +2842,7 @@
 
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI-2"></script>
     <script
-        src="{{ url_for('static', filename='script.js') }}?v=20260915-RC6-GUARDIAN-MACRO"
+        src="{{ url_for('static', filename='script.js') }}?v=20260916-RC7-PREAUDIT"
     ></script>
 
 
@@ -2853,7 +2853,7 @@
     {% if is_futures %}
 
     <script
-        src="{{ url_for('static', filename='futures.js') }}?v=20260915-RC6-GUARDIAN-MACRO"
+        src="{{ url_for('static', filename='futures.js') }}?v=20260916-RC7-PREAUDIT"
     ></script>
 
     {% endif %}
@@ -3407,153 +3407,28 @@
                 }
             }, 300000);
             
-            // 2. VELAS Y PATRONES - Cada 90 segundos (antes 30s, reduce carga en Render Free)
+            // 2. CONTEXTO / CORRELACIÓN - Cada 90 segundos, SIN análisis pesado
+            // RC7: este timer antes lanzaba /api/analyze para el par actual y
+            // 2-3 pares adicionales. Eso competía con Spot/Futures por el único
+            // slot pesado y provocaba la tormenta 503/502. Los gráficos/patrones
+            // se refrescan con el análisis principal de 5 minutos; aquí sólo se
+            // reutiliza el snapshot ya cargado en el navegador.
             setInterval(function() {
-                // Usar las variables globales actuales
                 const currentSymbol = window.currentSymbol || (window.PAGE_CONFIG?.defaultSymbol || 'BTC-USDT');
                 const interval = window.currentInterval || (window.PAGE_CONFIG?.defaultTimeframe || '1D');
-                
-                // Obtener datos del par actual (para gráficos) - usa wrapper universal
-                const _req = window.buildAnalyzeURL(currentSymbol, interval);
-                const _fetchOpts = _req.method === 'POST'
-                    ? { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(_req.body) }
-                    : { method: 'GET' };
-                fetch(_req.url, _fetchOpts)
-                    .then(response => response.json())
-                    .then(data => {
-                        if (data.success && data.data) {
-                            window.currentAnalysis = data.data;
-                            
-                            // Actualizar gráficos y patrones
-                            if (typeof window.updateCandleChart === 'function') {
-                                window.updateCandleChart(data.data);
-                            }
-                            if (typeof window.updateAllCharts === 'function') {
-                                window.updateAllCharts(data.data);
-                            }
-                            if (typeof window.updatePattern4Chart === 'function') {
-                                window.updatePattern4Chart(data.data);
-                            }
-                            if (typeof window.updateFormation40Chart === 'function') {
-                                window.updateFormation40Chart(data.data);
-                            }
-                            if (typeof window.updateRecentPatternsList === 'function') {
-                                window.updateRecentPatternsList(data.data);
-                            }
-                            
-                            // Actualizar precio en vivo
-                            const price = data.data.current_price || 0;
-                            const livePriceEl = document.getElementById('live-price');
-                            if (livePriceEl) {
-                                livePriceEl.textContent = `$${price.toFixed(2)}`;
-                            }
-                            
-                            const chartTitle = document.getElementById('chart-title');
-                            if (chartTitle) {
-                                const symbolName = currentSymbol.replace('-', '/');
-                                const intervalName = window.getIntervalName(interval);
-                                chartTitle.innerHTML = `${symbolName} ${intervalName} - <span id="live-price" class="live-price">$${price.toFixed(2)}</span>`;
-                            }
-                        }
-                    })
-                    .catch(error => console.error('Error actualizando par actual:', error));
-                
-                // ============ AHORA OBTENER DATOS DE LOS OTROS DOS PARES PARA CORRELACIÓN ============
-                // NOTA: la correlación global BTC/PAXG solo aplica en Spot. En Futuros se saltan.
-                const otrosPares = [];
-                if (!window.IS_FUTURES_PAGE) {
-                    if (currentSymbol !== 'BTC-USDT') otrosPares.push('BTC-USDT');
-                    if (currentSymbol !== 'PAXG-USDT') otrosPares.push('PAXG-USDT');
-                    if (currentSymbol !== 'PAXG-BTC') otrosPares.push('PAXG-BTC');
+                const current = window.currentAnalysis || null;
+                if (!current) return;
+
+                const correlationSnapshot = {
+                    correlation: current.correlation || window.globalCorrelationData?.correlation || {},
+                    symbol: currentSymbol,
+                    timeframe: interval
+                };
+                window.globalCorrelationData = correlationSnapshot;
+                if (typeof window.updateCorrelationInfo === 'function') {
+                    window.updateCorrelationInfo(correlationSnapshot);
                 }
-                
-                if (otrosPares.length > 0) {
-                    // Hacer fetch en paralelo para los otros pares
-                    const promesas = otrosPares.map(par => 
-                        fetch(`/api/analyze?symbol=${par}&interval=${interval}`)
-                            .then(res => res.json())
-                            .then(res => {
-                                if (res.success && res.data) {
-                                    return { par, data: res.data };
-                                }
-                                return { par, data: null };
-                            })
-                            .catch(err => {
-                                console.error(`Error obteniendo ${par}:`, err);
-                                return { par, data: null };
-                            })
-                    );
-                    
-                    Promise.all(promesas).then(resultadosOtros => {
-                        // Construir objeto con datos de los 3 pares
-                        const datosGlobales = {
-                            // Datos del par actual
-                            [currentSymbol]: window.currentAnalysis,
-                        };
-                        
-                        // Agregar los otros pares
-                        resultadosOtros.forEach(item => {
-                            if (item.data) {
-                                datosGlobales[item.par] = item.data;
-                            }
-                        });
-                        
-                        // Construir estructura de correlación global
-                        const correlationGlobal = {
-                            correlation: {
-                                btc_analysis: datosGlobales['BTC-USDT'] ? {
-                                    decision: { 
-                                        action: datosGlobales['BTC-USDT'].decision?.action || 'N/A', 
-                                        confidence: datosGlobales['BTC-USDT'].decision?.confidence || 0 
-                                    },
-                                    trend: {
-                                        direction: datosGlobales['BTC-USDT'].trend?.direction || 'neutral',
-                                        adx: datosGlobales['BTC-USDT'].trend?.adx || 0,
-                                        plus_di: datosGlobales['BTC-USDT'].trend?.plus_di || 0,
-                                        minus_di: datosGlobales['BTC-USDT'].trend?.minus_di || 0
-                                    }
-                                } : null,
-                                
-                                paxg_analysis: datosGlobales['PAXG-USDT'] ? {
-                                    trend: {
-                                        direction: datosGlobales['PAXG-USDT'].trend?.direction || 'neutral',
-                                        adx: datosGlobales['PAXG-USDT'].trend?.adx || 0,
-                                        plus_di: datosGlobales['PAXG-USDT'].trend?.plus_di || 0,
-                                        minus_di: datosGlobales['PAXG-USDT'].trend?.minus_di || 0
-                                    }
-                                } : null,
-                                
-                                paxg_btc_analysis: datosGlobales['PAXG-BTC'] ? {
-                                    decision: { 
-                                        action: datosGlobales['PAXG-BTC'].decision?.action || 'N/A', 
-                                        confidence: datosGlobales['PAXG-BTC'].decision?.confidence || 0 
-                                    },
-                                    trend: {
-                                        direction: datosGlobales['PAXG-BTC'].trend?.direction || 'neutral',
-                                        adx: datosGlobales['PAXG-BTC'].trend?.adx || 0,
-                                        plus_di: datosGlobales['PAXG-BTC'].trend?.plus_di || 0,
-                                        minus_di: datosGlobales['PAXG-BTC'].trend?.minus_di || 0
-                                    }
-                                } : null,
-                                
-                                rotation_signal: window.currentAnalysis?.correlation?.rotation_signal || 'NEUTRAL',
-                                weight_modifier: window.currentAnalysis?.correlation?.weight_modifier || 1.0
-                            },
-                            symbol: currentSymbol,
-                            timeframe: interval
-                        };
-                        
-                        // Guardar para referencia futura
-                        window.globalCorrelationData = correlationGlobal;
-                        
-                        // Actualizar la correlación
-                        if (typeof window.updateCorrelationInfo === 'function') {
-                            window.updateCorrelationInfo(correlationGlobal);
-                        }
-                        
-                        console.log('✅ Correlación global actualizada (intervalo 90s)');
-                    });
-                }
+                console.debug('♻️ Correlación reutilizada desde snapshot; sin análisis pesado adicional.');
             }, 90000);
             
             // 3. PRECIO EN VIVO - Cada 30 segundos (antes 15s, reduce carga en Render Free)

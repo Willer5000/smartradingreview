@@ -30,10 +30,10 @@ def test_active_futures_contract_retires_5m_15m():
     assert '>5m<' not in selector and '>15m<' not in selector
 
 
-def test_research_fusion_uses_40_cells_and_latest_cell_state():
+def test_research_fusion_uses_46_cells_and_latest_cell_state():
     fusion = txt('research_evidence_fusion.py')
-    assert '_COVERAGE_TARGET = 40' in fusion
-    assert '_FUTURES_TFS = ("30M","1H","2H","4H")' in fusion
+    assert '_COVERAGE_TARGET = 46' in fusion
+    assert '_FUTURES_TFS = _FUTURES_CORE_TFS + _FUTURES_HIGH_TFS' in fusion
     assert 'Current cell state must win over an older SHADOW_READY' in fusion
 
 
@@ -46,14 +46,14 @@ def test_analytics_is_bounded_and_middle_ground():
     assert 'Monitoreo de rentabilidad y continuidad' in html
     assert 'v1-validated-live-body' in html
     assert 'v1-coverage-matrix-body' in html
-    assert '40 celdas activas' in html
+    assert 'coverage_target||46' in js
     assert '20260914-FINAL-V1-RC2' in html
 
 
 def test_live_kpis_ignore_retired_futures_without_deleting_history():
     svc = txt('analytics_service.py')
-    assert "if active_tf not in {'30m', '1h', '2h', '4h'}" in svc
-    assert 'Historical rows remain in Supabase for audit/learning' in svc
+    assert "'retired_timeframes': ['5m', '15m']" in svc
+    assert "tf_order = ['5m', '15m', '30m', '1h', '2h', '4h', '12h', '1D', '1W']" in svc
 
 
 def test_memory_logs_are_telemetry_not_an_active_spam_source():

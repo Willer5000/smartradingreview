@@ -7,11 +7,11 @@ def txt(name):
     return (ROOT / name).read_text(encoding='utf-8')
 
 
-def test_canonical_40_cell_contract_and_no_pooled_counting():
+def test_canonical_46_cell_contract_and_no_pooled_counting():
     src = txt('research_evidence_fusion.py')
-    assert '_COVERAGE_TARGET = 40' in src
+    assert '_COVERAGE_TARGET = 46' in src
     assert '_canonical_cell_key' in src
-    assert 'if sym in _FUTURES_SYMBOLS and tf in _FUTURES_TFS' in src
+    assert '_FUTURES_TFS = _FUTURES_CORE_TFS + _FUTURES_HIGH_TFS' in src
     assert 'return None' in src
     assert 'shadow_live_candidates' in src
     assert 'oos_wr_weighted' in src and 'oos_total_r' in src
@@ -20,7 +20,7 @@ def test_canonical_40_cell_contract_and_no_pooled_counting():
 def test_simple_analytics_default_and_heavy_diagnostics_on_demand():
     html = txt('templates/analytics.html')
     js = txt('static/analytics.js')
-    assert 'Estado V1 · lectura rápida' in html
+    assert 'Estado del sistema · lectura rápida' in html
     assert 'v1-spot-live' in html and 'v1-futures-live' in html
     assert 'v1-spot-oos' in html and 'v1-futures-oos' in html
     assert 'id="q5-v2-section"' in html and 'chart-container mb-4 v1-advanced' in html

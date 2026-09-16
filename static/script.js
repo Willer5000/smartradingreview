@@ -2757,16 +2757,16 @@ window.runCompleteAnalysis = function() {
     const symbol = document.getElementById('symbol-select')?.value || cfg.defaultSymbol;
     const interval = document.getElementById('interval-select')?.value || cfg.defaultTimeframe;
 
-    // Hotfix 15.1: retries belong to one exact Futures view. Changing pair/TF
-    // must never inherit an old busy loop.
-    if (window.IS_FUTURES_PAGE) {
-        const retryKey = `${symbol}|${interval}`;
-        if (window.__FUTURES_ANALYSIS_RETRY_KEY__ !== retryKey) {
-            window.__FUTURES_ANALYSIS_RETRY_KEY__ = retryKey;
-            window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = 0;
-            window.__FUTURES_ANALYSIS_RETRY_STARTED_AT__ = 0;
-            clearTimeout(window.__FUTURES_ANALYSIS_RETRY_TIMER__);
-        }
+    // RC7: retries belong to one exact view in BOTH Spot and Futures.
+    // Changing pair/TF must never inherit an old busy loop.
+    const retryKey = `${symbol}|${interval}`;
+    const retryPrefix = window.IS_FUTURES_PAGE ? '__FUTURES_ANALYSIS' : '__SPOT_ANALYSIS';
+    const retryKeyName = `${retryPrefix}_RETRY_KEY__`;
+    if (window[retryKeyName] !== retryKey) {
+        window[retryKeyName] = retryKey;
+        window[`${retryPrefix}_BUSY_RETRIES__`] = 0;
+        window[`${retryPrefix}_RETRY_STARTED_AT__`] = 0;
+        clearTimeout(window[`${retryPrefix}_RETRY_TIMER__`]);
     }
     
     window.currentSymbol = symbol;
@@ -2906,6 +2906,47 @@ window.runCompleteAnalysis = function() {
 
 
             // ============================================================
+            // RC7 — SPOT BUSY/DEFERRED ES ESTADO NORMAL, NO ERROR
+            // ============================================================
+            // El heavy slot es único. Si otro cálculo legítimo está terminando,
+            // el backend devuelve 202. No mostramos error ni lanzamos otra
+            // petición paralela; un único timer reintenta la misma vista.
+            if (!window.IS_FUTURES_PAGE && data?.busy) {
+                const now = Date.now();
+                let startedAt = Number(window.__SPOT_ANALYSIS_RETRY_STARTED_AT__ || 0);
+                if (!startedAt) {
+                    startedAt = now;
+                    window.__SPOT_ANALYSIS_RETRY_STARTED_AT__ = startedAt;
+                }
+                const retryCount = Number(window.__SPOT_ANALYSIS_BUSY_RETRIES__ || 0);
+                const elapsedMs = now - startedAt;
+                const retryAfterMs = Math.min(5000, Math.max(1500, Number(data.retry_after_ms || 1800)));
+                const recommendationEl = document.getElementById('system-recommendation');
+                if (recommendationEl) {
+                    recommendationEl.innerHTML = `
+                        <div class="alert alert-info mb-0">
+                            <strong>⏳ Actualizando análisis Spot.</strong>
+                            <div class="small mt-2">El sistema está terminando un cálculo previo; no se duplicará el trabajo.</div>
+                        </div>`;
+                }
+                if (elapsedMs < 60000 && retryCount < 20) {
+                    window.__SPOT_ANALYSIS_BUSY_RETRIES__ = retryCount + 1;
+                    clearTimeout(window.__SPOT_ANALYSIS_RETRY_TIMER__);
+                    window.__SPOT_ANALYSIS_RETRY_TIMER__ = window.setTimeout(() => {
+                        if (typeof window.runCompleteAnalysis === 'function') window.runCompleteAnalysis();
+                    }, retryAfterMs);
+                } else if (recommendationEl) {
+                    recommendationEl.innerHTML = `
+                        <div class="alert alert-warning mb-0">
+                            <strong>⚠️ El análisis Spot sigue ocupado.</strong>
+                            <div class="small mt-2">La página continúa disponible. Puedes reintentar sin recargar.</div>
+                            <button type="button" class="btn btn-sm btn-outline-warning mt-2" onclick="window.runCompleteAnalysis?.()">Reintentar</button>
+                        </div>`;
+                }
+                return;
+            }
+
+            // ============================================================
             // HOTFIX 16.2 — FUTURES BUSY ES ESTADO NORMAL, NO ERROR HTTP
             // ============================================================
             // El backend responde 202 mientras el payload rico de gráficos
@@ -3013,6 +3054,10 @@ window.runCompleteAnalysis = function() {
                     window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = 0;
                     window.__FUTURES_ANALYSIS_RETRY_STARTED_AT__ = 0;
                     clearTimeout(window.__FUTURES_ANALYSIS_RETRY_TIMER__);
+                } else {
+                    window.__SPOT_ANALYSIS_BUSY_RETRIES__ = 0;
+                    window.__SPOT_ANALYSIS_RETRY_STARTED_AT__ = 0;
+                    clearTimeout(window.__SPOT_ANALYSIS_RETRY_TIMER__);
                 }
                 window.currentAnalysis = data.data;
                 // ============================================================
@@ -3280,7 +3325,7 @@ window.runCompleteAnalysis = function() {
                 // Hacer fetch en paralelo para los otros pares
                 // Hacer fetch en paralelo para los otros pares (USAR ENDPOINT RÁPIDO, no el de TGP)
                 const promesas = otrosPares.map(par =>
-                    fetch(`/api/analyze?symbol=${encodeURIComponent(par)}&interval=${encodeURIComponent(interval)}`)
+                    fetch(`/api/analyze?symbol=${encodeURIComponent(par)}&interval=${encodeURIComponent(interval)}&cache_only=1`)
                         .then(res => res.json())
                         .then(res => {
                             if (res.success && res.data) {
@@ -3512,10 +3557,21 @@ window.runCompleteAnalysis = function() {
                 error.message = 'El servidor está terminando una tarea de mercado.';
             }
 
-            console.error(
-                '❌ Error en análisis:',
-                error
-            );
+            // RC7: compatibilidad con un backend anterior que todavía pudiera
+            // responder BUSY con status no-2xx. Tampoco es un error de usuario.
+            if (!window.IS_FUTURES_PAGE && error?.busy) {
+                const now = Date.now();
+                let startedAt = Number(window.__SPOT_ANALYSIS_RETRY_STARTED_AT__ || 0);
+                if (!startedAt) { startedAt = now; window.__SPOT_ANALYSIS_RETRY_STARTED_AT__ = startedAt; }
+                const retryCount = Number(window.__SPOT_ANALYSIS_BUSY_RETRIES__ || 0);
+                if ((now - startedAt) < 60000 && retryCount < 20) {
+                    window.__SPOT_ANALYSIS_BUSY_RETRIES__ = retryCount + 1;
+                    const retryAfterMs = Math.min(5000, Math.max(1500, Number(error?.serverData?.retry_after_ms || 1800)));
+                    clearTimeout(window.__SPOT_ANALYSIS_RETRY_TIMER__);
+                    window.__SPOT_ANALYSIS_RETRY_TIMER__ = window.setTimeout(() => window.runCompleteAnalysis?.(), retryAfterMs);
+                    return;
+                }
+            }
 
             // Hotfix 15.1/15.2: el análisis interactivo Futures se calcula fuera
             // del único hilo web de Gunicorn. Mientras termina, el endpoint
@@ -3576,6 +3632,8 @@ window.runCompleteAnalysis = function() {
                     return;
                 }
             }
+
+            console.error('❌ Error en análisis:', error);
 
             if (window.IS_FUTURES_PAGE) {
                 window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = 0;

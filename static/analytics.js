@@ -2870,6 +2870,41 @@ async function loadResearchFederationAnalytics(){
         const actionable=candidates.filter(x=>['SHADOW_READY_FAST','SHADOW_READY','VALIDATED_SINGLE_ASSET','VALIDATION_REQUIRED','REJECTED_OOS','OBSERVE'].includes(String(x.stage||'')));
         const fmt=(v,d=2)=>Number.isFinite(Number(v))?Number(v).toFixed(d):'--';
         const pct=v=>Number.isFinite(Number(v))?`${Number(v).toFixed(1)}%`:'--';
+        const safe=v=>String(v??'').replace(/[&<>"']/g,ch=>({
+            '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+        }[ch]));
+        const strategyCardHtml=row=>{
+            const card=row?.strategy_card||{};
+            const raw=(card.raw_spec&&typeof card.raw_spec==='object')?card.raw_spec:(row?.strategy_spec||{});
+            const hasRich=Boolean(card.display_name||card.signal_logic||card.technical_id);
+            const name=card.display_name||uiHumanLabel(row?.strategy_family||'Especialista causal');
+            const technicalId=card.technical_id||row?.strategy_id||row?.candidate_key||'--';
+            const indicators=Array.isArray(card.indicators)?card.indicators:[];
+            const evidence=card.evidence||{};
+            const entry=card.entry||{};
+            const risk=card.risk||{};
+            const filters=card.filters||{};
+            return `<div class="small"><b>${safe(name)}</b></div>
+                <details class="mt-1"><summary class="small text-info" style="cursor:pointer">Ficha de estrategia</summary>
+                    <div class="border rounded p-2 mt-1 small text-start" style="min-width:320px;max-width:560px">
+                        <div><b>ID técnico inmutable:</b> <code>${safe(technicalId)}</code></div>
+                        ${card.fingerprint_sha256?`<div><b>Huella:</b> <code>${safe(String(card.fingerprint_sha256).slice(0,20))}…</code></div>`:''}
+                        <div><b>Estado:</b> ${safe(card.validation_stage||row?.stage||'--')}${card.immutable?' · 🔒 parámetros congelados':''}</div>
+                        <div><b>Mercado/celda:</b> ${safe(card.symbol||row?.symbol||'--')} · ${safe(card.timeframe||row?.timeframe||'--')} · ${safe(card.direction||row?.scope?.direction||'BOTH')}</div>
+                        <div><b>Régimen válido:</b> ${safe(card.valid_regime||row?.scope?.regime||'ALL')}</div>
+                        ${hasRich&&card.signal_logic?`<div class="mt-1"><b>Condición:</b> ${safe(card.signal_logic)}</div>`:''}
+                        ${indicators.length?`<div><b>Indicadores:</b> ${indicators.map(safe).join(' · ')}</div>`:''}
+                        ${entry.rule?`<div><b>Entry:</b> ${safe(entry.rule)}</div>`:''}
+                        ${risk.stop_rule?`<div><b>SL:</b> ${safe(risk.stop_rule)}</div>`:''}
+                        ${risk.take_profit_rule?`<div><b>TP:</b> ${safe(risk.take_profit_rule)}</div>`:''}
+                        ${filters.volatility_rule?`<div><b>Volatilidad:</b> ${safe(filters.volatility_rule)}</div>`:''}
+                        ${Number.isFinite(Number(filters.trend_strength_min))?`<div><b>Fuerza mínima:</b> ${safe(filters.trend_strength_rule||filters.trend_strength_min)}</div>`:''}
+                        ${hasRich?`<div><b>OOS:</b> N ${Number(evidence.oos_n??row?.oos_n??0)} · Exp ${fmt(evidence.oos_expectancy_r??row?.oos_exp_r,3)}R · PF ${fmt(evidence.oos_profit_factor??row?.oos_pf,2)}</div>`:''}
+                        <details class="mt-1"><summary style="cursor:pointer">Parámetros exactos validados</summary><pre class="small mb-0 mt-1" style="white-space:pre-wrap">${safe(JSON.stringify(raw,null,2))}</pre></details>
+                        ${!hasRich?'<div class="text-warning mt-1">Ficha enriquecida pendiente; los parámetros exactos ya son visibles arriba.</div>':''}
+                    </div>
+                </details>`;
+        };
         const renderBt=(bucket, emptyLabel='Sin estrategia OOS validada todavía')=>{
             if(!bucket || bucket.state==='NO_EVIDENCE') return `<span class="text-muted">${emptyLabel}</span>`;
             const best=bucket.best||{};
@@ -2938,7 +2973,7 @@ async function loadResearchFederationAnalytics(){
                 const certText=certState.includes('POSITIVE')?'🧩 Backtest histórico positivo · confirmar ejecución real':certState.includes('INCOMPLETE')?'🟡 Ejecución incompleta':'🔎 Pendiente';
                 const shadowState=String(row.shadow_state||'WAITING');
                 const status=row.recycle_required?'♻️ RECICLAR':shadowState==='CONFIRMED'?'✅ CONFIRMANDO':shadowState==='DIVERGED'||shadowState==='EARLY_DIVERGENCE'?'⚠️ DIVERGIENDO':signals>0?'👀 OBSERVANDO':'⏳ ESPERANDO SETUP';
-                return `<tr><td>${row.symbol||'--'}</td><td>${row.timeframe||'--'}</td><td>${uiHumanLabel(row.strategy_family||'Especialista causal')}</td><td>${row.oos_wr==null?'--':fmt(row.oos_wr,1)+'%'}</td><td>${oosPnl==null?'--':(oosPnl>=0?'+':'')+fmt(oosPnl,2)+'R'}</td><td>${row.oos_pf==null?'--':fmt(row.oos_pf,2)}</td><td class="${guardianDelta==null?'text-muted':Number(guardianDelta)>=0?'text-success':'text-warning'}">${guardianDeltaText}</td><td class="small">${certText}</td><td>${resolved}/${signals}</td><td>${status}</td></tr>`;
+                return `<tr><td>${row.symbol||'--'}</td><td>${row.timeframe||'--'}</td><td>${strategyCardHtml(row)}</td><td>${row.oos_wr==null?'--':fmt(row.oos_wr,1)+'%'}</td><td>${oosPnl==null?'--':(oosPnl>=0?'+':'')+fmt(oosPnl,2)+'R'}</td><td>${row.oos_pf==null?'--':fmt(row.oos_pf,2)}</td><td class="${guardianDelta==null?'text-muted':Number(guardianDelta)>=0?'text-success':'text-warning'}">${guardianDeltaText}</td><td class="small">${certText}</td><td>${resolved}/${signals}</td><td>${status}</td></tr>`;
             }).join(''):'<tr><td colspan="10" class="text-muted text-center">Aún no hay especialistas que hayan superado el OOS Guard.</td></tr>';
         }
         const covBody=document.getElementById('v1-coverage-matrix-body');

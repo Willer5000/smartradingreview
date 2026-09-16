@@ -26477,6 +26477,17 @@ def api_analyze():
         print(f"🔍 Ejecutando analyze_full_market...")
         cache_key = (symbol, interval)
         result = _analysis_cache_get(cache_key)
+        cache_only = str(request.args.get('cache_only', '')).strip().lower() in {'1','true','yes','on'}
+        if result is None and cache_only:
+            # RC7: passive UI panels must never launch the 9-trader heavy engine.
+            return jsonify({
+                'success': False,
+                'busy': True,
+                'deferred': True,
+                'cache_only': True,
+                'retry_after_ms': 90000,
+                'error': 'Snapshot aún no disponible; el panel esperará el próximo análisis principal.'
+            }), 202
         if result is None:
             result, result_source = _run_spot_analysis_singleflight(
                 symbol,
@@ -26490,7 +26501,7 @@ def api_analyze():
                     'deferred': True,
                     'retry_after_ms': 1800,
                     'error': 'El mismo análisis ya está en curso o el sistema está terminando una tarea de mercado.'
-                }), 503
+                }), 202
             print(f"♻️ [H3] Spot UI {symbol} {interval}: {result_source}", flush=True)
         else:
             print(f"⚡ CACHÉ UI: {symbol} {interval}")
@@ -30223,6 +30234,23 @@ def api_futures_analyze():
         # que el usuario vea dirección/Entry/SL/TP mientras se preparan gráficos.
         partial_data = _get_futures_runtime_cached(symbol, timeframe)
 
+        # RC7 anti-storm: a failed async job gets a short quiet period. Browser
+        # polls still receive 202/partial data, but cannot relaunch a heavy job
+        # every 3 s and turn one transient failure into repeated 502/503 load.
+        recent_error = _get_futures_ui_recent_error(symbol, timeframe, 20)
+        if recent_error:
+            return jsonify({
+                'success': False,
+                'busy': True,
+                'deferred': True,
+                'partial': bool(partial_data),
+                'data': partial_data,
+                'job_state': 'BACKOFF',
+                'retry_after_ms': 5000,
+                'last_error': recent_error.get('error'),
+                'error': 'Futures está recuperándose de un intento reciente; se reintentará sin duplicar análisis.',
+            }), 202
+
         _mark_futures_interactive_priority()
         job_state = _start_futures_ui_analysis_async(symbol, timeframe)
 
@@ -30717,6 +30745,29 @@ def _get_futures_ui_cached(symbol, timeframe):
         return item.get('data')
 
 
+
+
+def _get_futures_ui_recent_error(symbol, timeframe, max_age_seconds=20):
+    """Return a recent async UI-analysis failure without scheduling a storm.
+
+    RC7: when a Render/Futures job fails, browser polling must not immediately
+    launch the same heavy job every 3 seconds. A short backoff protects the
+    single heavy-analysis slot and lets the process recover.
+    """
+    key = _futures_ui_key(symbol, timeframe)
+    now = time.time()
+    with _FUTURES_UI_CACHE['lock']:
+        item = (_FUTURES_UI_CACHE.get('errors') or {}).get(key)
+        if not item:
+            return None
+        age = now - float(item.get('ts') or 0)
+        if age > max(1, int(max_age_seconds or 20)):
+            _FUTURES_UI_CACHE['errors'].pop(key, None)
+            return None
+        return {
+            'age_seconds': max(0, int(age)),
+            'error': str(item.get('error') or '')[:240],
+        }
 
 
 def _get_futures_runtime_cached(symbol, timeframe):
@@ -34619,9 +34670,59 @@ _ANALYTICS_SNAPSHOT_FRESH_SECONDS = max(300, int(os.getenv('ANALYTICS_SNAPSHOT_F
 _ANALYTICS_REFRESH_LOCK = threading.Lock()
 _ANALYTICS_REFRESHING = set()
 
+# RC6 — the HTTP request must never wait on Supabase.  RC5 moved the heavy
+# aggregation to a background thread but still called load_runtime_snapshot()
+# synchronously inside /api/analytics/quality-v2.  A slow PostgREST request was
+# therefore enough to make the browser hit its 12 s AbortController timeout.
+# Keep a very small in-process front cache; durable Supabase persistence remains
+# the restart-safe source, but it is hydrated only in the background.
+_ANALYTICS_RAM_LOCK = threading.Lock()
+_ANALYTICS_RAM_SNAPSHOTS = {}
+_ANALYTICS_RAM_MAX_ENTRIES = max(1, min(8, int(os.getenv('ANALYTICS_RAM_SNAPSHOT_MAX_ENTRIES', '4') or 4)))
+
+
+def _analytics_quality_ram_put(filters, data, *, snapshot_ts=None):
+    if not _analytics_quality_snapshot_usable(data):
+        return False
+    key = _analytics_snapshot_key(filters)
+    item = {
+        'data': data,
+        'ts': float(snapshot_ts or time.time()),
+        'last_access': time.monotonic(),
+    }
+    with _ANALYTICS_RAM_LOCK:
+        _ANALYTICS_RAM_SNAPSHOTS[key] = item
+        if len(_ANALYTICS_RAM_SNAPSHOTS) > _ANALYTICS_RAM_MAX_ENTRIES:
+            oldest = min(
+                _ANALYTICS_RAM_SNAPSHOTS.items(),
+                key=lambda kv: float((kv[1] or {}).get('last_access') or 0),
+            )[0]
+            if oldest != key or len(_ANALYTICS_RAM_SNAPSHOTS) > 1:
+                _ANALYTICS_RAM_SNAPSHOTS.pop(oldest, None)
+    return True
+
+
+def _analytics_quality_ram_get(filters):
+    key = _analytics_snapshot_key(filters)
+    with _ANALYTICS_RAM_LOCK:
+        item = _ANALYTICS_RAM_SNAPSHOTS.get(key)
+        if not isinstance(item, dict):
+            return None
+        data = item.get('data')
+        if not _analytics_quality_snapshot_usable(data):
+            _ANALYTICS_RAM_SNAPSHOTS.pop(key, None)
+            return None
+        item['last_access'] = time.monotonic()
+        ts = float(item.get('ts') or 0)
+    return {
+        'data': data,
+        'age_seconds': max(0, int(time.time() - ts)) if ts else None,
+        'source': 'ram',
+    }
+
 
 def _schedule_analytics_quality_refresh(filters):
-    """RC5 stale-while-revalidate refresh; never block the dashboard request."""
+    """RC6 hydrate/revalidate Analytics entirely outside the HTTP request."""
     key=_analytics_snapshot_key(filters)
     with _ANALYTICS_REFRESH_LOCK:
         if key in _ANALYTICS_REFRESHING:
@@ -34631,12 +34732,28 @@ def _schedule_analytics_quality_refresh(filters):
     def worker():
         acquired=False
         try:
+            # Restart recovery is also background-only.  Publish a durable
+            # snapshot to RAM immediately, even when stale, so the next browser
+            # retry can render useful data while revalidation continues.
+            persisted=_load_analytics_quality_snapshot(safe_filters,allow_expired=True)
+            if persisted:
+                age=persisted.get('age_seconds')
+                persisted_ts=(time.time()-float(age)) if age is not None else time.time()
+                _analytics_quality_ram_put(
+                    safe_filters, persisted['data'], snapshot_ts=persisted_ts
+                )
+                if age is not None and age <= _ANALYTICS_SNAPSHOT_FRESH_SECONDS:
+                    return
+
             acquired=_acquire_heavy_analysis('analytics-quality-v2-bg',timeout=1)
             if not acquired or not _memory_pressure_guard('analytics-quality-v2-bg',allow_soft=False):
                 return
             svc=_get_analytics_service()
             if svc is None: return
             data=svc.get_quality_v2_summary(**safe_filters)
+            # RAM is updated before durable persistence/cleanup, so a slow
+            # Supabase write can never postpone dashboard availability.
+            _analytics_quality_ram_put(safe_filters,data)
             _save_analytics_quality_snapshot(safe_filters,data)
         except Exception as exc:
             print(f'⚠️ [ANALYTICS] refresh background: {type(exc).__name__}: {exc}',flush=True)
@@ -34725,11 +34842,15 @@ def _save_analytics_quality_snapshot(filters, data):
         if not _analytics_quality_snapshot_usable(data):
             print('⚠️ [ANALYTICS] No se persiste snapshot vacío/parcial de aprendizaje.')
             return False
+        # Keep the request-safe RAM copy coherent even when this helper is
+        # called from another background path.
+        now_ts=time.time()
+        _analytics_quality_ram_put(filters,data,snapshot_ts=now_ts)
         from runtime_persistence import save_runtime_snapshot
         return save_runtime_snapshot(
             'analytics',
             _analytics_snapshot_key(filters),
-            {'ts': time.time(), 'filters': dict(filters), 'data': data},
+            {'ts': now_ts, 'filters': dict(filters), 'data': data},
             ttl_seconds=8 * 3600,
         )
     except Exception:
@@ -34786,19 +34907,33 @@ def api_analytics_summary():
 
 @app.route('/api/analytics/quality-v2')
 def api_analytics_quality_v2():
-    """RC5 snapshot-first Analytics. Heavy work is always background."""
+    """RC6 RAM-first Analytics: this request performs zero remote DB reads."""
     try:
         filters=_parse_analytics_filters()
         try: filters['days_back']=max(1,min(365,int(filters.get('days_back',90) or 90)))
         except Exception: filters['days_back']=90
-        stored=_load_analytics_quality_snapshot(filters,allow_expired=True)
+
+        # Critical invariant: never call _load_analytics_quality_snapshot() here.
+        # It talks to Supabase and can exceed the browser timeout during network
+        # contention.  Persistence hydration and aggregation live in the worker.
+        stored=_analytics_quality_ram_get(filters)
         if stored:
             age=stored.get('age_seconds')
             stale=age is None or age>_ANALYTICS_SNAPSHOT_FRESH_SECONDS
             if stale: _schedule_analytics_quality_refresh(filters)
-            return jsonify({'success':True,'data':stored['data'],'cached':True,'stale':bool(stale),'refreshing':bool(stale),'cache_age_seconds':age,'timestamp':datetime.now(bolivia_tz).isoformat()})
+            return jsonify({
+                'success':True, 'data':stored['data'], 'cached':True,
+                'cache_source':'ram', 'stale':bool(stale),
+                'refreshing':bool(stale), 'cache_age_seconds':age,
+                'timestamp':datetime.now(bolivia_tz).isoformat(),
+            })
+
         _schedule_analytics_quality_refresh(filters)
-        return jsonify({'success':True,'deferred':True,'data':None,'retry_after_seconds':8,'note':'Preparando snapshot analítico en segundo plano; Spot/Futures no se bloquean.'}),202
+        return jsonify({
+            'success':True, 'deferred':True, 'data':None,
+            'retry_after_seconds':5,
+            'note':'Restaurando Analytics en segundo plano; Spot/Futures siguen disponibles.',
+        }),202
     except Exception as e:
         return jsonify({'success':False,'error':str(e)}),500
 
@@ -47233,7 +47368,7 @@ def api_analyze_with_portfolio():
                     'deferred': True,
                     'retry_after_ms': 1800,
                     'error': 'El mismo análisis ya está en curso o el sistema está terminando una tarea de mercado.'
-                }), 503
+                }), 202
             print(f"♻️ [H3] Spot TGP {symbol} {timeframe}: {result_source}", flush=True)
 
             if (

@@ -66,7 +66,7 @@ def test_futures_ui_uses_intermarket_context_not_spot_rotation_placeholder():
     html = Path('templates/index.html').read_text(encoding='utf-8')
     assert 'Contexto intermercado Futures' in html
     assert 'No representa una rotación BTC/PAXG' in html
-    assert '20260915-RC6-GUARDIAN-MACRO' in html
+    assert '20260916-RC7-PREAUDIT' in html
 
 
 def test_link_bnb_and_high_tf_entry_contract_are_final_v1():
