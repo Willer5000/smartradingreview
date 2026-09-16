@@ -18883,6 +18883,92 @@ class TradingExpertSystem:
                 razones_consenso = ['Error en sistema de traders']
                 registro_votacion = {}
             # ==========================================================
+            # RC8.2 — CONTINGENCY PLAYBOOK
+            # ==========================================================
+            # A validated Research Champion remains the preferred specialist.
+            # While the exact market×symbol×TF×action cell is still unfilled,
+            # or Research/Supabase is temporarily unavailable, this deterministic
+            # playbook keeps the desk coherent WITHOUT fabricating validated alpha.
+            # It may preserve or downgrade the committee action, never create a
+            # direction that the committee did not already select and never bypass
+            # Safety / negative OOS / Alpha Decay.
+            contingency_playbook = {
+                'version': 'RC8_2_CONTINGENCY_PLAYBOOK_V1',
+                'active': False,
+                'reason': 'NOT_EVALUATED',
+            }
+            try:
+                research_prior = {
+                    'state': 'UNAVAILABLE',
+                    'support_score': 0.0,
+                    'penalty_score': 0.0,
+                }
+                try:
+                    from research_evidence_fusion import edge_prior
+                    strategy_blob = ' | '.join(str(x).upper() for x in (estrategias_consenso or []))
+                    research_prior = edge_prior(
+                        symbol,
+                        timeframe,
+                        accion_consenso,
+                        analysis_system_type,
+                        regime=str((market_regime or {}).get('regime') or '').upper() or None,
+                        runtime_features={
+                            'has_pullback': 'YES' if ('PULLBACK' in strategy_blob or 'RETEST' in strategy_blob) else 'NO',
+                            'has_sweep': 'YES' if ('SWEEP' in strategy_blob or 'LIQUIDITY' in strategy_blob or 'BARRIDO' in strategy_blob) else 'NO',
+                            'has_order_block': 'YES' if ('ORDER_BLOCK' in strategy_blob or 'ORDER BLOCK' in strategy_blob) else 'NO',
+                        },
+                    )
+                except Exception as research_prior_error:
+                    research_prior = {
+                        'state': 'UNAVAILABLE',
+                        'error': str(research_prior_error)[:160],
+                        'support_score': 0.0,
+                        'penalty_score': 0.0,
+                    }
+
+                from contingency_strategy_engine import build_contingency_playbook
+                contingency_playbook = build_contingency_playbook(
+                    layers=capas,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    system_type=analysis_system_type,
+                    committee_action=accion_consenso,
+                    committee_confidence=confianza_consenso,
+                    vote_record=registro_votacion,
+                    research_prior=research_prior,
+                )
+
+                if contingency_playbook.get('active'):
+                    strategy_name = str(contingency_playbook.get('strategy') or '').strip()
+                    if strategy_name and strategy_name not in estrategias_consenso:
+                        estrategias_consenso.append(strategy_name)
+                    razones_consenso.append(
+                        'RC8.2 contingencia: ' +
+                        str(contingency_playbook.get('reason') or 'celda sin Champion') +
+                        ' · ' + str(contingency_playbook.get('setup_family') or 'SETUP')
+                    )
+                    effective_action = str(contingency_playbook.get('effective_action') or accion_consenso).upper()
+                    if effective_action != str(accion_consenso or '').upper():
+                        razones_consenso.append(
+                            str(contingency_playbook.get('downgrade_reason') or 'Playbook de contingencia exige esperar.')
+                        )
+                        accion_consenso = effective_action
+                    # No validated alpha => confidence cannot look like a proven Champion.
+                    try:
+                        cap = float(((contingency_playbook.get('risk') or {}).get('confidence_cap')) or 100.0)
+                        confianza_consenso = min(float(confianza_consenso or 0.0), cap)
+                    except Exception:
+                        pass
+
+            except Exception as contingency_error:
+                contingency_playbook = {
+                    'version': 'RC8_2_CONTINGENCY_PLAYBOOK_V1',
+                    'active': False,
+                    'reason': 'CONTINGENCY_ENGINE_ERROR',
+                    'error': str(contingency_error)[:180],
+                }
+
+            # ==========================================================
             # Q7 — ADAPTIVE INTRADAY STRATEGY LAB
             # ==========================================================
             #
@@ -19081,6 +19167,9 @@ class TradingExpertSystem:
             # ==========================================================
             # Hidden per-analysis keys avoid shared mutable state between parallel
             # Futures analyses. They are removed immediately after levels.
+            if isinstance(structure, dict):
+                structure['_contingency_playbook'] = contingency_playbook
+
             if analysis_system_type == 'futures' and isinstance(structure, dict):
                 structure['_adaptive_strategy_lab'] = strategy_lab
                 structure['_adaptive_market_regime'] = str(
@@ -19116,6 +19205,16 @@ class TradingExpertSystem:
                     # Ajustar por sentimiento
                     if sentiment.get('sentiment_bias') in ['bullish_opportunity', 'bearish_opportunity']:
                         levels['suggested_size'] = min(1.0, levels['suggested_size'] * 1.2)
+
+                    # RC8.2: an unvalidated contingency cell uses reduced capital.
+                    if contingency_playbook.get('active'):
+                        try:
+                            contingency_size_cap = float(((contingency_playbook.get('risk') or {}).get('size_cap')) or 1.0)
+                            levels['suggested_size'] = min(float(levels.get('suggested_size', 1.0) or 1.0), contingency_size_cap)
+                            levels['contingency_size_cap'] = contingency_size_cap
+                            levels['contingency_authority'] = contingency_playbook.get('authority')
+                        except Exception:
+                            pass
                     
                     print(f"✅ Niveles calculados: Entry={levels['entry']}, SL={levels['stop_loss']}, TP={levels['take_profit']}")
                     
@@ -19130,6 +19229,7 @@ class TradingExpertSystem:
             if isinstance(structure, dict):
                 structure.pop('_adaptive_strategy_lab', None)
                 structure.pop('_adaptive_market_regime', None)
+                structure.pop('_contingency_playbook', None)
 
             # ==========================================================
             # COMMIT 36X
@@ -19786,6 +19886,7 @@ class TradingExpertSystem:
                 'sentiment': self._make_serializable(sentiment),
                 'liquidation': self._make_serializable(liquidation_data),
                 'market_regime': self._make_serializable(market_regime),   # nueva capa
+                'contingency_playbook': self._make_serializable(contingency_playbook),
                 'strategy_lab': self._make_serializable(strategy_lab),
                 'visual_evidence': self._make_serializable(visual_evidence),
                 'zones': self._make_serializable({
@@ -38485,7 +38586,8 @@ def _ai_compact_technical_context(
         'indicator_values',
         'market_context',
         'analysis_context',
-        'context'
+        'context',
+        'contingency_playbook'
     ):
         value = result.get(
             key

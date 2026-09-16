@@ -7,10 +7,10 @@ from flask import Blueprint, jsonify, render_template, Response
 
 _bp = Blueprint('research_federation_bridge', __name__)
 _session = requests.Session()
-_CACHE = {'ts': 0.0, 'payload': None, 'error': None}
+_CACHE = {'ts': 0.0, 'payload': None, 'error': None, 'watermark': None}
 _PROFIT_CACHE = {'ts': 0.0, 'payload': None}
 _CACHE_LOCK = threading.Lock()
-_CACHE_TTL = max(30, int(os.getenv('RESEARCH_BRIDGE_CACHE_SECONDS','60') or 60))
+_CACHE_TTL = max(300, int(os.getenv('RESEARCH_BRIDGE_CACHE_SECONDS','900') or 900))
 _BRIDGE_FAILURES = 0
 _BRIDGE_CIRCUIT_UNTIL = 0.0
 _BRIDGE_STATE_LOCK = threading.Lock()
@@ -133,7 +133,7 @@ def _best_causal_per_cell(rows):
     return list(best.values())
 
 def _balanced_candidates(rows, limit=240):
-    """Keep all 40 active V1 specialist cells visible without crowding out diagnostics."""
+    """Keep all active action-specific specialist cells visible without crowding out diagnostics."""
     rows=list(rows or [])
     limit=max(1,int(limit or 1))
     picked=[]; seen=set()
@@ -143,7 +143,7 @@ def _balanced_candidates(rows, limit=240):
         if not k or k in seen or len(picked)>=limit: return
         seen.add(k); picked.append(row)
 
-    # J.1: one best representative for each active V1 symbol×TF causal cell.
+    # J.1: one best representative for each active V1 market×symbol×TF×action causal cell.
     causal=_best_causal_per_cell(rows)
     causal.sort(key=lambda r: _causal_cell_id(r))
     for row in causal:
@@ -227,6 +227,7 @@ def _compact_promotion(row):
         'symbol': scope.get('symbol') or 'ALL',
         'timeframe': scope.get('timeframe') or 'ALL',
         'direction': scope.get('direction') or 'ALL',
+        'action': scope.get('action') or ('LONG' if str(scope.get('market_family') or '')=='CRYPTO_FUTURES' and str(scope.get('direction') or '').upper()=='LONG' else 'SHORT' if str(scope.get('market_family') or '')=='CRYPTO_FUTURES' and str(scope.get('direction') or '').upper()=='SHORT' else 'COMPRA_SPOT' if str(scope.get('direction') or '').upper()=='LONG' else 'VENTA_SPOT' if str(scope.get('direction') or '').upper()=='SHORT' else 'ALL'),
         'regime': scope.get('regime') or 'ALL',
         'backtest_n': int(allm.get('resolved') or 0),
         'backtest_wr': _num(allm.get('win_rate_pct')),
@@ -256,21 +257,154 @@ def _compact_promotion(row):
         'causal_dataset_signature': meta.get('causal_dataset_signature'),
     }
 
+def _snapshot_candidate(c):
+    """Convert one canonical Champion row from the one-row governance snapshot."""
+    evidence=c.get('evidence') or {}
+    allm=evidence.get('all') or {}
+    scope={
+        'market_family':c.get('market_family') or '--',
+        'symbol':c.get('symbol') or 'ALL',
+        'timeframe':c.get('timeframe') or 'ALL',
+        'direction':c.get('direction') or 'ALL',
+        'action':c.get('action') or ('LONG' if str(c.get('system_type') or '').upper()=='FUTURES' and str(c.get('direction') or '').upper()=='LONG' else 'SHORT' if str(c.get('system_type') or '').upper()=='FUTURES' and str(c.get('direction') or '').upper()=='SHORT' else 'COMPRA_SPOT' if str(c.get('direction') or '').upper()=='LONG' else 'VENTA_SPOT' if str(c.get('direction') or '').upper()=='SHORT' else 'ALL'),
+        'regime':c.get('regime') or 'ALL',
+    }
+    return {
+        'candidate_key':c.get('candidate_key'),
+        'source_engine':c.get('source_engine'),
+        'experiment':c.get('experiment'),
+        'stage':'SHADOW_READY',
+        'reason':'Champion canónico persistente',
+        'market_family':scope['market_family'],'symbol':scope['symbol'],'timeframe':scope['timeframe'],
+        'direction':scope['direction'],'action':scope['action'],'regime':scope['regime'],
+        'backtest_n':int(allm.get('resolved') or 0),'backtest_wr':_num(allm.get('win_rate_pct')),
+        'backtest_exp_r':_num(allm.get('expectancy_r')),'backtest_pf':_num(allm.get('profit_factor')),
+        'oos_n':int(c.get('oos_n') or 0),'oos_wr':_num(c.get('oos_wr_pct')),
+        'oos_exp_r':_num(c.get('oos_expectancy_r')),'oos_pf':_num(c.get('oos_profit_factor')),
+        'oos_max_dd_r':_num(c.get('oos_max_drawdown_r')),
+        'shadow_target':int(c.get('shadow_target') or 0),'canary_target':int(c.get('canary_target') or 0),
+        'research_version':c.get('research_version'),'updated_at':c.get('updated_at'),
+        'causal_strategy':True,'coverage_cell':{},'coverage_cell_id':c.get('cell_key'),
+        'finalist_rank':1,'strategy_family':c.get('strategy_family'),
+        'walk_forward_positive_ratio':_num(evidence.get('walk_forward_positive_ratio')),
+        'scope':scope,'strategy_id':c.get('strategy_id'),'strategy_spec':c.get('strategy_spec') or {},
+        'strategy_card':c.get('strategy_card') or {},'runtime_trackable':bool(c.get('runtime_trackable',True)),
+        'dataset_fingerprint':c.get('strategy_fingerprint'),'causal_dataset_signature':None,
+        'champion_role':'INCUMBENT','champion_since':c.get('champion_since'),
+        'alpha_state':c.get('alpha_state') or 'HEALTHY','alpha_detail':c.get('alpha_detail') or {},
+        'guardian_operational_replay':evidence.get('guardian_operational_replay') or {},
+        'full_stack_profitability_certification':evidence.get('full_stack_profitability_certification') or {},
+    }
+
+
+def _bridge_watermark():
+    """One tiny governance row replaces promotion+Shadow watermarks."""
+    try:
+        rows=_get('research_governance_snapshot_v1',{
+            'select':'id,updated_at,champion_count,pending_count','id':'eq.1','limit':'1'
+        })
+        if rows:
+            row=rows[0]
+            return ('KNOWLEDGE_CORE',str(row.get('updated_at') or ''),str(row.get('champion_count') or 0),str(row.get('pending_count') or 0))
+    except Exception:
+        pass
+    latest_p=_get('research_promotions_v1',{'select':'candidate_key,updated_at','order':'updated_at.desc','limit':'1'})
+    latest_s=_get('research_shadow_live_metrics_v1',{'select':'candidate_key,updated_at','order':'updated_at.desc','limit':'1'})
+    p=latest_p[0] if latest_p else {}; s=latest_s[0] if latest_s else {}
+    return (str(p.get('candidate_key') or ''),str(p.get('updated_at') or ''),str(s.get('candidate_key') or ''),str(s.get('updated_at') or ''))
+
+
 def _compact(force=False):
     now=time.monotonic()
     with _CACHE_LOCK:
-        if (not force) and _CACHE['payload'] and (now-_CACHE['ts']) < _CACHE_TTL:
-            return _CACHE['payload']
+        cached=_CACHE.get('payload')
+        cached_ts=float(_CACHE.get('ts') or 0.0)
+        cached_wm=_CACHE.get('watermark')
+        if (not force) and cached and (now-cached_ts) < _CACHE_TTL:
+            return cached
+
+    # After the local TTL, spend only a tiny watermark request first. If
+    # Validation/Shadow did not change, extend the cache without downloading
+    # hundreds of StrategySpec/metrics JSON rows again.
+    if (not force) and cached:
+        try:
+            wm=_bridge_watermark()
+            if cached_wm == wm:
+                _bridge_success()
+                with _CACHE_LOCK:
+                    _CACHE['ts']=now
+                    _CACHE['error']=None
+                return cached
+        except Exception as exc:
+            with _CACHE_LOCK:
+                _CACHE['error']=f'{type(exc).__name__}: {str(exc)[:180]}'
+            return cached
+    else:
+        wm=None
 
     try:
-        raw_promotions=_get('research_promotions_v1',{
-            'select':'candidate_key,source_engine,experiment,stage,reason,scope,metrics,meta,research_version,updated_at',
+        snapshots=_get('research_governance_snapshot_v1',{'select':'*','id':'eq.1','limit':'1'})
+        if snapshots:
+            snap=snapshots[0]
+            candidates=[_snapshot_candidate(x) for x in (snap.get('champions') or [])]
+            shadow=list(snap.get('shadow') or [])
+            try:
+                states=_get('research_engine_state_v1',{
+                    'select':'engine,status,last_seen_at,rss_mb,research_version,meta','order':'engine.asc','limit':'10'
+                })
+            except Exception:
+                # The canonical knowledge snapshot is sufficient for Analytics;
+                # engine heartbeat is diagnostic and must not blank valid Champions.
+                states=[]
+            coverage=_coverage([{'scope':x.get('scope') or {},'source_engine':x.get('source_engine')} for x in candidates])
+            coverage.update({
+                'target_cells':int(snap.get('target_cells') or 92),
+                'champion_count':int(snap.get('champion_count') or len(candidates)),
+                'pending_count':int(snap.get('pending_count') or max(0,92-len(candidates))),
+                'knowledge_core':True,
+                'snapshot_updated_at':snap.get('updated_at'),
+            })
+            wm=('KNOWLEDGE_CORE',str(snap.get('updated_at') or ''),str(snap.get('champion_count') or 0),str(snap.get('pending_count') or 0))
+            payload=(candidates,states,shadow,coverage)
+            _bridge_success()
+            with _CACHE_LOCK:
+                _CACHE['ts']=now; _CACHE['payload']=payload; _CACHE['watermark']=wm; _CACHE['error']=None
+            return payload
+    except Exception as exc:
+        # Backward-compatible fallback below; a temporary snapshot failure must
+        # never erase an already cached good state.
+        with _CACHE_LOCK:
+            if _CACHE.get('payload'):
+                _CACHE['error']=f'{type(exc).__name__}: {str(exc)[:180]}'
+                return _CACHE['payload']
+
+    try:
+        fields='candidate_key,source_engine,experiment,stage,reason,scope,metrics,meta,research_version,updated_at'
+        causal=_get('research_promotions_v1',{
+            'select':fields,
+            'experiment':'in.(CAUSAL_COVERAGE_STRATEGY,CAUSAL_REGISTRY_RETEST,CAUSAL_SHADOW_RECYCLE)',
+            'stage':'in.(SHADOW_READY,SHADOW_READY_FAST,VALIDATION_REQUIRED,REJECTED_OOS,OBSERVE)',
             'order':'updated_at.desc',
-            'limit':'1800',
+            'limit':'280',
         })
-        raw_promotions=[x for x in raw_promotions if (x.get('meta') or {}).get('is_current') is not False and str(x.get('stage') or '') != 'STALE']
+        diagnostics=_get('research_promotions_v1',{
+            'select':fields,
+            'stage':'in.(OBSERVE,VALIDATION_REQUIRED,REJECTED_OOS,VALIDATED_SINGLE_ASSET)',
+            'order':'updated_at.desc',
+            'limit':'80',
+        })
+        merged={}
+        for x in (causal or []) + (diagnostics or []):
+            key=str(x.get('candidate_key') or '')
+            if key and key not in merged:
+                merged[key]=x
+        raw_promotions=[
+            x for x in merged.values()
+            if (x.get('meta') or {}).get('is_current') is not False
+            and str(x.get('stage') or '') != 'STALE'
+        ]
         coverage=_coverage(raw_promotions)
-        visible=_balanced_candidates(raw_promotions,240)
+        visible=_balanced_candidates(raw_promotions,120)
         candidates=[_compact_promotion(x) for x in visible]
         states=_get('research_engine_state_v1',{
             'select':'engine,status,last_seen_at,rss_mb,research_version,meta',
@@ -278,10 +412,22 @@ def _compact(force=False):
             'limit':'10',
         })
         shadow=_get('research_shadow_live_metrics_v1',{
-            'select':'*',
+            'select':(
+                'candidate_key,source_engine,experiment,research_stage,market_family,symbol,timeframe,'
+                'signals_n,resolved_n,win_rate_pct,expectancy_r,profit_factor,pnl_pct_sum,avg_safety,'
+                'recent8_n,recent8_expectancy_r,recent8_profit_factor,recent8_trade_sharpe,'
+                'previous8_n,previous8_expectancy_r,previous8_trade_sharpe,current_loss_streak,updated_at'
+            ),
             'order':'updated_at.desc',
-            'limit':'600',
+            'limit':'140',
         })
+        if wm is None:
+            wm=(
+                str((causal[0] if causal else {}).get('candidate_key') or ''),
+                str((causal[0] if causal else {}).get('updated_at') or ''),
+                str((shadow[0] if shadow else {}).get('candidate_key') or ''),
+                str((shadow[0] if shadow else {}).get('updated_at') or ''),
+            )
         payload=(candidates,states,shadow,coverage)
     except Exception as exc:
         with _CACHE_LOCK:
@@ -294,8 +440,10 @@ def _compact(force=False):
     with _CACHE_LOCK:
         _CACHE['ts']=now
         _CACHE['payload']=payload
+        _CACHE['watermark']=wm
         _CACHE['error']=None
     return payload
+
 
 def _report(candidates,states,shadow,coverage):
     lines=['# Research Federation · sistema central','','- Bridge V1.2.1: evidencia externa + Shadow central observado.','- Nunca concede autoridad productiva automáticamente.','','## Motores']

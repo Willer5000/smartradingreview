@@ -2870,7 +2870,7 @@ async function loadResearchFederationAnalytics(){
             const missing=(coverage.missing_strategic_timeframes||[]);
             covEl.className=`small mb-2 ${missing.length?'text-warning':'text-success'}`;
             const causalInfo=data.profitability_evidence||{};
-            const causal=`Causal ${Number(causalInfo.coverage_cells||0)}/${Number(causalInfo.coverage_target||46)} · Validadas ${Number(causalInfo.validated_cells||0)}/${Number(causalInfo.coverage_target||46)} · OOS+ vigente ${Number(causalInfo.oos_positive_cells||0)} · OOS+ evidencia ${Number(causalInfo.oos_positive_evidence_cells ?? causalInfo.oos_positive_cells ?? 0)}`;
+            const causal=`Causal ${Number(causalInfo.coverage_cells||0)}/${Number(causalInfo.coverage_target||92)} · Validadas ${Number(causalInfo.validated_cells||0)}/${Number(causalInfo.coverage_target||92)} · OOS+ vigente ${Number(causalInfo.oos_positive_cells||0)} · OOS+ evidencia ${Number(causalInfo.oos_positive_evidence_cells ?? causalInfo.oos_positive_cells ?? 0)}`;
             covEl.textContent=`Cobertura estratégica · ${parts.join(' · ')} · ${causal}${missing.length?` · Sin evidencia actual: ${missing.join(', ')}`:''}${data.degraded?' · ⚠ datos cacheados':''}`;
         }
         const sm=new Map(shadow.map(x=>[x.candidate_key,x]));
@@ -2891,7 +2891,7 @@ async function loadResearchFederationAnalytics(){
             const entry=card.entry||{};
             const risk=card.risk||{};
             const filters=card.filters||{};
-            const direction=card.direction||row?.direction||row?.scope?.direction||'--';
+            const action=row?.action||row?.scope?.action||card.action||card.direction||row?.direction||row?.scope?.direction||'--';
             const regime=card.valid_regime||row?.regime||row?.scope?.regime||'--';
             const stage=String(card.validation_stage||row?.stage||'--');
             const stageHuman=['SHADOW_READY','SHADOW_READY_FAST'].includes(stage)
@@ -2903,7 +2903,7 @@ async function loadResearchFederationAnalytics(){
                 <details class="mt-1"><summary class="small text-info" style="cursor:pointer">Ficha de estrategia</summary>
                     <div class="border rounded p-2 mt-1 small text-start" style="min-width:320px;max-width:620px">
                         <div><b>Estado:</b> ${safe(stageHuman)}${card.immutable?' · 🔒 parámetros congelados':''}</div>
-                        <div><b>Celda:</b> ${safe(card.symbol||row?.symbol||'--')} · ${safe(card.timeframe||row?.timeframe||'--')} · ${safe(direction)}</div>
+                        <div><b>Celda:</b> ${safe(card.symbol||row?.symbol||'--')} · ${safe(card.timeframe||row?.timeframe||'--')} · ${safe(action)}</div>
                         <div><b>Régimen:</b> ${safe(regime)}</div>
                         ${hasRich&&card.signal_logic?`<div class="mt-2"><b>Qué busca:</b> ${safe(card.signal_logic)}</div>`:''}
                         ${indicators.length?`<div class="mt-1"><b>Qué observa:</b> ${indicators.map(safe).join(' · ')}</div>`:''}
@@ -2942,7 +2942,7 @@ async function loadResearchFederationAnalytics(){
         if(shadowBt) shadowBt.innerHTML=renderBt(profitability.futures_evaluation,'Sin challengers causales disponibles.');
         const simpleCoverage=document.getElementById('v1-coverage');
         const simpleCoverageNote=document.getElementById('v1-coverage-note');
-        if(simpleCoverage) simpleCoverage.textContent=`${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||46)} investigadas · ${Number(profitability.validated_cells||0)} Champions persistentes`;
+        if(simpleCoverage) simpleCoverage.textContent=`${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||92)} investigadas · ${Number(profitability.validated_cells||0)} Champions persistentes`;
         if(simpleCoverageNote) simpleCoverageNote.textContent=`OOS+ vigente ${Number(profitability.oos_positive_cells||0)} · evidencia OOS+ ${Number(profitability.oos_positive_evidence_cells ?? profitability.oos_positive_cells ?? 0)} · celdas aún sin Champion ${Number(profitability.searching_cells||0)}`;
         const simpleBucket=(id,noteId,bucket)=>{
             const el=document.getElementById(id), note=document.getElementById(noteId);
@@ -2997,9 +2997,9 @@ async function loadResearchFederationAnalytics(){
         const covBody=document.getElementById('v1-coverage-matrix-body');
         if(covBody){
             const groups=[
-                ['Futures 30m','30M',7,'CRYPTO_FUTURES'],['Futures 1h','1H',7,'CRYPTO_FUTURES'],['Futures 2h','2H',7,'CRYPTO_FUTURES'],['Futures 4h','4H',7,'CRYPTO_FUTURES'],
-                ['Futures 12h · BTC/ETH/SOL','12H',3,'CRYPTO_FUTURES'],['Futures 1D · BTC/ETH/SOL','1D',3,'CRYPTO_FUTURES'],
-                ['Spot 4h','4H',3,'SPOT'],['Spot 12h','12H',3,'SPOT'],['Spot 1D','1D',3,'SPOT'],['Spot 1W','1W',3,'SPOT']
+                ['Futures 30m · LONG/SHORT','30M',14,'CRYPTO_FUTURES'],['Futures 1h · LONG/SHORT','1H',14,'CRYPTO_FUTURES'],['Futures 2h · LONG/SHORT','2H',14,'CRYPTO_FUTURES'],['Futures 4h · LONG/SHORT','4H',14,'CRYPTO_FUTURES'],
+                ['Futures 12h · BTC/ETH/SOL · LONG/SHORT','12H',6,'CRYPTO_FUTURES'],['Futures 1D · BTC/ETH/SOL · LONG/SHORT','1D',6,'CRYPTO_FUTURES'],
+                ['Spot 4h · COMPRA/VENTA','4H',6,'SPOT'],['Spot 12h · COMPRA/VENTA','12H',6,'SPOT'],['Spot 1D · COMPRA/VENTA','1D',6,'SPOT'],['Spot 1W · COMPRA/VENTA','1W',6,'SPOT']
             ];
             covBody.innerHTML=groups.map(([label,tf,target,fam])=>{
                 const rows=matrix.filter(r=>String(r.timeframe||'').toUpperCase()===tf && (fam==='SPOT'?String(r.market_family||'')!=='CRYPTO_FUTURES':String(r.market_family||'')==='CRYPTO_FUTURES'));
@@ -3007,18 +3007,18 @@ async function loadResearchFederationAnalytics(){
                 return `<tr><td>${label}</td><td>${ok}/${target}</td><td class="${ok===target?'text-success':ok>0?'text-info':'text-muted'}">${ok===target?'✅ Completa':ok>0?'🟡 Parcial':'🔎 Buscando'}</td></tr>`;
             }).join('');
         }
-        const coverageLabel = profitability.coverage_target ? ` · Causal ${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||46)} · Validadas ${Number(profitability.validated_cells||0)} · Reciclar ${Number(profitability.recycle_required_cells||0)}` : '';
+        const coverageLabel = profitability.coverage_target ? ` · Causal ${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||92)} · Validadas ${Number(profitability.validated_cells||0)} · Reciclar ${Number(profitability.recycle_required_cells||0)}` : '';
         body.innerHTML=actionable.slice(0,80).map(x=>{const l=sm.get(x.candidate_key)||{};return `<tr>
           <td><span class="badge bg-secondary">${x.stage||'--'}</span></td>
           <td><b>${x.source_engine||'--'}</b><br><span class="text-muted small">${x.experiment||'--'}</span></td>
-          <td>${x.symbol&&x.symbol!=='ALL'?`${x.symbol} · `:''}${x.market_family||'--'} · ${x.timeframe||'--'}</td>
+          <td>${x.symbol&&x.symbol!=='ALL'?`${x.symbol} · `:''}${x.market_family||'--'} · ${x.timeframe||'--'} · ${x.action||x.scope?.action||x.direction||'--'}</td>
           <td>${x.backtest_n??0} / ${pct(x.backtest_wr)} / ${fmt(x.backtest_exp_r,3)}R</td>
           <td>${x.oos_n??0} / ${pct(x.oos_wr)} / ${fmt(x.oos_exp_r,3)}R / ${fmt(x.oos_pf,2)}</td>
           <td>${l.resolved_n??0}/${l.signals_n??0} / ${pct(l.win_rate_pct)} / ${fmt(l.expectancy_r,3)}R / ${fmt(l.profit_factor,2)}</td>
           <td>${fmt(l.avg_safety,1)}</td></tr>`}).join('') || `<tr><td colspan="7" class="text-muted text-center">${data.connected===false?'Research Bridge sin conexión':'Bridge conectado, pero todavía no hay filas visibles para esta cuenta/clave.'}</td></tr>`;
         const stages={}; candidates.forEach(x=>stages[x.stage]=(stages[x.stage]||0)+1);
         const kp=document.getElementById('rf-analytics-kpis');
-        if(kp) kp.innerHTML=[['Cobertura causal',`${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||46)}`],['Celdas validadas',Number(profitability.validated_cells||0)],['Shadow con actividad',`${Number(profitability.shadow_live_candidates||0)}/${Number(profitability.shadow_ready_cells||profitability.validated_cells||0)}`],['♻️ Reciclar',Number(profitability.recycle_required_cells||0)]].map(([k,v])=>`<div class="col-6 col-md-3"><div class="border rounded p-2 h-100"><div class="text-muted small">${k}</div><div class="h5 mb-0">${v}</div></div></div>`).join('');
+        if(kp) kp.innerHTML=[['Cobertura causal',`${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||92)}`],['Celdas validadas',Number(profitability.validated_cells||0)],['Shadow con actividad',`${Number(profitability.shadow_live_candidates||0)}/${Number(profitability.shadow_ready_cells||profitability.validated_cells||0)}`],['♻️ Reciclar',Number(profitability.recycle_required_cells||0)]].map(([k,v])=>`<div class="col-6 col-md-3"><div class="border rounded p-2 h-100"><div class="text-muted small">${k}</div><div class="h5 mb-0">${v}</div></div></div>`).join('');
     }catch(err){body.innerHTML=`<tr><td colspan="7" class="text-warning">${err.message}</td></tr>`;}
 }
 window.loadResearchFederationAnalytics=loadResearchFederationAnalytics;

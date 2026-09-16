@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-"""FINAL V1 — profitability evidence fusion for 46 active specialist cells.
+"""RC8.1 — profitability evidence fusion for 92 market×symbol×TF×action specialist cells.
 
 Rules:
 - causal OOS is a historical prior, never a live trade;
 - Shadow/live is current confirmation, never merged into historical N;
 - a positive OOS candidate may support an already-existing setup;
 - negative OOS or materially diverged Shadow can protect/block;
-- every Futures symbol×TF and every Spot market×TF is tracked separately.
+- every market×symbol×TF×action cell is tracked separately; Spot buy/sell never inherit Futures-style LONG/SHORT authority.
 """
 
 import math
@@ -30,8 +30,8 @@ _TTL = max(300, int(os.getenv("RESEARCH_EVIDENCE_CACHE_SECONDS", "900") or 900))
 _POSITIVE = {"SHADOW_READY", "SHADOW_READY_FAST"}
 _VISIBLE = _POSITIVE | {"OBSERVE", "VALIDATION_REQUIRED", "REJECTED_OOS", "VALIDATED_SINGLE_ASSET"}
 _EXPERIMENTS = {"CAUSAL_COVERAGE_STRATEGY", "CAUSAL_REGISTRY_RETEST", "CAUSAL_SHADOW_RECYCLE"}
-_COVERAGE_TARGET = 46
-_RESEARCH_VERSION_PREFIX = "RFV1_12_RC5_ITERATIVE_EDGE_46CELL"
+_COVERAGE_TARGET = 92
+_RESEARCH_VERSION_PREFIX = "RFV1_13_RC8_1_ACTION_EDGE_92CELL"
 _FUTURES_SYMBOLS = ("BTC-USDT","ETH-USDT","SOL-USDT","XRP-USDT","ADA-USDT","LINK-USDT","BNB-USDT")
 _FUTURES_CORE_TFS = ("30M","1H","2H","4H")
 _FUTURES_HIGH_TFS = ("12H","1D")
@@ -41,23 +41,39 @@ _SPOT_SYMBOLS = ("BTC-USDT","PAXG-USDT","PAXG-BTC")
 _SPOT_TFS = ("4H","12H","1D","1W")
 
 
+def _scope_action(scope: Dict[str, Any]) -> str:
+    fam=str((scope or {}).get("market_family") or "").upper()
+    action=str((scope or {}).get("action") or "").upper()
+    direction=str((scope or {}).get("direction") or "").upper()
+    if action:
+        return action
+    if fam == "CRYPTO_FUTURES":
+        return direction if direction in {"LONG","SHORT"} else ""
+    if direction == "LONG":
+        return "COMPRA_SPOT"
+    if direction == "SHORT":
+        return "VENTA_SPOT"
+    return ""
+
+
 def _canonical_cell_key(row: Dict[str, Any]) -> Optional[str]:
-    """Return one of the 46 active V1 symbol×TF cells, otherwise None."""
+    """Return one of the 92 market×symbol×TF×action cells, otherwise None."""
     scope = row.get("scope") or {}
     fam = str(scope.get("market_family") or "")
     sym = str(scope.get("symbol") or "").upper().replace("/", "-")
     tf = _norm_tf(scope.get("timeframe"))
+    action=_scope_action(scope)
     if fam == "CRYPTO_FUTURES":
-        if sym not in _FUTURES_SYMBOLS:
+        if action not in {"LONG","SHORT"} or sym not in _FUTURES_SYMBOLS:
             return None
         if tf in _FUTURES_CORE_TFS:
-            return f"FUTURES|{sym}|{tf}"
+            return f"FUTURES|{sym}|{tf}|{action}"
         if tf in _FUTURES_HIGH_TFS and sym in _FUTURES_HIGH_TF_SYMBOLS:
-            return f"FUTURES|{sym}|{tf}"
+            return f"FUTURES|{sym}|{tf}|{action}"
         return None
     if fam in {"CRYPTO_SPOT","PAXG_USDT","PAXG_BTC"}:
-        if sym in _SPOT_SYMBOLS and tf in _SPOT_TFS:
-            return f"SPOT|{sym}|{tf}"
+        if action in {"COMPRA_SPOT","VENTA_SPOT"} and sym in _SPOT_SYMBOLS and tf in _SPOT_TFS:
+            return f"SPOT|{sym}|{tf}|{action}"
     return None
 
 
@@ -89,18 +105,63 @@ def _num(v, default=None):
         return default
 
 
+def _snapshot_as_promotion(c: Dict[str, Any]) -> Dict[str, Any]:
+    """Canonical Champion -> legacy promotion shape used by fusion math."""
+    evidence=c.get('evidence') or {}
+    validation=dict(evidence.get('validation') or {})
+    validation.update({
+        'resolved':int(c.get('oos_n') or validation.get('resolved') or 0),
+        'win_rate_pct':c.get('oos_wr_pct') if c.get('oos_wr_pct') is not None else validation.get('win_rate_pct'),
+        'expectancy_r':c.get('oos_expectancy_r') if c.get('oos_expectancy_r') is not None else validation.get('expectancy_r'),
+        'profit_factor':c.get('oos_profit_factor') if c.get('oos_profit_factor') is not None else validation.get('profit_factor'),
+        'max_drawdown_r':c.get('oos_max_drawdown_r') if c.get('oos_max_drawdown_r') is not None else validation.get('max_drawdown_r'),
+    })
+    metrics={
+        'all':evidence.get('all') or {},
+        'validation':validation,
+        'walk_forward':evidence.get('walk_forward') or {},
+    }
+    scope={
+        'market_family':c.get('market_family'),'symbol':c.get('symbol'),'timeframe':c.get('timeframe'),
+        'direction':c.get('direction') or 'ALL','action':c.get('action') or ('LONG' if str(c.get('system_type') or '').upper()=='FUTURES' and str(c.get('direction') or '').upper()=='LONG' else 'SHORT' if str(c.get('system_type') or '').upper()=='FUTURES' and str(c.get('direction') or '').upper()=='SHORT' else 'COMPRA_SPOT' if str(c.get('direction') or '').upper()=='LONG' else 'VENTA_SPOT' if str(c.get('direction') or '').upper()=='SHORT' else 'ALL'),'regime':c.get('regime') or 'ALL',
+    }
+    alpha_detail=dict(c.get('alpha_detail') or {})
+    alpha_detail['state']=c.get('alpha_state') or alpha_detail.get('state') or 'HEALTHY'
+    meta={
+        'causal_strategy':True,'causal_candle_replay':True,'is_current':True,
+        'coverage_cell_id':c.get('cell_key'),'causal_strategy_id':c.get('strategy_id'),
+        'causal_strategy_family':c.get('strategy_family'),'causal_strategy_spec':c.get('strategy_spec') or {},
+        'strategy_card':c.get('strategy_card') or {},'champion_role':'INCUMBENT',
+        'champion_lineage_key':c.get('candidate_key'),'champion_since':c.get('champion_since'),
+        'recommended_shadow_target':int(c.get('shadow_target') or 0),'recommended_canary_target':int(c.get('canary_target') or 0),
+        'runtime_trackable':bool(c.get('runtime_trackable',True)),'alpha_decay_health':alpha_detail,
+        'guardian_operational_replay':evidence.get('guardian_operational_replay') or {},
+        'full_stack_profitability_certification':evidence.get('full_stack_profitability_certification') or {},
+        'walk_forward_positive_ratio':evidence.get('walk_forward_positive_ratio'),
+    }
+    return {
+        'candidate_key':c.get('candidate_key'),'source_engine':c.get('source_engine'),'experiment':c.get('experiment'),
+        'stage':'SHADOW_READY','reason':'Champion canónico persistente','scope':scope,'metrics':metrics,'meta':meta,
+        'research_version':c.get('research_version'),'updated_at':c.get('updated_at'),
+    }
+
+
 def _watermark(url: str, h: Dict[str, str]):
-    def one(table):
-        r=_SESSION.get(
-            f"{url}/rest/v1/{table}",
-            params={"select":"candidate_key,updated_at","order":"updated_at.desc","limit":"1"},
-            headers=h, timeout=4,
-        )
-        r.raise_for_status()
+    r=_SESSION.get(
+        f"{url}/rest/v1/research_governance_snapshot_v1",
+        params={'select':'id,updated_at,champion_count,pending_count','id':'eq.1','limit':'1'},
+        headers=h,timeout=4,
+    )
+    if r.ok:
         data=r.json()
-        row=data[0] if isinstance(data,list) and data else {}
-        return str(row.get("candidate_key") or ""), str(row.get("updated_at") or "")
-    return one("research_promotions_v1") + one("research_shadow_live_metrics_v1")
+        if isinstance(data,list) and data:
+            row=data[0]
+            return ('KNOWLEDGE_CORE',str(row.get('updated_at') or ''),str(row.get('champion_count') or 0),str(row.get('pending_count') or 0))
+    def one(table):
+        rr=_SESSION.get(f"{url}/rest/v1/{table}",params={'select':'candidate_key,updated_at','order':'updated_at.desc','limit':'1'},headers=h,timeout=4)
+        rr.raise_for_status(); data=rr.json(); row=data[0] if isinstance(data,list) and data else {}
+        return str(row.get('candidate_key') or ''),str(row.get('updated_at') or '')
+    return one('research_promotions_v1')+one('research_shadow_live_metrics_v1')
 
 
 def _load(force: bool = False):
@@ -128,6 +189,27 @@ def _load(force: bool = False):
             return cached_prom, cached_shadow
     else:
         wm=None
+
+    # Knowledge Core: one tiny row contains every active Champion + its Shadow.
+    # This is the normal path; laboratory tables are only a backward-compatible fallback.
+    try:
+        kr=_SESSION.get(
+            f"{url}/rest/v1/research_governance_snapshot_v1",
+            params={'select':'*','id':'eq.1','limit':'1'},headers=h,timeout=5,
+        )
+        kr.raise_for_status()
+        kd=kr.json()
+        if isinstance(kd,list) and kd:
+            snap=kd[0]
+            promotions=[_snapshot_as_promotion(x) for x in (snap.get('champions') or [])]
+            shadow=list(snap.get('shadow') or [])
+            wm=('KNOWLEDGE_CORE',str(snap.get('updated_at') or ''),str(snap.get('champion_count') or 0),str(snap.get('pending_count') or 0))
+            with _LOCK:
+                _CACHE.update(ts=now,promotions=list(promotions),shadow=list(shadow),watermark=wm)
+            return promotions,shadow
+    except Exception:
+        if cached_prom:
+            return cached_prom,cached_shadow
 
     r = _SESSION.get(
         f"{url}/rest/v1/research_promotions_v1",
@@ -214,10 +296,21 @@ def _match(p: Dict[str, Any], symbol: str, timeframe: str, direction: str, syste
     if wanted_symbol not in {"", "ALL", str(symbol or "").upper().replace("/", "-")}:
         return False
     wanted_direction = str(scope.get("direction") or "ALL").upper()
-    d = str(direction or "").upper()
+    requested_raw = str(direction or "").upper()
+    d = requested_raw
     if d == "COMPRA_SPOT": d = "LONG"
     if d == "VENTA_SPOT": d = "SHORT"
     if wanted_direction not in {"", "ALL", d}:
+        return False
+    wanted_action = _scope_action(scope)
+    requested_action = requested_raw
+    if str(system_type or '').lower() == 'spot':
+        if requested_raw == 'LONG': requested_action = 'COMPRA_SPOT'
+        elif requested_raw == 'SHORT': requested_action = 'VENTA_SPOT'
+    else:
+        if requested_raw in {'COMPRA_SPOT','VENTA_SPOT'}:
+            requested_action = 'LONG' if requested_raw == 'COMPRA_SPOT' else 'SHORT'
+    if wanted_action and requested_action and wanted_action != requested_action:
         return False
     wanted_regime = str(scope.get("regime") or "ALL").upper()
     if regime and wanted_regime not in {"", "ALL", str(regime).upper()}:
@@ -635,6 +728,7 @@ def profitability_snapshot(force: bool = False) -> Dict[str, Any]:
                 "champion_lineage_key": r.get("champion_lineage_key") or r.get("candidate_key"),
                 "champion_since": r.get("champion_since"),
                 "direction": scope.get("direction"),
+                "action": _scope_action(scope),
                 "regime": scope.get("regime"),
                 "runtime_trackable": bool(r.get("runtime_trackable")),
                 "updated_at": r.get("updated_at"),
@@ -650,7 +744,7 @@ def profitability_snapshot(force: bool = False) -> Dict[str, Any]:
                 "recycle_required": r.get("recycle_required"),
             })
         return {
-            "version": "RC8_RESEARCH_EVIDENCE_FUSION_V7_CHAMPION_PERSISTENCE",
+            "version": "RC8_1_RESEARCH_EVIDENCE_FUSION_V8_ACTION_CELLS",
             "authority": "EVIDENCE_PRIOR_ONLY",
             "coverage_cells": len(cells),
             "coverage_target": _COVERAGE_TARGET,
@@ -681,7 +775,7 @@ def profitability_snapshot(force: bool = False) -> Dict[str, Any]:
         }
     except Exception as exc:
         return {
-            "version": "RC8_RESEARCH_EVIDENCE_FUSION_V7_CHAMPION_PERSISTENCE", "authority": "EVIDENCE_PRIOR_ONLY",
+            "version": "RC8_1_RESEARCH_EVIDENCE_FUSION_V8_ACTION_CELLS", "authority": "EVIDENCE_PRIOR_ONLY",
             "state": "UNAVAILABLE", "error": str(exc)[:180], "coverage_cells": 0,
             "coverage_target": _COVERAGE_TARGET, "coverage_complete": False,
             "validated_cells": 0, "oos_positive_cells": 0, "searching_cells": _COVERAGE_TARGET,

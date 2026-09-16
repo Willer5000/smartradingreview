@@ -6287,6 +6287,25 @@ class FuturesAnalysis(TradingExpertSystem):
             if leverage_evaluation
             else 0
         )
+
+        # RC8.2 — contingency is intentionally canary-sized. A cell without a
+        # validated action-specific Champion must not recover profitability by
+        # increasing leverage. The normal economic/Safety gates below still
+        # apply and may reject the trade after this cap.
+        contingency_playbook = (
+            structure.get('_contingency_playbook', {})
+            if isinstance(structure, dict) else {}
+        ) or {}
+        if contingency_playbook.get('active'):
+            try:
+                contingency_leverage_cap = max(1, int(
+                    ((contingency_playbook.get('risk') or {}).get('leverage_cap')) or 10
+                ))
+                optimal_leverage = min(optimal_leverage, contingency_leverage_cap)
+                levels['contingency_leverage_cap'] = int(contingency_leverage_cap)
+                levels['contingency_mode'] = True
+            except Exception:
+                pass
         
         if optimal_leverage <= 0:
 

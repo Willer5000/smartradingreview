@@ -3011,7 +3011,7 @@ class AnalyticsService:
         
         try:
             response = (self.db.client.table('signals')
-                        .select('*, signal_indicators(strategy_name, indicator_values), signal_results(*)')
+                        .select('*, signal_indicators(strategy_name), signal_results(*)')
                         .eq('id', signal_id)
                         .limit(1)
                         .execute())

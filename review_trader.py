@@ -12965,50 +12965,59 @@ class ReviewTrader:
     # ========================================================================
     
     def should_save_signal(self, analysis_result: Dict) -> bool:
-        """
-        Decide si guardar una señal en la BD.
-        Aplica muestreo estratificado para evitar sobrecarga en TF cortas.
-        
-        Reglas:
-        - TODAS las señales de trading (LONG/SHORT/COMPRA_SPOT/VENTA_SPOT) SIEMPRE se guardan.
-        - Señales NO_OPERAR con confianza >= 55% se guardan (posibles oportunidades perdidas).
-        - Señales NO_OPERAR con confianza < 55% en TF cortas (5m, 15m) → DESCARTAR.
-        - En TF largas (>= 30m), todas las señales NO_OPERAR se guardan.
-        
-        Retorna: True si debe guardarse, False si debe descartarse.
+        """RC8.2 storage policy: keep learning, stop storing every no-trade candle.
+
+        - Executable Spot/Futures decisions are always persisted.
+        - Contingency/Alpha-decay/research-control observations are important and
+          are persisted even when the final result is ESPERAR/NO_OPERAR.
+        - Ordinary NO_OPERAR/ESPERAR rows use a deterministic 20% sample unless
+          confidence is high. Research Federation now owns exhaustive hypothesis
+          search, so Main no longer needs five near-identical no-trade rows out of
+          every five candles to learn missed opportunities.
         """
         try:
-            decision = analysis_result.get('decision', {})
-            action = decision.get('action', 'NO_OPERAR')
-            confidence = decision.get('confidence', 0)
-            timeframe = analysis_result.get('timeframe', '')
-            
-            # Regla 1: Señales de trading SIEMPRE se guardan
+            decision = analysis_result.get('decision', {}) or {}
+            action = str(decision.get('action', 'NO_OPERAR') or 'NO_OPERAR').upper()
+            confidence = float(decision.get('confidence', 0) or 0)
+
             if action in ('COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT'):
                 return True
-            
-            # Regla 2: Señales de espera se guardan si confianza >= 55%
-            if action in ('NO_OPERAR', 'ESPERAR', 'CAUTION', 'NEUTRAL'):
-                # En TF cortas: solo si confianza suficiente
-                if timeframe in ('5m', '15m'):
-                    if confidence < 55:
-                        return False  # Descartar ruido
-                # En TF medianas: filtro más laxo
-                elif timeframe in ('30m', '1h'):
-                    if confidence < 40:
-                        return False
-                # En TF largas: guardar todas (son pocas)
-                # timeframe en ('2h', '4h', '12h', '1D', '1W'): siempre guardar
-                
+
+            contingency = analysis_result.get('contingency_playbook') or {}
+            if isinstance(contingency, dict) and contingency.get('active'):
                 return True
-            
-            # Otro tipo de acción: guardar por defecto
-            return True
-            
+
+            strategies = [str(x).upper() for x in (decision.get('estrategias') or [])]
+            important_tokens = ('ALPHA_DECAY', 'RESEARCH_CAUSAL_OOS', 'VETO_DETECTADO', 'EDGE_BLOCKED')
+            if any(any(token in strategy for token in important_tokens) for strategy in strategies):
+                return True
+
+            # Strong no-trade/caution decisions are useful negative evidence.
+            if confidence >= 70:
+                return True
+
+            # Deterministic one-in-five sample keeps missed-opportunity learning
+            # statistically broad without filling Supabase with repetitive rows.
+            symbol = str(analysis_result.get('symbol') or '')
+            timeframe = str(analysis_result.get('timeframe') or '')
+            candle = str(
+                analysis_result.get('source_candle_timestamp')
+                or analysis_result.get('candle_timestamp')
+                or analysis_result.get('timestamp')
+                or ''
+            )
+            sample_id = uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f'smartradingreview-no-trade|{symbol}|{timeframe}|{candle}|{action}'
+            )
+            return (sample_id.int % 5) == 0
+
         except Exception as e:
             logger.error(f"Error en should_save_signal: {e}")
-            return True  # En caso de error, guardar (mejor tener demás que perder datos)
-    
+            # Fail closed for storage noise: an error in sampling must not turn
+            # Supabase into an unbounded log. Actionable signals were handled above.
+            return False
+
     def apply_optimization_cleanup(self) -> Dict:
         """
         Aplica todas las optimizaciones de almacenamiento:
