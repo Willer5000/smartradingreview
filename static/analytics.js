@@ -2853,7 +2853,14 @@ async function loadResearchFederationAnalytics(){
         const response=rfPayload.response;
         const data=rfPayload.json;
         if(!response.ok || !data.success) throw new Error(data.error||'Research Federation no disponible');
+        if(data.degraded && !data.data_available){
+            const covEl=document.getElementById('rf-analytics-coverage');
+            if(covEl){covEl.className='small mb-2 text-warning';covEl.textContent='Research temporalmente sin conexión a Supabase · se preservan Champions y el último estado conocido; no se interpreta como 0 celdas.';}
+            if(!body.dataset.hasResearchData) body.innerHTML='<tr><td colspan="7" class="text-warning text-center">Datos Research temporalmente no disponibles por infraestructura. No se han perdido Champions.</td></tr>';
+            return;
+        }
         const candidates=data.candidates||[], shadow=data.shadow_live||[];
+        body.dataset.hasResearchData='1';
         const coverage=data.coverage||{};
         const profitability=data.profitability_evidence||{};
         const strategic=coverage.strategic_timeframes||{};
@@ -2864,7 +2871,7 @@ async function loadResearchFederationAnalytics(){
             covEl.className=`small mb-2 ${missing.length?'text-warning':'text-success'}`;
             const causalInfo=data.profitability_evidence||{};
             const causal=`Causal ${Number(causalInfo.coverage_cells||0)}/${Number(causalInfo.coverage_target||46)} · Validadas ${Number(causalInfo.validated_cells||0)}/${Number(causalInfo.coverage_target||46)} · OOS+ vigente ${Number(causalInfo.oos_positive_cells||0)} · OOS+ evidencia ${Number(causalInfo.oos_positive_evidence_cells ?? causalInfo.oos_positive_cells ?? 0)}`;
-            covEl.textContent=`Cobertura estratégica · ${parts.join(' · ')} · ${causal}${missing.length?` · Sin evidencia actual: ${missing.join(', ')}`:''}`;
+            covEl.textContent=`Cobertura estratégica · ${parts.join(' · ')} · ${causal}${missing.length?` · Sin evidencia actual: ${missing.join(', ')}`:''}${data.degraded?' · ⚠ datos cacheados':''}`;
         }
         const sm=new Map(shadow.map(x=>[x.candidate_key,x]));
         const actionable=candidates.filter(x=>['SHADOW_READY_FAST','SHADOW_READY','VALIDATED_SINGLE_ASSET','VALIDATION_REQUIRED','REJECTED_OOS','OBSERVE'].includes(String(x.stage||'')));

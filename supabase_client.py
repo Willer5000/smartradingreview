@@ -163,9 +163,16 @@ class SupabaseClient:
             'OSError',
             'JSON could not be generated',
             'Connection timed out',
+            'Error code 521',
+            'code 521',
+            'HTTP 521',
             'Error code 522',
             'code 522',
             'HTTP 522',
+            'PGRST002',
+            'schema cache',
+            'SSLV3_ALERT_BAD_RECORD_MAC',
+            'bad record mac',
             '<!DOCTYPE html>',
             'Cloudflare',
         )
@@ -175,7 +182,7 @@ class SupabaseClient:
         with self._transient_lock:
             self._transient_failures += 1
             if self._transient_failures >= 2:
-                self._read_circuit_until = time.monotonic() + 20.0
+                self._read_circuit_until = time.monotonic() + 60.0
 
     def _mark_transport_success(self):
         with self._transient_lock:
@@ -185,6 +192,12 @@ class SupabaseClient:
     def read_circuit_open(self) -> bool:
         with self._transient_lock:
             return time.monotonic() < self._read_circuit_until
+
+    @staticmethod
+    def _is_origin_unavailable(exc: Exception) -> bool:
+        msg = str(exc)
+        markers = ('PGRST002','schema cache','JSON could not be generated','Error code 521','code 521','HTTP 521','Error code 522','code 522','HTTP 522','Cloudflare','<!DOCTYPE html>')
+        return any(m in msg for m in markers)
 
     def _with_retry(self, operation, *args, **kwargs):
         """Execute once + one bounded retry for transient transport failures.
@@ -202,6 +215,10 @@ class SupabaseClient:
             if not self._is_connection_error(e):
                 raise
             self._mark_transient_failure()
+            # 521/522/PGRST002 are provider/origin failures. Reconnecting the
+            # local client and immediately retrying only doubles pressure.
+            if self._is_origin_unavailable(e):
+                raise
             logger.debug(f"Error de conexión Supabase transitorio: {e}. Reconectando...")
             if not self._reconnect():
                 logger.warning(f"Error de conexión Supabase y no se pudo reconectar: {e}")

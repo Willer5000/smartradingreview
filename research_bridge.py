@@ -7,9 +7,13 @@ from flask import Blueprint, jsonify, render_template, Response
 
 _bp = Blueprint('research_federation_bridge', __name__)
 _session = requests.Session()
-_CACHE = {'ts': 0.0, 'payload': None}
+_CACHE = {'ts': 0.0, 'payload': None, 'error': None}
+_PROFIT_CACHE = {'ts': 0.0, 'payload': None}
 _CACHE_LOCK = threading.Lock()
 _CACHE_TTL = max(30, int(os.getenv('RESEARCH_BRIDGE_CACHE_SECONDS','60') or 60))
+_BRIDGE_FAILURES = 0
+_BRIDGE_CIRCUIT_UNTIL = 0.0
+_BRIDGE_STATE_LOCK = threading.Lock()
 
 def _cfg():
     url = str(
@@ -25,17 +29,50 @@ def _cfg():
     ).strip()
     return url, key
 
+def _bridge_circuit_open():
+    with _BRIDGE_STATE_LOCK:
+        return time.monotonic() < _BRIDGE_CIRCUIT_UNTIL
+
+
+def _bridge_failure(exc):
+    global _BRIDGE_FAILURES, _BRIDGE_CIRCUIT_UNTIL
+    with _BRIDGE_STATE_LOCK:
+        _BRIDGE_FAILURES += 1
+        if _BRIDGE_FAILURES >= 2:
+            _BRIDGE_CIRCUIT_UNTIL = time.monotonic() + 60.0
+    with _CACHE_LOCK:
+        _CACHE['error'] = f'{type(exc).__name__}: {str(exc)[:180]}'
+
+
+def _bridge_success():
+    global _BRIDGE_FAILURES, _BRIDGE_CIRCUIT_UNTIL
+    with _BRIDGE_STATE_LOCK:
+        _BRIDGE_FAILURES = 0
+        _BRIDGE_CIRCUIT_UNTIL = 0.0
+
+
 def _get(table, params):
+    if _bridge_circuit_open():
+        raise RuntimeError('SUPABASE_BRIDGE_CIRCUIT_OPEN')
     url,key=_cfg()
     if not url or not key:
         raise RuntimeError('Supabase Research Bridge no configurado')
     h={'apikey':key,'Accept':'application/json'}
     if key.count('.') == 2:
         h['Authorization']=f'Bearer {key}'
-    r=_session.get(f'{url}/rest/v1/{table}',params=params,headers=h,timeout=8)
-    r.raise_for_status()
-    data=r.json()
-    return data if isinstance(data,list) else []
+    try:
+        r=_session.get(f'{url}/rest/v1/{table}',params=params,headers=h,timeout=5)
+        if int(r.status_code or 0) in {500,502,503,504,520,521,522,523,524}:
+            raise requests.HTTPError(f'Supabase transient HTTP {r.status_code}',response=r)
+        r.raise_for_status()
+        ctype=str(r.headers.get('content-type') or '').lower()
+        if 'json' not in ctype:
+            raise ValueError(f'Supabase devolvió contenido no JSON ({ctype or "sin content-type"})')
+        data=r.json()
+        return data if isinstance(data,list) else []
+    except Exception as exc:
+        _bridge_failure(exc)
+        raise
 
 def _auth_guard(auth_fn):
     return auth_fn()
@@ -225,29 +262,39 @@ def _compact(force=False):
         if (not force) and _CACHE['payload'] and (now-_CACHE['ts']) < _CACHE_TTL:
             return _CACHE['payload']
 
-    raw_promotions=_get('research_promotions_v1',{
-        'select':'candidate_key,source_engine,experiment,stage,reason,scope,metrics,meta,research_version,updated_at',
-        'order':'updated_at.desc',
-        'limit':'1800',
-    })
-    raw_promotions=[x for x in raw_promotions if (x.get('meta') or {}).get('is_current') is not False and str(x.get('stage') or '') != 'STALE']
-    coverage=_coverage(raw_promotions)
-    visible=_balanced_candidates(raw_promotions,240)
-    candidates=[_compact_promotion(x) for x in visible]
-    states=_get('research_engine_state_v1',{
-        'select':'engine,status,last_seen_at,rss_mb,research_version,meta',
-        'order':'engine.asc',
-        'limit':'10',
-    })
-    shadow=_get('research_shadow_live_metrics_v1',{
-        'select':'*',
-        'order':'updated_at.desc',
-        'limit':'600',
-    })
-    payload=(candidates,states,shadow,coverage)
+    try:
+        raw_promotions=_get('research_promotions_v1',{
+            'select':'candidate_key,source_engine,experiment,stage,reason,scope,metrics,meta,research_version,updated_at',
+            'order':'updated_at.desc',
+            'limit':'1800',
+        })
+        raw_promotions=[x for x in raw_promotions if (x.get('meta') or {}).get('is_current') is not False and str(x.get('stage') or '') != 'STALE']
+        coverage=_coverage(raw_promotions)
+        visible=_balanced_candidates(raw_promotions,240)
+        candidates=[_compact_promotion(x) for x in visible]
+        states=_get('research_engine_state_v1',{
+            'select':'engine,status,last_seen_at,rss_mb,research_version,meta',
+            'order':'engine.asc',
+            'limit':'10',
+        })
+        shadow=_get('research_shadow_live_metrics_v1',{
+            'select':'*',
+            'order':'updated_at.desc',
+            'limit':'600',
+        })
+        payload=(candidates,states,shadow,coverage)
+    except Exception as exc:
+        with _CACHE_LOCK:
+            cached=_CACHE.get('payload')
+            _CACHE['error']=f'{type(exc).__name__}: {str(exc)[:180]}'
+        if cached:
+            return cached
+        raise
+    _bridge_success()
     with _CACHE_LOCK:
         _CACHE['ts']=now
         _CACHE['payload']=payload
+        _CACHE['error']=None
     return payload
 
 def _report(candidates,states,shadow,coverage):
@@ -262,6 +309,34 @@ def _report(candidates,states,shadow,coverage):
     for x in shadow[:35]:
         lines.append(f"- {x.get('research_stage')} | {x.get('source_engine')} | {x.get('experiment')} | {x.get('market_family')} {x.get('symbol')} {x.get('timeframe')} | señales={x.get('signals_n')} | resueltas={x.get('resolved_n')} | WR={x.get('win_rate_pct')}% | Exp.R={x.get('expectancy_r')} | PF={x.get('profit_factor')} | PnL={x.get('pnl_pct_sum')}% | Safety={x.get('avg_safety')}")
     return '\n'.join(lines)
+
+def _profitability_snapshot_safe(degraded=False):
+    if degraded or _bridge_circuit_open():
+        return _PROFIT_CACHE.get('payload') or {'state':'UNAVAILABLE','degraded':True}
+    try:
+        from research_evidence_fusion import profitability_snapshot
+        payload=profitability_snapshot(force=False)
+        _PROFIT_CACHE.update(ts=time.monotonic(), payload=payload)
+        return payload
+    except Exception as exc:
+        cached=_PROFIT_CACHE.get('payload')
+        if cached:
+            return cached
+        return {'state':'UNAVAILABLE','degraded':True,'error':str(exc)[:160]}
+
+
+def _degraded_empty_payload(exc):
+    return {
+        'success': True, 'connected': False, 'degraded': True,
+        'data_available': False, 'stale': False,
+        'candidates': [], 'engines': [], 'shadow_live': [],
+        'authority': 'RESEARCH_SHADOW_BRIDGE_J_V2', 'visible_rows': 0,
+        'coverage': {'by_timeframe':{},'by_engine':{},'by_market':{},'strategic_timeframes':{},'missing_strategic_timeframes':[],'total_current':0},
+        'profitability_evidence': _PROFIT_CACHE.get('payload') or {'state':'UNAVAILABLE','degraded':True},
+        'error': f'{type(exc).__name__}: {str(exc)[:180]}',
+        'retry_after_seconds': 60,
+    }
+
 
 def register_research_bridge(app, auth_fn):
     @_bp.get('/research-federation')
@@ -278,14 +353,18 @@ def register_research_bridge(app, auth_fn):
             return user
         try:
             c,s,l,cov=_compact()
-            try:
-                from research_evidence_fusion import profitability_snapshot
-                profitability = profitability_snapshot(force=False)
-            except Exception as _profit_error:
-                profitability = {'state':'UNAVAILABLE','error':str(_profit_error)[:160]}
+            with _CACHE_LOCK:
+                bridge_error=_CACHE.get('error')
+            degraded=bool(bridge_error)
+            profitability=_profitability_snapshot_safe(degraded=degraded)
             return jsonify({
                 'success':True,
-                'connected':True,
+                'connected':not degraded,
+                'degraded':degraded,
+                'data_available':bool(c or s or l),
+                'stale':degraded and bool(c or s or l),
+                'error':bridge_error,
+                'retry_after_seconds':60 if degraded else 0,
                 'candidates':c,
                 'engines':s,
                 'shadow_live':l,
@@ -295,12 +374,10 @@ def register_research_bridge(app, auth_fn):
                 'profitability_evidence': profitability,
             })
         except Exception as exc:
-            return jsonify({
-                'success':False,
-                'connected':False,
-                'error':str(exc)[:240],
-                'hint':'Verifica CENTRAL_SUPABASE_SERVICE_KEY en el Render central.',
-            }),500
+            # Observability must not become HTTP-500 during a provider outage.
+            # Empty/degraded is distinct from zero evidence and the UI preserves
+            # its last good state instead of repainting misleading zeros.
+            return jsonify(_degraded_empty_payload(exc)),200
 
     @_bp.get('/api/research-federation/export')
     def export():
@@ -309,8 +386,13 @@ def register_research_bridge(app, auth_fn):
             return user
         try:
             c,s,l,cov=_compact()
-            return Response(_report(c,s,l,cov),mimetype='text/markdown; charset=utf-8')
+            text=_report(c,s,l,cov)
+            with _CACHE_LOCK:
+                err=_CACHE.get('error')
+            if err:
+                text += '\n\n> Datos cacheados: Supabase no respondió al último refresco.\n'
+            return Response(text,status=200,mimetype='text/markdown; charset=utf-8')
         except Exception as exc:
-            return Response(f'# Error\n\n{exc}',status=500,mimetype='text/plain; charset=utf-8')
+            return Response('# Research Federation\n\nDatos temporalmente no disponibles. La indisponibilidad de Supabase no se interpreta como pérdida de Champions ni evidencia de trading.\n',status=200,mimetype='text/markdown; charset=utf-8')
 
     app.register_blueprint(_bp)

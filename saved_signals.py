@@ -1156,6 +1156,10 @@ def enrich_pending_funding_economics(
 
         return stats
 
+    if hasattr(db, 'read_circuit_open') and db.read_circuit_open():
+
+        return stats
+
 
     try:
 
@@ -3685,6 +3689,10 @@ def settle_pending_guardian_learning_events(
 
 
     if db is None:
+
+        return stats
+
+    if hasattr(db, 'read_circuit_open') and db.read_circuit_open():
 
         return stats
 

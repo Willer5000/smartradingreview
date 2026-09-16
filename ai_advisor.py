@@ -5490,6 +5490,10 @@ def settle_ai_outcomes(
 
         return stats
 
+    if hasattr(db, "read_circuit_open") and db.read_circuit_open():
+
+        return stats
+
 
     try:
 
