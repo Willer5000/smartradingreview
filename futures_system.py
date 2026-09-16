@@ -7414,8 +7414,16 @@ class FuturesAnalysis(TradingExpertSystem):
             try:
                 from review_trader import review_trader
                 if review_trader.db.enabled:
-                    review_trader.register_signal(result, system_type='futures')
-                    print(f"   📝 Señal registrada en ReviewTrader (futures)")
+                    _review_signal_id = review_trader.register_signal(
+                        result, system_type='futures'
+                    )
+                    if _review_signal_id:
+                        print(f"   📝 Señal registrada en ReviewTrader (futures)")
+                    else:
+                        print(
+                            "   ⚠️ ReviewTrader: persistencia no confirmada; "
+                            "el análisis continúa sin bloquearse"
+                        )
             except Exception as e:
                 logger.debug(f"ReviewTrader no disponible: {e}")
         

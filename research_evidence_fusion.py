@@ -25,8 +25,8 @@ except Exception:
 
 _SESSION = requests.Session()
 _LOCK = threading.Lock()
-_CACHE = {"ts": 0.0, "promotions": [], "shadow": []}
-_TTL = max(45, int(os.getenv("RESEARCH_EVIDENCE_CACHE_SECONDS", "90") or 90))
+_CACHE = {"ts": 0.0, "promotions": [], "shadow": [], "watermark": None}
+_TTL = max(300, int(os.getenv("RESEARCH_EVIDENCE_CACHE_SECONDS", "900") or 900))
 _POSITIVE = {"SHADOW_READY", "SHADOW_READY_FAST"}
 _VISIBLE = _POSITIVE | {"OBSERVE", "VALIDATION_REQUIRED", "REJECTED_OOS", "VALIDATED_SINGLE_ASSET"}
 _EXPERIMENTS = {"CAUSAL_COVERAGE_STRATEGY", "CAUSAL_REGISTRY_RETEST", "CAUSAL_SHADOW_RECYCLE"}
@@ -89,25 +89,61 @@ def _num(v, default=None):
         return default
 
 
+def _watermark(url: str, h: Dict[str, str]):
+    def one(table):
+        r=_SESSION.get(
+            f"{url}/rest/v1/{table}",
+            params={"select":"candidate_key,updated_at","order":"updated_at.desc","limit":"1"},
+            headers=h, timeout=4,
+        )
+        r.raise_for_status()
+        data=r.json()
+        row=data[0] if isinstance(data,list) and data else {}
+        return str(row.get("candidate_key") or ""), str(row.get("updated_at") or "")
+    return one("research_promotions_v1") + one("research_shadow_live_metrics_v1")
+
+
 def _load(force: bool = False):
     now = time.monotonic()
     with _LOCK:
-        if (not force) and _CACHE["promotions"] and now - _CACHE["ts"] < _TTL:
-            return list(_CACHE["promotions"]), list(_CACHE["shadow"])
+        cached_prom=list(_CACHE["promotions"])
+        cached_shadow=list(_CACHE["shadow"])
+        cached_wm=_CACHE.get("watermark")
+        cached_ts=float(_CACHE["ts"] or 0.0)
+        if (not force) and cached_prom and now - cached_ts < _TTL:
+            return cached_prom, cached_shadow
+
     url, h = _headers()
+
+    # The runtime prior is consulted frequently. After TTL, ask for two tiny
+    # watermarks first; if neither promotions nor Shadow changed, reuse RAM.
+    if (not force) and cached_prom:
+        try:
+            wm=_watermark(url,h)
+            if wm == cached_wm:
+                with _LOCK:
+                    _CACHE["ts"]=now
+                return cached_prom, cached_shadow
+        except Exception:
+            return cached_prom, cached_shadow
+    else:
+        wm=None
+
     r = _SESSION.get(
         f"{url}/rest/v1/research_promotions_v1",
         params={
             "select": "candidate_key,source_engine,experiment,stage,reason,scope,metrics,meta,research_version,updated_at",
+            "experiment": "in.(CAUSAL_COVERAGE_STRATEGY,CAUSAL_REGISTRY_RETEST,CAUSAL_SHADOW_RECYCLE)",
             "stage": "in.(OBSERVE,SHADOW_READY,SHADOW_READY_FAST,VALIDATION_REQUIRED,REJECTED_OOS,VALIDATED_SINGLE_ASSET)",
             "order": "updated_at.desc",
-            "limit": "1800",
+            "limit": "320",
         },
         headers=h,
         timeout=7,
     )
     r.raise_for_status()
-    promotions = r.json() if isinstance(r.json(), list) else []
+    raw=r.json()
+    promotions = raw if isinstance(raw, list) else []
     promotions = [
         p for p in promotions
         if str(p.get("experiment") or "") in _EXPERIMENTS
@@ -119,18 +155,35 @@ def _load(force: bool = False):
     try:
         sr = _SESSION.get(
             f"{url}/rest/v1/research_shadow_live_metrics_v1",
-            params={"select": "*", "order": "updated_at.desc", "limit": "600"},
+            params={
+                "select": (
+                    "candidate_key,source_engine,experiment,research_stage,market_family,symbol,timeframe,"
+                    "signals_n,resolved_n,win_rate_pct,expectancy_r,profit_factor,pnl_pct_sum,avg_safety,"
+                    "recent8_n,recent8_expectancy_r,recent8_profit_factor,recent8_trade_sharpe,"
+                    "previous8_n,previous8_expectancy_r,previous8_trade_sharpe,current_loss_streak,updated_at"
+                ),
+                "order": "updated_at.desc",
+                "limit": "140",
+            },
             headers=h,
             timeout=7,
         )
         sr.raise_for_status()
-        raw = sr.json()
-        if isinstance(raw, list):
-            shadow = raw
+        raw_shadow = sr.json()
+        if isinstance(raw_shadow, list):
+            shadow = raw_shadow
     except Exception:
-        pass
+        shadow = cached_shadow
+
+    if wm is None:
+        wm=(
+            str((promotions[0] if promotions else {}).get("candidate_key") or ""),
+            str((promotions[0] if promotions else {}).get("updated_at") or ""),
+            str((shadow[0] if shadow else {}).get("candidate_key") or ""),
+            str((shadow[0] if shadow else {}).get("updated_at") or ""),
+        )
     with _LOCK:
-        _CACHE.update(ts=now, promotions=list(promotions), shadow=list(shadow))
+        _CACHE.update(ts=now, promotions=list(promotions), shadow=list(shadow), watermark=wm)
     return promotions, shadow
 
 
@@ -194,16 +247,23 @@ def _shadow_state(row: Dict[str, Any]) -> str:
     baseline_exp = _num(row.get("oos_exp_r"))
     if loss_streak >= 8:
         return "ALPHA_DECAY"
+    trajectory_bad = bool(previous_n >= 6 and (
+        (recent_sharpe is not None and previous_sharpe is not None and recent_sharpe <= previous_sharpe - 0.25)
+        or (recent_exp is not None and previous_exp is not None and recent_exp <= previous_exp - 0.15)
+    ))
+    baseline_bad = bool(baseline_exp is not None and baseline_exp > 0 and recent_exp is not None and recent_exp <= min(0.0, baseline_exp * 0.25))
     if recent_n >= 8 and recent_exp is not None and recent_exp < 0:
         recent_bad = ((recent_pf is not None and recent_pf < 0.90) or
                       (recent_sharpe is not None and recent_sharpe < 0.0))
-        trajectory_bad = bool(previous_n >= 6 and (
-            (recent_sharpe is not None and previous_sharpe is not None and recent_sharpe <= previous_sharpe - 0.25)
-            or (recent_exp is not None and previous_exp is not None and recent_exp <= previous_exp - 0.15)
-        ))
-        baseline_bad = bool(baseline_exp is not None and baseline_exp > 0 and recent_exp <= min(0.0, baseline_exp * 0.25))
         if recent_bad and (trajectory_bad or baseline_bad):
             return "ALPHA_DECAY"
+    if recent_n >= 8 and (
+        (recent_exp is not None and baseline_exp is not None and baseline_exp > 0 and recent_exp < baseline_exp * 0.50)
+        or (recent_sharpe is not None and recent_sharpe <= 0.10)
+        or (recent_pf is not None and recent_pf < 1.05)
+        or trajectory_bad
+    ):
+        return "ALPHA_DECAY_WATCH"
     target = max(1, int(row.get("shadow_target") or 0) or 1)
     n = int(row.get("shadow_n") or 0)
     exp = _num(row.get("shadow_exp_r"))
@@ -417,8 +477,9 @@ def edge_prior(symbol: str, timeframe: str, direction: str, system_type: str, re
         positives = [x for x in matches if str(x.get("stage")) in _POSITIVE]
         negatives = [x for x in matches if str(x.get("stage")) == "REJECTED_OOS"]
         diverged = [x for x in positives if x.get("shadow_state") in {"DIVERGED", "EARLY_DIVERGENCE", "ALPHA_DECAY"}]
+        watched = [x for x in positives if x.get("shadow_state") == "ALPHA_DECAY_WATCH"]
         confirmed = [x for x in positives if x.get("shadow_state") == "CONFIRMED"]
-        pending = [x for x in positives if x.get("shadow_state") not in {"DIVERGED", "EARLY_DIVERGENCE", "CONFIRMED"}]
+        pending = [x for x in positives if x.get("shadow_state") not in {"DIVERGED", "EARLY_DIVERGENCE", "CONFIRMED", "ALPHA_DECAY", "ALPHA_DECAY_WATCH"}]
 
         if negatives:
             worst = min(negatives, key=lambda x: x.get("oos_exp_r") if x.get("oos_exp_r") is not None else 0.0)
@@ -436,6 +497,15 @@ def edge_prior(symbol: str, timeframe: str, direction: str, system_type: str, re
                 best_positive=worst_live,
                 recycle_required=True,
                 recycle_reason=("Alpha decay detectado: retirar continuidad y volver a Research/Shadow." if worst_live.get("shadow_state") == "ALPHA_DECAY" else "Shadow/live no confirmó el edge histórico; volver a backtest/Validation."),
+            )
+            return base
+        if watched:
+            weak = min(watched, key=lambda x: x.get("recent8_expectancy_r") if x.get("recent8_expectancy_r") is not None else 999)
+            base.update(
+                state="ALPHA_DECAY_WATCH", support_score=0.0,
+                penalty_score=max(float(base.get("penalty_score") or 0.0), 8.0),
+                best_positive=weak, recycle_required=False,
+                recycle_reason="Decay en observación: suspender apoyo positivo y priorizar Challenger sin borrar al incumbent.",
             )
             return base
         source = confirmed or pending
