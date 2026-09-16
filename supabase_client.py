@@ -331,6 +331,24 @@ class SupabaseClient:
             return None
             
         except Exception as e:
+            # RC8: the database also enforces one signal per market×cell×closed
+            # candle×direction. If two workers race, the loser receives a UNIQUE
+            # violation; recover the canonical id instead of creating noise or
+            # treating the idempotent race as an application error.
+            msg = str(e).lower()
+            if payload.get('candle_timestamp') and ('duplicate key' in msg or '23505' in msg or 'unique constraint' in msg):
+                try:
+                    existing = self.client.table('signals').select('id').eq(
+                        'symbol', payload['symbol']
+                    ).eq('timeframe', payload['timeframe']).eq(
+                        'action_normalized', payload['action_normalized']
+                    ).eq('system_type', payload['system_type']).eq(
+                        'candle_timestamp', payload['candle_timestamp']
+                    ).limit(1).execute()
+                    if existing.data:
+                        return existing.data[0].get('id')
+                except Exception:
+                    pass
             if self._is_connection_error(e):
                 logger.warning(f"Supabase temporalmente inaccesible al insertar señal: {type(e).__name__}")
             else:

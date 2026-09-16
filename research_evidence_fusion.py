@@ -261,14 +261,36 @@ def _summary(p: Dict[str, Any], shadow_map: Dict[str, Dict[str, Any]]) -> Dict[s
         "strategy_card": strategy_card,
         "strategy_id": strategy_id,
         "strategy_spec": strategy_spec,
+        "runtime_trackable": bool(
+            (p.get("meta") or {}).get("runtime_trackable")
+            or ((p.get("meta") or {}).get("runtime_contract") or {}).get("runtime_trackable")
+        ),
         "finalist_rank": (p.get("meta") or {}).get("finalist_rank_selection_only"),
         "registry_retest": bool((p.get("meta") or {}).get("registry_retest")),
         "shadow_recycle": bool((p.get("meta") or {}).get("shadow_recycle")),
         "original_candidate_key": (p.get("meta") or {}).get("original_candidate_key"),
+        "champion_role": (p.get("meta") or {}).get("champion_role"),
+        "champion_lineage_key": (p.get("meta") or {}).get("champion_lineage_key"),
+        "champion_since": (p.get("meta") or {}).get("champion_since"),
         "updated_at": p.get("updated_at"),
     }
     out["shadow_state"] = _shadow_state(out)
     out["recycle_required"] = out["shadow_state"] in {"DIVERGED", "EARLY_DIVERGENCE"}
+    if int(out.get("shadow_signals_n") or 0) > 0:
+        out["shadow_diagnostic"] = "OBSERVING_LIVE"
+        out["shadow_wait_reason_es"] = "Shadow ya observó al menos un setup live compatible con este Champion."
+    elif not key:
+        out["shadow_diagnostic"] = "TRACKING_IDENTITY_MISSING"
+        out["shadow_wait_reason_es"] = "Falta la identidad del Champion; Shadow no puede enlazar observaciones."
+    elif not strategy_spec:
+        out["shadow_diagnostic"] = "STRATEGY_SPEC_MISSING"
+        out["shadow_wait_reason_es"] = "Falta el StrategySpec congelado; la celda requiere reparación de integración antes de evaluar Shadow."
+    elif not out.get("runtime_trackable"):
+        out["shadow_diagnostic"] = "RUNTIME_CONTRACT_NOT_TRACKABLE"
+        out["shadow_wait_reason_es"] = "La estrategia existe, pero su contrato todavía no es reproducible en runtime."
+    else:
+        out["shadow_diagnostic"] = "WAITING_MARKET_SETUP"
+        out["shadow_wait_reason_es"] = "Esperando un setup live que cumpla exactamente el StrategySpec congelado; no se fabrica evidencia."
     return out
 
 
@@ -293,29 +315,53 @@ def _stage_priority(stage: Any) -> int:
 
 
 def _best_per_cell(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    best: Dict[str, Dict[str, Any]] = {}
-    scores: Dict[str, tuple] = {}
-    for row in rows or []:
-        cid = str(row.get("coverage_cell_id") or "")
-        if not cid:
+    """One persistent Champion per cell; Challengers cannot silently unfill it."""
+    rows=list(rows or [])
+    demoted_roots={
+        str(r.get("original_candidate_key") or "")
+        for r in rows
+        if str(r.get("experiment") or "") in {"CAUSAL_REGISTRY_RETEST","CAUSAL_SHADOW_RECYCLE"}
+        and str(r.get("stage") or "").upper()=="REJECTED_OOS"
+        and str(r.get("original_candidate_key") or "")
+    }
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        cid=str(row.get("coverage_cell_id") or "")
+        if cid:
+            grouped.setdefault(cid,[]).append(row)
+
+    result=[]
+    for cid,items in grouped.items():
+        positives=[r for r in items if str(r.get("stage") or "") in _POSITIVE and str(r.get("original_candidate_key") or r.get("candidate_key") or "") not in demoted_roots and not r.get("recycle_required")]
+        if positives:
+            explicit=[r for r in positives if str(r.get("champion_role") or "").upper()=="INCUMBENT"]
+            pool=explicit or positives
+            # For legacy rows without RC8 role metadata, the oldest validated
+            # lineage is the incumbent. Newer unrelated rows remain Challengers.
+            roots: Dict[str, List[Dict[str, Any]]] = {}
+            for r in pool:
+                root=str(r.get("original_candidate_key") or r.get("candidate_key") or "")
+                roots.setdefault(root,[]).append(r)
+            incumbent_root=min(roots, key=lambda root:min(str(x.get("updated_at") or "") for x in roots[root]))
+            lineage=roots[incumbent_root]
+            best=max(lineage,key=lambda r:(str(r.get("updated_at") or ""),_stage_priority(r.get("stage")),float(r.get("oos_exp_r") if r.get("oos_exp_r") is not None else -999),int(r.get("oos_n") or 0)))
+            best=dict(best)
+            best["champion_role"]="INCUMBENT"
+            best["champion_lineage_key"]=incumbent_root
+            result.append(best)
             continue
-        # Prefer validated state, then OOS performance/sample. A retest can
-        # replace its lineage first via _latest_by_lineage.
-        # Current cell state must win over an older SHADOW_READY. RC1 exposed
-        # a stale-count bug where an old validated lineage could keep a cell
-        # green after the OOS Guard had replaced it with VALIDATION_REQUIRED.
-        # ISO timestamps sort chronologically, then stage/OOS break ties.
-        score = (
+
+        # Truly unfilled cell: expose its newest/best Challenger state.
+        best=max(items,key=lambda row:(
             str(row.get("updated_at") or ""),
             _stage_priority(row.get("stage")),
             float(row.get("oos_exp_r") if row.get("oos_exp_r") is not None else -999),
             float(row.get("oos_pf") if row.get("oos_pf") is not None else -999),
             int(row.get("oos_n") or 0),
             -int(row.get("finalist_rank") or 999),
-        )
-        if cid not in best or score > scores[cid]:
-            best[cid] = row; scores[cid] = score
-    return list(best.values())
+        ))
+        result.append(best)
+    return result
 
 
 def edge_prior(symbol: str, timeframe: str, direction: str, system_type: str, regime: Optional[str] = None, runtime_features: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -477,6 +523,16 @@ def profitability_snapshot(force: bool = False) -> Dict[str, Any]:
                 "timeframe": scope.get("timeframe"),
                 "stage": r.get("stage"),
                 "strategy_family": r.get("strategy_family"),
+                "strategy_id": r.get("strategy_id"),
+                "strategy_spec": r.get("strategy_spec") or {},
+                "strategy_card": r.get("strategy_card") or {},
+                "champion_role": r.get("champion_role") or "INCUMBENT",
+                "champion_lineage_key": r.get("champion_lineage_key") or r.get("candidate_key"),
+                "champion_since": r.get("champion_since"),
+                "direction": scope.get("direction"),
+                "regime": scope.get("regime"),
+                "runtime_trackable": bool(r.get("runtime_trackable")),
+                "updated_at": r.get("updated_at"),
                 "oos_n": r.get("oos_n"), "oos_wr": r.get("oos_wr"),
                 "oos_exp_r": r.get("oos_exp_r"), "oos_pf": r.get("oos_pf"),
                 "guardian_operational_replay": r.get("guardian_operational_replay") or {},
@@ -484,10 +540,12 @@ def profitability_snapshot(force: bool = False) -> Dict[str, Any]:
                 "shadow_signals_n": r.get("shadow_signals_n"), "shadow_n": r.get("shadow_n"),
                 "shadow_exp_r": r.get("shadow_exp_r"), "shadow_pf": r.get("shadow_pf"),
                 "shadow_target": r.get("shadow_target"), "shadow_state": r.get("shadow_state"),
+                "shadow_diagnostic": r.get("shadow_diagnostic"),
+                "shadow_wait_reason_es": r.get("shadow_wait_reason_es"),
                 "recycle_required": r.get("recycle_required"),
             })
         return {
-            "version": "V1_RC4_RESEARCH_EVIDENCE_FUSION_V5",
+            "version": "RC8_RESEARCH_EVIDENCE_FUSION_V7_CHAMPION_PERSISTENCE",
             "authority": "EVIDENCE_PRIOR_ONLY",
             "coverage_cells": len(cells),
             "coverage_target": _COVERAGE_TARGET,
@@ -512,11 +570,13 @@ def profitability_snapshot(force: bool = False) -> Dict[str, Any]:
             "shadow_live_candidates": sum(1 for r in validated_cells if int(r.get("shadow_signals_n") or 0) > 0),
             "shadow_live_signals": sum(int(r.get("shadow_signals_n") or 0) for r in validated_cells),
             "shadow_live_resolved": sum(int(r.get("shadow_n") or 0) for r in validated_cells),
+            "shadow_waiting_market": sum(1 for r in validated_cells if r.get("shadow_diagnostic") == "WAITING_MARKET_SETUP"),
+            "shadow_tracking_errors": sum(1 for r in validated_cells if r.get("shadow_diagnostic") in {"TRACKING_IDENTITY_MISSING","STRATEGY_SPEC_MISSING","RUNTIME_CONTRACT_NOT_TRACKABLE"}),
             "causal_candidates": len(contract_rows),
         }
     except Exception as exc:
         return {
-            "version": "V1_RC4_RESEARCH_EVIDENCE_FUSION_V5", "authority": "EVIDENCE_PRIOR_ONLY",
+            "version": "RC8_RESEARCH_EVIDENCE_FUSION_V7_CHAMPION_PERSISTENCE", "authority": "EVIDENCE_PRIOR_ONLY",
             "state": "UNAVAILABLE", "error": str(exc)[:180], "coverage_cells": 0,
             "coverage_target": _COVERAGE_TARGET, "coverage_complete": False,
             "validated_cells": 0, "oos_positive_cells": 0, "searching_cells": _COVERAGE_TARGET,

@@ -7,6 +7,9 @@ problem never blocks Spot/Futures trading.
 from __future__ import annotations
 
 import time
+import hashlib
+import json
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
@@ -14,6 +17,18 @@ RUNTIME_TABLE = 'runtime_snapshots_v1'
 MACRO_TABLE = 'macro_context_events_v1'
 
 _CLEANUP_LAST = 0.0
+_RC8_WRITE_LOCK = threading.Lock()
+_RC8_SNAPSHOT_WRITES = {}
+_RC8_MACRO_WRITE = {'digest': None, 'ts': 0.0}
+_RC8_IDENTICAL_WRITE_SECONDS = 900.0
+
+
+def _stable_digest(value: Any) -> str:
+    try:
+        raw = json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False, default=str)
+    except Exception:
+        raw = repr(value)
+    return hashlib.sha256(raw.encode('utf-8', errors='replace')).hexdigest()
 
 
 def _db():
@@ -33,6 +48,13 @@ def save_runtime_snapshot(namespace: str, snapshot_key: str, payload: Dict[str, 
     if db is None or not isinstance(payload, dict):
         return False
     now = utc_now()
+    cache_key = (str(namespace or 'runtime')[:64], str(snapshot_key or 'default')[:128])
+    digest = _stable_digest(payload)
+    with _RC8_WRITE_LOCK:
+        prior = _RC8_SNAPSHOT_WRITES.get(cache_key)
+        if prior and prior.get('digest') == digest and (time.monotonic() - float(prior.get('ts') or 0.0)) < _RC8_IDENTICAL_WRITE_SECONDS:
+            cleanup_ephemeral_storage()
+            return True
     row = {
         'namespace': str(namespace or 'runtime')[:64],
         'snapshot_key': str(snapshot_key or 'default')[:128],
@@ -44,6 +66,8 @@ def save_runtime_snapshot(namespace: str, snapshot_key: str, payload: Dict[str, 
         db.client.table(RUNTIME_TABLE).upsert(
             row, on_conflict='namespace,snapshot_key'
         ).execute()
+        with _RC8_WRITE_LOCK:
+            _RC8_SNAPSHOT_WRITES[cache_key] = {'digest': digest, 'ts': time.monotonic()}
         cleanup_ephemeral_storage()
         return True
     except Exception as exc:
@@ -144,8 +168,15 @@ def persist_macro_events(news, calendar_rows) -> int:
     if not rows:
         cleanup_ephemeral_storage()
         return 0
+    macro_digest = _stable_digest(rows)
+    with _RC8_WRITE_LOCK:
+        if _RC8_MACRO_WRITE.get('digest') == macro_digest and (time.monotonic() - float(_RC8_MACRO_WRITE.get('ts') or 0.0)) < _RC8_IDENTICAL_WRITE_SECONDS:
+            cleanup_ephemeral_storage()
+            return len(rows)
     try:
         db.client.table(MACRO_TABLE).upsert(rows, on_conflict='event_key').execute()
+        with _RC8_WRITE_LOCK:
+            _RC8_MACRO_WRITE.update(digest=macro_digest, ts=time.monotonic())
         cleanup_ephemeral_storage(force=True)
         return len(rows)
     except Exception as exc:

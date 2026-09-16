@@ -5487,6 +5487,38 @@ class TradingExpertSystem:
                 'type': 'accion',
                 'order': 1
             },
+
+            # ============ RC8: TESIS OPERATIVA SEGÚN ACCIÓN ============
+            # Estas frases fijan la semántica antes de enumerar indicadores.
+            # COMPRA/VENTA son decisiones SPOT; LONG/SHORT son FUTURES.
+            'tesis_compra_spot': {
+                'template': 'La decisión es SPOT: propone adquirir o aumentar exposición al activo sin abrir una posición apalancada. La compra sólo es válida si la confluencia alcista y la zona de entrada justifican asumir exposición. ',
+                'type': 'tesis_accion', 'order': 1.5
+            },
+            'tesis_venta_spot': {
+                'template': 'La decisión es SPOT: propone reducir, vender o rotar la tenencia del activo; no abre una posición SHORT ni obtiene beneficio directo de una caída posterior. La venta debe estar respaldada por deterioro de estructura, momentum o relación riesgo/beneficio. ',
+                'type': 'tesis_accion', 'order': 1.5
+            },
+            'tesis_long_futures': {
+                'template': 'La decisión es FUTURES LONG: propone una posición alcista apalancada, distinta de una compra Spot. Sólo es ejecutable con dirección confirmada, Entry defendible, invalidación/SL y TP coherentes y Safety suficiente. ',
+                'type': 'tesis_accion', 'order': 1.5
+            },
+            'tesis_short_futures': {
+                'template': 'La decisión es FUTURES SHORT: propone una posición bajista apalancada, distinta de una venta Spot. Sólo es ejecutable con estructura bajista confirmada, Entry defendible, invalidación/SL y TP coherentes y Safety suficiente. ',
+                'type': 'tesis_accion', 'order': 1.5
+            },
+            'tesis_no_operar': {
+                'template': 'No existe una operación ejecutable con calidad suficiente: uno o más filtros de estructura, confirmación, riesgo o ejecución impiden publicar una entrada responsable. ',
+                'type': 'tesis_accion', 'order': 1.5
+            },
+            'tesis_esperar': {
+                'template': 'Existe una hipótesis de mercado, pero todavía no una entrada ejecutable. Se espera la confirmación que falta —por ejemplo cierre, retest, estructura, volumen o alineación multitemporal— antes de asumir riesgo. ',
+                'type': 'tesis_accion', 'order': 1.5
+            },
+            'tesis_caution': {
+                'template': 'Hay elementos operables, pero el riesgo contextual o de ejecución es elevado. La señal requiere menor exposición o confirmación adicional y no debe tratarse como una entrada de convicción normal. ',
+                'type': 'tesis_accion', 'order': 1.5
+            },
             
             # ============ CATEGORÍA 2: FUERZA DE TENDENCIA ============
             'fuerza_tendencia_adx_fuerte': {
@@ -6601,17 +6633,21 @@ class TradingExpertSystem:
             },
             
             # ============ CATEGORÍA 31: REFLEXIÓN DE ACCIÓN ============
-            'reflexion_compra_oportunidad': {
-                'template': 'Confluencia de factores presenta oportunidad de acumulación con relación riesgo/beneficio 1:{risk_reward}. ',
-                'type': 'reflexion',
-                'order': 31,
-                'condition': 'COMPRA_SPOT OR LONG'
+            'reflexion_compra_spot_oportunidad': {
+                'template': 'La confluencia favorece acumulación o rotación SPOT con relación riesgo/beneficio 1:{risk_reward}; no implica usar apalancamiento. ',
+                'type': 'reflexion', 'order': 31, 'condition': 'COMPRA_SPOT'
             },
-            'reflexion_venta_oportunidad': {
-                'template': 'Niveles de resistencia y agotamiento comprador ofrecen oportunidad de toma de ganancias. ',
-                'type': 'reflexion',
-                'order': 31,
-                'condition': 'VENTA_SPOT OR SHORT'
+            'reflexion_venta_spot_oportunidad': {
+                'template': 'El deterioro técnico favorece reducir o rotar la exposición SPOT y proteger capital; no equivale a abrir un SHORT. ',
+                'type': 'reflexion', 'order': 31, 'condition': 'VENTA_SPOT'
+            },
+            'reflexion_long_oportunidad': {
+                'template': 'La confluencia alcista permite considerar LONG FUTURES sólo con Entry, invalidación y R/R definidos; el apalancamiento queda subordinado al motor de riesgo. ',
+                'type': 'reflexion', 'order': 31, 'condition': 'LONG'
+            },
+            'reflexion_short_oportunidad': {
+                'template': 'La confluencia bajista permite considerar SHORT FUTURES sólo con Entry, invalidación y R/R definidos; no es una simple venta del activo Spot. ',
+                'type': 'reflexion', 'order': 31, 'condition': 'SHORT'
             },
             'reflexion_esperar_pullback': {
                 'template': 'Se recomienda esperar retroceso a {nivel_soporte} para mejorar relación riesgo/beneficio. ',
@@ -6675,27 +6711,33 @@ class TradingExpertSystem:
                 'order': 32
             },
             'recomendacion_compra_spot_paxg_btc': {
-                'template': 'Se recomienda COMPRA del ratio PAXG/BTC. ',
+                'template': 'Se recomienda COMPRA SPOT del ratio PAXG/BTC. ',
                 'type': 'recomendacion',
                 'order': 32
             },
             'recomendacion_venta_spot_paxg_btc': {
-                'template': 'Se aconseja VENTA del ratio PAXG/BTC. ',
+                'template': 'Se aconseja VENTA SPOT del ratio PAXG/BTC. ',
                 'type': 'recomendacion',
                 'order': 32
             },
+            'recomendacion_no_operar': {
+                'template': 'Se recomienda NO OPERAR: los filtros activos no permiten publicar una entrada con calidad y riesgo aceptables. ',
+                'type': 'recomendacion',
+                'order': 32
+            },
+            # Alias legacy; nuevas decisiones usan recomendacion_no_operar.
             'recomendacion_': {
-                'template': 'La prudencia aconseja NO OPERAR en estos niveles. ',
+                'template': 'Se recomienda NO OPERAR: los filtros activos no permiten publicar una entrada con calidad y riesgo aceptables. ',
                 'type': 'recomendacion',
                 'order': 32
             },
             'recomendacion_esperar': {
-                'template': 'Se recomienda ESPERAR, manteniendo liquidez. ',
+                'template': 'Se recomienda ESPERAR: todavía falta una confirmación suficiente para convertir la hipótesis en una entrada ejecutable. ',
                 'type': 'recomendacion',
                 'order': 32
             },
             'recomendacion_caution': {
-                'template': 'Se sugiere PRUDENCIA, reduciendo exposición. ',
+                'template': 'Se recomienda PRECAUCIÓN: existe una hipótesis operable, pero el riesgo contextual o de ejecución exige confirmación adicional y exposición contenida. ',
                 'type': 'recomendacion',
                 'order': 32
             },
@@ -6988,6 +7030,59 @@ class TradingExpertSystem:
     # SISTEMA DE SELECCIÓN INTELIGENTE DE PLANTILLAS
     # ========================================================================
     
+    def _plantilla_coherente_con_accion(self, decision, template_text):
+        """Reject templates that silently turn Spot into Futures or vice versa."""
+        action=str(decision or '').upper()
+        text=str(template_text or '').lower()
+        forbidden={
+            'COMPRA_SPOT': ('long futures','posición long','calidad estructural del long','abrir long'),
+            'VENTA_SPOT': ('short futures','posición short','calidad estructural del short','abrir short'),
+            'LONG': ('compra spot','venta spot','toma de ganancias spot'),
+            'SHORT': ('compra spot','venta spot','toma de ganancias spot'),
+        }.get(action,())
+        return not any(token in text for token in forbidden)
+
+    def _razones_consenso_coherentes(self, decision, razones_consenso, limit=2):
+        """RC8: select committee reasons that explain THIS final action.
+
+        Reasons are already produced by specialized traders. This function does
+        not invent evidence; it only prevents a bullish voter sentence from
+        being used as the explanation for NO_OPERAR/SHORT, or vice versa.
+        """
+        action=str(decision or 'NO_OPERAR').strip().upper()
+        if action in {'PRECAUCION','PRECAUCIÓN'}:
+            action='CAUTION'
+        reasons=[str(x).strip() for x in (razones_consenso or []) if str(x).strip()]
+        if not reasons:
+            return []
+        tokens={
+            'NO_OPERAR': ('riesgo','veto','no operar','insuficiente','conflicto','sin dirección','sin confirm','anomal','no genera voto','macro crítico','falta','degrad','rechaz'),
+            'ESPERAR': ('esperar','falta','confirm','timing','retest','sin dirección','insuficiente','pendiente','no clara','neutral'),
+            'CAUTION': ('riesgo','cautela','precauc','volatil','macro','correl','liquidez','funding','apalanc','extrem','conflicto'),
+            'COMPRA_SPOT': ('alcista','compra','acumul','soporte','rebote','fortaleza','risk-on','miedo','order block alcista','fvg alcista'),
+            'LONG': ('alcista','long','soporte','momentum positivo','fortaleza','pullback','retest','order block alcista','fvg alcista'),
+            'VENTA_SPOT': ('bajista','venta','reduc','rotación','resistencia','debilidad','distrib','risk-off','tomar ganancias'),
+            'SHORT': ('bajista','short','resistencia','presión vendedora','debilidad','distrib','order block bajista','fvg bajista'),
+        }.get(action,())
+        opposite={
+            'COMPRA_SPOT': ('short','venta spot','bajista'),
+            'LONG': ('short','venta spot','bajista'),
+            'VENTA_SPOT': ('long futures','compra spot','alcista'),
+            'SHORT': ('long futures','compra spot','alcista'),
+        }.get(action,())
+        chosen=[]
+        for reason in reasons:
+            low=reason.lower()
+            if opposite and any(x in low for x in opposite):
+                continue
+            if tokens and not any(x in low for x in tokens):
+                continue
+            if reason not in chosen:
+                chosen.append(reason.rstrip('.'))
+            if len(chosen)>=max(1,int(limit or 2)):
+                break
+        return chosen
+
     def seleccionar_plantillas_por_condiciones(self, decision, symbol, timeframe, 
                                               trend, momentum, volatility, volume, 
                                               structure, correlation, market_hours, 
@@ -6998,6 +7093,12 @@ class TradingExpertSystem:
         VERSIÓN COMPLETA CON TODAS LAS CATEGORÍAS DE NO OPERAR
         """
         try:
+            # RC8: una única semántica de decisión para todo el mensaje.
+            # Vacío legacy = NO_OPERAR. PRECAUCIÓN se representa como CAUTION.
+            decision = str(decision or 'NO_OPERAR').strip().upper()
+            if decision in {'PRECAUCION', 'PRECAUCIÓN'}:
+                decision = 'CAUTION'
+
             # ============ 1. MAPA DE CONDICIONES ACTIVAS ============
             condiciones_activas = self._mapear_condiciones_activas(
                 decision, symbol, timeframe, trend, momentum, volatility, volume,
@@ -7078,8 +7179,8 @@ class TradingExpertSystem:
                     else:
                         print(f"   🚫 Excluida condición contradictoria: {cond}")
             
-            elif decision in ['', 'ESPERAR', 'CAUTION']:
-                # Para NO OPERAR, SOLO condiciones de riesgo, confirmación o precaución
+            elif decision in ['NO_OPERAR', 'ESPERAR', 'CAUTION']:
+                # Para NO OPERAR / ESPERAR / PRECAUCIÓN: causas de bloqueo, espera o riesgo
                 # INCLUIR EXPLÍCITAMENTE ftm_no_trade y otras condiciones de no operabilidad
                 palabras_permitidas = [
                     'riesgo', 'confirmacion', 'precaucion', 'falso', 'adx_bajo', 
@@ -7099,7 +7200,7 @@ class TradingExpertSystem:
                     if permitida and not prohibida:
                         condiciones_filtradas.append(cond)
                     else:
-                        print(f"   🚫 Excluida condición no relevante para NO OPERAR: {cond}")
+                        print(f"   🚫 Excluida condición no relevante para {decision}: {cond}")
             else:
                 condiciones_filtradas = condiciones_activas
             
@@ -7111,9 +7212,7 @@ class TradingExpertSystem:
             ids_usados = set()     # Para evitar plantillas duplicadas
             
             accion_key = f"accion_{decision.lower()}"
-            if decision == '':
-                accion_key = 'accion_'
-            elif decision == 'ESPERAR':
+            if decision == 'ESPERAR':
                 accion_key = 'accion_esperar'
             elif decision == 'CAUTION':
                 accion_key = 'accion_caution'
@@ -7131,6 +7230,29 @@ class TradingExpertSystem:
                 print(f"   ✅ Plantilla de acción: {accion_key}")
             else:
                 print(f"   ⚠️ No se encontró plantilla de acción")
+
+            # RC8: tesis semántica obligatoria. Explica qué significa la acción
+            # antes de citar indicadores y evita confundir Spot con Futures.
+            tesis_por_decision = {
+                'COMPRA_SPOT': 'tesis_compra_spot',
+                'VENTA_SPOT': 'tesis_venta_spot',
+                'LONG': 'tesis_long_futures',
+                'SHORT': 'tesis_short_futures',
+                'NO_OPERAR': 'tesis_no_operar',
+                'ESPERAR': 'tesis_esperar',
+                'CAUTION': 'tesis_caution',
+            }
+            tesis_key = tesis_por_decision.get(decision)
+            if tesis_key and tesis_key in self.justification_bank:
+                plantilla = self.justification_bank[tesis_key]
+                plantillas_seleccionadas.append({
+                    'plantilla': plantilla,
+                    'order': 1.5,
+                    'categoria': 'tesis_accion',
+                    'id': tesis_key,
+                })
+                ids_usados.add(tesis_key)
+                textos_usados.add(plantilla['template'][:50])
             
             # ============ 6. DEFINIR PRIORIDAD DE CATEGORÍAS ============
             
@@ -7138,25 +7260,33 @@ class TradingExpertSystem:
             if decision in ['NO_OPERAR', 'ESPERAR', 'CAUTION']:
                 print(f"\n📋 PRIORIDAD PARA {decision}:")
                 
-                # Definir todas las categorías que pueden justificar NO OPERAR
-                prioridad_no_operar = [
-                    ('confirmacion', 'Confirmación'),
-                    ('riesgo', 'Riesgo'),
-                    ('precaucion', 'Precaución'),
-                    ('volumen_ballenas', 'Volumen'),
-                    ('volatilidad', 'Volatilidad'),
-                    ('liquidaciones', 'Liquidaciones'),
-                    ('multiframe', 'Multiframe'),
-                    ('sentimiento', 'Sentimiento'),
-                    ('estructura', 'Estructura'),
-                    ('smart_money', 'Smart Money'),
-                    ('perfil_volumen', 'Perfil Volumen'),
-                    ('patrones', 'Patrones'),
-                    ('momentum_clasico', 'Momentum Clásico'),
-                    ('correlacion', 'Correlación'),
-                    ('sesiones', 'Sesiones')
-                ]
-                
+                # RC8: cada estado no-ejecutable responde una pregunta distinta.
+                # NO_OPERAR -> qué bloquea; ESPERAR -> qué falta; CAUTION -> qué eleva riesgo.
+                prioridades_por_decision = {
+                    'NO_OPERAR': [
+                        ('riesgo', 'Bloqueo de riesgo'), ('confirmacion', 'Confirmación insuficiente'),
+                        ('volatilidad', 'Volatilidad'), ('volumen_ballenas', 'Liquidez/volumen'),
+                        ('multiframe', 'Conflicto multitemporal'), ('estructura', 'Estructura'),
+                        ('smart_money', 'Smart Money'), ('liquidaciones', 'Liquidaciones'),
+                        ('correlacion', 'Correlación'), ('sentimiento', 'Sentimiento'),
+                        ('sesiones', 'Sesión')
+                    ],
+                    'ESPERAR': [
+                        ('confirmacion', 'Confirmación pendiente'), ('estructura', 'Estructura/retest'),
+                        ('multiframe', 'Alineación multitemporal'), ('volumen_ballenas', 'Volumen'),
+                        ('smart_money', 'Liquidez institucional'), ('perfil_volumen', 'Zona de valor'),
+                        ('volatilidad', 'Volatilidad'), ('patrones', 'Patrón'),
+                        ('momentum_clasico', 'Momentum'), ('liquidaciones', 'Liquidaciones')
+                    ],
+                    'CAUTION': [
+                        ('riesgo', 'Riesgo'), ('precaucion', 'Precaución'),
+                        ('volatilidad', 'Volatilidad'), ('liquidaciones', 'Liquidaciones'),
+                        ('correlacion', 'Correlación'), ('sentimiento', 'Sentimiento/Macro'),
+                        ('volumen_ballenas', 'Liquidez/volumen'), ('multiframe', 'Multiframe'),
+                        ('estructura', 'Estructura'), ('sesiones', 'Sesión')
+                    ],
+                }
+                prioridad_no_operar = prioridades_por_decision.get(decision, [])
                 orden_base = 2
                 justificaciones_encontradas = 0
                 
@@ -7192,9 +7322,10 @@ class TradingExpertSystem:
                             # 'volumen', 'ATR', 'value area', 'sesión', etc. siempre que NO tengan
                             # palabras direccionales
                             tiene_direccional = any(p in texto_template for p in palabras_direccionales)
-                            
-                            # PERMITIR la frase si NO tiene palabras direccionales
-                            if not tiene_direccional:
+                            # NO_OPERAR debe ser neutral; ESPERAR/PRECAUCIÓN pueden
+                            # explicar el sesgo existente si esa condición está activa.
+                            frase_admisible = (not tiene_direccional) or decision in {'ESPERAR', 'CAUTION'}
+                            if frase_admisible:
                                 fingerprint = plantilla['template'][:50]
                                 
                                 if fingerprint not in textos_usados:
@@ -7252,17 +7383,22 @@ class TradingExpertSystem:
                     if 'indecision' in condiciones_activas:
                         razones.append("múltiples velas de indecisión")
                     
-                    if razones:
-                        razon_texto = ", ".join(razones[:3])
-                        plantilla_generica = {'template': f'Mercado sin condiciones claras: {razon_texto}. Se recomienda NO OPERAR. '}
+                    razon_texto = ", ".join(razones[:3]) if razones else "no existe confluencia suficiente entre estructura, confirmación y ejecución"
+                    if decision == 'ESPERAR':
+                        plantilla_generica = {'template': f'La entrada queda pendiente porque {razon_texto}. Se recomienda ESPERAR una confirmación verificable antes de ejecutar. '}
+                        generic_id = 'generica_esperar'
+                    elif decision == 'CAUTION':
+                        plantilla_generica = {'template': f'La operación exige PRECAUCIÓN porque {razon_texto}. Mantener exposición contenida y exigir confirmación adicional antes de ejecutar. '}
+                        generic_id = 'generica_caution'
                     else:
-                        plantilla_generica = {'template': 'Condiciones actuales no favorables para operar. Se recomienda NO OPERAR. '}
+                        plantilla_generica = {'template': f'NO OPERAR: {razon_texto}. Los mínimos de calidad no justifican una entrada ejecutable en este momento. '}
+                        generic_id = 'generica_no_operar'
                     
                     plantillas_seleccionadas.append({
                         'plantilla': plantilla_generica,
                         'order': orden_base,
                         'categoria': 'riesgo',
-                        'id': 'generica_no_operar'
+                        'id': generic_id
                     })
             
             # Para acciones de TRADING (COMPRA, VENTA, LONG, SHORT)
@@ -7516,6 +7652,9 @@ class TradingExpertSystem:
                                 continue
                             
                             plantilla = self.justification_bank[clave]
+                            if not self._plantilla_coherente_con_accion(decision, plantilla.get('template')):
+                                print(f"      🚫 RC8 semántica Spot/Futures: {clave}")
+                                continue
                             fingerprint = plantilla['template'][:50]
                             
                             if fingerprint not in textos_usados:
@@ -7531,44 +7670,28 @@ class TradingExpertSystem:
                                 print(f"      ✅ Seleccionada: {clave}")
                                 break  # Solo una por categoría
                 
-                # ============ AÑADIR REFLEXIÓN SI NO SE INCLUYÓ (CON FILTRO DIRECCIONAL) ============
-                if 'reflexion' not in [p['categoria'] for p in plantillas_seleccionadas] and len(plantillas_seleccionadas) < 7:
-                    reflexion_claves = self._filtrar_por_condiciones('reflexion', condiciones_filtradas)
-                    if reflexion_claves:
-                        # Filtrar según la decisión
-                        if decision in ['COMPRA_SPOT', 'LONG']:
-                            # Solo reflexiones que NO hablen de esperar o no operar
-                            reflexion_claves = [k for k in reflexion_claves 
-                                               if 'esperar' not in k.lower() 
-                                               and 'no_operar' not in k.lower()
-                                               and 'cautela' not in k.lower()]
-                        elif decision in ['VENTA_SPOT', 'SHORT']:
-                            # Solo reflexiones que NO hablen de esperar o no operar
-                            reflexion_claves = [k for k in reflexion_claves 
-                                               if 'esperar' not in k.lower() 
-                                               and 'no_operar' not in k.lower()
-                                               and 'cautela' not in k.lower()]
-                        else:
-                            # Para NO_OPERAR/ESPERAR, permitir reflexiones de precaución
-                            reflexion_claves = [k for k in reflexion_claves 
-                                               if any(x in k.lower() for x in ['esperar', 'cautela', 'precaucion'])]
-                        
-                        # Si después del filtro aún hay claves, seleccionar una
-                        if reflexion_claves:
-                            for clave in reflexion_claves:
-                                if clave not in ids_usados:
-                                    plantilla = self.justification_bank[clave]
-                                    fingerprint = plantilla['template'][:50]
-                                    if fingerprint not in textos_usados:
-                                        plantillas_seleccionadas.append({
-                                            'plantilla': plantilla,
-                                            'order': orden_base,
-                                            'categoria': 'reflexion',
-                                            'id': clave
-                                        })
-                                        orden_base += 1
-                                        print(f"      ✅ Reflexión seleccionada: {clave}")
-                                        break
+                # ============ RC8: REFLEXIÓN EXACTA POR INSTRUMENTO ============
+                if 'reflexion' not in [p['categoria'] for p in plantillas_seleccionadas] and len(plantillas_seleccionadas) < 8:
+                    reflexion_exacta = {
+                        'COMPRA_SPOT': 'reflexion_compra_spot_oportunidad',
+                        'VENTA_SPOT': 'reflexion_venta_spot_oportunidad',
+                        'LONG': 'reflexion_long_oportunidad',
+                        'SHORT': 'reflexion_short_oportunidad',
+                    }.get(decision)
+                    if reflexion_exacta and reflexion_exacta in self.justification_bank:
+                        plantilla = self.justification_bank[reflexion_exacta]
+                        fingerprint = plantilla['template'][:50]
+                        if fingerprint not in textos_usados:
+                            plantillas_seleccionadas.append({
+                                'plantilla': plantilla,
+                                'order': orden_base,
+                                'categoria': 'reflexion',
+                                'id': reflexion_exacta,
+                            })
+                            ids_usados.add(reflexion_exacta)
+                            textos_usados.add(fingerprint)
+                            orden_base += 1
+                            print(f"      ✅ Reflexión RC8: {reflexion_exacta}")
             
             # ============ 7. RECOMENDACIÓN ============
             # Determinar clave de recomendación según decisión y símbolo
@@ -7667,15 +7790,18 @@ class TradingExpertSystem:
                 # Fallback genérico
                 if decision == 'NO_OPERAR':
                     plantillas_seleccionadas.append({
-                        'plantilla': {'template': 'Se recomienda NO OPERAR en estos niveles. '},
-                        'order': 98,
-                        'categoria': 'recomendacion'
+                        'plantilla': {'template': 'Se recomienda NO OPERAR porque la evidencia disponible no supera los mínimos de estructura, ejecución y riesgo. '},
+                        'order': 98, 'categoria': 'recomendacion'
                     })
                 elif decision == 'ESPERAR':
                     plantillas_seleccionadas.append({
-                        'plantilla': {'template': 'Se recomienda ESPERAR por confirmación. '},
-                        'order': 98,
-                        'categoria': 'recomendacion'
+                        'plantilla': {'template': 'Se recomienda ESPERAR: la hipótesis todavía necesita confirmación antes de convertirse en Entry ejecutable. '},
+                        'order': 98, 'categoria': 'recomendacion'
+                    })
+                elif decision == 'CAUTION':
+                    plantillas_seleccionadas.append({
+                        'plantilla': {'template': 'Se recomienda PRECAUCIÓN: el riesgo es superior al normal y exige confirmación adicional o menor exposición. '},
+                        'order': 98, 'categoria': 'recomendacion'
                     })            
             # ============ 8. CIERRE ============
             plantillas_seleccionadas.append({
@@ -17067,6 +17193,22 @@ class TradingExpertSystem:
             estrategias_consenso, sentiment,
             liquidation  # <--- NUEVO PARÁMETRO
         )
+
+        # RC8: surface up to two real committee reasons coherent with the final
+        # action. This supplements the indicator bank; it never fabricates data.
+        razones_rc8 = self._razones_consenso_coherentes(decision, razones_consenso, limit=2)
+        if razones_rc8:
+            label = {
+                'NO_OPERAR': 'Bloqueo principal',
+                'ESPERAR': 'Confirmación pendiente',
+                'CAUTION': 'Riesgo principal',
+                'COMPRA_SPOT': 'Motivo de la compra Spot',
+                'VENTA_SPOT': 'Motivo de la venta Spot',
+                'LONG': 'Motivo del LONG Futures',
+                'SHORT': 'Motivo del SHORT Futures',
+            }.get(str(decision or '').upper(), 'Motivo principal')
+            committee_text = f"{label}: " + "; ".join(razones_rc8) + ". "
+            plantillas.insert(min(2, len(plantillas)), {'template': committee_text})
         
         # ============ EXTRACCIÓN MASIVA DE TODOS LOS INDICADORES ============
         

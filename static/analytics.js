@@ -2884,24 +2884,34 @@ async function loadResearchFederationAnalytics(){
             const entry=card.entry||{};
             const risk=card.risk||{};
             const filters=card.filters||{};
-            return `<div class="small"><b>${safe(name)}</b></div>
+            const direction=card.direction||row?.direction||row?.scope?.direction||'--';
+            const regime=card.valid_regime||row?.regime||row?.scope?.regime||'--';
+            const stage=String(card.validation_stage||row?.stage||'--');
+            const stageHuman=['SHADOW_READY','SHADOW_READY_FAST'].includes(stage)
+                ? 'Backtest/OOS aprobado · Champion persistente en Shadow hasta evidencia de degradación'
+                : uiHumanLabel(stage);
+            const role=String(row?.champion_role||'').toUpperCase();
+            const roleBadge=role==='INCUMBENT'?'<span class="badge bg-success ms-1">CHAMPION</span>':role==='CHALLENGER'?'<span class="badge bg-secondary ms-1">CHALLENGER</span>':'';
+            return `<div class="small"><b>${safe(name)}</b>${roleBadge}</div>
                 <details class="mt-1"><summary class="small text-info" style="cursor:pointer">Ficha de estrategia</summary>
-                    <div class="border rounded p-2 mt-1 small text-start" style="min-width:320px;max-width:560px">
-                        <div><b>ID técnico inmutable:</b> <code>${safe(technicalId)}</code></div>
-                        ${card.fingerprint_sha256?`<div><b>Huella:</b> <code>${safe(String(card.fingerprint_sha256).slice(0,20))}…</code></div>`:''}
-                        <div><b>Estado:</b> ${safe(card.validation_stage||row?.stage||'--')}${card.immutable?' · 🔒 parámetros congelados':''}</div>
-                        <div><b>Mercado/celda:</b> ${safe(card.symbol||row?.symbol||'--')} · ${safe(card.timeframe||row?.timeframe||'--')} · ${safe(card.direction||row?.scope?.direction||'BOTH')}</div>
-                        <div><b>Régimen válido:</b> ${safe(card.valid_regime||row?.scope?.regime||'ALL')}</div>
-                        ${hasRich&&card.signal_logic?`<div class="mt-1"><b>Condición:</b> ${safe(card.signal_logic)}</div>`:''}
-                        ${indicators.length?`<div><b>Indicadores:</b> ${indicators.map(safe).join(' · ')}</div>`:''}
-                        ${entry.rule?`<div><b>Entry:</b> ${safe(entry.rule)}</div>`:''}
-                        ${risk.stop_rule?`<div><b>SL:</b> ${safe(risk.stop_rule)}</div>`:''}
-                        ${risk.take_profit_rule?`<div><b>TP:</b> ${safe(risk.take_profit_rule)}</div>`:''}
-                        ${filters.volatility_rule?`<div><b>Volatilidad:</b> ${safe(filters.volatility_rule)}</div>`:''}
+                    <div class="border rounded p-2 mt-1 small text-start" style="min-width:320px;max-width:620px">
+                        <div><b>Estado:</b> ${safe(stageHuman)}${card.immutable?' · 🔒 parámetros congelados':''}</div>
+                        <div><b>Celda:</b> ${safe(card.symbol||row?.symbol||'--')} · ${safe(card.timeframe||row?.timeframe||'--')} · ${safe(direction)}</div>
+                        <div><b>Régimen:</b> ${safe(regime)}</div>
+                        ${hasRich&&card.signal_logic?`<div class="mt-2"><b>Qué busca:</b> ${safe(card.signal_logic)}</div>`:''}
+                        ${indicators.length?`<div class="mt-1"><b>Qué observa:</b> ${indicators.map(safe).join(' · ')}</div>`:''}
+                        ${entry.rule?`<div class="mt-1"><b>Cómo entra:</b> ${safe(entry.rule)}</div>`:''}
+                        ${risk.stop_rule?`<div><b>Cómo invalida / SL:</b> ${safe(risk.stop_rule)}</div>`:''}
+                        ${risk.take_profit_rule?`<div><b>Objetivo / TP:</b> ${safe(risk.take_profit_rule)}</div>`:''}
+                        ${filters.volatility_rule?`<div><b>Volatilidad requerida:</b> ${safe(filters.volatility_rule)}</div>`:''}
                         ${Number.isFinite(Number(filters.trend_strength_min))?`<div><b>Fuerza mínima:</b> ${safe(filters.trend_strength_rule||filters.trend_strength_min)}</div>`:''}
-                        ${hasRich?`<div><b>OOS:</b> N ${Number(evidence.oos_n??row?.oos_n??0)} · Exp ${fmt(evidence.oos_expectancy_r??row?.oos_exp_r,3)}R · PF ${fmt(evidence.oos_profit_factor??row?.oos_pf,2)}</div>`:''}
-                        <details class="mt-1"><summary style="cursor:pointer">Parámetros exactos validados</summary><pre class="small mb-0 mt-1" style="white-space:pre-wrap">${safe(JSON.stringify(raw,null,2))}</pre></details>
-                        ${!hasRich?'<div class="text-warning mt-1">Ficha enriquecida pendiente; los parámetros exactos ya son visibles arriba.</div>':''}
+                        ${hasRich?`<div class="mt-1"><b>Evidencia OOS:</b> N ${Number(evidence.oos_n??row?.oos_n??0)} · Exp ${fmt(evidence.oos_expectancy_r??row?.oos_exp_r,3)}R/trade · PF ${fmt(evidence.oos_profit_factor??row?.oos_pf,2)}</div>`:''}
+                        ${!hasRich?'<div class="text-danger mt-2"><b>Falla de integración:</b> el StrategySpec enriquecido no llegó a Main. Esta celda no debe mostrarse como ficha completa hasta repararlo.</div>':''}
+                        <details class="mt-2"><summary style="cursor:pointer">Detalles técnicos / auditoría</summary>
+                            <div class="mt-1"><b>ID técnico inmutable:</b> <code>${safe(technicalId)}</code></div>
+                            ${card.fingerprint_sha256?`<div><b>Huella:</b> <code>${safe(String(card.fingerprint_sha256).slice(0,24))}…</code></div>`:''}
+                            <details class="mt-1"><summary style="cursor:pointer">Parámetros exactos validados</summary><pre class="small mb-0 mt-1" style="white-space:pre-wrap">${safe(JSON.stringify(raw,null,2))}</pre></details>
+                        </details>
                     </div>
                 </details>`;
         };
@@ -2925,8 +2935,8 @@ async function loadResearchFederationAnalytics(){
         if(shadowBt) shadowBt.innerHTML=renderBt(profitability.futures_evaluation,'Sin challengers causales disponibles.');
         const simpleCoverage=document.getElementById('v1-coverage');
         const simpleCoverageNote=document.getElementById('v1-coverage-note');
-        if(simpleCoverage) simpleCoverage.textContent=`${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||46)} investigadas · ${Number(profitability.validated_cells||0)} validadas`;
-        if(simpleCoverageNote) simpleCoverageNote.textContent=`OOS+ vigente ${Number(profitability.oos_positive_cells||0)} · evidencia OOS+ ${Number(profitability.oos_positive_evidence_cells ?? profitability.oos_positive_cells ?? 0)} · buscando ${Number(profitability.searching_cells||0)}`;
+        if(simpleCoverage) simpleCoverage.textContent=`${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||46)} investigadas · ${Number(profitability.validated_cells||0)} Champions persistentes`;
+        if(simpleCoverageNote) simpleCoverageNote.textContent=`OOS+ vigente ${Number(profitability.oos_positive_cells||0)} · evidencia OOS+ ${Number(profitability.oos_positive_evidence_cells ?? profitability.oos_positive_cells ?? 0)} · celdas aún sin Champion ${Number(profitability.searching_cells||0)}`;
         const simpleBucket=(id,noteId,bucket)=>{
             const el=document.getElementById(id), note=document.getElementById(noteId);
             if(!el) return;
@@ -2940,7 +2950,7 @@ async function loadResearchFederationAnalytics(){
         simpleBucket('v1-futures-oos','v1-futures-oos-note',profitability.futures_official);
         const simpleShadow=document.getElementById('v1-shadow'), simpleShadowNote=document.getElementById('v1-shadow-note');
         if(simpleShadow) simpleShadow.textContent=`${Number(profitability.shadow_live_candidates||0)}/${Number(profitability.shadow_ready_cells||profitability.validated_cells||0)} con actividad`;
-        if(simpleShadowNote) simpleShadowNote.textContent=`Señales ${Number(profitability.shadow_live_signals||0)} · resueltas ${Number(profitability.shadow_live_resolved||0)} · reciclar ${Number(profitability.recycle_required_cells||0)}`;
+        if(simpleShadowNote) simpleShadowNote.textContent=`Señales ${Number(profitability.shadow_live_signals||0)} · resueltas ${Number(profitability.shadow_live_resolved||0)} · esperando mercado ${Number(profitability.shadow_waiting_market||0)} · errores de tracking ${Number(profitability.shadow_tracking_errors||0)} · reciclar ${Number(profitability.recycle_required_cells||0)}`;
         // RC2: tabla comprensible de continuidad LIVE/OOS.
         const setOosRow=(prefix,bucket)=>{
             v1Set(`v1-op-${prefix}-oos-n`, Number(bucket?.oos_n||0).toLocaleString());
@@ -2972,8 +2982,9 @@ async function loadResearchFederationAnalytics(){
                 const certState=String(cert.certification_state||'SIN CERTIFICAR');
                 const certText=certState.includes('POSITIVE')?'🧩 Backtest histórico positivo · confirmar ejecución real':certState.includes('INCOMPLETE')?'🟡 Ejecución incompleta':'🔎 Pendiente';
                 const shadowState=String(row.shadow_state||'WAITING');
-                const status=row.recycle_required?'♻️ RECICLAR':shadowState==='CONFIRMED'?'✅ CONFIRMANDO':shadowState==='DIVERGED'||shadowState==='EARLY_DIVERGENCE'?'⚠️ DIVERGIENDO':signals>0?'👀 OBSERVANDO':'⏳ ESPERANDO SETUP';
-                return `<tr><td>${row.symbol||'--'}</td><td>${row.timeframe||'--'}</td><td>${strategyCardHtml(row)}</td><td>${row.oos_wr==null?'--':fmt(row.oos_wr,1)+'%'}</td><td>${oosPnl==null?'--':(oosPnl>=0?'+':'')+fmt(oosPnl,2)+'R'}</td><td>${row.oos_pf==null?'--':fmt(row.oos_pf,2)}</td><td class="${guardianDelta==null?'text-muted':Number(guardianDelta)>=0?'text-success':'text-warning'}">${guardianDeltaText}</td><td class="small">${certText}</td><td>${resolved}/${signals}</td><td>${status}</td></tr>`;
+                const status=row.recycle_required?'♻️ RECICLAR':shadowState==='CONFIRMED'?'✅ CONFIRMANDO':shadowState==='DIVERGED'||shadowState==='EARLY_DIVERGENCE'?'⚠️ DIVERGIENDO':signals>0?'👀 OBSERVANDO':String(row.shadow_diagnostic||'')==='WAITING_MARKET_SETUP'?'⏳ ESPERANDO MERCADO':'⚠️ REVISAR TRACKING';
+                const waitReason=safe(row.shadow_wait_reason_es||'');
+                return `<tr><td>${row.symbol||'--'}</td><td>${row.timeframe||'--'}</td><td>${strategyCardHtml(row)}</td><td>${row.oos_wr==null?'--':fmt(row.oos_wr,1)+'%'}</td><td>${oosPnl==null?'--':(oosPnl>=0?'+':'')+fmt(oosPnl,2)+'R'}</td><td>${row.oos_pf==null?'--':fmt(row.oos_pf,2)}</td><td class="${guardianDelta==null?'text-muted':Number(guardianDelta)>=0?'text-success':'text-warning'}">${guardianDeltaText}</td><td class="small">${certText}</td><td>${resolved}/${signals}</td><td>${status}${waitReason?`<div class="text-muted small mt-1">${waitReason}</div>`:''}</td></tr>`;
             }).join(''):'<tr><td colspan="10" class="text-muted text-center">Aún no hay especialistas que hayan superado el OOS Guard.</td></tr>';
         }
         const covBody=document.getElementById('v1-coverage-matrix-body');

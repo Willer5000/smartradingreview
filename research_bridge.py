@@ -174,6 +174,12 @@ def _compact_promotion(row):
     val = metrics.get('validation') or {}
     meta = row.get('meta') or {}
     scope = row.get('scope') or {}
+    # RC8 P0: StrategySpec/Card are part of the immutable Champion contract.
+    # Do not strip them at the Research→Main bridge; Analytics must display the
+    # exact parameters that were validated, never BOTH/ALL/{} fallbacks.
+    strategy_spec = meta.get('causal_strategy_spec') or {}
+    strategy_card = meta.get('strategy_card') or {}
+    strategy_id = meta.get('causal_strategy_id')
     return {
         'candidate_key': row.get('candidate_key'),
         'source_engine': row.get('source_engine'),
@@ -204,6 +210,13 @@ def _compact_promotion(row):
         'finalist_rank': meta.get('finalist_rank_selection_only'),
         'strategy_family': meta.get('causal_strategy_family') or meta.get('factory_family'),
         'walk_forward_positive_ratio': _num(meta.get('walk_forward_positive_ratio')),
+        'scope': scope,
+        'strategy_id': strategy_id,
+        'strategy_spec': strategy_spec,
+        'strategy_card': strategy_card,
+        'runtime_trackable': bool(meta.get('runtime_trackable') or (meta.get('runtime_contract') or {}).get('runtime_trackable')),
+        'dataset_fingerprint': meta.get('dataset_fingerprint'),
+        'causal_dataset_signature': meta.get('causal_dataset_signature'),
     }
 
 def _compact(force=False):
