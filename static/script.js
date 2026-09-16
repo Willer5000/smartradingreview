@@ -2853,7 +2853,7 @@ window.runCompleteAnalysis = function() {
     // aun así la conexión queda bloqueada, abortamos y entramos al polling
     // acotado. Spot conserva un margen mayor.
     const analysisAbortController = new AbortController();
-    const analysisHttpTimeoutMs = window.IS_FUTURES_PAGE ? 12000 : 60000;
+    const analysisHttpTimeoutMs = window.IS_FUTURES_PAGE ? 25000 : 60000;
     const analysisHttpTimeoutId = window.setTimeout(
         () => analysisAbortController.abort(),
         analysisHttpTimeoutMs
@@ -2965,8 +2965,8 @@ window.runCompleteAnalysis = function() {
                 const retryCount = Number(window.__FUTURES_ANALYSIS_BUSY_RETRIES__ || 0);
                 const elapsedMs = now - startedAt;
                 const retryAfterMs = Math.min(
-                    5000,
-                    Math.max(2500, Number(data.retry_after_ms || 3000))
+                    12000,
+                    Math.max(4000, Number(data.retry_after_ms || 6000))
                 );
 
                 if (data.partial && data.data?.decision) {
@@ -2990,7 +2990,7 @@ window.runCompleteAnalysis = function() {
                     `;
                 }
 
-                if (elapsedMs < 90000 && retryCount < 24) {
+                if (elapsedMs < 90000 && retryCount < 8) {
                     window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = retryCount + 1;
                     clearTimeout(window.__FUTURES_ANALYSIS_RETRY_TIMER__);
                     window.__FUTURES_ANALYSIS_RETRY_TIMER__ = window.setTimeout(() => {
@@ -3551,10 +3551,10 @@ window.runCompleteAnalysis = function() {
             ) {
                 error.busy = true;
                 error.serverData = {
-                    retry_after_ms: 1500,
+                    retry_after_ms: 6000,
                     timeout: true
                 };
-                error.message = 'El servidor está terminando una tarea de mercado.';
+                error.message = 'La infraestructura tardó más de 25 s; se conserva el estado y se reintentará sin duplicar análisis.';
             }
 
             // RC7: compatibilidad con un backend anterior que todavía pudiera
@@ -3597,15 +3597,12 @@ window.runCompleteAnalysis = function() {
                 const serverRetry = Number(
                     error?.serverData?.retry_after_ms || 1800
                 );
-                const retryAfterMs = Math.min(
-                    4000,
-                    Math.max(1200, serverRetry)
-                );
+                const retryAfterMs = Math.min(12000, Math.max(4000, serverRetry));
 
-                // 45 s / 18 polls is a hard ceiling. If the backend cannot
+                // RC8: backoff amplio ante 520/522; evitar tormenta de polls. If the backend cannot
                 // prepare the rich chart payload in that window, surface a
                 // normal retry button instead of keeping the page spinning.
-                if (elapsedMs < 45000 && retryCount < 18) {
+                if (elapsedMs < 90000 && retryCount < 8) {
                     window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = retryCount + 1;
 
                     const recommendationEl = document.getElementById(

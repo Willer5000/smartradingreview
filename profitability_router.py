@@ -159,12 +159,41 @@ def _evidence_summary(candidate: Dict[str, Any], shadow: Dict[str, Any] | None =
         "shadow_expectancy_r": _num((shadow or {}).get("expectancy_r")),
         "shadow_pf": _num((shadow or {}).get("profit_factor")),
         "shadow_updated_at": (shadow or {}).get("updated_at"),
+        "recent8_n": int((shadow or {}).get("recent8_n") or 0),
+        "recent8_expectancy_r": _num((shadow or {}).get("recent8_expectancy_r")),
+        "recent8_profit_factor": _num((shadow or {}).get("recent8_profit_factor")),
+        "recent8_trade_sharpe": _num((shadow or {}).get("recent8_trade_sharpe")),
+        "previous8_n": int((shadow or {}).get("previous8_n") or 0),
+        "previous8_expectancy_r": _num((shadow or {}).get("previous8_expectancy_r")),
+        "previous8_trade_sharpe": _num((shadow or {}).get("previous8_trade_sharpe")),
+        "current_loss_streak": int((shadow or {}).get("current_loss_streak") or 0),
+        "champion_degraded": bool(meta.get("champion_degraded")),
+        "alpha_decay_health": meta.get("alpha_decay_health") or {},
         "factory_family": meta.get("factory_family"),
         "factory_strategy_id": meta.get("factory_strategy_id"),
     }
 
 
 def _shadow_confirmation_state(summary: Dict[str, Any]) -> str:
+    if summary.get("champion_degraded"):
+        return "ALPHA_DECAY"
+    loss_streak=int(summary.get("current_loss_streak") or 0)
+    recent_n=int(summary.get("recent8_n") or 0)
+    recent_exp=summary.get("recent8_expectancy_r")
+    recent_pf=summary.get("recent8_profit_factor")
+    recent_sharpe=summary.get("recent8_trade_sharpe")
+    prev_n=int(summary.get("previous8_n") or 0)
+    prev_exp=summary.get("previous8_expectancy_r")
+    prev_sharpe=summary.get("previous8_trade_sharpe")
+    base_exp=summary.get("holdout_expectancy_r")
+    if loss_streak >= 8:
+        return "ALPHA_DECAY"
+    if recent_n >= 8 and recent_exp is not None and float(recent_exp) < 0:
+        recent_bad=((recent_pf is not None and float(recent_pf)<0.90) or (recent_sharpe is not None and float(recent_sharpe)<0.0))
+        trajectory_bad=(prev_n>=6 and ((recent_sharpe is not None and prev_sharpe is not None and float(recent_sharpe)<=float(prev_sharpe)-0.25) or (prev_exp is not None and float(recent_exp)<=float(prev_exp)-0.15)))
+        baseline_bad=(base_exp is not None and float(base_exp)>0 and float(recent_exp)<=min(0.0,float(base_exp)*0.25))
+        if recent_bad and (trajectory_bad or baseline_bad):
+            return "ALPHA_DECAY"
     target=max(1,int(summary.get("shadow_target") or 0) or 1)
     n=int(summary.get("shadow_resolved") or 0)
     exp=summary.get("shadow_expectancy_r")
@@ -227,7 +256,7 @@ def evaluate_profitability_route(result: Dict[str, Any], system_type: str = "fut
                     summary["veto_eligible"] = True
                     negatives.append(summary)
             elif stage in {"SHADOW_READY", "SHADOW_READY_FAST"}:
-                if summary.get("shadow_state") in {"DIVERGED","EARLY_DIVERGENCE"}:
+                if summary.get("shadow_state") in {"DIVERGED","EARLY_DIVERGENCE","ALPHA_DECAY"}:
                     diverged.append(summary)
                 else:
                     positives.append(summary)
@@ -242,13 +271,12 @@ def evaluate_profitability_route(result: Dict[str, Any], system_type: str = "fut
 
         if diverged:
             worst_live = sorted(diverged, key=lambda x: x.get("shadow_expectancy_r") if x.get("shadow_expectancy_r") is not None else -999)[0]
-            hard = str(worst_live.get("shadow_state")) == "DIVERGED"
+            hard = str(worst_live.get("shadow_state")) in {"DIVERGED","ALPHA_DECAY"}
             base.update(
-                state="SHADOW_DIVERGED_RETEST",
+                state=("ALPHA_DECAY_VETO" if worst_live.get("shadow_state") == "ALPHA_DECAY" else "SHADOW_DIVERGED_RETEST"),
                 block_new_signal=bool(hard),
                 reason=(
-                    "El edge histórico no está siendo confirmado por Shadow/live; "
-                    "la estrategia vuelve a rebacktest/Validation antes de recuperar apoyo."
+                    ("Alpha decay detectado en la secuencia live del Champion; se bloquea nueva ejecución de ese edge y vuelve a Research/Shadow." if worst_live.get("shadow_state") == "ALPHA_DECAY" else "El edge histórico no está siendo confirmado por Shadow/live; la estrategia vuelve a rebacktest/Validation antes de recuperar apoyo.")
                 ),
                 best_diverged=worst_live,
                 recycle_required=True,

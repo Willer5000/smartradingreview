@@ -4998,6 +4998,8 @@ def list_saved_signals(status_filter: Optional[List[str]] = None,
     db = _get_db()
     if db is None:
         return []
+    if hasattr(db, 'read_circuit_open') and db.read_circuit_open():
+        return []
     
     try:
         def _op():

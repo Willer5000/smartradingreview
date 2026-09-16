@@ -19,6 +19,8 @@
 import os
 import json
 import logging
+import time
+import threading
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any
 
@@ -94,6 +96,10 @@ class SupabaseClient:
         self.client = None
         self.enabled = False
         self._reconnect_lock = None  # Se inicializa perezosamente
+        self._transient_lock = threading.Lock()
+        self._transient_failures = 0
+        self._read_circuit_until = 0.0
+        self._preferences_cache = {}
         
         if not self.url or not self.key:
             print("⚠️ SUPABASE no configurado (URL o KEY vacíos)")
@@ -155,40 +161,62 @@ class SupabaseClient:
             'Errno 11',                          # código EAGAIN en Linux
             'BrokenPipeError',
             'OSError',
+            'JSON could not be generated',
+            'Connection timed out',
+            'Error code 522',
+            'code 522',
+            'HTTP 522',
+            '<!DOCTYPE html>',
+            'Cloudflare',
         )
         return any(m in msg for m in markers)
     
+    def _mark_transient_failure(self):
+        with self._transient_lock:
+            self._transient_failures += 1
+            if self._transient_failures >= 2:
+                self._read_circuit_until = time.monotonic() + 20.0
+
+    def _mark_transport_success(self):
+        with self._transient_lock:
+            self._transient_failures = 0
+            self._read_circuit_until = 0.0
+
+    def read_circuit_open(self) -> bool:
+        with self._transient_lock:
+            return time.monotonic() < self._read_circuit_until
+
     def _with_retry(self, operation, *args, **kwargs):
-        """
-        Ejecuta una operación de Supabase con reintento automático ante
-        errores de conexión (ConnectionTerminated, EAGAIN, etc).
-        
-        operation: callable que ejecuta la query Supabase.
-        Si falla con error de conexión, reconecta y reintenta 1 vez.
-        Si falla por otro motivo, propaga la excepción.
-        
-        v22.6: cambio de log level: si el retry TIENE ÉXITO, se registra a
-        nivel DEBUG (no polluye los logs de Render). Solo si el retry FALLA
-        se registra a WARNING para alertar al operador. Los EAGAIN transitorios
-        (que se resuelven al 2° intento) son normales cuando el pool HTTP/2
-        está saturado y no ameritan preocupar.
+        """Execute once + one bounded retry for transient transport failures.
+
+        RC8 recognizes Cloudflare/Supabase 520/522 HTML errors as transport
+        failures. Repeated failures open a short *read* circuit used by the
+        high-frequency optional readers, preventing an outage from becoming a
+        request storm. Writes are never silently skipped by this helper.
         """
         try:
-            return operation(*args, **kwargs)
+            result = operation(*args, **kwargs)
+            self._mark_transport_success()
+            return result
         except Exception as e:
             if not self._is_connection_error(e):
                 raise
+            self._mark_transient_failure()
             logger.debug(f"Error de conexión Supabase transitorio: {e}. Reconectando...")
             if not self._reconnect():
                 logger.warning(f"Error de conexión Supabase y no se pudo reconectar: {e}")
                 raise
-            # Reintento (una sola vez)
+            time.sleep(0.35)
             try:
-                return operation(*args, **kwargs)
+                result = operation(*args, **kwargs)
+                self._mark_transport_success()
+                return result
             except Exception as e2:
+                if self._is_connection_error(e2):
+                    self._mark_transient_failure()
                 logger.warning(f"Error de conexión Supabase persistió tras retry: {e2}")
                 raise
-    
+
     # ========================================================================
     # NORMALIZACIÓN DE ACCIONES
     # ========================================================================
@@ -1346,6 +1374,12 @@ class SupabaseClient:
         if not self.enabled:
             return dict(defaults)
 
+        cache_key = str(user_name or '').strip()
+        cached = self._preferences_cache.get(cache_key) or {}
+        if self.read_circuit_open():
+            value = cached.get('value')
+            return dict(value) if isinstance(value, dict) else dict(defaults)
+
         def _json_list(value):
             if isinstance(value, list):
                 return value
@@ -1423,7 +1457,7 @@ class SupabaseClient:
                 row.get('futures_scalping_timezone') or 'UTC'
             ).strip() or 'UTC'
 
-            return {
+            value = {
                 'spot_telegram_enabled': bool(
                     row.get('spot_telegram_enabled', True)
                 ),
@@ -1441,13 +1475,17 @@ class SupabaseClient:
                 'futures_scalping_weekdays': weekdays,
                 'futures_scalping_timezone': timezone_name
             }
+            self._preferences_cache[cache_key] = {'ts': time.monotonic(), 'value': dict(value)}
+            return value
 
         except Exception as e:
             logger.warning(
                 "get_user_preferences "
                 f"({user_name}): {e}"
             )
-            return dict(defaults)
+            stale = self._preferences_cache.get(cache_key) or {}
+            value = stale.get('value')
+            return dict(value) if isinstance(value, dict) else dict(defaults)
 
     def upsert_user_preferences(
         self,

@@ -41,18 +41,19 @@ function _futSignalSchedule(kind, callback, delayMs = 4000) {
     }
     const elapsed = now - window._futuresSignalsState[startedKey];
     const retries = Number(window._futuresSignalsState[retriesKey] || 0);
-    if (elapsed >= 30000 || retries >= 6) {
+    if (elapsed >= 90000 || retries >= 5) {
         clearTimeout(window._futuresSignalsState[timerKey]);
         window._futuresSignalsState[timerKey] = null;
         return false;
     }
     window._futuresSignalsState[retriesKey] = retries + 1;
     clearTimeout(window._futuresSignalsState[timerKey]);
-    window._futuresSignalsState[timerKey] = setTimeout(callback, delayMs);
+    const effectiveDelay = Math.min(20000, Math.max(delayMs, Math.round(delayMs * (1 + retries * 0.75))));
+    window._futuresSignalsState[timerKey] = setTimeout(callback, effectiveDelay);
     return true;
 }
 
-async function _futFetchJsonTimeout(url, timeoutMs = 10000) {
+async function _futFetchJsonTimeout(url, timeoutMs = 16000) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -918,7 +919,7 @@ window.updateActiveSignals = async function() {
 
         const {response, json} = await _futFetchJsonTimeout(
             '/api/futures/signals/active?min_confidence=55&_ts=' + Date.now(),
-            10000
+            16000
         );
 
         const elapsed = ((performance.now() - startedAt) / 1000).toFixed(1);
@@ -1286,12 +1287,13 @@ window.updateActiveSignals = async function() {
 
     } catch (err) {
 
-        console.error(
-            '❌ ACTIVE FETCH:',
-            err
-        );
+        if (err?.name === 'AbortError') {
+            console.warn('⏳ ACTIVE: Supabase/Render tardó más de 16s; se conserva el último snapshot y se reintenta con backoff.');
+        } else {
+            console.error('❌ ACTIVE FETCH:', err);
+        }
 
-        const scheduled = _futSignalSchedule('active', () => window.updateActiveSignals(), 5000);
+        const scheduled = _futSignalSchedule('active', () => window.updateActiveSignals(), 8000);
         if (!window.futuresActiveLoaded) {
             signalsList.innerHTML = `
                 <div class="list-group-item bg-dark text-warning text-center py-3">
@@ -1806,7 +1808,7 @@ window.updatePreviousSignals = async function() {
 
         const {response, json} = await _futFetchJsonTimeout(
             '/api/futures/signals/previous?min_confidence=55&_ts=' + Date.now(),
-            10000
+            16000
         );
 
         const elapsed = ((performance.now() - startedAt) / 1000).toFixed(1);
@@ -2201,12 +2203,13 @@ window.updatePreviousSignals = async function() {
 
     } catch (err) {
 
-        console.error(
-            '❌ PREVIOUS FETCH:',
-            err
-        );
+        if (err?.name === 'AbortError') {
+            console.warn('⏳ PREVIOUS: Supabase/Render tardó más de 16s; se conserva el último snapshot y se reintenta con backoff.');
+        } else {
+            console.error('❌ PREVIOUS FETCH:', err);
+        }
 
-        const scheduled = _futSignalSchedule('previous', () => window.updatePreviousSignals(), 5000);
+        const scheduled = _futSignalSchedule('previous', () => window.updatePreviousSignals(), 8000);
         if (!window.futuresPrevLoaded) {
             signalsList.innerHTML = `
                 <div class="list-group-item bg-dark text-warning text-center py-3">

@@ -871,6 +871,9 @@ def _count_usage(
 
         return -1
 
+    if hasattr(db, "read_circuit_open") and db.read_circuit_open():
+        return -1
+
     try:
 
         def _op():

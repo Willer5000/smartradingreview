@@ -181,6 +181,29 @@ def _match(p: Dict[str, Any], symbol: str, timeframe: str, direction: str, syste
 
 
 def _shadow_state(row: Dict[str, Any]) -> str:
+    # RC8 Alpha Decay Shield: a Champion can lose continuity before the normal
+    # Shadow target when its exact live sequence shows structural deterioration.
+    loss_streak = int(row.get("current_loss_streak") or 0)
+    recent_n = int(row.get("recent8_n") or 0)
+    recent_exp = _num(row.get("recent8_expectancy_r"))
+    recent_pf = _num(row.get("recent8_profit_factor"))
+    recent_sharpe = _num(row.get("recent8_trade_sharpe"))
+    previous_n = int(row.get("previous8_n") or 0)
+    previous_exp = _num(row.get("previous8_expectancy_r"))
+    previous_sharpe = _num(row.get("previous8_trade_sharpe"))
+    baseline_exp = _num(row.get("oos_exp_r"))
+    if loss_streak >= 8:
+        return "ALPHA_DECAY"
+    if recent_n >= 8 and recent_exp is not None and recent_exp < 0:
+        recent_bad = ((recent_pf is not None and recent_pf < 0.90) or
+                      (recent_sharpe is not None and recent_sharpe < 0.0))
+        trajectory_bad = bool(previous_n >= 6 and (
+            (recent_sharpe is not None and previous_sharpe is not None and recent_sharpe <= previous_sharpe - 0.25)
+            or (recent_exp is not None and previous_exp is not None and recent_exp <= previous_exp - 0.15)
+        ))
+        baseline_bad = bool(baseline_exp is not None and baseline_exp > 0 and recent_exp <= min(0.0, baseline_exp * 0.25))
+        if recent_bad and (trajectory_bad or baseline_bad):
+            return "ALPHA_DECAY"
     target = max(1, int(row.get("shadow_target") or 0) or 1)
     n = int(row.get("shadow_n") or 0)
     exp = _num(row.get("shadow_exp_r"))
@@ -252,6 +275,14 @@ def _summary(p: Dict[str, Any], shadow_map: Dict[str, Dict[str, Any]]) -> Dict[s
         "shadow_exp_r": _num(live.get("expectancy_r")),
         "shadow_pf": _num(live.get("profit_factor")),
         "shadow_updated_at": live.get("updated_at"),
+        "recent8_n": int(live.get("recent8_n") or 0),
+        "recent8_expectancy_r": _num(live.get("recent8_expectancy_r")),
+        "recent8_profit_factor": _num(live.get("recent8_profit_factor")),
+        "recent8_trade_sharpe": _num(live.get("recent8_trade_sharpe")),
+        "previous8_n": int(live.get("previous8_n") or 0),
+        "previous8_expectancy_r": _num(live.get("previous8_expectancy_r")),
+        "previous8_trade_sharpe": _num(live.get("previous8_trade_sharpe")),
+        "current_loss_streak": int(live.get("current_loss_streak") or 0),
         "coverage_cell": (p.get("meta") or {}).get("coverage_cell") or {},
         "coverage_cell_id": (p.get("meta") or {}).get("coverage_cell_id"),
         "strategy_family": (p.get("meta") or {}).get("causal_strategy_family"),
@@ -272,10 +303,12 @@ def _summary(p: Dict[str, Any], shadow_map: Dict[str, Dict[str, Any]]) -> Dict[s
         "champion_role": (p.get("meta") or {}).get("champion_role"),
         "champion_lineage_key": (p.get("meta") or {}).get("champion_lineage_key"),
         "champion_since": (p.get("meta") or {}).get("champion_since"),
+        "champion_degraded": bool((p.get("meta") or {}).get("champion_degraded")),
+        "alpha_decay_health": (p.get("meta") or {}).get("alpha_decay_health") or {},
         "updated_at": p.get("updated_at"),
     }
     out["shadow_state"] = _shadow_state(out)
-    out["recycle_required"] = out["shadow_state"] in {"DIVERGED", "EARLY_DIVERGENCE"}
+    out["recycle_required"] = out["shadow_state"] in {"DIVERGED", "EARLY_DIVERGENCE", "ALPHA_DECAY"} or out.get("champion_degraded", False)
     if int(out.get("shadow_signals_n") or 0) > 0:
         out["shadow_diagnostic"] = "OBSERVING_LIVE"
         out["shadow_wait_reason_es"] = "Shadow ya observó al menos un setup live compatible con este Champion."
@@ -317,13 +350,15 @@ def _stage_priority(stage: Any) -> int:
 def _best_per_cell(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """One persistent Champion per cell; Challengers cannot silently unfill it."""
     rows=list(rows or [])
-    demoted_roots={
-        str(r.get("original_candidate_key") or "")
-        for r in rows
-        if str(r.get("experiment") or "") in {"CAUSAL_REGISTRY_RETEST","CAUSAL_SHADOW_RECYCLE"}
-        and str(r.get("stage") or "").upper()=="REJECTED_OOS"
-        and str(r.get("original_candidate_key") or "")
-    }
+    demoted_roots=set()
+    for r in rows:
+        root=str(r.get("champion_lineage_key") or r.get("original_candidate_key") or r.get("candidate_key") or "")
+        if r.get("champion_degraded") and root:
+            demoted_roots.add(root)
+        elif (str(r.get("experiment") or "") in {"CAUSAL_REGISTRY_RETEST","CAUSAL_SHADOW_RECYCLE"}
+              and str(r.get("stage") or "").upper()=="REJECTED_OOS"
+              and str(r.get("original_candidate_key") or "")):
+            demoted_roots.add(str(r.get("original_candidate_key")))
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for row in rows:
         cid=str(row.get("coverage_cell_id") or "")
@@ -381,7 +416,7 @@ def edge_prior(symbol: str, timeframe: str, direction: str, system_type: str, re
         base["candidates"] = matches[:6]
         positives = [x for x in matches if str(x.get("stage")) in _POSITIVE]
         negatives = [x for x in matches if str(x.get("stage")) == "REJECTED_OOS"]
-        diverged = [x for x in positives if x.get("shadow_state") in {"DIVERGED", "EARLY_DIVERGENCE"}]
+        diverged = [x for x in positives if x.get("shadow_state") in {"DIVERGED", "EARLY_DIVERGENCE", "ALPHA_DECAY"}]
         confirmed = [x for x in positives if x.get("shadow_state") == "CONFIRMED"]
         pending = [x for x in positives if x.get("shadow_state") not in {"DIVERGED", "EARLY_DIVERGENCE", "CONFIRMED"}]
 
@@ -397,10 +432,10 @@ def edge_prior(symbol: str, timeframe: str, direction: str, system_type: str, re
             base.update(
                 state="SHADOW_DIVERGED",
                 support_score=0.0,
-                penalty_score=max(float(base.get("penalty_score") or 0.0), 24.0 if worst_live.get("shadow_state") == "DIVERGED" else 14.0),
+                penalty_score=max(float(base.get("penalty_score") or 0.0), 32.0 if worst_live.get("shadow_state") == "ALPHA_DECAY" else (24.0 if worst_live.get("shadow_state") == "DIVERGED" else 14.0)),
                 best_positive=worst_live,
                 recycle_required=True,
-                recycle_reason="Shadow/live no confirmó el edge histórico; volver a backtest/Validation.",
+                recycle_reason=("Alpha decay detectado: retirar continuidad y volver a Research/Shadow." if worst_live.get("shadow_state") == "ALPHA_DECAY" else "Shadow/live no confirmó el edge histórico; volver a backtest/Validation."),
             )
             return base
         source = confirmed or pending
