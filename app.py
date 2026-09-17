@@ -5508,15 +5508,15 @@ class TradingExpertSystem:
                 'type': 'tesis_accion', 'order': 1.5
             },
             'tesis_no_operar': {
-                'template': 'No existe una operación ejecutable con calidad suficiente: uno o más filtros de estructura, confirmación, riesgo o ejecución impiden publicar una entrada responsable. ',
+                'template': '',
                 'type': 'tesis_accion', 'order': 1.5
             },
             'tesis_esperar': {
-                'template': 'Existe una hipótesis de mercado, pero todavía no una entrada ejecutable. Se espera la confirmación que falta —por ejemplo cierre, retest, estructura, volumen o alineación multitemporal— antes de asumir riesgo. ',
+                'template': '',
                 'type': 'tesis_accion', 'order': 1.5
             },
             'tesis_caution': {
-                'template': 'Hay elementos operables, pero el riesgo contextual o de ejecución es elevado. La señal requiere menor exposición o confirmación adicional y no debe tratarse como una entrada de convicción normal. ',
+                'template': '',
                 'type': 'tesis_accion', 'order': 1.5
             },
             
@@ -6721,23 +6721,23 @@ class TradingExpertSystem:
                 'order': 32
             },
             'recomendacion_no_operar': {
-                'template': 'Se recomienda NO OPERAR: los filtros activos no permiten publicar una entrada con calidad y riesgo aceptables. ',
+                'template': '',
                 'type': 'recomendacion',
                 'order': 32
             },
             # Alias legacy; nuevas decisiones usan recomendacion_no_operar.
             'recomendacion_': {
-                'template': 'Se recomienda NO OPERAR: los filtros activos no permiten publicar una entrada con calidad y riesgo aceptables. ',
+                'template': '',
                 'type': 'recomendacion',
                 'order': 32
             },
             'recomendacion_esperar': {
-                'template': 'Se recomienda ESPERAR: todavía falta una confirmación suficiente para convertir la hipótesis en una entrada ejecutable. ',
+                'template': '',
                 'type': 'recomendacion',
                 'order': 32
             },
             'recomendacion_caution': {
-                'template': 'Se recomienda PRECAUCIÓN: existe una hipótesis operable, pero el riesgo contextual o de ejecución exige confirmación adicional y exposición contenida. ',
+                'template': '',
                 'type': 'recomendacion',
                 'order': 32
             },
@@ -7385,16 +7385,19 @@ class TradingExpertSystem:
                     if 'indecision' in condiciones_activas:
                         razones.append("múltiples velas de indecisión")
                     
-                    razon_texto = ", ".join(razones[:3]) if razones else "no existe confluencia suficiente entre estructura, confirmación y ejecución"
-                    if decision == 'ESPERAR':
-                        plantilla_generica = {'template': f'La entrada queda pendiente porque {razon_texto}. Se recomienda ESPERAR una confirmación verificable antes de ejecutar. '}
-                        generic_id = 'generica_esperar'
-                    elif decision == 'CAUTION':
-                        plantilla_generica = {'template': f'La operación exige PRECAUCIÓN porque {razon_texto}. Mantener exposición contenida y exigir confirmación adicional antes de ejecutar. '}
-                        generic_id = 'generica_caution'
-                    else:
-                        plantilla_generica = {'template': f'NO OPERAR: {razon_texto}. Los mínimos de calidad no justifican una entrada ejecutable en este momento. '}
-                        generic_id = 'generica_no_operar'
+                    from reason_presenter import join_public_decision_evidence
+                    evidencia_publica = join_public_decision_evidence(
+                        decision, trend=trend, momentum=momentum, volatility=volatility,
+                        volume=volume, structure=structure, correlation=correlation,
+                        market_hours=market_hours, confirmation=confirmation,
+                        sentiment=sentiment, liquidation=liquidation, limit=4,
+                    )
+                    plantilla_generica = {'template': evidencia_publica + (' ' if evidencia_publica else '')}
+                    generic_id = (
+                        'generica_esperar' if decision == 'ESPERAR' else
+                        'generica_caution' if decision == 'CAUTION' else
+                        'generica_no_operar'
+                    )
                     
                     plantillas_seleccionadas.append({
                         'plantilla': plantilla_generica,
@@ -7790,21 +7793,10 @@ class TradingExpertSystem:
                         })
             else:
                 # Fallback genérico
-                if decision == 'NO_OPERAR':
-                    plantillas_seleccionadas.append({
-                        'plantilla': {'template': 'Se recomienda NO OPERAR porque la evidencia disponible no supera los mínimos de estructura, ejecución y riesgo. '},
-                        'order': 98, 'categoria': 'recomendacion'
-                    })
-                elif decision == 'ESPERAR':
-                    plantillas_seleccionadas.append({
-                        'plantilla': {'template': 'Se recomienda ESPERAR: la hipótesis todavía necesita confirmación antes de convertirse en Entry ejecutable. '},
-                        'order': 98, 'categoria': 'recomendacion'
-                    })
-                elif decision == 'CAUTION':
-                    plantillas_seleccionadas.append({
-                        'plantilla': {'template': 'Se recomienda PRECAUCIÓN: el riesgo es superior al normal y exige confirmación adicional o menor exposición. '},
-                        'order': 98, 'categoria': 'recomendacion'
-                    })            
+                if decision in {'NO_OPERAR', 'ESPERAR', 'CAUTION'}:
+                    # RC9: no añadir una conclusión genérica. La evidencia técnica
+                    # concreta ya explica por qué la acción queda bloqueada/pendiente.
+                    pass
             # ============ 8. CIERRE ============
             plantillas_seleccionadas.append({
                 'plantilla': {'template': '\n\n{timestamp} Hora Bolivia'},
@@ -18929,6 +18921,11 @@ class TradingExpertSystem:
                 )
 
                 if contingency_playbook.get('active'):
+                    # RC9: la arquitectura interna sigue oculta. Para el usuario sólo
+                    # se añaden observaciones concretas de mercado ya calculadas.
+                    for _public_item in (contingency_playbook.get('public_evidence') or []):
+                        if _public_item and _public_item not in razones_consenso:
+                            razones_consenso.append(_public_item)
                     # RC8.3 FINAL — el playbook es metadato operativo/auditable.
                     # NO se añade su código/nombre a estrategias_consenso ni a las
                     # justificaciones públicas. La recomendación debe explicar la
@@ -18937,12 +18934,9 @@ class TradingExpertSystem:
                     effective_action = str(contingency_playbook.get('effective_action') or accion_consenso).upper()
                     if effective_action != str(accion_consenso or '').upper():
                         from reason_presenter import public_reason
-                        razones_consenso.append(
-                            public_reason(
-                                contingency_playbook.get('downgrade_reason'),
-                                fallback='La operación debe esperar una confirmación técnica adicional antes de ejecutarse.'
-                            )
-                        )
+                        _downgrade_public = public_reason(contingency_playbook.get('downgrade_reason'))
+                        if _downgrade_public and not (contingency_playbook.get('public_evidence') or []):
+                            razones_consenso.append(_downgrade_public)
                         accion_consenso = effective_action
                     # No validated alpha => confidence cannot look like a proven Champion.
                     try:
@@ -19632,11 +19626,16 @@ class TradingExpertSystem:
                     text = public_reason(reason)
                     if text and text not in fallback_reasons:
                         fallback_reasons.append(text)
-                fallback_text = (
-                    ' '.join(fallback_reasons[:4])
-                    if fallback_reasons
-                    else 'La entrada no reúne confirmación técnica suficiente entre tendencia, momentum, volatilidad, volumen y estructura.'
-                )
+                if fallback_reasons:
+                    fallback_text = ' '.join(fallback_reasons[:4])
+                else:
+                    from reason_presenter import join_public_decision_evidence
+                    fallback_text = join_public_decision_evidence(
+                        accion_consenso, trend=trend, momentum=momentum, volatility=volatility,
+                        volume=volume, structure=structure, correlation=correlation,
+                        market_hours=market_hours, confirmation=confirmation,
+                        sentiment=sentiment, liquidation=liquidation_data, limit=4,
+                    )
 
                 action_text = (
                     str(accion_consenso)
@@ -19648,8 +19647,7 @@ class TradingExpertSystem:
                     f"{symbol.replace('-', '/')} "
                     f"en {timeframe}. "
                     f"{fallback_text} "
-                    f"Recomendación del comité: "
-                    f"{action_text}."
+                    f"Decisión final: {action_text}."
                 )
             
             # ============ DATAFRAME PARA GRÁFICOS ============
@@ -35082,9 +35080,113 @@ def _save_analytics_quality_snapshot(filters, data):
         return False
 
 
+
+def _rc9_system_info_widget_html():
+    """Lightweight, responsive help center for normal trading users."""
+    return r"""
+<style id="rc9-system-info-style">
+#rc9-info-button{position:fixed;right:18px;bottom:18px;z-index:1085;border:1px solid rgba(255,215,0,.5);background:#111820;color:#f5d76e;border-radius:999px;padding:10px 14px;font-weight:700;box-shadow:0 8px 28px rgba(0,0,0,.38);font-size:.92rem}
+#rc9-info-button:hover{background:#17212b;color:#fff}
+#rc9-info-layer{display:none;position:fixed;inset:0;z-index:1090;background:rgba(3,7,12,.78);backdrop-filter:blur(4px);padding:18px;overflow:auto}
+#rc9-info-layer.open{display:block}
+.rc9-info-panel{max-width:920px;margin:24px auto;background:#0f151c;border:1px solid rgba(255,255,255,.11);border-radius:18px;box-shadow:0 24px 70px rgba(0,0,0,.55);overflow:hidden;color:#e9eef4}
+.rc9-info-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:20px 22px;border-bottom:1px solid rgba(255,255,255,.09);background:linear-gradient(135deg,#131d27,#0c1218)}
+.rc9-info-title{font-size:1.15rem;font-weight:800;margin:0}.rc9-info-sub{font-size:.86rem;color:#9ba8b5;margin-top:4px}
+.rc9-info-close{border:0;background:transparent;color:#c7d0da;font-size:1.35rem;padding:6px 10px;border-radius:8px}.rc9-info-close:hover{background:rgba(255,255,255,.07)}
+.rc9-info-tabs{display:flex;gap:6px;overflow-x:auto;padding:12px 16px;border-bottom:1px solid rgba(255,255,255,.08);background:#0b1016}
+.rc9-info-tab{white-space:nowrap;border:1px solid rgba(255,255,255,.1);background:#111820;color:#aeb8c3;border-radius:999px;padding:8px 12px;font-size:.84rem}.rc9-info-tab.active{border-color:rgba(255,215,0,.55);color:#f4d76f;background:#1a2026}
+.rc9-info-body{padding:20px 22px}.rc9-info-section{display:none}.rc9-info-section.active{display:block}
+.rc9-info-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.rc9-info-card{background:#121a22;border:1px solid rgba(255,255,255,.08);border-radius:13px;padding:14px}.rc9-info-card h4{font-size:.96rem;margin:0 0 7px;color:#fff}.rc9-info-card p,.rc9-info-card li{font-size:.88rem;line-height:1.55;color:#b8c2cc;margin-bottom:6px}.rc9-info-card ul{padding-left:18px;margin-bottom:0}
+.rc9-info-badge{display:inline-block;padding:3px 8px;border-radius:999px;background:#18232d;border:1px solid rgba(255,255,255,.08);font-size:.76rem;color:#dce4eb;margin:2px 3px 2px 0}
+.rc9-info-note{border-left:3px solid #f2c94c;background:rgba(242,201,76,.07);padding:12px 14px;border-radius:9px;font-size:.88rem;color:#d8dfe6}
+.rc9-info-details{border:1px solid rgba(255,255,255,.08);border-radius:11px;background:#111820;margin-bottom:8px}.rc9-info-details summary{cursor:pointer;padding:12px 14px;font-weight:700;font-size:.9rem;color:#f1f4f7}.rc9-info-details div{padding:0 14px 13px;color:#b6c0ca;font-size:.86rem;line-height:1.55}
+@media(max-width:720px){#rc9-info-layer{padding:8px}.rc9-info-panel{margin:8px auto;border-radius:14px}.rc9-info-head,.rc9-info-body{padding:16px}.rc9-info-grid{grid-template-columns:1fr}#rc9-info-button{right:12px;bottom:12px;padding:9px 12px}.rc9-info-tabs{padding:10px 12px}}
+</style>
+<button id="rc9-info-button" type="button" aria-label="Abrir información del sistema"><i class="fas fa-circle-info me-1"></i> Información</button>
+<div id="rc9-info-layer" role="dialog" aria-modal="true" aria-labelledby="rc9-info-title">
+  <div class="rc9-info-panel">
+    <div class="rc9-info-head">
+      <div><h3 class="rc9-info-title" id="rc9-info-title">Guía del sistema</h3><div class="rc9-info-sub">Qué mira, cómo leerlo y cómo usar cada señal sin sobrecargar la pantalla.</div></div>
+      <button class="rc9-info-close" type="button" aria-label="Cerrar">✕</button>
+    </div>
+    <div class="rc9-info-tabs" role="tablist">
+      <button class="rc9-info-tab active" data-target="inicio">Inicio</button>
+      <button class="rc9-info-tab" data-target="uso">Cómo usarlo</button>
+      <button class="rc9-info-tab" data-target="senales">Señales</button>
+      <button class="rc9-info-tab" data-target="indicadores">Indicadores</button>
+      <button class="rc9-info-tab" data-target="riesgo">Riesgo</button>
+    </div>
+    <div class="rc9-info-body">
+      <section class="rc9-info-section active" data-section="inicio">
+        <div class="rc9-info-grid">
+          <div class="rc9-info-card"><h4>Qué hace</h4><p>Combina tendencia, momentum, volatilidad, volumen, estructura, liquidez y contexto para decidir si existe una oportunidad y en qué dirección.</p></div>
+          <div class="rc9-info-card"><h4>Qué no hace</h4><p>No obliga una operación. Cuando el mercado no ofrece una entrada clara puede indicar <b>Esperar</b>, <b>Precaución</b> o <b>No operar</b>.</p></div>
+          <div class="rc9-info-card"><h4>Spot</h4><p>Busca acumular y rotar entre BTC, PAXG y USDT preservando reservas y evitando ventas o compras sin ventaja técnica.</p></div>
+          <div class="rc9-info-card"><h4>Futuros</h4><p>Busca entradas precisas con invalidación clara, Stop Loss defendible y Take Profit alcanzable. La prioridad es la calidad de la operación, no la cantidad de señales.</p></div>
+        </div>
+        <div class="rc9-info-note mt-3">Una señal es una lectura técnica, no una garantía. Antes de operar revisa la justificación, Entry, Stop Loss, Take Profit y el riesgo que estás dispuesto a asumir.</div>
+      </section>
+      <section class="rc9-info-section" data-section="uso">
+        <div class="rc9-info-grid">
+          <div class="rc9-info-card"><h4>1. Elige mercado y par</h4><p>Usa Spot para acumulación/rotación. Usa Futuros para operaciones LONG o SHORT.</p></div>
+          <div class="rc9-info-card"><h4>2. Elige temporalidad</h4><p>Temporalidades bajas reaccionan más rápido y tienen más ruido. Temporalidades altas filtran mejor el contexto, pero generan menos oportunidades.</p></div>
+          <div class="rc9-info-card"><h4>3. Lee la justificación</h4><p>La recomendación debe explicar con datos concretos qué apoya la acción y qué la frena. Evita tomar una decisión sólo por el nombre de la señal.</p></div>
+          <div class="rc9-info-card"><h4>4. Revisa niveles</h4><p>En Futuros, Entry, Stop Loss y Take Profit deben formar una operación coherente. Si falta una confirmación, el sistema puede pedir esperar.</p></div>
+        </div>
+      </section>
+      <section class="rc9-info-section" data-section="senales">
+        <div class="rc9-info-grid">
+          <div class="rc9-info-card"><h4>🟢 Compra Spot</h4><p>Aumentar exposición al activo sin abrir una posición apalancada.</p></div>
+          <div class="rc9-info-card"><h4>🔴 Venta Spot</h4><p>Reducir o rotar una tenencia. No equivale a ganar con una caída como un SHORT.</p></div>
+          <div class="rc9-info-card"><h4>📈 LONG</h4><p>Operación de Futuros a favor de una subida, con niveles de entrada, invalidación y objetivo.</p></div>
+          <div class="rc9-info-card"><h4>📉 SHORT</h4><p>Operación de Futuros a favor de una caída, con niveles de entrada, invalidación y objetivo.</p></div>
+          <div class="rc9-info-card"><h4>⏳ Esperar</h4><p>Existe una idea posible, pero falta una condición concreta como cierre, retest, volumen o alineación de estructura.</p></div>
+          <div class="rc9-info-card"><h4>⚠️ Precaución</h4><p>La idea existe, pero la volatilidad, liquidez, contexto o ubicación del precio eleva el riesgo.</p></div>
+          <div class="rc9-info-card"><h4>⏸️ No operar</h4><p>El mercado actual no permite definir una operación responsable. La recomendación debe explicar exactamente por qué.</p></div>
+        </div>
+      </section>
+      <section class="rc9-info-section" data-section="indicadores">
+        <details class="rc9-info-details" open><summary>Tendencia</summary><div><span class="rc9-info-badge">EMA / SMA</span><span class="rc9-info-badge">ADX / DMI</span><span class="rc9-info-badge">Supertrend</span><span class="rc9-info-badge">Ichimoku</span><span class="rc9-info-badge">Parabolic SAR</span><br><b>EMA/SMA</b> ayudan a ver dirección y zonas de retroceso. <b>ADX</b> mide fuerza de tendencia; DMI ayuda a ver qué lado domina. Supertrend, Ichimoku y SAR aportan confirmaciones adicionales.</div></details>
+        <details class="rc9-info-details"><summary>Momentum</summary><div><span class="rc9-info-badge">RSI</span><span class="rc9-info-badge">MACD</span><span class="rc9-info-badge">Estocástico</span><span class="rc9-info-badge">CCI</span><br>Indican si el movimiento gana o pierde impulso. Las divergencias pueden advertir agotamiento o continuación, pero se interpretan junto con estructura y volumen.</div></details>
+        <details class="rc9-info-details"><summary>Volatilidad</summary><div><span class="rc9-info-badge">ATR</span><span class="rc9-info-badge">Bandas de Bollinger</span><span class="rc9-info-badge">Squeeze</span><br><b>ATR</b> estima cuánto se mueve normalmente el precio. Bollinger ayuda a detectar expansión, compresión y sobreextensión. Una compresión suele exigir confirmación antes de asumir dirección.</div></details>
+        <details class="rc9-info-details"><summary>Volumen y flujo</summary><div><span class="rc9-info-badge">Volumen relativo</span><span class="rc9-info-badge">MFI</span><span class="rc9-info-badge">OBV</span><span class="rc9-info-badge">VWAP</span><br>Sirven para comprobar si el movimiento tiene participación real y si el precio está negociando cerca o lejos de zonas de valor.</div></details>
+        <details class="rc9-info-details"><summary>Estructura y liquidez</summary><div><span class="rc9-info-badge">Soporte / Resistencia</span><span class="rc9-info-badge">Order Blocks</span><span class="rc9-info-badge">FVG</span><span class="rc9-info-badge">Barridos de liquidez</span><span class="rc9-info-badge">Perfil de volumen</span><br>Ayudan a localizar zonas donde una entrada puede defenderse, dónde una tesis queda invalidada y dónde existe un objetivo razonable.</div></details>
+        <details class="rc9-info-details"><summary>Contexto</summary><div><span class="rc9-info-badge">Sesión</span><span class="rc9-info-badge">Correlación</span><span class="rc9-info-badge">Sentimiento</span><span class="rc9-info-badge">Macro</span><span class="rc9-info-badge">Liquidaciones</span><br>El sistema también considera el entorno. Una buena señal técnica puede requerir más cautela si la liquidez es baja, la volatilidad es extrema o existe un evento de riesgo.</div></details>
+      </section>
+      <section class="rc9-info-section" data-section="riesgo">
+        <div class="rc9-info-grid">
+          <div class="rc9-info-card"><h4>Stop Loss</h4><p>Debe quedar detrás de una invalidación técnica, no en un punto elegido sólo por porcentaje.</p></div>
+          <div class="rc9-info-card"><h4>Take Profit</h4><p>Debe apuntar a una zona alcanzable: resistencia, soporte, liquidez o nivel estructural relevante.</p></div>
+          <div class="rc9-info-card"><h4>Apalancamiento</h4><p>No convierte una mala operación en buena. Primero debe existir una entrada de calidad y un riesgo controlado.</p></div>
+          <div class="rc9-info-card"><h4>Cuándo no entrar</h4><p>Si la dirección es débil, el precio sigue dentro de un rango, el volumen no confirma o el Stop Loss quedaría expuesto al ruido, esperar puede ser la mejor decisión.</p></div>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+<script id="rc9-system-info-script">
+(function(){
+  if(window.__RC9_SYSTEM_INFO__) return; window.__RC9_SYSTEM_INFO__=true;
+  function init(){
+    const btn=document.getElementById('rc9-info-button'), layer=document.getElementById('rc9-info-layer');
+    if(!btn||!layer) return; const close=layer.querySelector('.rc9-info-close');
+    const setOpen=(v)=>{layer.classList.toggle('open',!!v);document.body.style.overflow=v?'hidden':'';};
+    btn.addEventListener('click',()=>setOpen(true)); close.addEventListener('click',()=>setOpen(false));
+    layer.addEventListener('click',(e)=>{if(e.target===layer)setOpen(false)});
+    document.addEventListener('keydown',(e)=>{if(e.key==='Escape'&&layer.classList.contains('open'))setOpen(false)});
+    layer.querySelectorAll('.rc9-info-tab').forEach(tab=>tab.addEventListener('click',()=>{
+      layer.querySelectorAll('.rc9-info-tab').forEach(x=>x.classList.remove('active')); tab.classList.add('active');
+      layer.querySelectorAll('.rc9-info-section').forEach(x=>x.classList.toggle('active',x.dataset.section===tab.dataset.target));
+    }));
+  }
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+})();
+</script>
+"""
+
 @app.after_request
 def _memory_cleanup_after_analytics(response):
-    """Release transient Analytics objects before the next request."""
+    """Release transient objects and inject the lightweight RC9 user guide."""
     try:
         if request.path.startswith('/api/analytics/'):
             rss = _process_rss_mb()
@@ -35092,6 +35194,21 @@ def _memory_cleanup_after_analytics(response):
                 _trim_process_heap()
     except Exception:
         pass
+
+    # RC9 frontend: one lightweight help button shared by Spot and Futures.
+    # It is injected server-side so no existing template/JS file has to be
+    # replaced, reducing regression risk and the number of physical commits.
+    try:
+        if request.path in {'/', '/futures'} and response.status_code == 200:
+            ctype = str(response.headers.get('Content-Type') or '').lower()
+            if 'text/html' in ctype:
+                html = response.get_data(as_text=True)
+                if 'id="rc9-info-button"' not in html and '</body>' in html:
+                    html = html.replace('</body>', _rc9_system_info_widget_html() + '</body>', 1)
+                    response.set_data(html)
+                    response.headers.pop('Content-Length', None)
+    except Exception as _rc9_info_error:
+        print(f"⚠️ RC9 info widget omitido: {_rc9_info_error}")
     return response
 
 

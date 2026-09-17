@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-VERSION = "RC8_2_CONTINGENCY_PLAYBOOK_V1"
+VERSION = "RC9_FINAL_CONTINGENCY_PLAYBOOK_V1"
 _DIRECTIONAL = {"LONG", "SHORT", "COMPRA_SPOT", "VENTA_SPOT"}
 _NEGATIVE_RESEARCH = {"NEGATIVE_OOS", "SHADOW_DIVERGED", "ALPHA_DECAY"}
 _POSITIVE_RESEARCH = {"OOS_VALIDATED", "OOS_PLUS_SHADOW"}
@@ -318,7 +318,7 @@ def build_contingency_playbook(
     target_action = _action(selected_dir, market)
     try:
         from default_strategy_bank import select_strategy
-        bank_pick = select_strategy(target_action, regime, vol_state, groups, symbol=symbol)
+        bank_pick = select_strategy(target_action, regime, vol_state, groups, symbol=symbol, timeframe=timeframe, market=market)
         strategy = str(bank_pick.get("id") or "NO_PLAYBOOK")
         setup_family = str(bank_pick.get("family") or "NONE")
         strategy_quality = float(bank_pick.get("quality") or 0.0)
@@ -396,6 +396,27 @@ def build_contingency_playbook(
     rotation_signal = groups["rotation"].get("signal") or "NEUTRAL"
     intent = _portfolio_intent(market, symbol, selected_dir, rotation_signal)
 
+    # RC9: public explanation is built from observable market values, never from
+    # internal gate/role names.  Internal gates remain in this payload for audit.
+    try:
+        from reason_presenter import build_public_decision_evidence
+        public_evidence = build_public_decision_evidence(
+            effective_action,
+            trend=groups.get("trend"),
+            momentum=groups.get("momentum"),
+            volatility=groups.get("volatility"),
+            volume=groups.get("volume_flow"),
+            structure=groups.get("structure_liquidity"),
+            correlation=groups.get("rotation"),
+            market_hours=groups.get("market_time"),
+            confirmation=groups.get("confirmation"),
+            sentiment=groups.get("sentiment"),
+            liquidation=groups.get("liquidations"),
+            limit=4,
+        )
+    except Exception:
+        public_evidence = []
+
     return {
         "version": VERSION,
         "authority": "CONTINGENCY_PLAYBOOK_NOT_VALIDATED_ALPHA",
@@ -427,6 +448,7 @@ def build_contingency_playbook(
         "total_gates": required,
         "executable_contingency": bool(executable_contingency),
         "downgrade_reason": downgrade_reason,
+        "public_evidence": public_evidence,
         "vote_support": vote_support,
         "indicator_groups": groups,
         "direction_scores": {"long": round(long_score, 3), "short": round(short_score, 3), "reasons": score_reasons},
