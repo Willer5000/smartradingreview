@@ -322,13 +322,18 @@ def _technical_evidence(action: str, trend: Dict[str,Any], momentum: Dict[str,An
             txt += f"; EMA 50/200 están en {ema50:.2f} / {ema200:.2f}"
         _append_unique(out,txt)
 
+    has_rsi = any(k in m_ind for k in ('rsi','rsi_14')) or ('rsi' in momentum)
+    has_macd = any(k in m_ind for k in ('macd_histogram','macd_hist','histogram'))
+    has_stoch = any(k in m_ind for k in ('stoch_k','stochastic_k'))
     rsi=_f(_pick(m_ind,'rsi','rsi_14',default=_pick(momentum,'rsi')),50)
     macd=_f(_pick(m_ind,'macd_histogram','macd_hist','histogram'),0)
     stoch=_f(_pick(m_ind,'stoch_k','stochastic_k'),50)
-    mom_bits=[f"RSI {rsi:.1f}"]
-    if abs(macd)>1e-12: mom_bits.append(f"histograma MACD {macd:.3f}")
-    if stoch!=50: mom_bits.append(f"Estocástico %K {stoch:.1f}")
-    _append_unique(out,"El momentum se lee con " + ', '.join(mom_bits) + ("; el impulso es neutral/mixto" if 45<=rsi<=55 and abs(macd)<0.05 else "; confirma presión compradora" if rsi>55 and macd>=0 else "; confirma presión vendedora" if rsi<45 and macd<=0 else "; aún no está completamente alineado"))
+    mom_bits=[]
+    if has_rsi: mom_bits.append(f"RSI {rsi:.1f}")
+    if has_macd: mom_bits.append(f"histograma MACD {macd:.3f}")
+    if has_stoch: mom_bits.append(f"Estocástico %K {stoch:.1f}")
+    if mom_bits:
+        _append_unique(out,"El momentum se lee con " + ', '.join(mom_bits) + ("; el impulso es neutral/mixto" if 45<=rsi<=55 and abs(macd)<0.05 else "; confirma presión compradora" if rsi>55 and macd>=0 else "; confirma presión vendedora" if rsi<45 and macd<=0 else "; aún no está completamente alineado"))
     div=_divergence_sentence(momentum)
     if div: _append_unique(out,div)
 
@@ -442,6 +447,36 @@ def compose_professional_recommendation(
         if regime in regime_names: readable.append(regime_names[regime])
         if vol_state in vol_names: readable.append(vol_names[vol_state])
         _append_unique(evidence, 'Contexto de mercado: ' + ' con '.join(readable))
+
+    # RC9.2.1 — preserve the independent-family thesis that actually drove the
+    # decision. The details are market observations (ADX/DMI, structure, RSI/MACD,
+    # volume, MTF, macro/liquidity), not internal votes or scores. This is the
+    # bridge between the thesis-first engine and the public explanation.
+    thesis = (operational_context.get('thesis') or {}) if isinstance(operational_context, dict) else {}
+    families = thesis.get('families') or {}
+    family_labels = {
+        'trend': 'Tendencia',
+        'structure': 'Estructura y liquidez',
+        'momentum': 'Momentum',
+        'volume': 'Volumen',
+        'multiframe': 'Lectura multitemporal',
+        'macro': 'Contexto macro',
+        'liquidity': 'Mapa de liquidaciones',
+    }
+    if isinstance(families, dict):
+        for key, row in families.items():
+            if not isinstance(row, dict):
+                continue
+            detail = str(row.get('detail') or '').strip()
+            if not detail or 'desconocido' in detail.lower():
+                continue
+            # Neutral families are still useful for NO OPERAR/ESPERAR because a
+            # lack of direction can be the concrete reason to abstain.
+            score = abs(_f(row.get('score'),0))
+            if score < 0.12 and action not in {'NO_OPERAR','ESPERAR','CAUTION'}:
+                continue
+            label = family_labels.get(str(key).lower(), str(key).replace('_',' ').title())
+            _append_unique(evidence, f"{label}: {detail}")
     # Prioridad según la decisión. En ESPERAR/NO OPERAR/PRECAUCIÓN la causa
     # concreta de espera/bloqueo debe sobrevivir al límite de longitud; nunca
     # puede ser desplazada por una lista de indicadores menos decisivos.

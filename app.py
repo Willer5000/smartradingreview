@@ -17190,7 +17190,7 @@ class TradingExpertSystem:
                                          trend, momentum, volatility, volume, structure,
                                          correlation, market_hours, confirmation, conviction,
                                          estrategias_consenso, razones_consenso, sentiment=None,
-                                         liquidation=None):  # <--- NUEVO PARÁMETRO OPCIONAL
+                                         liquidation=None, operational_intelligence=None):
         """
         Genera mensaje concatenando MÚLTIPLES plantillas seleccionadas por condiciones.
         VERSIÓN MEJORADA CON SENTIMIENTO, MULTIFRAME, BOLLINGER, PERFIL VOLUMEN Y STOP HUNTS
@@ -18302,6 +18302,16 @@ class TradingExpertSystem:
         replace_dict['{squeeze_length}'] = str(volatility.get('squeeze_length', 0))
         replace_dict['{bb_width}'] = f"{volatility.get('bb_width', 0):.1f}"
         
+        # RC9.2.1 — the operational intelligence object must be passed from
+        # analyze_full_market into the public composer. In RC9.2 this name was
+        # referenced here without being a parameter, so Python raised NameError
+        # and silently returned to the old one-line template bank.
+        operational_intelligence = (
+            operational_intelligence
+            if isinstance(operational_intelligence, dict)
+            else {}
+        )
+
         # ================================================================
         # RC9.1 — PROFESSIONAL RECOMMENDATION COMPOSER V2
         # ================================================================
@@ -18343,24 +18353,78 @@ class TradingExpertSystem:
         except Exception as composer_error:
             print(f"⚠️ RC9.1 Recommendation Composer V2: {composer_error}")
 
-        # Fallback legacy sólo si el compositor técnico falla.
-        mensaje_completo = ""
-        for plantilla in plantillas:
-            template_text = plantilla['template']
-            mensaje_parcial = template_text
-            for key, value in replace_dict.items():
-                if key and isinstance(value, str):
-                    mensaje_parcial = mensaje_parcial.replace(key, value)
-            mensaje_completo += mensaje_parcial
+        # RC9.2.1 — NEVER fall back to the old one-line template bank.
+        # If the primary composer ever fails again, build a safe public thesis
+        # from the same real market layers. This prevents regressions such as
+        # "MERCADO SIN DIRECCIÓN: ADX..." being the whole recommendation.
+        try:
+            from reason_presenter import (
+                build_public_decision_evidence,
+                exact_spot_instruction,
+                public_reason,
+            )
+            fallback_items = build_public_decision_evidence(
+                decision,
+                trend=trend,
+                momentum=momentum,
+                volatility=volatility,
+                volume=volume,
+                structure=structure,
+                correlation=correlation,
+                market_hours=market_hours,
+                confirmation=confirmation,
+                sentiment=sentiment or {},
+                liquidation=liquidation or {},
+                specialist_reasons=razones_consenso,
+                limit=7,
+            )
+            mtf_summary = public_reason(
+                ((operational_intelligence.get('multi_timeframe') or {}).get('public_summary'))
+            )
+            if mtf_summary and mtf_summary not in fallback_items:
+                fallback_items.insert(0, mtf_summary)
 
-        import re
-        mensaje_completo = re.sub(r'\{[^}]+\}', '', mensaje_completo)
-        mensaje_completo = re.sub(r'\s+', ' ', mensaje_completo)
-        mensaje_completo = mensaje_completo.replace(' .', '.').replace(' ,', ',')
-        mensaje_completo = mensaje_completo.replace('  ', ' ').strip()
-        mensaje_completo = re.sub(r'\s+\.', '.', mensaje_completo)
-        mensaje_completo = re.sub(r'\s+,', ',', mensaje_completo)
-        return mensaje_completo
+            if decision in {'COMPRA_SPOT', 'VENTA_SPOT'}:
+                action_label = exact_spot_instruction(decision, symbol)
+            else:
+                action_label = {
+                    'LONG': 'LONG',
+                    'SHORT': 'SHORT',
+                    'ESPERAR': 'ESPERAR',
+                    'CAUTION': 'PRECAUCIÓN',
+                    'PRECAUCION': 'PRECAUCIÓN',
+                    'NO_OPERAR': 'NO OPERAR',
+                }.get(str(decision).upper(), str(decision).replace('_', ' '))
+
+            header = f"{action_label} · {symbol_name} en {timeframe_name}."
+            if decision == 'ESPERAR':
+                conclusion = (
+                    'Decisión: ESPERAR. Existe una hipótesis técnica, pero la entrada todavía '
+                    'no está confirmada; se exige que la condición pendiente quede resuelta antes de operar.'
+                )
+            elif str(decision).upper() in {'CAUTION', 'PRECAUCION'}:
+                conclusion = (
+                    'Decisión: PRECAUCIÓN. La tesis técnica existe, pero el riesgo actual deteriora '
+                    'la calidad de la entrada y no justifica ejecutarla en estas condiciones.'
+                )
+            elif decision == 'NO_OPERAR':
+                conclusion = (
+                    'Decisión: NO OPERAR. Las evidencias actuales no forman una tesis direccional y '
+                    'una ubicación de entrada suficientemente coherentes al mismo tiempo.'
+                )
+            else:
+                conclusion = f"Decisión: {action_label}."
+            body = ' '.join(fallback_items[:7] + [conclusion]).strip()
+            timestamp_text = datetime.now(self.bolivia_tz).strftime('%Y-%m-%d %H:%M:%S Hora Bolivia')
+            return ' '.join(f"{header} {body} {timestamp_text}".split())
+        except Exception as fallback_error:
+            print(f"❌ RC9.2.1 safe recommendation fallback: {fallback_error}")
+            return (
+                f"{str(decision).replace('_', ' ')} · {symbol_name} en {timeframe_name}. "
+                'No se pudo construir la explicación técnica completa; la señal no debe interpretarse '
+                'como ejecutable hasta que el análisis pueda presentarse íntegramente. '
+                f"{datetime.now(self.bolivia_tz).strftime('%Y-%m-%d %H:%M:%S Hora Bolivia')}"
+            )
                                          
     def _get_sentiment_description(self, sentiment):
         """Obtener descripción textual del sentimiento"""
@@ -19713,7 +19777,8 @@ class TradingExpertSystem:
                     [str(e) for e in estrategias_consenso],
                     [str(r) for r in razones_consenso],
                     sentiment,
-                    liquidation_data
+                    liquidation_data,
+                    operational_intelligence=operational_intelligence
                 )
                 print(f"✅ Mensaje generado correctamente")
             except Exception as e:
