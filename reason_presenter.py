@@ -8,7 +8,7 @@ tendencia, momentum, volatilidad, volumen, estructura, liquidez y ejecución.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Mapping, Callable
 
 
 # Identificadores de arquitectura/estado. Nunca se convierten en una frase
@@ -230,6 +230,300 @@ def exact_spot_instruction(action: str, symbol: str) -> str:
     return action
 
 
+
+# ===================== COMMIT 9.5 · 39/39 DECISION EVIDENCE =====================
+# Every functional component in the default strategy bank has an explicit public
+# adapter.  The adapter does not make a decision; it only translates the exact
+# market observation that the strategy bank already consumed.  This guarantees
+# that a component can never influence a signal yet become inexplicable to the
+# user.
+_COMPONENT_LABELS: Dict[str, str] = {
+    "sma":"SMA", "ema_stack":"EMA", "adx_dmi":"ADX/DMI", "supertrend":"Supertrend",
+    "ichimoku":"Ichimoku", "psar":"Parabolic SAR", "rsi":"RSI", "rsi_maverick":"RSI Maverick",
+    "macd":"MACD", "stochastic":"Estocástico", "williams_r":"Williams %R", "cci":"CCI",
+    "regular_divergence":"Divergencia regular", "hidden_divergence":"Divergencia oculta",
+    "atr":"ATR", "bollinger":"Bandas de Bollinger", "ftmaverick":"Fuerza Maverick", "squeeze":"Squeeze",
+    "volume_ratio":"Volumen relativo", "force_index":"Force Index", "mfi":"MFI", "obv":"OBV",
+    "whale_proxy":"Actividad de gran volumen", "iceberg":"Absorción de volumen", "vwap":"VWAP",
+    "volume_profile_poc":"POC", "hvn_lvn":"HVN/LVN", "order_block":"Order Block", "fvg":"FVG",
+    "liquidity_sweep":"Barrido de liquidez", "stop_hunt":"Stop Hunt", "support_resistance":"Soporte/Resistencia",
+    "fibonacci":"Fibonacci", "candlestick_patterns":"Patrones de velas", "liquidation_map":"Liquidaciones",
+    "sentiment":"Sentimiento", "macro_context":"Contexto macro", "correlation_rotation":"Correlación/rotación",
+    "market_session":"Sesión y liquidez",
+}
+
+_COMPONENT_CHART_HINTS: Dict[str, str] = {
+    "sma":"trend", "ema_stack":"trend", "adx_dmi":"trend", "supertrend":"trend", "ichimoku":"trend", "psar":"trend",
+    "rsi":"rsi", "rsi_maverick":"rsi_maverick", "macd":"macd", "stochastic":"momentum", "williams_r":"momentum", "cci":"momentum",
+    "regular_divergence":"rsi", "hidden_divergence":"rsi", "atr":"volatility", "bollinger":"volatility", "ftmaverick":"trend_strength", "squeeze":"volatility",
+    "volume_ratio":"volume", "force_index":"volume", "mfi":"volume", "obv":"volume", "whale_proxy":"volume", "iceberg":"orderflow", "vwap":"volume",
+    "volume_profile_poc":"volume_profile", "hvn_lvn":"volume_profile", "order_block":"smart_money", "fvg":"smart_money",
+    "liquidity_sweep":"smart_money", "stop_hunt":"smart_money", "support_resistance":"zones", "fibonacci":"fibonacci",
+    "candlestick_patterns":"price", "liquidation_map":"liquidations", "sentiment":"context", "macro_context":"context",
+    "correlation_rotation":"context", "market_session":"context",
+}
+
+
+def _es_dir(raw: Any) -> str:
+    value = _u(raw)
+    if value in {"BULLISH","UP","LONG","TREND_UP","STRONG_UP","WEAK_UP","ALCISTA"}: return "alcista"
+    if value in {"BEARISH","DOWN","SHORT","TREND_DOWN","STRONG_DOWN","WEAK_DOWN","BAJISTA"}: return "bajista"
+    return "neutral"
+
+
+def _node_price(row: Any) -> float:
+    if isinstance(row, Mapping):
+        return _f(row.get("price") or row.get("level") or row.get("value"), 0)
+    return _f(row, 0)
+
+
+def _nearest_number(values: Any, price: float) -> float:
+    nums: List[float] = []
+    if isinstance(values, Mapping):
+        values = list(values.values())
+    for row in values or []:
+        value = _node_price(row)
+        if value > 0:
+            nums.append(value)
+    if not nums:
+        return 0.0
+    if price > 0:
+        return min(nums, key=lambda v: abs(v-price))
+    return nums[0]
+
+
+def _component_text(name: str, groups: Mapping[str, Any], row: Mapping[str, Any] | None = None) -> str:
+    """Translate one normalized component into trader-facing evidence."""
+    row = dict(row or {})
+    t=dict(groups.get("trend") or {}); m=dict(groups.get("momentum") or {})
+    v=dict(groups.get("volatility") or {}); f=dict(groups.get("volume_flow") or {})
+    st=dict(groups.get("structure_liquidity") or {}); liq=dict(groups.get("liquidations") or {})
+    sent=dict(groups.get("sentiment") or {}); macro=dict(groups.get("macro") or {})
+    rot=dict(groups.get("rotation") or {}); mt=dict(groups.get("market_time") or {})
+    mtf=dict(groups.get("multi_timeframe") or {})
+    price=_f(st.get("current_price"),0)
+
+    if name == "sma":
+        a,b=_f(t.get("sma20")),_f(t.get("sma50"));
+        return f"SMA20 {a:.2f} frente a SMA50 {b:.2f}: estructura media {'alcista' if a>b else 'bajista' if a<b else 'equilibrada'}" if a>0 and b>0 else ""
+    if name == "ema_stack":
+        vals=[_f(t.get(k)) for k in ("ema9","ema21","ema50","ema200")]
+        if not all(x>0 for x in vals): return ""
+        state="alcista" if vals[0]>vals[1]>vals[2]>vals[3] else "bajista" if vals[0]<vals[1]<vals[2]<vals[3] else "mixta"
+        return f"EMA 9/21/50/200 = {vals[0]:.2f}/{vals[1]:.2f}/{vals[2]:.2f}/{vals[3]:.2f}; alineación {state}"
+    if name == "adx_dmi":
+        adx,pd,md=_f(t.get("adx")),_f(t.get("plus_di")),_f(t.get("minus_di"))
+        if not (adx or pd or md): return ""
+        dom="compradora" if pd>md else "vendedora" if md>pd else "equilibrada"
+        return f"ADX {adx:.1f}; +DI {pd:.1f} y -DI {md:.1f}: presión {dom} con fuerza {'alta' if adx>=25 else 'en desarrollo' if adx>=18 else 'baja'}"
+    if name == "supertrend":
+        raw=t.get("supertrend"); return f"Supertrend mantiene lectura {_es_dir(raw)}" if _u(raw) not in {"","NEUTRAL"} else ""
+    if name == "ichimoku":
+        cloud=t.get("ichimoku_cloud"); tk=t.get("ichimoku_tk")
+        if _u(cloud) in {"","NEUTRAL"} and _u(tk) in {"","NEUTRAL"}: return ""
+        bits=[]
+        if _u(cloud) not in {"","NEUTRAL"}: bits.append(f"nube {_es_dir(cloud)}")
+        if _u(tk) not in {"","NEUTRAL"}: bits.append(f"Tenkan/Kijun {_es_dir(tk)}")
+        return "Ichimoku: " + ", ".join(bits)
+    if name == "psar":
+        raw=t.get("psar"); return f"Parabolic SAR conserva sesgo {_es_dir(raw)}" if _u(raw) not in {"","NEUTRAL"} else ""
+    if name == "rsi":
+        x=m.get("rsi"); return f"RSI {float(x):.1f}: {'impulso comprador' if float(x)>=55 else 'impulso vendedor' if float(x)<=45 else 'zona neutral'}" if x is not None else ""
+    if name == "rsi_maverick":
+        x=m.get("rsi_maverick");
+        if x is None: return ""
+        x=float(x); state="extremo inferior/reacción potencial" if x<=.25 else "extremo superior/reacción potencial" if x>=.75 else "impulso alcista" if x>.55 else "impulso bajista" if x<.45 else "zona neutral"
+        return f"RSI Maverick {x:.2f}: {state}"
+    if name == "macd":
+        x=m.get("macd_histogram"); return f"Histograma MACD {float(x):+.4f}: momentum {'alcista' if float(x)>0 else 'bajista' if float(x)<0 else 'neutral'}" if x is not None else ""
+    if name == "stochastic":
+        k,d=m.get("stoch_k"),m.get("stoch_d");
+        return f"Estocástico %K/%D {float(k):.1f}/{float(d):.1f}" if k is not None and d is not None else ""
+    if name == "williams_r":
+        x=m.get("williams"); return f"Williams %R {float(x):.1f}: {'sobreventa' if float(x)<=-80 else 'sobrecompra' if float(x)>=-20 else 'zona intermedia'}" if x is not None else ""
+    if name == "cci":
+        x=m.get("cci"); return f"CCI {float(x):.1f}: {'sobreextensión positiva' if float(x)>=100 else 'sobreextensión negativa' if float(x)<=-100 else 'impulso intermedio'}" if x is not None else ""
+    if name == "regular_divergence":
+        rows=m.get("divergences") or []
+        if not rows: return ""
+        blob=" ".join(str(x).lower() for x in rows); direction="alcista" if "bull" in blob or "alcist" in blob else "bajista" if "bear" in blob or "bajist" in blob else "detectada"
+        return f"Divergencia regular {direction}: posible agotamiento/giro que necesita confirmación estructural"
+    if name == "hidden_divergence":
+        rows=m.get("hidden_divergences") or []
+        if not rows: return ""
+        blob=" ".join(str(x).lower() for x in rows); direction="alcista" if "bull" in blob or "alcist" in blob else "bajista" if "bear" in blob or "bajist" in blob else "detectada"
+        return f"Divergencia oculta {direction}: señal de continuidad a confirmar con estructura y volumen"
+    if name == "atr":
+        x=_f(v.get("atr_pct")); return f"ATR {x:.2f}% del precio: volatilidad {'elevada' if x>=4 else 'moderada' if x>=1 else 'baja'} para dimensionar Entry y Stop Loss" if x>0 else ""
+    if name == "bollinger":
+        pos=v.get("bb_position"); width=v.get("bb_width")
+        if pos is None and width is None: return ""
+        parts=[]
+        if pos is not None: parts.append(f"posición {float(pos):.2f}")
+        if width is not None: parts.append(f"ancho {float(width):.2f}")
+        return "Bandas de Bollinger: " + ", ".join(parts)
+    if name == "ftmaverick":
+        raw=v.get("ftm_state"); return f"Fuerza Maverick: {_u(raw).replace('_',' ').lower()}" if _u(raw) not in {"","NEUTRAL"} else ""
+    if name == "squeeze":
+        if v.get("squeeze_on") is None: return ""
+        return f"Squeeze {'activo' if v.get('squeeze_on') else 'inactivo'} durante {int(_f(v.get('squeeze_length')))} velas"
+    if name == "volume_ratio":
+        x=f.get("volume_ratio"); return f"Volumen relativo {float(x):.2f}× su promedio: participación {'alta' if float(x)>=1.2 else 'baja' if float(x)<.8 else 'normal'}" if x is not None else ""
+    if name == "force_index":
+        x=f.get("force_index"); return f"Force Index {float(x):+.4f}: presión {'compradora' if float(x)>0 else 'vendedora' if float(x)<0 else 'neutral'}" if x is not None else ""
+    if name == "mfi":
+        x=f.get("mfi"); return f"MFI {float(x):.1f}: flujo {'comprador' if float(x)>=55 else 'vendedor' if float(x)<=45 else 'neutral'}" if x is not None else ""
+    if name == "obv":
+        raw=f.get("obv_trend"); return f"OBV mantiene dirección {_es_dir(raw)}" if _u(raw) not in {"","NEUTRAL"} else ""
+    if name == "whale_proxy":
+        wc=dict(mtf.get("whale_context") or {}); age=wc.get("age_bars", f.get("whale_event_age_bars")); strength=_f(f.get("whale_signal_strength"),0)
+        buy=bool(f.get("whale_buy") or wc.get("buy_confirmed")); sell=bool(f.get("whale_sell") or wc.get("sell_confirmed")); pending=bool(f.get("whale_event_pending") or wc.get("pending_buy") or wc.get("pending_sell"))
+        if not (buy or sell or pending): return ""
+        state="reacción compradora confirmada" if buy else "reacción vendedora confirmada" if sell else "evento de volumen anómalo pendiente de reacción"
+        suffix=f", edad {age} velas" if age is not None else ""
+        suffix+=f", fuerza {strength:.2f}" if strength>0 else ""
+        return f"Actividad de gran volumen: {state}{suffix}; es un proxy precio/volumen, no identificación de billeteras"
+    if name == "iceberg":
+        buy,sell=bool(f.get("iceberg_buy")),bool(f.get("iceberg_sell"))
+        if not (buy or sell): return ""
+        return f"Proxy de absorción de volumen {'compradora' if buy else 'vendedora'} detectado"
+    if name == "vwap":
+        x=_f(f.get("vwap"));
+        if not (x>0 and price>0): return ""
+        return f"VWAP {x:.2f}; el precio {price:.2f} cotiza {'por encima' if price>x else 'por debajo' if price<x else 'sobre'} de la zona media negociada"
+    if name == "volume_profile_poc":
+        x=_f(st.get("poc"));
+        if x<=0: return ""
+        return f"POC {x:.2f}; concentra la mayor aceptación reciente de volumen"
+    if name == "hvn_lvn":
+        hvn=_nearest_number(st.get("hvn_nodes"),price); lvn=_nearest_number(st.get("lvn_nodes"),price)
+        if not (hvn or lvn): return ""
+        bits=[]
+        if hvn: bits.append(f"HVN {hvn:.2f}")
+        if lvn: bits.append(f"LVN {lvn:.2f}")
+        return "Perfil de volumen: " + " · ".join(bits)
+    if name == "order_block":
+        dirs=st.get("order_block_directions") or []
+        if not dirs: return ""
+        return "Order Block " + "/".join(_es_dir(x) for x in dirs) + " detectado como zona potencial de reacción"
+    if name == "fvg":
+        dirs=st.get("fvg_directions") or []
+        if not dirs: return ""
+        return "FVG " + "/".join(_es_dir(x) for x in dirs) + " pendiente/relevante como desequilibrio de precio"
+    if name == "liquidity_sweep":
+        dirs=st.get("sweep_directions") or []
+        if not dirs: return ""
+        return "Barrido de liquidez " + "/".join(_es_dir(x) for x in dirs) + " detectado; exige confirmación posterior al sweep"
+    if name == "stop_hunt":
+        dirs=st.get("stop_hunt_directions") or []
+        if not dirs: return ""
+        return "Stop Hunt " + "/".join(_es_dir(x) for x in dirs) + " detectado alrededor de un extremo reciente"
+    if name == "support_resistance":
+        sup,res=_f(st.get("support")),_f(st.get("resistance"))
+        if not (sup or res): return ""
+        bits=[]
+        if sup: bits.append(f"soporte {sup:.2f}")
+        if res: bits.append(f"resistencia {res:.2f}")
+        return "Zonas estructurales: " + " · ".join(bits)
+    if name == "fibonacci":
+        levels=st.get("fib_levels") or {}; near=_nearest_number(levels,price)
+        if not levels: return ""
+        if near>0: return f"Fibonacci: nivel relevante más cercano {near:.2f} frente a precio {price:.2f}"
+        return "Fibonacci aporta una zona de retroceso/continuación válida para el setup"
+    if name == "candlestick_patterns":
+        bull,bear=int(_f(st.get("bullish_patterns_count"))),int(_f(st.get("bearish_patterns_count")))
+        if bull+bear<=0: return ""
+        return f"Patrones de velas recientes: {bull} alcistas frente a {bear} bajistas"
+    if name == "liquidation_map":
+        lw,sw=_f(liq.get("long_weight")),_f(liq.get("short_weight")); events=int(_f(liq.get("events")))
+        if not (lw or sw or events): return ""
+        return f"Mapa de liquidaciones: exposición relativa long {lw:.2f} vs short {sw:.2f}; {events} eventos estimados"
+    if name == "sentiment":
+        bias=sent.get("bias"); val=sent.get("value")
+        if _u(bias) in {"","NEUTRAL"} and val is None: return ""
+        suffix=f" ({float(val):.1f})" if val is not None else ""
+        return f"Sentimiento {_es_dir(bias)}{suffix}"
+    if name == "macro_context":
+        if not macro.get("available"): return ""
+        return f"Contexto macro: riesgo {_u(macro.get('risk') or 'UNKNOWN').replace('_',' ').lower()}, sesgo {_es_dir(macro.get('bias'))}, postura Futures {_u(macro.get('futures_posture') or 'NORMAL').replace('_',' ').lower()}"
+    if name == "correlation_rotation":
+        raw=rot.get("signal");
+        if _u(raw) in {"","NEUTRAL"}: return ""
+        return f"Correlación/rotación: señal {_u(raw).replace('_',' ').lower()} con modificador {float(_f(rot.get('weight_modifier'),1)):.2f}"
+    if name == "market_session":
+        if not mt.get("available"): return ""
+        return f"Sesión {str(mt.get('session') or 'desconocida')} con liquidez {str(mt.get('liquidity') or 'desconocida').lower()}"
+    return ""
+
+
+# Explicit registry: 39/39 components from Commit 9.4 default_strategy_bank.
+PUBLIC_COMPONENT_ADAPTERS: Dict[str, Callable[[Mapping[str, Any], Mapping[str, Any] | None], str]] = {
+    "sma":lambda g,r=None:_component_text("sma",g,r), "ema_stack":lambda g,r=None:_component_text("ema_stack",g,r),
+    "adx_dmi":lambda g,r=None:_component_text("adx_dmi",g,r), "supertrend":lambda g,r=None:_component_text("supertrend",g,r),
+    "ichimoku":lambda g,r=None:_component_text("ichimoku",g,r), "psar":lambda g,r=None:_component_text("psar",g,r),
+    "rsi":lambda g,r=None:_component_text("rsi",g,r), "rsi_maverick":lambda g,r=None:_component_text("rsi_maverick",g,r),
+    "macd":lambda g,r=None:_component_text("macd",g,r), "stochastic":lambda g,r=None:_component_text("stochastic",g,r),
+    "williams_r":lambda g,r=None:_component_text("williams_r",g,r), "cci":lambda g,r=None:_component_text("cci",g,r),
+    "regular_divergence":lambda g,r=None:_component_text("regular_divergence",g,r), "hidden_divergence":lambda g,r=None:_component_text("hidden_divergence",g,r),
+    "atr":lambda g,r=None:_component_text("atr",g,r), "bollinger":lambda g,r=None:_component_text("bollinger",g,r),
+    "ftmaverick":lambda g,r=None:_component_text("ftmaverick",g,r), "squeeze":lambda g,r=None:_component_text("squeeze",g,r),
+    "volume_ratio":lambda g,r=None:_component_text("volume_ratio",g,r), "force_index":lambda g,r=None:_component_text("force_index",g,r),
+    "mfi":lambda g,r=None:_component_text("mfi",g,r), "obv":lambda g,r=None:_component_text("obv",g,r),
+    "whale_proxy":lambda g,r=None:_component_text("whale_proxy",g,r), "iceberg":lambda g,r=None:_component_text("iceberg",g,r),
+    "vwap":lambda g,r=None:_component_text("vwap",g,r), "volume_profile_poc":lambda g,r=None:_component_text("volume_profile_poc",g,r),
+    "hvn_lvn":lambda g,r=None:_component_text("hvn_lvn",g,r), "order_block":lambda g,r=None:_component_text("order_block",g,r),
+    "fvg":lambda g,r=None:_component_text("fvg",g,r), "liquidity_sweep":lambda g,r=None:_component_text("liquidity_sweep",g,r),
+    "stop_hunt":lambda g,r=None:_component_text("stop_hunt",g,r), "support_resistance":lambda g,r=None:_component_text("support_resistance",g,r),
+    "fibonacci":lambda g,r=None:_component_text("fibonacci",g,r), "candlestick_patterns":lambda g,r=None:_component_text("candlestick_patterns",g,r),
+    "liquidation_map":lambda g,r=None:_component_text("liquidation_map",g,r), "sentiment":lambda g,r=None:_component_text("sentiment",g,r),
+    "macro_context":lambda g,r=None:_component_text("macro_context",g,r), "correlation_rotation":lambda g,r=None:_component_text("correlation_rotation",g,r),
+    "market_session":lambda g,r=None:_component_text("market_session",g,r),
+}
+
+
+def decision_evidence_adapter_audit() -> Dict[str, Any]:
+    expected=set(_COMPONENT_LABELS)
+    actual=set(PUBLIC_COMPONENT_ADAPTERS)
+    return {"ok":expected==actual and len(actual)==39, "expected":len(expected), "actual":len(actual), "missing":sorted(expected-actual), "extra":sorted(actual-expected)}
+
+
+def build_decision_evidence(operational_context: Mapping[str, Any] | None) -> Dict[str, Any]:
+    """Structured evidence used by the public recommendation and future UI.
+
+    Only components declared by the selected playbook are emitted.  Every emitted
+    component therefore has both (a) a functional role in strategy evaluation and
+    (b) an explicit human-readable adapter.  Available-but-unselected indicators
+    remain visible in charts/diagnostics but do not clutter the recommendation.
+    """
+    op=dict(operational_context or {})
+    groups=dict(op.get("indicator_groups") or {})
+    strategy=dict(op.get("default_strategy") or {})
+    selected=list(strategy.get("indicators") or (op.get("decision_evidence") or {}).get("selected_indicators") or [])
+    functional={str(r.get("indicator")):dict(r) for r in (strategy.get("functional_evidence") or (op.get("decision_evidence") or {}).get("functional_evidence") or []) if isinstance(r,Mapping)}
+    items=[]
+    for name in selected:
+        adapter=PUBLIC_COMPONENT_ADAPTERS.get(str(name))
+        if not adapter:
+            continue
+        row=functional.get(str(name),{})
+        # If strategy evaluation explicitly marked the component unavailable, it
+        # did not influence this decision and should not be presented as evidence.
+        if row and not row.get("available",False):
+            continue
+        text=adapter(groups,row)
+        if not text:
+            continue
+        effect=_f(row.get("effect"),0) if row else 0.0
+        items.append({
+            "component":str(name), "label":_COMPONENT_LABELS.get(str(name),str(name)),
+            "family":str(row.get("family") or ""), "role":str(row.get("role") or ""),
+            "effect":round(effect,3), "decisive":bool(abs(effect)>=.25 or str(row.get("role") or "") in {"entry","invalidacion","riesgo"}),
+            "text":text, "chart_hint":_COMPONENT_CHART_HINTS.get(str(name),"context"),
+        })
+    items.sort(key=lambda x:(not x["decisive"],-abs(float(x["effect"]))))
+    return {"version":"COMMIT9_5_DECISION_EVIDENCE_V1","adapter_coverage":decision_evidence_adapter_audit(),"components":items}
+
+
 def _divergence_sentence(momentum: Dict[str, Any]) -> str:
     details = momentum.get('divergence_details') or []
     regular = momentum.get('divergences') or []
@@ -418,6 +712,15 @@ def compose_professional_recommendation(
 
     evidence=_technical_evidence(action,trend,momentum,volatility,volume,structure,confirmation,market_hours,liquidation,specialist_reasons)
 
+    # Commit 9.5 — exact 39/39 component adapters.  We only surface components
+    # that the selected playbook actually evaluated as available; this keeps the
+    # message concise while guaranteeing explainability for Fibonacci, Maverick,
+    # Force Index, VWAP, Supertrend, Ichimoku, PSAR, whale proxy, etc.
+    decision_evidence = build_decision_evidence(operational_context)
+    for item in decision_evidence.get("components") or []:
+        if item.get("decisive") or action in {"NO_OPERAR","ESPERAR","CAUTION"}:
+            _append_unique(evidence, item.get("text") or "")
+
     # RC9.2 — la recomendación pública expresa la lectura top-down que realmente
     # participó en la decisión. No expone códigos, roles internos ni nombres de
     # especialistas; sólo temporalidades y lectura de mercado comprensible.
@@ -501,6 +804,8 @@ def compose_professional_recommendation(
             score += 50
         if 'contexto de mercado' in low:
             score += 24
+        if any(x in low for x in ('fibonacci','rsi maverick','fuerza maverick','williams %r','force index','vwap','supertrend','ichimoku','parabolic sar','actividad de gran volumen','absorción de volumen')):
+            score += 20
         # Motivos con números concretos son especialmente auditables.
         if re.search(r'\d', sentence): score += 6
         return score

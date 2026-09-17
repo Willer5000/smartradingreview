@@ -19721,7 +19721,7 @@ class TradingExpertSystem:
                     }
                 }
             
-            # ============ NUEVO: ZONAS DINÁMICAS DE TRADING (DESPUÉS DE LA VOTACIÓN) ============
+            # ============ COMMIT 9.5: ZONAS DINÁMICAS DESDE TESIS + ESTRUCTURA + ESTRATEGIA ============
 
             print(f"📊 Calculando zonas dinámicas para {timeframe}...")
             
@@ -19738,69 +19738,17 @@ class TradingExpertSystem:
             
             zones_system = self.dynamic_zones[timeframe][symbol]
             
-            # ============ CORRECCIÓN: Obtener información de votación para zonas ============
-            veto_info = None
-            todos_los_votos = []
-            
-            # Caso 1: registro_votacion es un diccionario
-            if isinstance(registro_votacion, dict):
-                todos_los_votos = registro_votacion.get('todos_los_votos', [])
-                conteo_acciones = registro_votacion.get('conteo_acciones', {})
-                confianza_por_accion = registro_votacion.get('confianza_por_accion', {})
-                traders_por_accion = registro_votacion.get('traders_por_accion', {})
-                
-            # Caso 2: registro_votacion es una lista (como en caso de veto)
-            elif isinstance(registro_votacion, list):
-                print(f"   ⚠️ registro_votacion es una lista con {len(registro_votacion)} elementos")
-                todos_los_votos = registro_votacion
-                
-                # Construir diccionarios a partir de la lista
-                conteo_acciones = {}
-                confianza_por_accion = {}
-                traders_por_accion = {}
-                
-                for voto in todos_los_votos:
-                    if isinstance(voto, dict):
-                        accion = voto.get('accion')
-                        trader = voto.get('trader')
-                        confianza = voto.get('confianza_original', 0)
-                        
-                        if accion:
-                            conteo_acciones[accion] = conteo_acciones.get(accion, 0) + 1
-                            if accion not in traders_por_accion:
-                                traders_por_accion[accion] = []
-                            if trader:
-                                traders_por_accion[accion].append(trader)
-                            confianza_por_accion[accion] = confianza_por_accion.get(accion, 0) + confianza
-            
-            # Caso 3: otro tipo (error)
-            else:
-                print(f"   ⚠️ registro_votacion es de tipo {type(registro_votacion)}, usando valores vacíos")
-                todos_los_votos = []
-                conteo_acciones = {}
-                confianza_por_accion = {}
-                traders_por_accion = {}
-            
-            # Buscar veto del Escéptico
-            for voto in todos_los_votos:
-                if isinstance(voto, dict):
-                    if voto.get('trader') == 'Escéptico' and voto.get('accion') == 'NO_OPERAR' and voto.get('confianza_original', 0) >= 80:
-                        veto_info = {'trader': 'Escéptico', 'accion': 'NO_OPERAR', 'confianza': voto.get('confianza_original', 0)}
-                        print(f"   ⚠️ Veto detectado: {veto_info}")
-                        break
-            
-            # Calcular zonas
-            zonas_data = zones_system.calculate_zone_from_votes(
-                accion_consenso,
-                conteo_acciones,
-                confianza_por_accion,
-                traders_por_accion,
-                veto_info,
-                close_val,
-                current_idx,
-                volatility # <--- Nuevo: pasar volatility para ATR dinámico
+            # Commit 9.5 — zonas basadas en la misma tesis/estructura/estrategia
+            # que origina la señal. No usan votos, vetos ni número de especialistas.
+            zonas_data = zones_system.calculate_zone_from_thesis(
+                operational_intelligence=operational_intelligence,
+                structure=structure,
+                volatility=volatility,
+                current_price=close_val,
+                current_idx=current_idx,
+                system_type=analysis_system_type,
             )
-            
+
             # Obtener estado del precio
             price_status = zones_system.get_price_status(close_val)
             print(f"   📍 Estado: {price_status['estado']}")
@@ -19981,6 +19929,21 @@ class TradingExpertSystem:
                 dataframe=df
             )
             
+            # Commit 9.5 — persist the human-readable DecisionEvidence contract
+            # inside operational_intelligence.  The same 39/39 adapters used by
+            # the recommendation are therefore available for auditing/UI without
+            # re-interpreting raw indicators elsewhere.
+            try:
+                from reason_presenter import build_decision_evidence
+                _public_decision_evidence = build_decision_evidence(operational_intelligence)
+                if isinstance(operational_intelligence, dict):
+                    _de = operational_intelligence.setdefault('decision_evidence', {})
+                    if isinstance(_de, dict):
+                        _de['adapter_coverage'] = _public_decision_evidence.get('adapter_coverage')
+                        _de['public_components'] = _public_decision_evidence.get('components') or []
+            except Exception as evidence_error:
+                print(f"⚠️ DecisionEvidence público no disponible: {evidence_error}")
+
             # COMMIT 5 — Visual Evidence Router.
             # Metadatos exclusivos de presentación: no alteran consenso, Safety ni niveles.
             visual_evidence = {'version': 'VISUAL_EVIDENCE_V1', 'recommended': [], 'max_auto': 5}
@@ -23102,12 +23065,19 @@ class TradingZone:
             'opacity': self.opacity,
             'veto_active': self.veto_active,
             'veto_source': self.veto_source,
+            # Backward-compatible field retained for old frontends; values are
+            # structural factors, never trader names, since Commit 9.5.
             'source_traders': self.source_traders,
+            'source_factors': self.source_traders,
+            'basis': 'THESIS_STRUCTURE_STRATEGY',
             'active': self.active
         }
 class DynamicZones:
-    """
-    Sistema de zonas dinámicas de trading basado en consenso de traders
+    """Zonas dinámicas derivadas de tesis + estructura + estrategia.
+
+    Commit 9.5 elimina la dependencia de votos, vetos o número de especialistas.
+    Las zonas son contexto visual/operativo: señalan dónde una tesis puede
+    defenderse o invalidarse, pero no crean una señal ni bypass de Safety.
     """
     
     def __init__(self, symbol, timeframe):
@@ -23130,127 +23100,234 @@ class DynamicZones:
         print(f"✅ Zonas dinámicas inicializadas para {symbol} {timeframe}")
     
 
-    def calculate_zone_from_votes(self, accion, votos_por_accion, confianza_por_accion, 
-                                   traders_por_accion, veto_info, current_price, current_idx, volatility=None):
-        """
-        Calcula las zonas basado en la votación actual
-        CON EXPANSIÓN DINÁMICA POR CONFIANZA
-        """
+    @staticmethod
+    def _safe_float(value, default=0.0):
+        try:
+            return float(value if value is not None else default)
+        except Exception:
+            return float(default)
+
+    @staticmethod
+    def _family_label(family):
+        return {
+            'SWEEP_REVERSAL': 'Reversión tras barrido',
+            'MEAN_REVERSION': 'Reversión a valor',
+            'TREND_PULLBACK': 'Retroceso en tendencia',
+            'BREAKOUT_RETEST': 'Ruptura y retest',
+            'TREND_BREAK': 'Ruptura de tendencia',
+            'ROTATION': 'Rotación Spot',
+        }.get(str(family or '').upper(), 'Estructura de mercado')
+
+    def _collect_structural_candidates(self, side, structure, groups, current_price, atr_abs, family):
+        """Return structural POIs for one side without using votes/confidence."""
+        structure = structure if isinstance(structure, dict) else {}
+        groups = groups if isinstance(groups, dict) else {}
+        value_group = groups.get('volume_flow') or {}
+        candidates = []
+        family = str(family or '').upper()
+
+        family_priority = {
+            'SWEEP_REVERSAL': {'sweep': 7.0, 'stop_hunt': 7.0, 'ob': 6.0, 'support': 5.0, 'resistance': 5.0, 'fvg': 4.5, 'fib': 4.0, 'poc': 3.5, 'hvn': 3.0, 'vwap': 3.0},
+            'BREAKOUT_RETEST': {'support': 7.0, 'resistance': 7.0, 'fvg': 6.0, 'ob': 5.5, 'fib': 5.0, 'poc': 4.5, 'hvn': 4.0, 'vwap': 3.5, 'sweep': 3.5, 'stop_hunt': 3.5},
+            'TREND_PULLBACK': {'ob': 7.0, 'fvg': 6.0, 'fib': 5.5, 'support': 5.0, 'resistance': 5.0, 'vwap': 4.5, 'poc': 4.0, 'hvn': 3.5, 'sweep': 3.0, 'stop_hunt': 3.0},
+            'MEAN_REVERSION': {'vwap': 7.0, 'poc': 6.5, 'hvn': 6.0, 'support': 5.5, 'resistance': 5.5, 'fib': 4.0, 'ob': 3.5, 'fvg': 3.0, 'sweep': 4.0, 'stop_hunt': 4.0},
+            'ROTATION': {'vwap': 6.0, 'poc': 6.0, 'hvn': 5.0, 'support': 5.0, 'resistance': 5.0, 'fib': 4.0, 'ob': 3.5, 'fvg': 3.0},
+            'TREND_BREAK': {'support': 7.0, 'resistance': 7.0, 'fvg': 5.5, 'ob': 5.5, 'poc': 4.0, 'fib': 4.0, 'sweep': 4.0, 'stop_hunt': 4.0},
+        }
+        priorities = family_priority.get(family, family_priority['TREND_PULLBACK'])
+
+        def add(source, kind, low, high=None, strength=1.0):
+            low = self._safe_float(low)
+            high = self._safe_float(high if high is not None else low)
+            if low <= 0 and high <= 0:
+                return
+            if low <= 0: low = high
+            if high <= 0: high = low
+            if low > high: low, high = high, low
+            center = (low + high) / 2.0
+            if current_price <= 0:
+                return
+            # A retest can live slightly beyond the current price.  Anything far
+            # away is not a useful dynamic zone for the active setup.
+            side_slack = (0.65 if family in {'BREAKOUT_RETEST','TREND_BREAK'} else 0.15) * atr_abs
+            if side > 0 and center > current_price + side_slack:
+                return
+            if side < 0 and center < current_price - side_slack:
+                return
+            distance_atr = abs(center-current_price) / max(atr_abs, current_price*0.001)
+            if distance_atr > 4.0:
+                return
+            base = priorities.get(kind, 2.5) + float(strength or 0.0)
+            score = base - 0.75 * distance_atr
+            candidates.append({'source': source, 'kind': kind, 'low': low, 'high': high, 'center': center, 'score': score, 'distance_atr': distance_atr})
+
+        # Order Blocks preserve their real zone width.
+        for ob in structure.get('order_blocks', []) or []:
+            if not isinstance(ob, dict):
+                continue
+            typ = str(ob.get('type') or ob.get('direction') or '').lower()
+            wanted = ('bull' in typ or 'alcist' in typ) if side > 0 else ('bear' in typ or 'bajist' in typ)
+            if not wanted:
+                continue
+            pr = ob.get('price_range') or []
+            if isinstance(pr, (list, tuple)) and len(pr) >= 2:
+                add('Order Block', 'ob', pr[0], pr[1], 1.5 if ob.get('strength') == 'strong' else 0.5)
+            else:
+                add('Order Block', 'ob', ob.get('level') or ob.get('price'), strength=1.0)
+
+        for fvg in structure.get('fair_value_gaps', []) or structure.get('fvgs', []) or []:
+            if not isinstance(fvg, dict) or fvg.get('filled', False):
+                continue
+            typ = str(fvg.get('type') or fvg.get('direction') or '').lower()
+            wanted = ('bull' in typ or 'alcist' in typ) if side > 0 else ('bear' in typ or 'bajist' in typ)
+            if not wanted:
+                continue
+            add('FVG', 'fvg', fvg.get('gap_bottom') or fvg.get('low'), fvg.get('gap_top') or fvg.get('high'), 1.0 if fvg.get('strength') == 'strong' else 0.3)
+
+        levels = structure.get('supports', []) if side > 0 else structure.get('resistances', [])
+        singular = structure.get('nearest_support') if side > 0 else structure.get('nearest_resistance')
+        kind = 'support' if side > 0 else 'resistance'
+        label = 'Soporte' if side > 0 else 'Resistencia'
+        if singular:
+            add(label, kind, singular, strength=1.2)
+        for value in levels or []:
+            add(label, kind, value, strength=0.6)
+
+        # Sweeps and stop hunts are reaction anchors, especially for reversal.
+        for row in structure.get('liquidity_sweeps', []) or []:
+            if not isinstance(row, dict): continue
+            typ=str(row.get('type') or '').lower()
+            wanted=('bull' in typ or 'alcist' in typ) if side>0 else ('bear' in typ or 'bajist' in typ)
+            if wanted: add('Barrido de liquidez', 'sweep', row.get('sweep_level') or row.get('level'), strength=1.0)
+        for row in structure.get('stop_hunts', []) or []:
+            if not isinstance(row, dict): continue
+            typ=str(row.get('type') or '').lower()
+            wanted=('bull' in typ or 'alcist' in typ) if side>0 else ('bear' in typ or 'bajist' in typ)
+            if wanted: add('Stop Hunt', 'stop_hunt', row.get('level'), strength=0.8)
+
+        # Fibonacci is structural context.  Prefer 38.2/50/61.8 when present.
+        fibs = structure.get('fib_levels') or structure.get('fib_retracements') or structure.get('fibonacci') or {}
+        if isinstance(fibs, dict):
+            for key, value in fibs.items():
+                if str(key) in {'0.382','0.5','0.500','0.618','38.2','50','61.8'}:
+                    add(f'Fibonacci {key}', 'fib', value, strength=1.2 if '618' in str(key).replace('.','') else 0.6)
+
+        vp = structure.get('volume_profile') or {}
+        poc = vp.get('poc')
+        if poc:
+            add('POC', 'poc', poc, strength=1.0)
+        for row in (structure.get('hvn_nodes') or vp.get('hvn_nodes') or []):
+            value = row.get('price') if isinstance(row, dict) else row
+            add('HVN', 'hvn', value, strength=0.5)
+
+        vwap = self._safe_float(value_group.get('vwap'))
+        if vwap > 0:
+            add('VWAP', 'vwap', vwap, strength=0.8)
+
+        candidates.sort(key=lambda row: row['score'], reverse=True)
+        return candidates
+
+    def _derive_structural_zone(self, side, structure, groups, current_price, atr_abs, family, precision=False):
+        candidates = self._collect_structural_candidates(side, structure, groups, current_price, atr_abs, family)
+        if not candidates:
+            return None
+        best = candidates[0]
+        low, high = best['low'], best['high']
+        center = best['center']
+        # Single-price levels need a dynamic ATR envelope; genuine OB/FVG ranges
+        # keep their native geometry with a small volatility padding.
+        native_width = max(high-low, 0.0)
+        if native_width <= max(current_price*0.0002, atr_abs*0.05):
+            half = atr_abs * (0.24 if precision else 0.42)
+            low, high = center-half, center+half
+        else:
+            pad = atr_abs * (0.08 if precision else 0.14)
+            low, high = low-pad, high+pad
+            if precision:
+                mid=(low+high)/2.0
+                half=(high-low)*0.34
+                low,high=mid-half,mid+half
+        return {
+            'price_min': max(0.0, low), 'price_max': max(0.0, high),
+            'center': center, 'source': best['source'], 'kind': best['kind'],
+            'distance_atr': best['distance_atr'], 'score': best['score'],
+            'alternatives': [row['source'] for row in candidates[1:3]],
+        }
+
+    def calculate_zone_from_thesis(self, operational_intelligence, structure, volatility,
+                                   current_price, current_idx, system_type='spot'):
+        """Build watch/precision zones from the same thesis that drives signals."""
         self.current_idx = current_idx
         self.last_price = current_price
-        
-        # Obtener ATR de volatility layer si está disponible
-        atr_pct = 0.02  # 2% por defecto
-        if volatility and isinstance(volatility, dict):
-            atr_pct = volatility.get('atr_pct', 2.0) / 100
-        
-        # ============ ZONA DE COMPRA ============
-        compra_traders = traders_por_accion.get('COMPRA_SPOT', []) + traders_por_accion.get('LONG', [])
-        compra_confianza = max(
-            confianza_por_accion.get('COMPRA_SPOT', 0),
-            confianza_por_accion.get('LONG', 0)
-        )
-        
-        # Verificar veto del Escéptico
-        veto_activo = False
-        veto_source = None
-        if veto_info and veto_info.get('accion') == 'NO_OPERAR' and veto_info.get('confianza', 0) >= 80:
-            veto_activo = True
-            veto_source = veto_info.get('trader', 'Escéptico')
-            print(f"   ⚠️ Veto activo para zonas: {veto_source}")
-        
-        # Calcular rango de precio para COMPRA con expansión dinámica
-        if compra_traders and compra_confianza > 30:
-            # Factor de expansión basado en confianza y número de traders
-            trust_factor = min(2.0, (compra_confianza / 50) * (len(compra_traders) / 5))
-            expansion = atr_pct * (1 + trust_factor)
-            
-            # Si hay veto, reducir expansión
-            if veto_activo:
-                expansion *= 0.5
-            
-            # Zona COMPRA: más abajo que arriba (soporte)
-            price_min = current_price * (1 - expansion * 1.8)
-            price_max = current_price * (1 + expansion * 0.6)
-            
-            # Si la acción consenso es COMPRA, asegurar que el precio esté DENTRO
-            if accion in ['COMPRA_SPOT', 'LONG'] and compra_confianza > 60:
-                if current_price < price_min or current_price > price_max:
-                    # Expandir zona para incluir precio actual
-                    price_min = min(price_min, current_price * 0.98)
-                    price_max = max(price_max, current_price * 1.02)
-                    print(f"   🔧 Ajustando zona COMPRA para incluir precio actual")
-            
-            self._update_zone('COMPRA', price_min, price_max, compra_confianza, 
-                              compra_traders, veto_activo, veto_source, current_idx)
+        op = operational_intelligence if isinstance(operational_intelligence, dict) else {}
+        thesis = op.get('thesis') or {}
+        strategy = op.get('default_strategy') or {}
+        groups = op.get('indicator_groups') or {}
+        market = str(op.get('market') or system_type or 'SPOT').upper()
+        candidate_action = str(op.get('candidate_action') or 'NO_OPERAR').upper()
+        thesis_direction = str(thesis.get('direction') or '').upper()
+        family = str(strategy.get('family') or '').upper()
+        thesis_quality = self._safe_float(thesis.get('quality'))
+        strategy_quality = self._safe_float(strategy.get('quality'))
+        candidate_ready = bool(op.get('candidate_ready'))
+
+        atr_abs = self._safe_float((volatility or {}).get('atr'))
+        if atr_abs <= 0:
+            atr_pct = self._safe_float((volatility or {}).get('atr_pct')) / 100.0
+            atr_abs = max(current_price * atr_pct, current_price * 0.005)
+
+        long_watch = self._derive_structural_zone(1, structure, groups, current_price, atr_abs, family, precision=False)
+        short_watch = self._derive_structural_zone(-1, structure, groups, current_price, atr_abs, family, precision=False)
+        long_precision = self._derive_structural_zone(1, structure, groups, current_price, atr_abs, family, precision=True)
+        short_precision = self._derive_structural_zone(-1, structure, groups, current_price, atr_abs, family, precision=True)
+
+        long_supported = thesis_direction == 'BULLISH' or candidate_action in {'LONG','COMPRA_SPOT'}
+        short_supported = thesis_direction == 'BEARISH' or candidate_action in {'SHORT','VENTA_SPOT'}
+        base_conf = max(35.0, min(95.0, 0.55*thesis_quality + 0.45*strategy_quality))
+        family_label = self._family_label(family)
+
+        def sources(zone, direction_label):
+            rows=[direction_label, family_label, zone.get('source')]
+            rows.extend(zone.get('alternatives') or [])
+            out=[]
+            for item in rows:
+                item=str(item or '').strip()
+                if item and item not in out: out.append(item)
+            return out[:5]
+
+        # Broad spot/watch zones are structural even when no trade is ready.  The
+        # thesis only changes confidence; it never moves the zone by vote count.
+        if long_watch:
+            conf = min(92.0, base_conf + 6.0) if long_supported else min(55.0, max(35.0, base_conf*0.60))
+            self._update_zone('COMPRA', long_watch['price_min'], long_watch['price_max'], conf,
+                              sources(long_watch, 'Tesis alcista' if long_supported else 'Zona estructural de compra'), False, None, current_idx)
         else:
             self._decay_zone('COMPRA')
-        
-        # ============ ZONA DE VENTA ============
-        venta_traders = traders_por_accion.get('VENTA_SPOT', []) + traders_por_accion.get('SHORT', [])
-        venta_confianza = max(
-            confianza_por_accion.get('VENTA_SPOT', 0),
-            confianza_por_accion.get('SHORT', 0)
-        )
-        
-        if venta_traders and venta_confianza > 30:
-            trust_factor = min(2.0, (venta_confianza / 50) * (len(venta_traders) / 5))
-            expansion = atr_pct * (1 + trust_factor)
-            
-            if veto_activo:
-                expansion *= 0.5
-            
-            # Zona VENTA: más arriba que abajo (resistencia)
-            price_min = current_price * (1 - expansion * 0.6)
-            price_max = current_price * (1 + expansion * 1.8)
-            
-            # Si la acción consenso es VENTA, asegurar que el precio esté DENTRO
-            if accion in ['VENTA_SPOT', 'SHORT'] and venta_confianza > 60:
-                if current_price < price_min or current_price > price_max:
-                    price_min = min(price_min, current_price * 0.98)
-                    price_max = max(price_max, current_price * 1.02)
-                    print(f"   🔧 Ajustando zona VENTA para incluir precio actual")
-            
-            self._update_zone('VENTA', price_min, price_max, venta_confianza, 
-                              venta_traders, veto_activo, veto_source, current_idx)
+
+        if short_watch:
+            conf = min(92.0, base_conf + 6.0) if short_supported else min(55.0, max(35.0, base_conf*0.60))
+            self._update_zone('VENTA', short_watch['price_min'], short_watch['price_max'], conf,
+                              sources(short_watch, 'Tesis bajista' if short_supported else 'Zona estructural de venta'), False, None, current_idx)
         else:
             self._decay_zone('VENTA')
-        
-        # ============ ZONA LONG (PRECISIÓN) ============
-        long_traders = traders_por_accion.get('LONG', [])
-        long_confianza = confianza_por_accion.get('LONG', 0)
-        
-        if long_traders and long_confianza > 65 and not veto_activo:
-            trust_factor = min(1.5, (long_confianza / 70) * (len(long_traders) / 3))
-            expansion = atr_pct * trust_factor
-            
-            # Zona LONG: simétrica y estrecha
-            price_min = current_price * (1 - expansion)
-            price_max = current_price * (1 + expansion)
-            
-            self._update_zone('LONG', price_min, price_max, long_confianza, 
-                              long_traders, veto_activo, veto_source, current_idx)
+
+        # Precision Futures zones exist only when the thesis+strategy candidate is
+        # actually ready. They are *not* publication permission; Safety still owns
+        # execution after Entry/SL/TP economics.
+        if market == 'FUTURES' and candidate_ready and candidate_action == 'LONG' and long_precision:
+            self._update_zone('LONG', long_precision['price_min'], long_precision['price_max'], min(95.0, base_conf+8.0),
+                              sources(long_precision, 'Tesis LONG'), False, None, current_idx)
         else:
             self._decay_zone('LONG')
-        
-        # ============ ZONA SHORT (PRECISIÓN) ============
-        short_traders = traders_por_accion.get('SHORT', [])
-        short_confianza = confianza_por_accion.get('SHORT', 0)
-        
-        if short_traders and short_confianza > 65 and not veto_activo:
-            trust_factor = min(1.5, (short_confianza / 70) * (len(short_traders) / 3))
-            expansion = atr_pct * trust_factor
-            
-            price_min = current_price * (1 - expansion)
-            price_max = current_price * (1 + expansion)
-            
-            self._update_zone('SHORT', price_min, price_max, short_confianza, 
-                              short_traders, veto_activo, veto_source, current_idx)
+
+        if market == 'FUTURES' and candidate_ready and candidate_action == 'SHORT' and short_precision:
+            self._update_zone('SHORT', short_precision['price_min'], short_precision['price_max'], min(95.0, base_conf+8.0),
+                              sources(short_precision, 'Tesis SHORT'), False, None, current_idx)
         else:
             self._decay_zone('SHORT')
-        
+
         return self.get_active_zones()
-    
+
     def _update_zone(self, zone_type, price_min, price_max, confidence, traders, veto, veto_source, idx):
         """Actualiza o crea una zona con suavizado"""
         if self.zones[zone_type] is None:

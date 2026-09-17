@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-VERSION = "COMMIT9_4_OPERATIONAL_INTELLIGENCE_V1"
+VERSION = "COMMIT9_5_OPERATIONAL_INTELLIGENCE_V1"
 
 DIRECTIONAL_ACTIONS = {"LONG", "SHORT", "COMPRA_SPOT", "VENTA_SPOT"}
 NON_DIRECTIONAL_ACTIONS = {"ESPERAR", "PRECAUCION", "NO_OPERAR"}
@@ -585,6 +585,20 @@ def prepare_operational_intelligence(
         for key, value in dict(research_candidates or {}).items()
     }
 
+    # Commit 9.5 — one normalized technical snapshot feeds both the strategy
+    # selector and the public DecisionEvidence layer.  This prevents a strategy
+    # from being decided with one representation of an indicator and explained
+    # with another.  Missing values remain missing; nothing is synthesized.
+    try:
+        from contingency_strategy_engine import _indicator_groups
+        indicator_groups = _indicator_groups(dict(layers))
+        indicator_groups["multi_timeframe"] = dict(mtf_context or {})
+    except Exception as exc:
+        indicator_groups = {
+            "multi_timeframe": dict(mtf_context or {}),
+            "normalization_error": str(exc)[:160],
+        }
+
     bullish_action = "LONG" if market == "FUTURES" else "COMPRA_SPOT"
     bearish_action = "SHORT" if market == "FUTURES" else "VENTA_SPOT"
     long_support = len(thesis.get("long_families") or [])
@@ -635,11 +649,8 @@ def prepare_operational_intelligence(
     if selected_action in DIRECTIONAL_ACTIONS:
         try:
             from default_strategy_bank import select_strategy
-            from contingency_strategy_engine import _indicator_groups
-            groups = _indicator_groups(dict(layers))
-            groups["multi_timeframe"] = dict(mtf_context or {})
             strategy = select_strategy(
-                selected_action, regime, vol_state, groups,
+                selected_action, regime, vol_state, indicator_groups,
                 symbol=_u(symbol), timeframe=_u(timeframe), market=market,
             )
         except Exception as exc:
@@ -692,6 +703,16 @@ def prepare_operational_intelligence(
         "multi_timeframe": dict(mtf_context or {}),
         "thesis": thesis,
         "default_strategy": strategy,
+        # Public evidence and DynamicZones consume the same normalized market
+        # snapshot that the strategy bank evaluated.  This is metadata only; it
+        # carries no extra authority and cannot bypass Safety.
+        "indicator_groups": indicator_groups,
+        "decision_evidence": {
+            "version": "COMMIT9_5_DECISION_EVIDENCE_V1",
+            "selected_indicators": list(strategy.get("indicators") or []),
+            "functional_evidence": list(strategy.get("functional_evidence") or []),
+            "independent_families": list(strategy.get("independent_functional_families") or []),
+        },
         "selected_specialist_source": specialist_source,
         "selected_research_prior": selected_prior,
         "research_candidates": research_map,
