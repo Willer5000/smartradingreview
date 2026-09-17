@@ -5,6 +5,24 @@
 
 console.log('🚀 futures.js cargado - modo Futuros activo');
 
+const futHumanReason = (value) => {
+    if (typeof window.humanizeTradingReason === 'function') {
+        return window.humanizeTradingReason(value);
+    }
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const map = {
+        ACTION_CELL_NOT_YET_VALIDATED: 'Esta combinación de mercado, par, temporalidad y acción todavía no tiene una estrategia validada.',
+        STRUCTURE_RETEST: 'El movimiento necesita confirmar la nueva estructura con un retesteo antes de ejecutar la entrada.',
+        NEGATIVE_OOS: 'La validación fuera de muestra no confirma una ventaja estadística suficiente para operar.',
+        ALPHA_DECAY: 'La estrategia validada muestra deterioro reciente y queda suspendida hasta nueva validación.',
+        EDGE_BLOCKED: 'La evidencia estadística no autoriza una nueva señal ejecutable.'
+    };
+    const exact = raw.toUpperCase();
+    if (map[exact]) return map[exact];
+    return raw.replace(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+){1,}\b/g, token => map[token] || token.toLowerCase().replaceAll('_', ' '));
+};
+
 // ============================================================================
 // CONTROL DE CARGA DE SEÑALES FUTUROS
 // Evita peticiones simultáneas al mismo caché pesado.
@@ -474,7 +492,7 @@ function futRenderAnalysisDiagnostics(json, context) {
                 );
         const action = futEscapeHtml(candidate.action || 'NO_OPERAR');
         const confidence = fmtConfidence(candidate.confidence);
-        const baseReason = candidate.reason || candidate.active_reason || 'Sin motivo disponible';
+        const baseReason = futHumanReason(candidate.reason || candidate.active_reason || 'Sin motivo disponible');
         const reason = futEscapeHtml(
             isResearchShadow
                 ? `${baseReason} · Visible para investigación; no es señal ejecutable todavía.`
@@ -539,7 +557,7 @@ function futRenderAnalysisDiagnostics(json, context) {
 
                     <div class="small text-muted mt-1">
                         ${futEscapeHtml(
-                            candidate.manual_risk_reason
+                            futHumanReason(candidate.manual_risk_reason)
                             || ''
                         )}
                     </div>
@@ -553,7 +571,7 @@ function futRenderAnalysisDiagnostics(json, context) {
         ) {
             lifecycleHtml = `
                 <div class="small text-secondary mt-1">
-                    ${futEscapeHtml(candidate.active_reason || '')}
+                    ${futEscapeHtml(futHumanReason(candidate.active_reason || ''))}
                 </div>
             `;
         }
@@ -4284,12 +4302,12 @@ document.addEventListener('DOMContentLoaded', function() {
     // Refrescar panel review cada 3 min (v15: reduce carga en Render Free)
     setInterval(() => {
         if (typeof window.refreshReviewPanel === 'function') window.refreshReviewPanel();
-    }, 180000);
+    }, 900000); // RC8.3 Free Plan: 15 min
     
     // Refrescar stats globales cada 5 min
     setInterval(() => {
         if (typeof window.loadGlobalStats === 'function') window.loadGlobalStats();
-    }, 300000);
+    }, 900000); // RC8.3 Free Plan: 15 min
     
     // Cargar señales activas y anteriores inmediatamente (con delay para que
     // futures.js termine de sobrescribir window.updateActiveSignals y updatePreviousSignals)
@@ -4314,12 +4332,12 @@ document.addEventListener('DOMContentLoaded', function() {
     // Refrescar señales activas cada 2 min (v15: reduce carga)
     setInterval(() => {
         if (typeof window.updateActiveSignals === 'function') window.updateActiveSignals();
-    }, 120000);
+    }, 300000); // RC8.3 Free Plan: 5 min
     
     // Refrescar señales anteriores cada 10 min
     setInterval(() => {
         if (typeof window.updatePreviousSignals === 'function') window.updatePreviousSignals();
-    }, 600000);
+    }, 1800000); // RC8.3 Free Plan: 30 min
     
     // Cargar correlación al inicio
     setTimeout(() => {
@@ -5607,9 +5625,10 @@ window.updateSavedSignalsList = async function() {
                     guardian.tp_progress_ratio
                 );
 
-            const managementReason =
+            const managementReason = futHumanReason(
                 guardian.management_reason
                 || guardian.reason
+            )
                 || '';
 
             const guardianProtects = (
@@ -6129,7 +6148,7 @@ window.updateSavedSignalsList = async function() {
                             </span>
                 
                             <div class="small text-info mt-1">
-                                ${guardian.reason || ''}
+                                ${futHumanReason(guardian.reason || '')}
                             </div>
                         </div>
                     `;
@@ -6221,7 +6240,7 @@ window.updateSavedSignalsList = async function() {
                                 </div>
                 
                                 <div class="mt-2 text-danger">
-                                    ${guardian.reason || ''}
+                                    ${futHumanReason(guardian.reason || '')}
                                 </div>
                 
                             </div>
@@ -6239,7 +6258,7 @@ window.updateSavedSignalsList = async function() {
                                 🛡️ Guardian: REDUCIR / PROTEGER
                             </span>
                             <div class="small text-warning mt-1">
-                                ${guardian.reason || ''}
+                                ${futHumanReason(guardian.reason || '')}
                             </div>
                         </div>
                     `;

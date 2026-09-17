@@ -354,7 +354,10 @@ def build_contingency_playbook(
         "version": VERSION,
         "authority": "CONTINGENCY_PLAYBOOK_NOT_VALIDATED_ALPHA",
         "active": bool(active),
+        # Machine identifiers are preserved for audit/Research only. Public
+        # explanations are generated separately by reason_presenter.py.
         "reason": active_reason,
+        "reason_code": active_reason,
         "research_state": research_state,
         "market": market,
         "symbol": str(symbol or "").upper(),
@@ -367,6 +370,7 @@ def build_contingency_playbook(
         "volatility": {"state": vol_state, "atr_pct": groups["volatility"].get("atr_pct"), "squeeze_on": groups["volatility"].get("squeeze_on")},
         "strategy": strategy,
         "setup_family": setup_family,
+        "setup_code": setup_family,
         "entry": {"rule": entry_rule, "requires_closed_candle": True, "anti_fomo": True},
         "risk": {"size_cap": size_cap, "leverage_cap": leverage_cap, "confidence_cap": confidence_cap, "never_bypass_safety": True},
         "gates": gates,

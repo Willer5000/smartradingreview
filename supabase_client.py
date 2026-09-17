@@ -49,6 +49,16 @@ except ImportError:
 SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
 SUPABASE_KEY = os.environ.get('SUPABASE_KEY', '')
 
+# RC8.3 — FREE PLAN LOCKDOWN
+# Supabase Free includes 5 GB/month uncached egress. The hard objective is to
+# keep database traffic far below that ceiling. These guards are deliberately
+# conservative and can be overridden in Render without another deploy.
+FREE_PLAN_LOCKDOWN = str(os.environ.get('FREE_PLAN_LOCKDOWN', '1')).strip().lower() not in {'0','false','no','off'}
+MAIN_SUPABASE_DAILY_BUDGET_MB = max(20.0, float(os.environ.get('MAIN_SUPABASE_DAILY_BUDGET_MB', '120') or 120))
+MAIN_SUPABASE_DIAGNOSTIC_GUARD = max(0.10, min(0.95, float(os.environ.get('MAIN_SUPABASE_DIAGNOSTIC_GUARD', '0.70') or 0.70)))
+MAIN_SUPABASE_OPTIONAL_GUARD = max(MAIN_SUPABASE_DIAGNOSTIC_GUARD, min(0.98, float(os.environ.get('MAIN_SUPABASE_OPTIONAL_GUARD', '0.85') or 0.85)))
+MAIN_SUPABASE_IMPORTANT_GUARD = max(MAIN_SUPABASE_OPTIONAL_GUARD, min(0.995, float(os.environ.get('MAIN_SUPABASE_IMPORTANT_GUARD', '0.95') or 0.95)))
+
 # ============================================================================
 # LOGGING
 # ============================================================================
@@ -102,6 +112,13 @@ class SupabaseClient:
         self._transient_failures = 0
         self._read_circuit_until = 0.0
         self._preferences_cache = {}
+        self._recommendations_cache = {}
+        self._review_logs_cache = {}
+        self._storage_stats_cache = {'ts': 0.0, 'value': {}}
+        self._free_plan_lock = threading.Lock()
+        self._free_plan_day = datetime.utcnow().date().isoformat()
+        self._free_plan_response_bytes = 0
+        self._free_plan_requests = 0
         self._rest_session = requests.Session()
         self._rotation_lock = threading.Lock()
         self._rotation_last_check = {}
@@ -121,6 +138,12 @@ class SupabaseClient:
             self._create_client()
             self.enabled = True
             print(f"✅ SUPABASE conectado a: {self.url[:40]}...")
+            if FREE_PLAN_LOCKDOWN:
+                print(
+                    "🛡️ FREE PLAN LOCKDOWN activo · "
+                    f"presupuesto local Main {MAIN_SUPABASE_DAILY_BUDGET_MB:.0f} MB/día · "
+                    "diagnóstico y lecturas opcionales se degradan antes que trading crítico"
+                )
         except ImportError:
             print("❌ Librería 'supabase' no instalada. Ejecutar: pip install supabase")
         except Exception as e:
@@ -213,6 +236,66 @@ class SupabaseClient:
         markers = ('PGRST002','schema cache','JSON could not be generated','Error code 521','code 521','HTTP 521','Error code 522','code 522','HTTP 522','Cloudflare','<!DOCTYPE html>')
         return any(m in msg for m in markers)
 
+    def _free_plan_roll_day(self):
+        day = datetime.utcnow().date().isoformat()
+        with self._free_plan_lock:
+            if day != self._free_plan_day:
+                self._free_plan_day = day
+                self._free_plan_response_bytes = 0
+                self._free_plan_requests = 0
+
+    @staticmethod
+    def _estimate_json_bytes(value) -> int:
+        try:
+            return len(json.dumps(value, ensure_ascii=False, separators=(',', ':'), default=str).encode('utf-8'))
+        except Exception:
+            return 0
+
+    def _track_response_egress(self, result) -> None:
+        if not FREE_PLAN_LOCKDOWN:
+            return
+        try:
+            data = getattr(result, 'data', None)
+            size = self._estimate_json_bytes(data)
+        except Exception:
+            size = 0
+        self._free_plan_roll_day()
+        with self._free_plan_lock:
+            self._free_plan_response_bytes += max(0, int(size or 0))
+            self._free_plan_requests += 1
+
+    def free_plan_status(self) -> Dict[str, Any]:
+        self._free_plan_roll_day()
+        with self._free_plan_lock:
+            used = int(self._free_plan_response_bytes)
+            calls = int(self._free_plan_requests)
+            day = str(self._free_plan_day)
+        budget = int(MAIN_SUPABASE_DAILY_BUDGET_MB * 1024 * 1024)
+        ratio = (used / budget) if budget > 0 else 0.0
+        return {
+            'enabled': bool(FREE_PLAN_LOCKDOWN),
+            'day': day,
+            'estimated_response_mb': round(used / 1024 / 1024, 3),
+            'daily_budget_mb': round(MAIN_SUPABASE_DAILY_BUDGET_MB, 1),
+            'ratio': round(ratio, 4),
+            'tracked_requests': calls,
+            # This is application telemetry, not Supabase billing telemetry.
+            'billing_authoritative': False,
+        }
+
+    def free_plan_allows(self, priority: str = 'optional') -> bool:
+        if not FREE_PLAN_LOCKDOWN:
+            return True
+        ratio = float(self.free_plan_status().get('ratio') or 0.0)
+        level = str(priority or 'optional').lower()
+        if level == 'critical':
+            return True
+        if level == 'important':
+            return ratio < MAIN_SUPABASE_IMPORTANT_GUARD
+        if level == 'diagnostic':
+            return ratio < MAIN_SUPABASE_DIAGNOSTIC_GUARD
+        return ratio < MAIN_SUPABASE_OPTIONAL_GUARD
+
     def _with_retry(self, operation, *args, **kwargs):
         """Execute once + one bounded retry for transient transport failures.
 
@@ -224,6 +307,7 @@ class SupabaseClient:
         try:
             result = operation(*args, **kwargs)
             self._mark_transport_success()
+            self._track_response_egress(result)
             return result
         except Exception as e:
             if not self._is_connection_error(e):
@@ -241,6 +325,7 @@ class SupabaseClient:
             try:
                 result = operation(*args, **kwargs)
                 self._mark_transport_success()
+                self._track_response_egress(result)
                 return result
             except Exception as e2:
                 if self._is_connection_error(e2):
@@ -944,6 +1029,14 @@ class SupabaseClient:
             return None
         
         normalized = self.normalize_action(action)
+        cache_key = (str(symbol), str(timeframe), str(normalized))
+        cached = self._recommendations_cache.get(cache_key) or {}
+        if cached and (time.monotonic() - float(cached.get('ts') or 0.0)) < 1800:
+            value = cached.get('value')
+            return dict(value) if isinstance(value, dict) else None
+        if not self.free_plan_allows('important'):
+            value = cached.get('value')
+            return dict(value) if isinstance(value, dict) else None
         
         def _op():
             response = (self.client.table('review_recommendations')
@@ -959,7 +1052,9 @@ class SupabaseClient:
             return None
         
         try:
-            return self._with_retry(_op)
+            value = self._with_retry(_op)
+            self._recommendations_cache[cache_key] = {'ts': time.monotonic(), 'value': dict(value) if isinstance(value, dict) else None}
+            return value
         except Exception as e:
             # Si es error de conexión persistente, lo degradamos a warning
             # (no rompe la app, solo devolvemos None y la próxima llamada intentará de nuevo)
@@ -1316,9 +1411,15 @@ class SupabaseClient:
             return None
     
     def get_recent_review_logs(self, limit: int = 50) -> List[Dict]:
-        """Retorna los últimos N logs del ReviewTrader (ordenados por fecha DESC)"""
+        """Retorna los últimos N logs del ReviewTrader (ordenados por fecha DESC)."""
         if not self.enabled:
             return []
+        limit = max(1, min(int(limit or 50), 100))
+        cached = self._review_logs_cache.get(limit) or {}
+        if cached and (time.monotonic() - float(cached.get('ts') or 0.0)) < 900:
+            return list(cached.get('value') or [])
+        if not self.free_plan_allows('diagnostic'):
+            return list(cached.get('value') or [])
         
         # v22.6: envolver con _with_retry para tolerar EAGAIN transitorios
         # que aparecían cuando el frontend disparaba 8 requests en paralelo a
@@ -1331,7 +1432,9 @@ class SupabaseClient:
                         .limit(limit)
                         .execute())
             response = self._with_retry(_op)
-            return response.data or []
+            value = response.data or []
+            self._review_logs_cache[limit] = {'ts': time.monotonic(), 'value': list(value)}
+            return value
         except Exception as e:
             logger.error(f"Error obteniendo review_logs: {e}")
             return []
@@ -1350,6 +1453,11 @@ class SupabaseClient:
         """
         if not self.enabled:
             return {}
+        cached = self._storage_stats_cache or {}
+        if cached.get('value') and (time.monotonic() - float(cached.get('ts') or 0.0)) < 3600:
+            return dict(cached.get('value') or {})
+        if not self.free_plan_allows('diagnostic'):
+            return dict(cached.get('value') or {})
         
         tables = ['signals', 'signal_indicators', 'signal_results',
                   'strategy_stats_specific', 'strategy_stats_general',
@@ -1364,6 +1472,7 @@ class SupabaseClient:
             except Exception as e:
                 stats[table] = -1  # Error
         
+        self._storage_stats_cache = {'ts': time.monotonic(), 'value': dict(stats)}
         return stats
     
     # ========================================================================
@@ -1595,6 +1704,14 @@ class SupabaseClient:
 
         cache_key = str(user_name or '').strip()
         cached = self._preferences_cache.get(cache_key) or {}
+        # Preferences almost never change; a 6h local cache eliminates thousands
+        # of identical reads. Explicit preference writes invalidate this cache.
+        if cached and (time.monotonic() - float(cached.get('ts') or 0.0)) < 21600:
+            value = cached.get('value')
+            return dict(value) if isinstance(value, dict) else dict(defaults)
+        if not self.free_plan_allows('important'):
+            value = cached.get('value')
+            return dict(value) if isinstance(value, dict) else dict(defaults)
         if self.read_circuit_open():
             value = cached.get('value')
             return dict(value) if isinstance(value, dict) else dict(defaults)
@@ -1718,6 +1835,7 @@ class SupabaseClient:
             user_name = str(user_name or '').strip()
             if not user_name:
                 return False
+            self._preferences_cache.pop(user_name, None)
 
             if not isinstance(preferences, dict):
                 return False

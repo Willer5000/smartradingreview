@@ -7071,7 +7071,9 @@ class TradingExpertSystem:
             'SHORT': ('long futures','compra spot','alcista'),
         }.get(action,())
         chosen=[]
+        from reason_presenter import public_reason
         for reason in reasons:
+            reason = public_reason(reason)
             low=reason.lower()
             if opposite and any(x in low for x in opposite):
                 continue
@@ -18942,15 +18944,23 @@ class TradingExpertSystem:
                     strategy_name = str(contingency_playbook.get('strategy') or '').strip()
                     if strategy_name and strategy_name not in estrategias_consenso:
                         estrategias_consenso.append(strategy_name)
-                    razones_consenso.append(
-                        'RC8.2 contingencia: ' +
-                        str(contingency_playbook.get('reason') or 'celda sin Champion') +
-                        ' · ' + str(contingency_playbook.get('setup_family') or 'SETUP')
+                    # RC8.3 — las razones públicas son trading, no códigos internos.
+                    # reason/setup/authority permanecen en contingency_playbook para auditoría.
+                    from reason_presenter import contingency_public_reason
+                    public_contingency_reason = contingency_public_reason(
+                        contingency_playbook.get('reason_code') or contingency_playbook.get('reason'),
+                        contingency_playbook.get('setup_code') or contingency_playbook.get('setup_family'),
                     )
+                    if public_contingency_reason:
+                        razones_consenso.append(public_contingency_reason)
                     effective_action = str(contingency_playbook.get('effective_action') or accion_consenso).upper()
                     if effective_action != str(accion_consenso or '').upper():
+                        from reason_presenter import public_reason
                         razones_consenso.append(
-                            str(contingency_playbook.get('downgrade_reason') or 'Playbook de contingencia exige esperar.')
+                            public_reason(
+                                contingency_playbook.get('downgrade_reason'),
+                                fallback='La operación debe esperar una confirmación técnica adicional antes de ejecutarse.'
+                            )
                         )
                         accion_consenso = effective_action
                     # No validated alpha => confidence cannot look like a proven Champion.

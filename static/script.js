@@ -8,6 +8,40 @@ let currentAnalysis = null;
 let currentSymbol = 'BTC-USDT';
 let currentInterval = '1D';
 
+// RC8.3 — PUBLIC REASONS
+// Backend codes are useful for audit, never for the trader-facing explanation.
+window.humanizeTradingReason = window.humanizeTradingReason || function(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const map = {
+        ACTION_CELL_NOT_YET_VALIDATED: 'Esta combinación de mercado, par, temporalidad y acción todavía no tiene una estrategia validada; se aplica la contingencia con riesgo reducido.',
+        RESEARCH_UNAVAILABLE: 'La evidencia validada no está disponible temporalmente; se conserva el último estado conocido y se actúa de forma conservadora.',
+        STRUCTURE_RETEST: 'El movimiento necesita confirmar la nueva estructura con un retesteo antes de ejecutar la entrada.',
+        TREND_PULLBACK: 'La tendencia es favorable, pero la entrada debe esperar un retroceso hacia una zona técnica defendible.',
+        BREAKOUT_RETEST: 'La ruptura necesita aceptación y retesteo del nivel antes de ejecutar.',
+        LIQUIDITY_SWEEP_REVERSAL: 'El barrido de liquidez necesita confirmación de estructura y momentum antes de validar la reversión.',
+        RANGE_MEAN_REVERSION: 'El mercado está en balance y la entrada sólo es válida desde un extremo defendible del rango.',
+        SPOT_ROTATION: 'La señal corresponde a una rotación Spot entre BTC, PAXG y liquidez según fuerza relativa y protección del capital.',
+        NEGATIVE_OOS: 'La validación fuera de muestra no confirma una ventaja estadística suficiente para operar.',
+        SHADOW_DIVERGED: 'El seguimiento real se desvió de la validación y la estrategia queda suspendida.',
+        ALPHA_DECAY: 'La estrategia validada muestra deterioro reciente y queda suspendida hasta una nueva validación.',
+        DEGRADED_LOSS_STREAK: 'La estrategia acumula una racha de pérdidas incompatible con su comportamiento validado y queda suspendida.',
+        DEGRADED_ROLLING: 'Las métricas recientes se deterioraron frente a la referencia validada y se requiere una nueva validación.',
+        DEGRADED_RETEST: 'El retest del mismo linaje no confirmó la ventaja previa y la celda vuelve a búsqueda.',
+        EDGE_BLOCKED: 'La evidencia estadística no autoriza una nueva señal ejecutable.',
+        CONTINGENCY_PLAYBOOK_NOT_VALIDATED_ALPHA: 'Se está usando una estrategia provisional de contingencia; todavía no posee ventaja estadística validada.',
+        DEFAULT_STRUCTURE_RETEST: 'El movimiento necesita confirmar la nueva estructura con un retesteo antes de ejecutar la entrada.',
+        DEFAULT_TREND_PULLBACK: 'La tendencia es favorable, pero la entrada debe esperar un retroceso hacia una zona técnica defendible.',
+        DEFAULT_BREAKOUT_RETEST: 'La ruptura necesita aceptación y retesteo del nivel antes de ejecutar.',
+        DEFAULT_LIQUIDITY_SWEEP_REVERSAL: 'El barrido de liquidez necesita confirmación de estructura y momentum antes de validar la reversión.'
+    };
+    const exact = raw.toUpperCase();
+    if (map[exact]) return map[exact];
+    let text = raw.replace(/\bRC\d+(?:\.\d+)?\s*(?:contingencia|contingency)?\s*:\s*/gi, '');
+    text = text.replace(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+){1,}\b/g, token => map[token] ? map[token].replace(/[.]$/, '') : token.toLowerCase().replaceAll('_', ' '));
+    return text.replace(/\s*·\s*/g, '. ').replace(/\s{2,}/g, ' ').trim();
+};
+
 // ============================================================================
 // TGP — AUTENTICACIÓN Y PORTFOLIO SERVER-SIDE
 // ============================================================================
@@ -1921,7 +1955,7 @@ function displayTGPResult(tgp) {
     
     banner.classList.remove('d-none');
     const reasonEl = document.getElementById('tgp-reason');
-    if (reasonEl) reasonEl.textContent = tgp.reason;
+    if (reasonEl) reasonEl.textContent = window.humanizeTradingReason(tgp.reason);
     
     if (tgp.action === 'HOLD') {
         const riskWatch = tgp.market_risk_watch || {};
@@ -1937,7 +1971,7 @@ function displayTGPResult(tgp) {
                 : '🛡️ Guardián: MANTENER';
         }
         if (reasonEl && hasRiskAlert && riskWatch.reason) {
-            reasonEl.textContent = `${riskWatch.reason} El Guardián espera confirmación cerrada antes de rotar capital.`;
+            reasonEl.textContent = `${window.humanizeTradingReason(riskWatch.reason)} El Guardián espera confirmación cerrada antes de rotar capital.`;
         }
         if (tradeDetails) tradeDetails.classList.add('d-none');
         if (vetoBadge) vetoBadge.classList.add('d-none');
@@ -9844,7 +9878,7 @@ setInterval(() => {
     ) {
         window.updatePreviousSignals();
     }
-}, 120000); // Cada 2 minutos
+}, 300000); // RC8.3 Free Plan: cada 5 minutos
 
 
 function updateMarketAlerts(data) {

@@ -21,6 +21,9 @@ _RC8_WRITE_LOCK = threading.Lock()
 _RC8_SNAPSHOT_WRITES = {}
 _RC8_MACRO_WRITE = {'digest': None, 'ts': 0.0}
 _RC8_IDENTICAL_WRITE_SECONDS = 900.0
+_RC83_READ_CACHE = {}
+_RC83_READ_CACHE_TTL = 300.0
+_RC83_MACRO_READ_CACHE = {'ts': 0.0, 'value': []}
 
 
 def _stable_digest(value: Any) -> str:
@@ -63,11 +66,28 @@ def save_runtime_snapshot(namespace: str, snapshot_key: str, payload: Dict[str, 
         'expires_at': (now + timedelta(seconds=max(300, int(ttl_seconds or 21600)))).isoformat(),
     }
     try:
-        db.client.table(RUNTIME_TABLE).upsert(
-            row, on_conflict='namespace,snapshot_key'
-        ).execute()
+        # RC8.3 Free Plan: do not ask PostgREST to echo the JSONB snapshot.
+        if hasattr(db, '_rest_minimal'):
+            db._rest_minimal(
+                'POST', RUNTIME_TABLE, payload=row,
+                params={'on_conflict': 'namespace,snapshot_key'},
+                prefer='resolution=merge-duplicates,return=minimal',
+            )
+        else:
+            db.client.table(RUNTIME_TABLE).upsert(
+                row, on_conflict='namespace,snapshot_key'
+            ).execute()
         with _RC8_WRITE_LOCK:
             _RC8_SNAPSHOT_WRITES[cache_key] = {'digest': digest, 'ts': time.monotonic()}
+            _RC83_READ_CACHE[cache_key] = {
+                'ts': time.monotonic(),
+                'value': {
+                    'payload': dict(payload),
+                    'updated_at': row['updated_at'],
+                    'expires_at': row['expires_at'],
+                    'expired': False,
+                },
+            }
         cleanup_ephemeral_storage()
         return True
     except Exception as exc:
@@ -79,6 +99,13 @@ def load_runtime_snapshot(namespace: str, snapshot_key: str, *, allow_expired: b
     db = _db()
     if db is None:
         return None
+    cache_key = (str(namespace or 'runtime')[:64], str(snapshot_key or 'default')[:128])
+    with _RC8_WRITE_LOCK:
+        cached = _RC83_READ_CACHE.get(cache_key) or {}
+        if cached and (time.monotonic() - float(cached.get('ts') or 0.0)) < _RC83_READ_CACHE_TTL:
+            value = cached.get('value')
+            if isinstance(value, dict):
+                return dict(value)
     try:
         response = (
             db.client.table(RUNTIME_TABLE)
@@ -104,12 +131,15 @@ def load_runtime_snapshot(namespace: str, snapshot_key: str, *, allow_expired: b
                 expired = False
         if expired and not allow_expired:
             return None
-        return {
+        value = {
             'payload': row.get('payload') if isinstance(row.get('payload'), dict) else {},
             'updated_at': row.get('updated_at'),
             'expires_at': row.get('expires_at'),
             'expired': expired,
         }
+        with _RC8_WRITE_LOCK:
+            _RC83_READ_CACHE[cache_key] = {'ts': time.monotonic(), 'value': dict(value)}
+        return value
     except Exception as exc:
         print(f"⚠️ [PERSIST] runtime snapshot load {namespace}/{snapshot_key}: {exc}")
         return None
@@ -174,7 +204,13 @@ def persist_macro_events(news, calendar_rows) -> int:
             cleanup_ephemeral_storage()
             return len(rows)
     try:
-        db.client.table(MACRO_TABLE).upsert(rows, on_conflict='event_key').execute()
+        if hasattr(db, '_rest_minimal'):
+            db._rest_minimal(
+                'POST', MACRO_TABLE, payload=rows, params={'on_conflict': 'event_key'},
+                prefer='resolution=merge-duplicates,return=minimal',
+            )
+        else:
+            db.client.table(MACRO_TABLE).upsert(rows, on_conflict='event_key').execute()
         with _RC8_WRITE_LOCK:
             _RC8_MACRO_WRITE.update(digest=macro_digest, ts=time.monotonic())
         cleanup_ephemeral_storage(force=True)
@@ -188,6 +224,11 @@ def load_active_macro_events(*, limit: int = 80):
     db = _db()
     if db is None:
         return []
+    cached = _RC83_MACRO_READ_CACHE
+    if cached.get('value') and (time.monotonic() - float(cached.get('ts') or 0.0)) < 600:
+        return list(cached.get('value') or [])[:max(1, int(limit or 80))]
+    if hasattr(db, 'free_plan_allows') and not db.free_plan_allows('optional'):
+        return list(cached.get('value') or [])[:max(1, int(limit or 80))]
     now = utc_now().isoformat()
     try:
         response = (
@@ -213,6 +254,8 @@ def load_active_macro_events(*, limit: int = 80):
                 **payload,
             }
             result.append(item)
+        _RC83_MACRO_READ_CACHE['ts'] = time.monotonic()
+        _RC83_MACRO_READ_CACHE['value'] = list(result)
         return result
     except Exception as exc:
         print(f"⚠️ [PERSIST] macro events load: {exc}")

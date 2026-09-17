@@ -27,7 +27,7 @@ DEFAULT_STRATEGIES = {
 
 _cache_lock = threading.Lock()
 _cache = {}
-_cache_ttl = 180.0
+_cache_ttl = 900.0
 
 
 def default_registry_snapshot() -> Dict[str, Any]:

@@ -23,10 +23,20 @@ Requiere: supabase_client.supabase_db habilitado + tabla saved_signals creada.
 """
 
 import logging
+import time
+import threading
 from datetime import datetime
 from typing import Dict, List, Optional
 
 logger = logging.getLogger('SAVED_SIGNALS')
+
+# RC8.3 — browser-facing saved-signal reads can arrive in bursts from several
+# panels. Cache only USER-SCOPED lists; the lifecycle worker calls without a
+# user and therefore always sees fresh operational state.
+_SAVED_LIST_CACHE = {}
+_SAVED_LIST_CACHE_LOCK = threading.Lock()
+_SAVED_LIST_CACHE_TTL = 45.0
+
 # ============================================================================
 # FASE 7G.2 — VIGENCIA DE SETUPS GUARDADOS
 # ============================================================================
@@ -1153,10 +1163,6 @@ def enrich_pending_funding_economics(
 
 
     if db is None:
-
-        return stats
-
-    if hasattr(db, 'read_circuit_open') and db.read_circuit_open():
 
         return stats
 
@@ -3692,10 +3698,6 @@ def settle_pending_guardian_learning_events(
 
         return stats
 
-    if hasattr(db, 'read_circuit_open') and db.read_circuit_open():
-
-        return stats
-
 
     try:
 
@@ -5008,6 +5010,19 @@ def list_saved_signals(status_filter: Optional[List[str]] = None,
         return []
     if hasattr(db, 'read_circuit_open') and db.read_circuit_open():
         return []
+
+    cache_key = None
+    if user_name:
+        cache_key = (
+            str(user_name),
+            tuple(sorted(str(x) for x in (status_filter or []))),
+            int(limit or 200),
+            status_filter is None,
+        )
+        with _SAVED_LIST_CACHE_LOCK:
+            cached = _SAVED_LIST_CACHE.get(cache_key) or {}
+        if cached and (time.monotonic() - float(cached.get('ts') or 0.0)) < _SAVED_LIST_CACHE_TTL:
+            return [dict(row) for row in (cached.get('value') or [])]
     
     try:
         def _op():
@@ -5021,10 +5036,25 @@ def list_saved_signals(status_filter: Optional[List[str]] = None,
             return q.order('created_at', desc=True).limit(limit).execute()
         r = db._with_retry(_op)
         rows = r.data if r and r.data else []
-        return [
+        value = [
             _with_saved_signal_economic_outcome(row)
             for row in rows
         ]
+        if cache_key is not None:
+            with _SAVED_LIST_CACHE_LOCK:
+                _SAVED_LIST_CACHE[cache_key] = {
+                    'ts': time.monotonic(),
+                    'value': [dict(row) for row in value],
+                }
+                # Bound process memory: keep only the newest 32 UI query shapes.
+                if len(_SAVED_LIST_CACHE) > 32:
+                    oldest = sorted(
+                        _SAVED_LIST_CACHE.items(),
+                        key=lambda item: float((item[1] or {}).get('ts') or 0.0)
+                    )[:len(_SAVED_LIST_CACHE)-32]
+                    for key, _ in oldest:
+                        _SAVED_LIST_CACHE.pop(key, None)
+        return value
     except Exception as e:
         logger.error(f"list_saved_signals: {e}")
         return []

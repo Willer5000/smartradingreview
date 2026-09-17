@@ -1077,6 +1077,19 @@ function loR(value, decimals = 2) {
 function loHumanReason(value) {
     const raw = String(value || '');
     if (!raw) return 'Sin detalle adicional.';
+    const tradingReason = {
+        ACTION_CELL_NOT_YET_VALIDATED: 'Esta combinación todavía no tiene una estrategia validada; se mantiene contingencia protegida.',
+        STRUCTURE_RETEST: 'La entrada necesita confirmar la nueva estructura mediante un retesteo.',
+        NEGATIVE_OOS: 'La validación fuera de muestra no confirma ventaja suficiente.',
+        SHADOW_DIVERGED: 'El seguimiento real se desvió de la validación y la estrategia queda suspendida.',
+        ALPHA_DECAY: 'La estrategia muestra deterioro reciente y queda suspendida hasta nueva validación.',
+        DEGRADED_LOSS_STREAK: 'Una racha de pérdidas deterioró la validez operativa de la estrategia.',
+        DEGRADED_ROLLING: 'Las métricas recientes se deterioraron frente a la referencia validada.',
+        DEGRADED_RETEST: 'El retest del mismo linaje no confirmó la ventaja previa.',
+        EDGE_BLOCKED: 'La evidencia estadística no autoriza una nueva señal ejecutable.',
+        CONTINGENCY_PLAYBOOK_NOT_VALIDATED_ALPHA: 'La contingencia es provisional y todavía no posee ventaja estadística validada.'
+    };
+    if (tradingReason[raw]) return tradingReason[raw];
     if (raw === 'COHORTE_INCOMPLETA') return 'La lectura completa de la cohorte todavía no está demostrada.';
     if (raw === 'PNL_NETO_REALIZADO_AUN_NO_VERIFICABLE') return 'Comisión, slippage y funding realizados todavía no están atribuidos de forma uniforme.';
     if (/^FUTURES_\d+_DE_25_RESUELTAS$/.test(raw)) {
@@ -1120,6 +1133,7 @@ function loHumanReason(value) {
     if (raw === 'STALE_GOVERNANCE_STATE') return 'La última comprobación de gobernanza está desactualizada; la autoridad positiva se cerró por seguridad.';
     if (raw === 'recent_health_ok') return 'Los resultados recientes muestran deterioro y bloquean promoción positiva.';
     if (raw === 'failure_streak_ok') return 'Existe una racha de pérdidas demasiado larga para habilitar promoción positiva.';
+    if (/^[A-Z0-9]+(?:_[A-Z0-9]+)+$/.test(raw)) return raw.toLowerCase().replaceAll('_', ' ').replace(/^./, c => c.toUpperCase());
     return uiHumanLabel(raw);
 }
 
@@ -2796,15 +2810,18 @@ async function loadV1MacroStatus(){
 
 window.loadAllAnalytics = async function() {
     showToast('🔄 Actualizando estado del sistema...', 'info');
-    // Vista simple: sólo las tres fuentes que realmente gobiernan V1.
-    const coreTasks = [
-        loadQualityV2(),
-        loadLearningGovernanceStatus(),
-        loadResearchFederationAnalytics(),
-        loadV1MacroStatus()
+    // RC8.3 Free Plan: secuencial, no ocho lecturas simultáneas contra Supabase.
+    // La vista simple sólo consulta las fuentes que gobiernan producción.
+    const tasks = [
+        () => loadQualityV2(),
+        () => loadLearningGovernanceStatus(),
+        () => loadResearchFederationAnalytics(),
+        () => loadV1MacroStatus()
     ];
-    const results = await Promise.allSettled(coreTasks);
-    results.forEach(result => { if (result.status === 'rejected') console.warn('Estado del sistema parcial:', result.reason); });
+    for (const task of tasks) {
+        try { await task(); } catch (err) { console.warn('Estado del sistema parcial:', err); }
+        await new Promise(resolve => setTimeout(resolve, 120));
+    }
     if (window.__V1_ADVANCED_ANALYTICS__) {
         await window.setAdvancedAnalytics(true);
     }
@@ -2836,8 +2853,8 @@ document.addEventListener('DOMContentLoaded', function() {
         loadResearchFederationAnalytics();
         loadLearningGovernanceStatus();
         loadV1MacroStatus();
-    }, 300000);
-    setInterval(() => loadQualityV2(), 900000);
+    }, 900000); // RC8.3 Free Plan: 15 min
+    setInterval(() => loadQualityV2(), 1800000); // diagnóstico pesado: 30 min
 });
 
 
