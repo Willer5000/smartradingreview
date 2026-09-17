@@ -14918,7 +14918,8 @@ class TradingExpertSystem:
         volatility,
         timeframe,
         liquidation=None,
-        market_type='spot'
+        market_type='spot',
+        setup_family=None
     ):
         """
         Selección Smart Money del ENTRY.
@@ -15160,10 +15161,19 @@ class TradingExpertSystem:
             )
         )
     
+        setup_family_key = str(setup_family or '').upper()
+        # Breakout/retest may legitimately retest the accepted side of the old
+        # range. Pullbacks/reversals keep the stricter no-chase rule.
         if direction == 'long':
-            ceiling = previous_close
+            if setup_family_key in ('BREAKOUT_RETEST', 'STRUCTURE_RETEST'):
+                ceiling = min(current_price, previous_close + 1.25 * atr)
+            else:
+                ceiling = previous_close
         else:
-            floor = previous_close
+            if setup_family_key in ('BREAKOUT_RETEST', 'STRUCTURE_RETEST'):
+                floor = max(current_price, previous_close - 1.25 * atr)
+            else:
+                floor = previous_close
     
         # ==========================================================
         # ORDER BLOCKS
@@ -16089,6 +16099,10 @@ class TradingExpertSystem:
             previous_close = structure.get('previous_close', current_price) or current_price
             
             # ============ SELECCIONAR ENTRY ÓPTIMO (retroceso/rebote) ============
+            setup_family = str(
+                ((structure.get('_contingency_playbook') or {}).get('setup_family'))
+                or ''
+            ).upper()
             (
                 entry,
                 entry_source,
@@ -16106,21 +16120,30 @@ class TradingExpertSystem:
                     'futures'
                     if is_futures
                     else 'spot'
-                )
+                ),
+                setup_family=setup_family,
             )
             
-            # ============ GARANTÍA DURA de la regla del usuario ============
-            # LONG: entry NUNCA puede ser > previous_close
-            # SHORT: entry NUNCA puede ser < previous_close
-            if direction == 'long' and entry > previous_close:
-                print(f"   ⚠️ Entry LONG {entry:.4f} > cierre anterior {previous_close:.4f}. Forzando a cierre.")
-                entry = previous_close
-                entry_source = f'Cierre anterior (regla LONG<=close_prev)'
-            elif direction == 'short' and entry < previous_close:
-                print(f"   ⚠️ Entry SHORT {entry:.4f} < cierre anterior {previous_close:.4f}. Forzando a cierre.")
-                entry = previous_close
-                entry_source = f'Cierre anterior (regla SHORT>=close_prev)'
-            
+            # ============ REGLA ANTI-CHASE ESPECÍFICA DEL SETUP ============
+            # Pullback/reversal: no perseguir más allá del cierre previo.
+            # Breakout/retest: aceptar el lado roto sólo si sigue siendo un retest
+            # cercano (máx. 1.25 ATR) y nunca peor que el precio actual.
+            if setup_family in ('BREAKOUT_RETEST', 'STRUCTURE_RETEST'):
+                if direction == 'long':
+                    entry = min(entry, current_price, previous_close + 1.25 * atr)
+                else:
+                    entry = max(entry, current_price, previous_close - 1.25 * atr)
+            else:
+                if direction == 'long' and entry > previous_close:
+                    print(f"   ⚠️ Entry LONG {entry:.4f} > cierre anterior {previous_close:.4f}. Forzando a cierre.")
+                    entry = previous_close
+                    entry_source = 'Cierre anterior (anti-FOMO pullback/reversión)'
+                elif direction == 'short' and entry < previous_close:
+                    print(f"   ⚠️ Entry SHORT {entry:.4f} < cierre anterior {previous_close:.4f}. Forzando a cierre.")
+                    entry = previous_close
+                    entry_source = 'Cierre anterior (anti-FOMO pullback/reversión)'
+            entry_quality['setup_family'] = setup_family or 'UNSPECIFIED'
+
             print(f"   🎯 Entry: ${entry:.4f} ({entry_source}, score {entry_score:.0f})")
             
             # Apalancamiento base
@@ -18310,6 +18333,8 @@ class TradingExpertSystem:
                 sentiment=sentiment or {},
                 liquidation=liquidation or {},
                 specialist_reasons=razones_consenso,
+                multi_timeframe=(operational_intelligence or {}).get('multi_timeframe') or {},
+                operational_context=operational_intelligence or {},
                 timestamp_text=timestamp_text,
                 max_evidence=7,
             )
@@ -18869,7 +18894,7 @@ class TradingExpertSystem:
                 'time_factor': time_factor,
                 'sentiment': sentiment,
                 'liquidation': liquidation_data,
-                'market_regime': market_regime,   # nueva capa 11
+                'market_regime': market_regime,   # legacy regime retained for old specialists
                 'symbol': symbol,
                 'timeframe': timeframe,
                 'btc_analysis': btc_analysis,
@@ -18877,8 +18902,33 @@ class TradingExpertSystem:
                 'ratio_analysis': paxg_btc_analysis,
                 'macro_context': macro_context_snapshot
             }
-            
-            # ============ SISTEMA DE 9 TRADERS ============
+
+            # ==========================================================
+            # RC9.2 — THESIS-FIRST OPERATIONAL INTELLIGENCE
+            # ==========================================================
+            # Multi-timeframe context is read only from already available cache.
+            # It never fabricates a higher timeframe and never opens new requests.
+            operational_mtf = _build_operational_mtf_context(
+                symbol, timeframe, analysis_system_type, capas
+            )
+            capas['multi_timeframe_context'] = operational_mtf
+            try:
+                from operational_intelligence import prepare_operational_intelligence
+                operational_intelligence = prepare_operational_intelligence(
+                    layers=capas, symbol=symbol, timeframe=timeframe,
+                    system_type=analysis_system_type, mtf_context=operational_mtf
+                )
+            except Exception as operational_error:
+                operational_intelligence = {
+                    'version': 'RC9_2_OPERATIONAL_INTELLIGENCE_V1',
+                    'candidate_ready': False, 'candidate_action': 'NO_OPERAR',
+                    'multi_timeframe': operational_mtf,
+                    'error': str(operational_error)[:180],
+                    'never_bypass_safety': True,
+                }
+            capas['operational_intelligence'] = operational_intelligence
+
+            # ============ SISTEMA DE ESPECIALISTAS INTERNOS ============
             print(f"👥 Iniciando votación de 9 traders...")
             moderador = Moderador()
             try:
@@ -18925,7 +18975,7 @@ class TradingExpertSystem:
                         timeframe,
                         accion_consenso,
                         analysis_system_type,
-                        regime=str((market_regime or {}).get('regime') or '').upper() or None,
+                        regime=str((((operational_intelligence or {}).get('context') or {}).get('regime')) or (market_regime or {}).get('regime') or '').upper() or None,
                         runtime_features={
                             'has_pullback': 'YES' if ('PULLBACK' in strategy_blob or 'RETEST' in strategy_blob) else 'NO',
                             'has_sweep': 'YES' if ('SWEEP' in strategy_blob or 'LIQUIDITY' in strategy_blob or 'BARRIDO' in strategy_blob) else 'NO',
@@ -19367,6 +19417,38 @@ class TradingExpertSystem:
                     or 'ENTRY_MISSED'
                 )
             
+            # ==========================================================
+            # RC9.2 — SETUP-AWARE EXECUTION GUARD
+            # ==========================================================
+            operational_execution = {'applied': False, 'action': accion_consenso}
+            if str(accion_consenso or '').upper() in ('COMPRA_SPOT','VENTA_SPOT','LONG','SHORT'):
+                try:
+                    from operational_intelligence import execution_setup_guard
+                    _setup_family_for_guard = (
+                        (contingency_playbook or {}).get('setup_family')
+                        or ((operational_intelligence or {}).get('default_strategy') or {}).get('family')
+                    )
+                    operational_execution = execution_setup_guard(
+                        action=accion_consenso, levels=levels,
+                        setup_family=_setup_family_for_guard,
+                        market=('FUTURES' if analysis_system_type == 'futures' else 'SPOT'),
+                        timeframe=timeframe,
+                    )
+                    if operational_execution.get('applied'):
+                        _original_operational_action = str(accion_consenso)
+                        accion_consenso = str(operational_execution.get('action') or 'ESPERAR').upper()
+                        confianza_consenso = min(float(confianza_consenso or 0), 68.0 if analysis_system_type == 'futures' else 72.0)
+                        for _r in operational_execution.get('reasons') or []:
+                            if _r and _r not in razones_consenso:
+                                razones_consenso.append(str(_r))
+                        levels['is_executable'] = False
+                        levels['publication_status'] = 'ANALYSIS_ONLY'
+                        levels['suggested_size'] = 0
+                        levels['rejected_reason'] = '; '.join(operational_execution.get('reasons') or [])[:320]
+                        print(f"🧠 [RC9.2 EXECUTION] {_original_operational_action} → {accion_consenso}")
+                except Exception as _execution_guard_error:
+                    operational_execution = {'applied': False, 'action': accion_consenso, 'error': str(_execution_guard_error)[:160]}
+
             # ============ CALCULAR CONVICCIÓN ============
             print(f"📈 Calculando convicción...")
             if accion_consenso in ['COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT']:
@@ -19899,7 +19981,9 @@ class TradingExpertSystem:
                 'time_factor': self._make_serializable(time_factor),
                 'sentiment': self._make_serializable(sentiment),
                 'liquidation': self._make_serializable(liquidation_data),
-                'market_regime': self._make_serializable(market_regime),   # nueva capa
+                'market_regime': self._make_serializable(market_regime),   # legacy/raw layer
+                'operational_intelligence': self._make_serializable(operational_intelligence),
+                'operational_execution': self._make_serializable(operational_execution),
                 'contingency_playbook': self._make_serializable(contingency_playbook),
                 'strategy_lab': self._make_serializable(strategy_lab),
                 'visual_evidence': self._make_serializable(visual_evidence),
@@ -25118,6 +25202,99 @@ class TraderEspectico(TraderBase):
         return accion, confianza, estrategias, razones
 
 # ============================================================================
+# RC9.2 — OPERATIONAL MULTI-TIMEFRAME CONTEXT
+# ============================================================================
+def _get_operational_mtf_peer(symbol, timeframe, system_type='spot'):
+    """Read another timeframe from existing caches only; never opens a request.
+
+    Cache keys historically mix ``4h``/``4H`` and ``1D`` casing. RC9.2
+    resolves them canonically so a real cached TF is never missed because of
+    spelling.
+    """
+    try:
+        target_symbol = str(symbol or '').upper().replace('/', '-')
+        target_tf = str(timeframe or '').upper()
+        if str(system_type or '').lower() == 'futures':
+            cache_data = (_futures_analysis_cache.get('data') or {}) if '_futures_analysis_cache' in globals() else {}
+            analysis_map = cache_data.get('analysis') or {}
+            row = None
+            for key, candidate in analysis_map.items():
+                if not isinstance(key, tuple) or len(key) < 2:
+                    continue
+                if str(key[0] or '').upper().replace('/', '-') == target_symbol and str(key[1] or '').upper() == target_tf:
+                    row = candidate
+                    break
+            if not isinstance(row, dict) or not row.get('success'):
+                return None
+            if row.get('market_data_is_synthetic') is True or row.get('source_candle_closed') is False:
+                return None
+            return row
+
+        # Spot cache is deliberately tiny. Search its current keys rather than
+        # assuming exact case, then use the normal TTL-aware getter.
+        candidate_key = None
+        cache_obj = globals().get('_ANALYSIS_CACHE') or {}
+        for key in list(cache_obj.keys()):
+            if not isinstance(key, tuple) or len(key) < 2:
+                continue
+            if str(key[0] or '').upper().replace('/', '-') == target_symbol and str(key[1] or '').upper() == target_tf:
+                candidate_key = key
+                break
+        if candidate_key is None:
+            candidate_key = (symbol, timeframe)
+        row = _analysis_cache_get(candidate_key)
+        if isinstance(row, dict) and row.get('system_type') == 'futures':
+            row = None
+        if isinstance(row, dict) and row.get('success'):
+            return row
+
+        # Spot keeps a compact multi-timeframe Guardian snapshot precisely so
+        # 4H/12H/1D/1W context survives the tiny full-analysis cache. Reuse it
+        # before declaring the operational MTF lane incomplete; this adds zero
+        # market requests and zero Supabase reads.
+        try:
+            with _TGP_MARKET_SNAPSHOT_LOCK:
+                compact = _TGP_MARKET_SNAPSHOT.get((target_symbol, timeframe))
+                if compact is None:
+                    compact = next((
+                        value for (sym, tf), value in _TGP_MARKET_SNAPSHOT.items()
+                        if str(sym or '').upper().replace('/', '-') == target_symbol
+                        and str(tf or '').upper() == target_tf
+                    ), None)
+            if isinstance(compact, dict) and compact.get('success'):
+                return compact
+        except Exception:
+            pass
+        return None
+    except Exception:
+        return None
+
+
+def _build_operational_mtf_context(symbol, timeframe, system_type, current_layers):
+    try:
+        from operational_intelligence import mtf_required_timeframes, build_multiframe_context
+        market = 'FUTURES' if str(system_type or '').lower() == 'futures' else 'SPOT'
+        peers = {}
+        for tf in mtf_required_timeframes(market, timeframe):
+            if str(tf).upper() == str(timeframe).upper():
+                continue
+            row = _get_operational_mtf_peer(symbol, tf, system_type)
+            if row:
+                peers[str(tf).upper()] = row
+        return build_multiframe_context(
+            market=market, timeframe=timeframe, current_layers=current_layers, peer_analyses=peers
+        )
+    except Exception as exc:
+        return {
+            'version': 'RC9_2_OPERATIONAL_INTELLIGENCE_V1',
+            'alignment': 'INCOMPLETE', 'dominant_direction': 'NEUTRAL',
+            'conflict': False, 'complete': False, 'roles': {},
+            'missing_timeframes': [],
+            'public_summary': 'No hay suficientes temporalidades reales en caché para confirmar alineación multitemporal.',
+            'error': str(exc)[:160],
+        }
+
+# ============================================================================
 # TRADER 8: MULTIFRAME ANALYST - VERSIÓN CORREGIDA CON ANÁLISIS REAL
 # ============================================================================
 def _get_higher_tf_analysis_from_cache(symbol, current_timeframe, system_type='spot'):
@@ -25908,8 +26085,8 @@ class Moderador:
     def _normalize_action_for_market(action, system_type):
         """Unifica el vocabulario antes de contar votos del comité."""
         normalized = str(action or 'NO_OPERAR').upper()
-        if normalized == 'CAUTION':
-            normalized = 'ESPERAR'
+        if normalized in ('CAUTION', 'PRECAUCION', 'PRECAUCIÓN'):
+            normalized = 'PRECAUCION'
         if str(system_type or 'spot').lower() == 'futures':
             return {
                 'COMPRA_SPOT': 'LONG',
@@ -26264,64 +26441,98 @@ class Moderador:
             print(f"   Razón: {veto_razon}")
             return 'NO_OPERAR', 90, ['VETO_DETECTADO'], [veto_razon or 'Veto del comité'], votos
         
-        # 8. SELECCIONAR ACCIÓN GANADORA
-        # Priorizar acciones con al menos 2 votos
-        acciones_con_votos = {a: c for a, c in conteo_acciones.items() if c >= 2 and a not in ['NO_OPERAR', 'NEUTRAL']}
-        
-        if acciones_con_votos:
-            # Entre las acciones con al menos 2 votos, elegir la de mayor confianza
-            accion_ganadora = max(acciones_con_votos.keys(), 
-                                  key=lambda a: confianza_por_accion.get(a, 0))
-            confianza_final = confianza_por_accion.get(accion_ganadora, 50)
-            traders_que_apoyan = traders_por_accion.get(accion_ganadora, [])
-            estrategias_detectadas = list(set(estrategias_por_accion.get(accion_ganadora, [])))
-            razones_consolidadas = razones_por_accion.get(accion_ganadora, [])[:3]
-            
-            print(f"\n🏆 Acción ganadora: {accion_ganadora}")
-            print(f"   Confianza: {confianza_final:.1f}%")
-            print(f"   Apoyada por: {', '.join(traders_que_apoyan)}")
-            
+        # 8. RC9.2 — TESIS DE MERCADO PRIMERO; ESPECIALISTAS COMO EVIDENCIA
+        try:
+            from operational_intelligence import moderator_candidate
+            _op_candidate = moderator_candidate(
+                capas.get('operational_intelligence') or {}, votos, system_type
+            )
+        except Exception as _op_candidate_error:
+            _op_candidate = {'use': False, 'reason': str(_op_candidate_error)[:120]}
+
+        if _op_candidate.get('use'):
+            accion_ganadora = str(_op_candidate.get('action') or 'NO_OPERAR').upper()
+            confianza_final = float(_op_candidate.get('confidence') or 0)
+            traders_que_apoyan = [
+                str(v.get('trader')) for v in votos
+                if self._normalize_action_for_market(v.get('accion'), system_type) == accion_ganadora
+            ]
+            estrategias_detectadas = list(dict.fromkeys(
+                e for v in votos
+                if self._normalize_action_for_market(v.get('accion'), system_type) == accion_ganadora
+                for e in (v.get('estrategias') or [])
+            ))
+            razones_consolidadas = []
+            _thesis = (capas.get('operational_intelligence') or {}).get('thesis') or {}
+            _mtf = (capas.get('operational_intelligence') or {}).get('multi_timeframe') or {}
+            if _mtf.get('public_summary'):
+                razones_consolidadas.append(str(_mtf.get('public_summary')))
+            for _fam in (_thesis.get('independent_support_families') or [])[:4]:
+                _detail = ((_thesis.get('families') or {}).get(_fam) or {}).get('detail')
+                if _detail:
+                    razones_consolidadas.append(str(_detail))
+            print(
+                f"🧠 [RC9.2 THESIS] {accion_ganadora} "
+                f"calidad={_thesis.get('quality')} "
+                f"familias={_thesis.get('independent_support_families')}"
+            )
         else:
-            # Sin acciones con 2+ votos, verificar si ESPERAR tiene apoyo
-            if conteo_acciones.get('ESPERAR', 0) >= 2:
+            # RC9.2: cuando la tesis independiente no está lista, los votos
+            # internos permanecen como auditoría/evidencia pero YA NO pueden
+            # fabricar una dirección por mayoría. La salida es conservadora y
+            # explica si falta contexto, existe contradicción o simplemente no
+            # hay una tesis suficientemente madura.
+            _op_reason = str(_op_candidate.get('reason') or 'THESIS_NOT_READY').upper()
+            _op_action = str(_op_candidate.get('action') or '').upper()
+            _op_state = capas.get('operational_intelligence') or {}
+            _op_thesis = _op_state.get('thesis') or {}
+            _op_mtf = _op_state.get('multi_timeframe') or {}
+
+            if _op_action == 'PRECAUCION' or _op_reason == 'SPECIALIST_CONTRADICTION':
+                accion_ganadora = 'PRECAUCION'
+                confianza_final = min(72.0, max(55.0, float(_op_thesis.get('quality') or 60)))
+                razones_consolidadas = [
+                    str(_op_mtf.get('public_summary') or ''),
+                    'La tesis técnica existe, pero presenta contradicciones relevantes y no justifica una entrada inmediata.'
+                ]
+            elif _op_action == 'ESPERAR' or _op_reason == 'NO_INDEPENDENT_SPECIALIST_CONFIRMATION':
                 accion_ganadora = 'ESPERAR'
-                confianza_final = confianza_por_accion.get('ESPERAR', 60)
-                traders_que_apoyan = traders_por_accion.get('ESPERAR', [])
-                estrategias_detectadas = list(set(estrategias_por_accion.get('ESPERAR', [])))
-                razones_consolidadas = razones_por_accion.get('ESPERAR', [])[:3]
-                
-                print(f"\n⏳ Acción ganadora: ESPERAR")
-                print(f"   Confianza: {confianza_final:.1f}%")
-                print(f"   Apoyada por: {', '.join(traders_que_apoyan)}")
-                
-            # Si hay una acción con 1 voto pero muy alta confianza (>85)
-            elif len(conteo_acciones) == 1:
-                accion_unica = list(conteo_acciones.keys())[0]
-                if confianza_por_accion.get(accion_unica, 0) >= 85:
-                    accion_ganadora = accion_unica
-                    confianza_final = confianza_por_accion[accion_unica]
-                    traders_que_apoyan = traders_por_accion.get(accion_unica, [])
-                    estrategias_detectadas = list(set(estrategias_por_accion.get(accion_unica, [])))
-                    razones_consolidadas = razones_por_accion.get(accion_unica, [])[:3]
-                    
-                    print(f"\n🎲 Acción ganadora (única con alta confianza): {accion_ganadora}")
-                    print(f"   Confianza: {confianza_final:.1f}%")
-                    print(f"   Apoyada por: {', '.join(traders_que_apoyan)}")
-                else:
-                    accion_ganadora = 'ESPERAR'
-                    confianza_final = 60
-                    traders_que_apoyan = []
-                    estrategias_detectadas = []
-                    razones_consolidadas = ["Poca convicción en la señal única"]
-                    print(f"\n🤔 Sin consenso claro - Se recomienda ESPERAR")
+                confianza_final = min(74.0, max(55.0, float(_op_thesis.get('quality') or 60)))
+                razones_consolidadas = [
+                    str(_op_mtf.get('public_summary') or ''),
+                    'El mercado muestra una dirección potencial, pero aún falta confirmación independiente suficiente para convertirla en una entrada.'
+                ]
+            elif _op_mtf.get('conflict'):
+                accion_ganadora = 'PRECAUCION'
+                confianza_final = 66.0
+                razones_consolidadas = [
+                    str(_op_mtf.get('public_summary') or ''),
+                    'Las temporalidades disponibles están en conflicto; operar ahora aumenta el riesgo de entrar contra la estructura dominante.'
+                ]
+            elif str(_op_thesis.get('direction') or '').upper() in ('BULLISH','BEARISH'):
+                accion_ganadora = 'ESPERAR'
+                confianza_final = min(70.0, max(55.0, float(_op_thesis.get('quality') or 60)))
+                razones_consolidadas = [
+                    str(_op_mtf.get('public_summary') or ''),
+                    'Existe una tesis direccional, pero el contexto, la estrategia elegible o la calidad de la evidencia todavía no alcanzan el nivel operativo requerido.'
+                ]
             else:
                 accion_ganadora = 'NO_OPERAR'
-                confianza_final = 70
-                traders_que_apoyan = []
-                estrategias_detectadas = []
-                razones_consolidadas = ["Sin consenso claro entre los traders"]
-                print(f"\n🤷 Sin consenso - Decisión: NO_OPERAR")
-        
+                confianza_final = 68.0
+                razones_consolidadas = [
+                    str(_op_mtf.get('public_summary') or ''),
+                    'No existe una tesis direccional suficientemente coherente entre estructura, momentum, volumen y contexto.'
+                ]
+
+            razones_consolidadas = [r for r in razones_consolidadas if r]
+            traders_que_apoyan = []
+            estrategias_detectadas = []
+            print(
+                f"🧠 [RC9.2 THESIS] sin candidato ejecutable → {accion_ganadora} "
+                f"({str(_op_thesis.get('direction') or 'NEUTRAL')}, calidad={_op_thesis.get('quality')})"
+            )
+
+
         # ================================================================
         # FINAL V1 RC4 — COMITÉ JERÁRQUICO / FAMILIAS DE EVIDENCIA
         # ================================================================
@@ -26361,7 +26572,7 @@ class Moderador:
                     razones_consolidadas = list(razones_consolidadas or [])
                     razones_consolidadas.insert(
                         0,
-                        'RC4 jerárquico: ' + str(hierarchical_committee.get('reason') or 'quality gate')
+                        str(hierarchical_committee.get('reason') or 'La evidencia independiente no alcanza la calidad operativa requerida')
                     )
                     print(
                         f"🧠 [RC4 HIERARCHY] {baseline_before_hierarchy} → "
@@ -30747,6 +30958,33 @@ def _compact_futures_runtime_result(result):
                 'plus_di', 'minus_di'
             )
             if key in trend
+        }
+
+    operational = result.get('operational_intelligence') or {}
+    if isinstance(operational, dict):
+        mtf = operational.get('multi_timeframe') or {}
+        thesis = operational.get('thesis') or {}
+        compact['operational_intelligence'] = {
+            'version': operational.get('version'),
+            'context': operational.get('context'),
+            'candidate_action': operational.get('candidate_action'),
+            'candidate_ready': operational.get('candidate_ready'),
+            'multi_timeframe': {
+                'alignment': mtf.get('alignment'),
+                'dominant_direction': mtf.get('dominant_direction'),
+                'conflict': mtf.get('conflict'),
+                'public_summary': mtf.get('public_summary'),
+            },
+            'thesis': {
+                'direction': thesis.get('direction'),
+                'quality': thesis.get('quality'),
+                'independent_support_families': thesis.get('independent_support_families'),
+            },
+            'default_strategy': {
+                'id': (operational.get('default_strategy') or {}).get('id'),
+                'family': (operational.get('default_strategy') or {}).get('family'),
+                'quality': (operational.get('default_strategy') or {}).get('quality'),
+            },
         }
 
     message = result.get('message')

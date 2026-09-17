@@ -48,10 +48,10 @@ _INTERNAL_SETUP_CODES = {
 }
 
 _CODE_TOKEN = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+){1,}\b")
-_VERSION_PREFIX = re.compile(r"\bRC\d+(?:\.\d+)?\s*(?:contingencia|contingency)?\s*:\s*", re.I)
+_VERSION_PREFIX = re.compile(r"\bRC\d+(?:\.\d+)?(?:\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+)?\s*:\s*", re.I)
 
 _INTERNAL_DELIBERATION_WORDS = re.compile(
-    r"\b(?:comit[eé]|veto(?: [uú]nico)?|r[eé]plica(?: del comit[eé])?|voto(?:s)?|consenso|trader(?: de revisi[oó]n)?)\b",
+    r"\b(?:comit[eé]|veto(?: [uú]nico)?|r[eé]plica(?: del comit[eé])?|voto(?:s)?|consenso|trader(?: de revisi[oó]n)?|publication gate|quality gate|champion|challenger)\b",
     re.I,
 )
 _ROLE_PREFIX = re.compile(
@@ -396,11 +396,13 @@ def compose_professional_recommendation(
     market_hours: Dict[str,Any] | None = None, confirmation: Dict[str,Any] | None = None,
     sentiment: Dict[str,Any] | None = None, liquidation: Dict[str,Any] | None = None,
     specialist_reasons: Iterable[Any] | None = None, timestamp_text: str = '', max_evidence: int = 6,
+    multi_timeframe: Dict[str,Any] | None = None, operational_context: Dict[str,Any] | None = None,
 ) -> str:
     """Professional public narrative: rich technical thesis, no internal roles/codes."""
     action=_u(action) or 'NO_OPERAR'
     if action in {'PRECAUCION','PRECAUCIÓN'}: action='CAUTION'
     levels=levels or {}; trend=trend or {}; momentum=momentum or {}; volatility=volatility or {}; volume=volume or {}; structure=structure or {}; correlation=correlation or {}; market_hours=market_hours or {}; confirmation=confirmation or {}; sentiment=sentiment or {}; liquidation=liquidation or {}
+    multi_timeframe=multi_timeframe or {}; operational_context=operational_context or {}
 
     label_map={'LONG':'📈 LONG','SHORT':'📉 SHORT','ESPERAR':'⏳ ESPERAR','NO_OPERAR':'⏸️ NO OPERAR','CAUTION':'⚠️ PRECAUCIÓN'}
     if action in {'COMPRA_SPOT','VENTA_SPOT'}:
@@ -410,6 +412,36 @@ def compose_professional_recommendation(
     header=f"{label} · {symbol_name} en {timeframe_name}."
 
     evidence=_technical_evidence(action,trend,momentum,volatility,volume,structure,confirmation,market_hours,liquidation,specialist_reasons)
+
+    # RC9.2 — la recomendación pública expresa la lectura top-down que realmente
+    # participó en la decisión. No expone códigos, roles internos ni nombres de
+    # especialistas; sólo temporalidades y lectura de mercado comprensible.
+    mtf_text = public_reason(multi_timeframe.get('public_summary')) if isinstance(multi_timeframe, dict) else ''
+    if mtf_text:
+        _append_unique(evidence, mtf_text)
+
+    context = (operational_context.get('context') or {}) if isinstance(operational_context, dict) else {}
+    regime = str(context.get('regime') or '').upper()
+    vol_state = str(context.get('volatility') or '').upper()
+    regime_names = {
+        'TREND_UP': 'tendencia alcista',
+        'TREND_DOWN': 'tendencia bajista',
+        'BALANCE': 'mercado equilibrado/lateral',
+        'TRANSITION': 'transición de estructura',
+        'VOLATILITY_SHOCK': 'mercado alterado por un shock de volatilidad',
+    }
+    vol_names = {
+        'LOW': 'volatilidad baja',
+        'NORMAL': 'volatilidad normal',
+        'COMPRESSION': 'compresión de volatilidad',
+        'EXPANSION': 'expansión de volatilidad',
+        'SHOCK': 'volatilidad extrema',
+    }
+    if regime in regime_names or vol_state in vol_names:
+        readable = []
+        if regime in regime_names: readable.append(regime_names[regime])
+        if vol_state in vol_names: readable.append(vol_names[vol_state])
+        _append_unique(evidence, 'Contexto de mercado: ' + ' con '.join(readable))
     # Prioridad según la decisión. En ESPERAR/NO OPERAR/PRECAUCIÓN la causa
     # concreta de espera/bloqueo debe sobrevivir al límite de longitud; nunca
     # puede ser desplazada por una lista de indicadores menos decisivos.
@@ -430,6 +462,10 @@ def compose_professional_recommendation(
             if 'volumen' in low: score += 32
             if 'ema' in low or 'supertrend' in low or 'ichimoku' in low: score += 28
             if 'atr' in low or 'bollinger' in low: score += 20
+        if 'multitemporal' in low or 'temporalidad' in low:
+            score += 50
+        if 'contexto de mercado' in low:
+            score += 24
         # Motivos con números concretos son especialmente auditables.
         if re.search(r'\d', sentence): score += 6
         return score

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-VERSION = "RC9_FINAL_CONTINGENCY_PLAYBOOK_V1"
+VERSION = "RC9_2_CONTINGENCY_PLAYBOOK_V1"
 _DIRECTIONAL = {"LONG", "SHORT", "COMPRA_SPOT", "VENTA_SPOT"}
 _NEGATIVE_RESEARCH = {"NEGATIVE_OOS", "SHADOW_DIVERGED", "ALPHA_DECAY"}
 _POSITIVE_RESEARCH = {"OOS_VALIDATED", "OOS_PLUS_SHADOW"}
@@ -194,30 +194,35 @@ def _indicator_groups(layers: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _vol_state(groups: Dict[str, Any]) -> str:
-    v = groups["volatility"]
-    if v.get("squeeze_on"):
-        return "SQUEEZE"
-    ftm = _u(v.get("ftm_state"))
-    atr = _f(v.get("atr_pct"))
-    width = _f(v.get("bb_width"))
-    if ftm in {"EXTREME", "HIGH", "EXPANSION", "VOLATILE"} or atr >= 4.0 or width >= 5.0:
-        return "HIGH_EXPANSION"
-    if atr <= 0 and width <= 0:
-        return "UNKNOWN"
-    return "NORMAL"
+    try:
+        from operational_intelligence import canonical_volatility
+        raw = groups.get("volatility") or {}
+        return canonical_volatility(raw)
+    except Exception:
+        v = groups["volatility"]
+        if v.get("squeeze_on"):
+            return "COMPRESSION"
+        atr = _f(v.get("atr_pct")); width = _f(v.get("bb_width"))
+        if atr >= 4.0 or width >= 5.0:
+            return "EXPANSION"
+        return "NORMAL"
 
 
 def _regime(layers: Dict[str, Any], groups: Dict[str, Any]) -> str:
     raw = _u((layers.get("market_regime") or {}).get("regime"))
-    if raw:
-        return raw
+    try:
+        from operational_intelligence import canonical_regime
+        if raw:
+            return canonical_regime(raw)
+    except Exception:
+        pass
     d = groups["trend"]["direction"]
     adx = _f(groups["trend"]["adx"])
     if adx >= 25 and d == "BULLISH":
-        return "TRENDING_BULL"
+        return "TREND_UP"
     if adx >= 25 and d == "BEARISH":
-        return "TRENDING_BEAR"
-    return "RANGING"
+        return "TREND_DOWN"
+    return "BALANCE"
 
 
 def _raw_direction_score(groups: Dict[str, Any]) -> Tuple[float, float, List[str]]:
@@ -248,14 +253,14 @@ def _strategy_name(market: str, symbol: str, regime: str, vol_state: str, direct
     rotation = _u(groups["rotation"].get("signal"))
     if market == "SPOT" and symbol.upper() in {"BTC-USDT", "PAXG-USDT", "PAXG-BTC"} and rotation not in {"", "NEUTRAL", "NONE"}:
         return "DEFAULT_SPOT_ROTATION", "ROTATION"
-    if vol_state == "SQUEEZE":
+    if vol_state == "COMPRESSION":
         return "DEFAULT_BREAKOUT_RETEST", "BREAKOUT_RETEST"
     if regime in {"RANGING", "BALANCE", "RANGE"}:
         rsi = _f(groups["momentum"].get("rsi"), 50)
         if (direction == "LONG" and rsi <= 42) or (direction == "SHORT" and rsi >= 58):
             return "DEFAULT_LIQUIDITY_SWEEP_REVERSAL", "SWEEP_REVERSAL"
         return "DEFAULT_RANGE_MEAN_REVERSION", "MEAN_REVERSION"
-    if vol_state == "HIGH_EXPANSION":
+    if vol_state in {"EXPANSION", "SHOCK"}:
         return "DEFAULT_STRUCTURE_RETEST", "STRUCTURE_RETEST"
     return "DEFAULT_TREND_PULLBACK", "TREND_PULLBACK"
 
@@ -264,18 +269,14 @@ def _portfolio_intent(market: str, symbol: str, direction: str, rotation_signal:
     if market == "FUTURES":
         return "TACTICAL_LONG" if direction == "LONG" else "TACTICAL_SHORT" if direction == "SHORT" else "FLAT"
     sym = symbol.upper()
-    rot = _u(rotation_signal)
-    if "PAXG" in rot and ("BTC" in rot or "GOLD" in rot):
-        return "ROTATE_BTC_TO_PAXG"
-    if "BTC" in rot and ("PAXG" in rot or "GOLD" in rot):
-        return "ROTATE_PAXG_TO_BTC"
     if direction == "LONG":
-        if sym == "BTC-USDT": return "ACCUMULATE_SATOSHIS"
-        if sym == "PAXG-USDT": return "ACCUMULATE_PAXG"
-        if sym == "PAXG-BTC": return "ROTATION_ACCUMULATE_PAXG_VS_BTC"
-        return "ACCUMULATE_ASSET"
+        if sym == "BTC-USDT": return "BUY_BTC_WITH_USDT"
+        if sym == "PAXG-USDT": return "BUY_PAXG_WITH_USDT"
+        if sym == "PAXG-BTC": return "ROTATE_BTC_TO_PAXG"
     if direction == "SHORT":
-        return "REDUCE_TO_USDT_OR_ROTATE"
+        if sym == "BTC-USDT": return "SELL_BTC_TO_USDT"
+        if sym == "PAXG-USDT": return "SELL_PAXG_TO_USDT"
+        if sym == "PAXG-BTC": return "ROTATE_PAXG_TO_BTC"
     return "HOLD_RESERVES"
 
 

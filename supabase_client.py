@@ -54,7 +54,13 @@ SUPABASE_KEY = os.environ.get('SUPABASE_KEY', '')
 # keep database traffic far below that ceiling. These guards are deliberately
 # conservative and can be overridden in Render without another deploy.
 FREE_PLAN_LOCKDOWN = str(os.environ.get('FREE_PLAN_LOCKDOWN', '1')).strip().lower() not in {'0','false','no','off'}
-MAIN_SUPABASE_DAILY_BUDGET_MB = max(20.0, float(os.environ.get('MAIN_SUPABASE_DAILY_BUDGET_MB', '60') or 60))
+MAIN_SUPABASE_DAILY_BUDGET_MB = max(12.0, float(os.environ.get('MAIN_SUPABASE_DAILY_BUDGET_MB', '30') or 30))
+# RC9.2: FREE_PLAN_LOCKDOWN is a hard cap as well as a default. This protects
+# old Render env values (for example 60 MB/day) from silently restoring the
+# previous egress envelope after this deploy. Research has its own much smaller
+# cap; together they leave large headroom below Supabase Free monthly egress.
+if FREE_PLAN_LOCKDOWN:
+    MAIN_SUPABASE_DAILY_BUDGET_MB = min(MAIN_SUPABASE_DAILY_BUDGET_MB, 30.0)
 MAIN_SUPABASE_DIAGNOSTIC_GUARD = max(0.10, min(0.95, float(os.environ.get('MAIN_SUPABASE_DIAGNOSTIC_GUARD', '0.70') or 0.70)))
 MAIN_SUPABASE_OPTIONAL_GUARD = max(MAIN_SUPABASE_DIAGNOSTIC_GUARD, min(0.98, float(os.environ.get('MAIN_SUPABASE_OPTIONAL_GUARD', '0.85') or 0.85)))
 MAIN_SUPABASE_IMPORTANT_GUARD = max(MAIN_SUPABASE_OPTIONAL_GUARD, min(0.995, float(os.environ.get('MAIN_SUPABASE_IMPORTANT_GUARD', '0.95') or 0.95)))

@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any, Dict, List
 
-VERSION = "RC9_FINAL_DEFAULT_STRATEGY_BANK_V1"
+VERSION = "RC9_2_DEFAULT_STRATEGY_BANK_V1"
 
 # Canonical indicator/market components already calculated by the main engine.
 INDICATOR_UNIVERSE = {
@@ -134,8 +134,29 @@ RC9_SUPPORTED = {
     },
     "FUTURES": {
         "symbols": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "ADA-USDT", "BNB-USDT", "LINK-USDT"],
+        # Execution core. 12H/1D are added per symbol only where the governed
+        # Research universe contains those cells (BTC/ETH/SOL).
         "timeframes": ["30M", "1H", "2H", "4H", "12H", "1D"],
         "actions": ["LONG", "SHORT"],
+    },
+}
+
+# Family/timeframe preferences are technical defaults, not learned alpha. A
+# strategy is not made universal merely to fill a matrix.
+_FAMILY_TIMEFRAMES = {
+    "SPOT": {
+        "SWEEP_REVERSAL": ["4H", "12H", "1D"],
+        "MEAN_REVERSION": ["4H", "12H", "1D"],
+        "TREND_PULLBACK": ["4H", "12H", "1D", "1W"],
+        "BREAKOUT_RETEST": ["4H", "12H", "1D"],
+        "TREND_BREAK": ["4H", "12H", "1D", "1W"],
+        "ROTATION": ["4H", "12H", "1D", "1W"],
+    },
+    "FUTURES": {
+        "SWEEP_REVERSAL": ["30M", "1H", "2H", "4H"],
+        "MEAN_REVERSION": ["30M", "1H", "2H"],
+        "TREND_PULLBACK": ["1H", "2H", "4H", "12H", "1D"],
+        "BREAKOUT_RETEST": ["30M", "1H", "2H", "4H", "12H"],
     },
 }
 
@@ -148,12 +169,12 @@ _FAMILY_REGIMES = {
     "ROTATION": ["BALANCE", "TREND_UP", "TREND_DOWN", "TRANSITION", "VOLATILITY_SHOCK"],
 }
 _FAMILY_VOLATILITY = {
-    "SWEEP_REVERSAL": ["LOW", "NORMAL", "HIGH", "COMPRESSION"],
+    "SWEEP_REVERSAL": ["LOW", "NORMAL", "EXPANSION", "COMPRESSION"],
     "MEAN_REVERSION": ["LOW", "NORMAL", "COMPRESSION"],
-    "TREND_PULLBACK": ["LOW", "NORMAL", "HIGH"],
-    "BREAKOUT_RETEST": ["COMPRESSION", "NORMAL", "HIGH", "HIGH_EXPANSION", "VOLATILITY_SHOCK"],
-    "TREND_BREAK": ["NORMAL", "HIGH", "HIGH_EXPANSION", "VOLATILITY_SHOCK"],
-    "ROTATION": ["LOW", "NORMAL", "HIGH", "VOLATILITY_SHOCK"],
+    "TREND_PULLBACK": ["LOW", "NORMAL", "EXPANSION"],
+    "BREAKOUT_RETEST": ["COMPRESSION", "NORMAL", "EXPANSION", "SHOCK"],
+    "TREND_BREAK": ["NORMAL", "EXPANSION", "SHOCK"],
+    "ROTATION": ["LOW", "NORMAL", "EXPANSION", "SHOCK"],
 }
 
 
@@ -162,7 +183,7 @@ def _rc9_enrich_strategy(row: Dict[str, Any]) -> None:
     family = str(row.get("family") or "").upper()
     row.setdefault("markets", [market])
     row.setdefault("symbols", list(RC9_SUPPORTED[market]["symbols"]))
-    row.setdefault("timeframes", list(RC9_SUPPORTED[market]["timeframes"]))
+    row.setdefault("timeframes", list(_FAMILY_TIMEFRAMES.get(market, {}).get(family, RC9_SUPPORTED[market]["timeframes"])))
     row.setdefault("regimes", list(_FAMILY_REGIMES.get(family, ["BALANCE", "TRANSITION", "TREND_UP", "TREND_DOWN"])))
     row.setdefault("volatility", list(_FAMILY_VOLATILITY.get(family, ["LOW", "NORMAL", "HIGH"])))
     # Un indicador sólo cuenta como funcional si participa en una de estas
@@ -180,28 +201,30 @@ def _tf(value: Any) -> str:
 
 
 def coverage_matrix() -> Dict[str, Any]:
-    """Audit default availability across the production universe.
+    """Audit the exact 92 governed action cells.
 
-    This is coverage, not statistical validation.  A playbook still has to pass
-    the normal quality/safety checks before a public trade can be issued.
+    Coverage means at least one technically suitable Default family exists for
+    the cell. It is not proof of profitability.
     """
+    try:
+        from operational_intelligence import official_universe_cells
+        cells = official_universe_cells()
+    except Exception:
+        cells = []
     missing = []
     checked = 0
-    for market, spec in RC9_SUPPORTED.items():
-        for symbol in spec["symbols"]:
-            for timeframe in spec["timeframes"]:
-                for action in spec["actions"]:
-                    checked += 1
-                    rows = [
-                        r for r in STRATEGIES
-                        if market in r.get("markets", [])
-                        and symbol in r.get("symbols", [])
-                        and timeframe in r.get("timeframes", [])
-                        and action in r.get("actions", [])
-                    ]
-                    if not rows:
-                        missing.append({"market":market,"symbol":symbol,"timeframe":timeframe,"action":action})
-    return {"ok": not missing, "checked": checked, "missing": missing}
+    for market, symbol, timeframe, action in cells:
+        checked += 1
+        rows = [
+            r for r in STRATEGIES
+            if market in r.get("markets", [])
+            and symbol in r.get("symbols", [])
+            and timeframe in r.get("timeframes", [])
+            and action in r.get("actions", [])
+        ]
+        if not rows:
+            missing.append({"market":market,"symbol":symbol,"timeframe":timeframe,"action":action})
+    return {"ok": not missing and checked == 92, "checked": checked, "missing": missing}
 
 
 # Replace RC8 selector with RC9 context-aware version while keeping backwards
@@ -214,13 +237,18 @@ def select_strategy(action: str, regime: str, vol_state: str, groups: Dict[str, 
     symbol = _u(symbol)
     timeframe = _tf(timeframe)
 
+    try:
+        from operational_intelligence import is_official_cell
+        if symbol and timeframe and not is_official_cell(market, symbol, timeframe, action):
+            return {"id":"NO_PLAYBOOK","family":"NONE","quality":0.0,"confirmations":[],"indicators":[],"coverage_reason":"outside_governed_universe"}
+    except Exception:
+        pass
+
     candidates = [r for r in STRATEGIES if action in r.get("actions", []) and market in r.get("markets", [])]
     if symbol:
-        scoped = [r for r in candidates if symbol in r.get("symbols", [])]
-        if scoped: candidates = scoped
+        candidates = [r for r in candidates if symbol in r.get("symbols", [])]
     if timeframe:
-        scoped = [r for r in candidates if timeframe in r.get("timeframes", [])]
-        if scoped: candidates = scoped
+        candidates = [r for r in candidates if timeframe in r.get("timeframes", [])]
     if not candidates:
         return {"id":"NO_PLAYBOOK","family":"NONE","quality":0.0,"confirmations":[],"indicators":[],"coverage_reason":"unsupported_cell"}
 
@@ -243,7 +271,7 @@ def select_strategy(action: str, regime: str, vol_state: str, groups: Dict[str, 
         family = "SWEEP_REVERSAL"
     elif regime in {"RANGING","BALANCE","RANGE"}:
         family = "MEAN_REVERSION"
-    elif vol_state in {"HIGH_EXPANSION", "VOLATILITY_SHOCK"}:
+    elif vol_state in {"EXPANSION", "SHOCK", "HIGH_EXPANSION", "VOLATILITY_SHOCK"}:
         family = "BREAKOUT_RETEST"
     elif action == "VENTA_SPOT" and regime in {"TREND_DOWN", "TRANSITION"}:
         family = "TREND_BREAK"
