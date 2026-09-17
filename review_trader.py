@@ -7598,145 +7598,177 @@ class ReviewTrader:
     # ========================================================================
     
     def detect_missed_opportunities(self, price_fetcher) -> int:
-        """
-        Recorre señales NO_OPERAR/ESPERAR/CAUTION recientes y verifica si el precio
-        se movió a favor >MISSED_OPP_THRESHOLD_PCT en las siguientes velas.
-        
-        Si sí, se registra como oportunidad perdida y se aprende de esa combinación.
-        
-        Retorna: número de oportunidades perdidas detectadas.
+        """RC9.1 — aprendizaje contrafactual separado de las operaciones.
+
+        Evalúa NO_OPERAR / ESPERAR / CAUTION normalizados como NO_OPERAR.
+        - Si después aparece un desplazamiento unilateral > umbral, registra una
+          oportunidad perdida en la tabla diagnóstica existente.
+        - Si no aparece desplazamiento o el precio barre ambos lados, cierra la
+          observación con un estado counterfactual que NO cuenta como TP/SL.
+
+        Esta evidencia jamás entra al win rate oficial ni convierte por sí sola
+        una abstención en LONG/SHORT; sirve para aprender si la prudencia fue
+        adecuada o si faltó detectar una oportunidad.
         """
         if not self.db.enabled:
             return 0
-        
         try:
-            # Obtener señales NO_OPERAR recientes (últimos 7 días, aún pendientes de análisis)
-            no_op_signals = self.db.iter_pending_signals(hours_old_max=168, directional=False)
-            print("\n🔍 [REVIEW] Buscando oportunidades perdidas por lotes")
-            
+            no_op_signals = self.db.iter_pending_signals(
+                hours_old_max=168,
+                directional=False
+            )
+            print("\n🔍 [REVIEW] Evaluando decisiones de espera/no-operar")
             missed = 0
-            
+            resolved_observations = 0
+            evaluation_horizon = max(6, MISSED_OPP_MIN_CANDLES)
+
             for signal in no_op_signals:
                 try:
                     symbol = signal.get('symbol')
                     timeframe = signal.get('timeframe')
-                    system_type = self._normalize_system_type(
-                        signal.get('system_type')
-                    )
+                    system_type = self._normalize_system_type(signal.get('system_type'))
+                    original_action = str(
+                        signal.get('action_original')
+                        or signal.get('action_normalized')
+                        or 'NO_OPERAR'
+                    ).upper()
 
-                    # No reinterpretar como oportunidades perdidas las antiguas
-                    # filas Futures cuya procedencia no puede demostrarse.
-                    if (
-                        system_type == 'futures'
-                        and not self._is_clean_futures_signal(signal)
-                    ):
+                    if system_type == 'futures' and not self._is_clean_futures_signal(signal):
                         continue
 
-                    price_at_signal = float(signal.get('current_price', 0))
-                    
-                    if price_at_signal == 0:
+                    price_at_signal = float(signal.get('current_price', 0) or 0)
+                    if price_at_signal <= 0:
                         continue
-                    
-                    df, _ = self._fetch_market_data_for_signal(
-                        signal,
-                        price_fetcher
-                    )
+
+                    df, _ = self._fetch_market_data_for_signal(signal, price_fetcher)
                     if df is None or len(df) == 0:
                         continue
-                    
-                    # Filtrar velas POSTERIORES a la señal
+
                     signal_ts = self._parse_ts(signal.get('candle_timestamp'))
                     if not signal_ts:
                         continue
-                    
+
                     import pandas as pd
-                    df_after = df[pd.to_datetime(df['time'], utc=True) > pd.Timestamp(signal_ts, tz='UTC')]
-                    
-                    if len(df_after) < MISSED_OPP_MIN_CANDLES:
+                    df_after = df[
+                        pd.to_datetime(df['time'], utc=True)
+                        > pd.Timestamp(signal_ts, tz='UTC')
+                    ]
+                    if len(df_after) < evaluation_horizon:
                         continue
-                    
-                    # Buscar el máximo movimiento a favor (positivo Y negativo)
-                    max_high = df_after['high'].max()
-                    min_low = df_after['low'].min()
-                    
-                    pct_up = ((max_high - price_at_signal) / price_at_signal) * 100
-                    pct_down = ((price_at_signal - min_low) / price_at_signal) * 100
-                    
-                    if pct_up > MISSED_OPP_THRESHOLD_PCT:
-                        # Se debió haber comprado (LONG)
-                        idx_of_max = df_after['high'].idxmax()
-                        candles_to = int(idx_of_max) if isinstance(idx_of_max, (int, float)) else 0
-                        
-                        strategies = self._get_signal_strategies(signal['id'])
-                        
-                        opp_data = {
+
+                    # Ventana fija y causal: sólo las primeras N velas posteriores.
+                    eval_df = df_after.iloc[:evaluation_horizon]
+                    max_high = float(eval_df['high'].max())
+                    min_low = float(eval_df['low'].min())
+                    pct_up = ((max_high - price_at_signal) / price_at_signal) * 100.0
+                    pct_down = ((price_at_signal - min_low) / price_at_signal) * 100.0
+                    threshold = float(MISSED_OPP_THRESHOLD_PCT)
+                    up_miss = pct_up > threshold
+                    down_miss = pct_down > threshold
+                    strategies = self._get_signal_strategies(signal['id'])
+                    indicators = signal.get('indicators_snapshot', {}) or {}
+
+                    if up_miss and not down_miss:
+                        idx = eval_df['high'].idxmax()
+                        try:
+                            candles_to = int(eval_df.index.get_loc(idx)) + 1
+                        except Exception:
+                            candles_to = evaluation_horizon
+                        self.db.insert_missed_opportunity({
                             'symbol': symbol,
                             'timeframe': timeframe,
-                            'action_should': self._scoped_action(
-                                'LONG',
-                                system_type
-                            ),
+                            'action_should': self._scoped_action('LONG', system_type),
                             'confidence': signal.get('confidence', 0),
                             'strategies': strategies,
-                            'indicators_snapshot': signal.get('indicators_snapshot', {}),
+                            'indicators_snapshot': indicators,
                             'price_at_signal': price_at_signal,
                             'max_favorable_price': max_high,
                             'max_favorable_pct': pct_up,
                             'candles_to_max': candles_to,
                             'candle_timestamp': signal.get('candle_timestamp')
-                        }
-                        self.db.insert_missed_opportunity(opp_data)
+                        })
+                        self.db.update_signal_result(signal['id'], {
+                            'status': 'missed_opportunity',
+                            'exit_price': max_high,
+                            'exit_timestamp': datetime.utcnow().isoformat(),
+                            'pnl_pct': pct_up,
+                            'candles_to_result': evaluation_horizon,
+                            'notes': (
+                                f'counterfactual=missed_up;original_action={original_action};'
+                                f'up={pct_up:.4f};down={pct_down:.4f};threshold={threshold:.4f}'
+                            )
+                        })
                         missed += 1
-                        print(f"   ⚠️ Oportunidad LONG perdida: {symbol} {timeframe} → +{pct_up:.2f}%")
-                    
-                    if pct_down > MISSED_OPP_THRESHOLD_PCT:
-                        # Se debió haber vendido (SHORT)
-                        idx_of_min = df_after['low'].idxmin()
-                        candles_to = int(idx_of_min) if isinstance(idx_of_min, (int, float)) else 0
-                        
-                        strategies = self._get_signal_strategies(signal['id'])
-                        
-                        opp_data = {
+                        resolved_observations += 1
+                        print(f"   ⚠️ Oportunidad alcista perdida: {symbol} {timeframe} +{pct_up:.2f}%")
+
+                    elif down_miss and not up_miss:
+                        idx = eval_df['low'].idxmin()
+                        try:
+                            candles_to = int(eval_df.index.get_loc(idx)) + 1
+                        except Exception:
+                            candles_to = evaluation_horizon
+                        self.db.insert_missed_opportunity({
                             'symbol': symbol,
                             'timeframe': timeframe,
-                            'action_should': self._scoped_action(
-                                'SHORT',
-                                system_type
-                            ),
+                            'action_should': self._scoped_action('SHORT', system_type),
                             'confidence': signal.get('confidence', 0),
                             'strategies': strategies,
-                            'indicators_snapshot': signal.get('indicators_snapshot', {}),
+                            'indicators_snapshot': indicators,
                             'price_at_signal': price_at_signal,
                             'max_favorable_price': min_low,
                             'max_favorable_pct': pct_down,
                             'candles_to_max': candles_to,
                             'candle_timestamp': signal.get('candle_timestamp')
-                        }
-                        self.db.insert_missed_opportunity(opp_data)
-                        missed += 1
-                        print(f"   ⚠️ Oportunidad SHORT perdida: {symbol} {timeframe} → -{pct_down:.2f}%")
-                    
-                    # Marcar la señal como procesada (aunque haya sido NO_OPERAR)
-                    if pct_up > MISSED_OPP_THRESHOLD_PCT or pct_down > MISSED_OPP_THRESHOLD_PCT:
+                        })
                         self.db.update_signal_result(signal['id'], {
                             'status': 'missed_opportunity',
-                            'exit_price': max_high if pct_up > pct_down else min_low,
+                            'exit_price': min_low,
                             'exit_timestamp': datetime.utcnow().isoformat(),
-                            'pnl_pct': max(pct_up, pct_down),
-                            'candles_to_result': candles_to,
-                            'notes': 'Oportunidad perdida detectada'
+                            'pnl_pct': pct_down,
+                            'candles_to_result': evaluation_horizon,
+                            'notes': (
+                                f'counterfactual=missed_down;original_action={original_action};'
+                                f'up={pct_up:.4f};down={pct_down:.4f};threshold={threshold:.4f}'
+                            )
                         })
-                    
+                        missed += 1
+                        resolved_observations += 1
+                        print(f"   ⚠️ Oportunidad bajista perdida: {symbol} {timeframe} -{pct_down:.2f}%")
+
+                    else:
+                        # Ambos lados > umbral = mercado de barridas/whipsaw; ninguno
+                        # > umbral = abstención defendible. En ambos casos NO es trade.
+                        classification = (
+                            'counterfactual_whipsaw_both_sides'
+                            if up_miss and down_miss
+                            else 'counterfactual_abstention_correct'
+                        )
+                        self.db.update_signal_result(signal['id'], {
+                            'status': classification,
+                            'exit_price': float(eval_df['close'].iloc[-1]),
+                            'exit_timestamp': datetime.utcnow().isoformat(),
+                            'pnl_pct': 0.0,
+                            'candles_to_result': evaluation_horizon,
+                            'notes': (
+                                f'counterfactual={classification};original_action={original_action};'
+                                f'up={pct_up:.4f};down={pct_down:.4f};threshold={threshold:.4f}'
+                            )
+                        })
+                        resolved_observations += 1
+
                 except Exception as e:
-                    logger.error(f"Error detectando oportunidad en {signal.get('id')}: {e}")
-            
-            print(f"\n📊 [REVIEW] Oportunidades perdidas detectadas: {missed}")
+                    logger.error(f"Error evaluando abstención {signal.get('id')}: {e}")
+
+            print(
+                f"\n📊 [REVIEW] Contrafactual: {resolved_observations} observaciones "
+                f"resueltas · {missed} oportunidades perdidas"
+            )
             return missed
-            
         except Exception as e:
             logger.error(f"Error en detect_missed_opportunities: {e}")
             return 0
-    
+
     def _get_signal_strategies(self, signal_id: str) -> List[str]:
         """Obtiene las estrategias asociadas a una señal"""
         if not self.db.enabled:

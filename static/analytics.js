@@ -1687,6 +1687,20 @@ async function loadLearningGovernanceStatus() {
             }
         }
 
+        const scientistStatusLabel = (value) => {
+            const state = String(value || 'UNKNOWN').toUpperCase();
+            const labels = {
+                DONE: 'Actualizado', SUCCESS: 'Actualizado', SLOT_ALREADY_DONE: 'Actualizado',
+                RUNNING_LLM: 'Analizando', CHECKING_SLOT: 'Preparando análisis',
+                CLAIMING_SLOT: 'Preparando análisis', CLAIM_RECOVERED: 'Preparando análisis',
+                SLOT_CLAIMED_BY_OTHER_WORKER: 'Análisis en curso',
+                SLOT_RETRY_PENDING: 'Reintento pendiente',
+                SLOT_CLAIM_FAILED: 'No pudo iniciar', SLOT_NOT_CLAIMED: 'No pudo iniciar',
+                WATCHDOG_STARTED: 'En espera', NOT_STARTED: 'En espera', UNKNOWN: 'Sin estado'
+            };
+            return labels[state] || uiHumanLabel(state);
+        };
+
         if (kind === 'gemini' && json.success) {
             const data = json.data || {};
             const state = String(data.state || 'WAITING_FIRST_RUN');
@@ -1700,18 +1714,20 @@ async function loadLearningGovernanceStatus() {
             const scheduler = data.scheduler && typeof data.scheduler === 'object' ? data.scheduler : {};
             const schedulerAt = scheduler.last_attempt_at || '--';
             q5SetText('lo-gemini-scheduler-last', schedulerAt === '--' ? '--' : formatDate(schedulerAt));
-            q5SetText('lo-gemini-scheduler-state', uiHumanLabel(scheduler.status || 'UNKNOWN'));
+            q5SetText('lo-gemini-scheduler-state', scientistStatusLabel(scheduler.status));
             q5SetText('lo-gemini-fallback', data.fallback_active ? 'Sí' : 'No');
             const schedulerDetail = schedulerAt !== '--'
-                ? ` Scheduler: ${uiHumanLabel(scheduler.status || 'UNKNOWN')}.`
+                ? ` Estado del aprendizaje: ${scientistStatusLabel(scheduler.status)}.`
                 : '';
             q5SetText('lo-gemini-reason', (data.reason ? uiHumanLabel(data.reason) : 'Actividad leída sin realizar llamadas adicionales.') + schedulerDetail);
             const simpleScientist = document.getElementById('v1-scientist');
             const simpleScientistNote = document.getElementById('v1-scientist-note');
             if (simpleScientist) {
                 const schedState = String(scheduler.status || 'UNKNOWN').toUpperCase();
-                simpleScientist.textContent = schedulerAt === '--' ? `⚠️ ${uiHumanLabel(schedState)}` : `✅ ${uiHumanLabel(schedState)}`;
-                simpleScientist.className = `v1-simple-value ${schedulerAt === '--' ? 'text-warning' : (['DONE','SUCCESS','RUNNING_LLM','CHECKING_SLOT','CLAIMING_SLOT','SLOT_ALREADY_DONE'].includes(schedState) ? 'text-success' : (schedState === 'SLOT_CLAIMED_BY_OTHER_WORKER' ? 'text-info' : 'text-warning'))}`;
+                const healthyStates = ['DONE','SUCCESS','RUNNING_LLM','CHECKING_SLOT','CLAIMING_SLOT','CLAIM_RECOVERED','SLOT_ALREADY_DONE','SLOT_CLAIMED_BY_OTHER_WORKER'];
+                const isHealthy = healthyStates.includes(schedState);
+                simpleScientist.textContent = `${isHealthy ? '✅' : '⚠️'} ${scientistStatusLabel(schedState)}`;
+                simpleScientist.className = `v1-simple-value ${isHealthy ? 'text-success' : 'text-warning'}`;
             }
             if (simpleScientistNote) {
                 const runtimeError = String(scheduler.runtime_error || json.data?.scheduler_runtime?.last_error || '').trim();

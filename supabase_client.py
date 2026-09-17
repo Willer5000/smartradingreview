@@ -940,7 +940,7 @@ class SupabaseClient:
         while processed < max_rows and time.monotonic() - start < budget_seconds:
             try:
                 query = (self.client.table('signals')
-                         .select('id,symbol,timeframe,system_type,action_normalized,'
+                         .select('id,symbol,timeframe,system_type,action_original,action_normalized,'
                                  'status,created_at,candle_timestamp,current_price,'
                                  'entry_price,stop_loss,take_profit,confidence,indicators_snapshot,'
                                  'leverage,q6_learning:context->learning,'

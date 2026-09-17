@@ -234,6 +234,9 @@ def _market_metrics(signals: List[Dict]) -> Dict:
         'expired_after_entry': counts['expired_after_entry'],
         'ambiguous': counts['ambiguous'],
         'invalid_setup': counts['invalid_setup'],
+        'missed_opportunity': counts['missed_opportunity'],
+        'counterfactual_abstention_correct': counts['counterfactual_abstention_correct'],
+        'counterfactual_whipsaw_both_sides': counts['counterfactual_whipsaw_both_sides'],
         'win_rate': round(counts['tp_hit'] / resolved * 100, 1)
         if resolved else None,
         'avg_pnl_pct': round(sum(pnl_values) / len(pnl_values), 4)
@@ -2786,43 +2789,42 @@ def _fetch_learning_data() -> Dict:
         #
         # Esto sólo afecta al gate del informe.
         # No modifica reglas operativas ni señales.
-        if not (
-            fetch_diagnostics.get('complete', False)
-            and fetch_diagnostics.get('shadow_sample_complete', False)
-        ):
-            promotion_reasons = list(
-                walk_forward_analysis.get(
-                    'promotion_reasons'
+        official_complete = bool(fetch_diagnostics.get('complete', False))
+        shadow_complete = bool(fetch_diagnostics.get('shadow_sample_complete', False))
+        shadow_truncated = bool(fetch_diagnostics.get('shadow_sample_truncated', False))
+
+        # RC9.1 — una sola verdad para la cohorte oficial. La muestra Shadow es
+        # diagnóstica y puede estar deliberadamente acotada por el plan Free;
+        # eso NO vuelve incompleta a la cohorte oficial. Ambos estados bloquean
+        # promoción cuando corresponde, pero se explican con causas distintas.
+        data['learning_integrity'] = {
+            'official_cohort_complete': official_complete,
+            'official_cohort_coverage_pct': fetch_diagnostics.get('coverage_pct'),
+            'shadow_diagnostic_complete': shadow_complete,
+            'shadow_diagnostic_truncated': shadow_truncated,
+        }
+
+        if not (official_complete and shadow_complete):
+            promotion_reasons = list(walk_forward_analysis.get('promotion_reasons') or [])
+
+            if not official_complete:
+                integrity_reason = (
+                    'La cohorte oficial de ' + str(REPORT_DAYS_BACK) +
+                    ' días está incompleta; no se permite promoción con resultados oficiales parciales.'
                 )
-                or []
-            )
-
-            integrity_reason = (
-                'Lectura Supabase de la cohorte '
-                f'{REPORT_DAYS_BACK}d incompleta: '
-                'no se permite promoción con una '
-                'muestra potencialmente truncada.'
-            )
-
-            if (
-                integrity_reason
-                not in promotion_reasons
-            ):
-                promotion_reasons.append(
-                    integrity_reason
+            else:
+                integrity_reason = (
+                    'La cohorte oficial está completa, pero la muestra Shadow usada para el diagnóstico '
+                    'Cautious está acotada; no se permite promoción hasta validar esa subcohorte con '
+                    'cobertura suficiente.'
                 )
 
-            walk_forward_analysis[
-                'promotion_ready'
-            ] = False
+            if integrity_reason not in promotion_reasons:
+                promotion_reasons.append(integrity_reason)
 
-            walk_forward_analysis[
-                'promotion_status'
-            ] = 'NOT_READY'
-
-            walk_forward_analysis[
-                'promotion_reasons'
-            ] = promotion_reasons
+            walk_forward_analysis['promotion_ready'] = False
+            walk_forward_analysis['promotion_status'] = 'NOT_READY'
+            walk_forward_analysis['promotion_reasons'] = promotion_reasons
 
         data[
             'futures_walk_forward_analysis'
@@ -2846,6 +2848,19 @@ def _fetch_learning_data() -> Dict:
         data['missed_opp_from_signals'] = sum(
             1 for signal in eligible_signals
             if signal.get('status') == 'missed_opportunity'
+        )
+        data['counterfactual_observations'] = sum(
+            1 for signal in eligible_signals
+            if str(signal.get('status') or '').startswith('counterfactual_')
+            or signal.get('status') == 'missed_opportunity'
+        )
+        data['counterfactual_correct'] = sum(
+            1 for signal in eligible_signals
+            if signal.get('status') == 'counterfactual_abstention_correct'
+        )
+        data['counterfactual_whipsaw'] = sum(
+            1 for signal in eligible_signals
+            if signal.get('status') == 'counterfactual_whipsaw_both_sides'
         )
     except Exception as e:
         logger.warning(f'Error trayendo signals con indicadores: {e}')
@@ -3224,6 +3239,12 @@ def generate_learning_pdf() -> bytes:
         ['Spot histórico/replay/TF retirado fuera de la cohorte actual (conservado)', str(quarantine.get('spot_legacy', 0))],
         ['Análisis Futures shadow (no publicados)', str(quarantine.get('futures_shadow', 0))],
         ['Registros sin mercado en cuarentena', str(quarantine.get('unscoped', 0))],
+        ['Decisiones ESPERAR / NO OPERAR / PRECAUCIÓN ya evaluadas', str(data.get('counterfactual_observations', 0))],
+        ['   — Abstención defendible / mercado de barridas / oportunidad perdida', (
+            f"{int(data.get('counterfactual_correct', 0) or 0)} / "
+            f"{int(data.get('counterfactual_whipsaw', 0) or 0)} / "
+            f"{int(data.get('missed_opp_from_signals', 0) or 0)}"
+        )],
         [
             'Oportunidades perdidas (diagnóstico no separado)',
             (

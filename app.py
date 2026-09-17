@@ -18279,30 +18279,62 @@ class TradingExpertSystem:
         replace_dict['{squeeze_length}'] = str(volatility.get('squeeze_length', 0))
         replace_dict['{bb_width}'] = f"{volatility.get('bb_width', 0):.1f}"
         
-        # ============ CONCATENAR PLANTILLAS ============
+        # ================================================================
+        # RC9.1 — PROFESSIONAL RECOMMENDATION COMPOSER V2
+        # ================================================================
+        # Las plantillas antiguas permanecen disponibles como respaldo interno,
+        # pero ya NO determinan la recomendación visible. La salida pública se
+        # reconstruye siempre desde la evidencia técnica real de este análisis y
+        # desde las razones técnicas de los especialistas, ocultando sus nombres,
+        # votos, vetos y códigos internos.
+        try:
+            from reason_presenter import compose_professional_recommendation
+            timestamp_text = datetime.now(self.bolivia_tz).strftime(
+                '%Y-%m-%d %H:%M:%S Hora Bolivia'
+            )
+            professional_message = compose_professional_recommendation(
+                decision,
+                symbol=symbol,
+                symbol_name=symbol_name,
+                timeframe_name=timeframe_name,
+                confidence=confidence,
+                levels=levels,
+                trend=trend,
+                momentum=momentum,
+                volatility=volatility,
+                volume=volume,
+                structure=structure,
+                correlation=correlation,
+                market_hours=market_hours,
+                confirmation=confirmation,
+                sentiment=sentiment or {},
+                liquidation=liquidation or {},
+                specialist_reasons=razones_consenso,
+                timestamp_text=timestamp_text,
+                max_evidence=7,
+            )
+            if professional_message:
+                return professional_message
+        except Exception as composer_error:
+            print(f"⚠️ RC9.1 Recommendation Composer V2: {composer_error}")
+
+        # Fallback legacy sólo si el compositor técnico falla.
         mensaje_completo = ""
         for plantilla in plantillas:
             template_text = plantilla['template']
             mensaje_parcial = template_text
-            
-            # Aplicar reemplazos
             for key, value in replace_dict.items():
                 if key and isinstance(value, str):
                     mensaje_parcial = mensaje_parcial.replace(key, value)
-            
             mensaje_completo += mensaje_parcial
-        
-        # ============ LIMPIEZA FINAL ============
+
         import re
         mensaje_completo = re.sub(r'\{[^}]+\}', '', mensaje_completo)
         mensaje_completo = re.sub(r'\s+', ' ', mensaje_completo)
         mensaje_completo = mensaje_completo.replace(' .', '.').replace(' ,', ',')
         mensaje_completo = mensaje_completo.replace('  ', ' ').strip()
-        
-        # Eliminar espacios antes de puntuación
         mensaje_completo = re.sub(r'\s+\.', '.', mensaje_completo)
         mensaje_completo = re.sub(r'\s+,', ',', mensaje_completo)
-        
         return mensaje_completo
                                          
     def _get_sentiment_description(self, sentiment):
@@ -19761,7 +19793,7 @@ class TradingExpertSystem:
             
             # COMMIT 5 — Visual Evidence Router.
             # Metadatos exclusivos de presentación: no alteran consenso, Safety ni niveles.
-            visual_evidence = {'version': 'VISUAL_EVIDENCE_V1', 'recommended': [], 'max_auto': 4}
+            visual_evidence = {'version': 'VISUAL_EVIDENCE_V1', 'recommended': [], 'max_auto': 5}
             try:
                 evidence = {}
                 def _add_visual(chart, label, score, reason):
@@ -19797,6 +19829,8 @@ class TradingExpertSystem:
                     _add_visual('volume', 'Volumen y presión de mercado', 88, 'Volumen citado en la justificación')
                 if any(token in reason_text for token in ('poc', 'hvn', 'lvn', 'perfil de volumen')):
                     _add_visual('volume-profile', 'Perfil de volumen', 90, 'Nivel de volumen relevante')
+                if any(token in reason_text for token in ('soporte', 'resistencia', 'retest', 'rango', 'zona de reacción')):
+                    _add_visual('trading-zones', 'Zonas de reacción', 91, 'Soportes, resistencias o retest relevantes')
                 if any(token in reason_text for token in ('liquid', 'liquidez agrupada')):
                     _add_visual('liquidation-heatmap', 'Mapa de liquidaciones', 86, 'Liquidez o liquidaciones relevantes')
                 if any(token in reason_text for token in ('order block', 'fvg', 'sweep', 'barrido', 'mss', 'displacement')):
@@ -19826,7 +19860,7 @@ class TradingExpertSystem:
                 visual_evidence = {
                     'version': 'VISUAL_EVIDENCE_V1',
                     'recommended': [],
-                    'max_auto': 4,
+                    'max_auto': 5,
                     'error': str(visual_error)[:120],
                 }
 
@@ -30603,6 +30637,44 @@ _FUTURES_TF_SECONDS = {
 }
 
 
+def _enrich_futures_public_message(result):
+    """RC9.1: añade contexto observable de libro/flujo sin darle autoridad nueva.
+
+    FuturesSystem ya calcula microestructura pública de KuCoin. Esta función
+    solamente traduce sus métricas a lenguaje de trader para la recomendación;
+    NO cambia acción, Entry, SL, TP, Safety, leverage ni publicación.
+    """
+    if not isinstance(result, dict) or not result.get('success'):
+        return result
+    try:
+        from reason_presenter import append_futures_microstructure_context
+        decision = result.get('decision') or {}
+        action = str(decision.get('action') or 'NO_OPERAR')
+        micro = result.get('futures_microstructure_context') or {}
+        if isinstance(micro, dict) and micro.get('available'):
+            result['message'] = append_futures_microstructure_context(
+                result.get('message') or '', micro, action
+            )
+            visual = result.get('visual_evidence') or {}
+            if isinstance(visual, dict):
+                recommended = list(visual.get('recommended') or [])
+                if not any(str(x.get('chart') or '') == 'order-flow' for x in recommended if isinstance(x, dict)):
+                    recommended.append({
+                        'chart': 'order-flow',
+                        'label': 'Flujo y libro de órdenes',
+                        'score': 96,
+                        'reason': 'Microestructura Futures disponible para esta señal',
+                    })
+                visual['recommended'] = sorted(
+                    recommended, key=lambda item: -int(item.get('score', 0)) if isinstance(item, dict) else 0
+                )
+                visual['max_auto'] = max(5, int(visual.get('max_auto') or 0))
+                result['visual_evidence'] = visual
+    except Exception as micro_public_error:
+        print(f"⚠️ RC9.1 microestructura pública: {micro_public_error}")
+    return result
+
+
 def _compact_futures_runtime_result(result):
     """Hotfix 14.7: keep only the Futures fields required by live UI/lifecycle.
 
@@ -30696,6 +30768,18 @@ def _compact_futures_runtime_result(result):
                 )
                 if key in source
             }
+            if source_key == 'futures_microstructure_context':
+                metrics = source.get('metrics') or {}
+                if isinstance(metrics, dict):
+                    compact[source_key]['metrics'] = {
+                        key: metrics.get(key)
+                        for key in (
+                            'orderbook_imbalance', 'spread_pct', 'recent_buy_share',
+                            'oi_change_pct', 'funding_rate', 'basis_pct',
+                            'liquidity_band', 'liquidity_score'
+                        )
+                        if key in metrics
+                    }
 
     uncertainty = result.get('uncertainty_shadow_gate') or {}
     if isinstance(uncertainty, dict) and uncertainty:
@@ -31058,6 +31142,7 @@ def _start_futures_ui_analysis_async(symbol, timeframe):
 
             result = _apply_profitability_router(result, symbol, timeframe)
             result = _apply_36s_futures_ai_control(result, symbol, timeframe)
+            result = _enrich_futures_public_message(result)
             ui_result = _compact_futures_ui_result(result)
             ui_result = _compact_fast_futures_ui_result(
                 ui_result,
@@ -32263,6 +32348,7 @@ def _analyze_futures_all_parallel(combos_override=None):
                     )
                 )
 
+            r = _enrich_futures_public_message(r)
 
             # Hotfix 14.7: ReviewTrader already persisted the rich research
             # payload.  The live cache keeps only what UI/lifecycle needs.
@@ -36921,23 +37007,51 @@ def _run_ai_learning_daily(q6_slot=None, trigger_source='daily'):
             abandoned_after_minutes=12
         )
         if not claimed:
-            # RC4.1: distinguir DONE real de un lease de otro worker.
+            # RC9.1: MISSING no es un estado sano. Puede ocurrir si Supabase
+            # rechazó/transitoriamente perdió el INSERT del claim. Hacemos UNA
+            # recuperación acotada; DONE/RUNNING siguen siendo idempotentes.
             from q6_integrity import read_job_status
             slot_state = read_job_status(review_trader.db, 'AI_LEARNING_V2', q6_slot)
             db_status = str(slot_state.get('status') or 'UNKNOWN').upper()
-            mapped = {
-                'DONE': 'SLOT_ALREADY_DONE',
-                'RUNNING': 'SLOT_CLAIMED_BY_OTHER_WORKER',
-                'FAILED': 'SLOT_RETRY_PENDING',
-                'MISSING': 'SLOT_NOT_CLAIMED',
-            }.get(db_status, f'SLOT_{db_status}')
-            _ai_learning_runtime_update(
-                status=mapped,
-                slot_db_status=db_status,
-                slot_updated_at=slot_state.get('updated_at'),
-                last_error=slot_state.get('error'),
-            )
-            return False
+
+            if db_status == 'MISSING':
+                time.sleep(0.35)
+                claimed = claim_daily_job(
+                    review_trader.db,
+                    'AI_LEARNING_V2',
+                    q6_slot,
+                    retry=True,
+                    failed_retry_minutes=5,
+                    abandoned_after_minutes=12
+                )
+                if claimed:
+                    _ai_learning_runtime_update(
+                        status='CLAIM_RECOVERED',
+                        slot_db_status='RUNNING',
+                        slot_updated_at=datetime.now(timezone.utc).isoformat(),
+                        last_error=None,
+                    )
+                else:
+                    slot_state = read_job_status(review_trader.db, 'AI_LEARNING_V2', q6_slot)
+                    db_status = str(slot_state.get('status') or 'MISSING').upper()
+
+            if not claimed:
+                mapped = {
+                    'DONE': 'SLOT_ALREADY_DONE',
+                    'RUNNING': 'SLOT_CLAIMED_BY_OTHER_WORKER',
+                    'FAILED': 'SLOT_RETRY_PENDING',
+                    'MISSING': 'SLOT_CLAIM_FAILED',
+                }.get(db_status, f'SLOT_{db_status}')
+                error_text = slot_state.get('error')
+                if db_status == 'MISSING' and not error_text:
+                    error_text = 'No se pudo persistir el turno del científico en q6_job_runs'
+                _ai_learning_runtime_update(
+                    status=mapped,
+                    slot_db_status=db_status,
+                    slot_updated_at=slot_state.get('updated_at'),
+                    last_error=error_text,
+                )
+                return False
 
         _ai_learning_runtime_update(status='RUNNING_LLM')
         learning_context = _build_ai_learning_context()
