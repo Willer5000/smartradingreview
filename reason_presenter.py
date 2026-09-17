@@ -49,6 +49,19 @@ _INTERNAL_SETUP_CODES = {
 _CODE_TOKEN = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+){1,}\b")
 _VERSION_PREFIX = re.compile(r"\bRC\d+(?:\.\d+)?\s*(?:contingencia|contingency)?\s*:\s*", re.I)
 
+_INTERNAL_DELIBERATION_WORDS = re.compile(
+    r"\b(?:comit[eé]|veto(?: [uú]nico)?|r[eé]plica(?: del comit[eé])?|voto(?:s)?|consenso|trader(?: de revisi[oó]n)?)\b",
+    re.I,
+)
+_ROLE_PREFIX = re.compile(
+    r"^\s*(?:Esc[eé]ptico|Smart Money|Chartista|Multiframe|Pullback|El Liquidador)\s*(?:\([^)]*%[^)]*\))?\s*[:\-–]\s*",
+    re.I,
+)
+_ROLE_WITH_PERCENT = re.compile(
+    r"\b(?:Esc[eé]ptico|Smart Money|Chartista|Multiframe|El Liquidador)\s*\(\s*\d+(?:[.,]\d+)?%\s*\)",
+    re.I,
+)
+
 
 def _is_internal(code: str) -> bool:
     value = str(code or "").strip().upper()
@@ -76,7 +89,15 @@ def public_reason(value: object, *, fallback: str = "") -> str:
     exact = text.upper()
     if _is_internal(exact):
         return ""
+    # Deliberación interna nunca es una justificación técnica pública.
+    if _INTERNAL_DELIBERATION_WORDS.search(text):
+        return ""
 
+    # Si un motivo heredado sólo prefija el nombre de un rol interno, retiramos
+    # la etiqueta y preservamos la explicación técnica posterior. Términos de
+    # trading legítimos como "pullback" siguen siendo visibles.
+    text = _ROLE_PREFIX.sub("", text).strip()
+    text = _ROLE_WITH_PERCENT.sub("", text).strip(" -–:;")
     text = _VERSION_PREFIX.sub("", text).strip()
 
     # Elimina códigos incrustados en frases heredadas. Si tras retirarlos sólo

@@ -32,15 +32,15 @@ def test_no_operar_esperar_caution_have_distinct_explanations():
     assert 'La operación exige PRECAUCIÓN porque' in selector
 
 
-def test_committee_reasons_are_filtered_for_final_action():
+def test_internal_committee_reasons_are_not_surface_text():
     helper=section('def _razones_consenso_coherentes', 'def seleccionar_plantillas_por_condiciones')
     assert "'NO_OPERAR': ('riesgo'" in helper
     assert "'COMPRA_SPOT': ('alcista'" in helper
     assert "'SHORT': ('bajista'" in helper
     generator=section('def generate_professional_message_with_consenso', 'def _get_sentiment_description')
-    assert '_razones_consenso_coherentes(decision, razones_consenso' in generator
-    assert 'Motivo de la compra Spot' in generator
-    assert 'Motivo del SHORT Futures' in generator
+    assert '_razones_consenso_coherentes(decision, razones_consenso' not in generator
+    assert 'Motivo de la compra Spot' not in generator
+    assert 'Motivo del SHORT Futures' not in generator
 
 
 def test_recommendation_labels_do_not_equate_spot_and_futures():

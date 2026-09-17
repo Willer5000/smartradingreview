@@ -123,12 +123,17 @@ def _indicator_groups(layers: Dict[str, Any]) -> Dict[str, Any]:
             "minus_di": round(_f(trend.get("minus_di")), 2),
             "ema9": _f(trend.get("ema9")), "ema21": _f(trend.get("ema21")),
             "ema50": _f(trend.get("ema50")), "ema200": _f(trend.get("ema200")),
+            "supertrend": _u((trend.get("indicators") or {}).get("supertrend_trend")),
+            "ichimoku_cloud": _u((trend.get("indicators") or {}).get("ichimoku_cloud")),
+            "ichimoku_tk": _u((trend.get("indicators") or {}).get("ichimoku_tk")),
         },
         "momentum": {
             "available": bool(momentum), "direction": momentum_dir or "NEUTRAL",
             "score": round(_f(momentum.get("score")), 2), "rsi": round(_f(mi.get("rsi"), 50), 2),
             "rsi_maverick": round(_f(mi.get("rsi_maverick"), .5), 4),
             "macd_histogram": round(_f(mi.get("macd_histogram")), 6),
+            "divergences": list(momentum.get("divergences") or []),
+            "hidden_divergences": list(momentum.get("hidden_divergences") or []),
             "stoch_k": round(_f(mi.get("stoch_k"), 50), 2),
             "williams": round(_f(mi.get("williams"), -50), 2), "cci": round(_f(mi.get("cci")), 2),
         },
@@ -140,7 +145,8 @@ def _indicator_groups(layers: Dict[str, Any]) -> Dict[str, Any]:
         },
         "volume_flow": {
             "available": bool(volume), "volume_ratio": round(_f(volume.get("volume_ratio"), 1), 3),
-            "mfi": round(_f(volume.get("mfi"), 50), 2), "obv_trend": obv_dir or "NEUTRAL",
+            "mfi": round(_f(volume.get("mfi"), 50), 2),
+            "force_index": round(_f(volume.get("force_index")), 4), "obv_trend": obv_dir or "NEUTRAL",
             "whale_buy": bool(volume.get("whale_buy_confirmed") or volume.get("whale_buy")),
             "whale_sell": bool(volume.get("whale_sell_confirmed") or volume.get("whale_sell")),
             "iceberg_buy": bool(volume.get("iceberg_buy")), "iceberg_sell": bool(volume.get("iceberg_sell")),
@@ -153,6 +159,9 @@ def _indicator_groups(layers: Dict[str, Any]) -> Dict[str, Any]:
             "has_patterns": bool((structure.get("patterns") or {}).get("recent_patterns")),
             "has_order_blocks": bool(structure.get("order_blocks") or structure.get("order_blocks_active")),
             "has_fvg": bool(structure.get("fvgs") or structure.get("fair_value_gaps")),
+            "has_liquidity_sweep": bool(structure.get("liquidity_sweeps")),
+            "has_stop_hunt": bool(structure.get("stop_hunts")),
+            "has_volume_profile": bool(structure.get("volume_profile") or structure.get("hvn_nodes") or structure.get("lvn_nodes")),
         },
         "liquidations": {
             "available": bool(liq), "long_weight": round(_f(liq.get("total_long_weight")), 3),
@@ -305,9 +314,18 @@ def build_contingency_playbook(
     direction_agrees = committee_dir != "NEUTRAL" and directional == committee_dir
     families = int(vote_support.get("independent_families") or 0)
 
-    strategy, setup_family = _strategy_name(market, symbol, regime, vol_state, committee_dir if committee_dir != "NEUTRAL" else directional, groups)
     selected_dir = committee_dir if committee_dir != "NEUTRAL" else directional
     target_action = _action(selected_dir, market)
+    try:
+        from default_strategy_bank import select_strategy
+        bank_pick = select_strategy(target_action, regime, vol_state, groups, symbol=symbol)
+        strategy = str(bank_pick.get("id") or "NO_PLAYBOOK")
+        setup_family = str(bank_pick.get("family") or "NONE")
+        strategy_quality = float(bank_pick.get("quality") or 0.0)
+    except Exception:
+        strategy, setup_family = _strategy_name(market, symbol, regime, vol_state, selected_dir, groups)
+        bank_pick = {"id": strategy, "family": setup_family, "quality": 0.0, "confirmations": [], "indicators": []}
+        strategy_quality = 0.0
 
     gates = {
         "data_health": data_ok,
@@ -318,6 +336,7 @@ def build_contingency_playbook(
         "setup_or_execution_role": bool(vote_support.get("has_setup") or vote_support.get("has_execution")),
         "macro_safe": not (market == "FUTURES" and (macro_risk == "CRITICAL" or macro_posture in {"BLOCK", "HALT", "NO_TRADE"})),
         "research_not_negative": not blocked_by_research,
+        "strategy_quality": strategy_quality >= (75.0 if market == "FUTURES" else 65.0),
     }
     green = sum(1 for x in gates.values() if x)
     required = len(gates)
@@ -397,6 +416,9 @@ def build_contingency_playbook(
         "volatility": {"state": vol_state, "atr_pct": groups["volatility"].get("atr_pct"), "squeeze_on": groups["volatility"].get("squeeze_on")},
         "strategy": strategy,
         "setup_family": setup_family,
+        "strategy_quality": round(strategy_quality, 2),
+        "strategy_confirmations": list(bank_pick.get("confirmations") or []),
+        "strategy_indicators": list(bank_pick.get("indicators") or []),
         "setup_code": setup_family,
         "entry": {"rule": entry_rule, "requires_closed_candle": True, "anti_fomo": True},
         "risk": {"size_cap": size_cap, "leverage_cap": leverage_cap, "confidence_cap": confidence_cap, "never_bypass_safety": True},

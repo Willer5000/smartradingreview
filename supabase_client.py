@@ -54,7 +54,7 @@ SUPABASE_KEY = os.environ.get('SUPABASE_KEY', '')
 # keep database traffic far below that ceiling. These guards are deliberately
 # conservative and can be overridden in Render without another deploy.
 FREE_PLAN_LOCKDOWN = str(os.environ.get('FREE_PLAN_LOCKDOWN', '1')).strip().lower() not in {'0','false','no','off'}
-MAIN_SUPABASE_DAILY_BUDGET_MB = max(20.0, float(os.environ.get('MAIN_SUPABASE_DAILY_BUDGET_MB', '120') or 120))
+MAIN_SUPABASE_DAILY_BUDGET_MB = max(20.0, float(os.environ.get('MAIN_SUPABASE_DAILY_BUDGET_MB', '60') or 60))
 MAIN_SUPABASE_DIAGNOSTIC_GUARD = max(0.10, min(0.95, float(os.environ.get('MAIN_SUPABASE_DIAGNOSTIC_GUARD', '0.70') or 0.70)))
 MAIN_SUPABASE_OPTIONAL_GUARD = max(MAIN_SUPABASE_DIAGNOSTIC_GUARD, min(0.98, float(os.environ.get('MAIN_SUPABASE_OPTIONAL_GUARD', '0.85') or 0.85)))
 MAIN_SUPABASE_IMPORTANT_GUARD = max(MAIN_SUPABASE_OPTIONAL_GUARD, min(0.995, float(os.environ.get('MAIN_SUPABASE_IMPORTANT_GUARD', '0.95') or 0.95)))
@@ -1814,7 +1814,7 @@ class SupabaseClient:
                 tf for tf in spot_allowed if tf in raw_spot_tf
             ]
 
-            scalping_allowed = ('5m', '15m', '30m')
+            scalping_allowed = ('5m', '15m')
             raw_scalping_tf = _json_list(
                 row.get('futures_scalping_timeframes')
             )
@@ -1915,7 +1915,7 @@ class SupabaseClient:
                 tf for tf in spot_allowed if tf in requested_spot
             ]
 
-            scalping_allowed = ('5m', '15m', '30m')
+            scalping_allowed = ('5m', '15m')
             requested_scalping = (
                 merged.get('futures_scalping_timeframes', []) or []
             )

@@ -17196,22 +17196,10 @@ class TradingExpertSystem:
             liquidation  # <--- NUEVO PARÁMETRO
         )
 
-        # RC8: surface up to two real committee reasons coherent with the final
-        # action. This supplements the indicator bank; it never fabricates data.
-        razones_rc8 = self._razones_consenso_coherentes(decision, razones_consenso, limit=2)
-        if razones_rc8:
-            label = {
-                'NO_OPERAR': 'Bloqueo principal',
-                'ESPERAR': 'Confirmación pendiente',
-                'CAUTION': 'Riesgo principal',
-                'COMPRA_SPOT': 'Motivo de la compra Spot',
-                'VENTA_SPOT': 'Motivo de la venta Spot',
-                'LONG': 'Motivo del LONG Futures',
-                'SHORT': 'Motivo del SHORT Futures',
-            }.get(str(decision or '').upper(), 'Motivo principal')
-            committee_text = f"{label}: " + "; ".join(razones_rc8) + ". "
-            plantillas.insert(min(2, len(plantillas)), {'template': committee_text})
-        
+        # RC8.4: razones internas del comité permanecen sólo para auditoría.
+        # La recomendación pública se explica exclusivamente con evidencia técnica
+        # de las capas/indicadores seleccionada por el banco de plantillas.
+
         # ============ EXTRACCIÓN MASIVA DE TODOS LOS INDICADORES ============
         
         # ---------- TREND (CAPA 1) ----------
@@ -19638,25 +19626,16 @@ class TradingExpertSystem:
                 # Reutilizamos razones_consenso ya calculadas.
                 # ======================================================
 
-                fallback_reasons = [
-                    str(reason).strip()
-                    for reason in (
-                        razones_consenso
-                        or []
-                    )
-                    if str(reason).strip()
-                ]
-
+                from reason_presenter import public_reason
+                fallback_reasons = []
+                for reason in (razones_consenso or []):
+                    text = public_reason(reason)
+                    if text and text not in fallback_reasons:
+                        fallback_reasons.append(text)
                 fallback_text = (
-                    ' '.join(
-                        fallback_reasons[:8]
-                    )
+                    ' '.join(fallback_reasons[:4])
                     if fallback_reasons
-                    else (
-                        'El comité alcanzó consenso, '
-                        'pero la plantilla detallada '
-                        'no pudo completarse.'
-                    )
+                    else 'La entrada no reúne confirmación técnica suficiente entre tendencia, momentum, volatilidad, volumen y estructura.'
                 )
 
                 action_text = (
@@ -43376,12 +43355,100 @@ def learning_worker_loop():
         time.sleep(next_sleep)
 
 # ============================================================================
+# RC8.4 — ALERTAS FUTURES NORMALES (NO SCALPING)
+# ============================================================================
+# 30m/1h/2h/4h/12h/1D usan el flujo operativo normal. El notifier no analiza
+# mercado ni baja gates: sólo publica setups que ya son EXECUTABLE_SIGNAL.
+# 5m/15m quedan reservados al notifier de scalping y sus preferencias por usuario.
+_FUTURES_STANDARD_ALERT_TFS = ('30m','1h','2h','4h','12h','1D')
+_FUTURES_STANDARD_ALERT_LOOP_INTERVAL = 60
+
+def _build_futures_standard_message(user, symbol, timeframe, result, lifecycle_record=None):
+    from html import escape
+    decision=(result.get('decision') or {}); levels=(result.get('levels') or {})
+    action=str(decision.get('action') or '').upper()
+    try:
+        entry=float(levels.get('entry') or 0); sl=float(levels.get('stop_loss') or 0); tp=float(levels.get('take_profit') or 0)
+        safety=float(levels.get('execution_safety') or 0); rr=float(levels.get('risk_reward') or 0)
+        entry_score=float(levels.get('entry_score') or levels.get('entry_quality_score') or 0)
+        tp_quality=float(levels.get('tp_quality_score') or 0)
+        leverage=int(float(levels.get('leverage') or 1))
+    except Exception:
+        entry=sl=tp=safety=rr=entry_score=tp_quality=0.0; leverage=1
+    icon='🟢' if action=='LONG' else '🔴'
+    validity=_futures_signal_validity(result,timeframe,lifecycle_record)
+    link=_futures_signal_public_url(symbol,timeframe,result)
+    evidence=[]
+    try:
+        top=expert_system.get_top_signal_indicators_for_telegram(result, action, limit=4)
+        for item in top or []:
+            if isinstance(item, dict):
+                label=str(item.get('label') or item.get('name') or item.get('indicator') or '').strip()
+            else:
+                label=str(item or '').strip()
+            if label and label not in evidence: evidence.append(label)
+    except Exception:
+        pass
+    lines=[
+        f"👤 <b>{escape(str(user))}</b>",
+        "📈 <b>FUTURES · SETUP OPERATIVO</b>", '',
+        f"{icon} <b>{escape(symbol)} · {escape(timeframe)} · {escape(action)}</b>",
+        f"🛡️ Safety: <b>{safety:.1f}</b> · Entry: <b>{entry_score:.1f}</b> · TP quality: <b>{tp_quality:.1f}</b>",
+    ]
+    if evidence:
+        lines.append("📊 Confirmaciones: " + escape(', '.join(evidence[:4])))
+    lines += [
+        '', f"💰 Entry: <b>{entry:.8g}</b>", f"🎯 TP: {tp:.8g}", f"🛑 SL: {sl:.8g}",
+        f"⚖️ R/R: {rr:.2f}", f"⚡ Apalancamiento: <b>x{leverage}</b>",
+        f"⏳ Vigencia: <b>{escape(validity['duration_text'])}</b>", '',
+        f"🔗 <a href=\"{escape(link)}\">Abrir señal</a>",
+    ]
+    return '\n'.join(lines)
+
+def futures_standard_alert_loop():
+    print('📈 FUTURES notifier normal iniciado (30m–1D; sólo EXECUTABLE_SIGNAL)')
+    time.sleep(95)
+    while True:
+        try:
+            users=sorted(_telegram_market_users('futures'))
+            if not users:
+                time.sleep(_FUTURES_STANDARD_ALERT_LOOP_INTERVAL); continue
+            with _futures_analysis_cache['lock']:
+                raw=dict(_futures_analysis_cache.get('data') or {})
+            analyses=dict(raw.get('analysis') or {}); lifecycle=dict(raw.get('lifecycle') or {})
+            for (symbol,timeframe), result in analyses.items():
+                if timeframe not in _FUTURES_STANDARD_ALERT_TFS or not isinstance(result,dict) or not result.get('success'):
+                    continue
+                if str(result.get('analysis_mode') or '').upper()!='CLOSED_CANDLE' or not bool(result.get('source_candle_closed',False)):
+                    continue
+                action=str(((result.get('decision') or {}).get('action') or '')).upper()
+                if action not in ('LONG','SHORT'): continue
+                levels=result.get('levels') or {}
+                publication_status=str(levels.get('publication_status') or result.get('publication_status') or '').upper()
+                if publication_status!='EXECUTABLE_SIGNAL': continue
+                signal_id=str(result.get('signal_id') or '')
+                lc=lifecycle.get(signal_id) or {}
+                validity=_futures_signal_validity(result,timeframe,lc)
+                if str(lc.get('lifecycle_status') or 'waiting_entry')!='waiting_entry' or validity.get('expired'): continue
+                for user in users:
+                    key=_futures_scalping_alert_key(user,result,symbol,timeframe)
+                    key='NORMAL|'+key
+                    if _futures_scalping_alert_already_sent(key): continue
+                    msg=_build_futures_standard_message(user,symbol,timeframe,result,lc)
+                    if expert_system.send_telegram_alert(msg,None,category='FUTURES_SETUP'):
+                        _mark_futures_scalping_alert_sent(key)
+                        print(f'✅ Futures Telegram normal: {user} · {symbol} {timeframe} {action}')
+        except Exception as exc:
+            print(f'❌ futures_standard_alert_loop: {exc}')
+        time.sleep(_FUTURES_STANDARD_ALERT_LOOP_INTERVAL)
+
+# ============================================================================
 # COMMIT 36K — ALERTAS PERSONALIZADAS DE SCALPING FUTURES
 # ============================================================================
 #
 # REGLAS:
 # - sólo EXECUTABLE_SIGNAL;
-# - sólo 30m en V1 RC2; 5m/15m retirados por costo operativo;
+# - sólo 5m/15m; preferencia personal de alertas de scalping;
 # - sólo usuarios que lo activaron explícitamente;
 # - respeta timezone, días y ventana horaria del usuario;
 # - usa el caché Futures existente: NO dispara análisis;
@@ -43389,7 +43456,8 @@ def learning_worker_loop():
 # ============================================================================
 
 _FUTURES_SCALPING_TFS = (
-    '30m',
+    '5m',
+    '15m',
 )
 
 _FUTURES_SCALPING_PREF_CACHE = {}
@@ -44849,7 +44917,7 @@ def api_user_futures_scalping_preferences():
 
                     'error':
                         (
-                            'Debes seleccionar 30m.'
+                            'Debes seleccionar al menos una temporalidad de scalping (5m o 15m).'
                         )
                 }), 400
 
@@ -45554,6 +45622,19 @@ def _start_background_threads():
         )
     except Exception as e:
         print(f"⚠️ Error iniciando macro-context: {e}")
+
+    # RC8.4 — notifier Futures normal. Sólo publica setups que ya pasaron
+    # el Publication Gate; no comparte preferencias con scalping.
+    try:
+        t_futures_standard = threading.Thread(
+            target=futures_standard_alert_loop,
+            name='futures-standard-alerts',
+            daemon=True
+        )
+        t_futures_standard.start()
+        print("✅ Thread futures_standard_alerts iniciado (30m–1D, sólo EXECUTABLE_SIGNAL)")
+    except Exception as e:
+        print(f"⚠️ Error iniciando futures_standard_alerts: {e}")
 
     # Commit 36K — notifier personalizado de scalping Futures.
     #
