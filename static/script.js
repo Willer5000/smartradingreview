@@ -8,38 +8,27 @@ let currentAnalysis = null;
 let currentSymbol = 'BTC-USDT';
 let currentInterval = '1D';
 
-// RC8.3 — PUBLIC REASONS
-// Backend codes are useful for audit, never for the trader-facing explanation.
-window.humanizeTradingReason = window.humanizeTradingReason || function(value) {
+// RC8.3 FINAL — PUBLIC REASONS
+// La recomendación visible explica mercado, no arquitectura interna.
+window.humanizeTradingReason = function(value) {
     const raw = String(value || '').trim();
     if (!raw) return '';
-    const map = {
-        ACTION_CELL_NOT_YET_VALIDATED: 'Esta combinación de mercado, par, temporalidad y acción todavía no tiene una estrategia validada; se aplica la contingencia con riesgo reducido.',
-        RESEARCH_UNAVAILABLE: 'La evidencia validada no está disponible temporalmente; se conserva el último estado conocido y se actúa de forma conservadora.',
-        STRUCTURE_RETEST: 'El movimiento necesita confirmar la nueva estructura con un retesteo antes de ejecutar la entrada.',
-        TREND_PULLBACK: 'La tendencia es favorable, pero la entrada debe esperar un retroceso hacia una zona técnica defendible.',
-        BREAKOUT_RETEST: 'La ruptura necesita aceptación y retesteo del nivel antes de ejecutar.',
-        LIQUIDITY_SWEEP_REVERSAL: 'El barrido de liquidez necesita confirmación de estructura y momentum antes de validar la reversión.',
-        RANGE_MEAN_REVERSION: 'El mercado está en balance y la entrada sólo es válida desde un extremo defendible del rango.',
-        SPOT_ROTATION: 'La señal corresponde a una rotación Spot entre BTC, PAXG y liquidez según fuerza relativa y protección del capital.',
-        NEGATIVE_OOS: 'La validación fuera de muestra no confirma una ventaja estadística suficiente para operar.',
-        SHADOW_DIVERGED: 'El seguimiento real se desvió de la validación y la estrategia queda suspendida.',
-        ALPHA_DECAY: 'La estrategia validada muestra deterioro reciente y queda suspendida hasta una nueva validación.',
-        DEGRADED_LOSS_STREAK: 'La estrategia acumula una racha de pérdidas incompatible con su comportamiento validado y queda suspendida.',
-        DEGRADED_ROLLING: 'Las métricas recientes se deterioraron frente a la referencia validada y se requiere una nueva validación.',
-        DEGRADED_RETEST: 'El retest del mismo linaje no confirmó la ventaja previa y la celda vuelve a búsqueda.',
-        EDGE_BLOCKED: 'La evidencia estadística no autoriza una nueva señal ejecutable.',
-        CONTINGENCY_PLAYBOOK_NOT_VALIDATED_ALPHA: 'Se está usando una estrategia provisional de contingencia; todavía no posee ventaja estadística validada.',
-        DEFAULT_STRUCTURE_RETEST: 'El movimiento necesita confirmar la nueva estructura con un retesteo antes de ejecutar la entrada.',
-        DEFAULT_TREND_PULLBACK: 'La tendencia es favorable, pero la entrada debe esperar un retroceso hacia una zona técnica defendible.',
-        DEFAULT_BREAKOUT_RETEST: 'La ruptura necesita aceptación y retesteo del nivel antes de ejecutar.',
-        DEFAULT_LIQUIDITY_SWEEP_REVERSAL: 'El barrido de liquidez necesita confirmación de estructura y momentum antes de validar la reversión.'
-    };
+    const internal = new Set([
+        'ACTION_CELL_NOT_YET_VALIDATED','RESEARCH_UNAVAILABLE',
+        'VALIDATED_CHAMPION_AVAILABLE','KNOWN_NEGATIVE_OR_DECAY',
+        'CONTINGENCY_PLAYBOOK_NOT_VALIDATED_ALPHA','CONTINGENCY_ENGINE_ERROR',
+        'NOT_EVALUATED','EDGE_BLOCKED','NEGATIVE_OOS','SHADOW_DIVERGED',
+        'ALPHA_DECAY','DEGRADED_LOSS_STREAK','DEGRADED_ROLLING','DEGRADED_RETEST',
+        'STRUCTURE_RETEST','TREND_PULLBACK','BREAKOUT_RETEST',
+        'LIQUIDITY_SWEEP_REVERSAL','RANGE_MEAN_REVERSION','SPOT_ROTATION',
+        'DEFAULT_STRUCTURE_RETEST','DEFAULT_TREND_PULLBACK','DEFAULT_BREAKOUT_RETEST',
+        'DEFAULT_LIQUIDITY_SWEEP_REVERSAL','DEFAULT_RANGE_MEAN_REVERSION','DEFAULT_SPOT_ROTATION'
+    ]);
     const exact = raw.toUpperCase();
-    if (map[exact]) return map[exact];
+    if (internal.has(exact)) return '';
     let text = raw.replace(/\bRC\d+(?:\.\d+)?\s*(?:contingencia|contingency)?\s*:\s*/gi, '');
-    text = text.replace(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+){1,}\b/g, token => map[token] ? map[token].replace(/[.]$/, '') : token.toLowerCase().replaceAll('_', ' '));
-    return text.replace(/\s*·\s*/g, '. ').replace(/\s{2,}/g, ' ').trim();
+    text = text.replace(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+){1,}\b/g, token => internal.has(token) ? '' : '');
+    return text.replace(/\s*·\s*/g, ' ').replace(/\s{2,}/g, ' ').replace(/^[\s:;,.·-]+|[\s:;,.·-]+$/g, '').trim();
 };
 
 // ============================================================================

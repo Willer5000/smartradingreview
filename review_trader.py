@@ -1503,6 +1503,16 @@ class ReviewTrader:
         if not self._is_clean_futures_signal(signal):
             return False
 
+        # RC8.3 FINAL: la cohorte ReviewTrader debe ser idéntica a Analytics.
+        # 5m/15m y cualquier celda fuera del contrato actual se conservan como
+        # historia/Research, pero no calibran WR/PF/Expectancy ni autoridad.
+        from cohort_integrity import futures_cell_active
+        if not futures_cell_active(
+            signal.get('symbol'),
+            signal.get('timeframe') or signal.get('interval')
+        ):
+            return False
+
         learning = self._get_signal_learning(signal)
         return bool(
             self._as_bool(learning.get('statistically_eligible', False))

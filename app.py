@@ -6550,25 +6550,25 @@ class TradingExpertSystem:
             
             # ============ CATEGORÍA 28: CONFIRMACIÓN (AGREGAR) ============
             'confirmacion_pendiente': {
-                'template': 'CONFIRMACIÓN PENDIENTE: La señal requiere validación con volumen y cierre fuera de rango. ',
+                'template': 'El volumen y el cierre de vela todavía deben confirmar la ruptura del rango. ',
                 'type': 'confirmacion',
                 'order': 28,
                 'condition': 'confirmacion_pendiente'
             },
             'confirmacion_esperar_velas': {
-                'template': 'SE REQUIEREN {wait_bars} VELA(S) DE CONFIRMACIÓN: Esperar cierre fuera del rango para validar. ',
+                'template': 'La entrada necesita {wait_bars} vela(s) cerrada(s) fuera del rango antes de considerarse confirmada. ',
                 'type': 'confirmacion',
                 'order': 28,
                 'condition': 'requiere_espera'
             },
             'confirmacion_falso_breakout_alcista': {
-                'template': 'FALSO BREAKOUT ALCISTA: Precio superó {breakout_level} pero cerró dentro del rango. Posible trampa para toros. ',
+                'template': 'El precio superó {breakout_level} pero cerró nuevamente dentro del rango; la ruptura alcista no quedó confirmada. ',
                 'type': 'confirmacion',
                 'order': 28,
                 'condition': 'falso_breakout_alcista'
             },
             'confirmacion_falso_breakdown_bajista': {
-                'template': 'FALSO BREAKDOWN BAJISTA: Precio perforó {breakout_level} pero cerró por encima. Posible trampa para osos. ',
+                'template': 'El precio perforó {breakout_level} pero cerró nuevamente por encima; la ruptura bajista no quedó confirmada. ',
                 'type': 'confirmacion',
                 'order': 28,
                 'condition': 'falso_breakdown_bajista'
@@ -18941,18 +18941,11 @@ class TradingExpertSystem:
                 )
 
                 if contingency_playbook.get('active'):
-                    strategy_name = str(contingency_playbook.get('strategy') or '').strip()
-                    if strategy_name and strategy_name not in estrategias_consenso:
-                        estrategias_consenso.append(strategy_name)
-                    # RC8.3 — las razones públicas son trading, no códigos internos.
-                    # reason/setup/authority permanecen en contingency_playbook para auditoría.
-                    from reason_presenter import contingency_public_reason
-                    public_contingency_reason = contingency_public_reason(
-                        contingency_playbook.get('reason_code') or contingency_playbook.get('reason'),
-                        contingency_playbook.get('setup_code') or contingency_playbook.get('setup_family'),
-                    )
-                    if public_contingency_reason:
-                        razones_consenso.append(public_contingency_reason)
+                    # RC8.3 FINAL — el playbook es metadato operativo/auditable.
+                    # NO se añade su código/nombre a estrategias_consenso ni a las
+                    # justificaciones públicas. La recomendación debe explicar la
+                    # señal con los indicadores y especialistas que realmente la
+                    # sostienen (tendencia, momentum, volumen, estructura, etc.).
                     effective_action = str(contingency_playbook.get('effective_action') or accion_consenso).upper()
                     if effective_action != str(accion_consenso or '').upper():
                         from reason_presenter import public_reason

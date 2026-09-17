@@ -11,16 +11,9 @@ const futHumanReason = (value) => {
     }
     const raw = String(value || '').trim();
     if (!raw) return '';
-    const map = {
-        ACTION_CELL_NOT_YET_VALIDATED: 'Esta combinación de mercado, par, temporalidad y acción todavía no tiene una estrategia validada.',
-        STRUCTURE_RETEST: 'El movimiento necesita confirmar la nueva estructura con un retesteo antes de ejecutar la entrada.',
-        NEGATIVE_OOS: 'La validación fuera de muestra no confirma una ventaja estadística suficiente para operar.',
-        ALPHA_DECAY: 'La estrategia validada muestra deterioro reciente y queda suspendida hasta nueva validación.',
-        EDGE_BLOCKED: 'La evidencia estadística no autoriza una nueva señal ejecutable.'
-    };
-    const exact = raw.toUpperCase();
-    if (map[exact]) return map[exact];
-    return raw.replace(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+){1,}\b/g, token => map[token] || token.toLowerCase().replaceAll('_', ' '));
+    // Fail closed: si parece un identificador interno, no se muestra.
+    if (/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/.test(raw)) return '';
+    return raw.replace(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+){1,}\b/g, '').replace(/\s{2,}/g, ' ').trim();
 };
 
 // ============================================================================

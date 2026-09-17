@@ -1159,12 +1159,17 @@ class SupabaseClient:
             return False
     
     def get_signals_for_stats(self, days_back: int = 90) -> List[Dict]:
-        """Devuelve señales resueltas con caché incremental de bajo egress.
+        """Señales cerradas de la cohorte operativa actual, con egress acotado.
 
-        FREE-PLAN: la versión histórica descargaba ``SELECT *`` hasta 50k filas
-        cada cuatro horas. Ahora la primera hidratación usa sólo las columnas
-        necesarias y, mientras viva el proceso, los siguientes ciclos piden
-        únicamente filas cuyo ``closed_at`` sea posterior al watermark.
+        RC8.3 FINAL:
+        - deja de descargar todo el histórico 90d + relación anidada;
+        - filtra en PostgREST la generación 36W actual;
+        - Futures: sólo EXECUTABLE_SIGNAL estadísticamente elegible;
+        - Spot: sólo cohorte Q6 verificable/elegible;
+        - hidrata nombres de estrategias en lotes sólo para las filas devueltas.
+
+        5m/15m y Legacy siguen guardados, pero ReviewTrader no los usa para
+        calibrar la producción actual.
         """
         if not self.enabled:
             return []
@@ -1175,75 +1180,117 @@ class SupabaseClient:
             select_cols = (
                 'id,symbol,timeframe,system_type,action_normalized,status,'
                 'entry_price,stop_loss,take_profit,leverage,context,'
-                'created_at,closed_at,signal_indicators(strategy_name)'
+                'created_at,closed_at'
             )
 
-            # Si cambió la ventana solicitada, rehacer una única hidratación.
             if self._stats_cache_days != days_back:
                 self._stats_signals_cache = []
                 self._stats_closed_watermark = ''
                 self._stats_cache_days = days_back
 
-            def _fetch(after_closed=''):
-                all_data = []
-                offset = 0
-                page_size = 500
-                # 8k filas compactas es un techo defensivo muy por debajo de
-                # las 50k antiguas y suficiente para el ReviewTrader actual.
-                max_rows = 8000
-                while len(all_data) < max_rows:
-                    query = (
-                        self.client.table('signals')
-                        .select(select_cols)
-                        .neq('status', 'pending')
-                        .gte('created_at', cutoff)
+            def _base_query(market):
+                q = (
+                    self.client.table('signals')
+                    .select(select_cols)
+                    .eq('system_type', market)
+                    .neq('status', 'pending')
+                    .gte('created_at', cutoff)
+                    .eq('context->execution->>quality_score_version', '36W_V2_NORMALIZED')
+                )
+                if market == 'futures':
+                    q = (
+                        q.eq('context->learning->>cohort', 'FUTURES_PERPETUAL_REAL_CLOSED_V1')
+                         .eq('context->learning->>market_data_source', 'KUCOIN_FUTURES_PERPETUAL_REST')
+                         .eq('context->learning->>market_data_is_synthetic', 'false')
+                         .eq('context->learning->>source_candle_closed', 'true')
+                         .eq('context->learning->>evaluation_role', 'EXECUTABLE_SIGNAL')
+                         .eq('context->learning->>statistically_eligible', 'true')
                     )
+                else:
+                    q = (
+                        q.eq('context->learning->>cohort', 'SPOT_REAL_CLOSED_Q6')
+                         .eq('context->learning->>market_data_source', 'KUCOIN_SPOT_REST')
+                         .eq('context->learning->>market_data_is_synthetic', 'false')
+                         .eq('context->learning->>source_candle_closed', 'true')
+                         .eq('context->learning->>analysis_version', 'spot_closed_q6_v1')
+                         .eq('context->learning->>statistically_eligible', 'true')
+                    )
+                return q
+
+            def _fetch(after_closed=''):
+                rows = []
+                for market in ('spot', 'futures'):
+                    q = _base_query(market)
                     if after_closed:
-                        query = query.gt('closed_at', after_closed)
-                    response = (
-                        query.order('closed_at', desc=False)
-                        .range(offset, min(offset + page_size - 1, max_rows - 1))
+                        q = q.gt('closed_at', after_closed)
+                    response = self._with_retry(
+                        lambda q=q: q.order('closed_at', desc=False).limit(1000).execute()
+                    )
+                    rows.extend(response.data or [])
+                return rows
+
+            fresh_rows = _fetch('' if not self._stats_signals_cache else self._stats_closed_watermark)
+            if not self._stats_signals_cache:
+                merged = {str(row.get('id')): row for row in fresh_rows if row.get('id')}
+            else:
+                merged = {str(row.get('id')): row for row in self._stats_signals_cache if row.get('id')}
+                for row in fresh_rows:
+                    if row.get('id'):
+                        merged[str(row.get('id'))] = row
+
+            # Sólo la cohorte activa actual puede calibrar.
+            try:
+                from cohort_integrity import classify_quality_signal
+                from q6_integrity import verified_spot_current
+                filtered = []
+                for row in merged.values():
+                    market = str(row.get('system_type') or '').lower()
+                    info = classify_quality_signal(
+                        row,
+                        spot_verified=bool(verified_spot_current(row)) if market == 'spot' else False
+                    )
+                    if info.get('cohort') in {'OFFICIAL_CURRENT_SPOT', 'OFFICIAL_CURRENT_FUTURES'}:
+                        filtered.append(row)
+                merged = {str(row.get('id')): row for row in filtered if row.get('id')}
+            except Exception:
+                pass
+
+            # Hidratar únicamente nombres de estrategia para las pocas filas
+            # oficiales. indicator_values ya vive una sola vez en signals y no
+            # se descarga aquí.
+            ids = list(merged.keys())
+            strategies = {}
+            for start_i in range(0, len(ids), 120):
+                batch = ids[start_i:start_i + 120]
+                if not batch:
+                    continue
+                response = self._with_retry(
+                    lambda batch=batch: (
+                        self.client.table('signal_indicators')
+                        .select('signal_id,strategy_name')
+                        .in_('signal_id', batch)
                         .execute()
                     )
-                    batch = response.data or []
-                    if not batch:
-                        break
-                    all_data.extend(batch)
-                    if len(batch) < page_size:
-                        break
-                    offset += page_size
-                return all_data[:max_rows]
+                )
+                for item in response.data or []:
+                    sid = str(item.get('signal_id') or '')
+                    name = item.get('strategy_name')
+                    if sid and name:
+                        strategies.setdefault(sid, []).append({'strategy_name': name})
 
-            if not self._stats_signals_cache:
-                self._stats_signals_cache = _fetch()
-            else:
-                # Sólo filas que cambiaron de pending -> resultado desde el
-                # último ciclo. No hay re-descarga del histórico completo.
-                delta = _fetch(self._stats_closed_watermark)
-                if delta:
-                    by_id = {str(row.get('id')): row for row in self._stats_signals_cache}
-                    for row in delta:
-                        by_id[str(row.get('id'))] = row
-                    self._stats_signals_cache = list(by_id.values())
+            for sid, row in merged.items():
+                row['signal_indicators'] = strategies.get(sid, [])
 
-            # Poda local por antigüedad; no genera ninguna consulta adicional.
-            self._stats_signals_cache = [
-                row for row in self._stats_signals_cache
-                if str(row.get('created_at') or '') >= cutoff
-            ]
+            self._stats_signals_cache = list(merged.values())
             closed_values = [
-                str(row.get('closed_at') or '')
-                for row in self._stats_signals_cache
+                str(row.get('closed_at') or '') for row in self._stats_signals_cache
                 if row.get('closed_at')
             ]
             if closed_values:
                 self._stats_closed_watermark = max(closed_values)
-
             return list(self._stats_signals_cache)
         except Exception as e:
-            logger.error(f"Error obteniendo señales para stats: {e}")
-            # Si Supabase cae después de haber hidratado el caché, conservar la
-            # evidencia local en vez de devolver vacío y romper aprendizaje.
+            logger.error(f"Error obteniendo señales compactas para stats: {e}")
             return list(self._stats_signals_cache or [])
 
     def get_missed_opportunities_by_context(self, symbol: str = None, 

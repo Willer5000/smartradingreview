@@ -331,10 +331,37 @@ def build_contingency_playbook(
     downgrade_reason = ""
     if blocked_by_research and action in _DIRECTIONAL:
         effective_action = "NO_OPERAR"
-        downgrade_reason = "Evidencia OOS/Shadow negativa o Alpha Decay: la contingencia no puede rescatar la celda."
+        downgrade_reason = (
+            "El comportamiento reciente de esta estrategia no conserva evidencia "
+            "suficiente para abrir una nueva operación."
+        )
     elif active and action in _DIRECTIONAL and not executable_contingency:
         effective_action = "ESPERAR" if data_ok and gates["macro_safe"] else "NO_OPERAR"
-        downgrade_reason = "Playbook de contingencia incompleto: falta alineación independiente para ejecutar sin Champion."
+        if not data_ok:
+            downgrade_reason = (
+                "Faltan datos suficientes de precio, estructura o volatilidad para "
+                "validar una entrada defendible."
+            )
+        elif not gates["macro_safe"]:
+            downgrade_reason = (
+                "El riesgo macroeconómico actual no permite asumir una nueva "
+                "exposición apalancada con seguridad."
+            )
+        elif not gates["direction_agrees_committee"]:
+            downgrade_reason = (
+                "Tendencia, momentum y estructura no confirman la misma dirección "
+                "que la señal propuesta."
+            )
+        elif not gates["independent_evidence"]:
+            downgrade_reason = (
+                "La señal todavía no reúne suficientes confirmaciones independientes "
+                "entre tendencia, momentum, volumen y estructura."
+            )
+        else:
+            downgrade_reason = (
+                "La estructura y el punto de entrada todavía no ofrecen una zona "
+                "defendible con invalidación clara."
+            )
 
     if market == "FUTURES":
         size_cap = 0.35

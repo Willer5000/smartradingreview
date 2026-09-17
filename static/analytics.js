@@ -1077,9 +1077,13 @@ function loR(value, decimals = 2) {
 function loHumanReason(value) {
     const raw = String(value || '');
     if (!raw) return 'Sin detalle adicional.';
+    const internalOnly = new Set([
+        'ACTION_CELL_NOT_YET_VALIDATED','STRUCTURE_RETEST',
+        'CONTINGENCY_PLAYBOOK_NOT_VALIDATED_ALPHA','CONTINGENCY_ENGINE_ERROR',
+        'NOT_EVALUATED'
+    ]);
+    if (internalOnly.has(raw.toUpperCase())) return 'Sin detalle adicional.';
     const tradingReason = {
-        ACTION_CELL_NOT_YET_VALIDATED: 'Esta combinación todavía no tiene una estrategia validada; se mantiene contingencia protegida.',
-        STRUCTURE_RETEST: 'La entrada necesita confirmar la nueva estructura mediante un retesteo.',
         NEGATIVE_OOS: 'La validación fuera de muestra no confirma ventaja suficiente.',
         SHADOW_DIVERGED: 'El seguimiento real se desvió de la validación y la estrategia queda suspendida.',
         ALPHA_DECAY: 'La estrategia muestra deterioro reciente y queda suspendida hasta nueva validación.',
@@ -1087,7 +1091,6 @@ function loHumanReason(value) {
         DEGRADED_ROLLING: 'Las métricas recientes se deterioraron frente a la referencia validada.',
         DEGRADED_RETEST: 'El retest del mismo linaje no confirmó la ventaja previa.',
         EDGE_BLOCKED: 'La evidencia estadística no autoriza una nueva señal ejecutable.',
-        CONTINGENCY_PLAYBOOK_NOT_VALIDATED_ALPHA: 'La contingencia es provisional y todavía no posee ventaja estadística validada.'
     };
     if (tradingReason[raw]) return tradingReason[raw];
     if (raw === 'COHORTE_INCOMPLETA') return 'La lectura completa de la cohorte todavía no está demostrada.';
@@ -2959,7 +2962,7 @@ async function loadResearchFederationAnalytics(){
         if(shadowBt) shadowBt.innerHTML=renderBt(profitability.futures_evaluation,'Sin challengers causales disponibles.');
         const simpleCoverage=document.getElementById('v1-coverage');
         const simpleCoverageNote=document.getElementById('v1-coverage-note');
-        if(simpleCoverage) simpleCoverage.textContent=`${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||92)} investigadas · ${Number(profitability.validated_cells||0)} Champions persistentes`;
+        if(simpleCoverage) simpleCoverage.textContent=`${Number(profitability.validated_cells||0)}/${Number(profitability.coverage_target||92)} con Champion · ${Math.max(0, Number(profitability.coverage_target||92)-Number(profitability.validated_cells||0))} pendientes`;
         if(simpleCoverageNote) simpleCoverageNote.textContent=`OOS+ vigente ${Number(profitability.oos_positive_cells||0)} · evidencia OOS+ ${Number(profitability.oos_positive_evidence_cells ?? profitability.oos_positive_cells ?? 0)} · celdas aún sin Champion ${Number(profitability.searching_cells||0)}`;
         const simpleBucket=(id,noteId,bucket)=>{
             const el=document.getElementById(id), note=document.getElementById(noteId);

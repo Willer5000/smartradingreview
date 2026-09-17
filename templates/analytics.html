@@ -118,9 +118,11 @@
                     <div class="col-md-2">
                         <label class="form-label small mb-1">Acción</label>
                         <select class="form-select form-select-sm bg-dark text-white" id="f-action">
-                            <option value="">Ambas</option>
-                            <option value="LONG">LONG</option>
-                            <option value="SHORT">SHORT</option>
+                            <option value="">Todas</option>
+                            <option value="LONG">LONG (Futuros)</option>
+                            <option value="SHORT">SHORT (Futuros)</option>
+                            <option value="COMPRA_SPOT">COMPRA SPOT</option>
+                            <option value="VENTA_SPOT">VENTA SPOT</option>
                         </select>
                     </div>
                     <div class="col-md-2">
@@ -151,7 +153,7 @@
                 <button class="btn btn-outline-secondary btn-sm" id="v1-toggle-advanced" type="button">Ver diagnóstico avanzado</button>
             </div>
             <div class="row g-2">
-                <div class="col-lg-3 col-md-4 col-6"><div class="v1-simple-card"><div class="small text-muted">Cobertura Research</div><div class="v1-simple-value" id="v1-coverage">--</div><div class="small text-muted" id="v1-coverage-note">46 celdas objetivo</div></div></div>
+                <div class="col-lg-3 col-md-4 col-6"><div class="v1-simple-card"><div class="small text-muted">Cobertura Research</div><div class="v1-simple-value" id="v1-coverage">--</div><div class="small text-muted" id="v1-coverage-note">92 celdas objetivo</div></div></div>
                 <div class="col-lg-3 col-md-4 col-6"><div class="v1-simple-card"><div class="small text-muted">Spot · LIVE</div><div class="v1-simple-value" id="v1-spot-live">--</div><div class="small text-muted" id="v1-spot-live-note">Lo que realmente está ocurriendo ahora</div></div></div>
                 <div class="col-lg-3 col-md-4 col-6"><div class="v1-simple-card"><div class="small text-muted">Spot · Backtest/OOS</div><div class="v1-simple-value" id="v1-spot-oos">--</div><div class="small text-muted" id="v1-spot-oos-note">WR y PnL histórico</div></div></div>
                 <div class="col-lg-3 col-md-4 col-6"><div class="v1-simple-card"><div class="small text-muted">Futures · LIVE</div><div class="v1-simple-value" id="v1-futures-live">--</div><div class="small text-muted" id="v1-futures-live-note">Lo que realmente está ocurriendo ahora</div></div></div>

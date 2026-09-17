@@ -73,7 +73,8 @@ REPORT_STRATEGY_SOFT_BUDGET_SECONDS = 20.0
 # Esto NO redefine la cohorte oficial ni reduce el requisito de
 # validación. Sólo garantiza una ruta de diagnóstico liviana.
 REPORT_SAFE_PAGE_SIZE = 500
-REPORT_SAFE_MAX_ROWS = 5000  # H.2: sólo cohortes estadísticas relevantes; RAM acotada.
+REPORT_SAFE_MAX_ROWS = 1200  # RC8.3 FINAL: cohorte oficial actual; RAM/egress acotados.
+REPORT_SHADOW_SAMPLE_MAX_ROWS = 240  # diagnóstico; nunca autoridad productiva.
 
 LEARNING_CONTRACT_VERSION = 'market_separated_v1'
 FUTURES_REAL_DATA_SOURCE = 'KUCOIN_FUTURES_PERPETUAL_REST'
@@ -1966,39 +1967,32 @@ def _compact_signal_for_learning_report(row: Dict) -> Dict:
 # ============================================================================
 
 def _fetch_all_signals_with_indicators(db, days_back: int = 90):
-    """Lee la cohorte estadística RELEVANTE, no todo el inventario de signals.
+    """Lee exactamente la generación operativa actual y una muestra Shadow.
 
-    HOTFIX H.2
+    RC8.3 FINAL
     -----------
-    El informe anterior hacía COUNT de *todas* las filas de 90 días y luego
-    intentaba descargarlas para recién después separar Q6/Futures limpio. Con
-    ~19k filas, Render agotaba el presupuesto temporal aunque la evidencia que
-    realmente usa el informe era <3k.
+    La versión H.2 pedía *todo* Futures limpio (incluido Shadow), que hoy puede
+    superar miles de filas y consumir el presupuesto antes de llegar a la
+    cohorte ejecutable. Resultado: Analytics veía Futures oficiales y el PDF
+    podía mostrar 0.
 
-    Esta versión hace push-down de los contratos ya existentes:
-      * Spot: sólo SPOT_REAL_CLOSED_Q6 + statistically_eligible=true.
-      * Futures: sólo FUTURES_PERPETUAL_REAL_CLOSED_V1 real/closed/no synthetic
-        (incluye executable + shadow porque ambos alimentan el diagnóstico).
+    Este fetch separa responsabilidades:
+      * cohorte oficial: generación 36W + procedencia verificable;
+      * Futures oficial: EXECUTABLE_SIGNAL + statistically_eligible=true;
+      * Shadow: muestra reciente acotada, sólo diagnóstico.
 
-    El inventario bruto se cuenta por separado, sin descargarlo. Así "100% de
-    cobertura" significa 100% de la cohorte estadística necesaria, NO que se
-    hayan cargado decenas de miles de filas irrelevantes. Si cualquiera de los
-    dos scopes queda truncado, el gate sigue fail-closed / NOT_READY.
+    La completitud de la cohorte oficial NO depende de descargar todo Shadow.
+    Cualquier promoción Cautious sí permanece fail-closed si Shadow está
+    truncado.
     """
     from datetime import timedelta
     import time
-    from q6_integrity import (
-        SPOT_SOURCE,
-        SPOT_COHORT,
-        SPOT_VERSION,
-    )
+    from q6_integrity import SPOT_SOURCE, SPOT_COHORT, SPOT_VERSION
 
     started_at = time.monotonic()
     now = datetime.utcnow()
-    cutoff_dt = now - timedelta(days=days_back)
-    snapshot_end_dt = now + timedelta(seconds=2)
-    cutoff = cutoff_dt.isoformat()
-    snapshot_end = snapshot_end_dt.isoformat()
+    cutoff = (now - timedelta(days=days_back)).isoformat()
+    snapshot_end = (now + timedelta(seconds=2)).isoformat()
 
     select_fields = (
         'id, symbol, timeframe, action_normalized, status, '
@@ -2028,38 +2022,27 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
     )
 
     diagnostics = {
-        'window_days': int(days_back),
-        'cutoff': cutoff,
-        'snapshot_end': snapshot_end,
-        'expected_rows': 0,              # cohorte relevante
-        'inventory_expected_rows': None, # inventario bruto, count-only
-        'fetched_rows': 0,
-        'coverage_pct': None,
-        'complete': False,
-        'primary_pages': 0,
-        'fallback_used': False,
-        'fallback_slices': 0,
-        'strategy_rows': 0,
-        'strategy_batches': 0,
-        'strategy_hydration_complete': True,
-        'strategy_hydration_skipped': False,
-        'time_budget_exhausted': False,
-        'fetch_elapsed_seconds': 0.0,
-        'safe_snapshot_mode': True,
-        'safe_max_rows': REPORT_SAFE_MAX_ROWS,
-        'safe_page_size': REPORT_SAFE_PAGE_SIZE,
-        'reached_window_end': False,
-        'count_skipped': False,
-        'result_mode': 'SCOPED_STATISTICAL_COHORT_H2',
-        'scope_counts': {},
-        'errors': [],
-        'model_version': 'report_fetch_scoped_h2',
+        'window_days': int(days_back), 'cutoff': cutoff, 'snapshot_end': snapshot_end,
+        'expected_rows': 0, 'inventory_expected_rows': None, 'fetched_rows': 0,
+        'coverage_pct': None, 'complete': False, 'primary_pages': 0,
+        'fallback_used': False, 'fallback_slices': 0, 'strategy_rows': 0,
+        'strategy_batches': 0, 'strategy_hydration_complete': True,
+        'strategy_hydration_skipped': False, 'time_budget_exhausted': False,
+        'fetch_elapsed_seconds': 0.0, 'safe_snapshot_mode': True,
+        'safe_max_rows': REPORT_SAFE_MAX_ROWS, 'safe_page_size': REPORT_SAFE_PAGE_SIZE,
+        'reached_window_end': False, 'count_skipped': False,
+        'result_mode': 'CURRENT_OFFICIAL_PLUS_BOUNDED_SHADOW_RC83',
+        'scope_counts': {}, 'errors': [], 'model_version': 'report_fetch_current_rc83',
+        'shadow_sample_fetched': 0, 'shadow_sample_complete': False,
+        'shadow_sample_truncated': False,
     }
 
-    scopes = {
+    quality_version = '36W_V2_NORMALIZED'
+    official_scopes = {
         'spot_verified': {
             'system_type': 'spot',
             'eq': [
+                ('context->execution->>quality_score_version', quality_version),
                 ('context->learning->>cohort', SPOT_COHORT),
                 ('context->learning->>market_data_source', SPOT_SOURCE),
                 ('context->learning->>market_data_is_synthetic', 'false'),
@@ -2072,17 +2055,34 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
                 'context->learning->>source_candle_close_timestamp',
             ],
         },
-        'futures_clean': {
+        'futures_verified': {
             'system_type': 'futures',
             'eq': [
+                ('context->execution->>quality_score_version', quality_version),
                 ('context->learning->>contract_version', LEARNING_CONTRACT_VERSION),
                 ('context->learning->>cohort', FUTURES_REAL_COHORT),
                 ('context->learning->>market_data_source', FUTURES_REAL_DATA_SOURCE),
                 ('context->learning->>market_data_is_synthetic', 'false'),
                 ('context->learning->>source_candle_closed', 'true'),
+                ('context->learning->>evaluation_role', 'EXECUTABLE_SIGNAL'),
+                ('context->learning->>statistically_eligible', 'true'),
             ],
             'not_null': [],
         },
+    }
+    shadow_scope = {
+        'system_type': 'futures',
+        'eq': [
+            ('context->execution->>quality_score_version', quality_version),
+            ('context->learning->>contract_version', LEARNING_CONTRACT_VERSION),
+            ('context->learning->>cohort', FUTURES_REAL_COHORT),
+            ('context->learning->>market_data_source', FUTURES_REAL_DATA_SOURCE),
+            ('context->learning->>market_data_is_synthetic', 'false'),
+            ('context->learning->>source_candle_closed', 'true'),
+            ('context->learning->>evaluation_role', 'SHADOW_ANALYSIS'),
+            ('context->learning->>statistically_eligible', 'false'),
+        ],
+        'not_null': [],
     }
 
     def _apply_window(query):
@@ -2096,45 +2096,25 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
             query = query.not_.is_(column, 'null')
         return query
 
-    def _count_query(config=None, system_type=None):
-        query = db.client.table('signals').select('id', count='exact')
-        query = _apply_window(query)
-        if config is not None:
-            query = _apply_scope(query, config)
-        elif system_type is not None:
-            query = query.eq('system_type', system_type)
-        return query.limit(1)
-
-    def _run_count(config=None, system_type=None):
-        def _execute():
-            return _count_query(config=config, system_type=system_type).execute()
-        response = db._with_retry(_execute) if hasattr(db, '_with_retry') else _execute()
+    def _count(config):
+        q = db.client.table('signals').select('id', count='exact')
+        q = _apply_scope(_apply_window(q), config).limit(1)
+        response = db._with_retry(lambda: q.execute()) if hasattr(db, '_with_retry') else q.execute()
         return int(getattr(response, 'count', 0) or 0)
 
-    # Counts son livianos y permiten reportar lo excluido sin descargarlo.
+    expected_by_scope = {}
     try:
-        inventory_total = _run_count()
-        spot_inventory = _run_count(system_type='spot')
-        futures_inventory = _run_count(system_type='futures')
-        spot_expected = _run_count(config=scopes['spot_verified'])
-        futures_expected = _run_count(config=scopes['futures_clean'])
-
-        diagnostics['inventory_expected_rows'] = inventory_total
-        diagnostics['expected_rows'] = spot_expected + futures_expected
+        for name, config in official_scopes.items():
+            expected_by_scope[name] = _count(config)
+        diagnostics['expected_rows'] = sum(expected_by_scope.values())
         diagnostics['scope_counts'].update({
-            'spot_inventory': spot_inventory,
-            'futures_inventory': futures_inventory,
-            'spot_verified_expected': spot_expected,
-            'futures_clean_expected': futures_expected,
-            'spot_legacy_count': max(0, spot_inventory - spot_expected),
-            'futures_legacy_count': max(0, futures_inventory - futures_expected),
-            'unscoped_count': max(0, inventory_total - spot_inventory - futures_inventory),
+            'spot_verified_expected': expected_by_scope.get('spot_verified', 0),
+            'futures_verified_expected': expected_by_scope.get('futures_verified', 0),
         })
     except Exception as count_error:
         diagnostics['count_skipped'] = True
         diagnostics['expected_rows'] = None
-        diagnostics['errors'].append(f'scoped_count_error:{str(count_error)[:160]}')
-        logger.warning('⚠️ Learning PDF H.2: COUNT scoped falló: %s', count_error)
+        diagnostics['errors'].append(f'official_count_error:{str(count_error)[:160]}')
 
     all_data = []
     seen_ids = set()
@@ -2142,198 +2122,107 @@ def _fetch_all_signals_with_indicators(db, days_back: int = 90):
     def _append_unique(batch):
         added = 0
         for row in batch or []:
-            if not isinstance(row, dict):
-                continue
-            compacted = _compact_signal_for_learning_report(row)
+            compacted = _compact_signal_for_learning_report(row) if isinstance(row, dict) else {}
             if not compacted:
                 continue
             row_id = str(compacted.get('id') or '').strip()
-            dedupe_key = row_id or '|'.join([
-                str(compacted.get('created_at') or ''),
-                str(compacted.get('symbol') or ''),
-                str(compacted.get('timeframe') or ''),
-                str(compacted.get('action_normalized') or ''),
+            key = row_id or '|'.join([
+                str(compacted.get('created_at') or ''), str(compacted.get('symbol') or ''),
+                str(compacted.get('timeframe') or ''), str(compacted.get('action_normalized') or '')
             ])
-            if dedupe_key in seen_ids:
+            if key in seen_ids:
                 continue
-            seen_ids.add(dedupe_key)
-            all_data.append(compacted)
-            added += 1
+            seen_ids.add(key); all_data.append(compacted); added += 1
         return added
 
-    def _execute_page(config, offset, size):
-        last_error = None
-        for attempt in range(3):
-            try:
-                query = db.client.table('signals').select(select_fields)
-                query = _apply_window(query)
-                query = _apply_scope(query, config)
-                response = (
-                    query
-                    .order('created_at', desc=True)
-                    .order('id', desc=True)
-                    .range(offset, offset + size - 1)
-                    .execute()
-                )
-                return response, None
-            except Exception as exc:
-                last_error = exc
-                if attempt < 2:
-                    time.sleep(0.15 * (attempt + 1))
-        return None, last_error
-
-    fetched_by_scope = {}
+    official_fetched = 0
     complete_by_scope = {}
-
-    for scope_name, config in scopes.items():
-        offset = 0
-        scope_fetched = 0
-        scope_complete = False
-        expected_key = (
-            'spot_verified_expected'
-            if scope_name == 'spot_verified'
-            else 'futures_clean_expected'
-        )
-        scope_expected = diagnostics['scope_counts'].get(expected_key)
-
+    for scope_name, config in official_scopes.items():
+        offset = 0; fetched = 0; scope_complete = False
+        expected = expected_by_scope.get(scope_name)
         while True:
             if time.monotonic() - started_at >= REPORT_FETCH_SOFT_BUDGET_SECONDS:
                 diagnostics['time_budget_exhausted'] = True
                 diagnostics['errors'].append(f'{scope_name}:time_budget_exhausted')
                 break
-
-            if scope_expected is not None and scope_fetched >= int(scope_expected):
-                scope_complete = True
-                break
-
-            if len(all_data) >= REPORT_SAFE_MAX_ROWS:
-                diagnostics['errors'].append('safe_snapshot_relevant_row_cap')
-                break
-
-            size = min(
-                REPORT_SAFE_PAGE_SIZE,
-                max(1, REPORT_SAFE_MAX_ROWS - len(all_data))
-            )
-            response, error = _execute_page(config, offset, size)
-            if error is not None:
-                diagnostics['errors'].append(f'{scope_name}:offset_{offset}:{str(error)[:150]}')
-                break
-
+            if expected is not None and fetched >= expected:
+                scope_complete = True; break
+            size = min(REPORT_SAFE_PAGE_SIZE, max(1, REPORT_SAFE_MAX_ROWS - official_fetched))
+            if size <= 0:
+                diagnostics['errors'].append('official_safe_row_cap'); break
+            try:
+                q = db.client.table('signals').select(select_fields)
+                q = _apply_scope(_apply_window(q), config)
+                response = q.order('created_at', desc=True).order('id', desc=True).range(offset, offset+size-1).execute()
+            except Exception as exc:
+                diagnostics['errors'].append(f'{scope_name}:offset_{offset}:{str(exc)[:150]}'); break
             batch = response.data or []
             diagnostics['primary_pages'] += 1
             if not batch:
-                scope_complete = True
-                break
-
+                scope_complete = True; break
             _append_unique(batch)
-            scope_fetched += len(batch)
-            offset += len(batch)
-
-            # Con count exacto, no necesitamos una página vacía extra.
-            if scope_expected is not None and scope_fetched >= int(scope_expected):
-                scope_complete = True
-                break
-
-        fetched_by_scope[scope_name] = scope_fetched
+            fetched += len(batch); official_fetched += len(batch); offset += len(batch)
+            if len(batch) < size:
+                scope_complete = True; break
         complete_by_scope[scope_name] = scope_complete
-
-    diagnostics['scope_counts'].update({
-        'spot_verified_fetched': fetched_by_scope.get('spot_verified', 0),
-        'futures_clean_fetched': fetched_by_scope.get('futures_clean', 0),
-    })
-
-    all_data.sort(key=lambda row: str(row.get('created_at') or ''), reverse=True)
-    diagnostics['fetched_rows'] = len(all_data)
-    diagnostics['reached_window_end'] = all(complete_by_scope.values()) if complete_by_scope else False
+        diagnostics['scope_counts'][f'{scope_name}_fetched'] = fetched
 
     expected_rows = diagnostics.get('expected_rows')
-    # Compatibilidad con los tests/diagnósticos de Commit E: ahora el COUNT
-    # prueba completitud sobre la cohorte scoped, no sobre todo el inventario.
-    diagnostics['expected_rows'] = expected_rows
-    count_proves_complete = bool(
-        expected_rows is not None
-        and len(all_data) == int(expected_rows)
-    )
-    counts_match = count_proves_complete
-    diagnostics['complete'] = bool(
-        counts_match
-        and all(complete_by_scope.values())
-        and not diagnostics['errors']
-    )
-
+    diagnostics['fetched_rows'] = official_fetched
+    diagnostics['reached_window_end'] = all(complete_by_scope.values()) if complete_by_scope else False
+    counts_match = bool(expected_rows is not None and official_fetched == int(expected_rows))
+    diagnostics['complete'] = bool(counts_match and all(complete_by_scope.values()) and not diagnostics['errors'])
     if expected_rows is not None:
-        diagnostics['coverage_pct'] = (
-            100.0 if int(expected_rows) <= 0
-            else round(min(100.0, len(all_data) / int(expected_rows) * 100.0), 2)
-        )
-
+        diagnostics['coverage_pct'] = 100.0 if int(expected_rows)<=0 else round(min(100.0, official_fetched/int(expected_rows)*100.0),2)
     if not diagnostics['complete']:
-        diagnostics['errors'].append('scoped_statistical_cohort_incomplete')
-        logger.warning(
-            '⚠️ Learning PDF H.2: cohorte estadística scoped incompleta %s/%s.',
-            len(all_data), expected_rows
-        )
+        diagnostics['errors'].append('official_current_cohort_incomplete')
 
-    # Hidratar estrategias sólo para resultados elegibles resueltos. Ya no se
-    # salta por estar en SAFE MODE: con el scope H.2 son muy pocos IDs y el coste
-    # es acotado. Si falla, las tablas auxiliares quedan incompletas pero el gate
-    # principal conserva su cobertura estadística.
-    signal_by_id = {
-        str(row.get('id')): row
-        for row in all_data
-        if row.get('id')
-    }
-    strategy_ids = []
-    for row in all_data:
-        status = str(row.get('status') or '').strip().lower()
-        if status not in ('tp_hit', 'sl_hit', 'expired', 'missed_opportunity'):
-            continue
-        market = _normalize_market(row)
-        if market != 'spot' and not _is_verified_futures_trade(row):
-            continue
-        row_id = str(row.get('id') or '').strip()
-        if row_id:
-            strategy_ids.append(row_id)
+    # Shadow: sólo muestra reciente y acotada. No forma parte de los KPI LIVE.
+    # Si llega al límite, se marca truncada y cualquier promoción Cautious sigue
+    # bloqueada por integridad.
+    if time.monotonic() - started_at < REPORT_FETCH_SOFT_BUDGET_SECONDS:
+        try:
+            q = db.client.table('signals').select(select_fields)
+            q = _apply_scope(_apply_window(q), shadow_scope)
+            response = q.order('created_at', desc=True).limit(REPORT_SHADOW_SAMPLE_MAX_ROWS).execute()
+            shadow_batch = response.data or []
+            _append_unique(shadow_batch)
+            diagnostics['shadow_sample_fetched'] = len(shadow_batch)
+            diagnostics['shadow_sample_complete'] = len(shadow_batch) < REPORT_SHADOW_SAMPLE_MAX_ROWS
+            diagnostics['shadow_sample_truncated'] = len(shadow_batch) >= REPORT_SHADOW_SAMPLE_MAX_ROWS
+        except Exception as exc:
+            diagnostics['errors'].append(f'shadow_sample:{str(exc)[:150]}')
+            diagnostics['shadow_sample_complete'] = False
 
-    if not diagnostics.get('complete', False):
-        strategy_ids = []
-        diagnostics['strategy_hydration_complete'] = False
-        diagnostics['strategy_hydration_skipped'] = True
+    all_data.sort(key=lambda row: str(row.get('created_at') or ''), reverse=True)
 
-    relation_batch_size = 300
-    for batch_start in range(0, len(strategy_ids), relation_batch_size):
+    # Hidratar estrategias sólo para señales oficiales resueltas; nunca para la
+    # muestra Shadow masiva.
+    cohorts_now = _split_learning_cohorts(all_data)
+    official_ids = []
+    for row in cohorts_now['spot'] + cohorts_now['futures_verified']:
+        if str(row.get('status') or '').lower() in ('tp_hit','sl_hit','expired','missed_opportunity') and row.get('id'):
+            official_ids.append(str(row.get('id')))
+    signal_by_id = {str(row.get('id')):row for row in all_data if row.get('id')}
+    for batch_start in range(0, len(official_ids), 120):
         if time.monotonic() - started_at >= REPORT_STRATEGY_SOFT_BUDGET_SECONDS:
             diagnostics['strategy_hydration_complete'] = False
             diagnostics['strategy_hydration_skipped'] = True
-            diagnostics['errors'].append('strategy_soft_time_budget_exhausted')
             break
-
-        id_batch = strategy_ids[batch_start:batch_start + relation_batch_size]
+        batch = official_ids[batch_start:batch_start+120]
         try:
-            relation_response = (
-                db.client.table('signal_indicators')
-                .select('signal_id, strategy_name')
-                .in_('signal_id', id_batch)
-                .execute()
-            )
+            relation = db.client.table('signal_indicators').select('signal_id,strategy_name').in_('signal_id', batch).execute()
             diagnostics['strategy_batches'] += 1
-            for item in relation_response.data or []:
-                if not isinstance(item, dict):
-                    continue
-                signal_id = str(item.get('signal_id') or '').strip()
-                strategy_name = item.get('strategy_name')
-                target = signal_by_id.get(signal_id)
-                if target is None or not strategy_name:
-                    continue
-                target.setdefault('signal_indicators', []).append({
-                    'strategy_name': strategy_name
-                })
-                diagnostics['strategy_rows'] += 1
+            for item in relation.data or []:
+                sid=str(item.get('signal_id') or ''); name=item.get('strategy_name')
+                if sid in signal_by_id and name:
+                    signal_by_id[sid].setdefault('signal_indicators',[]).append({'strategy_name':name})
+                    diagnostics['strategy_rows'] += 1
         except Exception as exc:
             diagnostics['strategy_hydration_complete'] = False
-            diagnostics['errors'].append(f'strategy_hydration_{batch_start}:{str(exc)[:160]}')
+            diagnostics['errors'].append(f'strategy_hydration:{str(exc)[:150]}')
 
-    diagnostics['fetch_elapsed_seconds'] = round(time.monotonic() - started_at, 2)
+    diagnostics['fetch_elapsed_seconds'] = round(time.monotonic()-started_at,2)
     return all_data, diagnostics
 
 
@@ -2897,9 +2786,9 @@ def _fetch_learning_data() -> Dict:
         #
         # Esto sólo afecta al gate del informe.
         # No modifica reglas operativas ni señales.
-        if not fetch_diagnostics.get(
-            'complete',
-            False
+        if not (
+            fetch_diagnostics.get('complete', False)
+            and fetch_diagnostics.get('shadow_sample_complete', False)
         ):
             promotion_reasons = list(
                 walk_forward_analysis.get(
@@ -3289,15 +3178,22 @@ def generate_learning_pdf() -> bytes:
             (
                 'FALLBACK TEMPORAL'
                 if (data.get('fetch_diagnostics') or {}).get('fallback_used')
-                else 'PAGINACIÓN ACOTADA (Spot verificado + Futures real)'
+                else 'COHORTE OFICIAL ACOTADA + SHADOW MUESTREADO'
             )
         ],
         [
-            'Estado lectura cohorte',
+            'Estado lectura cohorte oficial',
             (
                 'COMPLETA'
                 if (data.get('fetch_diagnostics') or {}).get('complete', False)
                 else 'INCOMPLETA - NO CALIBRAR'
+            )
+        ],
+        [
+            'Shadow Futures cargado',
+            (
+                f"{int((data.get('fetch_diagnostics') or {}).get('shadow_sample_fetched') or 0)} recientes"
+                + (' · muestra acotada' if (data.get('fetch_diagnostics') or {}).get('shadow_sample_truncated') else ' · completo')
             )
         ],
         ['SPOT — señales en cohorte', str(spot_metrics.get('total', 0))],

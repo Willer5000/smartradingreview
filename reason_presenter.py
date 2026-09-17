@@ -1,122 +1,99 @@
-"""Public-facing trading reason presenter.
+"""Presentación pública de motivos de trading.
 
-Internal engine identifiers are useful for auditing and tests, but they must
-never be shown verbatim as the explanation of a trading decision.  This module
-keeps the machine code and the human explanation deliberately separate.
+Los identificadores internos de Research, gobernanza, contingencia y versiones
+se conservan para auditoría, pero NO forman parte de la justificación visible
+de una recomendación. La justificación pública debe hablar de mercado:
+tendencia, momentum, volatilidad, volumen, estructura, liquidez y ejecución.
 """
 from __future__ import annotations
 
 import re
 from typing import Iterable, List, Optional
 
-_CODE_TEXT = {
-    "ACTION_CELL_NOT_YET_VALIDATED": (
-        "Esta combinación de mercado, par, temporalidad y acción todavía no tiene "
-        "una estrategia validada; se aplica el plan de contingencia con riesgo reducido."
-    ),
-    "RESEARCH_UNAVAILABLE": (
-        "La evidencia validada no está disponible temporalmente; se conserva el último "
-        "estado conocido y sólo se permite la lógica de contingencia protegida."
-    ),
-    "STRUCTURE_RETEST": (
-        "El movimiento necesita confirmar la nueva estructura con un retesteo antes de ejecutar la entrada."
-    ),
-    "TREND_PULLBACK": (
-        "La tendencia es favorable, pero la entrada debe esperar un retroceso hacia una zona técnica defendible."
-    ),
-    "BREAKOUT_RETEST": (
-        "Hay una ruptura potencial; se exige un retesteo y aceptación del nivel antes de entrar."
-    ),
-    "LIQUIDITY_SWEEP_REVERSAL": (
-        "Se detecta un posible barrido de liquidez; la reversión sólo es válida si estructura y momentum confirman el giro."
-    ),
-    "RANGE_MEAN_REVERSION": (
-        "El mercado está en balance; la operación busca retorno hacia valor desde un extremo del rango, con invalidación clara."
-    ),
-    "SPOT_ROTATION": (
-        "La señal corresponde a una rotación de cartera Spot entre BTC, PAXG y liquidez según fuerza relativa y protección del capital."
-    ),
-    "NEGATIVE_OOS": (
-        "La validación fuera de muestra no confirma una ventaja estadística suficiente para autorizar esta operación."
-    ),
-    "SHADOW_DIVERGED": (
-        "El comportamiento observado en seguimiento real se apartó de la validación y la estrategia queda suspendida."
-    ),
-    "ALPHA_DECAY": (
-        "La estrategia validada muestra deterioro reciente de su ventaja y queda suspendida hasta una nueva validación."
-    ),
-    "DEGRADED_LOSS_STREAK": (
-        "La estrategia acumula una racha de pérdidas incompatible con su comportamiento validado y queda suspendida."
-    ),
-    "DEGRADED_ROLLING": (
-        "Las métricas recientes de la estrategia se deterioraron frente a su referencia y se requiere una nueva validación."
-    ),
-    "DEGRADED_RETEST": (
-        "El retest del mismo linaje no confirmó la ventaja previa; la celda vuelve a búsqueda de una estrategia mejor."
-    ),
-    "EDGE_BLOCKED": (
-        "La evidencia estadística no autoriza una nueva señal ejecutable en esta celda."
-    ),
-    "CONTINGENCY_PLAYBOOK_NOT_VALIDATED_ALPHA": (
-        "Se está usando una estrategia provisional de contingencia; todavía no posee ventaja estadística validada."
-    ),
-    "CONTINGENCY_ENGINE_ERROR": (
-        "El módulo de contingencia no pudo completar su evaluación; se mantiene una postura conservadora."
-    ),
-    "NOT_EVALUATED": "La contingencia todavía no fue necesaria para esta decisión.",
+# Identificadores de arquitectura/estado. Nunca se convierten en una frase
+# pública de recomendación: se omiten y permanecen sólo en auditoría/Analytics.
+_INTERNAL_ONLY_CODES = {
+    "ACTION_CELL_NOT_YET_VALIDATED",
+    "RESEARCH_UNAVAILABLE",
+    "VALIDATED_CHAMPION_AVAILABLE",
+    "KNOWN_NEGATIVE_OR_DECAY",
+    "CONTINGENCY_PLAYBOOK_NOT_VALIDATED_ALPHA",
+    "CONTINGENCY_ENGINE_ERROR",
+    "NOT_EVALUATED",
+    "EDGE_BLOCKED",
+    "NEGATIVE_OOS",
+    "SHADOW_DIVERGED",
+    "ALPHA_DECAY",
+    "DEGRADED_LOSS_STREAK",
+    "DEGRADED_ROLLING",
+    "DEGRADED_RETEST",
 }
 
-_DEFAULT_SETUP_TEXT = {
-    "DEFAULT_STRUCTURE_RETEST": _CODE_TEXT["STRUCTURE_RETEST"],
-    "DEFAULT_TREND_PULLBACK": _CODE_TEXT["TREND_PULLBACK"],
-    "DEFAULT_BREAKOUT_RETEST": _CODE_TEXT["BREAKOUT_RETEST"],
-    "DEFAULT_LIQUIDITY_SWEEP_REVERSAL": _CODE_TEXT["LIQUIDITY_SWEEP_REVERSAL"],
-    "DEFAULT_RANGE_MEAN_REVERSION": _CODE_TEXT["RANGE_MEAN_REVERSION"],
-    "DEFAULT_SPOT_ROTATION": _CODE_TEXT["SPOT_ROTATION"],
+# Nombres internos del playbook. El setup queda registrado en context/Research,
+# pero no se usa como una supuesta "razón" frente al usuario.
+_INTERNAL_SETUP_CODES = {
+    "STRUCTURE_RETEST",
+    "TREND_PULLBACK",
+    "BREAKOUT_RETEST",
+    "LIQUIDITY_SWEEP_REVERSAL",
+    "RANGE_MEAN_REVERSION",
+    "SPOT_ROTATION",
+    "DEFAULT_STRUCTURE_RETEST",
+    "DEFAULT_TREND_PULLBACK",
+    "DEFAULT_BREAKOUT_RETEST",
+    "DEFAULT_LIQUIDITY_SWEEP_REVERSAL",
+    "DEFAULT_RANGE_MEAN_REVERSION",
+    "DEFAULT_SPOT_ROTATION",
 }
 
-# Tokens that are diagnostic identifiers rather than prose.  We do not destroy
-# unknown text; we only rewrite code-looking fragments.
 _CODE_TOKEN = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+){1,}\b")
 _VERSION_PREFIX = re.compile(r"\bRC\d+(?:\.\d+)?\s*(?:contingencia|contingency)?\s*:\s*", re.I)
 
 
+def _is_internal(code: str) -> bool:
+    value = str(code or "").strip().upper()
+    return value in _INTERNAL_ONLY_CODES or value in _INTERNAL_SETUP_CODES
+
+
 def humanize_code(value: object) -> str:
+    """No inventa prosa para códigos internos: los excluye de la UI pública."""
     code = str(value or "").strip().upper()
-    if not code:
+    if not code or _is_internal(code):
         return ""
-    if code in _CODE_TEXT:
-        return _CODE_TEXT[code]
-    if code in _DEFAULT_SETUP_TEXT:
-        return _DEFAULT_SETUP_TEXT[code]
-    # Safe generic fallback for an unknown machine identifier.
-    return code.replace("_", " ").lower().capitalize() + "."
+    # Si un identificador desconocido llega a esta capa, es más seguro ocultarlo
+    # que transformar PROGRAMMER_CODE en una justificación artificial.
+    if _CODE_TOKEN.fullmatch(code):
+        return ""
+    return str(value or "").strip()
 
 
 def public_reason(value: object, *, fallback: str = "") -> str:
-    """Return a user-facing Spanish reason while preserving natural prose."""
+    """Conserva sólo prosa natural de mercado y elimina metadatos internos."""
     text = str(value or "").strip()
     if not text:
         return str(fallback or "").strip()
 
     exact = text.upper()
-    if exact in _CODE_TEXT or exact in _DEFAULT_SETUP_TEXT:
-        return humanize_code(exact)
+    if _is_internal(exact):
+        return ""
 
     text = _VERSION_PREFIX.sub("", text).strip()
 
-    # Common legacy compound format: CODE · CODE.  Translate every machine token
-    # but leave genuine trading prose untouched.
+    # Elimina códigos incrustados en frases heredadas. Si tras retirarlos sólo
+    # quedan separadores, no muestra nada. La UI debe usar las razones reales
+    # de los traders/indicadores en lugar de explicar la arquitectura.
     def repl(match: re.Match) -> str:
-        return humanize_code(match.group(0)).rstrip(".")
+        token = match.group(0)
+        return "" if _is_internal(token) or _CODE_TOKEN.fullmatch(token) else token
 
     cleaned = _CODE_TOKEN.sub(repl, text)
-    cleaned = re.sub(r"\s*·\s*", ". ", cleaned)
-    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" -·:")
+    cleaned = re.sub(r"\s*·\s*", " ", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" -·:.;")
 
     if not cleaned:
-        cleaned = str(fallback or "").strip()
-    if cleaned and cleaned[-1] not in ".!?":
+        return ""
+
+    if cleaned[-1] not in ".!?":
         cleaned += "."
     return cleaned
 
@@ -134,9 +111,11 @@ def public_reasons(values: Optional[Iterable[object]], *, limit: int = 4) -> Lis
 
 
 def contingency_public_reason(reason_code: object, setup_code: object) -> str:
-    pieces = []
-    for raw in (reason_code, setup_code):
-        piece = public_reason(raw)
-        if piece and piece not in pieces:
-            pieces.append(piece)
-    return " ".join(pieces).strip()
+    """La contingencia no se explica en la recomendación pública.
+
+    reason_code/setup_code quedan disponibles en ``contingency_playbook`` para
+    auditoría y aprendizaje. La recomendación usa las razones de mercado que ya
+    emitieron los especialistas.
+    """
+    del reason_code, setup_code
+    return ""
