@@ -16,8 +16,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 VERSION = "RC9_2_CONTINGENCY_PLAYBOOK_V1"
 _DIRECTIONAL = {"LONG", "SHORT", "COMPRA_SPOT", "VENTA_SPOT"}
-_NEGATIVE_RESEARCH = {"NEGATIVE_OOS", "SHADOW_DIVERGED", "ALPHA_DECAY"}
-_POSITIVE_RESEARCH = {"OOS_VALIDATED", "OOS_PLUS_SHADOW"}
+_NEGATIVE_RESEARCH = {"REJECTED_OOS", "NEGATIVE_OOS", "SHADOW_DIVERGED", "ALPHA_DECAY", "DEGRADED", "REVOKED"}
+_POSITIVE_RESEARCH = {"SHADOW_READY", "OOS_VALIDATED", "OOS_PLUS_SHADOW", "CHAMPION", "VALIDATED"}
 
 
 def _f(v: Any, default: float = 0.0) -> float:
@@ -98,7 +98,13 @@ def _vote_support(votes: Iterable[Dict[str, Any]], direction: str) -> Dict[str, 
 
 
 def _indicator_groups(layers: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize every live technical component used by the default bank.
+
+    Commit 9.4 deliberately exposes *observed values*, not synthetic defaults.
+    A missing component stays unavailable and therefore cannot create quality.
+    """
     trend = layers.get("trend") or {}
+    ti = trend.get("indicators") or {}
     momentum = layers.get("momentum") or {}
     mi = momentum.get("indicators") or {}
     vol = layers.get("volatility") or {}
@@ -110,88 +116,222 @@ def _indicator_groups(layers: Dict[str, Any]) -> Dict[str, Any]:
     correlation = layers.get("correlation") or {}
     hours = layers.get("market_hours") or {}
     time_factor = layers.get("time_factor") or {}
+    mtf = layers.get("multi_timeframe_context") or layers.get("multi_timeframe") or {}
 
+    def _dir_list(rows: Any) -> List[str]:
+        output: List[str] = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            raw = _u(row.get("type") or row.get("direction") or row.get("side"))
+            if raw in {"BULLISH", "BUY", "LONG", "ALCISTA"}:
+                value = "BULLISH"
+            elif raw in {"BEARISH", "SELL", "SHORT", "BAJISTA"}:
+                value = "BEARISH"
+            else:
+                continue
+            if value not in output:
+                output.append(value)
+        return output
+
+    volume_profile = structure.get("volume_profile") or {}
+    patterns = structure.get("patterns") or {}
     trend_dir = _u(trend.get("direction"))
     momentum_dir = _u(momentum.get("direction"))
     obv_dir = _u(volume.get("obv_trend"))
-    macro_bias = _u(macro.get("directional_bias"))
+    macro_bias = _u(
+        macro.get("directional_bias")
+        or macro.get("direction")
+        or macro.get("bias")
+    )
 
     groups = {
         "trend": {
-            "available": bool(trend), "direction": trend_dir or "NEUTRAL",
-            "adx": round(_f(trend.get("adx")), 2), "plus_di": round(_f(trend.get("plus_di")), 2),
+            "available": bool(trend),
+            "direction": trend_dir or "NEUTRAL",
+            "adx": round(_f(trend.get("adx")), 2),
+            "plus_di": round(_f(trend.get("plus_di")), 2),
             "minus_di": round(_f(trend.get("minus_di")), 2),
-            "ema9": _f(trend.get("ema9")), "ema21": _f(trend.get("ema21")),
-            "ema50": _f(trend.get("ema50")), "ema200": _f(trend.get("ema200")),
-            "supertrend": _u((trend.get("indicators") or {}).get("supertrend_trend")),
-            "ichimoku_cloud": _u((trend.get("indicators") or {}).get("ichimoku_cloud")),
-            "ichimoku_tk": _u((trend.get("indicators") or {}).get("ichimoku_tk")),
+            "sma20": _f(ti.get("sma20") or trend.get("sma20")),
+            "sma50": _f(ti.get("sma50") or trend.get("sma50")),
+            "ema9": _f(ti.get("ema9") or trend.get("ema9")),
+            "ema21": _f(ti.get("ema21") or trend.get("ema21")),
+            "ema50": _f(ti.get("ema50") or trend.get("ema50")),
+            "ema200": _f(ti.get("ema200") or trend.get("ema200")),
+            "supertrend": _u(ti.get("supertrend_trend")),
+            "ichimoku_cloud": _u(ti.get("ichimoku_cloud")),
+            "ichimoku_tk": _u(ti.get("ichimoku_tk")),
+            "psar": _u(ti.get("parabolic_sar_trend")),
         },
         "momentum": {
-            "available": bool(momentum), "direction": momentum_dir or "NEUTRAL",
-            "score": round(_f(momentum.get("score")), 2), "rsi": round(_f(mi.get("rsi"), 50), 2),
-            "rsi_maverick": round(_f(mi.get("rsi_maverick"), .5), 4),
-            "macd_histogram": round(_f(mi.get("macd_histogram")), 6),
+            "available": bool(momentum),
+            "direction": momentum_dir or "NEUTRAL",
+            "score": round(_f(momentum.get("score")), 2),
+            "rsi": (round(_f(mi.get("rsi")), 2) if mi.get("rsi") is not None else None),
+            "rsi_maverick": (
+                round(_f(mi.get("rsi_maverick")), 4)
+                if mi.get("rsi_maverick") is not None else None
+            ),
+            "macd_histogram": (
+                round(_f(mi.get("macd_histogram")), 6)
+                if mi.get("macd_histogram") is not None else None
+            ),
             "divergences": list(momentum.get("divergences") or []),
             "hidden_divergences": list(momentum.get("hidden_divergences") or []),
-            "stoch_k": round(_f(mi.get("stoch_k"), 50), 2),
-            "williams": round(_f(mi.get("williams"), -50), 2), "cci": round(_f(mi.get("cci")), 2),
+            "stoch_k": (
+                round(_f(mi.get("stoch_k")), 2)
+                if mi.get("stoch_k") is not None else None
+            ),
+            "stoch_d": (
+                round(_f(mi.get("stoch_d")), 2)
+                if mi.get("stoch_d") is not None else None
+            ),
+            "williams": (
+                round(_f(mi.get("williams")), 2)
+                if mi.get("williams") is not None else None
+            ),
+            "cci": (
+                round(_f(mi.get("cci")), 2)
+                if mi.get("cci") is not None else None
+            ),
         },
         "volatility": {
-            "available": bool(vol), "atr_pct": round(_f(vol.get("atr_pct")), 4),
-            "bb_width": round(_f(vol.get("bb_width")), 4), "bb_position": round(_f(vol.get("bb_position"), .5), 4),
-            "squeeze_on": bool(vol.get("squeeze_on")), "squeeze_length": int(_f(vol.get("squeeze_length"))),
-            "ftm_state": _u(vol.get("ftm_state")) or "NEUTRAL",
+            "available": bool(vol),
+            "atr": _f(vol.get("atr")),
+            "atr_pct": round(_f(vol.get("atr_pct")), 4),
+            "bb_width": (
+                round(_f(vol.get("bb_width")), 4)
+                if vol.get("bb_width") is not None else None
+            ),
+            "bb_position": (
+                round(_f(vol.get("bb_position")), 4)
+                if vol.get("bb_position") is not None else None
+            ),
+            "squeeze_on": (
+                bool(vol.get("squeeze_on"))
+                if vol.get("squeeze_on") is not None else None
+            ),
+            "squeeze_length": int(_f(vol.get("squeeze_length"))),
+            "ftm_state": _u(
+                vol.get("ftm_state")
+                or vol.get("trend_force_state")
+                or vol.get("maverick_state")
+            ) or "NEUTRAL",
         },
         "volume_flow": {
-            "available": bool(volume), "volume_ratio": round(_f(volume.get("volume_ratio"), 1), 3),
-            "mfi": round(_f(volume.get("mfi"), 50), 2),
-            "force_index": round(_f(volume.get("force_index")), 4), "obv_trend": obv_dir or "NEUTRAL",
+            "available": bool(volume),
+            "volume_ratio": (
+                round(_f(volume.get("volume_ratio")), 3)
+                if volume.get("volume_ratio") is not None else None
+            ),
+            "mfi": (
+                round(_f(volume.get("mfi")), 2)
+                if volume.get("mfi") is not None else None
+            ),
+            "force_index": (
+                round(_f(volume.get("force_index")), 4)
+                if volume.get("force_index") is not None else None
+            ),
+            "obv_trend": obv_dir or "NEUTRAL",
+            "vwap": _f(volume.get("vwap")),
             "whale_buy": bool(volume.get("whale_buy_confirmed") or volume.get("whale_buy")),
             "whale_sell": bool(volume.get("whale_sell_confirmed") or volume.get("whale_sell")),
-            "iceberg_buy": bool(volume.get("iceberg_buy")), "iceberg_sell": bool(volume.get("iceberg_sell")),
+            "whale_extended_buy": bool(volume.get("whale_extended_buy")),
+            "whale_extended_sell": bool(volume.get("whale_extended_sell")),
+            "whale_event_pending": bool(volume.get("whale_event_pending")),
+            "whale_event_age_bars": volume.get("whale_event_age_bars"),
+            "whale_signal_strength": _f(volume.get("whale_signal_strength")),
+            # Compatibility names represent an OHLCV absorption proxy, not a
+            # directly observed exchange iceberg order.
+            "iceberg_buy": bool(volume.get("iceberg_buy")),
+            "iceberg_sell": bool(volume.get("iceberg_sell")),
         },
         "structure_liquidity": {
-            "available": bool(structure), "current_price": _f(structure.get("current_price")),
-            "direction": _u(structure.get("direction") or structure.get("structure_direction")) or "NEUTRAL",
+            "available": bool(structure),
+            "current_price": _f(structure.get("current_price")),
+            "direction": _u(
+                structure.get("direction") or structure.get("structure_direction")
+            ) or "NEUTRAL",
             "support": _f(structure.get("nearest_support") or structure.get("support")),
             "resistance": _f(structure.get("nearest_resistance") or structure.get("resistance")),
-            "has_patterns": bool((structure.get("patterns") or {}).get("recent_patterns")),
-            "has_order_blocks": bool(structure.get("order_blocks") or structure.get("order_blocks_active")),
-            "has_fvg": bool(structure.get("fvgs") or structure.get("fair_value_gaps")),
+            "fib_levels": dict(structure.get("fib_levels") or {}),
+            "poc": _f(volume_profile.get("poc")),
+            "hvn_nodes": list(
+                structure.get("hvn_nodes")
+                or volume_profile.get("hvn_nodes")
+                or []
+            ),
+            "lvn_nodes": list(
+                structure.get("lvn_nodes")
+                or volume_profile.get("lvn_nodes")
+                or []
+            ),
+            "bullish_patterns_count": int(_f(
+                structure.get("bullish_patterns_count")
+                if structure.get("bullish_patterns_count") is not None
+                else patterns.get("bullish_count")
+            )),
+            "bearish_patterns_count": int(_f(
+                structure.get("bearish_patterns_count")
+                if structure.get("bearish_patterns_count") is not None
+                else patterns.get("bearish_count")
+            )),
+            "order_block_directions": _dir_list(structure.get("order_blocks")),
+            "fvg_directions": _dir_list(
+                structure.get("fair_value_gaps") or structure.get("fvgs")
+            ),
+            "sweep_directions": _dir_list(structure.get("liquidity_sweeps")),
+            "stop_hunt_directions": _dir_list(structure.get("stop_hunts")),
+            "has_patterns": bool(patterns.get("recent_patterns") or patterns.get("all_patterns")),
+            "has_order_blocks": bool(structure.get("order_blocks")),
+            "has_fvg": bool(structure.get("fair_value_gaps") or structure.get("fvgs")),
             "has_liquidity_sweep": bool(structure.get("liquidity_sweeps")),
             "has_stop_hunt": bool(structure.get("stop_hunts")),
-            "has_volume_profile": bool(structure.get("volume_profile") or structure.get("hvn_nodes") or structure.get("lvn_nodes")),
+            "has_volume_profile": bool(volume_profile),
         },
         "liquidations": {
-            "available": bool(liq), "long_weight": round(_f(liq.get("total_long_weight")), 3),
+            "available": bool(liq),
+            "long_weight": round(_f(liq.get("total_long_weight")), 3),
             "short_weight": round(_f(liq.get("total_short_weight")), 3),
-            "events": int(_f(liq.get("total_spikes"))), "data_type": str(liq.get("data_type") or ""),
+            "events": int(_f(liq.get("total_spikes"))),
+            "data_type": str(liq.get("data_type") or ""),
         },
         "macro": {
-            "available": bool(macro.get("enabled", bool(macro))), "risk": _u(macro.get("risk_level")) or "UNKNOWN",
-            "bias": macro_bias or "NEUTRAL", "futures_posture": _u(macro.get("futures_posture")) or "NORMAL",
+            "available": bool(macro.get("enabled", bool(macro))),
+            "risk": _u(macro.get("risk_level") or macro.get("risk")) or "UNKNOWN",
+            "bias": macro_bias or "NEUTRAL",
+            "futures_posture": _u(macro.get("futures_posture")) or "NORMAL",
         },
         "sentiment": {
-            "available": bool(sentiment), "value": round(_f(sentiment.get("current_value"), 50), 2),
-            "bias": _u(sentiment.get("sentiment_bias")) or "NEUTRAL",
+            "available": bool(sentiment),
+            "value": (
+                round(_f(sentiment.get("current_value")), 2)
+                if sentiment.get("current_value") is not None else None
+            ),
+            "bias": _u(sentiment.get("sentiment_bias") or sentiment.get("bias")) or "NEUTRAL",
         },
         "rotation": {
-            "available": bool(correlation), "signal": _u(correlation.get("rotation_signal")) or "NEUTRAL",
+            "available": bool(correlation),
+            "signal": _u(correlation.get("rotation_signal")) or "NEUTRAL",
             "weight_modifier": round(_f(correlation.get("weight_modifier"), 1), 3),
         },
         "market_time": {
-            "available": bool(hours or time_factor), "session": str(hours.get("session") or "UNKNOWN"),
-            "liquidity": str(hours.get("liquidity") or "unknown"), "day_type": str(hours.get("day_type") or "UNKNOWN"),
+            "available": bool(hours or time_factor),
+            "session": str(hours.get("session") or "UNKNOWN"),
+            "liquidity": str(hours.get("liquidity") or "unknown"),
+            "day_type": str(hours.get("day_type") or "UNKNOWN"),
             "time_score": round(_f(time_factor.get("score"), 0), 2),
         },
+        "multi_timeframe": dict(mtf or {}),
     }
     groups["coverage"] = {
-        "available_groups": sum(1 for k, v in groups.items() if isinstance(v, dict) and v.get("available")),
+        "available_groups": sum(
+            1 for key, value in groups.items()
+            if key != "coverage" and isinstance(value, dict) and value.get("available")
+        ),
         "total_groups": 10,
     }
     return groups
-
 
 def _vol_state(groups: Dict[str, Any]) -> str:
     try:
@@ -289,6 +429,9 @@ def build_contingency_playbook(
     action = _u(committee_action) or "NO_OPERAR"
     committee_dir = _direction(action)
     groups = _indicator_groups(layers or {})
+    operational = dict((layers or {}).get("operational_intelligence") or {})
+    if operational.get("multi_timeframe"):
+        groups["multi_timeframe"] = dict(operational.get("multi_timeframe") or {})
     regime = _regime(layers or {}, groups)
     vol_state = _vol_state(groups)
     research = dict(research_prior or {})
@@ -307,45 +450,64 @@ def build_contingency_playbook(
 
     long_score, short_score, score_reasons = _raw_direction_score(groups)
     directional = "LONG" if long_score >= short_score + .75 else "SHORT" if short_score >= long_score + .75 else "NEUTRAL"
-    vote_support = _vote_support(_votes(vote_record), directional if directional != "NEUTRAL" else committee_dir)
+    vote_support = _vote_support(_votes(vote_record), committee_dir)
 
     macro_risk = _u(groups["macro"].get("risk"))
     macro_posture = _u(groups["macro"].get("futures_posture"))
     data_ok = bool(groups["structure_liquidity"].get("current_price")) and groups["coverage"]["available_groups"] >= 6
-    direction_agrees = committee_dir != "NEUTRAL" and directional == committee_dir
-    families = int(vote_support.get("independent_families") or 0)
 
     selected_dir = committee_dir if committee_dir != "NEUTRAL" else directional
     target_action = _action(selected_dir, market)
-    try:
-        from default_strategy_bank import select_strategy
-        bank_pick = select_strategy(target_action, regime, vol_state, groups, symbol=symbol, timeframe=timeframe, market=market)
-        strategy = str(bank_pick.get("id") or "NO_PLAYBOOK")
-        setup_family = str(bank_pick.get("family") or "NONE")
-        strategy_quality = float(bank_pick.get("quality") or 0.0)
-    except Exception:
-        strategy, setup_family = _strategy_name(market, symbol, regime, vol_state, selected_dir, groups)
-        bank_pick = {"id": strategy, "family": setup_family, "quality": 0.0, "confirmations": [], "indicators": []}
-        strategy_quality = 0.0
+    bank_pick = dict(operational.get("default_strategy") or {})
+    if not bank_pick or str(bank_pick.get("id") or "") in {"", "NO_PLAYBOOK"}:
+        try:
+            from default_strategy_bank import select_strategy
+            bank_pick = select_strategy(
+                target_action, regime, vol_state, groups,
+                symbol=symbol, timeframe=timeframe, market=market,
+            )
+        except Exception:
+            strategy, setup_family = _strategy_name(market, symbol, regime, vol_state, selected_dir, groups)
+            bank_pick = {"id": strategy, "family": setup_family, "quality": 0.0, "confirmations": [], "indicators": []}
+    strategy = str(bank_pick.get("id") or "NO_PLAYBOOK")
+    setup_family = str(bank_pick.get("family") or "NONE")
+    strategy_quality = float(bank_pick.get("quality") or 0.0)
+
+    thesis = dict(operational.get("thesis") or {})
+    live_families = list(thesis.get("independent_support_families") or [])
+    minimum_live_families = 4 if market == "FUTURES" else 3
+    learned = str(operational.get("selected_specialist_source") or "DEFAULT").upper() == "LEARNED"
+    # A learned specialist may use a slightly smaller *directional* family set
+    # because exact historical evidence is one prior, but it still needs at
+    # least 3 Futures / 2 Spot live independent families and all later Safety.
+    minimum_if_learned = 3 if market == "FUTURES" else 2
+    family_requirement = minimum_if_learned if learned else minimum_live_families
 
     gates = {
         "data_health": data_ok,
         "context_known": regime not in {"", "UNKNOWN"},
         "volatility_known": vol_state != "UNKNOWN",
-        "direction_agrees_committee": direction_agrees,
-        "independent_evidence": families >= (3 if market == "FUTURES" else 2),
-        "setup_or_execution_role": bool(vote_support.get("has_setup") or vote_support.get("has_execution")),
-        "macro_safe": not (market == "FUTURES" and (macro_risk == "CRITICAL" or macro_posture in {"BLOCK", "HALT", "NO_TRADE"})),
+        "independent_market_evidence": len(live_families) >= family_requirement,
+        "macro_safe": not (
+            market == "FUTURES"
+            and (macro_risk == "CRITICAL" or macro_posture in {"BLOCK", "HALT", "NO_TRADE"})
+        ),
         "research_not_negative": not blocked_by_research,
-        "strategy_quality": strategy_quality >= (75.0 if market == "FUTURES" else 65.0),
+        "strategy_quality": strategy_quality >= (78.0 if market == "FUTURES" else 70.0),
+        "operational_candidate_ready": bool(operational.get("candidate_ready")) if action in _DIRECTIONAL else True,
     }
     green = sum(1 for x in gates.values() if x)
     required = len(gates)
-
-    # Futures contingency is intentionally stricter than Spot. It can only keep
-    # an already-issued committee direction; it never manufactures one.
-    min_green = 8 if market == "FUTURES" else 7
-    executable_contingency = active and action in _DIRECTIONAL and target_action == action and green >= min_green
+    # Commit 9.4: contingency no longer re-runs a second committee-majority
+    # permission layer. It accepts only a thesis-first candidate that already
+    # passed live context + learned/default strategy selection. Safety remains
+    # downstream and unchanged.
+    executable_contingency = bool(
+        active
+        and action in _DIRECTIONAL
+        and target_action == action
+        and all(gates.values())
+    )
 
     effective_action = action
     downgrade_reason = ""
@@ -367,15 +529,15 @@ def build_contingency_playbook(
                 "El riesgo macroeconómico actual no permite asumir una nueva "
                 "exposición apalancada con seguridad."
             )
-        elif not gates["direction_agrees_committee"]:
+        elif not gates["independent_market_evidence"]:
             downgrade_reason = (
-                "Tendencia, momentum y estructura no confirman la misma dirección "
-                "que la señal propuesta."
+                "La señal todavía no reúne suficientes familias independientes de "
+                "evidencia entre tendencia, estructura, momentum, volumen y contexto."
             )
-        elif not gates["independent_evidence"]:
+        elif not gates["operational_candidate_ready"]:
             downgrade_reason = (
-                "La señal todavía no reúne suficientes confirmaciones independientes "
-                "entre tendencia, momentum, volumen y estructura."
+                "La tesis de mercado todavía no alcanza la calidad operativa requerida "
+                "para enviar una entrada a los controles finales de ejecución."
             )
         else:
             downgrade_reason = (

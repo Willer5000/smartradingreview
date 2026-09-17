@@ -720,6 +720,14 @@ def _compact_tgp_analysis(result):
         or {}
     )
 
+    volume_layer = (
+        result.get(
+            'volume',
+            {}
+        )
+        or {}
+    )
+
     # RC6 · Guardian Spot necesita observar deterioro de mercado aunque Main
     # decida NO_OPERAR. Guardamos sólo métricas de VELAS CERRADAS y volatilidad;
     # nunca el DataFrame completo. Esto evita reaccionar a un simple mechazo.
@@ -1038,6 +1046,12 @@ def _compact_tgp_analysis(result):
         },
 
         'structure': {
+            'direction': str(
+                structure.get('direction')
+                or structure.get('structure_direction')
+                or 'neutral'
+            ),
+
             'order_blocks_count':
                 _count(
                     structure.get(
@@ -1061,6 +1075,20 @@ def _compact_tgp_analysis(result):
                         []
                     )
                 )
+        },
+
+        # Commit 9.4: compact higher-TF anomalous-volume reaction context.
+        # It is tiny and avoids refetching historical candles for 4H timing.
+        'volume': {
+            'whale_buy_confirmed': bool(volume_layer.get('whale_buy_confirmed')),
+            'whale_sell_confirmed': bool(volume_layer.get('whale_sell_confirmed')),
+            'whale_extended_buy': bool(volume_layer.get('whale_extended_buy')),
+            'whale_extended_sell': bool(volume_layer.get('whale_extended_sell')),
+            'whale_event_pending': bool(volume_layer.get('whale_event_pending')),
+            'whale_event_age_bars': volume_layer.get('whale_event_age_bars'),
+            'whale_signal_strength': _optional_float(volume_layer.get('whale_signal_strength')),
+            'volume_ratio': _optional_float(volume_layer.get('volume_ratio')),
+            'vwap': _optional_float(volume_layer.get('vwap')),
         },
 
         'correlation': {
@@ -2004,7 +2032,7 @@ class TradingExpertSystem:
                 'whale_confirmation_index': None, 'whale_event_pending': False,
                 'whale_signal_source': 'OHLCV_VOLUME_REACTION_PROXY',
                 'whale_observed': False,
-                'whale_timeframe_policy': '12h_1D_REACTION_ONLY'
+                'whale_timeframe_policy': '12h_1D_1W_REACTION_MAX_7_BARS'
             }
             if n < 25:
                 return empty
@@ -2136,7 +2164,7 @@ class TradingExpertSystem:
                 'whale_event_pending': not bool(selected['confirmed']),
                 'whale_signal_source': 'OHLCV_VOLUME_REACTION_PROXY',
                 'whale_observed': False,
-                'whale_timeframe_policy': '12h_1D_REACTION_ONLY'
+                'whale_timeframe_policy': '12h_1D_1W_REACTION_MAX_7_BARS'
             }
             
         except Exception as e:
@@ -2156,7 +2184,7 @@ class TradingExpertSystem:
                 'whale_confirmation_index': None, 'whale_event_pending': False,
                 'whale_signal_source': 'OHLCV_VOLUME_REACTION_PROXY',
                 'whale_observed': False,
-                'whale_timeframe_policy': '12h_1D_REACTION_ONLY'
+                'whale_timeframe_policy': '12h_1D_1W_REACTION_MAX_7_BARS'
             }
     # === FIN calculate_whale_signals_improved ===
     
@@ -9221,6 +9249,9 @@ class TradingExpertSystem:
             ema21 = self.calculate_ema(close, 21)
             ema50 = self.calculate_ema(close, 50)
             ema200 = self.calculate_ema(close, 200)
+            # Commit 9.4: SMA is a functional default-strategy input, not metadata.
+            sma20 = self.calculate_sma(close, 20)
+            sma50 = self.calculate_sma(close, 50)
             
             adx_data = self.calculate_adx(high, low, close, 14)
             supertrend = self.calculate_supertrend(high, low, close, 10, 3)
@@ -9363,6 +9394,8 @@ class TradingExpertSystem:
             ema21_val = float(ema21[-1]) if len(ema21) > 0 else 0
             ema50_val = float(ema50[-1]) if len(ema50) > 0 else 0
             ema200_val = float(ema200[-1]) if len(ema200) > 0 else 0
+            sma20_val = float(sma20[-1]) if len(sma20) > 0 else 0
+            sma50_val = float(sma50[-1]) if len(sma50) > 0 else 0
             supertrend_val = float(supertrend['supertrend'][-1]) if len(supertrend['supertrend']) > 0 else 0
             supertrend_trend = 'bullish' if len(supertrend['trend']) > 0 and supertrend['trend'][-1] == 1 else 'bearish' if len(supertrend['trend']) > 0 and supertrend['trend'][-1] == -1 else 'neutral'
             
@@ -9393,6 +9426,8 @@ class TradingExpertSystem:
                 'votes': votes,
                 'score': direction_score,
                 'indicators': {
+                    'sma20': sma20_val,
+                    'sma50': sma50_val,
                     'ema9': ema9_val,
                     'ema21': ema21_val,
                     'ema50': ema50_val,
@@ -9421,6 +9456,8 @@ class TradingExpertSystem:
                 'votes': votes,
                 'score': direction_score,
                 'indicators': {
+                    'sma20': float(sma20[-1]) if 'sma20' in locals() and len(sma20) > 0 else 0,
+                    'sma50': float(sma50[-1]) if 'sma50' in locals() and len(sma50) > 0 else 0,
                     'ema9': ema9_val,
                     'ema21': ema21_val,
                     'ema50': ema50_val,
@@ -10022,13 +10059,21 @@ class TradingExpertSystem:
             
             volume_sma = self.calculate_sma(volume, 20)
             volume_ratio = volume[-1] / volume_sma[-1] if volume_sma[-1] != 0 else 1
+            # Rolling 20-bar VWAP. It is consumed by default strategies as a
+            # value/entry reference; it never creates a trade by itself.
+            _vwap_len = min(20, len(close))
+            _vwap_volume = float(np.sum(volume[-_vwap_len:])) if _vwap_len else 0.0
+            vwap_value = (
+                float(np.sum(close[-_vwap_len:] * volume[-_vwap_len:]) / _vwap_volume)
+                if _vwap_len and _vwap_volume > 0 else 0.0
+            )
             
             obv_sma = self.calculate_sma(obv, 20)
             obv_trend = 'bullish' if obv[-1] > obv[-5] else 'bearish' if obv[-1] < obv[-5] else 'neutral'
             
             # ============ DETECTOR DE BALLENAS MEJORADO ============
             whale_data = None
-            if timeframe in ['12h', '1D']:
+            if timeframe in ['12h', '1D', '1W']:
                 whale_data = self.calculate_whale_signals_improved(df)
             else:
                 whale_data = {
@@ -10045,7 +10090,7 @@ class TradingExpertSystem:
                     'whale_confirmation_index': None, 'whale_event_pending': False,
                     'whale_signal_source': 'OHLCV_VOLUME_REACTION_PROXY',
                     'whale_observed': False,
-                    'whale_timeframe_policy': '12h_1D_REACTION_ONLY'
+                    'whale_timeframe_policy': '12h_1D_1W_REACTION_MAX_7_BARS'
                 }
             
             # ============ PUNTUACIÓN DE ACUMULACIÓN/DISTRIBUCIÓN ============
@@ -10131,6 +10176,7 @@ class TradingExpertSystem:
                 'obv_trend': obv_trend,
                 'mfi': float(mfi[-1]) if len(mfi) > 0 else 50,
                 'force_index': float(force_index[-1]) if len(force_index) > 0 else 0,
+                'vwap': float(vwap_value),
                 'accumulation_score': float(accumulation_score),
                 'accumulation_reasons': accumulation_reasons[-3:],
                 
@@ -10139,6 +10185,8 @@ class TradingExpertSystem:
                 'whale_sell': whale_sell_confirmed,
                 'whale_buy_confirmed': whale_buy_confirmed,
                 'whale_sell_confirmed': whale_sell_confirmed,
+                'whale_extended_buy': bool(whale_data.get('extended_buy', False)) if whale_data else False,
+                'whale_extended_sell': bool(whale_data.get('extended_sell', False)) if whale_data else False,
                 'whale_signal_strength': float(whale_signal_strength),
                 'whale_pump': float(whale_data.get('whale_pump', 0)) if whale_data else 0,
                 'whale_dump': float(whale_data.get('whale_dump', 0)) if whale_data else 0,
@@ -10154,7 +10202,7 @@ class TradingExpertSystem:
                 'whale_confirmation_index': whale_data.get('whale_confirmation_index') if whale_data else None,
                 'whale_signal_source': whale_data.get('whale_signal_source', 'OHLCV_VOLUME_REACTION_PROXY') if whale_data else 'OHLCV_VOLUME_REACTION_PROXY',
                 'whale_observed': False,
-                'whale_timeframe_policy': '12h_1D_REACTION_ONLY'
+                'whale_timeframe_policy': '12h_1D_1W_REACTION_MAX_7_BARS'
             }
             
         except Exception as e:
@@ -10190,7 +10238,7 @@ class TradingExpertSystem:
                 'whale_confirmation_index': None,
                 'whale_signal_source': 'OHLCV_VOLUME_REACTION_PROXY',
                 'whale_observed': False,
-                'whale_timeframe_policy': '12h_1D_REACTION_ONLY'
+                'whale_timeframe_policy': '12h_1D_1W_REACTION_MAX_7_BARS'
             }
     # === FIN FUNCIÓN COMPLETA ===
     
@@ -18976,11 +19024,24 @@ class TradingExpertSystem:
                 symbol, timeframe, analysis_system_type, capas
             )
             capas['multi_timeframe_context'] = operational_mtf
+            _operational_regime_raw = str(
+                ((market_regime or {}).get('regime') if isinstance(market_regime, dict) else '')
+                or ''
+            ).upper()
+            try:
+                from operational_intelligence import canonical_regime as _canonical_operational_regime
+                _operational_regime = _canonical_operational_regime(_operational_regime_raw)
+            except Exception:
+                _operational_regime = _operational_regime_raw
+            research_candidates = _load_operational_research_candidates(
+                symbol, timeframe, analysis_system_type, capas, _operational_regime
+            )
             try:
                 from operational_intelligence import prepare_operational_intelligence
                 operational_intelligence = prepare_operational_intelligence(
                     layers=capas, symbol=symbol, timeframe=timeframe,
-                    system_type=analysis_system_type, mtf_context=operational_mtf
+                    system_type=analysis_system_type, mtf_context=operational_mtf,
+                    research_candidates=research_candidates,
                 )
             except Exception as operational_error:
                 operational_intelligence = {
@@ -19026,33 +19087,15 @@ class TradingExpertSystem:
                 'reason': 'NOT_EVALUATED',
             }
             try:
-                research_prior = {
-                    'state': 'UNAVAILABLE',
-                    'support_score': 0.0,
-                    'penalty_score': 0.0,
-                }
-                try:
-                    from research_evidence_fusion import edge_prior
-                    strategy_blob = ' | '.join(str(x).upper() for x in (estrategias_consenso or []))
-                    research_prior = edge_prior(
-                        symbol,
-                        timeframe,
-                        accion_consenso,
-                        analysis_system_type,
-                        regime=str((((operational_intelligence or {}).get('context') or {}).get('regime')) or (market_regime or {}).get('regime') or '').upper() or None,
-                        runtime_features={
-                            'has_pullback': 'YES' if ('PULLBACK' in strategy_blob or 'RETEST' in strategy_blob) else 'NO',
-                            'has_sweep': 'YES' if ('SWEEP' in strategy_blob or 'LIQUIDITY' in strategy_blob or 'BARRIDO' in strategy_blob) else 'NO',
-                            'has_order_block': 'YES' if ('ORDER_BLOCK' in strategy_blob or 'ORDER BLOCK' in strategy_blob) else 'NO',
-                        },
-                    )
-                except Exception as research_prior_error:
-                    research_prior = {
+                research_prior = dict(
+                    (operational_intelligence or {}).get('selected_research_prior')
+                    or (research_candidates or {}).get(str(accion_consenso or '').upper())
+                    or {
                         'state': 'UNAVAILABLE',
-                        'error': str(research_prior_error)[:160],
                         'support_score': 0.0,
                         'penalty_score': 0.0,
                     }
+                )
 
                 from contingency_strategy_engine import build_contingency_playbook
                 contingency_playbook = build_contingency_playbook(
@@ -25360,6 +25403,91 @@ def _build_operational_mtf_context(symbol, timeframe, system_type, current_layer
         }
 
 # ============================================================================
+# COMMIT 9.4 — LEARNED SPECIALIST CANDIDATES (CACHED, FAIL-CLOSED)
+# ============================================================================
+_OPERATIONAL_RESEARCH_PRIOR_CACHE = {}
+_OPERATIONAL_RESEARCH_PRIOR_CACHE_TTL = 300.0
+_OPERATIONAL_RESEARCH_PRIOR_CACHE_LOCK = threading.Lock()
+
+
+def _operational_runtime_features(layers):
+    structure = (layers or {}).get('structure') or {}
+    confirmation = (layers or {}).get('confirmation') or {}
+    sweeps = structure.get('liquidity_sweeps') or []
+    obs = structure.get('order_blocks') or []
+    retest = bool(
+        confirmation.get('retest_confirmed')
+        or confirmation.get('breakout_retest')
+        or confirmation.get('retest')
+    )
+    return {
+        'has_sweep': 'YES' if sweeps else 'NO',
+        'has_order_block': 'YES' if obs else 'NO',
+        'has_pullback': 'YES' if retest else 'NO',
+    }
+
+
+def _load_operational_research_candidates(symbol, timeframe, system_type, layers, regime):
+    """Read both directional learned priors before the live thesis is finalized.
+
+    Reads are cached for five minutes and fail closed. This does not grant
+    production authority: the candidate still needs current-market support and
+    every existing Entry/SL/TP/Safety gate.
+    """
+    market = 'FUTURES' if str(system_type or '').lower() == 'futures' else 'SPOT'
+    actions = ('LONG', 'SHORT') if market == 'FUTURES' else ('COMPRA_SPOT', 'VENTA_SPOT')
+    features = _operational_runtime_features(layers)
+    cache_key = (
+        str(symbol or '').upper(), str(timeframe or '').upper(), market,
+        str(regime or '').upper(), tuple(sorted(features.items())),
+    )
+    now = time.time()
+    try:
+        with _OPERATIONAL_RESEARCH_PRIOR_CACHE_LOCK:
+            cached = _OPERATIONAL_RESEARCH_PRIOR_CACHE.get(cache_key)
+            if cached and now - float(cached.get('at') or 0) < _OPERATIONAL_RESEARCH_PRIOR_CACHE_TTL:
+                return dict(cached.get('data') or {})
+    except Exception:
+        pass
+
+    result = {}
+    try:
+        from research_evidence_fusion import edge_prior
+        for action in actions:
+            try:
+                prior = edge_prior(
+                    symbol, timeframe, action, system_type,
+                    regime=str(regime or '').upper() or None,
+                    runtime_features=dict(features),
+                )
+                result[action] = dict(prior or {})
+            except Exception as exc:
+                result[action] = {
+                    'state': 'UNAVAILABLE', 'support_score': 0.0,
+                    'penalty_score': 0.0, 'error': str(exc)[:120],
+                }
+    except Exception as exc:
+        for action in actions:
+            result[action] = {
+                'state': 'UNAVAILABLE', 'support_score': 0.0,
+                'penalty_score': 0.0, 'error': str(exc)[:120],
+            }
+    try:
+        with _OPERATIONAL_RESEARCH_PRIOR_CACHE_LOCK:
+            _OPERATIONAL_RESEARCH_PRIOR_CACHE[cache_key] = {'at': now, 'data': dict(result)}
+            if len(_OPERATIONAL_RESEARCH_PRIOR_CACHE) > 256:
+                oldest = sorted(
+                    _OPERATIONAL_RESEARCH_PRIOR_CACHE.items(),
+                    key=lambda item: float((item[1] or {}).get('at') or 0),
+                )[:64]
+                for key, _ in oldest:
+                    _OPERATIONAL_RESEARCH_PRIOR_CACHE.pop(key, None)
+    except Exception:
+        pass
+    return result
+
+
+# ============================================================================
 # TRADER 8: MULTIFRAME ANALYST - VERSIÓN CORREGIDA CON ANÁLISIS REAL
 # ============================================================================
 def _get_higher_tf_analysis_from_cache(symbol, current_timeframe, system_type='spot'):
@@ -26501,12 +26629,16 @@ class Moderador:
         for voto in votos:
             voto['veto_estado'] = veto_estado
         
+        # Commit 9.4 — una objeción interna nunca puede finalizar la señal antes
+        # de evaluar la tesis de mercado. Se conserva sólo para auditoría y como
+        # evidencia de control. Safety sigue siendo la autoridad final posterior.
         if veto_activo:
-            print(f"\n🚫 Decisión final: NO_OPERAR por veto (confianza 90%)")
-            print(f"   Razón: {veto_razon}")
-            return 'NO_OPERAR', 90, ['VETO_DETECTADO'], [veto_razon or 'Veto del comité'], votos
+            print(f"\n🛡️ Objeción interna registrada (no vinculante): {veto_razon}")
+            for _voto in votos:
+                _voto['control_objection_active'] = True
+                _voto['control_objection_reason'] = str(veto_razon or '')[:220]
         
-        # 8. RC9.2 — TESIS DE MERCADO PRIMERO; ESPECIALISTAS COMO EVIDENCIA
+        # 8. COMMIT 9.4 — TESIS DE MERCADO PRIMERO; ESPECIALISTAS COMO EVIDENCIA
         try:
             from operational_intelligence import moderator_candidate
             _op_candidate = moderator_candidate(
@@ -35535,12 +35667,13 @@ def _rc9_system_info_widget_html():
         </div>
       </section>
       <section class="rc9-info-section" data-section="indicadores">
-        <details class="rc9-info-details" open><summary>Tendencia</summary><div><span class="rc9-info-badge">EMA / SMA</span><span class="rc9-info-badge">ADX / DMI</span><span class="rc9-info-badge">Supertrend</span><span class="rc9-info-badge">Ichimoku</span><span class="rc9-info-badge">Parabolic SAR</span><br><b>EMA/SMA</b> ayudan a ver dirección y zonas de retroceso. <b>ADX</b> mide fuerza de tendencia; DMI ayuda a ver qué lado domina. Supertrend, Ichimoku y SAR aportan confirmaciones adicionales.</div></details>
-        <details class="rc9-info-details"><summary>Momentum</summary><div><span class="rc9-info-badge">RSI</span><span class="rc9-info-badge">MACD</span><span class="rc9-info-badge">Estocástico</span><span class="rc9-info-badge">CCI</span><br>Indican si el movimiento gana o pierde impulso. Las divergencias pueden advertir agotamiento o continuación, pero se interpretan junto con estructura y volumen.</div></details>
-        <details class="rc9-info-details"><summary>Volatilidad</summary><div><span class="rc9-info-badge">ATR</span><span class="rc9-info-badge">Bandas de Bollinger</span><span class="rc9-info-badge">Squeeze</span><br><b>ATR</b> estima cuánto se mueve normalmente el precio. Bollinger ayuda a detectar expansión, compresión y sobreextensión. Una compresión suele exigir confirmación antes de asumir dirección.</div></details>
-        <details class="rc9-info-details"><summary>Volumen y flujo</summary><div><span class="rc9-info-badge">Volumen relativo</span><span class="rc9-info-badge">MFI</span><span class="rc9-info-badge">OBV</span><span class="rc9-info-badge">VWAP</span><br>Sirven para comprobar si el movimiento tiene participación real y si el precio está negociando cerca o lejos de zonas de valor.</div></details>
-        <details class="rc9-info-details"><summary>Estructura y liquidez</summary><div><span class="rc9-info-badge">Soporte / Resistencia</span><span class="rc9-info-badge">Order Blocks</span><span class="rc9-info-badge">FVG</span><span class="rc9-info-badge">Barridos de liquidez</span><span class="rc9-info-badge">Perfil de volumen</span><br>Ayudan a localizar zonas donde una entrada puede defenderse, dónde una tesis queda invalidada y dónde existe un objetivo razonable.</div></details>
-        <details class="rc9-info-details"><summary>Contexto</summary><div><span class="rc9-info-badge">Sesión</span><span class="rc9-info-badge">Correlación</span><span class="rc9-info-badge">Sentimiento</span><span class="rc9-info-badge">Macro</span><span class="rc9-info-badge">Liquidaciones</span><br>El sistema también considera el entorno. Una buena señal técnica puede requerir más cautela si la liquidez es baja, la volatilidad es extrema o existe un evento de riesgo.</div></details>
+        <details class="rc9-info-details" open><summary>Tendencia y fuerza</summary><div><span class="rc9-info-badge">EMA / SMA</span><span class="rc9-info-badge">ADX / DMI</span><span class="rc9-info-badge">Supertrend</span><span class="rc9-info-badge">Ichimoku</span><span class="rc9-info-badge">Parabolic SAR</span><span class="rc9-info-badge">Fuerza Maverick</span><br>Definen dirección, fuerza y zonas de retroceso. <b>Fuerza Maverick</b> ayuda a distinguir expansión, pérdida de impulso y entornos propensos a ruido.</div></details>
+        <details class="rc9-info-details"><summary>Momentum y divergencias</summary><div><span class="rc9-info-badge">RSI</span><span class="rc9-info-badge">RSI Maverick</span><span class="rc9-info-badge">MACD</span><span class="rc9-info-badge">Estocástico</span><span class="rc9-info-badge">CCI</span><span class="rc9-info-badge">Williams %R</span><span class="rc9-info-badge">Force Index</span><span class="rc9-info-badge">Divergencias regulares / ocultas</span><br>Evalúan impulso y agotamiento. Las divergencias regulares ayudan a estudiar giros; las ocultas, continuidad. Nunca se usan aisladas de estructura y volumen.</div></details>
+        <details class="rc9-info-details"><summary>Volatilidad</summary><div><span class="rc9-info-badge">ATR</span><span class="rc9-info-badge">Bandas de Bollinger</span><span class="rc9-info-badge">Squeeze</span><br><b>ATR</b> mide el movimiento habitual; Bollinger y Squeeze ayudan a reconocer compresión, expansión y sobreextensión antes de definir una entrada.</div></details>
+        <details class="rc9-info-details"><summary>Volumen y participación</summary><div><span class="rc9-info-badge">Volumen relativo</span><span class="rc9-info-badge">MFI</span><span class="rc9-info-badge">OBV</span><span class="rc9-info-badge">VWAP</span><span class="rc9-info-badge">Actividad de gran volumen</span><span class="rc9-info-badge">Absorción (proxy)</span><br>Comprueban si el movimiento tiene participación real. La actividad de gran volumen observa una anomalía y su reacción posterior hasta 7 velas del marco donde ocurrió; puede servir como contexto para una entrada en un marco menor. Es un proxy de precio/volumen, no identifica billeteras individuales.</div></details>
+        <details class="rc9-info-details"><summary>Estructura, zonas y liquidez</summary><div><span class="rc9-info-badge">Soporte / Resistencia</span><span class="rc9-info-badge">Order Blocks</span><span class="rc9-info-badge">FVG</span><span class="rc9-info-badge">Barridos / Stop Hunts</span><span class="rc9-info-badge">Fibonacci</span><span class="rc9-info-badge">POC / HVN / LVN</span><span class="rc9-info-badge">Patrones de velas</span><br>Localizan zonas de reacción, invalidación y objetivos. Fibonacci, Order Blocks, FVG y perfil de volumen se usan como confluencia; no crean una operación por sí solos.</div></details>
+        <details class="rc9-info-details"><summary>Flujo de órdenes · Futuros</summary><div><span class="rc9-info-badge">Order Book</span><span class="rc9-info-badge">Imbalance</span><span class="rc9-info-badge">Spread / profundidad</span><span class="rc9-info-badge">Open Interest</span><span class="rc9-info-badge">Funding</span><span class="rc9-info-badge">Basis</span><span class="rc9-info-badge">Liquidaciones</span><br>Ayudan a juzgar calidad de ejecución y riesgo, especialmente en marcos bajos. Complementan una tesis técnica; no sustituyen estructura, Entry ni Safety.</div></details>
+        <details class="rc9-info-details"><summary>Contexto</summary><div><span class="rc9-info-badge">Multitemporalidad</span><span class="rc9-info-badge">Sesión</span><span class="rc9-info-badge">Correlación / rotación</span><span class="rc9-info-badge">Sentimiento</span><span class="rc9-info-badge">Macro</span><br>El sistema combina contexto mayor, estructura, setup y timing. Cada herramienta se utiliza sólo cuando corresponde a la estrategia y al mercado; no se fuerzan todos los indicadores dentro de una misma señal.</div></details>
       </section>
       <section class="rc9-info-section" data-section="riesgo">
         <div class="rc9-info-grid">

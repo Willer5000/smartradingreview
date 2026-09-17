@@ -5,17 +5,6 @@
 
 console.log('🚀 futures.js cargado - modo Futuros activo');
 
-const futHumanReason = (value) => {
-    if (typeof window.humanizeTradingReason === 'function') {
-        return window.humanizeTradingReason(value);
-    }
-    const raw = String(value || '').trim();
-    if (!raw) return '';
-    // Fail closed: si parece un identificador interno, no se muestra.
-    if (/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/.test(raw)) return '';
-    return raw.replace(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+){1,}\b/g, '').replace(/\s{2,}/g, ' ').trim();
-};
-
 // ============================================================================
 // CONTROL DE CARGA DE SEÑALES FUTUROS
 // Evita peticiones simultáneas al mismo caché pesado.
@@ -24,67 +13,8 @@ window._futuresSignalsState = {
     activeLoading: false,
     previousLoading: false,
     activeTimer: null,
-    previousTimer: null,
-    activeStartedAt: 0,
-    previousStartedAt: 0,
-    activeRetries: 0,
-    previousRetries: 0
+    previousTimer: null
 };
-
-// HOTFIX H.3 — ningún panel Futures puede esperar para siempre.
-function _futSignalReset(kind) {
-    const timerKey = kind === 'active' ? 'activeTimer' : 'previousTimer';
-    const startedKey = kind === 'active' ? 'activeStartedAt' : 'previousStartedAt';
-    const retriesKey = kind === 'active' ? 'activeRetries' : 'previousRetries';
-    clearTimeout(window._futuresSignalsState[timerKey]);
-    window._futuresSignalsState[timerKey] = null;
-    window._futuresSignalsState[startedKey] = 0;
-    window._futuresSignalsState[retriesKey] = 0;
-}
-
-function _futSignalSchedule(kind, callback, delayMs = 4000) {
-    const timerKey = kind === 'active' ? 'activeTimer' : 'previousTimer';
-    const startedKey = kind === 'active' ? 'activeStartedAt' : 'previousStartedAt';
-    const retriesKey = kind === 'active' ? 'activeRetries' : 'previousRetries';
-    const now = Date.now();
-    if (!window._futuresSignalsState[startedKey]) {
-        window._futuresSignalsState[startedKey] = now;
-    }
-    const elapsed = now - window._futuresSignalsState[startedKey];
-    const retries = Number(window._futuresSignalsState[retriesKey] || 0);
-    if (elapsed >= 90000 || retries >= 5) {
-        clearTimeout(window._futuresSignalsState[timerKey]);
-        window._futuresSignalsState[timerKey] = null;
-        return false;
-    }
-    window._futuresSignalsState[retriesKey] = retries + 1;
-    clearTimeout(window._futuresSignalsState[timerKey]);
-    const effectiveDelay = Math.min(20000, Math.max(delayMs, Math.round(delayMs * (1 + retries * 0.75))));
-    window._futuresSignalsState[timerKey] = setTimeout(callback, effectiveDelay);
-    return true;
-}
-
-async function _futFetchJsonTimeout(url, timeoutMs = 16000) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-        const response = await fetch(url, {
-            method: 'GET',
-            cache: 'no-store',
-            headers: {'Cache-Control': 'no-cache'},
-            signal: controller.signal
-        });
-        const text = await response.text();
-        let json = {};
-        try { json = text ? JSON.parse(text) : {}; } catch (_) {}
-        if (!response.ok) {
-            throw new Error(json.error || json.message || `HTTP ${response.status}`);
-        }
-        return {response, json};
-    } finally {
-        clearTimeout(timer);
-    }
-}
 // Helper global: nunca mostrar confianza > 100% (defensa contra datos viejos).
 function fmtConfidence(c) {
     const n = Number(c) || 0;
@@ -134,6 +64,31 @@ function futEscapeHtml(value) {
         .replace(/'/g, '&#039;');
 }
 
+function futPublicAnalysisRole(name, index) {
+    const key = String(name || '').toLowerCase();
+    if (key.includes('técnico') || key.includes('tecnico')) return 'Tendencia e indicadores';
+    if (key.includes('chart')) return 'Estructura y patrones';
+    if (key.includes('ballena')) return 'Volumen anómalo y reacción';
+    if (key.includes('macro')) return 'Contexto macro';
+    if (key.includes('pullback')) return 'Retrocesos y timing';
+    if (key.includes('smart')) return 'Liquidez y zona de entrada';
+    if (key.includes('escépt') || key.includes('escept')) return 'Control de calidad';
+    if (key.includes('multi')) return 'Contexto multitemporal';
+    if (key.includes('liquid')) return 'Riesgo de liquidaciones';
+    if (key.includes('revisión') || key.includes('revision')) return 'Evidencia estadística';
+    return `Criterio técnico ${Number(index || 0) + 1}`;
+}
+
+function futPublicAuditText(value) {
+    return String(value || '')
+        .replace(/Escéptico/gi, 'control de calidad')
+        .replace(/Trader de Revisión/gi, 'evidencia estadística')
+        .replace(/Smart Money/gi, 'liquidez y entrada')
+        .replace(/comité/gi, 'conjunto de evidencias')
+        .replace(/veto/gi, 'objeción')
+        .replace(/réplica/gi, 'confirmación alternativa');
+}
+
 function futRenderDecisionAudit(audit) {
     if (!audit || audit.schema_version !== 'DECISION_AUDIT_V1') {
         return '';
@@ -149,17 +104,17 @@ function futRenderDecisionAudit(audit) {
         return Number.isFinite(number) ? number.toFixed(decimals) : '--';
     };
     const dispositionMeta = {
-        APOYO_FINAL: ['success', 'APOYÓ EL RESULTADO'],
-        APOYO_AL_VETO: ['danger', 'ACTIVÓ/RESPALDÓ VETO'],
-        OPOSICION_DIRECCIONAL: ['warning text-dark', 'QUEDÓ EN MINORÍA'],
-        CAUTELA_ESPERAR: ['info text-dark', 'PIDIÓ ESPERAR'],
-        CAUTELA_NO_OPERAR: ['secondary', 'PIDIÓ NO OPERAR'],
-        ABSTENCION: ['secondary', 'SE ABSTUVO'],
-        ERROR_CONTROLADO: ['danger', 'FALLÓ; VOTO NEUTRALIZADO']
+        APOYO_FINAL: ['success', 'COINCIDE'],
+        APOYO_AL_VETO: ['warning text-dark', 'OBJECIÓN DE CONTROL'],
+        OPOSICION_DIRECCIONAL: ['warning text-dark', 'LECTURA CONTRARIA'],
+        CAUTELA_ESPERAR: ['info text-dark', 'PIDE ESPERAR'],
+        CAUTELA_NO_OPERAR: ['secondary', 'PIDE NO OPERAR'],
+        ABSTENCION: ['secondary', 'SIN SEÑAL'],
+        ERROR_CONTROLADO: ['secondary', 'NO DISPONIBLE']
     };
 
     let votesHtml = '';
-    votes.forEach(vote => {
+    votes.forEach((vote, voteIndex) => {
         const disposition = String(vote.disposition || 'ABSTENCION');
         const meta = dispositionMeta[disposition]
             || dispositionMeta.ABSTENCION;
@@ -172,8 +127,8 @@ function futRenderDecisionAudit(audit) {
             : `${futEscapeHtml(originalAction)} → ${futEscapeHtml(normalizedAction)}`;
         const counted = vote.counted_confidence;
         const countedText = counted === null || counted === undefined
-            ? 'no entró al conteo principal'
-            : `conteo final ${numberText(counted, 1)}%`;
+            ? 'sin aporte direccional'
+            : `aporte ${numberText(counted, 1)}%`;
         const reasons = Array.isArray(vote.reasons) ? vote.reasons : [];
         const strategies = Array.isArray(vote.strategies) ? vote.strategies : [];
         const explanation = reasons[0]
@@ -182,23 +137,22 @@ function futRenderDecisionAudit(audit) {
         votesHtml += `
             <div class="border-top border-secondary py-2">
                 <div class="d-flex flex-wrap justify-content-between gap-1">
-                    <strong>${futEscapeHtml(vote.trader || 'Trader')}</strong>
+                    <strong>${futEscapeHtml(futPublicAnalysisRole(vote.trader, voteIndex))}</strong>
                     <span class="badge bg-${meta[0]}">${meta[1]}</span>
                 </div>
                 <div class="small text-light mt-1">
-                    Voto: <strong>${actionText}</strong> ·
+                    Lectura: <strong>${actionText}</strong> ·
                     confianza ${numberText(vote.original_confidence, 1)}%
                 </div>
                 <div class="small text-muted">
                     ${numberText(vote.original_confidence, 1)}%
-                    × peso ${numberText(vote.base_weight, 2)}
-                    × régimen ${numberText(vote.regime_multiplier, 2)}
-                    × aprendizaje ${numberText(vote.review_multiplier, 2)}
-                    = ${numberText(vote.weighted_confidence, 1)}%
+                    · contexto ${numberText(vote.regime_multiplier, 2)}
+                    · evidencia ${numberText(vote.review_multiplier, 2)}
+                    · aporte final ${numberText(vote.weighted_confidence, 1)}%
                     · ${countedText}
                 </div>
                 <div class="small text-secondary mt-1">
-                    ${futEscapeHtml(explanation)}
+                    ${futEscapeHtml(futPublicAuditText(explanation))}
                 </div>
             </div>
         `;
@@ -222,7 +176,7 @@ function futRenderDecisionAudit(audit) {
         <details class="mt-2 border border-secondary rounded p-2"
                  onclick="event.stopPropagation();">
             <summary class="text-info" style="cursor:pointer;">
-                🔎 Auditor de la decisión · ${votes.length} traders
+                🔎 Cómo se evaluó la señal · ${votes.length} criterios
             </summary>
             <div class="small mt-2">
                 <div>
@@ -237,19 +191,17 @@ function futRenderDecisionAudit(audit) {
                     volumen ${numberText(input.volume_ratio, 2)}x
                 </div>
                 <div class="mt-2">
-                    <strong>Moderador:</strong>
-                    ${futEscapeHtml(trace.decision_basis || 'SIN_TRAZA')} ·
+                    <strong>Resultado del análisis:</strong>
                     resultado ${futEscapeHtml(trace.final_action || 'NO_OPERAR')}
-                    (${numberText(trace.final_confidence, 1)}%) ·
-                    veto ${futEscapeHtml(trace.veto_state || 'SIN_VETO')}
+                    (${numberText(trace.final_confidence, 1)}%) · control interno aplicado
                 </div>
                 ${finalReasons.length > 0 ? `
                     <div class="text-light mt-1">
-                        ${futEscapeHtml(finalReasons.join(' · '))}
+                        ${futEscapeHtml(futPublicAuditText(finalReasons.join(' · ')))}
                     </div>
                 ` : ''}
                 <div class="text-secondary mt-1">
-                    Auditoría de sólo lectura: explica la decisión, no la modifica.
+                    Detalle de sólo lectura: muestra las evidencias que participaron en la decisión.
                 </div>
                 <div class="mt-2">${votesHtml}</div>
             </div>
@@ -355,10 +307,7 @@ window.openManualAnalysisSave = function(
             candidate.signal_id,
 
         execution_origin:
-                    'USER_MANUAL_ANALYSIS',
-
-        source_context:
-            'PREVIOUS_ANALYSIS_ONLY',
+            'USER_MANUAL_ANALYSIS',
 
         manual_risk_class:
             riskClass,
@@ -453,43 +402,16 @@ function futRenderAnalysisDiagnostics(json, context) {
         const classification = String(
             candidate.classification || 'ANALYSIS_ERROR'
         );
-        const isResearchShadow = String(
-            candidate.engine_publication_status || ''
-        ).toUpperCase() === 'RESEARCH_ONLY_SHADOW';
-
-        const meta = isResearchShadow
-            ? {badge: 'info text-dark', label: 'RESEARCH / SHADOW'}
-            : (statusMeta[classification] || statusMeta.ANALYSIS_ERROR);
-        const rawSymbol = String(
-                    candidate.symbol || ''
-                );
-        
-                const rawTimeframe = String(
-                    candidate.timeframe || ''
-                );
-        
-                const symbol = futEscapeHtml(
-                    rawSymbol.replace('-', '/')
-                );
-        
-                const timeframe = futEscapeHtml(
-                    rawTimeframe || '--'
-                );
-        
-                const navSymbol = futEscapeHtml(
-                    rawSymbol
-                );
-        
-                const navTimeframe = futEscapeHtml(
-                    rawTimeframe
-                );
+        const meta = statusMeta[classification]
+            || statusMeta.ANALYSIS_ERROR;
+        const symbol = futEscapeHtml(
+            String(candidate.symbol || '').replace('-', '/')
+        );
+        const timeframe = futEscapeHtml(candidate.timeframe || '--');
         const action = futEscapeHtml(candidate.action || 'NO_OPERAR');
         const confidence = fmtConfidence(candidate.confidence);
-        const baseReason = futHumanReason(candidate.reason || candidate.active_reason || 'Sin motivo disponible');
         const reason = futEscapeHtml(
-            isResearchShadow
-                ? `${baseReason} · Visible para investigación; no es señal ejecutable todavía.`
-                : baseReason
+            candidate.reason || candidate.active_reason || 'Sin motivo disponible'
         );
         const safety = candidate.execution_safety;
         const safetyMinimum = candidate.execution_safety_minimum;
@@ -510,8 +432,7 @@ function futRenderAnalysisDiagnostics(json, context) {
         let manualSaveHtml = '';
 
         if (
-            context === 'previous'
-            && classification === 'ANALYSIS_ONLY'
+            classification === 'ANALYSIS_ONLY'
             && candidate.manual_save_allowed === true
             && candidate.signal_id
         ) {
@@ -550,7 +471,7 @@ function futRenderAnalysisDiagnostics(json, context) {
 
                     <div class="small text-muted mt-1">
                         ${futEscapeHtml(
-                            futHumanReason(candidate.manual_risk_reason)
+                            candidate.manual_risk_reason
                             || ''
                         )}
                     </div>
@@ -564,22 +485,15 @@ function futRenderAnalysisDiagnostics(json, context) {
         ) {
             lifecycleHtml = `
                 <div class="small text-secondary mt-1">
-                    ${futEscapeHtml(futHumanReason(candidate.active_reason || ''))}
+                    ${futEscapeHtml(candidate.active_reason || '')}
                 </div>
             `;
         }
 
         excludedHtml += `
-                    <div
-                        class="border-bottom border-secondary py-2"
-                        style="cursor:pointer;"
-                        data-nav-symbol="${navSymbol}"
-                        data-nav-timeframe="${navTimeframe}"
-                        onclick="window.changeToSignal(
-                            this.dataset.navSymbol,
-                            this.dataset.navTimeframe
-                        )"
-                    >
+            <div class="border-bottom border-secondary py-2"
+                 style="cursor:pointer;"
+                 onclick="window.changeToSignal('${String(candidate.symbol || '').replace(/'/g, "\'")}', '${String(candidate.timeframe || '').replace(/'/g, "\'")}')">
                 <div class="d-flex flex-wrap justify-content-between gap-1">
                     <div>
                         <span class="badge bg-${meta.badge} me-1">
@@ -592,26 +506,11 @@ function futRenderAnalysisDiagnostics(json, context) {
                         ${action} · ${confidence}%
                     </small>
                 </div>
-                <div class="small text-light mt-1">
-                    ${reason}
-                    ${safetyHtml}
+                <div class="small text-muted mt-1">
+                    Haz clic en la señal para ver el análisis completo, contexto, indicadores y niveles en la recomendación central.
                 </div>
                 ${lifecycleHtml}
                 ${manualSaveHtml}
-
-                <div class="small text-muted mt-1">
-                    ${
-                        manualSaveHtml
-                            ? (
-                                'Sigue siendo ANALYSIS_ONLY: guardarla '
-                                + 'sólo crea seguimiento personal.'
-                            )
-                            : (
-                                'Información diagnóstica: '
-                                + 'no se puede guardar como operación.'
-                            )
-                    }
-                </div>
                 ${futRenderDecisionAudit(candidate.decision_audit)}
             </div>
         `;
@@ -857,7 +756,7 @@ window.loadGlobalStats = async function() {
 // SOBREESCRIBIR: updateActiveSignals (vela ACTUAL — dinámica)
 // ============================================================================
 // Solo se ejecuta si estamos en /futures. Usa /api/futures/signals/active
-// que retorna el universo productivo y expone Research/Shadow como diagnóstico
+// que retorna SOLO las 5 cripto × 6 TF × LONG/SHORT
 
 window.updateActiveSignals = async function() {
 
@@ -872,11 +771,7 @@ window.updateActiveSignals = async function() {
             activeLoading: false,
             previousLoading: false,
             activeTimer: null,
-            previousTimer: null,
-            activeStartedAt: 0,
-            previousStartedAt: 0,
-            activeRetries: 0,
-            previousRetries: 0
+            previousTimer: null
         };
     }
 
@@ -902,8 +797,15 @@ window.updateActiveSignals = async function() {
 
     // Si ya hay una petición, no crear otra.
     if (window._futuresSignalsState.activeLoading) {
-        console.warn('⚠️ ACTIVE: petición anterior todavía en curso; no se duplica.');
-        return;
+        console.warn(
+            '⚠️ ACTIVE: petición anterior marcada como activa.'
+        );
+
+        // IMPORTANTE:
+        // No nos quedamos bloqueados para siempre.
+        // Como no tenemos referencia al fetch anterior,
+        // liberamos el estado y permitimos una nueva consulta.
+        window._futuresSignalsState.activeLoading = false;
     }
 
     window._futuresSignalsState.activeLoading = true;
@@ -911,30 +813,51 @@ window.updateActiveSignals = async function() {
     console.log(
         '🚀 ACTIVE: iniciando consulta...'
     );
-    if (!window.futuresActiveLoaded) {
-        signalsList.innerHTML = `
-            <div class="list-group-item bg-dark text-info text-center py-3">
-                <div class="spinner-border spinner-border-sm me-2"></div>
-                Consultando servidor de Futuros...
-            </div>
-        `;
-        if (signalsCount) {
-            signalsCount.textContent = '...';
-            signalsCount.className = 'badge bg-info';
-        }
+    signalsList.innerHTML = `
+        <div class="list-group-item bg-dark text-info text-center py-3">
+            <div class="spinner-border spinner-border-sm me-2"></div>
+            Consultando servidor de Futuros...
+        </div>
+    `;
+
+    if (signalsCount) {
+        signalsCount.textContent = '...';
+        signalsCount.className = 'badge bg-info';
     }
 
     const startedAt = performance.now();
 
     try {
 
-        const {response, json} = await _futFetchJsonTimeout(
+        const response = await fetch(
             '/api/futures/signals/active?min_confidence=55&_ts=' + Date.now(),
-            16000
+            {
+                method: 'GET',
+                cache: 'no-store',
+                headers: {
+                    'Cache-Control': 'no-cache'
+                }
+            }
         );
 
-        const elapsed = ((performance.now() - startedAt) / 1000).toFixed(1);
-        console.log(`📥 ACTIVE HTTP ${response.status} en ${elapsed}s`);
+        const elapsed = (
+            (performance.now() - startedAt) / 1000
+        ).toFixed(1);
+
+        console.log(
+            `📥 ACTIVE HTTP ${response.status} en ${elapsed}s`
+        );
+
+        if (!response.ok) {
+
+            const text = await response.text();
+
+            throw new Error(
+                `HTTP ${response.status}: ${text.substring(0, 500)}`
+            );
+        }
+
+        const json = await response.json();
 
         console.log('📦 ACTIVE JSON:', json);
 
@@ -992,22 +915,6 @@ window.updateActiveSignals = async function() {
             json.warming_up
         );
 
-        // HOTFIX H.1 — refrescar un combo en background no invalida el
-        // snapshot ya disponible. Sólo un warm-up SIN cache bloquea la lista.
-        const backgroundRefresh = Boolean(
-            json.background_refresh && json.cache_ready
-        );
-        const backgroundRefreshHtml = backgroundRefresh
-            ? `
-                <div class="list-group-item bg-dark border-info text-info py-2">
-                    <small>
-                        🔄 Actualizando ${futEscapeHtml(progress.current || 'otro mercado')} en segundo plano.
-                        Las señales actuales siguen visibles.
-                    </small>
-                </div>
-            `
-            : '';
-
         console.log(
             '📊 ACTIVE:',
             {
@@ -1018,31 +925,60 @@ window.updateActiveSignals = async function() {
             }
         );
 
-        // H.3: sólo un warm-up SIN snapshot puede bloquear la primera vista.
-        // Si cache_ready o ya llegaron señales, se renderiza inmediatamente.
-        const blockingWarmup = Boolean(running && !json.cache_ready && signals.length === 0);
-        if (blockingWarmup) {
-            const scheduled = _futSignalSchedule('active', () => window.updateActiveSignals(), 4000);
-            const pct = total > 0 ? Math.min(100, (completed / total) * 100) : 0;
-            if (!window.futuresActiveLoaded) {
-                signalsList.innerHTML = scheduled ? `
-                    <div class="list-group-item bg-dark text-info text-center py-3">
-                        <div class="spinner-border spinner-border-sm me-2"></div>
-                        <strong>Preparando primer snapshot Futures: ${completed}/${total}</strong>
-                        <div class="progress mt-2" style="height:6px;">
-                            <div class="progress-bar bg-info" style="width:${pct}%;"></div>
+        // ------------------------------------------------------------
+        // SERVIDOR TODAVÍA PROCESANDO
+        // ------------------------------------------------------------
+        if (running) {
+
+            const pct = total > 0
+                ? Math.min(
+                    100,
+                    (completed / total) * 100
+                )
+                : 0;
+
+            signalsList.innerHTML = `
+                <div class="list-group-item bg-dark text-info text-center py-3">
+
+                    <div class="spinner-border spinner-border-sm me-2"></div>
+
+                    <strong>
+                        Analizando Futuros: ${completed}/${total}
+                    </strong>
+
+                    <br>
+
+                    <small class="text-muted">
+                        ${progress.current || 'Preparando análisis...'}
+                    </small>
+
+                    <div class="progress mt-2"
+                         style="height: 6px;">
+
+                        <div
+                            class="progress-bar bg-info"
+                            style="width: ${pct}%;">
                         </div>
+
                     </div>
-                ` : `
-                    <div class="list-group-item bg-dark text-warning text-center py-3">
-                        ⚠️ El warm-up continúa, pero la espera automática terminó para evitar carga infinita.
-                        <button class="btn btn-sm btn-outline-warning ms-2" onclick="window.updateActiveSignals()">Reintentar</button>
-                    </div>
-                `;
+
+                    <small class="d-block mt-2 text-secondary">
+                        Resultado recibido del servidor en ${elapsed}s
+                    </small>
+
+                </div>
+            `;
+
+            if (signalsCount) {
+                signalsCount.textContent =
+                    `${completed}/${total}`;
+
+                signalsCount.className =
+                    'badge bg-info';
             }
+
             return;
         }
-        _futSignalReset('active');
 
         // ------------------------------------------------------------
         // SERVIDOR TERMINÓ
@@ -1067,7 +1003,7 @@ window.updateActiveSignals = async function() {
         // ------------------------------------------------------------
         if (signals.length === 0) {
 
-            signalsList.innerHTML = backgroundRefreshHtml + diagnosticsHtml + `
+            signalsList.innerHTML = diagnosticsHtml + `
                 <div class="list-group-item bg-dark text-warning text-center py-3">
 
                     <strong>
@@ -1214,10 +1150,9 @@ window.updateActiveSignals = async function() {
                 <div
                     class="list-group-item bg-dark text-white border-secondary"
                     style="cursor:pointer;"
-                    data-signal="${_encodeFuturesSignal(sig)}"
-                    onclick="window.openFuturesActiveSignal(
-                        event,
-                        this.getAttribute('data-signal')
+                    onclick="window.changeToSignal(
+                        '${sig.symbol}',
+                        '${sig.timeframe}'
                     )"
                 >
 
@@ -1294,29 +1229,38 @@ window.updateActiveSignals = async function() {
             `;
         });
 
-        signalsList.innerHTML = backgroundRefreshHtml + diagnosticsHtml + html;
+        signalsList.innerHTML = diagnosticsHtml + html;
 
     } catch (err) {
 
-        if (err?.name === 'AbortError') {
-            console.warn('⏳ ACTIVE: Supabase/Render tardó más de 16s; se conserva el último snapshot y se reintenta con backoff.');
-        } else {
-            console.error('❌ ACTIVE FETCH:', err);
-        }
+        console.error(
+            '❌ ACTIVE FETCH:',
+            err
+        );
 
-        const scheduled = _futSignalSchedule('active', () => window.updateActiveSignals(), 8000);
-        if (!window.futuresActiveLoaded) {
-            signalsList.innerHTML = `
-                <div class="list-group-item bg-dark text-warning text-center py-3">
-                    <strong>⚠️ No se pudo consultar Futuros</strong><br>
-                    <small>${err.message || 'Error de conexión'}${scheduled ? ' · reintentando' : ''}</small>
-                    ${scheduled ? '' : '<button class="btn btn-sm btn-outline-warning ms-2" onclick="window.updateActiveSignals()">Reintentar</button>'}
-                </div>
-            `;
-            if (signalsCount) {
-                signalsCount.textContent = '--';
-                signalsCount.className = 'badge bg-secondary';
-            }
+        signalsList.innerHTML = `
+            <div class="list-group-item bg-dark text-danger text-center py-3">
+
+                <strong>
+                    ❌ No se pudo consultar Futuros
+                </strong>
+
+                <br>
+
+                <small>
+                    ${err.message || 'Error de conexión'}
+                </small>
+
+            </div>
+        `;
+
+        if (signalsCount) {
+
+            signalsCount.textContent =
+                'ERR';
+
+            signalsCount.className =
+                'badge bg-danger';
         }
 
     } finally {
@@ -1396,340 +1340,12 @@ function _decodeFuturesSignal(encodedSignal) {
     return JSON.parse(decodeURIComponent(encodedSignal));
 }
 
-// ============================================================================
-// HOTFIX F.2 — CONTEXTO CANÓNICO DE UNA SEÑAL FUTURES ACTIVA
-// ============================================================================
-// Una señal activa conserva la recomendación que la originó. Un análisis
-// posterior del mismo par/TF puede describir el mercado ACTUAL, pero no debe
-// reescribir la recomendación, Entry, SL, TP, RR ni leverage de una señal
-// waiting_entry / entry_touched que todavía sigue vigente.
-// ============================================================================
-
-window._futuresPinnedSignalRecommendation = null;
-window._futuresLastFreshRecommendationData = null;
-window._futuresLifecycleNavigationInProgress = false;
-window.__FUTURES_SIGNAL_CONTEXT_VERSION__ = 'F3';
-console.log('🧭 Hotfix F.3 cargado: contexto canónico de señal Futures');
-
-function _futuresSignalSnapshotToRecommendation(sig) {
-    sig = sig || {};
-
-    const originalMessage = String(
-        sig.message
-        || 'Señal Futures activa conservada desde su vela fuente.'
-    );
-
-    const sourceText = String(
-        sig.source_candle_close_timestamp
-        || sig.source_candle_timestamp
-        || sig.candle_timestamp
-        || ''
-    );
-
-    const lifecycleText = String(
-        sig.lifecycle_status
-        || ''
-    ).toUpperCase();
-
-    const prefix = [
-        '<div class="alert alert-info py-2 mb-2">',
-        '<strong>📌 RECOMENDACIÓN QUE ORIGINÓ ESTA SEÑAL</strong>',
-        sourceText
-            ? `<br><small>Vela fuente: ${futEscapeHtml(sourceText)}</small>`
-            : '',
-        lifecycleText
-            ? `<br><small>Estado: ${futEscapeHtml(lifecycleText)}</small>`
-            : '',
-        '</div>'
-    ].join('');
-
-    return {
-        symbol: sig.symbol,
-        timeframe: sig.timeframe,
-        decision: {
-            action: sig.action,
-            confidence: Number(sig.confidence || 0)
-        },
-        levels: {
-            entry: sig.entry,
-            stop_loss: sig.stop_loss,
-            take_profit: sig.take_profit,
-            leverage: sig.leverage,
-            risk_reward: sig.risk_reward
-        },
-        message: prefix + futEscapeHtml(originalMessage).replace(/\n/g, '<br>'),
-        source_candle_timestamp: sig.source_candle_timestamp,
-        source_candle_close_timestamp: sig.source_candle_close_timestamp,
-        recommendation_context: 'ACTIVE_SIGNAL_SNAPSHOT'
-    };
-}
-
-function _futuresSelectedPairMatchesSignal(sig) {
-    if (!sig) return false;
-
-    const symbol = String(
-        document.getElementById('symbol-select')?.value
-        || window.currentSymbol
-        || ''
-    );
-
-    const timeframe = String(
-        document.getElementById('interval-select')?.value
-        || window.currentInterval
-        || ''
-    );
-
-    return (
-        symbol === String(sig.symbol || '')
-        && timeframe === String(sig.timeframe || '')
-    );
-}
-
-function _futuresRenderCurrentMarketState(currentData, sig, loading = false) {
-    const container = document.getElementById('system-recommendation');
-    if (!container || !sig) return;
-
-    let block = document.getElementById('futures-current-market-state');
-    if (!block) {
-        block = document.createElement('div');
-        block.id = 'futures-current-market-state';
-        block.className = 'mt-3 p-3 border border-secondary rounded-3 bg-dark';
-        container.appendChild(block);
-    }
-
-    if (loading || !currentData || !currentData.decision) {
-        block.innerHTML = `
-            <div class="small text-muted">
-                <strong>🔎 Estado actual del mercado</strong><br>
-                Actualizando el análisis actual. Este dato NO reemplaza
-                la recomendación que originó la señal activa.
-            </div>
-        `;
-        return;
-    }
-
-    const currentAction = String(
-        currentData.decision.action
-        || 'NO_OPERAR'
-    ).toUpperCase();
-
-    const currentConfidence = Number(
-        currentData.decision.confidence
-        || 0
-    );
-
-    const currentMessage = String(
-        currentData.message
-        || 'Sin comentario adicional.'
-    );
-
-    const sameDirection = (
-        currentAction === String(sig.action || '').toUpperCase()
-    );
-
-    const note = sameDirection
-        ? 'El análisis actual coincide con la dirección de la señal.'
-        : (
-            'El análisis actual describe el mercado AHORA. '
-            + 'No invalida ni reescribe automáticamente una señal '
-            + 'activa que todavía conserva su propia vigencia.'
-        );
-
-    block.innerHTML = `
-        <div class="small">
-            <strong>🔎 Estado actual del mercado · no reemplaza la señal</strong>
-            <div class="mt-1">
-                Acción actual:
-                <strong>${futEscapeHtml(currentAction)}</strong>
-                · Confianza ${Math.max(0, Math.min(100, currentConfidence)).toFixed(0)}%
-            </div>
-            <div class="text-muted mt-1">
-                ${futEscapeHtml(note)}
-            </div>
-            <div class="text-secondary mt-2">
-                ${futEscapeHtml(currentMessage).replace(/\n/g, '<br>')}
-            </div>
-        </div>
-    `;
-}
-
-function _futuresClearPinnedSignalRecommendation(restoreCurrent = false) {
-    window._futuresPinnedSignalRecommendation = null;
-
-    const currentState = document.getElementById('futures-current-market-state');
-    if (currentState) currentState.remove();
-
-    if (
-        restoreCurrent
-        && window._futuresBaseUpdateRecommendation
-        && window._futuresLastFreshRecommendationData
-    ) {
-        window._futuresBaseUpdateRecommendation(
-            window._futuresLastFreshRecommendationData
-        );
-    }
-}
-
-function _futuresInstallSignalRecommendationBridge() {
-    if (!window.IS_FUTURES_PAGE) return false;
-
-    const currentRenderer = window.updateRecommendation;
-    if (typeof currentRenderer !== 'function') return false;
-
-    // F.3: no dependemos de que el wrapper se haya instalado una única vez
-    // durante la carga. Si otro script reemplazó updateRecommendation, lo
-    // volvemos a enlazar justo antes de abrir una señal activa.
-    if (currentRenderer.__futuresSignalContextF3 === true) {
-        return true;
-    }
-
-    const baseRenderer = (
-        currentRenderer.__futuresSignalContextBase
-        || currentRenderer
-    );
-
-    window._futuresBaseUpdateRecommendation = baseRenderer;
-
-    const signalAwareRenderer = function(data) {
-        window._futuresLastFreshRecommendationData = data;
-
-        const sig = window._futuresPinnedSignalRecommendation;
-
-        if (!sig) {
-            return baseRenderer(data);
-        }
-
-        if (!_futuresSelectedPairMatchesSignal(sig)) {
-            _futuresClearPinnedSignalRecommendation(false);
-            return baseRenderer(data);
-        }
-
-        baseRenderer(
-            _futuresSignalSnapshotToRecommendation(sig)
-        );
-
-        _futuresRenderCurrentMarketState(
-            data,
-            sig,
-            false
-        );
-    };
-
-    signalAwareRenderer.__futuresSignalContextF3 = true;
-    signalAwareRenderer.__futuresSignalContextBase = baseRenderer;
-
-    window.updateRecommendation = signalAwareRenderer;
-    window._futuresRecommendationContextWrapped = true;
-
-    console.log(
-        '✅ F.3: recomendación de origen enlazada al contexto de señales activas'
-    );
-
-    return true;
-}
-
-// Intento normal al cargar. openFuturesActiveSignal() vuelve a instalarlo
-// de forma perezosa si fuese necesario.
-_futuresInstallSignalRecommendationBridge();
-
-(function _wrapFuturesChangeToSignalContext() {
-    if (!window.IS_FUTURES_PAGE) return;
-    if (window._futuresChangeToSignalContextWrapped) return;
-    if (typeof window.changeToSignal !== 'function') return;
-
-    window._futuresChangeToSignalContextWrapped = true;
-    window._futuresBaseChangeToSignal = window.changeToSignal;
-
-    window.changeToSignal = function(symbol, timeframe) {
-        if (!window._futuresLifecycleNavigationInProgress) {
-            _futuresClearPinnedSignalRecommendation(false);
-        }
-
-        return window._futuresBaseChangeToSignal(
-            symbol,
-            timeframe
-        );
-    };
-})();
-
-window.openFuturesActiveSignal = function(event, encodedSignal) {
-    if (event) event.stopPropagation();
-
-    const sig = _decodeFuturesSignal(encodedSignal);
-    if (!sig || !sig.symbol || !sig.timeframe) return;
-
-    // F.3: instalar/reinstalar el puente en el momento exacto del click.
-    // Así no dependemos del orden de carga de otros scripts ni de un wrapper
-    // que pudiera haber sido reemplazado después.
-    _futuresInstallSignalRecommendationBridge();
-
-    // Guardamos el snapshot canónico ANTES de navegar. El análisis nuevo sólo
-    // servirá para gráficos y para el bloque secundario "Estado actual".
-    window._futuresPinnedSignalRecommendation = sig;
-    window._futuresLifecycleNavigationInProgress = true;
-
-    const renderPinnedNow = function() {
-        if (window._futuresPinnedSignalRecommendation !== sig) return;
-
-        const renderer = (
-            window._futuresBaseUpdateRecommendation
-            || window.updateRecommendation
-        );
-
-        if (typeof renderer === 'function') {
-            renderer(
-                _futuresSignalSnapshotToRecommendation(sig)
-            );
-        }
-
-        _futuresRenderCurrentMarketState(
-            window._futuresLastFreshRecommendationData,
-            sig,
-            !window._futuresLastFreshRecommendationData
-        );
-    };
-
-    try {
-        window.changeToSignal(
-            sig.symbol,
-            sig.timeframe
-        );
-    } finally {
-        window._futuresLifecycleNavigationInProgress = false;
-    }
-
-    // Render inmediato y una segunda pasada después de que la navegación haya
-    // actualizado selects/DOM. Las respuestas asíncronas posteriores quedan
-    // protegidas por signalAwareRenderer.
-    renderPinnedNow();
-    window.setTimeout(renderPinnedNow, 0);
-    window.setTimeout(renderPinnedNow, 250);
-};
-
-// Si el usuario cambia par/TF manualmente, deja de estar mirando el snapshot
-// de la señal activa y vuelve a la recomendación del análisis seleccionado.
-document.addEventListener('change', function(event) {
-    const id = String(event?.target?.id || '');
-    if (id === 'symbol-select' || id === 'interval-select') {
-        _futuresClearPinnedSignalRecommendation(false);
-    }
-});
-
 window.openSaveSignalFromCard = function(event, encodedSignal, alreadyInPosition) {
     if (event) event.stopPropagation();
-
-    const sig = _decodeFuturesSignal(
-        encodedSignal
-    );
-
-    sig.source_context =
-        'PREVIOUS_CONFIRMED';
-
-    window.openSaveSignalModal(
-        sig,
-        Boolean(alreadyInPosition)
-    );
+    const sig = _decodeFuturesSignal(encodedSignal);
+    window.openSaveSignalModal(sig, Boolean(alreadyInPosition));
 };
+
 
 // ============================================================================
 // SOBREESCRIBIR: updatePreviousSignals (vela ANTERIOR — estática)
@@ -1745,11 +1361,7 @@ window.updatePreviousSignals = async function() {
             activeLoading: false,
             previousLoading: false,
             activeTimer: null,
-            previousTimer: null,
-            activeStartedAt: 0,
-            previousStartedAt: 0,
-            activeRetries: 0,
-            previousRetries: 0
+            previousTimer: null
         };
     }
 
@@ -1787,9 +1399,18 @@ window.updatePreviousSignals = async function() {
         return;
     }
 
-    if (window._futuresSignalsState.previousLoading) {
-        console.warn('⚠️ PREVIOUS: petición anterior todavía en curso; no se duplica.');
-        return;
+    if (
+        window._futuresSignalsState
+            .previousLoading
+    ) {
+
+        console.warn(
+            '⚠️ PREVIOUS: petición anterior marcada como activa.'
+        );
+
+        // Evitar bloqueo permanente.
+        window._futuresSignalsState
+            .previousLoading = false;
     }
 
     window._futuresSignalsState
@@ -1799,17 +1420,23 @@ window.updatePreviousSignals = async function() {
         '🚀 PREVIOUS: iniciando consulta...'
     );
 
-    if (!window.futuresPrevLoaded) {
-        signalsList.innerHTML = `
-            <div class="list-group-item bg-dark text-info text-center py-3">
-                <div class="spinner-border spinner-border-sm me-2"></div>
-                Consultando vela anterior...
-            </div>
-        `;
-        if (signalsCount) {
-            signalsCount.textContent = '...';
-            signalsCount.className = 'badge bg-info';
-        }
+    signalsList.innerHTML = `
+        <div class="list-group-item bg-dark text-info text-center py-3">
+
+            <div class="spinner-border spinner-border-sm me-2"></div>
+
+            Consultando vela anterior...
+
+        </div>
+    `;
+
+    if (signalsCount) {
+
+        signalsCount.textContent =
+            '...';
+
+        signalsCount.className =
+            'badge bg-info';
     }
 
     const startedAt =
@@ -1817,13 +1444,40 @@ window.updatePreviousSignals = async function() {
 
     try {
 
-        const {response, json} = await _futFetchJsonTimeout(
-            '/api/futures/signals/previous?min_confidence=55&_ts=' + Date.now(),
-            16000
+        const response = await fetch(
+            '/api/futures/signals/previous?min_confidence=55&_ts='
+            + Date.now(),
+            {
+                method: 'GET',
+                cache: 'no-store',
+                headers: {
+                    'Cache-Control': 'no-cache'
+                }
+            }
         );
 
-        const elapsed = ((performance.now() - startedAt) / 1000).toFixed(1);
-        console.log(`📥 PREVIOUS HTTP ${response.status} en ${elapsed}s`);
+        const elapsed =
+            (
+                (performance.now() -
+                    startedAt) / 1000
+            ).toFixed(1);
+
+        console.log(
+            `📥 PREVIOUS HTTP ${response.status} en ${elapsed}s`
+        );
+
+        if (!response.ok) {
+
+            const text =
+                await response.text();
+
+            throw new Error(
+                `HTTP ${response.status}: ${text.substring(0, 500)}`
+            );
+        }
+
+        const json =
+            await response.json();
 
         console.log(
             '📦 PREVIOUS JSON:',
@@ -1893,22 +1547,6 @@ window.updatePreviousSignals = async function() {
                 json.warming_up
             );
 
-        // HOTFIX H.1 — la vela anterior ya calculada no desaparece mientras
-        // otro símbolo/TF se actualiza en el round-robin incremental.
-        const backgroundRefresh = Boolean(
-            json.background_refresh && json.cache_ready
-        );
-        const backgroundRefreshHtml = backgroundRefresh
-            ? `
-                <div class="list-group-item bg-dark border-info text-info py-2">
-                    <small>
-                        🔄 Actualizando ${futEscapeHtml(progress.current || 'otro mercado')} en segundo plano.
-                        La última vela cerrada disponible sigue siendo válida para visualización.
-                    </small>
-                </div>
-            `
-            : '';
-
         console.log(
             '📊 PREVIOUS:',
             {
@@ -1919,29 +1557,67 @@ window.updatePreviousSignals = async function() {
             }
         );
 
-        const blockingWarmup = Boolean(running && !json.cache_ready && signals.length === 0);
-        if (blockingWarmup) {
-            const scheduled = _futSignalSchedule('previous', () => window.updatePreviousSignals(), 4000);
-            const pct = total > 0 ? Math.min(100, (completed / total) * 100) : 0;
-            if (!window.futuresPrevLoaded) {
-                signalsList.innerHTML = scheduled ? `
-                    <div class="list-group-item bg-dark text-info text-center py-3">
-                        <div class="spinner-border spinner-border-sm me-2"></div>
-                        <strong>Preparando vela anterior: ${completed}/${total}</strong>
-                        <div class="progress mt-2" style="height:6px;">
-                            <div class="progress-bar bg-warning" style="width:${pct}%;"></div>
+        // ------------------------------------------------------------
+        // SERVIDOR TODAVÍA TRABAJANDO
+        // ------------------------------------------------------------
+        if (running) {
+
+            const pct =
+                total > 0
+                    ? Math.min(
+                        100,
+                        (completed / total) * 100
+                    )
+                    : 0;
+
+            signalsList.innerHTML = `
+                <div class="list-group-item bg-dark text-info text-center py-3">
+
+                    <div class="spinner-border spinner-border-sm me-2"></div>
+
+                    <strong>
+                        Analizando vela anterior:
+                        ${completed}/${total}
+                    </strong>
+
+                    <br>
+
+                    <small class="text-muted">
+                        ${progress.current || 'Preparando análisis...'}
+                    </small>
+
+                    <div
+                        class="progress mt-2"
+                        style="height:6px;"
+                    >
+
+                        <div
+                            class="progress-bar bg-warning"
+                            style="width:${pct}%;">
                         </div>
+
                     </div>
-                ` : `
-                    <div class="list-group-item bg-dark text-warning text-center py-3">
-                        ⚠️ El warm-up continúa, pero la espera automática terminó para evitar carga infinita.
-                        <button class="btn btn-sm btn-outline-warning ms-2" onclick="window.updatePreviousSignals()">Reintentar</button>
-                    </div>
-                `;
+
+                    <small
+                        class="d-block mt-2 text-secondary"
+                    >
+                        Respuesta recibida en ${elapsed}s
+                    </small>
+
+                </div>
+            `;
+
+            if (signalsCount) {
+
+                signalsCount.textContent =
+                    `${completed}/${total}`;
+
+                signalsCount.className =
+                    'badge bg-info';
             }
+
             return;
         }
-        _futSignalReset('previous');
 
         // ------------------------------------------------------------
         // SERVIDOR TERMINÓ
@@ -1988,7 +1664,7 @@ window.updatePreviousSignals = async function() {
         // ------------------------------------------------------------
         if (signals.length === 0) {
 
-            signalsList.innerHTML = backgroundRefreshHtml + diagnosticsHtml + `
+            signalsList.innerHTML = diagnosticsHtml + `
                 <div class="list-group-item bg-dark text-warning text-center py-3">
 
                     <strong>
@@ -2210,29 +1886,38 @@ window.updatePreviousSignals = async function() {
         });
 
         signalsList.innerHTML =
-            backgroundRefreshHtml + diagnosticsHtml + html;
+            diagnosticsHtml + html;
 
     } catch (err) {
 
-        if (err?.name === 'AbortError') {
-            console.warn('⏳ PREVIOUS: Supabase/Render tardó más de 16s; se conserva el último snapshot y se reintenta con backoff.');
-        } else {
-            console.error('❌ PREVIOUS FETCH:', err);
-        }
+        console.error(
+            '❌ PREVIOUS FETCH:',
+            err
+        );
 
-        const scheduled = _futSignalSchedule('previous', () => window.updatePreviousSignals(), 8000);
-        if (!window.futuresPrevLoaded) {
-            signalsList.innerHTML = `
-                <div class="list-group-item bg-dark text-warning text-center py-3">
-                    <strong>⚠️ No se pudo consultar la vela anterior</strong><br>
-                    <small>${err.message || 'Error de conexión'}${scheduled ? ' · reintentando' : ''}</small>
-                    ${scheduled ? '' : '<button class="btn btn-sm btn-outline-warning ms-2" onclick="window.updatePreviousSignals()">Reintentar</button>'}
-                </div>
-            `;
-            if (signalsCount) {
-                signalsCount.textContent = '--';
-                signalsCount.className = 'badge bg-secondary';
-            }
+        signalsList.innerHTML = `
+            <div class="list-group-item bg-dark text-danger text-center py-3">
+
+                <strong>
+                    ❌ No se pudo consultar la vela anterior
+                </strong>
+
+                <br>
+
+                <small>
+                    ${err.message || 'Error de conexión'}
+                </small>
+
+            </div>
+        `;
+
+        if (signalsCount) {
+
+            signalsCount.textContent =
+                'ERR';
+
+            signalsCount.className =
+                'badge bg-danger';
         }
 
     } finally {
@@ -2424,7 +2109,7 @@ window.updateCorrelationInfo = function(data) {
     // directamente /api/futures/correlation
     const tf = document.getElementById('interval-select')?.value || '1h';
     
-    fetch(`/api/futures/correlation?timeframe=${encodeURIComponent(tf)}&symbol=${encodeURIComponent(window.currentFuturesSymbol || document.getElementById('futures-symbol')?.value || 'BTC-USDT')}`)
+    fetch(`/api/futures/correlation?timeframe=${tf}`)
         .then(r => r.json())
         .then(json => {
             if (!json.success) return;
@@ -2488,11 +2173,11 @@ function renderFuturesCorrelation(payload) {
         topHTML += `
             <div class="mb-2">
                 <small class="text-success fw-bold">
-                    <i class="fas fa-arrow-trend-up me-1"></i>Mayor fuerza alcista (LONG):
+                    <i class="fas fa-arrow-up me-1"></i>🚀 Mayor fuerza ALCISTA (LONG):
                 </small>
                 <div class="mt-1">
                     ${topLong.map((r, idx) => {
-                        const medal = `${idx + 1}.`;
+                        const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : '🥉';
                         return `
                             <div class="d-flex justify-content-between small">
                                 <span>${medal} ${r.symbol.replace('-', '/')}</span>
@@ -2509,11 +2194,11 @@ function renderFuturesCorrelation(payload) {
         topHTML += `
             <div class="mb-2">
                 <small class="text-danger fw-bold">
-                    <i class="fas fa-arrow-trend-down me-1"></i>Mayor fuerza bajista (SHORT):
+                    <i class="fas fa-arrow-down me-1"></i>📉 Mayor fuerza BAJISTA (SHORT):
                 </small>
                 <div class="mt-1">
                     ${topShort.map((r, idx) => {
-                        const medal = `${idx + 1}.`;
+                        const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : '🥉';
                         return `
                             <div class="d-flex justify-content-between small">
                                 <span>${medal} ${r.symbol.replace('-', '/')}</span>
@@ -2544,26 +2229,13 @@ function renderFuturesCorrelation(payload) {
         </div>
     `;
     
-    const title = document.getElementById('correlation-panel-title');
-    if (title) title.innerHTML = '<i class="fas fa-network-wired me-2"></i>Contexto intermercado Futures';
-    const ctx = payload.intermarket_context || {};
-    const fmtCtx = (v, digits=2) => (v === null || v === undefined || v === '') ? '--' : (Number.isFinite(Number(v)) ? Number(v).toFixed(digits) : String(v));
-    const htf = (row) => row?.available ? `${String(row.direction || 'neutral').toUpperCase()} · ADX ${fmtCtx(row.adx,1)}` : 'SIN DATOS';
-    const contextHTML = `
-        <div class="mt-3 p-2 bg-dark rounded small border border-secondary">
-            <div class="fw-semibold text-info mb-1">Contexto para ${ctx.selected_symbol || '--'}</div>
-            <div>BTC 12H: <b>${htf(ctx.btc_12h)}</b> · BTC 1D: <b>${htf(ctx.btc_1d)}</b></div>
-            <div>Amplitud: ${ctx.breadth?.bullish ?? 0} alcistas / ${ctx.breadth?.bearish ?? 0} bajistas · Régimen: <b>${ctx.regime || '--'}</b></div>
-            <div>Funding: ${fmtCtx(ctx.funding_rate,4)} · OI Δ: ${fmtCtx(ctx.oi_change_pct,2)}% · Orderbook: ${fmtCtx(ctx.orderbook_imbalance,2)} · Liquidez: ${ctx.liquidity_band || '--'}</div>
-        </div>`;
     container.innerHTML = `
         <div class="mb-2">
-            <small class="text-muted">Direcciones y fuerza del universo Futures en <strong>${payload.timeframe}</strong>. No es rotación BTC/PAXG.</small>
+            <small class="text-muted">Direcciones y fuerza de las 5 cripto de futuros en <strong>${payload.timeframe}</strong>:</small>
         </div>
         ${pairsHTML}
         ${topHTML}
         ${explanation}
-        ${contextHTML}
     `;
 }
 
@@ -2742,7 +2414,7 @@ function _futScalpingApplyPreferences(
 
     _futScalpingSetMessage(
         enabled
-            ? 'Alertas Futures 30m activadas con tu horario personal.'
+            ? 'Alertas de scalping activadas con tu horario personal.'
             : 'Alertas de scalping desactivadas.',
         enabled
             ? 'success'
@@ -2947,7 +2619,7 @@ function _futScalpingValidateForm(
         )
         || payload.futures_scalping_timeframes.length === 0
     ) {
-        return 'Selecciona 30m.';
+        return 'Selecciona al menos 5m, 15m o 30m.';
     }
 
     if (
@@ -3179,938 +2851,6 @@ function _futDetectBrowserTimezone() {
     }
 }
 
-// ============================================================================
-// COMMIT 36P — PERFIL PERSONAL DE RIESGO FUTURES
-// ============================================================================
-
-window._futuresRiskProfile = null;
-
-
-function _futRiskNumber(value) {
-
-    const number = Number(
-        value
-    );
-
-    if (
-        !Number.isFinite(
-            number
-        )
-        || number <= 0
-    ) {
-        return null;
-    }
-
-    return number;
-}
-
-
-function _futRiskInputValue(
-    id,
-    value
-) {
-
-    const element =
-        document.getElementById(
-            id
-        );
-
-    if (!element) {
-        return;
-    }
-
-    element.value =
-        value === null
-        || value === undefined
-            ? ''
-            : value;
-}
-
-
-function _futRiskSetStatus(
-    mode
-) {
-
-    const badge =
-        document.getElementById(
-            'futures-risk-status-badge'
-        );
-
-    if (!badge) {
-        return;
-    }
-
-    if (
-        mode === 'PROFILE_ADVISORY'
-    ) {
-
-        badge.textContent =
-            'PERFIL';
-
-        badge.className =
-            'badge bg-info text-dark';
-
-    } else {
-
-        badge.textContent =
-            'MANUAL';
-
-        badge.className =
-            'badge bg-secondary';
-    }
-}
-
-
-function _futRiskSetMessage(
-    text,
-    type = 'secondary'
-) {
-
-    const element =
-        document.getElementById(
-            'futures-risk-message'
-        );
-
-    if (!element) {
-        return;
-    }
-
-    element.className =
-        (
-            'alert '
-            + `alert-${type} `
-            + 'py-2 px-2 small mb-3'
-        );
-
-    element.textContent =
-        text;
-}
-
-
-function _futApplyRiskProfileForm(
-    profile,
-    user
-) {
-
-    profile =
-        profile
-        || {};
-
-    window._futuresRiskProfile =
-        profile;
-
-
-    const mode =
-        String(
-            profile.futures_risk_mode
-            || 'MANUAL'
-        ).toUpperCase();
-
-
-    const policy =
-        String(
-            profile.futures_margin_policy
-            || 'FIXED_USDT'
-        ).toUpperCase();
-
-
-    const modeEl =
-        document.getElementById(
-            'futures-risk-mode'
-        );
-
-    const policyEl =
-        document.getElementById(
-            'futures-margin-policy'
-        );
-
-
-    if (modeEl) {
-        modeEl.value =
-            mode;
-    }
-
-
-    if (policyEl) {
-        policyEl.value =
-            policy;
-    }
-
-
-    _futRiskInputValue(
-        'futures-risk-equity',
-        profile.futures_equity_usdt
-    );
-
-
-    _futRiskInputValue(
-        'futures-risk-allocation',
-        profile.futures_max_allocation_pct
-    );
-
-
-    _futRiskInputValue(
-        'futures-risk-max-loss',
-        profile
-            .futures_max_loss_pct_equity_per_trade
-    );
-
-
-    _futRiskInputValue(
-        'futures-risk-preferred-margin',
-        profile.futures_preferred_margin_usdt
-    );
-
-
-    _futRiskInputValue(
-        'futures-risk-max-leverage',
-        profile.futures_personal_max_leverage
-    );
-
-
-    const userLabel =
-        document.getElementById(
-            'futures-risk-user-label'
-        );
-
-
-    if (userLabel) {
-
-        userLabel.textContent =
-            user
-            || '—';
-    }
-
-
-    _futRiskSetStatus(
-        mode
-    );
-
-
-    if (
-        mode === 'PROFILE_ADVISORY'
-    ) {
-
-        _futRiskSetMessage(
-            (
-                'Perfil personal activo. '
-                + 'El sistema usará tus límites para '
-                + 'sugerirte cuánto margen y leverage usar. '
-                + 'No convierte una señal mala en buena.'
-            ),
-            'info'
-        );
-
-    } else {
-
-        _futRiskSetMessage(
-            (
-                'Modo manual: tú decides cuánto margen '
-                + 'y leverage utilizar. '
-                + 'Tus límites personales no se aplican '
-                + 'automáticamente.'
-            ),
-            'secondary'
-        );
-    }
-}
-
-
-window.loadFuturesRiskProfile =
-async function({
-    silent = false
-} = {}) {
-
-    if (
-        !window.IS_FUTURES_PAGE
-    ) {
-        return null;
-    }
-
-
-    try {
-
-        const response =
-            await fetch(
-                '/api/user/futures-risk-profile',
-                {
-                    method:
-                        'GET',
-
-                    credentials:
-                        'same-origin',
-
-                    cache:
-                        'no-store'
-                }
-            );
-
-
-        const json =
-            await response.json();
-
-
-        if (
-            !response.ok
-            || !json.success
-        ) {
-
-            if (
-                response.status === 401
-            ) {
-
-                window._futuresRiskProfile =
-                    null;
-
-                _futRiskSetStatus(
-                    'MANUAL'
-                );
-
-                _futRiskSetMessage(
-                    (
-                        'Inicia sesión para usar '
-                        + 'tu perfil de riesgo Futures.'
-                    ),
-                    'secondary'
-                );
-
-                return null;
-            }
-
-
-            throw new Error(
-                json.error
-                || 'No se pudo cargar el perfil.'
-            );
-        }
-
-
-        _futApplyRiskProfileForm(
-            json.profile,
-            json.user
-        );
-
-
-        return json.profile;
-
-
-    } catch (error) {
-
-        console.warn(
-            '⚠️ Perfil de riesgo:',
-            error
-        );
-
-
-        if (!silent) {
-
-            _futRiskSetMessage(
-                (
-                    'No se pudo cargar el perfil. '
-                    + 'Se conserva modo manual.'
-                ),
-                'warning'
-            );
-        }
-
-
-        return null;
-    }
-};
-
-
-function _futCollectRiskProfile() {
-
-    const mode =
-        String(
-            document
-                .getElementById(
-                    'futures-risk-mode'
-                )
-                ?.value
-            || 'MANUAL'
-        ).toUpperCase();
-
-
-    const policy =
-        String(
-            document
-                .getElementById(
-                    'futures-margin-policy'
-                )
-                ?.value
-            || 'FIXED_USDT'
-        ).toUpperCase();
-
-
-    const optionalNumber =
-        id => {
-
-            const value =
-                document
-                    .getElementById(
-                        id
-                    )
-                    ?.value;
-
-            if (
-                value === ''
-                || value === undefined
-                || value === null
-            ) {
-                return null;
-            }
-
-            const number =
-                Number(
-                    value
-                );
-
-            return Number.isFinite(
-                number
-            )
-                ? number
-                : null;
-        };
-
-
-    return {
-        futures_risk_mode:
-            mode,
-
-        futures_margin_policy:
-            policy,
-
-        futures_equity_usdt:
-            optionalNumber(
-                'futures-risk-equity'
-            ),
-
-        futures_max_allocation_pct:
-            optionalNumber(
-                'futures-risk-allocation'
-            ),
-
-        futures_max_loss_pct_equity_per_trade:
-            optionalNumber(
-                'futures-risk-max-loss'
-            ),
-
-        futures_preferred_margin_usdt:
-            optionalNumber(
-                'futures-risk-preferred-margin'
-            ),
-
-        futures_personal_max_leverage:
-            optionalNumber(
-                'futures-risk-max-leverage'
-            ),
-    };
-}
-
-
-window.saveFuturesRiskProfile =
-async function() {
-
-    try {
-
-        const profile =
-            _futCollectRiskProfile();
-
-
-        const response =
-            await fetch(
-                '/api/user/futures-risk-profile',
-                {
-                    method:
-                        'POST',
-
-                    credentials:
-                        'same-origin',
-
-                    headers: {
-                        'Content-Type':
-                            'application/json'
-                    },
-
-                    body:
-                        JSON.stringify(
-                            profile
-                        )
-                }
-            );
-
-
-        const json =
-            await response.json();
-
-
-        if (
-            !response.ok
-            || !json.success
-        ) {
-
-            throw new Error(
-                json.error
-                || 'No se pudo guardar.'
-            );
-        }
-
-
-        _futApplyRiskProfileForm(
-            json.profile,
-            json.user
-        );
-
-
-        futShowToast(
-            '🛡️ Perfil Futures guardado',
-            'success'
-        );
-
-
-    } catch (error) {
-
-        _futRiskSetMessage(
-            error.message,
-            'danger'
-        );
-
-
-        futShowToast(
-            (
-                'Perfil de riesgo: '
-                + error.message
-            ),
-            'danger'
-        );
-    }
-};
-
-
-function _futCalculatePersonalSizing(
-    signal,
-    entry,
-    stopLoss
-) {
-
-    const profile =
-        window._futuresRiskProfile
-        || {};
-
-
-    const mode =
-        String(
-            profile.futures_risk_mode
-            || 'MANUAL'
-        ).toUpperCase();
-
-
-    const technicalLeverage =
-        Math.max(
-            1,
-            Math.floor(
-                Number(
-                    signal?.leverage
-                )
-                || 1
-            )
-        );
-
-
-    let appliedLeverage =
-        technicalLeverage;
-
-
-    const personalMax =
-        _futRiskNumber(
-            profile
-                .futures_personal_max_leverage
-        );
-
-
-    if (
-        mode === 'PROFILE_ADVISORY'
-        && personalMax
-    ) {
-
-        appliedLeverage =
-            Math.min(
-                technicalLeverage,
-                Math.max(
-                    1,
-                    Math.floor(
-                        personalMax
-                    )
-                )
-            );
-    }
-
-
-    // ================================================================
-    // DEFAULT ANTIGUO
-    // ================================================================
-
-    let baseMargin =
-        10.0;
-
-    let marginSource =
-        'DEFAULT_10_USDT';
-
-
-    const equity =
-        _futRiskNumber(
-            profile
-                .futures_equity_usdt
-        );
-
-
-    const allocationPct =
-        _futRiskNumber(
-            profile
-                .futures_max_allocation_pct
-        );
-
-
-    const preferredMargin =
-        _futRiskNumber(
-            profile
-                .futures_preferred_margin_usdt
-        );
-
-
-    const maxLossPct =
-        _futRiskNumber(
-            profile
-                .futures_max_loss_pct_equity_per_trade
-        );
-
-
-    const marginPolicy =
-        String(
-            profile.futures_margin_policy
-            || 'FIXED_USDT'
-        ).toUpperCase();
-
-
-    if (
-        mode === 'PROFILE_ADVISORY'
-    ) {
-
-        if (
-            marginPolicy === 'EQUITY_PCT'
-            && equity
-            && allocationPct
-        ) {
-
-            baseMargin =
-                equity
-                * allocationPct
-                / 100.0;
-
-            marginSource =
-                'EQUITY_PCT';
-
-
-        } else if (
-            preferredMargin
-        ) {
-
-            baseMargin =
-                preferredMargin;
-
-            marginSource =
-                'FIXED_USDT';
-        }
-    }
-
-
-    let suggestedMargin =
-        baseMargin;
-
-
-    let riskBudgetUsdt =
-        null;
-
-
-    let maxMarginBySL =
-        null;
-
-
-    const entryNumber =
-        Number(
-            entry
-        );
-
-
-    const stopNumber =
-        Number(
-            stopLoss
-        );
-
-
-    let stopFraction =
-        null;
-
-
-    if (
-        Number.isFinite(
-            entryNumber
-        )
-        && entryNumber > 0
-        && Number.isFinite(
-            stopNumber
-        )
-        && stopNumber > 0
-    ) {
-
-        stopFraction =
-            Math.abs(
-                entryNumber
-                - stopNumber
-            )
-            / entryNumber;
-    }
-
-
-    // ================================================================
-    // PERSONAL MAX LOSS CAP
-    // ================================================================
-    //
-    // NO mueve el SL.
-    //
-    // Reduce margen sugerido si el sizing original implicaría
-    // una pérdida superior al presupuesto personal.
-    // ================================================================
-
-    if (
-        mode === 'PROFILE_ADVISORY'
-        && equity
-        && maxLossPct
-        && stopFraction
-        && stopFraction > 0
-    ) {
-
-        riskBudgetUsdt =
-            equity
-            * maxLossPct
-            / 100.0;
-
-
-        const lossPerMarginUsdt =
-            appliedLeverage
-            * stopFraction;
-
-
-        if (
-            lossPerMarginUsdt > 0
-        ) {
-
-            maxMarginBySL =
-                riskBudgetUsdt
-                / lossPerMarginUsdt;
-
-
-            suggestedMargin =
-                Math.min(
-                    suggestedMargin,
-                    maxMarginBySL
-                );
-        }
-    }
-
-
-    suggestedMargin =
-        Math.max(
-            0.01,
-            suggestedMargin
-        );
-
-
-    const estimatedLossAtSL =
-        (
-            stopFraction
-            && stopFraction > 0
-        )
-            ? (
-                suggestedMargin
-                * appliedLeverage
-                * stopFraction
-            )
-            : null;
-
-
-    return {
-        mode:
-            mode,
-
-        marginSource:
-            marginSource,
-
-        technicalLeverage:
-            technicalLeverage,
-
-        appliedLeverage:
-            appliedLeverage,
-
-        baseMargin:
-            baseMargin,
-
-        suggestedMargin:
-            suggestedMargin,
-
-        riskBudgetUsdt:
-            riskBudgetUsdt,
-
-        maxMarginBySL:
-            maxMarginBySL,
-
-        estimatedLossAtSL:
-            estimatedLossAtSL,
-    };
-}
-
-
-function _futApplyRiskProfileToSaveModal(
-    signal,
-    entry,
-    stopLoss
-) {
-
-    const investmentEl =
-        document.getElementById(
-            'ss-investment'
-        );
-
-    const leverageEl =
-        document.getElementById(
-            'ss-leverage'
-        );
-
-    const leverageHint =
-        document.getElementById(
-            'ss-leverage-hint'
-        );
-
-    const preview =
-        document.getElementById(
-            'ss-risk-profile-preview'
-        );
-
-
-    if (
-        !investmentEl
-        || !leverageEl
-    ) {
-        return;
-    }
-
-
-    const sizing =
-        _futCalculatePersonalSizing(
-            signal,
-            entry,
-            stopLoss
-        );
-
-
-    if (
-        sizing.mode
-        !== 'PROFILE_ADVISORY'
-    ) {
-
-        if (preview) {
-
-            preview.className =
-                (
-                    'alert alert-secondary '
-                    + 'py-2 px-3 small mb-0'
-                );
-
-            preview.textContent =
-                (
-                    'Perfil de riesgo: MANUAL. '
-                    + 'Se conserva el sizing actual.'
-                );
-        }
-
-
-        return;
-    }
-
-
-    investmentEl.value =
-        sizing
-            .suggestedMargin
-            .toFixed(
-                2
-            );
-
-
-    leverageEl.value =
-        sizing.appliedLeverage;
-
-
-    if (leverageHint) {
-
-        leverageHint.textContent =
-            (
-                'Leverage técnico: '
-                + `${sizing.technicalLeverage}x`
-                + ' · perfil usado: '
-                + `${sizing.appliedLeverage}x`
-            );
-    }
-
-
-    if (preview) {
-
-        const lossText =
-            sizing.estimatedLossAtSL
-            !== null
-                ? (
-                    sizing
-                        .estimatedLossAtSL
-                        .toFixed(
-                            2
-                        )
-                    + ' USDT'
-                )
-                : '--';
-
-
-        const budgetText =
-            sizing.riskBudgetUsdt
-            !== null
-                ? (
-                    sizing
-                        .riskBudgetUsdt
-                        .toFixed(
-                            2
-                        )
-                    + ' USDT'
-                )
-                : '--';
-
-
-        preview.className =
-            (
-                'alert alert-info '
-                + 'py-2 px-3 small mb-0'
-            );
-
-
-        preview.textContent =
-            (
-                'Margen sugerido: '
-                + `${sizing.suggestedMargin.toFixed(2)} USDT`
-                + ' · pérdida aprox. al SL: '
-                + lossText
-                + ' · límite personal: '
-                + budgetText
-            );
-    }
-}
 
 // ============================================================================
 // INICIALIZACIÓN
@@ -4215,92 +2955,18 @@ document.addEventListener('DOMContentLoaded', function() {
         1800
     );
 
-
-    // =====================================================================
-    // COMMIT 36P — PERFIL PERSONAL DE RIESGO FUTURES
-    // =====================================================================
-
-    const riskCollapse =
-        document.getElementById(
-            'futures-risk-settings-body'
-        );
-
-
-    if (riskCollapse) {
-
-        riskCollapse.addEventListener(
-            'shown.bs.collapse',
-            () => {
-
-                window.loadFuturesRiskProfile({
-                    silent: false
-                });
-            }
-        );
-    }
-
-
-    const saveRiskButton =
-        document.getElementById(
-            'btn-save-futures-risk'
-        );
-
-
-    if (saveRiskButton) {
-
-        saveRiskButton.addEventListener(
-            'click',
-            () => {
-
-                window.saveFuturesRiskProfile();
-            }
-        );
-    }
-
-
-    const refreshRiskButton =
-        document.getElementById(
-            'btn-refresh-futures-risk'
-        );
-
-
-    if (refreshRiskButton) {
-
-        refreshRiskButton.addEventListener(
-            'click',
-            () => {
-
-                window.loadFuturesRiskProfile({
-                    silent: false
-                });
-            }
-        );
-    }
-
-
-    setTimeout(
-        () => {
-
-            window.loadFuturesRiskProfile({
-                silent: true
-            });
-
-        },
-        2200
-    );
-
-
+    
     // ============ INICIALIZAR ANÁLISIS PRINCIPAL DE FUTUROS ============
 
     // Refrescar panel review cada 3 min (v15: reduce carga en Render Free)
     setInterval(() => {
         if (typeof window.refreshReviewPanel === 'function') window.refreshReviewPanel();
-    }, 900000); // RC8.3 Free Plan: 15 min
+    }, 180000);
     
     // Refrescar stats globales cada 5 min
     setInterval(() => {
         if (typeof window.loadGlobalStats === 'function') window.loadGlobalStats();
-    }, 900000); // RC8.3 Free Plan: 15 min
+    }, 300000);
     
     // Cargar señales activas y anteriores inmediatamente (con delay para que
     // futures.js termine de sobrescribir window.updateActiveSignals y updatePreviousSignals)
@@ -4325,12 +2991,12 @@ document.addEventListener('DOMContentLoaded', function() {
     // Refrescar señales activas cada 2 min (v15: reduce carga)
     setInterval(() => {
         if (typeof window.updateActiveSignals === 'function') window.updateActiveSignals();
-    }, 300000); // RC8.3 Free Plan: 5 min
+    }, 120000);
     
     // Refrescar señales anteriores cada 10 min
     setInterval(() => {
         if (typeof window.updatePreviousSignals === 'function') window.updatePreviousSignals();
-    }, 1800000); // RC8.3 Free Plan: 30 min
+    }, 600000);
     
     // Cargar correlación al inicio
     setTimeout(() => {
@@ -4380,13 +3046,8 @@ window._currentSavedSignal = null;
     if (typeof original !== 'function') return;
 
     window.showFuturesPrevJustif = function(sig) {
-    
-            sig.source_context =
-                sig.source_context
-                || 'PREVIOUS_CONFIRMED';
-    
-            // Guardar la señal en una variable global PERO también pasarla directamente al botón
-            window._currentPrevSignal = sig;
+        // Guardar la señal en una variable global PERO también pasarla directamente al botón
+        window._currentPrevSignal = sig;
         original(sig);
         
         // Configurar el botón GUARDAR para que pase la señal DIRECTAMENTE
@@ -4411,7 +3072,23 @@ window.openSaveSignalModal = function(sig, alreadyInPosition = false) {
         sig = window._currentPrevSignal;
     }
     
-   
+    // Si sigue sin haber señal, intentar usar el análisis actual del panel principal
+    if (!sig && window.currentAnalysis && window.currentAnalysis.decision) {
+        const d = window.currentAnalysis.decision;
+        const l = window.currentAnalysis.levels || {};
+        sig = {
+            symbol: window.currentAnalysis.symbol || window.currentSymbol,
+            timeframe: window.currentAnalysis.timeframe || window.currentInterval,
+            action: (d.action === 'SHORT' || d.action === 'VENTA_SPOT') ? 'SHORT' : 'LONG',
+            confidence: d.confidence || 0,
+            entry: l.entry || window.currentAnalysis.current_price,
+            stop_loss: l.stop_loss || 0,
+            take_profit: l.take_profit || 0,
+            leverage: l.leverage || 1
+        };
+        console.log('✅ Usando análisis actual como fallback:', sig.symbol, sig.action);
+    }
+    
     if (!sig) {
         showToast('No hay señal activa ni seleccionada. Esperá a que cargue el análisis o hacé clic en una señal de la vela anterior.', 'warning');
         return;
@@ -4462,107 +3139,23 @@ window.openSaveSignalModal = function(sig, alreadyInPosition = false) {
     document.getElementById('ss-leverage').value = sig.leverage || 1;
     document.getElementById('ss-leverage-hint').textContent = `Sugerido por el sistema: ${sig.leverage || 1}x`;
     
-    // ============================================================
-    // 36M FINAL — NO INVENTAR ENTRY / SL / TP
-    // ============================================================
-    // Las señales Previous deben conservar los niveles estructurales
-    // calculados por el sistema.
-    //
-    // El precio live sólo puede servir como referencia de Entry cuando
-    // el usuario declara explícitamente "Guardar en operación".
-    // Nunca se fabrican SL/TP porcentuales de respaldo.
-    // ============================================================
-    
-    const sourceEntry = Number(
-        sig.entry
-        || sig.entry_price
+    // Fallback: si no hay entry/sl/tp en la señal, usar el precio actual del mercado como base
+    const currentPrice = Number(
+        sig.current_price
+        || sig.live_price
+        || window.lastPrices?.[sig.symbol]
+        || window.currentAnalysis?.current_price
         || 0
     );
+    const defaultEntry = currentPrice > 0 ? currentPrice.toFixed(2) : '';
+    const defaultSL = currentPrice > 0 ? (currentPrice * 0.95).toFixed(2) : '';  // 5% abajo
+    const defaultTP = currentPrice > 0 ? (currentPrice * 1.10).toFixed(2) : '';  // 10% arriba
     
-    const sourceSL = Number(
-        sig.stop_loss
-        || 0
-    );
-    
-    const sourceTP = Number(
-        sig.take_profit
-        || 0
-    );
-    
-    // Una Previous guardable debe conservar siempre SL y TP reales.
-    if (
-        !(sourceSL > 0)
-        || !(sourceTP > 0)
-    ) {
-        futShowToast(
-            'No se puede guardar: la señal no conserva SL/TP estructurales válidos.',
-            'warning'
-        );
-        return;
-    }
-    
-    // Si todavía NO estamos en posición, también debe existir
-    // el Entry estructural original.
-    if (
-        !alreadyInPosition
-        && !(sourceEntry > 0)
-    ) {
-        futShowToast(
-            'No se puede guardar: la señal no conserva un Entry estructural válido.',
-            'warning'
-        );
-        return;
-    }
-    
-    // Sólo "Guardar en operación" puede sugerir el precio live
-    // como Entry editable. Nunca se usa para fabricar SL o TP.
-    const liveEntryPrice = alreadyInPosition
-        ? Number(
-            sig.current_price
-            || sig.live_price
-            || window.lastPrices?.[sig.symbol]
-            || 0
-        )
-        : 0;
-    
-    document.getElementById('ss-entry').value =
-        alreadyInPosition
-            ? (
-                liveEntryPrice > 0
-                    ? liveEntryPrice.toFixed(2)
-                    : sourceEntry
-            )
-            : sourceEntry;
-    
-    document.getElementById('ss-sl').value =
-        sourceSL;
-    
-    document.getElementById('ss-tp').value =
-        sourceTP;
-
-    // ============================================================
-    // COMMIT 36P
-    // QUALITY GATE YA OCURRIÓ.
-    // AHORA SÓLO APLICAMOS SIZING PERSONAL.
-    // ============================================================
-
-    const riskSizingEntry =
-        Number(
-            document
-                .getElementById(
-                    'ss-entry'
-                )
-                ?.value
-            || sourceEntry
-        );
-
-
-    _futApplyRiskProfileToSaveModal(
-        sig,
-        riskSizingEntry,
-        sourceSL
-    );
-    
+    document.getElementById('ss-entry').value = alreadyInPosition
+        ? (defaultEntry || sig.entry || sig.entry_price || '')
+        : (sig.entry || sig.entry_price || defaultEntry);
+    document.getElementById('ss-sl').value = sig.stop_loss || defaultSL;
+    document.getElementById('ss-tp').value = sig.take_profit || defaultTP;
     document.getElementById('ss-notes').value = '';
     // v22.9.4: fecha/hora de ingreso — default = ahora en zona local del navegador
     document.getElementById('ss-entry-at').value = _nowLocalDatetimeInput();
@@ -4740,15 +3333,10 @@ window.confirmSaveSignal = async function() {
 
         source_signal_id:
             sig.source_signal_id
-            || sig.signal_id
             || null,
-        
-                source_context:
-                    sig.source_context
-                    || null,
-        
-                manual_override_ack:
-                    Boolean(
+
+        manual_override_ack:
+            Boolean(
                 sig.manual_override_ack
             ),
 
@@ -5034,7 +3622,10 @@ async function(detailsEl) {
                                 class="text-end"
                             >
                                 ${
-                                    _statusBadge(s)
+                                    _statusBadge(
+                                        s.status,
+                                        s.entry_touched
+                                    )
                                 }
 
                                 ${
@@ -5126,296 +3717,28 @@ window.updateSavedSignalsList = async function() {
         const kJson = await kRes.json();
         if (kJson.success) {
             const k = kJson.data || {};
-            const wrEl =
-                document.getElementById(
-                    'ss-kpi-winrate'
-                );
-
-            const pnlEl =
-                document.getElementById(
-                    'ss-kpi-pnl'
-                );
-
-            const netEl =
-                document.getElementById(
-                    'ss-kpi-net'
-                );
-
-            const economicsEl =
-                document.getElementById(
-                    'ss-kpi-econ-coverage'
-                );
-
-            const cntEl =
-                document.getElementById(
-                    'ss-kpi-count'
-                );
-
-
-            // ========================================================
-            // KPI ANTIGUO — WIN RATE
-            // ========================================================
-
+            const wrEl = document.getElementById('ss-kpi-winrate');
+            const pnlEl = document.getElementById('ss-kpi-pnl');
+            const cntEl = document.getElementById('ss-kpi-count');
             if (wrEl) {
-
-                wrEl.textContent =
-                    `WR: ${(k.win_rate || 0).toFixed(1)}%`;
-
-                let cls =
-                    'bg-secondary';
-
+                wrEl.textContent = `WR: ${(k.win_rate || 0).toFixed(1)}%`;
+                let cls = 'bg-secondary';
                 if (k.total >= 5) {
-
-                    cls =
-                        k.win_rate >= 55
-                            ? 'bg-success'
-                            : (
-                                k.win_rate >= 40
-                                    ? 'bg-warning text-dark'
-                                    : 'bg-danger'
-                            );
+                    cls = k.win_rate >= 55 ? 'bg-success' : (k.win_rate >= 40 ? 'bg-warning text-dark' : 'bg-danger');
                 }
-
-                wrEl.className =
-                    'badge ' + cls;
+                wrEl.className = 'badge ' + cls;
             }
-
-
-            // ========================================================
-            // KPI BRUTO EXISTENTE
-            // ========================================================
-
             if (pnlEl) {
-
-                const grossPnl =
-                    Number(
-                        k.pnl_total_usdt
-                        || 0
-                    );
-
-                const sign =
-                    grossPnl >= 0
-                        ? '+'
-                        : '';
-
-                pnlEl.textContent =
-                    (
-                        `PnL bruto: `
-                        + `${sign}`
-                        + `${grossPnl.toFixed(2)} USDT`
-                    );
-
-                let cls =
-                    'bg-secondary';
-
+                const sign = (k.pnl_total_usdt || 0) >= 0 ? '+' : '';
+                pnlEl.textContent = `PnL: ${sign}${(k.pnl_total_usdt || 0).toFixed(2)} USDT`;
+                let cls = 'bg-secondary';
                 if (k.total >= 5) {
-
-                    cls =
-                        grossPnl > 0
-                            ? 'bg-success'
-                            : (
-                                grossPnl < 0
-                                    ? 'bg-danger'
-                                    : 'bg-warning text-dark'
-                            );
+                    cls = k.pnl_total_usdt > 0 ? 'bg-success' : (k.pnl_total_usdt < 0 ? 'bg-danger' : 'bg-warning text-dark');
                 }
-
-                pnlEl.className =
-                    'badge ' + cls;
+                pnlEl.className = 'badge ' + cls;
             }
-
-
-            // ========================================================
-            // COMMIT 36O.3
-            // ECONOMÍA NET ESTIMADA
-            // ========================================================
-
-            const economics =
-                (
-                    k.economics
-                    && typeof k.economics === 'object'
-                )
-                    ? k.economics
-                    : {};
-
-
-            const netSamples =
-                Number(
-                    economics.net_samples
-                    || 0
-                );
-
-
-            const closedTotal =
-                Number(
-                    economics.closed_total
-                    ?? k.total
-                    ?? 0
-                );
-
-
-            const coveragePct =
-                Number(
-                    economics.coverage_pct
-                    || 0
-                );
-
-
-            if (netEl) {
-
-                if (netSamples > 0) {
-
-                    const netPnl =
-                        Number(
-                            economics
-                                .estimated_net_pnl_total_usdt
-                            || 0
-                        );
-
-                    const netSign =
-                        netPnl >= 0
-                            ? '+'
-                            : '';
-
-                    netEl.textContent =
-                        (
-                            `Neto est.: `
-                            + `${netSign}`
-                            + `${netPnl.toFixed(2)} USDT`
-                        );
-
-
-                    // Deliberadamente neutral:
-                    // es una estimación económica,
-                    // NO una señal de trading.
-
-                    netEl.className =
-                        'badge bg-secondary';
-
-
-                    const netExp =
-                        economics
-                            .estimated_net_expectancy_r;
-
-
-                    const netExpText =
-                        (
-                            netExp === null
-                            || netExp === undefined
-                        )
-                            ? '--'
-                            : Number(
-                                netExp
-                            ).toFixed(3);
-
-
-                    netEl.title =
-                        (
-                            `Neto estimado. `
-                            + `Muestra: ${netSamples}. `
-                            + `Expectancy neta est.: `
-                            + `${netExpText}R. `
-                            + `Fee/slippage estimados; `
-                            + `funding rates públicos observados. `
-                            + `No autoriza Commit 37.`
-                        );
-
-                } else {
-
-                    netEl.textContent =
-                        'Neto est.: --';
-
-                    netEl.className =
-                        'badge bg-secondary';
-
-                    netEl.title =
-                        (
-                            'Todavía no existen operaciones '
-                            + 'cerradas con economía calculable '
-                            + 'completa.'
-                        );
-                }
-            }
-
-
-            // ========================================================
-            // COMMIT 36O.3
-            // COBERTURA ECONÓMICA
-            // ========================================================
-
-            if (economicsEl) {
-
-                economicsEl.textContent =
-                    (
-                        `Costes: `
-                        + `${netSamples}/`
-                        + `${closedTotal} `
-                        + `(${coveragePct.toFixed(0)}%)`
-                    );
-
-
-                // También se mantiene neutral.
-                // Cobertura != rentabilidad.
-
-                economicsEl.className =
-                    'badge bg-dark';
-
-
-                const grossExp =
-                    economics
-                        .gross_expectancy_r;
-
-
-                const netExp =
-                    economics
-                        .estimated_net_expectancy_r;
-
-
-                const grossExpText =
-                    (
-                        grossExp === null
-                        || grossExp === undefined
-                    )
-                        ? '--'
-                        : Number(
-                            grossExp
-                        ).toFixed(3);
-
-
-                const netExpText =
-                    (
-                        netExp === null
-                        || netExp === undefined
-                    )
-                        ? '--'
-                        : Number(
-                            netExp
-                        ).toFixed(3);
-
-
-                economicsEl.title =
-                    (
-                        `Cobertura económica: `
-                        + `${netSamples}/${closedTotal}. `
-                        + `Expectancy bruta: `
-                        + `${grossExpText}R. `
-                        + `Expectancy neta estimada: `
-                        + `${netExpText}R.`
-                    );
-            }
-
-
-            // ========================================================
-            // CONTADOR EXISTENTE
-            // ========================================================
-
             if (cntEl) {
-
-                cntEl.textContent =
-                    (
-                        `${k.total || 0} cerradas / `
-                        + `${k.active || 0} activas`
-                    );
+                cntEl.textContent = `${k.total || 0} cerradas / ${k.active || 0} activas`;
             }
         }
         
@@ -5529,7 +3852,10 @@ window.updateSavedSignalsList = async function() {
                     ? 'success'
                     : 'danger';        
             const statusBadge =
-                _statusBadge(s);
+                _statusBadge(
+                    s.status,
+                    s.entry_touched
+                );
         
             const pnlDisplay =
                 _formatPnl(s);
@@ -5618,10 +3944,9 @@ window.updateSavedSignalsList = async function() {
                     guardian.tp_progress_ratio
                 );
 
-            const managementReason = futHumanReason(
+            const managementReason =
                 guardian.management_reason
                 || guardian.reason
-            )
                 || '';
 
             const guardianProtects = (
@@ -6141,7 +4466,7 @@ window.updateSavedSignalsList = async function() {
                             </span>
                 
                             <div class="small text-info mt-1">
-                                ${futHumanReason(guardian.reason || '')}
+                                ${guardian.reason || ''}
                             </div>
                         </div>
                     `;
@@ -6233,7 +4558,7 @@ window.updateSavedSignalsList = async function() {
                                 </div>
                 
                                 <div class="mt-2 text-danger">
-                                    ${futHumanReason(guardian.reason || '')}
+                                    ${guardian.reason || ''}
                                 </div>
                 
                             </div>
@@ -6251,7 +4576,7 @@ window.updateSavedSignalsList = async function() {
                                 🛡️ Guardian: REDUCIR / PROTEGER
                             </span>
                             <div class="small text-warning mt-1">
-                                ${futHumanReason(guardian.reason || '')}
+                                ${guardian.reason || ''}
                             </div>
                         </div>
                     `;
@@ -6338,55 +4663,17 @@ window.updateSavedSignalsList = async function() {
     }
 };
 
-function _statusBadge(signalOrStatus, entryTouched) {
-    const signal = (
-        signalOrStatus
-        && typeof signalOrStatus === 'object'
-    )
-        ? signalOrStatus
-        : {
-            status: signalOrStatus,
-            entry_touched: entryTouched,
-        };
-
-    const status = String(signal.status || '').toLowerCase();
-    const touched = Boolean(signal.entry_touched);
-
-    // HOTFIX 14.2: el motivo SL no equivale necesariamente a LOSS.
-    // Si Guardian/manual movió el SL por encima de Entry (LONG) o por debajo
-    // (SHORT), el PnL observado manda para la etiqueta económica.
-    let grossOutcome = String(signal.gross_outcome || '').toUpperCase();
-    if (!grossOutcome && touched && !['active', 'entry_touched', 'expired'].includes(status)) {
-        const pnl = Number(signal.pnl_pct);
-        if (Number.isFinite(pnl)) {
-            grossOutcome = pnl > 0 ? 'WIN' : pnl < 0 ? 'LOSS' : 'BREAKEVEN';
-        }
-    }
-
+function _statusBadge(status, entryTouched) {
     if (status === 'active') return '<span class="badge bg-info">⏳ Esperando entry</span>';
     if (status === 'entry_touched') return '<span class="badge bg-primary">🎯 En operación</span>';
-    if (status === 'tp_hit') {
-        if (grossOutcome === 'LOSS') return '<span class="badge bg-danger">TP · resultado negativo</span>';
-        if (grossOutcome === 'BREAKEVEN') return '<span class="badge bg-secondary">TP · break-even</span>';
-        return '<span class="badge bg-success">✅ TP · WIN</span>';
-    }
-    if (status === 'sl_hit') {
-        if (grossOutcome === 'WIN') {
-            return '<span class="badge bg-success">✅ SL protegido · WIN</span>';
-        }
-        if (grossOutcome === 'BREAKEVEN') {
-            return '<span class="badge bg-secondary">◦ SL protegido · BE</span>';
-        }
-        return '<span class="badge bg-danger">❌ SL · LOSS</span>';
-    }
+    if (status === 'tp_hit') return '<span class="badge bg-success">✅ TP</span>';
+    if (status === 'sl_hit') return '<span class="badge bg-danger">❌ SL</span>';
     if (status === 'expired') {
         return '<span class="badge bg-secondary">⌛ Expirada sin Entry</span>';
     }
     if (status === 'closed_manual') {
-        if (!touched) return '<span class="badge bg-secondary">🔒 Cerrada (sin entry)</span>';
-        if (grossOutcome === 'WIN') return '<span class="badge bg-success">✅ Cierre manual · WIN</span>';
-        if (grossOutcome === 'LOSS') return '<span class="badge bg-danger">❌ Cierre manual · LOSS</span>';
-        return '<span class="badge bg-secondary">◦ Cierre manual · BE</span>';
+        return entryTouched ? '<span class="badge bg-warning text-dark">🔒 Cerrada</span>'
+                             : '<span class="badge bg-secondary">🔒 Cerrada (sin entry)</span>';
     }
     return `<span class="badge bg-secondary">${status}</span>`;
 }
@@ -6423,19 +4710,6 @@ window.openSavedSignalDetail = async function(signalId) {
         window._currentSavedSignal = sig;
         const c = json.candles;
         const currentPrice = json.current_price;
-        const savedEntry = Number(sig.entry || 0);
-        const originalEntry = Number(sig.original_entry || 0);
-        const hasDifferentOriginalEntry = (
-            savedEntry > 0
-            && originalEntry > 0
-            && Math.abs(savedEntry - originalEntry)
-                > Math.max(1e-10, savedEntry * 0.000001)
-        );
-        const marketDataLabel = (
-            json.market_data_source === 'KUCOIN_FUTURES_PERPETUAL_REST'
-                ? 'KuCoin Futures perpetuo'
-                : 'Futures'
-        );
         
         // Habilitar/deshabilitar botones según estado
         const isOpen = (sig.status === 'active' || sig.status === 'entry_touched');
@@ -6445,7 +4719,7 @@ window.openSavedSignalDetail = async function(signalId) {
         // Renderizar body con panel de info + div para el gráfico
         const emoji = sig.action === 'LONG' ? '📈' : '📉';
         const badgeClass = sig.action === 'LONG' ? 'success' : 'danger';
-        const statusBadge = _statusBadge(sig);
+        const statusBadge = _statusBadge(sig.status, sig.entry_touched);
         const pnlDisplay = _formatPnl(sig);
         
         body.innerHTML = `
@@ -6458,18 +4732,11 @@ window.openSavedSignalDetail = async function(signalId) {
                 ${statusBadge}
                 <div class="ms-auto">${pnlDisplay}</div>
             </div>
-            <div class="row g-2 mb-2 small">
-                <div class="col-md-3"><span class="text-muted">Entry operativo guardado:</span> <strong class="text-primary">${sig.entry}</strong></div>
+            <div class="row g-2 mb-3 small">
+                <div class="col-md-3"><span class="text-muted">Entry:</span> <strong class="text-primary">${sig.entry}</strong></div>
                 <div class="col-md-3"><span class="text-muted">SL:</span> <strong class="text-danger">${sig.stop_loss}</strong></div>
                 <div class="col-md-3"><span class="text-muted">TP:</span> <strong class="text-success">${sig.take_profit}</strong></div>
-                <div class="col-md-3"><span class="text-muted">Precio actual Futures:</span> <strong>${currentPrice}</strong></div>
-            </div>
-            <div class="small text-muted mb-3">
-                Fuente de seguimiento: <strong>${marketDataLabel}</strong>.
-                ${hasDifferentOriginalEntry
-                    ? `· Entry original del análisis: <strong>${originalEntry}</strong>.`
-                    : ''}
-                El lifecycle usa el <strong>Entry operativo guardado</strong>.
+                <div class="col-md-3"><span class="text-muted">Precio actual:</span> <strong>${currentPrice}</strong></div>
             </div>
             <div class="row g-2 mb-3 small">
                 <div class="col-md-6"><span class="text-muted">🕒 Ingreso:</span> <strong>${_fmtLocalDate(sig.entry_at || sig.created_at)}</strong></div>

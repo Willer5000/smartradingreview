@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-VERSION = "RC9_2_OPERATIONAL_INTELLIGENCE_V1"
+VERSION = "COMMIT9_4_OPERATIONAL_INTELLIGENCE_V1"
 
 DIRECTIONAL_ACTIONS = {"LONG", "SHORT", "COMPRA_SPOT", "VENTA_SPOT"}
 NON_DIRECTIONAL_ACTIONS = {"ESPERAR", "PRECAUCION", "NO_OPERAR"}
@@ -183,10 +183,12 @@ def _norm_direction(value: Any) -> str:
 
 
 def _analysis_snapshot(tf: str, analysis: Mapping[str, Any] | None, *, current_layers: Mapping[str, Any] | None = None) -> Dict[str, Any]:
+    """Compact MTF snapshot including higher-timeframe anomalous-volume context."""
     if current_layers is not None:
         trend = dict(current_layers.get("trend") or {})
         momentum = dict(current_layers.get("momentum") or {})
         structure = dict(current_layers.get("structure") or {})
+        volume = dict(current_layers.get("volume") or {})
         return {
             "available": True,
             "timeframe": _u(tf),
@@ -194,6 +196,13 @@ def _analysis_snapshot(tf: str, analysis: Mapping[str, Any] | None, *, current_l
             "adx": round(_f(trend.get("adx")), 2),
             "momentum": _norm_direction(momentum.get("direction")),
             "structure": _norm_direction(structure.get("direction") or structure.get("structure_direction")),
+            "whale_buy_confirmed": bool(volume.get("whale_buy_confirmed") or volume.get("whale_buy")),
+            "whale_sell_confirmed": bool(volume.get("whale_sell_confirmed") or volume.get("whale_sell")),
+            "whale_extended_buy": bool(volume.get("whale_extended_buy")),
+            "whale_extended_sell": bool(volume.get("whale_extended_sell")),
+            "whale_event_pending": bool(volume.get("whale_event_pending")),
+            "whale_event_age_bars": volume.get("whale_event_age_bars"),
+            "whale_signal_strength": _f(volume.get("whale_signal_strength")),
             "closed_candle": True,
             "source": "CURRENT",
         }
@@ -203,6 +212,10 @@ def _analysis_snapshot(tf: str, analysis: Mapping[str, Any] | None, *, current_l
     trend = dict(row.get("trend") or {})
     momentum = dict(row.get("momentum") or {})
     structure = dict(row.get("structure") or {})
+    volume = dict(row.get("volume") or {})
+    # Some compact Guardian snapshots carry the volume layer under `layers`.
+    if not volume and isinstance(row.get("layers"), Mapping):
+        volume = dict((row.get("layers") or {}).get("volume") or {})
     closed = row.get("source_candle_closed")
     if closed is None:
         closed = str(row.get("analysis_mode") or "").upper() in {"CLOSED_CANDLE", ""}
@@ -213,11 +226,17 @@ def _analysis_snapshot(tf: str, analysis: Mapping[str, Any] | None, *, current_l
         "adx": round(_f(trend.get("adx")), 2),
         "momentum": _norm_direction(momentum.get("direction")),
         "structure": _norm_direction(structure.get("direction") or structure.get("structure_direction")),
+        "whale_buy_confirmed": bool(volume.get("whale_buy_confirmed") or volume.get("whale_buy")),
+        "whale_sell_confirmed": bool(volume.get("whale_sell_confirmed") or volume.get("whale_sell")),
+        "whale_extended_buy": bool(volume.get("whale_extended_buy")),
+        "whale_extended_sell": bool(volume.get("whale_extended_sell")),
+        "whale_event_pending": bool(volume.get("whale_event_pending")),
+        "whale_event_age_bars": volume.get("whale_event_age_bars"),
+        "whale_signal_strength": _f(volume.get("whale_signal_strength")),
         "closed_candle": bool(closed),
         "synthetic": row.get("market_data_is_synthetic"),
         "source": "CACHE",
     }
-
 
 def build_multiframe_context(*, market: Any, timeframe: Any, current_layers: Mapping[str, Any], peer_analyses: Mapping[str, Mapping[str, Any]] | None = None) -> Dict[str, Any]:
     market = _u(market)
@@ -290,6 +309,56 @@ def build_multiframe_context(*, market: Any, timeframe: Any, current_layers: Map
     else:
         alignment = "MIXED"
 
+    # Commit 9.4 — higher-TF anomalous-volume context. A 12H/1D/1W event
+    # may support lower-TF timing for up to seven source bars, but never creates
+    # a trade by itself. Confirmed reactions outrank pending events.
+    whale_rows: List[Dict[str, Any]] = []
+    for snap in unique_snapshots.values():
+        tf_name = _u(snap.get("timeframe"))
+        if tf_name not in {"12H", "1D", "1W"}:
+            continue
+        age = snap.get("whale_event_age_bars")
+        try:
+            age_ok = age is not None and 0 <= int(age) <= 7
+        except Exception:
+            age_ok = False
+        buy_confirmed = bool(snap.get("whale_buy_confirmed")) and age_ok
+        sell_confirmed = bool(snap.get("whale_sell_confirmed")) and age_ok
+        pending = bool(snap.get("whale_event_pending")) and age_ok
+        extended_buy = bool(snap.get("whale_extended_buy")) and age_ok
+        extended_sell = bool(snap.get("whale_extended_sell")) and age_ok
+        if buy_confirmed or sell_confirmed or pending or extended_buy or extended_sell:
+            whale_rows.append({
+                "timeframe": tf_name,
+                "age_bars": int(age) if age_ok else None,
+                "buy_confirmed": buy_confirmed,
+                "sell_confirmed": sell_confirmed,
+                "pending_buy": bool(pending and extended_buy and not sell_confirmed),
+                "pending_sell": bool(pending and extended_sell and not buy_confirmed),
+                "strength": round(_f(snap.get("whale_signal_strength")), 2),
+            })
+    whale_rows.sort(
+        key=lambda r: (
+            1 if (r.get("buy_confirmed") or r.get("sell_confirmed")) else 0,
+            _f(r.get("strength")),
+            -int(r.get("age_bars") or 0),
+        ),
+        reverse=True,
+    )
+    whale_best = whale_rows[0] if whale_rows else {}
+    whale_context = {
+        "active": bool(whale_best),
+        "source_timeframe": whale_best.get("timeframe"),
+        "age_bars": whale_best.get("age_bars"),
+        "buy_confirmed": bool(whale_best.get("buy_confirmed")),
+        "sell_confirmed": bool(whale_best.get("sell_confirmed")),
+        "pending_buy": bool(whale_best.get("pending_buy")),
+        "pending_sell": bool(whale_best.get("pending_sell")),
+        "strength": _f(whale_best.get("strength")),
+        "observations": whale_rows[:4],
+        "policy": "ANOMALOUS_VOLUME_REACTION_CONTEXT_MAX_7_SOURCE_BARS",
+    }
+
     return {
         "version": VERSION,
         "market": market,
@@ -303,6 +372,7 @@ def build_multiframe_context(*, market: Any, timeframe: Any, current_layers: Map
         "missing_timeframes": sorted(set(missing)),
         "complete": unique_timeframes >= 3 and not conflict,
         "public_summary": _mtf_public_summary(role_rows, alignment),
+        "whale_context": whale_context,
     }
 
 
@@ -474,38 +544,145 @@ def build_independent_thesis(*, layers: Mapping[str, Any], mtf_context: Mapping[
     }
 
 
-def prepare_operational_intelligence(*, layers: Mapping[str, Any], symbol: Any, timeframe: Any, system_type: Any, mtf_context: Mapping[str, Any]) -> Dict[str, Any]:
+_POSITIVE_RESEARCH_STATES = {
+    "SHADOW_READY", "OOS_VALIDATED", "OOS_PLUS_SHADOW", "CHAMPION", "VALIDATED",
+}
+_NEGATIVE_RESEARCH_STATES = {
+    "REJECTED_OOS", "NEGATIVE_OOS", "SHADOW_DIVERGED", "ALPHA_DECAY",
+    "DEGRADED", "REVOKED",
+}
+
+
+def _research_state(row: Mapping[str, Any] | None) -> str:
+    return _u((row or {}).get("state"))
+
+
+def _research_positive(row: Mapping[str, Any] | None) -> bool:
+    return _research_state(row) in _POSITIVE_RESEARCH_STATES and not bool((row or {}).get("recycle_required"))
+
+
+def _research_negative(row: Mapping[str, Any] | None) -> bool:
+    return _research_state(row) in _NEGATIVE_RESEARCH_STATES or bool((row or {}).get("recycle_required"))
+
+
+def prepare_operational_intelligence(
+    *, layers: Mapping[str, Any], symbol: Any, timeframe: Any, system_type: Any,
+    mtf_context: Mapping[str, Any], research_candidates: Mapping[str, Mapping[str, Any]] | None = None,
+) -> Dict[str, Any]:
+    """Build the final pre-Safety candidate from learned + default intelligence.
+
+    Learned evidence is evaluated *before* internal specialist opinions. It never
+    bypasses live market support or Safety. A known negative exact action cannot
+    be rescued by a default playbook.
+    """
     market = "FUTURES" if _u(system_type) == "FUTURES" else "SPOT"
     raw_regime = (layers.get("market_regime") or {}).get("regime")
     regime = canonical_regime(raw_regime)
     vol_state = canonical_volatility(layers.get("volatility") or {}, raw_regime)
     thesis = build_independent_thesis(layers=layers, mtf_context=mtf_context, market=market)
-    action = thesis.get("action") or "NO_OPERAR"
-    strategy: Dict[str, Any] = {"id":"NO_PLAYBOOK","family":"NONE","quality":0.0,"confirmations":[]}
-    if action in DIRECTIONAL_ACTIONS:
+    research_map = {
+        canonical_action(key, market): dict(value or {})
+        for key, value in dict(research_candidates or {}).items()
+    }
+
+    bullish_action = "LONG" if market == "FUTURES" else "COMPRA_SPOT"
+    bearish_action = "SHORT" if market == "FUTURES" else "VENTA_SPOT"
+    long_support = len(thesis.get("long_families") or [])
+    short_support = len(thesis.get("short_families") or [])
+    learned_support_min = 3 if market == "FUTURES" else 2
+
+    thesis_action = thesis.get("action") or "NO_OPERAR"
+    selected_action = thesis_action
+    selected_prior: Dict[str, Any] = {}
+    specialist_source = "DEFAULT"
+
+    # If the purely live thesis is neutral, a validated learned specialist may
+    # open a *candidate* only when current independent families already support
+    # the same side. This lets learned and default intelligence interleave while
+    # refusing historical edge that the current market contradicts.
+    if selected_action not in DIRECTIONAL_ACTIONS:
+        candidates: List[Tuple[float, str, Dict[str, Any]]] = []
+        for action, support_count in (
+            (bullish_action, long_support), (bearish_action, short_support)
+        ):
+            prior = research_map.get(action) or {}
+            if not _research_positive(prior) or support_count < learned_support_min:
+                continue
+            score = _f(prior.get("support_score")) - _f(prior.get("penalty_score"))
+            candidates.append((score, action, prior))
+        if candidates:
+            candidates.sort(key=lambda row: row[0], reverse=True)
+            best = candidates[0]
+            # Ambiguous learned priors do not manufacture direction.
+            if len(candidates) == 1 or best[0] >= candidates[1][0] + 0.15:
+                selected_action = best[1]
+                selected_prior = best[2]
+                specialist_source = "LEARNED"
+    else:
+        selected_prior = research_map.get(selected_action) or {}
+        if _research_positive(selected_prior):
+            specialist_source = "LEARNED"
+
+    blocked_by_research = bool(
+        selected_action in DIRECTIONAL_ACTIONS
+        and _research_negative(research_map.get(selected_action) or {})
+    )
+
+    strategy: Dict[str, Any] = {
+        "id": "NO_PLAYBOOK", "family": "NONE", "quality": 0.0,
+        "confirmations": [], "conflicts": [],
+    }
+    if selected_action in DIRECTIONAL_ACTIONS:
         try:
             from default_strategy_bank import select_strategy
             from contingency_strategy_engine import _indicator_groups
             groups = _indicator_groups(dict(layers))
-            strategy = select_strategy(action, regime, vol_state, groups, symbol=_u(symbol), timeframe=_u(timeframe), market=market)
+            groups["multi_timeframe"] = dict(mtf_context or {})
+            strategy = select_strategy(
+                selected_action, regime, vol_state, groups,
+                symbol=_u(symbol), timeframe=_u(timeframe), market=market,
+            )
         except Exception as exc:
-            strategy = {"id":"NO_PLAYBOOK","family":"NONE","quality":0.0,"confirmations":[],"error":str(exc)[:160]}
-    official = action in DIRECTIONAL_ACTIONS and is_official_cell(market, symbol, timeframe, action)
+            strategy = {
+                "id":"NO_PLAYBOOK", "family":"NONE", "quality":0.0,
+                "confirmations":[], "conflicts":[], "error":str(exc)[:160],
+            }
+
+    official = (
+        selected_action in DIRECTIONAL_ACTIONS
+        and is_official_cell(market, symbol, timeframe, selected_action)
+    )
     min_quality = 78.0 if market == "FUTURES" else 70.0
-    mtf_unique = int((mtf_context or {}).get("available_unique_timeframes") or 0)
-    # Missing peer TFs are explicit and reduce thesis support; they do not stop
-    # the whole engine when a cache lane is temporarily cold. A REAL conflict
-    # between available timeframes does stop a directional Default candidate.
     mtf_usable = not bool((mtf_context or {}).get("conflict"))
-    candidate_ready = bool(
-        official and thesis.get("direction") in {"BULLISH","BEARISH"}
+    support_count = (
+        long_support if action_direction(selected_action) == "BULLISH" else short_support
+    )
+    # Learned specialists still need live independent support. Defaults need the
+    # full thesis-quality threshold as before.
+    thesis_ok = bool(
+        thesis.get("direction") in {"BULLISH", "BEARISH"}
         and float(thesis.get("quality") or 0) >= min_quality
-        and float(strategy.get("quality") or 0) >= min_quality
+    )
+    learned_live_ok = bool(
+        specialist_source == "LEARNED"
+        and support_count >= learned_support_min
+        and not bool((mtf_context or {}).get("conflict"))
+    )
+    strategy_ok = bool(
+        float(strategy.get("quality") or 0) >= min_quality
         and strategy.get("regime_match", True)
         and strategy.get("volatility_match", True)
+    )
+    candidate_ready = bool(
+        official
+        and selected_action in DIRECTIONAL_ACTIONS
+        and not blocked_by_research
+        and (thesis_ok or learned_live_ok)
+        and strategy_ok
         and mtf_usable
         and not (market == "FUTURES" and _u(thesis.get("macro_risk")) == "CRITICAL")
     )
+
     return {
         "version": VERSION,
         "market": market,
@@ -515,14 +692,17 @@ def prepare_operational_intelligence(*, layers: Mapping[str, Any], symbol: Any, 
         "multi_timeframe": dict(mtf_context or {}),
         "thesis": thesis,
         "default_strategy": strategy,
-        "candidate_action": action if candidate_ready else "NO_OPERAR",
+        "selected_specialist_source": specialist_source,
+        "selected_research_prior": selected_prior,
+        "research_candidates": research_map,
+        "research_blocks_selected_action": blocked_by_research,
+        "candidate_action": selected_action if candidate_ready else "NO_OPERAR",
         "candidate_ready": candidate_ready,
         "official_cell": official,
         "mtf_usable": mtf_usable,
         "mtf_complete": bool((mtf_context or {}).get("complete")),
         "never_bypass_safety": True,
     }
-
 
 def moderator_candidate(operational: Mapping[str, Any], votes: Iterable[Mapping[str, Any]], market: Any) -> Dict[str, Any]:
     """Return a thesis-first candidate without using a simple trader majority.
