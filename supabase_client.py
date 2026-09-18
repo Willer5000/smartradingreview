@@ -131,6 +131,8 @@ class SupabaseClient:
     def __init__(self, url: str = None, key: str = None):
         self.url = url or SUPABASE_URL
         self.key = key or SUPABASE_KEY
+        self.url_source = 'explicit' if url else SUPABASE_URL_SOURCE
+        self.key_source = 'explicit' if key else SUPABASE_KEY_SOURCE
         self.client = None
         self.enabled = False
         self._reconnect_lock = None  # Se inicializa perezosamente
@@ -166,9 +168,9 @@ class SupabaseClient:
             print(f"✅ SUPABASE conectado a: {self.url[:40]}...")
             print(
                 "🔐 SUPABASE backend: "
-                f"url={SUPABASE_URL_SOURCE} · key={SUPABASE_KEY_SOURCE}"
+                f"url={self.url_source} · key={self.key_source}"
             )
-            if SUPABASE_KEY_SOURCE == 'SUPABASE_KEY':
+            if self.key_source == 'SUPABASE_KEY':
                 print(
                     "⚠️ SUPABASE backend usa SUPABASE_KEY de compatibilidad. "
                     "Si esa clave es anon/public, las tablas RLS internas "
@@ -614,27 +616,44 @@ class SupabaseClient:
             return
         
         try:
-            rows = []
+            # RC9.6.2 — idempotencia real. El motor puede reportar la misma
+            # estrategia desde más de un especialista; la relación N:M sólo
+            # necesita una fila por (signal_id, strategy_name).
+            unique_strategies = []
+            seen = set()
             for strategy in strategies:
+                name = str(strategy or '').strip()
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                unique_strategies.append(name)
+
+            rows = []
+            created_at = datetime.utcnow().isoformat()
+            for strategy in unique_strategies:
                 rows.append({
                     'signal_id': signal_id,
                     'strategy_name': strategy,
-                    # RC8.2: the compact indicator snapshot already lives once
-                    # on signals.indicators_snapshot. Repeating the same JSON for
-                    # every strategy multiplied storage/egress without adding
-                    # learning information. This table is only the N:M link.
                     'indicator_values': None,
-                    'created_at': datetime.utcnow().isoformat()
+                    'created_at': created_at
                 })
-            
+
             if rows:
-                self._rest_minimal(
-                    'POST',
-                    'signal_indicators',
-                    payload=rows,
-                    timeout=(1.25, 2.5),
-                    prefer='return=minimal',
-                )
+                try:
+                    self._rest_minimal(
+                        'POST',
+                        'signal_indicators',
+                        payload=rows,
+                        params={'on_conflict': 'signal_id,strategy_name'},
+                        timeout=(1.25, 2.5),
+                        prefer='resolution=ignore-duplicates,return=minimal',
+                    )
+                except requests.HTTPError as write_error:
+                    status = int(getattr(getattr(write_error, 'response', None), 'status_code', 0) or 0)
+                    msg = str(write_error).lower()
+                    if not (status == 409 or '23505' in msg or 'duplicate key' in msg):
+                        raise
+                    logger.debug('signal_indicators duplicado ignorado de forma idempotente')
                 self._schedule_rotation('signal_indicators')
         except Exception as e:
             if self._is_connection_error(e):
@@ -1164,7 +1183,10 @@ class SupabaseClient:
             for stat in stats_list:
                 # Construir filtro de unicidad
                 if general:
-                    # general: único por (strategy, action)
+                    # General is intentionally non-directional in the current
+                    # engine. Keep the legacy DB uniqueness contract explicit.
+                    stat = dict(stat)
+                    stat['action'] = str(stat.get('action') or 'ALL')
                     query = (self.client.table(table)
                              .select('id')
                              .eq('strategy', stat['strategy'])

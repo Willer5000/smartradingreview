@@ -1,5 +1,5 @@
 # review_trader.py
-# El Trader de Revisión: 10º trader del sistema, aprende del historial
+# ReviewTrader: gobernador estadístico Backtest/OOS + alpha decay
 # Versión 1.0 - FASE 2
 #
 # CARACTERÍSTICAS:
@@ -9,7 +9,7 @@
 # - Detecta oportunidades perdidas (NO_OPERAR que resultaron rentables)
 # - Recalcula estadísticas individuales (par+TF+acción+estrategia) y generales (agregado)
 # - Genera recomendaciones cacheadas para consumo del frontend
-# - Vota en el Moderador con multiplicador de confianza (0.5x - 1.5x)
+# - Ajusta la influencia estadística de la evidencia; no es un décimo voto
 # - Tolerante a fallos: si Supabase no está disponible, retorna neutralidad
 
 import logging
@@ -135,6 +135,23 @@ FUTURES_REAL_COHORT = 'FUTURES_PERPETUAL_REAL_CLOSED_V1'
 FUTURES_LEGACY_COHORT = 'FUTURES_LEGACY_UNVERIFIED'
 from q6_integrity import SPOT_COHORT, SPOT_LEGACY, clean_spot_learning, verified_spot, verified_spot_current
 SPOT_LEARNING_COHORT = SPOT_COHORT
+
+
+def _active_futures_runtime_cell(symbol, timeframe):
+    """RC9.6.2: production/learning may fetch market data only for active 9.6 cells.
+
+    Legacy 5m/15m rows stay in Supabase for audit but are never queried against
+    KuCoin again.  This also respects the class-specific TF contract.
+    """
+    try:
+        from futures_universe import timeframe_allowed
+        return bool(timeframe_allowed(symbol, timeframe))
+    except Exception:
+        # Fail closed: if the contract cannot be loaded, do not resurrect
+        # retired fast timeframes or unknown cells.
+        return str(timeframe or '').strip() in {'30m', '1h', '2h', '4h', '12h', '1D'}
+
+
 CAUTIOUS_SHADOW_MODEL_VERSION = 'cautious_shadow_v1'
 CAUTIOUS_SHADOW_NEAR_MISS_RATIO = 0.80
 CAUTIOUS_SHADOW_RISK_MULTIPLIER = 0.50
@@ -1565,6 +1582,9 @@ class ReviewTrader:
                 return df, SPOT_SOURCE
             except Exception:
                 return None, 'SPOT_SOURCE_REJECTED'
+
+        if not _active_futures_runtime_cell(symbol, timeframe):
+            return None, 'FUTURES_RETIRED_OR_OUT_OF_CONTRACT_TF'
 
         if not self._is_clean_futures_signal(signal):
             return None, 'FUTURES_LEGACY_QUARANTINED'
@@ -4299,6 +4319,13 @@ class ReviewTrader:
                 system_type = self._normalize_system_type(
                     signal.get('system_type')
                 )
+
+                if (
+                    system_type == 'futures'
+                    and not _active_futures_runtime_cell(symbol, timeframe)
+                ):
+                    stats['legacy_futures_quarantined'] += 1
+                    continue
 
                 # Las filas antiguas de Futuros no tienen una cadena de
                 # procedencia demostrable. No se borran ni se reinterpretan:
@@ -7633,8 +7660,11 @@ class ReviewTrader:
                         or 'NO_OPERAR'
                     ).upper()
 
-                    if system_type == 'futures' and not self._is_clean_futures_signal(signal):
-                        continue
+                    if system_type == 'futures':
+                        if not _active_futures_runtime_cell(symbol, timeframe):
+                            continue
+                        if not self._is_clean_futures_signal(signal):
+                            continue
 
                     price_at_signal = float(signal.get('current_price', 0) or 0)
                     if price_at_signal <= 0:
@@ -8531,12 +8561,12 @@ class ReviewTrader:
             by_timeframe = {}
 
             futures_timeframes = (
-                '5m',
-                '15m',
                 '30m',
                 '1h',
                 '2h',
-                '4h'
+                '4h',
+                '12h',
+                '1D'
             )
 
             for timeframe in (
@@ -11546,6 +11576,10 @@ class ReviewTrader:
 
             general_rows.append({
                 'strategy': strategy,
+                # strategy_stats_general historically keys by strategy+action.
+                # Current aggregation is intentionally market-wide, therefore
+                # use an explicit non-directional key instead of raising KeyError.
+                'action': 'ALL',
                 'total_signals': total,
                 'wins': wins,
                 'losses': losses,

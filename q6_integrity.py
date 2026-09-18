@@ -215,20 +215,64 @@ def claim_daily_job(
     key = f'{job_name}:{slot}'
     now = datetime.now(timezone.utc)
     payload = {'job_key': key, 'status': 'RUNNING', 'updated_at': now.isoformat()}
+    insert_error = None
     try:
         db.client.table('q6_job_runs').insert(payload).execute()
         return True
     except Exception as exc:
-        # HOTFIX 9.6.1: antes el error real de RLS/credencial/transporte se
-        # descartaba y Analytics sólo veía MISSING. Registramos el motivo sin
-        # imprimir credenciales ni payloads sensibles.
-        logger.warning(
-            'q6_job_runs claim insert failed job=%s slot=%s error=%s: %s',
-            job_name,
-            slot,
-            type(exc).__name__,
-            str(exc)[:240],
+        insert_error = exc
+        msg = str(exc).lower()
+        duplicate = (
+            '23505' in msg
+            or 'duplicate key' in msg
+            or 'q6_job_runs_pkey' in msg
         )
+
+        # RC9.6.2 — a duplicate key is the NORMAL proof that another worker
+        # already claimed this slot. Do not retry the same INSERT via REST and
+        # do not report it as a database failure; proceed to lease/status logic.
+        if duplicate:
+            logger.info(
+                'q6_job_runs slot already claimed job=%s slot=%s',
+                job_name,
+                slot,
+            )
+        else:
+            rest_insert = getattr(db, '_rest_minimal', None)
+            if callable(rest_insert):
+                try:
+                    rest_insert(
+                        'POST',
+                        'q6_job_runs',
+                        payload=payload,
+                        timeout=(1.5, 3.0),
+                        prefer='return=minimal',
+                    )
+                    logger.info(
+                        'q6_job_runs claim recovered via REST job=%s slot=%s',
+                        job_name,
+                        slot,
+                    )
+                    return True
+                except Exception as rest_exc:
+                    logger.warning(
+                        'q6_job_runs claim failed job=%s slot=%s sdk=%s: %s rest=%s: %s',
+                        job_name,
+                        slot,
+                        type(exc).__name__,
+                        str(exc)[:180],
+                        type(rest_exc).__name__,
+                        str(rest_exc)[:180],
+                    )
+            else:
+                logger.warning(
+                    'q6_job_runs claim insert failed job=%s slot=%s error=%s: %s',
+                    job_name,
+                    slot,
+                    type(exc).__name__,
+                    str(exc)[:240],
+                )
+
         if not retry:
             return False
         try:
@@ -244,8 +288,37 @@ def claim_daily_job(
             )
             if age < delay:
                 return False
-            claimed = db.client.table('q6_job_runs').update(payload).eq('job_key', key).eq('updated_at', previous).execute()
-            return bool(claimed.data)
+
+            update_payload = {
+                'status': 'RUNNING',
+                'updated_at': now.isoformat(),
+            }
+            try:
+                claimed = (
+                    db.client.table('q6_job_runs')
+                    .update(update_payload)
+                    .eq('job_key', key)
+                    .eq('updated_at', previous)
+                    .execute()
+                )
+                return bool(claimed.data)
+            except Exception as update_exc:
+                rest_update = getattr(db, '_rest_minimal', None)
+                if callable(rest_update):
+                    rest_update(
+                        'PATCH',
+                        'q6_job_runs',
+                        payload=update_payload,
+                        params={
+                            'job_key': f'eq.{key}',
+                            'updated_at': f'eq.{previous}',
+                        },
+                        timeout=(1.5, 3.0),
+                        prefer='return=minimal',
+                    )
+                    state = read_job_status(db, job_name, slot)
+                    return str(state.get('status') or '').upper() == 'RUNNING'
+                raise update_exc
         except Exception as retry_exc:
             logger.warning(
                 'q6_job_runs claim retry failed job=%s slot=%s error=%s: %s',
@@ -283,10 +356,38 @@ def read_job_status(db, job_name, slot):
 
 
 def finish_daily_job(db, job_name, slot, success):
+    payload = {
+        'status': 'DONE' if success else 'FAILED',
+        'updated_at': datetime.now(timezone.utc).isoformat(),
+    }
+    key = f'{job_name}:{slot}'
     try:
-        db.client.table('q6_job_runs').update({'status': 'DONE' if success else 'FAILED',
-            'updated_at': datetime.now(timezone.utc).isoformat()}).eq('job_key', f'{job_name}:{slot}').execute()
+        db.client.table('q6_job_runs').update(payload).eq('job_key', key).execute()
+        return True
     except Exception as exc:
+        rest_update = getattr(db, '_rest_minimal', None)
+        if callable(rest_update):
+            try:
+                rest_update(
+                    'PATCH',
+                    'q6_job_runs',
+                    payload=payload,
+                    params={'job_key': f'eq.{key}'},
+                    timeout=(1.5, 3.0),
+                    prefer='return=minimal',
+                )
+                return True
+            except Exception as rest_exc:
+                logger.warning(
+                    'q6_job_runs finish failed job=%s slot=%s sdk=%s: %s rest=%s: %s',
+                    job_name,
+                    slot,
+                    type(exc).__name__,
+                    str(exc)[:160],
+                    type(rest_exc).__name__,
+                    str(rest_exc)[:160],
+                )
+                return False
         logger.warning(
             'q6_job_runs finish failed job=%s slot=%s error=%s: %s',
             job_name,
@@ -295,4 +396,18 @@ def finish_daily_job(db, job_name, slot, success):
             str(exc)[:240],
         )
         return False
-    return True
+
+
+def q6_backend_status(db):
+    """Small read-only diagnostic for Analytics/logs; never exposes secrets."""
+    source = str(getattr(db, 'key_source', '') or '')
+    privileged = source in {'CENTRAL_SUPABASE_SERVICE_KEY', 'SUPABASE_SERVICE_ROLE_KEY'}
+    key = str(getattr(db, 'key', '') or '')
+    if key.startswith('sb_secret_'):
+        privileged = True
+    return {
+        'db_enabled': bool(getattr(db, 'enabled', False)),
+        'credential_source': source or 'UNKNOWN',
+        'privileged_backend_key': bool(privileged),
+        'q6_table': 'q6_job_runs',
+    }

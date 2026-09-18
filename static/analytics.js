@@ -1350,7 +1350,7 @@ function updateV1ReviewTraderNote() {
         : '';
     v1Set(
         'v1-reviewtrader-note',
-        `Backtest/OOS primario · Champions activos ${stats.championCount}/${RF96_RESEARCH_TARGET} · OOS+ activos ${stats.oosPositive} · LIVE/Shadow sólo confirma continuidad y alpha decay${scientistText}`
+        `Backtest/OOS primario · Champions activos ${stats.championCount}/${RF96_RESEARCH_TARGET} · OOS+ activos ${stats.oosPositive} · Prioridad Research: 30m/1h/2h + Spot 4h/12h · Safety intacto · LIVE/Shadow confirma continuidad/alpha decay${scientistText}`
     );
 }
 

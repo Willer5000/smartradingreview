@@ -18954,7 +18954,7 @@ class TradingExpertSystem:
             # ============ DETECTAR RÉGIMEN DE MERCADO ============
             # Nueva "capa 11": clasifica el mercado en TRENDING_BULL / TRENDING_BEAR
             # / RANGING / HIGH_VOLATILITY. El Moderador usa este régimen para
-            # ajustar los pesos de los 10 traders (ver Moderador.procesar_votacion).
+            # ajustar los pesos de los 9 especialistas técnicos (ver Moderador.procesar_votacion).
             market_regime = self.detect_market_regime(trend, momentum, volatility, structure)
             print(f"📊 Régimen detectado: {market_regime['regime']} (confianza {market_regime['confidence']}%)")
             for r in market_regime.get('reasoning', []):
@@ -19857,7 +19857,7 @@ class TradingExpertSystem:
             # CRÍTICO v20: incluir 'todos_los_votos' con las estrategias de CADA
             # trader individual. Sin esto, review_trader._extract_strategies solo
             # ve 'estrategias_consenso' (filtro frecuencia≥2) y perdemos las
-            # estrategias únicas de 9 de los 10 traders (SmartMoney, Ballenas,
+            # estrategias únicas de los 9 especialistas (SmartMoney, Ballenas,
             # Macro, Pullback, Multiframe, Liquidation, etc).
             registro_serializable = {}
             try:
@@ -26320,8 +26320,13 @@ class TraderLiquidation(TraderBase):
 # ============================================================================
 
 class Moderador:
-    """El moderador recibe los votos de los 10 traders (9 originales + ReviewTrader) y genera una decisión"""
-    
+    """Especialistas técnicos + ReviewTrader como gobernador estadístico.
+
+    RC9.6.2 elimina la antigua doble función de ReviewTrader como "10º voto".
+    Los nueve especialistas siguen produciendo evidencia técnica. ReviewTrader
+    sólo ajusta la influencia de esa evidencia con Backtest/OOS y alpha decay.
+    """
+
     def __init__(self):
         self.traders = [
             TraderTecnico(),
@@ -26332,21 +26337,25 @@ class Moderador:
             TraderSmartMoney(),
             TraderEspectico(),
             TraderMultiframe(),
-            TraderLiquidation()  # Trader 9
+            TraderLiquidation()  # Especialista 9
         ]
-        
-        # === Agregar ReviewTrader como 10º trader (opcional, tolerante a fallos) ===
-        # También guardamos referencia directa para consultar get_confidence_adjustment
-        # y ejercer su rol de "juez del comité" sobre los otros 9 traders.
+
+        # ReviewTrader NO se agrega a self.traders. Conserva únicamente su rol
+        # estadístico: Champion/OOS, Group Prior limitado y alpha decay.
         self._review_trader = None
         try:
             from review_trader import review_trader
-            self.traders.append(review_trader)
             self._review_trader = review_trader
-            print(f"✅ Moderador: ReviewTrader agregado como 10º trader + juez del comité")
+            print(
+                "✅ Moderador: 9 especialistas técnicos + "
+                "ReviewTrader como gobernador estadístico Backtest/OOS"
+            )
         except Exception as e:
-            print(f"⚠️ Moderador: ReviewTrader no disponible ({e}). Continuando con 9 traders.")
-        
+            print(
+                f"⚠️ Moderador: ReviewTrader no disponible ({e}). "
+                "Continuando con evidencia técnica sin ajuste estadístico."
+            )
+
     # ========================================================================
     # PESOS DINÁMICOS POR RÉGIMEN DE MERCADO
     # ========================================================================
@@ -26458,17 +26467,16 @@ class Moderador:
                 # 1. peso_base: importancia estructural del trader (1.0-1.5)
                 # 2. mult_régimen: amplificación/atenuación según contexto de
                 #    mercado (TRENDING vs RANGING vs HIGH_VOLATILITY)
-                # 3. mult_review: el ReviewTrader ajusta la voz de OTROS traders
-                #    según su historial. Si "TraderChartista con DOBLE_SUELO en
-                #    BTC 4h" históricamente pierde 60% de las veces, su voto se
-                #    atenúa (0.7x). Si TraderBallenas en breakouts gana 75%, su
-                #    voto se amplifica (1.3x). Es el juez del comité.
+                # 3. mult_review: ReviewTrader actúa como gobernador estadístico
+                #    Backtest/OOS. Ajusta la influencia de la evidencia técnica
+                #    cuando existe muestra válida; no emite un voto adicional.
                 
                 regime_mult = self._get_regime_multiplier(trader.nombre, regime)
                 
-                # El ReviewTrader NO se ajusta a sí mismo (evitar bucle)
+                # ReviewTrader no forma parte de self.traders; sólo aporta el
+                # multiplicador estadístico de la celda actual.
                 review_mult = 1.0
-                if trader.nombre != 'Trader de Revisión' and self._review_trader is not None:
+                if self._review_trader is not None:
                     try:
                         review_mult = self._review_trader.get_confidence_adjustment(
                             symbol,
@@ -26485,34 +26493,33 @@ class Moderador:
                 expert_shadow_mult = 1.0
                 expert_governed_mult = 1.0
                 expert_governed_state = 'OBSERVE'
-                if trader.nombre != 'Trader de Revisión':
-                    try:
-                        from dynamic_expert_committee import (
-                            get_shadow_multiplier,
-                            get_governed_multiplier,
-                        )
-                        expert_shadow_mult = get_shadow_multiplier(
-                            trader=trader.nombre,
-                            market=system_type,
-                            timeframe=timeframe,
-                            direction=accion,
-                            regime=regime,
-                            relation='SUPPORT',
-                            symbol=symbol,
-                        )
-                        expert_governed_mult, expert_governed_state = get_governed_multiplier(
-                            trader=trader.nombre,
-                            market=system_type,
-                            timeframe=timeframe,
-                            direction=accion,
-                            regime=regime,
-                            relation='SUPPORT',
-                            symbol=symbol,
-                        )
-                    except Exception:
-                        expert_shadow_mult = 1.0
-                        expert_governed_mult = 1.0
-                        expert_governed_state = 'OBSERVE'
+                try:
+                    from dynamic_expert_committee import (
+                        get_shadow_multiplier,
+                        get_governed_multiplier,
+                    )
+                    expert_shadow_mult = get_shadow_multiplier(
+                        trader=trader.nombre,
+                        market=system_type,
+                        timeframe=timeframe,
+                        direction=accion,
+                        regime=regime,
+                        relation='SUPPORT',
+                        symbol=symbol,
+                    )
+                    expert_governed_mult, expert_governed_state = get_governed_multiplier(
+                        trader=trader.nombre,
+                        market=system_type,
+                        timeframe=timeframe,
+                        direction=accion,
+                        regime=regime,
+                        relation='SUPPORT',
+                        symbol=symbol,
+                    )
+                except Exception:
+                    expert_shadow_mult = 1.0
+                    expert_governed_mult = 1.0
+                    expert_governed_state = 'OBSERVE'
 
                 peso_efectivo_base = trader.peso_base * regime_mult * review_mult
                 peso_efectivo = peso_efectivo_base * expert_governed_mult
@@ -26597,33 +26604,24 @@ class Moderador:
         estrategias_por_accion = {}
         razones_por_accion = {}
         
-        # NEUTRAL cualificado del ReviewTrader: cuando el juez dice "no hay
-        # evidencia estadística clara" con conf ≥60, actúa como abstención
-        # cualificada que penaliza los votos direccionales (reduce su confianza).
+        # RC9.6.2: ReviewTrader ya no emite un voto NEUTRAL ni penaliza por
+        # abstención. Su influencia estadística ya fue aplicada una sola vez
+        # mediante get_confidence_adjustment() sobre la evidencia técnica.
         review_neutral_penalty = 1.0
-        for voto in votos:
-            if (voto['trader'] == 'Trader de Revisión'
-                    and voto['accion'] == 'NEUTRAL'
-                    and voto['confianza_original'] >= 60):
-                # Penalización proporcional: NEUTRAL@60 → 0.90, NEUTRAL@80 → 0.80, NEUTRAL@95 → 0.70
-                penalty = 1.0 - (voto['confianza_original'] - 50) / 150.0
-                review_neutral_penalty = max(0.60, min(1.0, penalty))
-                print(f"   ⚖️ ReviewTrader NEUTRAL@{voto['confianza_original']}% aplicará penalización {review_neutral_penalty:.2f} a votos direccionales")
-                break
-        
+
         for voto in votos:
             accion = voto['accion']
             voto['penalizacion_neutral_review'] = review_neutral_penalty
             voto['incluido_en_conteo'] = False
             voto['confianza_contabilizada'] = None
 
-            # Saltar NEUTRAL para el conteo principal (pero ya fue procesado arriba)
+            # NEUTRAL de cualquier especialista no entra al conteo direccional.
             if accion == 'NEUTRAL':
                 continue
                 
             confianza = voto['confianza']
             
-            # Aplicar penalización si el ReviewTrader emitió NEUTRAL cualificado
+            # ReviewTrader no añade una segunda abstención/votación en RC9.6.2
             if accion in ('LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT'):
                 confianza = confianza * review_neutral_penalty
 
@@ -26853,14 +26851,13 @@ class Moderador:
 
 
         # ================================================================
-        # FINAL V1 RC4 — COMITÉ JERÁRQUICO / FAMILIAS DE EVIDENCIA
+        # RC9.6.2 — AUDITORÍA JERÁRQUICA SIN SEGUNDO VETO DE PRODUCCIÓN
         # ================================================================
-        # Los 10 traders se mantienen. RC4 no suma opiniones correlacionadas como
-        # si fueran pruebas independientes: organiza CONTEXTO → SETUP → EJECUCIÓN
-        # → CONTROL/APRENDIZAJE. La jerarquía es un gate de calidad:
-        # - nunca reabre NO_OPERAR/ESPERAR;
-        # - nunca invierte LONG↔SHORT;
-        # - sí puede retrasar/vetar una señal direccional débil o conflictiva.
+        # Thesis-first ya exige candidato elegible + apoyo independiente y luego
+        # todavía pasa Entry/SL/TP/Economics/Execution Safety. Mantener un segundo
+        # gate construido desde los mismos votos reintroducía timidez/correlación
+        # duplicada. Conservamos el diagnóstico para ReviewTrader/Analytics, pero
+        # NO puede cambiar acción ni confianza productiva.
         try:
             from hierarchical_committee import build_hierarchical_assessment
             hierarchical_committee = build_hierarchical_assessment(
@@ -26871,57 +26868,35 @@ class Moderador:
                 symbol=symbol,
                 regime=regime,
             )
-            hierarchy_action = str(
+            hierarchical_committee = dict(hierarchical_committee or {})
+            hierarchical_committee['authority'] = 'SHADOW_DIAGNOSTIC'
+            hierarchical_committee['production_change'] = False
+            hierarchical_committee['baseline_action'] = str(
+                accion_ganadora or 'NO_OPERAR'
+            ).upper()
+            hierarchical_committee['counterfactual_action'] = str(
                 hierarchical_committee.get('recommended_action')
                 or accion_ganadora
+                or 'NO_OPERAR'
             ).upper()
-            baseline_before_hierarchy = str(accion_ganadora or 'NO_OPERAR').upper()
-
-            if baseline_before_hierarchy in ('LONG','SHORT','COMPRA_SPOT','VENTA_SPOT'):
-                if hierarchy_action in ('NO_OPERAR','ESPERAR'):
-                    accion_ganadora = hierarchy_action
-                    confianza_final = max(
-                        0.0,
-                        min(
-                            100.0,
-                            float(confianza_final or 0)
-                            * float(hierarchical_committee.get('confidence_multiplier') or 1.0)
-                        )
-                    )
-                    razones_consolidadas = list(razones_consolidadas or [])
-                    razones_consolidadas.insert(
-                        0,
-                        str(hierarchical_committee.get('reason') or 'La evidencia independiente no alcanza la calidad operativa requerida')
-                    )
-                    print(
-                        f"🧠 [RC4 HIERARCHY] {baseline_before_hierarchy} → "
-                        f"{accion_ganadora}: {hierarchical_committee.get('reason')}"
-                    )
-                elif hierarchy_action == baseline_before_hierarchy:
-                    confianza_final = max(
-                        0.0,
-                        min(
-                            100.0,
-                            float(confianza_final or 0)
-                            * float(hierarchical_committee.get('confidence_multiplier') or 1.0)
-                        )
-                    )
-                    print(
-                        f"🧠 [RC4 HIERARCHY] confirma {accion_ganadora} | "
-                        f"familias={hierarchical_committee.get('independent_support_families')} | "
-                        f"score={hierarchical_committee.get('support_score')}"
-                    )
+            print(
+                "🔎 [RC9.6.2 HIERARCHY SHADOW] "
+                f"baseline={hierarchical_committee['baseline_action']} "
+                f"counterfactual={hierarchical_committee['counterfactual_action']} "
+                f"score={hierarchical_committee.get('support_score')}"
+            )
         except Exception as hierarchy_error:
             hierarchical_committee = {
-                'version': 'RC4_HIERARCHICAL_TRADING_INTELLIGENCE_V1',
-                'authority': 'PRODUCTION_QUALITY_GATE',
+                'version': 'RC9_6_2_HIERARCHY_SHADOW',
+                'authority': 'SHADOW_DIAGNOSTIC',
+                'production_change': False,
                 'status': 'UNAVAILABLE',
                 'error': str(hierarchy_error)[:180],
                 'baseline_action': str(accion_ganadora or 'NO_OPERAR').upper(),
-                'recommended_action': str(accion_ganadora or 'NO_OPERAR').upper(),
+                'counterfactual_action': str(accion_ganadora or 'NO_OPERAR').upper(),
                 'quality_gate_passed': None,
             }
-            print(f"⚠️ [RC4 HIERARCHY] no disponible: {hierarchy_error}")
+            print(f"⚠️ [RC9.6.2 HIERARCHY SHADOW] no disponible: {hierarchy_error}")
 
         # Commit 12 — simulación paralela del comité experto. Se calcula
         # después de la decisión baseline y nunca reemplaza accion_ganadora.
@@ -31688,8 +31663,8 @@ def _hotfix16_1_navigation_priority():
     try:
         path = str(request.path or '')
         if path in _INTERACTIVE_PAGE_PATHS:
-            _mark_system_interactive_priority(seconds=90)
-            print(f"🖥️ [UI PRIORITY] navegación {path}: pausa background 90s")
+            _mark_system_interactive_priority(seconds=120)
+            print(f"🖥️ [UI PRIORITY] navegación {path}: pausa background 120s")
     except Exception:
         # Fail-open: nunca romper una petición por el mecanismo de prioridad.
         pass
@@ -31790,7 +31765,7 @@ def _start_futures_ui_analysis_async(symbol, timeframe):
         try:
             # Current incremental combo may finish first.  Because interactive
             # priority is already active, the loop will not start a replacement.
-            heavy_acquired = _acquire_heavy_analysis(owner, timeout=35)
+            heavy_acquired = _acquire_heavy_analysis(owner, timeout=18)
             if not heavy_acquired:
                 raise RuntimeError('No se obtuvo turno de análisis Futures')
 
@@ -35216,6 +35191,47 @@ def api_review_recommendations(symbol, timeframe, action):
         return jsonify({'success': False, 'error': f'Error interno: {str(e)}'}), 500
 
 
+
+# ============================================================================
+# RC9.6.2 — Q6 BACKEND HEALTH (READ ONLY)
+# ============================================================================
+@app.route('/api/review/q6-health', methods=['GET'])
+def api_review_q6_health():
+    """Observability for the Learning Scientist claim path.
+
+    Never exposes the backend key and never creates a database row.
+    """
+    if not _authenticated_user():
+        return jsonify({'success': False, 'error': 'Debes iniciar sesión.'}), 401
+    try:
+        from review_trader import review_trader
+        from q6_integrity import q6_backend_status, read_job_status
+
+        slot = _ai_learning_slot(datetime.now(bolivia_tz))
+        backend = q6_backend_status(review_trader.db)
+        scientist = read_job_status(
+            review_trader.db,
+            'AI_LEARNING_V2',
+            slot,
+        )
+        return jsonify({
+            'success': True,
+            'slot': slot,
+            'backend': backend,
+            'scientist_job': scientist,
+            'runtime': _ai_learning_runtime_snapshot(),
+            'rule': (
+                'MISSING after a Scientist attempt means the backend claim did '
+                'not persist. DONE/RUNNING/FAILED prove q6_job_runs is reachable.'
+            ),
+        }), 200
+    except Exception as exc:
+        return jsonify({
+            'success': False,
+            'error': f'{type(exc).__name__}: {str(exc)[:180]}',
+        }), 200
+
+
 # ============================================================================
 # ENDPOINT 5: Estadísticas generales del ReviewTrader
 # ============================================================================
@@ -37915,43 +37931,67 @@ def _run_ai_learning_daily(q6_slot=None, trigger_source='daily'):
 
 
 def _q6_run_daily_review():
+    """RC9.6.2 — daily coordination without a 3-minute global heavy lock.
+
+    Backtest/OOS is now the primary learning source. Live/Shadow continuity is
+    already evaluated by the bounded learning_worker in micro-batches, with
+    stats/autopilot recalculated periodically. Running run_full_review() again
+    under the single heavy lock duplicated work and could starve every Futures
+    request for >200 s. The daily slot now coordinates Scientist/recovery only.
+    """
     if not _Q6_DAILY_LOCK.acquire(blocking=False):
         return
 
-    heavy_acquired = False
-
     try:
-        heavy_acquired = _acquire_heavy_analysis(
-            'reviewtrader-daily'
-        )
-
-        if not heavy_acquired:
+        # Human navigation always wins. Do not even claim a daily background
+        # slot while the user is opening Spot/Futures/Analytics.
+        if _system_interactive_priority_active():
+            print('⏸️ [Q6 DAILY] interfaz activa; ciclo diario diferido.')
             return
 
         from review_trader import review_trader
         from q6_integrity import daily_slot, claim_daily_job, finish_daily_job
+
         slot = daily_slot(datetime.now(bolivia_tz))
-        review_claimed = claim_daily_job(review_trader.db, 'REVIEW', slot, retry=True)
+        review_claimed = claim_daily_job(
+            review_trader.db,
+            'REVIEW_COORDINATION',
+            slot,
+            retry=True,
+            failed_retry_minutes=10,
+            abandoned_after_minutes=30,
+        )
+
         if review_claimed:
-            success = ejecutar_review_diario(q6_slot=slot)
-            finish_daily_job(review_trader.db, 'REVIEW', slot, success)
+            # No market-data sweep here. The continuous cooperative worker owns
+            # LIVE/Shadow outcomes; Research owns historical strategy discovery.
+            scientist_ok = _run_ai_learning_daily(
+                q6_slot=slot,
+                trigger_source='review-coordination',
+            )
+            finish_daily_job(
+                review_trader.db,
+                'REVIEW_COORDINATION',
+                slot,
+                True,
+            )
+            print(
+                '✅ [Q6 DAILY] coordinación liviana completada · '
+                f'Scientist={"OK" if scientist_ok else "PENDING/EXISTING"}'
+            )
         else:
-            # El review puede estar DONE mientras Gemini nunca llegó a correr
-            # por un reinicio/error previo. Recuperamos sólo AI_LEARNING.
+            # If the coordination slot already exists, Scientist can still
+            # recover independently without blocking the analysis slot.
             _run_ai_learning_daily(q6_slot=slot, trigger_source='recovery')
+
     except Exception as exc:
-        print(f"Q6 ciclo diario pendiente: {type(exc).__name__}: {exc}", flush=True)
+        print(f"Q6 coordinación diaria pendiente: {type(exc).__name__}: {exc}", flush=True)
         try:
             import traceback
             traceback.print_exc()
         except Exception:
             pass
     finally:
-        if heavy_acquired:
-            _release_heavy_analysis(
-                'reviewtrader-daily'
-            )
-
         _Q6_DAILY_LOCK.release()
 
 
@@ -42204,6 +42244,53 @@ def _build_ai_learning_context():
             'learning_mode':
                 'BACKTEST_OOS_PRIMARY_LIVE_ALPHA_DECAY',
 
+            # RC9.6.2 — research scarcity focus. This does NOT lower production
+            # gates. It tells Trader IA/Research where new edge is most valuable.
+            'priority_focus': {
+                'mode': 'FAST_EDGE_DISCOVERY_WITHOUT_SAFETY_RELAXATION',
+                'futures': {
+                    'primary_timeframes': ['30m', '1h', '2h'],
+                    'representatives': {
+                        'CORE1': 'BTC-USDT',
+                        'CORE2': 'XRP-USDT',
+                        'MEDIUM': 'LINK-USDT',
+                        'HIGH': 'SUI-USDT',
+                    },
+                    'quality_bottlenecks_to_improve': [
+                        'entry_smc',
+                        'take_profit_quality',
+                        'stop_loss_protection',
+                        'entry_reachability',
+                        'time_to_resolution',
+                    ],
+                    'rule': (
+                        'Improve candidate quality and speed through strategy/entry '
+                        'design; never lower Safety or manufacture leverage edge.'
+                    ),
+                },
+                'spot': {
+                    'primary_timeframes': ['4h', '12h'],
+                    'pairs': ['BTC-USDT', 'PAXG-USDT', 'PAXG-BTC'],
+                    'goals': [
+                        'opportunistic_accumulation',
+                        'liquidity_recovery',
+                        'BTC_PAXG_rotation',
+                    ],
+                    'rule': (
+                        'Increase opportunity coverage by finding validated timing '
+                        'setups, not by forcing calendar-based buys/sells.'
+                    ),
+                },
+            },
+
+            'proposal_output_contract': {
+                'key': 'strategy_proposals',
+                'status': 'SHADOW_PROPOSAL',
+                'runtime_testable': True,
+                'minimum_per_learning_update': 1,
+                'research_only': True,
+            },
+
             'required_hypotheses': {
                 'min': 1,
                 'max': 3,
@@ -44496,7 +44583,7 @@ def learning_worker_loop():
 # ============================================================================
 # 30m/1h/2h/4h/12h/1D usan el flujo operativo normal. El notifier no analiza
 # mercado ni baja gates: sólo publica setups que ya son EXECUTABLE_SIGNAL.
-# 5m/15m quedan reservados al notifier de scalping y sus preferencias por usuario.
+# 5m/15m están retirados del runtime activo; no tienen notifier propio.
 _FUTURES_STANDARD_ALERT_TFS = ('30m','1h','2h','4h','12h','1D')
 _FUTURES_STANDARD_ALERT_LOOP_INTERVAL = 60
 
@@ -44665,22 +44752,14 @@ def futures_standard_alert_loop():
 
 
 # ============================================================================
-# COMMIT 36K — ALERTAS PERSONALIZADAS DE SCALPING FUTURES
+# LEGACY 36K — RETIRADO EN RC9.6.2
 # ============================================================================
-#
-# REGLAS:
-# - sólo EXECUTABLE_SIGNAL;
-# - sólo 5m/15m; preferencia personal de alertas de scalping;
-# - sólo usuarios que lo activaron explícitamente;
-# - respeta timezone, días y ventana horaria del usuario;
-# - usa el caché Futures existente: NO dispara análisis;
-# - anti-spam por usuario + signal_id.
+# 5m/15m permanecen sólo como historia compatible. No se analizan, no se
+# consultan a KuCoin y no arrancan notifier propio. 30m+ usa el flujo Futures
+# común y el monitor de zona de Entry.
 # ============================================================================
 
-_FUTURES_SCALPING_TFS = (
-    '5m',
-    '15m',
-)
+_FUTURES_SCALPING_TFS = ()  # RC9.6.2: retired; 30m+ uses common Futures alert flow
 
 _FUTURES_SCALPING_PREF_CACHE = {}
 _FUTURES_SCALPING_PREF_CACHE_LOCK = threading.Lock()
@@ -46861,31 +46940,9 @@ def _start_background_threads():
     except Exception as e:
         print(f"⚠️ Error iniciando futures_standard_alerts: {e}")
 
-    # Commit 36K — notifier personalizado de scalping Futures.
-    #
-    # Es liviano: sólo lee el caché Futures existente.
-    # Con preferencias desactivadas (default) prácticamente no hace trabajo.
-    try:
-
-        t_scalping = threading.Thread(
-            target=futures_scalping_alert_loop,
-            name='futures-scalping-alerts',
-            daemon=True
-        )
-
-        t_scalping.start()
-
-        print(
-            "✅ Thread futures_scalping_alerts iniciado "
-            "(setup EXECUTABLE_SIGNAL según horario personal)"
-        )
-
-    except Exception as e:
-
-        print(
-            "⚠️ Error iniciando "
-            f"futures_scalping_alerts: {e}"
-        )
+    # RC9.6.2 — legacy scalping notifier retired. 5m/15m are not part of
+    # the active Futures contract; all 30m+ executable alerts use the common
+    # futures_standard_alert_loop. Do not start an idle legacy thread.
     print("=" * 60 + "\n")
 
 
