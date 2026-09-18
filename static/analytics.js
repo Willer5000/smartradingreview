@@ -2893,6 +2893,7 @@ async function loadResearchFederationAnalytics(){
         updateV1ReviewTraderNote();
         body.dataset.hasResearchData='1';
         const coverage=data.coverage||{};
+        const analyzedRecent=Math.max(0, Math.min(RF96_RESEARCH_TARGET, Number(coverage.analyzed_last_cycle||0)));
         const profitability=data.profitability_evidence||{};
         const rf96Stats=rf96ActiveChampionStats(candidates);
         const activeCandidates=rf96Stats.rows;
@@ -2904,8 +2905,8 @@ async function loadResearchFederationAnalytics(){
             const parts=['4H','12H','1D','1W'].map(tf=>`${tf}: ${Number(strategic[tf]||0)}`);
             const missing=(coverage.missing_strategic_timeframes||[]);
             covEl.className=`small mb-2 ${missing.length?'text-warning':'text-success'}`;
-            const causal=`Contrato Research 9.7 ${RF96_RESEARCH_TARGET} celdas · Champions activos ${activeChampionCount}/${RF96_RESEARCH_TARGET} · pendientes ${activePending} · OOS+ activos ${rf96Stats.oosPositive}`;
-            covEl.textContent=`Cobertura estratégica · ${parts.join(' · ')} · ${causal}${missing.length?` · Sin evidencia actual: ${missing.join(', ')}`:''}${data.degraded?' · ⚠ datos cacheados':''}`;
+            const causal=`Analizadas recientemente ${analyzedRecent}/${RF96_RESEARCH_TARGET} · validadas ${activeChampionCount}/${RF96_RESEARCH_TARGET} · pendientes ${activePending} · con ventaja histórica positiva ${rf96Stats.oosPositive}`;
+            covEl.textContent=`Cobertura por temporalidad · ${parts.join(' · ')} · ${causal}${missing.length?` · Aún sin validación final: ${missing.join(', ')}`:''}${data.degraded?' · mostrando el último estado disponible':''}`;
         }
         const sm=new Map(shadow.map(x=>[x.candidate_key,x]));
         const actionable=activeCandidates.filter(x=>['SHADOW_READY_FAST','SHADOW_READY','VALIDATED_SINGLE_ASSET','VALIDATION_REQUIRED','REJECTED_OOS','OBSERVE'].includes(String(x.stage||'')));
@@ -2976,8 +2977,8 @@ async function loadResearchFederationAnalytics(){
         if(shadowBt) shadowBt.innerHTML=renderBt(profitability.futures_evaluation,'Sin challengers causales disponibles.');
         const simpleCoverage=document.getElementById('v1-coverage');
         const simpleCoverageNote=document.getElementById('v1-coverage-note');
-        if(simpleCoverage) simpleCoverage.textContent=`${activeChampionCount}/${RF96_RESEARCH_TARGET} validadas · ${activePending} pendientes`;
-        if(simpleCoverageNote) simpleCoverageNote.textContent=`Con ventaja histórica positiva ${rf96Stats.oosPositive} · las pruebas antiguas se conservan como referencia, pero no cuentan para la cobertura nueva.`;
+        if(simpleCoverage) simpleCoverage.textContent=`${analyzedRecent}/${RF96_RESEARCH_TARGET} analizadas · ${activeChampionCount}/${RF96_RESEARCH_TARGET} validadas`;
+        if(simpleCoverageNote) simpleCoverageNote.textContent=`Pendientes de validación: ${activePending} · con ventaja histórica positiva: ${rf96Stats.oosPositive}. Investigar no significa todavía autorizar una estrategia.`;
         const simpleBucket=(id,noteId,bucket)=>{
             const el=document.getElementById(id), note=document.getElementById(noteId);
             if(!el) return;
@@ -3032,9 +3033,9 @@ async function loadResearchFederationAnalytics(){
         const covBody=document.getElementById('v1-coverage-matrix-body');
         if(covBody){
             const groups=[
-                ['Futures 30m · reps CORE1/CORE2/MEDIUM/HIGH','30M',8,'CRYPTO_FUTURES'],
-                ['Futures 1h · reps CORE1/CORE2/MEDIUM/HIGH','1H',8,'CRYPTO_FUTURES'],
-                ['Futures 2h · reps CORE1/CORE2/MEDIUM/HIGH','2H',8,'CRYPTO_FUTURES'],
+                ['Futures 30m · grupos de riesgo','30M',8,'CRYPTO_FUTURES'],
+                ['Futures 1h · grupos de riesgo','1H',8,'CRYPTO_FUTURES'],
+                ['Futures 2h · grupos de riesgo','2H',8,'CRYPTO_FUTURES'],
                 ['Futures 4h · BTC/XRP/LINK','4H',6,'CRYPTO_FUTURES'],
                 ['Futures 12h · BTC/XRP','12H',4,'CRYPTO_FUTURES'],
                 ['Futures 1D · BTC','1D',2,'CRYPTO_FUTURES'],
@@ -3049,7 +3050,7 @@ async function loadResearchFederationAnalytics(){
                 return `<tr><td>${label}</td><td>${ok}/${target}</td><td class="${ok===target?'text-success':ok>0?'text-info':'text-muted'}">${ok===target?'✅ Completa':ok>0?'🟡 Parcial':'🔎 Buscando'}</td></tr>`;
             }).join('');
         }
-        const coverageLabel = ` · Investigación ${activeChampionCount}/${RF96_RESEARCH_TARGET} estrategias validadas · ${activePending} pendientes`;
+        const coverageLabel = ` · Analizadas recientemente ${analyzedRecent}/${RF96_RESEARCH_TARGET} · validadas ${activeChampionCount}/${RF96_RESEARCH_TARGET}`;
         body.innerHTML=actionable.slice(0,80).map(x=>{const l=sm.get(x.candidate_key)||{};return `<tr>
           <td><span class="badge bg-secondary">${x.stage||'--'}</span></td>
           <td><b>${x.source_engine||'--'}</b><br><span class="text-muted small">${x.experiment||'--'}</span></td>
@@ -3060,7 +3061,7 @@ async function loadResearchFederationAnalytics(){
           <td>${fmt(l.avg_safety,1)}</td></tr>`}).join('') || `<tr><td colspan="7" class="text-muted text-center">${data.connected===false?'Research Bridge sin conexión':'Bridge conectado, pero todavía no hay filas visibles para esta cuenta/clave.'}</td></tr>`;
         const stages={}; activeCandidates.forEach(x=>stages[x.stage]=(stages[x.stage]||0)+1);
         const kp=document.getElementById('rf-analytics-kpis');
-        if(kp) kp.innerHTML=[['Cobertura de pruebas',`${activeChampionCount}/${RF96_RESEARCH_TARGET}`],['Estrategias validadas',activeChampionCount],['Con ventaja positiva',rf96Stats.oosPositive],['Pendientes',activePending]].map(([k,v])=>`<div class="col-6 col-md-3"><div class="border rounded p-2 h-100"><div class="text-muted small">${k}</div><div class="h5 mb-0">${v}</div></div></div>`).join('');
+        if(kp) kp.innerHTML=[['Analizadas recientemente',`${analyzedRecent}/${RF96_RESEARCH_TARGET}`],['Estrategias validadas',activeChampionCount],['Con ventaja positiva',rf96Stats.oosPositive],['Pendientes de validación',activePending]].map(([k,v])=>`<div class="col-6 col-md-3"><div class="border rounded p-2 h-100"><div class="text-muted small">${k}</div><div class="h5 mb-0">${v}</div></div></div>`).join('');
     }catch(err){body.innerHTML=`<tr><td colspan="7" class="text-warning">${err.message}</td></tr>`;}
 }
 window.loadResearchFederationAnalytics=loadResearchFederationAnalytics;

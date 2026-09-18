@@ -316,6 +316,30 @@ def _snapshot_candidate(c):
     }
 
 
+def _engine_progress_from_states(states, target_cells=60):
+    expected = {'execution': 8, 'risk': 16, 'strategy': 12, 'traders': 24}
+    progress = {}
+    analyzed = 0
+    for row in states or []:
+        engine = str(row.get('engine') or '').lower()
+        if engine not in expected:
+            continue
+        meta = row.get('meta') or {}
+        seen = max(0, min(expected[engine], int(meta.get('last_causal_cells') or 0)))
+        analyzed += seen
+        progress[engine] = {
+            'analyzed_last_cycle': seen,
+            'expected': expected[engine],
+            'last_seen_at': row.get('last_seen_at'),
+            'status': row.get('status'),
+        }
+    return {
+        'analyzed_last_cycle': max(0, min(int(target_cells or 60), analyzed)),
+        'target_cells': int(target_cells or 60),
+        'by_engine': progress,
+    }
+
+
 def _bridge_watermark():
     """One tiny governance row replaces promotion+Shadow watermarks."""
     try:
@@ -376,10 +400,14 @@ def _compact(force=False):
                 # engine heartbeat is diagnostic and must not blank valid Champions.
                 states=[]
             coverage=_coverage([{'scope':x.get('scope') or {},'source_engine':x.get('source_engine')} for x in candidates])
+            target_cells=int(snap.get('target_cells') or 60)
+            progress=_engine_progress_from_states(states, target_cells)
             coverage.update({
-                'target_cells':int(snap.get('target_cells') or 60),
+                'target_cells':target_cells,
                 'champion_count':int(snap.get('champion_count') or len(candidates)),
-                'pending_count':int(snap.get('pending_count') or max(0,60-len(candidates))),
+                'pending_count':int(snap.get('pending_count') or max(0,target_cells-len(candidates))),
+                'analyzed_last_cycle':int(progress.get('analyzed_last_cycle') or 0),
+                'engine_progress':progress.get('by_engine') or {},
                 'knowledge_core':True,
                 'snapshot_updated_at':snap.get('updated_at'),
             })
@@ -430,6 +458,9 @@ def _compact(force=False):
             'order':'engine.asc',
             'limit':'10',
         })
+        progress=_engine_progress_from_states(states, int(coverage.get('target_cells') or 60))
+        coverage['analyzed_last_cycle']=int(progress.get('analyzed_last_cycle') or 0)
+        coverage['engine_progress']=progress.get('by_engine') or {}
         shadow=_get('research_shadow_live_metrics_v1',{
             'select':(
                 'candidate_key,source_engine,experiment,research_stage,market_family,symbol,timeframe,'

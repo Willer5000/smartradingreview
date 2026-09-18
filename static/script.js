@@ -4333,8 +4333,57 @@ window.updateCandleChart = function(data) {
         }
     };
     
-    Plotly.newPlot('candle-chart', traces, layout, {responsive: true, displaylogo: false});
+    Plotly.newPlot('candle-chart', traces, layout, {responsive: true, displaylogo: false})
+        .then(() => {
+            if (window.__lastLiveCandlePayload && typeof window.updateLiveCandleOverlay === 'function') {
+                window.updateLiveCandleOverlay(window.__lastLiveCandlePayload);
+            }
+        });
 }
+
+// RC9.7.5 — vela actual únicamente visual.
+// El análisis, indicadores y niveles siguen usando exclusivamente velas cerradas.
+window.updateLiveCandleOverlay = function(payload) {
+    const chartDiv = document.getElementById('candle-chart');
+    const candle = payload && payload.current_candle;
+    if (!chartDiv || !candle || !window.Plotly) return;
+
+    const values = ['open', 'high', 'low', 'close'].map(k => Number(candle[k]));
+    if (!candle.time || values.some(v => !Number.isFinite(v) || v <= 0)) return;
+
+    window.__lastLiveCandlePayload = payload;
+    const liveTrace = {
+        x: [new Date(candle.time)],
+        open: [values[0]],
+        high: [values[1]],
+        low: [values[2]],
+        close: [values[3]],
+        type: 'candlestick',
+        name: 'Vela actual · en formación',
+        meta: 'LIVE_OPEN_CANDLE',
+        opacity: 0.72,
+        increasing: {line: {color: '#35D7C8', width: 2}, fillcolor: 'rgba(53,215,200,0.45)'},
+        decreasing: {line: {color: '#FFB347', width: 2}, fillcolor: 'rgba(255,179,71,0.45)'},
+        showlegend: true,
+        yaxis: 'y',
+        hovertemplate: '<b>Vela actual · en formación</b><br>Open: %{open}<br>High: %{high}<br>Low: %{low}<br>Precio: %{close}<extra></extra>'
+    };
+
+    const data = Array.isArray(chartDiv.data) ? chartDiv.data : [];
+    const idx = data.findIndex(t => t && t.meta === 'LIVE_OPEN_CANDLE');
+    if (idx >= 0) {
+        Plotly.restyle(chartDiv, {
+            x: [[new Date(candle.time)]],
+            open: [[values[0]]],
+            high: [[values[1]]],
+            low: [[values[2]]],
+            close: [[values[3]]]
+        }, [idx]);
+    } else if (data.length > 0) {
+        Plotly.addTraces(chartDiv, liveTrace);
+    }
+};
+
 // ============ FAIR VALUE GAPS + ORDER BLOCKS + LIQUIDITY SWEEPS + STOP HUNTS ============
 function updateFVGAOBChart(data) {
     console.log('🟣🟣🟣 EJECUTANDO updateFVGAOBChart');
@@ -9207,6 +9256,16 @@ window.updateInstantRecommendation = function updateInstantRecommendation(
             'op-entry'
         );
 
+    const entryLabelEl =
+        document.getElementById(
+            'op-entry-label'
+        );
+
+    const livePriceOpEl =
+        document.getElementById(
+            'op-live-price'
+        );
+
     const slEl =
         document.getElementById(
             'op-sl'
@@ -9434,33 +9493,35 @@ window.updateInstantRecommendation = function updateInstantRecommendation(
     // Si el backend no los entrega, mostramos "--".
     // ============================================================
 
-    if (entryEl) {
+    const isDirectionalAction = ['COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT'].includes(action);
 
-        entryEl.textContent =
-            formatTradingLevel(
-                levels.entry,
-                symbol
-            );
+    if (entryLabelEl) {
+        entryLabelEl.textContent = isDirectionalAction ? 'Entrada:' : 'Precio analizado:';
     }
 
+    if (entryEl) {
+        entryEl.textContent = formatTradingLevel(
+            isDirectionalAction ? levels.entry : (data.current_price || levels.entry),
+            symbol
+        );
+    }
 
     if (slEl) {
-
-        slEl.textContent =
-            formatTradingLevel(
-                levels.stop_loss,
-                symbol
-            );
+        slEl.textContent = isDirectionalAction
+            ? formatTradingLevel(levels.stop_loss, symbol)
+            : 'NO DISPONIBLE';
     }
 
-
     if (tpEl) {
+        tpEl.textContent = isDirectionalAction
+            ? formatTradingLevel(levels.take_profit, symbol)
+            : 'NO DISPONIBLE';
+    }
 
-        tpEl.textContent =
-            formatTradingLevel(
-                levels.take_profit,
-                symbol
-            );
+    // El precio en vivo se completa con /api/price. No reutilizamos el precio
+    // de la vela cerrada como si fuera cotización actual.
+    if (livePriceOpEl && !livePriceOpEl.textContent.trim()) {
+        livePriceOpEl.textContent = '--';
     }
 
 
@@ -9478,12 +9539,7 @@ window.updateInstantRecommendation = function updateInstantRecommendation(
             );
 
         leverageEl.textContent =
-            (
-                Number.isFinite(
-                    leverage
-                )
-                && leverage > 0
-            )
+            isDirectionalAction && Number.isFinite(leverage) && leverage > 0
                 ? `${leverage}x`
                 : '--x';
     }

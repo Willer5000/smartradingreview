@@ -27255,11 +27255,18 @@ def api_price():
     try:
         symbol = request.args.get('symbol', 'BTC-USDT')
         interval = request.args.get('interval', '1D')
-        
-        # Elegir el system apropiado (spot vs futures) según symbol
+        market = str(request.args.get('market') or 'spot').strip().lower()
+
+        # RC9.7.5: Futures must visualize its real perpetual contract, not the
+        # Spot market. This endpoint remains display-only; trading decisions are
+        # still produced by the corresponding closed-candle analysis pipeline.
         try:
-            from kucoin_cache import fetch_kucoin_candles
-            df = fetch_kucoin_candles(symbol, interval, timeout=8)
+            if market == 'futures':
+                futures_market = _get_futures_system()
+                df = futures_market.get_kucoin_data(symbol, interval) if futures_market is not None else None
+            else:
+                from kucoin_cache import fetch_kucoin_candles
+                df = fetch_kucoin_candles(symbol, interval, timeout=8)
         except Exception as e:
             return jsonify({'success': False, 'error': f'fetch failed: {e}'}), 500
         
@@ -27269,14 +27276,37 @@ def api_price():
         current_price = float(df['close'].iloc[-1])
         previous_close = float(df['close'].iloc[-2]) if len(df) >= 2 else current_price
         change_pct = ((current_price - previous_close) / previous_close * 100) if previous_close > 0 else 0.0
+
+        # RC9.7.5: the trading decision still uses only closed candles, but the
+        # UI may draw the current open candle as a clearly marked visual overlay.
+        # This payload is display-only and is never fed back into indicators,
+        # Entry/SL/TP, Safety or publication logic.
+        last_row = df.iloc[-1]
+        last_time = last_row.get('time')
+        try:
+            last_time_iso = last_time.isoformat()
+        except Exception:
+            last_time_iso = str(last_time)
+        current_candle = {
+            'time': last_time_iso,
+            'open': float(last_row.get('open')),
+            'high': float(last_row.get('high')),
+            'low': float(last_row.get('low')),
+            'close': float(last_row.get('close')),
+            'display_only': True,
+            'is_forming': True,
+        }
         
         return jsonify({
             'success': True,
             'symbol': symbol,
             'timeframe': interval,
+            'market': market,
             'current_price': current_price,
             'previous_close': previous_close,
             'change_pct': change_pct,
+            'current_candle': current_candle,
+            'analysis_uses_closed_candles': True,
             'timestamp': datetime.now(bolivia_tz).isoformat()
         })
     except Exception as e:

@@ -1210,7 +1210,7 @@
                         <div class="mt-2 text-end">
                             <small class="text-muted">
                                 <i class="fas fa-sync-alt me-1"></i>
-                                Velas actualizadas cada 30 seg
+                                Precio en vivo cada 30 s · señales basadas en velas cerradas
                             </small>
                         </div>
                     </div>
@@ -2062,7 +2062,8 @@
                                     <span class="badge bg-dark" id="op-leverage">--x</span>
                                 </div>
                                 <div class="mt-2">
-                                    <p class="small mb-1"><strong>Entrada:</strong> <span id="op-entry">---</span></p>
+                                    <p class="small mb-1"><strong id="op-entry-label">Entrada:</strong> <span id="op-entry">---</span></p>
+                                    <p class="small mb-1"><strong>Precio actual:</strong> <span id="op-live-price">---</span></p>
                                     <p class="small mb-1"><strong>Stop Loss:</strong> <span id="op-sl">---</span></p>
                                     <p class="small mb-0"><strong>Take Profit:</strong> <span id="op-tp">---</span></p>
                                 </div>
@@ -2090,6 +2091,16 @@
                         <div class="p-2 text-center">
                             <small class="text-muted">Confirmaciones de cierres anteriores que aún esperan entrada o siguen en seguimiento.</small>
                         </div>
+                    </div>
+                </div>
+                <!-- RC9.7.5: diagnóstico del universo separado de las señales vigentes -->
+                <div class="card bg-dark border-info mb-4" id="futures-market-status-card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="fas fa-shield-alt me-2"></i>Estado del mercado</h5>
+                        <span class="badge bg-dark">Futuros</span>
+                    </div>
+                    <div class="card-body p-0" id="futures-market-diagnostics">
+                        <div class="p-3 text-muted text-center">Esperando el diagnóstico del ciclo...</div>
                     </div>
                 </div>
                 <!-- NUEVO: SEÑALES DE LA VELA ANTERIOR -->
@@ -2601,7 +2612,7 @@
 
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI-2"></script>
     <script
-        src="{{ url_for('static', filename='script.js') }}?v=20260918-RC9-7-4-FINAL-FREEZE"
+        src="{{ url_for('static', filename='script.js') }}?v=20260918-RC9-7-5-POLISH-FREEZE"
     ></script>
 
 
@@ -2612,7 +2623,7 @@
     {% if is_futures %}
 
     <script
-        src="{{ url_for('static', filename='futures.js') }}?v=20260918-RC9-7-4-FINAL-FREEZE"
+        src="{{ url_for('static', filename='futures.js') }}?v=20260918-RC9-7-5-POLISH-FREEZE"
     ></script>
 
     {% endif %}
@@ -3194,30 +3205,36 @@
             // Antes usaba /api/analyze (ejecuta 9 traders + 10 capas cada 5s), que
             // saturaba Render Free con 502 Bad Gateway. Ahora usa /api/price que solo
             // consulta velas (con caché HTTP) y responde en <50ms.
-            setInterval(function() {
+            window.refreshLivePriceAndCandle = function() {
                 if (document.hidden) return;
                 const symbol = window.currentSymbol || (window.PAGE_CONFIG?.defaultSymbol || 'BTC-USDT');
                 const interval = window.currentInterval || (window.PAGE_CONFIG?.defaultTimeframe || '1D');
-                
-                fetch(`/api/price?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}`)
+
+                fetch(`/api/price?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&market=${window.IS_FUTURES_PAGE ? 'futures' : 'spot'}`)
                     .then(response => {
                         if (!response.ok) throw new Error('HTTP ' + response.status);
                         return response.json();
                     })
                     .then(data => {
                         if (data.success && data.current_price) {
+                            const formatted = `$${Number(data.current_price).toFixed(2)}`;
                             const livePriceEl = document.getElementById('live-price');
-                            if (livePriceEl) {
-                                livePriceEl.textContent = `$${Number(data.current_price).toFixed(2)}`;
+                            const opLivePriceEl = document.getElementById('op-live-price');
+                            if (livePriceEl) livePriceEl.textContent = formatted;
+                            if (opLivePriceEl) opLivePriceEl.textContent = formatted;
+                            if (typeof window.updateLiveCandleOverlay === 'function') {
+                                window.updateLiveCandleOverlay(data);
+                            } else {
+                                window.__lastLiveCandlePayload = data;
                             }
                         }
                     })
                     .catch(error => {
-                        // Silencioso: si falla temporalmente no lo mostramos como error,
-                        // el próximo tick lo recuperará.
                         console.debug('price refresh skipped:', error.message);
                     });
-            }, 30000);
+            };
+            window.refreshLivePriceAndCandle();
+            setInterval(window.refreshLivePriceAndCandle, 30000);
         }
         window.getInstantRecommendation = function() {
             const cfg = window.PAGE_CONFIG || {};

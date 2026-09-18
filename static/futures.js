@@ -424,7 +424,7 @@ function futRenderAnalysisDiagnostics(json, context) {
         if (safety !== null && safety !== undefined) {
             safetyHtml = `
                 <span class="text-info ms-2">
-                    Safety ${Number(safety).toFixed(1)}
+                    Seguridad ${Number(safety).toFixed(1)}
                     ${
                         safetyMinimum !== null && safetyMinimum !== undefined
                             ? `/ mínimo ${Number(safetyMinimum).toFixed(1)}`
@@ -565,6 +565,17 @@ function futRenderAnalysisDiagnostics(json, context) {
                 pero un filtro de seguridad impidió publicarla.
             </div>
             ${detailHtml}
+        </div>
+    `;
+}
+
+function futPublishMarketDiagnostics(json, context) {
+    const host = document.getElementById('futures-market-diagnostics');
+    if (!host) return;
+    const html = futRenderAnalysisDiagnostics(json, context);
+    host.innerHTML = html || `
+        <div class="p-3 text-muted text-center">
+            Sin diagnóstico adicional para este ciclo.
         </div>
     `;
 }
@@ -912,6 +923,7 @@ window.updateActiveSignals = async function() {
                 json,
                 'active'
             );
+        futPublishMarketDiagnostics(json, 'active');
 
         const completed = Number(
             progress.completed || 0
@@ -1014,7 +1026,7 @@ window.updateActiveSignals = async function() {
         // ------------------------------------------------------------
         if (signals.length === 0) {
 
-            signalsList.innerHTML = diagnosticsHtml + `
+            signalsList.innerHTML = `
                 <div class="list-group-item bg-dark text-warning text-center py-3">
 
                     <strong>
@@ -1238,7 +1250,7 @@ window.updateActiveSignals = async function() {
             `;
         });
 
-        signalsList.innerHTML = diagnosticsHtml + html;
+        signalsList.innerHTML = html;
 
     } catch (err) {
 
@@ -1540,6 +1552,7 @@ window.updatePreviousSignals = async function() {
                 json,
                 'previous'
             );
+        futPublishMarketDiagnostics(json, 'previous');
 
         const completed =
             Number(
@@ -1672,7 +1685,7 @@ window.updatePreviousSignals = async function() {
         // ------------------------------------------------------------
         if (signals.length === 0) {
 
-            signalsList.innerHTML = diagnosticsHtml + `
+            signalsList.innerHTML = `
                 <div class="list-group-item bg-dark text-warning text-center py-3">
 
                     <strong>
@@ -1895,8 +1908,7 @@ window.updatePreviousSignals = async function() {
             `;
         });
 
-        signalsList.innerHTML =
-            diagnosticsHtml + html;
+        signalsList.innerHTML = html;
 
     } catch (err) {
 
