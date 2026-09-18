@@ -2093,16 +2093,6 @@
                         </div>
                     </div>
                 </div>
-                <!-- RC9.7.5: diagnóstico del universo separado de las señales vigentes -->
-                <div class="card bg-dark border-info mb-4" id="futures-market-status-card">
-                    <div class="card-header d-flex justify-content-between align-items-center">
-                        <h5 class="mb-0"><i class="fas fa-shield-alt me-2"></i>Estado del mercado</h5>
-                        <span class="badge bg-dark">Futuros</span>
-                    </div>
-                    <div class="card-body p-0" id="futures-market-diagnostics">
-                        <div class="p-3 text-muted text-center">Esperando el diagnóstico del ciclo...</div>
-                    </div>
-                </div>
                 <!-- NUEVO: SEÑALES DE LA VELA ANTERIOR -->
                 <div class="card bg-dark border-warning mt-4">
                     <div class="card-header signal-header-previous d-flex justify-content-between align-items-center">
@@ -2612,7 +2602,7 @@
 
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI-2"></script>
     <script
-        src="{{ url_for('static', filename='script.js') }}?v=20260918-RC9-7-5-POLISH-FREEZE"
+        src="{{ url_for('static', filename='script.js') }}?v=20260918-RC9-7-6-FUTURES-SIGNALS"
     ></script>
 
 
@@ -2623,7 +2613,7 @@
     {% if is_futures %}
 
     <script
-        src="{{ url_for('static', filename='futures.js') }}?v=20260918-RC9-7-5-POLISH-FREEZE"
+        src="{{ url_for('static', filename='futures.js') }}?v=20260918-RC9-7-6-FUTURES-SIGNALS"
     ></script>
 
     {% endif %}

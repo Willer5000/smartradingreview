@@ -34448,6 +34448,58 @@ def _build_futures_analysis_visibility(cache, min_confidence):
     }
 
 
+def _futures_directional_hidden_candidates(visibility, source_context):
+    """
+    RC9.7.6 — subconjunto visible para las listas de señales Futures.
+
+    La interfaz de oportunidades NO debe llenarse con NO_OPERAR / ESPERAR /
+    PRECAUCION ni errores de datos. Sólo se muestran hipótesis LONG/SHORT que
+    fueron clasificadas como ANALYSIS_ONLY y que el servidor ya evaluó como
+    riesgo manual MEDIUM/HIGH.
+
+    - En CURRENT_ANALYSIS_ONLY son informativas: no pueden guardarse.
+    - En PREVIOUS_ANALYSIS_ONLY pertenecen al último cierre confirmado y sí
+      pueden ofrecer guardado manual, sujeto a la validación server-side 36M.
+    """
+    candidates = (visibility or {}).get('candidates') or []
+    allow_manual_save = str(source_context).upper() == 'PREVIOUS_ANALYSIS_ONLY'
+    visible = []
+
+    for raw in candidates:
+        if not isinstance(raw, dict):
+            continue
+
+        action = str(raw.get('action') or '').upper()
+        classification = str(raw.get('classification') or '').upper()
+        risk_class = str(raw.get('manual_risk_class') or '').upper()
+
+        if action not in ('LONG', 'SHORT'):
+            continue
+        if classification != 'ANALYSIS_ONLY':
+            continue
+        if risk_class not in ('MEDIUM', 'HIGH'):
+            continue
+        if raw.get('manual_save_allowed') is not True:
+            continue
+
+        item = dict(raw)
+        item['source_context'] = str(source_context).upper()
+        # El backend de guardado acepta overrides únicamente desde la vela
+        # anterior. La lista actual sólo explica por qué no fue publicada.
+        item['manual_save_allowed'] = bool(allow_manual_save)
+        visible.append(item)
+
+    visible.sort(
+        key=lambda item: (
+            0 if str(item.get('manual_risk_class') or '').upper() == 'MEDIUM' else 1,
+            -float(item.get('confidence') or 0),
+            str(item.get('symbol') or ''),
+            str(item.get('timeframe') or ''),
+        )
+    )
+    return visible
+
+
 # ============================================================================
 # ENDPOINT: Señales VIGENTES (ciclo de vida persistente, excluye nuevas confirmadas)
 # ============================================================================
@@ -34644,6 +34696,11 @@ def api_futures_signals_active():
                 visibility['summary'],
             'analysis_candidates':
                 visibility['candidates'],
+            'other_directional_signals':
+                _futures_directional_hidden_candidates(
+                    visibility,
+                    'CURRENT_ANALYSIS_ONLY'
+                ),
             'cache_age':
                 cache.get(
                     'cache_age',
@@ -35086,6 +35143,11 @@ def api_futures_signals_previous():
                 visibility['summary'],
             'analysis_candidates':
                 visibility['candidates'],
+            'other_directional_signals':
+                _futures_directional_hidden_candidates(
+                    visibility,
+                    'PREVIOUS_ANALYSIS_ONLY'
+                ),
             'cache_age':
                 cache.get(
                     'cache_age',

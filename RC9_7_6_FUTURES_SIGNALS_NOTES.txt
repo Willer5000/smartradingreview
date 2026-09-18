@@ -1,0 +1,32 @@
+RC9.7.6 — FUTURES SIGNAL UX / LIFECYCLE FINALIZATION
+
+Objetivo
+- Eliminar el panel separado "Estado del mercado".
+- Mantener "Señales vigentes" y "Nuevas señales confirmadas" como listas operativas.
+- Añadir en ambas listas "Por qué no aparecen otras señales (X)".
+- X cuenta SOLO hipótesis LONG/SHORT ANALYSIS_ONLY de riesgo MEDIUM/HIGH.
+- NO_OPERAR / ESPERAR / PRECAUCION / errores permanecen disponibles para aprendizaje interno, pero no se muestran como oportunidades.
+- En la lista vigente/actual, los MEDIUM/HIGH son informativos y NO se pueden guardar.
+- En la vela anterior, MEDIUM/HIGH pueden guardarse manualmente con PREVIOUS_ANALYSIS_ONLY y validación server-side ya existente.
+
+Archivos
+- app.py
+- static/futures.js
+- templates/index.html
+- test_rc9_7_6_futures_signal_ux.py
+
+No cambia
+- Safety
+- Entry / SL / TP
+- leverage
+- Research/OOS
+- estrategia de publicación Premium
+- lifecycle persistente de señales oficiales
+
+Validación local
+- python -m py_compile app.py: OK
+- node --check static/futures.js: OK
+- pytest test_rc9_7_6_futures_signal_ux.py: 5 passed
+
+Commit sugerido
+RC9.7.6 fix Futures current/previous signal lists and remove noise

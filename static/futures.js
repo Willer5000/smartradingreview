@@ -351,232 +351,141 @@ window.openManualAnalysisSave = function(
     );
 };
 function futRenderAnalysisDiagnostics(json, context) {
-    const summary = json && json.analysis_summary;
-    const candidates = Array.isArray(json && json.analysis_candidates)
-        ? json.analysis_candidates
+    // RC9.7.6 — en las listas de señales sólo interesan otras hipótesis
+    // LONG/SHORT de riesgo MEDIO/ALTO. NO_OPERAR / ESPERAR / PRECAUCIÓN y
+    // errores de datos siguen disponibles para aprendizaje interno, pero no
+    // ocupan espacio en una lista que el usuario interpreta como oportunidad.
+    let candidates = Array.isArray(json && json.other_directional_signals)
+        ? json.other_directional_signals
         : [];
 
-    // Compatibilidad durante despliegues: si el backend todavía es anterior
-    // al commit 7, no insertar un panel vacío ni romper las listas existentes.
-    if (!summary || candidates.length === 0) {
-        return '';
+    // Fallback compatible con un backend anterior durante un deploy mixto.
+    if (candidates.length === 0 && Array.isArray(json && json.analysis_candidates)) {
+        candidates = json.analysis_candidates.filter(candidate => {
+            const action = String(candidate.action || '').toUpperCase();
+            const classification = String(candidate.classification || '').toUpperCase();
+            const riskClass = String(candidate.manual_risk_class || '').toUpperCase();
+            return (
+                (action === 'LONG' || action === 'SHORT')
+                && classification === 'ANALYSIS_ONLY'
+                && (riskClass === 'MEDIUM' || riskClass === 'HIGH')
+                && candidate.manual_save_allowed === true
+            );
+        }).map(candidate => ({
+            ...candidate,
+            // En el análisis actual nunca se ofrece guardado; sólo la vela
+            // anterior puede transformarse en seguimiento manual.
+            manual_save_allowed: context === 'previous',
+            source_context: context === 'previous'
+                ? 'PREVIOUS_ANALYSIS_ONLY'
+                : 'CURRENT_ANALYSIS_ONLY'
+        }));
     }
 
-    const executable = Number(summary.executable || 0);
-    const activeNow = Number(summary.active_now || 0);
-    const analysisOnly = Number(summary.analysis_only || 0);
-    const noTrade = Number(summary.no_trade || 0);
-    const errors = Number(summary.errors || 0);
+    const title = 'Por qué no aparecen otras señales';
 
-    const excluded = candidates.filter(candidate => {
-        if (context === 'active') {
-            return !candidate.is_active;
-        }
-        return candidate.classification !== 'EXECUTABLE_SIGNAL';
-    });
+    if (candidates.length === 0) {
+        return `
+            <details class="mt-2 px-2 pb-2">
+                <summary class="text-secondary" style="cursor:pointer;">
+                    ${title} (0)
+                </summary>
+                <div class="small text-muted mt-2">
+                    No hubo otras hipótesis LONG/SHORT de riesgo medio o alto en este ciclo.
+                </div>
+            </details>
+        `;
+    }
 
-    const shouldOpen = (
-        context === 'active'
-            ? activeNow === 0
-            : executable === 0
-    );
+    let rows = '';
 
-    const statusMeta = {
-        EXECUTABLE_SIGNAL: {
-            badge: 'success',
-            label: 'EJECUTABLE'
-        },
-        ANALYSIS_ONLY: {
-            badge: 'warning text-dark',
-            label: 'SOLO ANÁLISIS'
-        },
-        NO_TRADE: {
-            badge: 'secondary',
-            label: 'NO OPERAR'
-        },
-        ANALYSIS_ERROR: {
-            badge: 'danger',
-            label: 'ERROR DE DATOS'
-        }
-    };
+    candidates.forEach(candidate => {
+        const action = String(candidate.action || '').toUpperCase();
+        if (action !== 'LONG' && action !== 'SHORT') return;
 
-    let excludedHtml = '';
+        const riskClass = String(candidate.manual_risk_class || '').toUpperCase();
+        if (riskClass !== 'MEDIUM' && riskClass !== 'HIGH') return;
 
-    excluded.forEach(candidate => {
-        const classification = String(
-            candidate.classification || 'ANALYSIS_ERROR'
-        );
-        const meta = statusMeta[classification]
-            || statusMeta.ANALYSIS_ERROR;
-        const symbol = futEscapeHtml(
-            String(candidate.symbol || '').replace('-', '/')
-        );
+        const isLong = action === 'LONG';
+        const directionBadge = isLong ? 'success' : 'danger';
+        const riskBadge = riskClass === 'MEDIUM'
+            ? 'warning text-dark'
+            : 'danger';
+        const riskLabel = riskClass === 'MEDIUM'
+            ? 'RIESGO MEDIO'
+            : 'RIESGO ALTO';
+        const symbol = futEscapeHtml(String(candidate.symbol || '').replace('-', '/'));
         const timeframe = futEscapeHtml(candidate.timeframe || '--');
-        const action = futEscapeHtml(candidate.action || 'NO_OPERAR');
         const confidence = fmtConfidence(candidate.confidence);
         const reason = futEscapeHtml(
-            candidate.reason || candidate.active_reason || 'Sin motivo disponible'
+            candidate.manual_risk_reason
+            || candidate.reason
+            || 'No superó el filtro final de publicación.'
         );
-        const safety = candidate.execution_safety;
-        const safetyMinimum = candidate.execution_safety_minimum;
 
-        let safetyHtml = '';
-        if (safety !== null && safety !== undefined) {
-            safetyHtml = `
-                <span class="text-info ms-2">
-                    Seguridad ${Number(safety).toFixed(1)}
-                    ${
-                        safetyMinimum !== null && safetyMinimum !== undefined
-                            ? `/ mínimo ${Number(safetyMinimum).toFixed(1)}`
-                            : ''
-                    }
-                </span>
-            `;
-        }
-        let manualSaveHtml = '';
-
+        let saveHtml = '';
         if (
-            classification === 'ANALYSIS_ONLY'
+            context === 'previous'
             && candidate.manual_save_allowed === true
             && candidate.signal_id
         ) {
-            const manualKey = String(
-                candidate.signal_id
-            );
-
-            window._manualAnalysisCandidates[
-                manualKey
-            ] = {
+            const manualKey = String(candidate.signal_id);
+            window._manualAnalysisCandidates[manualKey] = {
                 ...candidate,
-                source_context: (
-                    context === 'previous'
-                        ? 'PREVIOUS_ANALYSIS_ONLY'
-                        : 'CURRENT_ANALYSIS_ONLY'
-                ),
+                source_context: 'PREVIOUS_ANALYSIS_ONLY'
             };
 
-            const riskClass = String(
-                candidate.manual_risk_class
-                || ''
-            ).toUpperCase();
-
-            const isMedium = (
-                riskClass === 'MEDIUM'
-            );
-
-            manualSaveHtml = `
+            saveHtml = `
                 <div class="mt-2">
-                    <span class="badge ${isMedium ? 'bg-warning text-dark' : 'bg-danger'} me-1">
-                        ${isMedium ? 'RIESGO MEDIO' : 'RIESGO ALTO'}
-                    </span>
-
                     <button
                         type="button"
-                        class="btn btn-sm ${isMedium ? 'btn-outline-warning' : 'btn-outline-danger'}"
+                        class="btn btn-sm ${riskClass === 'MEDIUM' ? 'btn-outline-warning' : 'btn-outline-danger'}"
                         onclick="event.stopPropagation(); window.openManualAnalysisSave('${manualKey}');"
                     >
-                        ${isMedium
-                            ? '💾 Guardar manual'
-                            : '🧪 Guardar experimental'}
+                        ${riskClass === 'MEDIUM' ? '💾 Guardar seguimiento' : '🧪 Guardar experimental'}
                     </button>
-
                     <div class="small text-muted mt-1">
-                        ${futEscapeHtml(
-                            candidate.manual_risk_reason
-                            || ''
-                        )}
+                        Guardado manual: conserva la clasificación de riesgo y no convierte la señal en recomendación oficial.
                     </div>
                 </div>
             `;
         }
-        let lifecycleHtml = '';
-        if (
-            classification === 'EXECUTABLE_SIGNAL'
-            && !candidate.is_active
-        ) {
-            lifecycleHtml = `
-                <div class="small text-secondary mt-1">
-                    ${futEscapeHtml(candidate.active_reason || '')}
-                </div>
-            `;
-        }
 
-        excludedHtml += `
-            <div class="border-bottom border-secondary py-2"
+        const contextText = context === 'previous'
+            ? 'Hipótesis LONG/SHORT del último cierre que no superó el filtro final.'
+            : 'Hipótesis LONG/SHORT del análisis actual que no superó el filtro final.';
+
+        rows += `
+            <div class="border-top border-secondary py-2"
                  style="cursor:pointer;"
                  onclick="window.changeToSignal('${String(candidate.symbol || '').replace(/'/g, "\'")}', '${String(candidate.timeframe || '').replace(/'/g, "\'")}')">
                 <div class="d-flex flex-wrap justify-content-between gap-1">
                     <div>
-                        <span class="badge bg-${meta.badge} me-1">
-                            ${meta.label}
-                        </span>
+                        <span class="badge bg-${directionBadge} me-1">${action}</span>
                         <strong>${symbol}</strong>
                         <span class="badge bg-dark ms-1">${timeframe}</span>
                     </div>
-                    <small class="text-muted">
-                        ${action} · ${confidence}%
-                    </small>
+                    <div>
+                        <span class="badge bg-${riskBadge}">${riskLabel}</span>
+                        <span class="badge bg-secondary ms-1">${confidence}%</span>
+                    </div>
                 </div>
-                <div class="small text-muted mt-1">
-                    Haz clic en la señal para ver el análisis completo, contexto, indicadores y niveles en la recomendación central.
-                </div>
-                ${lifecycleHtml}
-                ${manualSaveHtml}
-                ${futRenderDecisionAudit(candidate.decision_audit)}
+                <div class="small text-muted mt-1">${contextText}</div>
+                <div class="small text-light mt-1">${reason}</div>
+                ${saveHtml}
             </div>
         `;
     });
 
-    const detailHtml = excluded.length > 0
-        ? `
-            <details class="mt-2" ${shouldOpen ? 'open' : ''}>
-                <summary class="text-warning" style="cursor:pointer;">
-                    Por qué no aparecen otras señales (${excluded.length})
-                </summary>
-                <div class="mt-2 px-2"
-                     style="max-height:360px; overflow-y:auto;">
-                    ${excludedHtml}
-                </div>
-            </details>
-        `
-        : `
-            <div class="small text-success mt-2">
-                No existen análisis ocultos por los filtros actuales.
-            </div>
-        `;
-
     return `
-        <div class="list-group-item bg-dark text-white border-info">
-            <div class="d-flex flex-wrap justify-content-between gap-2">
-                <strong>🛡️ Diagnóstico del ciclo</strong>
-                <small class="text-muted">
-                    ${Number(summary.total_analyzed || 0)} combinaciones
-                </small>
+        <details class="mt-2 px-2 pb-2">
+            <summary class="text-warning" style="cursor:pointer;">
+                ${title} (${candidates.length})
+            </summary>
+            <div class="mt-2" style="max-height:360px; overflow-y:auto;">
+                ${rows}
             </div>
-            <div class="d-flex flex-wrap gap-1 mt-2">
-                <span class="badge bg-success">Activas: ${activeNow}</span>
-                <span class="badge bg-info text-dark">Ejecutables: ${executable}</span>
-                <span class="badge bg-warning text-dark">Solo análisis: ${analysisOnly}</span>
-                <span class="badge bg-secondary">No operar: ${noTrade}</span>
-                ${errors > 0 ? `<span class="badge bg-danger">Errores: ${errors}</span>` : ''}
-            </div>
-            <div class="small text-muted mt-2">
-                “Solo análisis” indica que hubo dirección LONG/SHORT,
-                pero un filtro de seguridad impidió publicarla.
-            </div>
-            ${detailHtml}
-        </div>
-    `;
-}
-
-function futPublishMarketDiagnostics(json, context) {
-    const host = document.getElementById('futures-market-diagnostics');
-    if (!host) return;
-    const html = futRenderAnalysisDiagnostics(json, context);
-    host.innerHTML = html || `
-        <div class="p-3 text-muted text-center">
-            Sin diagnóstico adicional para este ciclo.
-        </div>
+        </details>
     `;
 }
 
@@ -923,7 +832,6 @@ window.updateActiveSignals = async function() {
                 json,
                 'active'
             );
-        futPublishMarketDiagnostics(json, 'active');
 
         const completed = Number(
             progress.completed || 0
@@ -1028,46 +936,11 @@ window.updateActiveSignals = async function() {
 
             signalsList.innerHTML = `
                 <div class="list-group-item bg-dark text-warning text-center py-3">
-
-                    <strong>
-                        ✅ Análisis de Futuros completado
-                    </strong>
-
+                    <strong>✅ Análisis de Futuros completado</strong>
                     <br>
-
-                    <small>
-                        No hay señales vigentes de cierres anteriores en este momento.
-                        ${
-                            filterStats
-                                ? `
-                                <div class="small text-secondary mt-2">
-                                    Procesados:
-                                    ${filterStats.total_processed || 0}
-                                    ·
-                                    NO_OPERAR:
-                                    ${filterStats.non_directional || 0}
-                                    ·
-                                    Confianza:
-                                    ${filterStats.low_confidence || 0}
-                                    ·
-                                    Niveles inválidos:
-                                    ${filterStats.invalid_levels || 0}
-                                    ·
-                                    Leverage:
-                                    ${filterStats.leverage_out_of_range || 0}
-                                </div>
-                                `
-                                : ''
-                        }
-                    </small>
-
-                    <br>
-
-                    <small class="text-muted">
-                        ${completed}/${total} análisis procesados.
-                    </small>
-
+                    <small>No hay señales vigentes de cierres anteriores en este momento.</small>
                 </div>
+                ${diagnosticsHtml}
             `;
 
             return;
@@ -1250,7 +1123,7 @@ window.updateActiveSignals = async function() {
             `;
         });
 
-        signalsList.innerHTML = html;
+        signalsList.innerHTML = html + diagnosticsHtml;
 
     } catch (err) {
 
@@ -1552,7 +1425,6 @@ window.updatePreviousSignals = async function() {
                 json,
                 'previous'
             );
-        futPublishMarketDiagnostics(json, 'previous');
 
         const completed =
             Number(
@@ -1687,35 +1559,11 @@ window.updatePreviousSignals = async function() {
 
             signalsList.innerHTML = `
                 <div class="list-group-item bg-dark text-warning text-center py-3">
-
-                    <strong>
-                        ✅ Análisis completado
-                    </strong>
-
+                    <strong>✅ Análisis completado</strong>
                     <br>
-
-                    <small>
-                        No hay nuevas señales confirmadas en el último cierre.
-                    </small>
-
-                    ${filterStats ? `
-                        <div class="small text-secondary mt-2">
-                            Analizados: ${filterStats.total_processed || 0}
-                            · Sin dirección: ${filterStats.non_directional || 0}
-                            · Solo análisis / rechazadas por seguridad: ${filterStats.non_executable || 0}
-                            · Confianza insuficiente: ${filterStats.low_confidence || 0}
-                            · Niveles inválidos: ${filterStats.invalid_levels || 0}
-                            · Leverage fuera de rango: ${filterStats.leverage_out_of_range || 0}
-                        </div>
-                    ` : ''}
-
-                    <br>
-
-                    <small class="text-muted">
-                        ${completed}/${total} análisis procesados.
-                    </small>
-
+                    <small>No hay nuevas señales confirmadas en el último cierre.</small>
                 </div>
+                ${diagnosticsHtml}
             `;
 
             return;
@@ -1908,7 +1756,7 @@ window.updatePreviousSignals = async function() {
             `;
         });
 
-        signalsList.innerHTML = html;
+        signalsList.innerHTML = html + diagnosticsHtml;
 
     } catch (err) {
 
