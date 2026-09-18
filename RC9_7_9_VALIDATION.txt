@@ -1,15 +1,16 @@
-RC9.7.9 validation
-- Supersedes RC9.7.7 and RC9.7.8 if not deployed.
-- Python compile: app.py, saved_signals.py OK
-- JavaScript syntax: static/script.js, static/futures.js OK
+RC9.7.9 validation · final MEDIUM/HIGH vigentes
+- Python compile: app.py + saved_signals.py OK
+- JavaScript syntax: static/futures.js + static/script.js OK
 - Jinja parse: templates/index.html OK
-- Tests: 7 passed
-- Futures UI order: Señales activas -> Señales confirmadas -> Señales vigentes -> Señales Guardadas
-- Señales activas: green header, navigation-only to symbol/timeframe/charts/recommendation; no save controls in this lane
-- Señales confirmadas: latest confirmed close; guardable
-- Señales vigentes: red header; older still-valid lifecycle; guardable without resetting valid_until
-- Current directional diagnostics are shown with Señales activas, not mixed into Señales vigentes
-- Previous/confirmed diagnostics remain in Señales confirmadas
-- RC9.7.7 live visuals preserved
-- RC9.7.8 source_valid_until/Guardian lifecycle preserved
-- No Research, Safety, Entry, SL, TP, leverage or OOS gate changes
+- Tests RC9.7.9: 12 passed
+- UI order: Señales activas → Señales confirmadas → Señales vigentes → Señales Guardadas
+- Señales activas remain navigation-only; current MEDIUM/HIGH diagnostic is not guardable
+- Confirmed MEDIUM/HIGH remains guardable from PREVIOUS_ANALYSIS_ONLY
+- Vigent MEDIUM/HIGH has a separate “Por qué no aparecen otras señales” and uses ACTIVE_ANALYSIS_ONLY
+- Vigent manual candidates are persisted in the canonical Futures lifecycle without becoming EXECUTABLE_SIGNAL
+- Official vigent cards exclude ANALYSIS_ONLY lifecycle rows
+- Manual vigent save preserves source_valid_until and server-side risk classification
+- If lifecycle already has entry_touched, saved signal starts in-position so Guardian can protect it
+- NO OPERAR / ESPERAR / PRECAUCIÓN / errors / Safety<55 are excluded from the vigent manual list
+- Live visual candle/indicator work from RC9.7.7 remains included
+- No changes to Research, OOS gates, Entry, SL, TP, Safety or leverage

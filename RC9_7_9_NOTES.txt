@@ -1,17 +1,32 @@
-RC9.7.9 — TRES CARRILES DE SEÑALES FUTURES
+RC9.7.9 — TRES CARRILES DE SEÑALES FUTURES · FINAL MEDIUM/HIGH VIGENTES
 
-SUPERCEDES RC9.7.7 y RC9.7.8. Si no fueron desplegados, usar sólo este commit.
+REEMPLAZA RC9.7.7 y RC9.7.8. Si no fueron desplegados, usar sólo este commit.
+También reemplaza el ZIP RC9.7.9 anterior si fue descargado pero todavía no desplegado.
 
 Orden UI Futures:
-1) Señales activas — barra verde. Atajos del análisis actual; sólo navegación a par/TF/gráficos/recomendación. NO se guardan desde esta lista.
-2) Señales confirmadas — último cierre confirmado; guardables.
-3) Señales vigentes — barra roja. Confirmaciones de cierres anteriores que mantienen lifecycle; guardables sin reiniciar valid_until.
-4) Señales Guardadas.
+1) Señales activas — barra verde. Atajos del análisis actual; abre par/TF/gráficos/indicadores/recomendación. NO se guardan desde esta lista.
+   - Su “Por qué no aparecen otras señales” muestra sólo hipótesis LONG/SHORT MEDIUM/HIGH del análisis actual, informativas.
+2) Señales confirmadas — último cierre confirmado; señales oficiales guardables.
+   - Su “Por qué no aparecen otras señales” muestra MEDIUM/HIGH del último cierre, guardables manualmente.
+3) Señales vigentes — barra roja. Cierres anteriores que conservan lifecycle.
+   - Señales oficiales vigentes: guardables sin reiniciar valid_until.
+   - “Por qué no aparecen otras señales”: MEDIUM/HIGH de cierres anteriores que siguen técnicamente vigentes; también guardables manualmente.
+   - NO OPERAR / ESPERAR / PRECAUCIÓN / errores / Safety <55 NO aparecen en ese desplegable.
+4) Señales Guardadas — lifecycle personal + Entry/Guardian/TP/SL/cierre.
+
+Lifecycle MEDIUM/HIGH vigente:
+- se crea sólo si la hipótesis es LONG/SHORT, ANALYSIS_ONLY, el servidor la clasifica MEDIUM/HIGH y conserva Entry/SL/TP válidos;
+- valid_until usa el mismo contrato técnico de timeframe + alcanzabilidad de Entry + perfil de salida/riesgo;
+- al pasar una nueva vela, deja de estar en Confirmadas y puede pasar a Vigentes si no expiró;
+- guardarla NO reinicia valid_until;
+- si Entry ya fue tocado, puede guardarse directamente “en operación” y Guardian queda habilitado;
+- si no toca Entry antes de valid_until, desaparece como vigente y no puede guardarse pendiente;
+- nunca se convierte en EXECUTABLE_SIGNAL ni relaja Safety.
 
 Se conserva:
 - live visuals de RC9.7.7;
 - source_valid_until y Guardian de RC9.7.8;
 - Entry/SL/TP/Safety/Research sin cambios;
-- diagnósticos "Por qué no aparecen otras señales" en carril actual y en confirmadas, no como ruido dentro de vigentes.
+- lifecycle oficial separado del lifecycle diagnóstico MEDIUM/HIGH.
 
 SQL: ejecutar RC9_7_9_SAVED_SIGNALS_VALIDITY.sql si todavía no se ejecutó. Es idempotente (ADD COLUMN IF NOT EXISTS).

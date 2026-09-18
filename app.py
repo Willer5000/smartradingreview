@@ -29366,7 +29366,8 @@ def api_saved_signals_create():
         if source_context not in (
             'PREVIOUS_CONFIRMED',
             'PREVIOUS_ANALYSIS_ONLY',
-            'ACTIVE_CONFIRMED'
+            'ACTIVE_CONFIRMED',
+            'ACTIVE_ANALYSIS_ONLY'
         ):
             return jsonify({
                 'success': False,
@@ -29380,18 +29381,18 @@ def api_saved_signals_create():
             source_context
         )
         if execution_origin == 'USER_MANUAL_ANALYSIS':
-            if (
-                source_context
-                != 'PREVIOUS_ANALYSIS_ONLY'
+            if source_context not in (
+                'PREVIOUS_ANALYSIS_ONLY',
+                'ACTIVE_ANALYSIS_ONLY'
             ):
                 return jsonify({
                     'success': False,
                     'error': (
-                        'El guardado manual sólo se '
-                        'permite desde el diagnóstico '
-                        'de Vela Anterior.'
+                        'El guardado manual sólo se permite desde una '
+                        'hipótesis confirmada o vigente de riesgo medio/alto.'
                     )
                 }), 403
+
             if data.get('manual_override_ack') is not True:
                 return jsonify({
                     'success': False,
@@ -29412,129 +29413,262 @@ def api_saved_signals_create():
                     'error': 'Falta source_signal_id del análisis original.'
                 }), 400
 
-            # Usar exclusivamente el análisis YA EXISTENTE del caché.
-            # No dispara un nuevo trade ni recalcula niveles.
+            # No se recalculan niveles ni se crea un nuevo análisis para
+            # justificar el override. La fuente debe existir en el snapshot
+            # canónico del servidor: último cierre (PREVIOUS) o lifecycle
+            # persistente (ACTIVE).
             current_cache = _get_or_refresh_futures_analysis()
-            raw_analysis = (
-                current_cache.get('analysis')
-                or {}
-            )
 
-            source_result = None
+            if source_context == 'ACTIVE_ANALYSIS_ONLY':
+                lifecycle_record = (
+                    current_cache.get('lifecycle')
+                    or {}
+                ).get(source_signal_id)
 
-            for raw_result in raw_analysis.values():
-                if (
-                    isinstance(raw_result, dict)
-                    and str(
-                        raw_result.get('signal_id')
-                        or ''
-                    ) == source_signal_id
+                if not isinstance(lifecycle_record, dict):
+                    return jsonify({
+                        'success': False,
+                        'error': (
+                            'La hipótesis vigente ya no está disponible. '
+                            'Actualiza Futuros y vuelve a intentarlo.'
+                        )
+                    }), 409
+
+                lifecycle_status = str(
+                    lifecycle_record.get('lifecycle_status')
+                    or ''
+                )
+                if lifecycle_status not in ('waiting_entry', 'entry_touched'):
+                    return jsonify({
+                        'success': False,
+                        'error': 'La hipótesis ya no está vigente.'
+                    }), 409
+
+                if lifecycle_record.get('manual_save_allowed') is not True:
+                    return jsonify({
+                        'success': False,
+                        'error': (
+                            'La hipótesis vigente ya no cumple las condiciones '
+                            'para seguimiento manual.'
+                        )
+                    }), 403
+
+                server_risk_class = str(
+                    lifecycle_record.get('manual_risk_class')
+                    or ''
+                ).upper()
+                if server_risk_class not in ('MEDIUM', 'HIGH'):
+                    return jsonify({
+                        'success': False,
+                        'error': 'Clasificación de riesgo vigente no válida.'
+                    }), 403
+
+                requested_risk_class = str(
+                    data.get('risk_class')
+                    or ''
+                ).upper()
+                if requested_risk_class != server_risk_class:
+                    return jsonify({
+                        'success': False,
+                        'error': (
+                            'La clasificación de riesgo cambió. '
+                            'Actualiza la lista antes de guardar.'
+                        )
+                    }), 409
+
+                source_valid_until = lifecycle_record.get('valid_until')
+                if lifecycle_status == 'waiting_entry':
+                    if not source_valid_until:
+                        return jsonify({
+                            'success': False,
+                            'error': 'No existe una vigencia técnica verificable.'
+                        }), 409
+                    try:
+                        _valid_until = pd.Timestamp(source_valid_until)
+                        if _valid_until.tz is None:
+                            _valid_until = _valid_until.tz_localize('UTC')
+                        else:
+                            _valid_until = _valid_until.tz_convert('UTC')
+                        if pd.Timestamp.now(tz='UTC') >= _valid_until:
+                            return jsonify({
+                                'success': False,
+                                'error': (
+                                    'La vigencia para esperar Entry ya finalizó. '
+                                    'No se puede guardar como señal pendiente.'
+                                )
+                            }), 409
+                    except Exception:
+                        return jsonify({
+                            'success': False,
+                            'error': 'No se pudo verificar la vigencia técnica.'
+                        }), 409
+
+                # Canonicalizar identidad y procedencia. Los niveles que el
+                # usuario edita en el modal siguen siendo personales, pero la
+                # evidencia ORIGINAL siempre sale del lifecycle del servidor.
+                data['symbol'] = lifecycle_record.get('symbol') or data.get('symbol')
+                data['timeframe'] = lifecycle_record.get('timeframe') or data.get('timeframe')
+                data['action'] = lifecycle_record.get('action') or data.get('action')
+                data['execution_origin'] = 'USER_MANUAL_ANALYSIS'
+                data['risk_class'] = server_risk_class
+                data['system_executable'] = False
+                data['engine_publication_status'] = str(
+                    lifecycle_record.get('publication_status')
+                    or lifecycle_record.get('engine_publication_status')
+                    or 'ANALYSIS_ONLY'
+                ).upper()
+                data['execution_safety_at_save'] = lifecycle_record.get(
+                    'execution_safety'
+                )
+                data['execution_safety_minimum_at_save'] = lifecycle_record.get(
+                    'execution_safety_minimum'
+                )
+                data['original_risk_reward'] = lifecycle_record.get(
+                    'risk_reward'
+                )
+                data['source_signal_id'] = source_signal_id
+                data['manual_override_ack'] = True
+                data['original_rejection_reason'] = str(
+                    lifecycle_record.get('original_rejection_reason')
+                    or lifecycle_record.get('manual_risk_reason')
+                    or 'ANALYSIS_ONLY'
+                )[:1000]
+                data['original_confidence'] = float(
+                    lifecycle_record.get('confidence')
+                    or 0
+                )
+                data['original_entry'] = float(
+                    lifecycle_record.get('entry')
+                    or 0
+                )
+                data['original_stop_loss'] = float(
+                    lifecycle_record.get('stop_loss')
+                    or 0
+                )
+                data['original_take_profit'] = float(
+                    lifecycle_record.get('take_profit')
+                    or 0
+                )
+                data['original_leverage'] = int(
+                    lifecycle_record.get('leverage')
+                    or 1
+                )
+                data['candle_timestamp'] = (
+                    lifecycle_record.get('source_candle_timestamp')
+                    or data.get('candle_timestamp')
+                )
+                data['source_valid_until'] = source_valid_until
+
+                # Si el lifecycle técnico ya registró Entry, el guardado nace
+                # directamente como operación y Guardian queda habilitado.
+                if lifecycle_status == 'entry_touched':
+                    data['already_in_position'] = True
+
+            else:
+                raw_analysis = current_cache.get('analysis') or {}
+                source_result = None
+
+                for raw_result in raw_analysis.values():
+                    if (
+                        isinstance(raw_result, dict)
+                        and str(raw_result.get('signal_id') or '')
+                            == source_signal_id
+                    ):
+                        source_result = raw_result
+                        break
+
+                if source_result is None:
+                    return jsonify({
+                        'success': False,
+                        'error': (
+                            'El análisis original ya no está en el último cierre. '
+                            'Actualiza las señales y vuelve a intentarlo.'
+                        )
+                    }), 409
+
+                server_profile = _futures_manual_risk_profile(
+                    source_result
+                )
+
+                if not server_profile.get('allowed'):
+                    return jsonify({
+                        'success': False,
+                        'error': (
+                            server_profile.get('reason')
+                            or 'El análisis no admite guardado manual.'
+                        )
+                    }), 403
+
+                requested_risk_class = str(
+                    data.get('risk_class')
+                    or ''
+                ).upper()
+
+                if requested_risk_class != server_profile.get(
+                    'risk_class'
                 ):
-                    source_result = raw_result
-                    break
+                    return jsonify({
+                        'success': False,
+                        'error': (
+                            'La clasificación de riesgo cambió. '
+                            'Actualiza el diagnóstico antes de guardar.'
+                        )
+                    }), 409
 
-            if source_result is None:
-                return jsonify({
-                    'success': False,
-                    'error': (
-                        'El análisis original ya no está en el caché actual. '
-                        'Actualiza las señales y vuelve a intentarlo.'
-                    )
-                }), 409
+                source_decision = source_result.get('decision') or {}
+                source_levels = source_result.get('levels') or {}
 
-            server_profile = _futures_manual_risk_profile(
-                source_result
-            )
-
-            if not server_profile.get('allowed'):
-                return jsonify({
-                    'success': False,
-                    'error': (
-                        server_profile.get('reason')
-                        or 'El análisis no admite guardado manual.'
-                    )
-                }), 403
-
-            requested_risk_class = str(
-                data.get('risk_class')
-                or ''
-            ).upper()
-
-            if requested_risk_class != server_profile.get(
-                'risk_class'
-            ):
-                return jsonify({
-                    'success': False,
-                    'error': (
-                        'La clasificación de riesgo cambió. '
-                        'Actualiza el diagnóstico antes de guardar.'
-                    )
-                }), 409
-
-            source_decision = (
-                source_result.get('decision')
-                or {}
-            )
-
-            source_levels = (
-                source_result.get('levels')
-                or {}
-            )
-
-            # Trazabilidad ORIGINAL siempre tomada del servidor.
-            # El usuario puede editar sus niveles personales en el modal,
-            # pero no puede falsificar la evidencia que originó el setup.
-            data['execution_origin'] = 'USER_MANUAL_ANALYSIS'
-            data['risk_class'] = server_profile['risk_class']
-            data['system_executable'] = False
-            data['engine_publication_status'] = str(
-                source_levels.get('publication_status')
-                or source_result.get('publication_status')
-                or 'ANALYSIS_ONLY'
-            ).upper()
-            data['execution_safety_at_save'] = (
-                server_profile.get('execution_safety')
-            )
-            data['execution_safety_minimum_at_save'] = (
-                server_profile.get('execution_safety_minimum')
-            )
-            data['original_risk_reward'] = (
-                server_profile.get('risk_reward')
-            )
-            data['source_signal_id'] = source_signal_id
-            data['manual_override_ack'] = True
-            data['original_rejection_reason'] = _futures_reason_text(
-                (
+                data['execution_origin'] = 'USER_MANUAL_ANALYSIS'
+                data['risk_class'] = server_profile['risk_class']
+                data['system_executable'] = False
+                data['engine_publication_status'] = str(
+                    source_levels.get('publication_status')
+                    or source_result.get('publication_status')
+                    or 'ANALYSIS_ONLY'
+                ).upper()
+                data['execution_safety_at_save'] = (
+                    server_profile.get('execution_safety')
+                )
+                data['execution_safety_minimum_at_save'] = (
+                    server_profile.get('execution_safety_minimum')
+                )
+                data['original_risk_reward'] = (
+                    server_profile.get('risk_reward')
+                )
+                data['source_signal_id'] = source_signal_id
+                data['manual_override_ack'] = True
+                data['original_rejection_reason'] = _futures_reason_text(
                     source_levels.get('rejected_reason')
-                    or source_result.get('rejected_reason')
-                ),
-                'ANALYSIS_ONLY'
-            )
+                    or source_result.get('rejected_reason'),
+                    'ANALYSIS_ONLY'
+                )
+                data['original_confidence'] = float(
+                    source_decision.get('confidence') or 0
+                )
+                data['original_entry'] = float(
+                    source_levels.get('entry') or 0
+                )
+                data['original_stop_loss'] = float(
+                    source_levels.get('stop_loss') or 0
+                )
+                data['original_take_profit'] = float(
+                    source_levels.get('take_profit') or 0
+                )
+                data['original_leverage'] = int(
+                    source_levels.get('leverage') or 1
+                )
+                data['candle_timestamp'] = (
+                    source_result.get('source_candle_timestamp')
+                    or data.get('candle_timestamp')
+                )
 
-            data['original_confidence'] = float(
-                source_decision.get('confidence')
-                or 0
-            )
-            data['original_entry'] = float(
-                source_levels.get('entry')
-                or 0
-            )
-            data['original_stop_loss'] = float(
-                source_levels.get('stop_loss')
-                or 0
-            )
-            data['original_take_profit'] = float(
-                source_levels.get('take_profit')
-                or 0
-            )
-            data['original_leverage'] = int(
-                source_levels.get('leverage')
-                or 1
-            )
-            data['candle_timestamp'] = (
-                source_result.get('source_candle_timestamp')
-                or data.get('candle_timestamp')
-            )
+                # El último cierre también hereda valid_until del lifecycle
+                # canónico si está disponible.
+                _lc = (current_cache.get('lifecycle') or {}).get(source_signal_id)
+                if isinstance(_lc, dict):
+                    data['source_valid_until'] = _lc.get('valid_until')
+                    if str(_lc.get('lifecycle_status') or '') == 'entry_touched':
+                        data['already_in_position'] = True
 
         else:
         
@@ -32225,7 +32359,7 @@ def _refresh_futures_signal_lifecycle(
     La decisión y los niveles permanecen inmutables. El precio vivo sólo puede:
     - tocar Entry;
     - tocar TP/SL después de Entry;
-    - expirar la espera tras 6 velas cerradas.
+    - expirar la espera según timeframe, alcanzabilidad de Entry y perfil de salida.
     """
     lifecycle = {
         key: dict(value)
@@ -32401,12 +32535,34 @@ def _refresh_futures_signal_lifecycle(
             and float(levels.get('take_profit') or 0) > 0
         )
 
+        # RC9.7.9 FINAL — las hipótesis direccionales MEDIUM/HIGH también
+        # conservan un lifecycle técnico compacto. Esto NO las convierte en
+        # señales oficiales: sólo permite que, después de dejar de ser el
+        # último cierre, sigan apareciendo como "otras señales" mientras su
+        # Entry todavía sea técnicamente vigente. Si el usuario decide
+        # guardarlas, el lifecycle personal/Guardian comienza en saved_signals.
+        manual_profile = _futures_manual_risk_profile(result)
+        manual_candidate = (
+            action in ('LONG', 'SHORT')
+            and signal_id
+            and source_ts
+            and source_close_ts
+            and publication_status != 'EXECUTABLE_SIGNAL'
+            and bool(manual_profile.get('allowed'))
+            and str(manual_profile.get('risk_class') or '').upper()
+                in ('MEDIUM', 'HIGH')
+            and float(levels.get('entry') or 0) > 0
+            and float(levels.get('stop_loss') or 0) > 0
+            and float(levels.get('take_profit') or 0) > 0
+        )
+        trackable = bool(executable or manual_candidate)
+
         # Migración no destructiva de señales creadas antes del auditor. Si el
         # mismo signal_id ya existe, sólo se completa su explicación; decisión,
         # niveles y estado operativo permanecen intactos.
-        if executable and signal_id in lifecycle and decision.get('audit'):
+        if trackable and signal_id in lifecycle:
             existing_record = lifecycle[signal_id]
-            if not existing_record.get('decision_audit'):
+            if decision.get('audit') and not existing_record.get('decision_audit'):
                 existing_record['decision_audit'] = decision.get('audit')
                 existing_record['market_data_source'] = result.get(
                     'market_data_source'
@@ -32422,7 +32578,44 @@ def _refresh_futures_signal_lifecycle(
                 )
                 existing_record['analysis_mode'] = result.get('analysis_mode')
 
-        if executable and signal_id not in lifecycle:
+            # Completar metadatos RC9.7.9 si el registro ya existía en RAM.
+            if manual_candidate:
+                existing_record.setdefault('system_executable', False)
+                existing_record.setdefault('manual_save_allowed', True)
+                existing_record.setdefault(
+                    'manual_risk_class',
+                    str(manual_profile.get('risk_class') or '').upper()
+                )
+                existing_record.setdefault(
+                    'manual_risk_reason',
+                    manual_profile.get('reason') or ''
+                )
+                existing_record.setdefault(
+                    'manual_requires_ack',
+                    bool(manual_profile.get('requires_ack'))
+                )
+                existing_record.setdefault(
+                    'manual_rejection_stage',
+                    manual_profile.get('rejection_stage')
+                )
+                existing_record.setdefault(
+                    'manual_rejection_codes',
+                    manual_profile.get('rejection_codes') or []
+                )
+                existing_record.setdefault(
+                    'execution_safety_minimum',
+                    manual_profile.get('execution_safety_minimum')
+                )
+                existing_record.setdefault(
+                    'original_rejection_reason',
+                    _futures_reason_text(
+                        levels.get('rejected_reason')
+                        or result.get('rejected_reason'),
+                        'ANALYSIS_ONLY'
+                    )
+                )
+
+        if trackable and signal_id not in lifecycle:
             source_close = pd.Timestamp(source_close_ts)
 
             if source_close.tz is None:
@@ -32457,7 +32650,49 @@ def _refresh_futures_signal_lifecycle(
                 'tp_source': levels.get('tp_source'),
                 'sl_source': levels.get('sl_source'),
                 'execution_safety': levels.get('execution_safety'),
+                'execution_safety_minimum': (
+                    manual_profile.get('execution_safety_minimum')
+                    if manual_candidate
+                    else levels.get('execution_safety_operational_min')
+                ),
                 'publication_status': publication_status,
+                'engine_publication_status': publication_status,
+                'system_executable': bool(executable),
+                'manual_save_allowed': bool(manual_candidate),
+                'manual_risk_class': (
+                    str(manual_profile.get('risk_class') or '').upper()
+                    if manual_candidate
+                    else 'PREMIUM'
+                ),
+                'manual_risk_reason': (
+                    manual_profile.get('reason') or ''
+                    if manual_candidate
+                    else ''
+                ),
+                'manual_requires_ack': (
+                    bool(manual_profile.get('requires_ack'))
+                    if manual_candidate
+                    else False
+                ),
+                'manual_rejection_stage': (
+                    manual_profile.get('rejection_stage')
+                    if manual_candidate
+                    else None
+                ),
+                'manual_rejection_codes': (
+                    manual_profile.get('rejection_codes') or []
+                    if manual_candidate
+                    else []
+                ),
+                'original_rejection_reason': (
+                    _futures_reason_text(
+                        levels.get('rejected_reason')
+                        or result.get('rejected_reason'),
+                        'ANALYSIS_ONLY'
+                    )
+                    if manual_candidate
+                    else None
+                ),
                 'source_candle_timestamp': str(source_ts),
                 'source_candle_close_timestamp': str(source_close_ts),
                 'market_data_source': result.get('market_data_source'),
@@ -34538,7 +34773,9 @@ def _futures_directional_hidden_candidates(visibility, source_context):
 
     - En CURRENT_ANALYSIS_ONLY son informativas: no pueden guardarse.
     - En PREVIOUS_ANALYSIS_ONLY pertenecen al último cierre confirmado y sí
-      pueden ofrecer guardado manual, sujeto a la validación server-side 36M.
+      pueden ofrecer guardado manual, sujeto a validación server-side.
+    - Las hipótesis de cierres anteriores usan _futures_vigent_manual_candidates
+      y ACTIVE_ANALYSIS_ONLY; no se mezclan con este helper del ciclo actual.
     """
     candidates = (visibility or {}).get('candidates') or []
     allow_manual_save = str(source_context).upper() == 'PREVIOUS_ANALYSIS_ONLY'
@@ -34563,14 +34800,148 @@ def _futures_directional_hidden_candidates(visibility, source_context):
 
         item = dict(raw)
         item['source_context'] = str(source_context).upper()
-        # El backend de guardado acepta overrides únicamente desde la vela
-        # anterior. La lista actual sólo explica por qué no fue publicada.
+        # Este helper sólo entrega CURRENT/PREVIOUS. La lista actual es
+        # informativa; el último cierre confirmado sí puede guardarse.
         item['manual_save_allowed'] = bool(allow_manual_save)
         visible.append(item)
 
     visible.sort(
         key=lambda item: (
             0 if str(item.get('manual_risk_class') or '').upper() == 'MEDIUM' else 1,
+            -float(item.get('confidence') or 0),
+            str(item.get('symbol') or ''),
+            str(item.get('timeframe') or ''),
+        )
+    )
+    return visible
+
+
+def _futures_vigent_manual_candidates(cache, fresh_signal_ids=None):
+    """
+    RC9.7.9 FINAL — MEDIUM/HIGH de cierres anteriores aún vigentes.
+
+    Usa únicamente el lifecycle canónico ya calculado. No reanaliza mercado,
+    no relaja Safety y no transforma ANALYSIS_ONLY en señal oficial.
+
+    Se excluye el signal_id que pertenece al último cierre para evitar que la
+    misma hipótesis aparezca a la vez en "Señales confirmadas" y en
+    "Señales vigentes". Una vez llega una vela nueva, el registro anterior
+    puede aparecer aquí mientras su valid_until no haya vencido o, si Entry
+    ya fue tocado, mientras continúe en seguimiento.
+    """
+    cache = cache or {}
+    lifecycle = cache.get('lifecycle') or {}
+    fresh_signal_ids = {str(x) for x in (fresh_signal_ids or set()) if str(x)}
+    now_utc = pd.Timestamp.now(tz='UTC')
+    visible = []
+
+    _configured_futures_module()
+    from futures_system import futures_timeframe_allowed
+
+    for signal_id, record in lifecycle.items():
+        if not isinstance(record, dict):
+            continue
+
+        signal_id = str(signal_id or record.get('signal_id') or '')
+        if not signal_id or signal_id in fresh_signal_ids:
+            continue
+
+        publication_status = str(
+            record.get('publication_status')
+            or record.get('engine_publication_status')
+            or ''
+        ).upper()
+        if publication_status == 'EXECUTABLE_SIGNAL':
+            continue
+        if record.get('system_executable') is True:
+            continue
+        if record.get('manual_save_allowed') is not True:
+            continue
+
+        risk_class = str(record.get('manual_risk_class') or '').upper()
+        if risk_class not in ('MEDIUM', 'HIGH'):
+            continue
+
+        lifecycle_status = str(record.get('lifecycle_status') or '')
+        if lifecycle_status not in ('waiting_entry', 'entry_touched'):
+            continue
+
+        symbol = str(record.get('symbol') or '')
+        timeframe = str(record.get('timeframe') or '')
+        if not futures_timeframe_allowed(symbol, timeframe):
+            continue
+
+        remaining_seconds = None
+        valid_until_raw = record.get('valid_until')
+        if lifecycle_status == 'waiting_entry':
+            try:
+                valid_until = pd.Timestamp(valid_until_raw)
+                if valid_until.tz is None:
+                    valid_until = valid_until.tz_localize('UTC')
+                else:
+                    valid_until = valid_until.tz_convert('UTC')
+                remaining_seconds = max(
+                    0,
+                    int((valid_until - now_utc).total_seconds())
+                )
+                if remaining_seconds <= 0:
+                    continue
+            except Exception:
+                # Sin vencimiento verificable no se ofrece guardado manual
+                # desde la lista persistente. Fallar cerrado.
+                continue
+
+        visible.append({
+            'signal_id': signal_id,
+            'symbol': symbol,
+            'timeframe': timeframe,
+            'classification': 'ANALYSIS_ONLY',
+            'engine_publication_status': publication_status or 'ANALYSIS_ONLY',
+            'status_label': 'HIPÓTESIS DIRECCIONAL · VIGENTE',
+            'reason': (
+                record.get('original_rejection_reason')
+                or record.get('manual_risk_reason')
+                or 'No superó el filtro final de publicación.'
+            ),
+            'active_reason': (
+                'Entry ya alcanzado; puede guardarse en operación.'
+                if lifecycle_status == 'entry_touched'
+                else 'Todavía conserva vigencia para esperar Entry.'
+            ),
+            'action': str(record.get('action') or '').upper(),
+            'confidence': float(record.get('confidence') or 0),
+            'directional': True,
+            'is_executable': False,
+            'manual_save_allowed': True,
+            'manual_risk_class': risk_class,
+            'manual_risk_reason': record.get('manual_risk_reason') or '',
+            'manual_requires_ack': bool(record.get('manual_requires_ack', True)),
+            'manual_rejection_stage': record.get('manual_rejection_stage'),
+            'manual_rejection_codes': record.get('manual_rejection_codes') or [],
+            'is_active': True,
+            'lifecycle_status': lifecycle_status,
+            'entry_touched': lifecycle_status == 'entry_touched',
+            'entry': record.get('entry'),
+            'stop_loss': record.get('stop_loss'),
+            'take_profit': record.get('take_profit'),
+            'leverage': record.get('leverage'),
+            'risk_reward': record.get('risk_reward'),
+            'execution_safety': record.get('execution_safety'),
+            'execution_safety_minimum': record.get('execution_safety_minimum'),
+            'source_candle_timestamp': record.get('source_candle_timestamp'),
+            'source_candle_close_timestamp': record.get('source_candle_close_timestamp'),
+            'analysis_price': record.get('analysis_price'),
+            'current_price': record.get('current_price'),
+            'valid_until': valid_until_raw,
+            'tiempo_restante': remaining_seconds,
+            'source_context': 'ACTIVE_ANALYSIS_ONLY',
+            'decision_audit': _futures_decision_audit_for_api(record),
+        })
+
+    visible.sort(
+        key=lambda item: (
+            0 if item.get('manual_risk_class') == 'MEDIUM' else 1,
+            0 if item.get('lifecycle_status') == 'entry_touched' else 1,
             -float(item.get('confidence') or 0),
             str(item.get('symbol') or ''),
             str(item.get('timeframe') or ''),
@@ -34602,6 +34973,7 @@ def api_futures_signals_active():
         # different opportunities. It moves to /active only after a newer
         # candle replaces it in the canonical analysis snapshot.
         fresh_confirmed_ids = set()
+        fresh_manual_ids = set()
         for (_symbol, _tf), _latest in (cache.get('analysis') or {}).items():
             if not isinstance(_latest, dict) or not _latest.get('success'):
                 continue
@@ -34611,10 +34983,20 @@ def api_futures_signals_active():
             _publication = str(
                 _levels.get('publication_status')
                 or ('ANALYSIS_ONLY' if _levels.get('is_rejected') else 'EXECUTABLE_SIGNAL')
-            )
+            ).upper()
             _signal_id = str(_latest.get('signal_id') or '')
-            if _signal_id and _action in ('LONG', 'SHORT') and _publication == 'EXECUTABLE_SIGNAL':
+            if not _signal_id or _action not in ('LONG', 'SHORT'):
+                continue
+            if _publication == 'EXECUTABLE_SIGNAL':
                 fresh_confirmed_ids.add(_signal_id)
+                continue
+            _manual_profile = _futures_manual_risk_profile(_latest)
+            if (
+                _manual_profile.get('allowed')
+                and str(_manual_profile.get('risk_class') or '').upper()
+                    in ('MEDIUM', 'HIGH')
+            ):
+                fresh_manual_ids.add(_signal_id)
 
         active_signals = []
         filter_stats = {
@@ -34640,6 +35022,21 @@ def api_futures_signals_active():
             if lifecycle_status not in ('waiting_entry', 'entry_touched'):
                 filter_stats['not_active'] += 1
                 continue
+
+            # El carril principal de "Señales vigentes" conserva sólo las
+            # señales oficiales. MEDIUM/HIGH ANALYSIS_ONLY se exponen debajo
+            # mediante "Por qué no aparecen otras señales".
+            record_publication = str(
+                record.get('publication_status')
+                or record.get('engine_publication_status')
+                or ''
+            ).upper()
+            if (
+                record_publication != 'EXECUTABLE_SIGNAL'
+                or record.get('system_executable') is False
+            ):
+                continue
+
             if str(signal_id) in fresh_confirmed_ids:
                 filter_stats['new_confirmation'] += 1
                 continue
@@ -34776,10 +35173,25 @@ def api_futures_signals_active():
                 visibility['summary'],
             'analysis_candidates':
                 visibility['candidates'],
+            # Hipótesis MEDIUM/HIGH del análisis ACTUAL: sólo navegación
+            # y diagnóstico; no guardables hasta que exista cierre confirmado.
             'other_directional_signals':
                 _futures_directional_hidden_candidates(
                     visibility,
                     'CURRENT_ANALYSIS_ONLY'
+                ),
+
+            # RC9.7.9 FINAL — MEDIUM/HIGH de cierres ANTERIORES que todavía
+            # conservan vigencia técnica. Son guardables manualmente sin
+            # reiniciar valid_until y, si Entry ya fue tocado, pueden guardarse
+            # directamente en operación para activar Guardian.
+            'vigent_other_directional_signals':
+                _futures_vigent_manual_candidates(
+                    cache,
+                    fresh_signal_ids=(
+                        fresh_confirmed_ids
+                        | fresh_manual_ids
+                    )
                 ),
             'cache_age':
                 cache.get(

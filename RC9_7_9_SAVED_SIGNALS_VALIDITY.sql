@@ -1,4 +1,4 @@
--- RC9.7.8 · conservar la vigencia técnica original al guardar una señal
+-- RC9.7.9 · conservar la vigencia técnica original al guardar una señal confirmada o vigente
 -- Ejecutar UNA sola vez en Supabase SQL Editor antes del deploy Main.
 ALTER TABLE public.saved_signals
     ADD COLUMN IF NOT EXISTS source_valid_until TIMESTAMPTZ;

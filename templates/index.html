@@ -2138,8 +2138,9 @@
                                 Cargando señales vigentes...
                             </div>
                         </div>
+                        <div id="vigent-signals-diagnostics"></div>
                         <div class="p-2 text-center">
-                            <small class="text-muted">Señales confirmadas en cierres anteriores que todavía conservan vigencia. Pueden guardarse sin reiniciar su reloj; si Entry ya fue alcanzado, el Guardian continúa hasta TP, SL o cierre.</small>
+                            <small class="text-muted">Señales confirmadas en cierres anteriores que todavía conservan vigencia. Pueden guardarse sin reiniciar su reloj; las hipótesis LONG/SHORT de riesgo medio/alto vigentes aparecen en “Por qué no aparecen otras señales”. Si Entry ya fue alcanzado, el Guardian continúa hasta TP, SL o cierre.</small>
                         </div>
                     </div>
                 </div>
@@ -2630,7 +2631,7 @@
 
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI-2"></script>
     <script
-        src="{{ url_for('static', filename='script.js') }}?v=20260918-RC9-7-9-THREE-SIGNAL-LANES"
+        src="{{ url_for('static', filename='script.js') }}?v=20260918-RC9-7-9-VIGENT-MEDHIGH-FINAL"
     ></script>
 
 
@@ -2641,7 +2642,7 @@
     {% if is_futures %}
 
     <script
-        src="{{ url_for('static', filename='futures.js') }}?v=20260918-RC9-7-9-THREE-SIGNAL-LANES"
+        src="{{ url_for('static', filename='futures.js') }}?v=20260918-RC9-7-9-VIGENT-MEDHIGH-FINAL"
     ></script>
 
     {% endif %}

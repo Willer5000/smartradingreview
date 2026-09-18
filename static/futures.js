@@ -219,7 +219,8 @@ window._manualAnalysisCandidates = (
 
 
 window.openManualAnalysisSave = function(
-    manualKey
+    manualKey,
+    alreadyInPosition = false
 ) {
     const candidate = (
         window._manualAnalysisCandidates[
@@ -329,7 +330,19 @@ window.openManualAnalysisSave = function(
             candidate.execution_safety,
 
         execution_safety_minimum:
-            candidate.execution_safety_minimum
+            candidate.execution_safety_minimum,
+
+        source_valid_until:
+            candidate.valid_until || null,
+
+        valid_until:
+            candidate.valid_until || null,
+
+        lifecycle_status:
+            candidate.lifecycle_status || null,
+
+        entry_touched:
+            Boolean(candidate.entry_touched)
     };
 
     // En un override manual NO generamos niveles artificiales.
@@ -347,7 +360,11 @@ window.openManualAnalysisSave = function(
 
     window.openSaveSignalModal(
         sig,
-        false
+        Boolean(
+            alreadyInPosition
+            || candidate.entry_touched
+            || candidate.lifecycle_status === 'entry_touched'
+        )
     );
 };
 function futRenderAnalysisDiagnostics(json, context) {
@@ -355,12 +372,20 @@ function futRenderAnalysisDiagnostics(json, context) {
     // LONG/SHORT de riesgo MEDIO/ALTO. NO_OPERAR / ESPERAR / PRECAUCIÓN y
     // errores de datos siguen disponibles para aprendizaje interno, pero no
     // ocupan espacio en una lista que el usuario interpreta como oportunidad.
-    let candidates = Array.isArray(json && json.other_directional_signals)
-        ? json.other_directional_signals
+    const candidateKey = context === 'vigent'
+        ? 'vigent_other_directional_signals'
+        : 'other_directional_signals';
+
+    let candidates = Array.isArray(json && json[candidateKey])
+        ? json[candidateKey]
         : [];
 
     // Fallback compatible con un backend anterior durante un deploy mixto.
-    if (candidates.length === 0 && Array.isArray(json && json.analysis_candidates)) {
+    if (
+        context !== 'vigent'
+        && candidates.length === 0
+        && Array.isArray(json && json.analysis_candidates)
+    ) {
         candidates = json.analysis_candidates.filter(candidate => {
             const action = String(candidate.action || '').toUpperCase();
             const classification = String(candidate.classification || '').toUpperCase();
@@ -424,36 +449,88 @@ function futRenderAnalysisDiagnostics(json, context) {
         );
 
         let saveHtml = '';
-        if (
-            context === 'previous'
+        const canManualSave = (
+            (context === 'previous' || context === 'vigent')
             && candidate.manual_save_allowed === true
             && candidate.signal_id
-        ) {
+        );
+
+        if (canManualSave) {
             const manualKey = String(candidate.signal_id);
+            const sourceContext = context === 'vigent'
+                ? 'ACTIVE_ANALYSIS_ONLY'
+                : 'PREVIOUS_ANALYSIS_ONLY';
+
             window._manualAnalysisCandidates[manualKey] = {
                 ...candidate,
-                source_context: 'PREVIOUS_ANALYSIS_ONLY'
+                source_context: sourceContext
             };
 
-            saveHtml = `
-                <div class="mt-2">
-                    <button
-                        type="button"
-                        class="btn btn-sm ${riskClass === 'MEDIUM' ? 'btn-outline-warning' : 'btn-outline-danger'}"
-                        onclick="event.stopPropagation(); window.openManualAnalysisSave('${manualKey}');"
-                    >
-                        ${riskClass === 'MEDIUM' ? '💾 Guardar seguimiento' : '🧪 Guardar experimental'}
-                    </button>
-                    <div class="small text-muted mt-1">
-                        Guardado manual: conserva la clasificación de riesgo y no convierte la señal en recomendación oficial.
+            if (context === 'vigent') {
+                const entryTouched = (
+                    candidate.entry_touched === true
+                    || candidate.lifecycle_status === 'entry_touched'
+                );
+
+                saveHtml = entryTouched
+                    ? `
+                        <div class="mt-2">
+                            <button
+                                type="button"
+                                class="btn btn-sm btn-success"
+                                onclick="event.stopPropagation(); window.openManualAnalysisSave('${manualKey}', true);"
+                            >
+                                ✅ Guardar en operación
+                            </button>
+                            <div class="small text-muted mt-1">
+                                Entry ya fue alcanzado. El guardado queda en seguimiento y Guardian puede actuar desde este punto.
+                            </div>
+                        </div>
+                    `
+                    : `
+                        <div class="d-flex flex-wrap gap-2 mt-2">
+                            <button
+                                type="button"
+                                class="btn btn-sm ${riskClass === 'MEDIUM' ? 'btn-outline-warning' : 'btn-outline-danger'}"
+                                onclick="event.stopPropagation(); window.openManualAnalysisSave('${manualKey}', false);"
+                            >
+                                ${riskClass === 'MEDIUM' ? '💾 Guardar seguimiento' : '🧪 Guardar experimental'}
+                            </button>
+                            <button
+                                type="button"
+                                class="btn btn-sm btn-success"
+                                onclick="event.stopPropagation(); window.openManualAnalysisSave('${manualKey}', true);"
+                            >
+                                ✅ Guardar en operación
+                            </button>
+                        </div>
+                        <div class="small text-muted mt-1">
+                            Conserva la vigencia original; guardar no reinicia el reloj pre-Entry.
+                        </div>
+                    `;
+            } else {
+                saveHtml = `
+                    <div class="mt-2">
+                        <button
+                            type="button"
+                            class="btn btn-sm ${riskClass === 'MEDIUM' ? 'btn-outline-warning' : 'btn-outline-danger'}"
+                            onclick="event.stopPropagation(); window.openManualAnalysisSave('${manualKey}', false);"
+                        >
+                            ${riskClass === 'MEDIUM' ? '💾 Guardar seguimiento' : '🧪 Guardar experimental'}
+                        </button>
+                        <div class="small text-muted mt-1">
+                            Guardado manual: conserva la clasificación de riesgo y no convierte la señal en recomendación oficial.
+                        </div>
                     </div>
-                </div>
-            `;
+                `;
+            }
         }
 
         const contextText = context === 'previous'
             ? 'Hipótesis LONG/SHORT del último cierre que no superó el filtro final.'
-            : 'Hipótesis LONG/SHORT del análisis actual que no superó el filtro final.';
+            : (context === 'vigent'
+                ? 'Hipótesis LONG/SHORT de cierres anteriores que todavía conservan vigencia técnica.'
+                : 'Hipótesis LONG/SHORT del análisis actual que no superó el filtro final.');
 
         rows += `
             <div class="border-top border-secondary py-2"
@@ -472,6 +549,13 @@ function futRenderAnalysisDiagnostics(json, context) {
                 </div>
                 <div class="small text-muted mt-1">${contextText}</div>
                 <div class="small text-light mt-1">${reason}</div>
+                ${context === 'vigent' ? `
+                    <div class="small ${candidate.lifecycle_status === 'entry_touched' ? 'text-info' : 'text-warning'} mt-1">
+                        ${candidate.lifecycle_status === 'entry_touched'
+                            ? '📍 Entry alcanzado · seguimiento activo'
+                            : `⏳ Vigencia restante: <strong>${_formatPreviousSignalValidity(Number(candidate.tiempo_restante || 0))}</strong>`}
+                    </div>
+                ` : ''}
                 ${saveHtml}
             </div>
         `;
@@ -833,12 +917,25 @@ window.updateActiveSignals = async function() {
                 'active'
             );
 
-        // RC9.7.9 — el diagnóstico del análisis ACTUAL pertenece a
-        // "Señales activas", no a las señales persistentes/vigentes.
+        const vigentDiagnosticsHtml =
+            futRenderAnalysisDiagnostics(
+                json,
+                'vigent'
+            );
+
+        // El diagnóstico del análisis ACTUAL pertenece a "Señales activas".
         const currentDiagnostics =
             document.getElementById('current-active-diagnostics');
         if (currentDiagnostics) {
             currentDiagnostics.innerHTML = diagnosticsHtml;
+        }
+
+        // RC9.7.9 FINAL — cada carril tiene su propio "Por qué no aparecen".
+        // Aquí sólo MEDIUM/HIGH de cierres anteriores que siguen vigentes.
+        const vigentDiagnostics =
+            document.getElementById('vigent-signals-diagnostics');
+        if (vigentDiagnostics) {
+            vigentDiagnostics.innerHTML = vigentDiagnosticsHtml;
         }
 
         const completed = Number(
