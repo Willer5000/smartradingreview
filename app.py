@@ -19021,7 +19021,7 @@ class TradingExpertSystem:
             # Multi-timeframe context is read only from already available cache.
             # It never fabricates a higher timeframe and never opens new requests.
             operational_mtf = _build_operational_mtf_context(
-                symbol, timeframe, analysis_system_type, capas
+                symbol, timeframe, analysis_system_type, capas, analyzer=self
             )
             capas['multi_timeframe_context'] = operational_mtf
             _operational_regime_raw = str(
@@ -25457,29 +25457,105 @@ def _get_operational_mtf_peer(symbol, timeframe, system_type='spot'):
         return None
 
 
-def _build_operational_mtf_context(symbol, timeframe, system_type, current_layers):
+# RC9.7 — tiny on-demand MTF cache.  This is deliberately separate from the
+# full market-analysis cache: a missing 12H/1D context should not force a full
+# recursive analysis or a 63-cell warm-up.
+_OPERATIONAL_MTF_MINIMAL_CACHE = {}
+_OPERATIONAL_MTF_MINIMAL_LOCK = threading.Lock()
+_OPERATIONAL_MTF_MINIMAL_TTL = 300.0
+
+def _get_operational_mtf_peer_minimal(analyzer, symbol, target_tf, system_type):
+    if analyzer is None:
+        return None
+    key=(str(system_type or '').lower(), str(symbol or '').upper(), str(target_tf or '').upper())
+    now=time.monotonic()
+    try:
+        with _OPERATIONAL_MTF_MINIMAL_LOCK:
+            cached=_OPERATIONAL_MTF_MINIMAL_CACHE.get(key) or {}
+            if cached and now-float(cached.get('at') or 0)<_OPERATIONAL_MTF_MINIMAL_TTL:
+                return cached.get('value')
+    except Exception:
+        pass
+    try:
+        df=analyzer.get_kucoin_data(symbol, target_tf)
+        if df is None or len(df)<80:
+            return None
+        if str(system_type or '').lower()!='futures':
+            try:
+                from q6_integrity import prepare_spot_frame
+                df=prepare_spot_frame(df, target_tf)
+            except Exception:
+                pass
+        trend=analyzer.analyze_trend_layer(df)
+        momentum=analyzer.analyze_momentum_layer(df)
+        volume=analyzer.analyze_volume_layer(df, target_tf)
+        structure=analyzer.analyze_price_structure_layer(df, target_tf, symbol)
+        row={
+            'success':True, 'symbol':symbol, 'timeframe':target_tf,
+            'system_type':str(system_type or '').lower(),
+            'trend':trend or {}, 'momentum':momentum or {}, 'volume':volume or {}, 'structure':structure or {},
+            'analysis_mode':'CLOSED_CANDLE', 'source_candle_closed':True,
+            'market_data_is_synthetic':False, '_minimal_mtf_on_demand':True,
+        }
+        with _OPERATIONAL_MTF_MINIMAL_LOCK:
+            _OPERATIONAL_MTF_MINIMAL_CACHE[key]={'at':now,'value':row}
+            if len(_OPERATIONAL_MTF_MINIMAL_CACHE)>96:
+                oldest=sorted(_OPERATIONAL_MTF_MINIMAL_CACHE.items(),key=lambda kv:float((kv[1] or {}).get('at') or 0))[:24]
+                for old_key,_ in oldest:
+                    _OPERATIONAL_MTF_MINIMAL_CACHE.pop(old_key,None)
+        return row
+    except Exception as exc:
+        print(f"⚠️ [MTF ON-DEMAND] {symbol} {target_tf}: {str(exc)[:140]}")
+        return None
+
+def _build_operational_mtf_context(symbol, timeframe, system_type, current_layers, analyzer=None):
     try:
         from operational_intelligence import mtf_required_timeframes, build_multiframe_context
         market = 'FUTURES' if str(system_type or '').lower() == 'futures' else 'SPOT'
+        required=list(mtf_required_timeframes(market, timeframe, symbol))
+        # For Spot 4H, 1D+12H gives the most useful trend/whale reaction context
+        # per request; 1W can remain cached/background.
+        if market=='SPOT' and str(timeframe).upper()=='4H':
+            order={'1D':0,'12H':1,'1W':2,'4H':3}
+            required=sorted(required,key=lambda tf:order.get(str(tf).upper(),9))
         peers = {}
-        for tf in mtf_required_timeframes(market, timeframe, symbol):
+        missing=[]
+        for tf in required:
             if str(tf).upper() == str(timeframe).upper():
                 continue
             row = _get_operational_mtf_peer(symbol, tf, system_type)
             if row:
                 peers[str(tf).upper()] = row
-        return build_multiframe_context(
+            else:
+                missing.append(str(tf).upper())
+
+        # No mass warm-up. At most two minimal peer frames are fetched for the
+        # interactive cell, and only when real cache is missing.
+        enabled=str(os.environ.get('MTF_ON_DEMAND_ENABLED','1')).strip().lower() not in {'0','false','no','off'}
+        budget=max(0,min(2,int(os.environ.get('MTF_ON_DEMAND_MAX_PEERS','2') or 2)))
+        if enabled and analyzer is not None and missing and budget>0:
+            for tf in missing[:budget]:
+                row=_get_operational_mtf_peer_minimal(analyzer,symbol,tf,system_type)
+                if row:
+                    peers[str(tf).upper()]=row
+
+        result=build_multiframe_context(
             market=market, timeframe=timeframe, current_layers=current_layers, peer_analyses=peers, symbol=symbol
         )
+        result['on_demand_enabled']=enabled
+        result['on_demand_budget']=budget
+        result['on_demand_loaded']=[tf for tf,row in peers.items() if isinstance(row,dict) and row.get('_minimal_mtf_on_demand')]
+        return result
     except Exception as exc:
         return {
-            'version': 'RC9_2_OPERATIONAL_INTELLIGENCE_V1',
+            'version': 'RC9_7_THESIS_CONTINGENCY_RESILIENCE_V1',
             'alignment': 'INCOMPLETE', 'dominant_direction': 'NEUTRAL',
             'conflict': False, 'complete': False, 'roles': {},
             'missing_timeframes': [],
             'public_summary': 'No hay suficientes temporalidades reales en caché para confirmar alineación multitemporal.',
             'error': str(exc)[:160],
         }
+
 
 # ============================================================================
 # COMMIT 9.4 — LEARNED SPECIALIST CANDIDATES (CACHED, FAIL-CLOSED)

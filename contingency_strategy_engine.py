@@ -472,6 +472,20 @@ def build_contingency_playbook(
     strategy = str(bank_pick.get("id") or "NO_PLAYBOOK")
     setup_family = str(bank_pick.get("family") or "NONE")
     strategy_quality = float(bank_pick.get("quality") or 0.0)
+    candidate_source = str(operational.get("candidate_source") or "NONE").upper()
+    thesis_quality = float((operational.get("thesis") or {}).get("quality") or 0.0)
+    # RC9.7: a named default strategy is one valid contingency source, not a
+    # prerequisite for a technically complete thesis.  Autonomous and learned
+    # live candidates already passed the stricter quality checks in
+    # operational_intelligence.py; this layer must not silently re-introduce
+    # the old "strategy name or no trade" rule.
+    default_required_for_path = candidate_source in {"THESIS+DEFAULT", "LEARNED+DEFAULT"}
+    default_quality_floor = 78.0 if market == "FUTURES" else 70.0
+    candidate_path_quality_ok = (
+        strategy_quality >= default_quality_floor
+        if default_required_for_path
+        else candidate_source in {"THESIS_AUTONOMOUS", "LEARNED+LIVE"}
+    )
 
     thesis = dict(operational.get("thesis") or {})
     live_families = list(thesis.get("independent_support_families") or [])
@@ -493,7 +507,10 @@ def build_contingency_playbook(
             and (macro_risk == "CRITICAL" or macro_posture in {"BLOCK", "HALT", "NO_TRADE"})
         ),
         "research_not_negative": not blocked_by_research,
-        "strategy_quality": strategy_quality >= (78.0 if market == "FUTURES" else 70.0),
+        # Backward-compatible gate name: for an autonomous/learned-live path
+        # this means the *candidate path* quality is valid; no default strategy
+        # is required.  The raw default quality remains separately auditable.
+        "strategy_quality": bool(candidate_path_quality_ok),
         "operational_candidate_ready": bool(operational.get("candidate_ready")) if action in _DIRECTIONAL else True,
     }
     green = sum(1 for x in gates.values() if x)
@@ -538,6 +555,11 @@ def build_contingency_playbook(
             downgrade_reason = (
                 "La tesis de mercado todavía no alcanza la calidad operativa requerida "
                 "para enviar una entrada a los controles finales de ejecución."
+            )
+        elif not gates["strategy_quality"] and default_required_for_path:
+            downgrade_reason = (
+                "La estrategia de contingencia seleccionada todavía no alcanza su "
+                "calidad técnica mínima para esta celda."
             )
         else:
             downgrade_reason = (
@@ -601,6 +623,10 @@ def build_contingency_playbook(
         "strategy": strategy,
         "setup_family": setup_family,
         "strategy_quality": round(strategy_quality, 2),
+        "candidate_source": candidate_source,
+        "thesis_quality": round(thesis_quality, 2),
+        "default_strategy_required": bool(default_required_for_path),
+        "candidate_path_quality_ok": bool(candidate_path_quality_ok),
         "strategy_confirmations": list(bank_pick.get("confirmations") or []),
         "strategy_indicators": list(bank_pick.get("indicators") or []),
         "setup_code": setup_family,

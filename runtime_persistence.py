@@ -1,7 +1,8 @@
 """Hotfix 14.6 — bounded persistence for ephemeral runtime state.
 
-Moves restart-survival snapshots out of Render's ephemeral filesystem and into
-Supabase. The helpers are intentionally tiny, best-effort and fail-open: a DB
+Keeps bounded runtime snapshots in Supabase *and* a local fail-open copy.
+The local copy is intentionally ephemeral (Render /tmp) but prevents a live
+process from becoming blind when Supabase is unavailable or returns 402. A DB
 problem never blocks Spot/Futures trading.
 """
 from __future__ import annotations
@@ -12,6 +13,12 @@ import json
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
+
+try:
+    from local_resilience import save_snapshot as _local_save_snapshot, load_snapshot as _local_load_snapshot
+except Exception:
+    _local_save_snapshot = None
+    _local_load_snapshot = None
 
 RUNTIME_TABLE = 'runtime_snapshots_v1'
 MACRO_TABLE = 'macro_context_events_v1'
@@ -47,9 +54,17 @@ def utc_now() -> datetime:
 
 
 def save_runtime_snapshot(namespace: str, snapshot_key: str, payload: Dict[str, Any], *, ttl_seconds: int = 21600) -> bool:
-    db = _db()
-    if db is None or not isinstance(payload, dict):
+    if not isinstance(payload, dict):
         return False
+    local_ok = False
+    try:
+        if _local_save_snapshot is not None:
+            local_ok = bool(_local_save_snapshot(namespace, snapshot_key, payload, ttl_seconds=ttl_seconds))
+    except Exception:
+        local_ok = False
+    db = _db()
+    if db is None or bool(getattr(db, 'provider_restricted', lambda: False)()):
+        return local_ok
     now = utc_now()
     cache_key = (str(namespace or 'runtime')[:64], str(snapshot_key or 'default')[:128])
     digest = _stable_digest(payload)
@@ -92,13 +107,11 @@ def save_runtime_snapshot(namespace: str, snapshot_key: str, payload: Dict[str, 
         return True
     except Exception as exc:
         print(f"⚠️ [PERSIST] runtime snapshot save {namespace}/{snapshot_key}: {exc}")
-        return False
+        return local_ok
 
 
 def load_runtime_snapshot(namespace: str, snapshot_key: str, *, allow_expired: bool = False) -> Optional[Dict[str, Any]]:
     db = _db()
-    if db is None:
-        return None
     cache_key = (str(namespace or 'runtime')[:64], str(snapshot_key or 'default')[:128])
     with _RC8_WRITE_LOCK:
         cached = _RC83_READ_CACHE.get(cache_key) or {}
@@ -106,6 +119,11 @@ def load_runtime_snapshot(namespace: str, snapshot_key: str, *, allow_expired: b
             value = cached.get('value')
             if isinstance(value, dict):
                 return dict(value)
+    if db is None or bool(getattr(db, 'provider_restricted', lambda: False)()):
+        try:
+            return _local_load_snapshot(namespace, snapshot_key, allow_expired=allow_expired) if _local_load_snapshot else None
+        except Exception:
+            return None
     try:
         response = (
             db.client.table(RUNTIME_TABLE)
@@ -137,12 +155,20 @@ def load_runtime_snapshot(namespace: str, snapshot_key: str, *, allow_expired: b
             'expires_at': row.get('expires_at'),
             'expired': expired,
         }
+        try:
+            if _local_save_snapshot is not None:
+                _local_save_snapshot(namespace, snapshot_key, value['payload'], ttl_seconds=21600)
+        except Exception:
+            pass
         with _RC8_WRITE_LOCK:
             _RC83_READ_CACHE[cache_key] = {'ts': time.monotonic(), 'value': dict(value)}
         return value
     except Exception as exc:
         print(f"⚠️ [PERSIST] runtime snapshot load {namespace}/{snapshot_key}: {exc}")
-        return None
+        try:
+            return _local_load_snapshot(namespace, snapshot_key, allow_expired=allow_expired) if _local_load_snapshot else None
+        except Exception:
+            return None
 
 
 def persist_macro_events(news, calendar_rows) -> int:

@@ -1455,7 +1455,7 @@ STRATEGY_TO_TRADER = {
     'SHORT_EXTREME_REVERSAL': 'TraderLiquidation',
     'SPIKE_ACCUMULATION_LONG': 'TraderLiquidation',
     'SPIKE_ACCUMULATION_SHORT': 'TraderLiquidation',
-    # ReviewTrader (juez del comité)
+    # ReviewTrader (gobernador estadístico)
     'REVIEW_HISTORICO_GANADOR_LONG': 'ReviewTrader',
     'REVIEW_HISTORICO_GANADOR_SHORT': 'ReviewTrader',
     'REVIEW_PATRON_PERDEDOR': 'ReviewTrader',
@@ -1467,7 +1467,6 @@ CANONICAL_TRADERS = [
     'TraderTecnico', 'TraderChartista', 'TraderBallenas',
     'TraderMacro', 'TraderPullback', 'TraderSmartMoney',
     'TraderEspectico', 'TraderMultiframe', 'TraderLiquidation',
-    'ReviewTrader',
 ]
 
 
@@ -4357,11 +4356,11 @@ def generate_learning_pdf() -> bytes:
         story.append(Paragraph(f"<i>Sin datos suficientes.</i>", style_body))
     
     # ============ v22: 7. ESTRATEGIAS POR TRADER (auditoría del comité) ============
-    # Permite al usuario verificar que cada uno de los 10 traders está
-    # aportando estrategias distintas y qué performance tiene cada uno.
+    # Permite verificar la cobertura de los 9 especialistas técnicos.
+    # ReviewTrader es gobernador estadístico y no participa como décimo voto.
     story.append(Paragraph("Estrategias por trader (cobertura del comité)", style_h2))
     story.append(Paragraph(
-        "Cada uno de los 10 traders del sistema emite un conjunto de estrategias distintas. "
+        "Los 9 especialistas técnicos del sistema aportan evidencia y estrategias distintas; ReviewTrader se audita aparte como gobernador estadístico. "
         "La contribución se separa por mercado. Esta tabla muestra <b>qué está aportando cada trader</b>: cuántas estrategias diferentes "
         "ha emitido, cuántas señales resueltas tiene y su win rate. Si un trader tiene 0 señales, "
         "significa que no ha aportado en el período — puede indicar que no encuentra setups o que "
@@ -4577,10 +4576,10 @@ def generate_learning_pdf() -> bytes:
         f"detección de oportunidades perdidas + recalculo + optimización)."
         f"<br/><br/>"
         f"<b>Cómo se aplica el aprendizaje:</b>"
-        f"<br/>• El ReviewTrader (10º trader del comité) consulta las estrategias "
-        f"históricamente ganadoras para el (par, TF, acción) y emite voto con confianza "
-        f"proporcional a cuántas coinciden con las estrategias activas actuales."
-        f"<br/>• El voto se pondera con peso 1.0 en el consenso final junto a los otros 9 traders."
+        f"<br/>• ReviewTrader es gobernador estadístico, no un décimo trader democrático. "
+        f"Separa Backtest/OOS de LIVE/Shadow y reduce autoridad cuando detecta deterioro."
+        f"<br/>• Las estrategias Default, Champions Research y tesis autónomas se atribuyen por "
+        f"mercado, símbolo/grupo, temporalidad y acción; ninguna evidencia histórica salta Safety."
         f"<br/>• Las 'oportunidades perdidas' se registran para futura calibración pero "
         f"aún no ajustan automáticamente las decisiones — es información para el operador humano."
         f"<br/>• El PnL de este informe es bruto. Comisión, slippage y funding se "

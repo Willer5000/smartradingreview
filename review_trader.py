@@ -198,7 +198,8 @@ Q3B_LEARNING_SNAPSHOT_VERSION = (
 
 class ReviewTrader:
     """
-    El 10º trader del sistema. Aprende del historial almacenado en Supabase.
+    Gobernador estadístico del sistema. Aprende del historial disponible y
+    nunca actúa como un décimo voto democrático.
     
     Responsabilidades:
     1. Guardar todas las señales generadas (para aprendizaje futuro).
@@ -1707,6 +1708,37 @@ class ReviewTrader:
             context[
                 'learning'
             ] = learning
+
+            # ==========================================================
+            # RC9.7 — SOURCE ATTRIBUTION (THESIS / DEFAULT / RESEARCH)
+            # ==========================================================
+            # Persist the exact contingency/archetype identity so outcomes can
+            # finally be compared Default vs Learned vs Autonomous thesis.
+            op = analysis_result.get('operational_intelligence') or {}
+            if isinstance(op, dict):
+                ds = op.get('default_strategy') or {}
+                th = op.get('thesis') or {}
+                mtf = op.get('multi_timeframe') or {}
+                context['learning']['operational_source_v1'] = {
+                    'version': str(op.get('version') or '')[:100],
+                    'candidate_source': str(op.get('candidate_source') or 'NONE')[:40],
+                    'candidate_action': str(op.get('candidate_action') or 'NO_OPERAR')[:32],
+                    'candidate_ready': bool(op.get('candidate_ready')),
+                    'default_strategy_id': str(ds.get('id') or '')[:220],
+                    'default_archetype_id': str(ds.get('archetype_id') or '')[:120],
+                    'default_specialization_key': str(ds.get('specialization_key') or '')[:300],
+                    'default_family': str(ds.get('family') or '')[:80],
+                    'default_quality': ds.get('quality'),
+                    'eligible_strategy_count': ds.get('eligible_strategy_count'),
+                    'thesis_direction': str(th.get('direction') or 'NEUTRAL')[:20],
+                    'thesis_quality': th.get('quality'),
+                    'thesis_families': list(th.get('independent_support_families') or [])[:12],
+                    'mtf_alignment': str(mtf.get('alignment') or 'INCOMPLETE')[:20],
+                    'mtf_complete': bool(mtf.get('complete')),
+                    'risk_class': str(op.get('risk_class') or '')[:20],
+                    'research_state': str((op.get('selected_research_prior') or {}).get('state') or '')[:40],
+                    'never_bypass_safety': True,
+                }
 
             # ==========================================================
             # COMMIT 2 — STRATEGY ATTRIBUTION V2
@@ -7624,18 +7656,181 @@ class ReviewTrader:
     # 3. DETECTAR OPORTUNIDADES PERDIDAS
     # ========================================================================
     
+    @staticmethod
+    def _counterfactual_move_floor_pct(system_type: str, timeframe: str, indicators: Dict) -> float:
+        """Diagnostic move floor for abstentions that have no executable geometry.
+
+        This is NOT a trade gate.  It only replaces the old universal >2% rule
+        with a market/timeframe-aware review threshold.  A move above this floor
+        is labelled for review, never counted as a missed *executable* trade
+        unless Entry/SL/TP geometry proves that the entry was reachable and TP
+        preceded SL.
+        """
+        market = str(system_type or '').lower()
+        tf = str(timeframe or '').upper()
+        spot = {'4H': 0.60, '12H': 0.80, '1D': 1.00, '1W': 1.40}
+        futures = {'30M': 0.35, '1H': 0.45, '2H': 0.55, '4H': 0.80, '12H': 1.10, '1D': 1.50}
+        base = float((futures if market == 'futures' else spot).get(tf, 0.80))
+
+        def _find_atr_pct(value, depth=0):
+            if depth > 4:
+                return None
+            if isinstance(value, dict):
+                for key in ('atr_pct', 'atr_percent', 'atr_percentage'):
+                    try:
+                        if value.get(key) is not None:
+                            number = float(value.get(key))
+                            if math.isfinite(number) and number > 0:
+                                return number
+                    except Exception:
+                        pass
+                for child in value.values():
+                    found = _find_atr_pct(child, depth + 1)
+                    if found is not None:
+                        return found
+            return None
+
+        atr_pct = _find_atr_pct(indicators or {})
+        if atr_pct is None:
+            return round(base, 4)
+        # Keep a bounded diagnostic threshold: ATR informs the scale without
+        # making one noisy ATR estimate able to hide all opportunities.
+        adaptive = 0.75 * float(atr_pct)
+        return round(max(base * 0.75, min(base * 1.75, adaptive)), 4)
+
+    @staticmethod
+    def _counterfactual_candidate_geometry(signal: Dict) -> Dict:
+        context = signal.get('context') or {}
+        learning = context.get('learning') if isinstance(context, dict) else {}
+        learning = learning if isinstance(learning, dict) else {}
+        source = learning.get('operational_source_v1') or {}
+        source = source if isinstance(source, dict) else {}
+        candidate_action = str(source.get('candidate_action') or '').upper()
+
+        try:
+            entry = float(signal.get('entry_price') or signal.get('entry') or 0)
+        except Exception:
+            entry = 0.0
+        try:
+            sl = float(signal.get('stop_loss') or 0)
+        except Exception:
+            sl = 0.0
+        try:
+            tp = float(signal.get('take_profit') or 0)
+        except Exception:
+            tp = 0.0
+
+        bullish = candidate_action in {'LONG', 'COMPRA_SPOT'}
+        bearish = candidate_action in {'SHORT', 'VENTA_SPOT'}
+        valid = bool(
+            entry > 0 and sl > 0 and tp > 0 and (
+                (bullish and sl < entry < tp)
+                or (bearish and tp < entry < sl)
+            )
+        )
+        return {
+            'valid': valid,
+            'action': candidate_action,
+            'direction': 'LONG' if bullish else 'SHORT' if bearish else 'NEUTRAL',
+            'entry': entry,
+            'stop_loss': sl,
+            'take_profit': tp,
+            'risk_r': abs(entry - sl) if valid else 0.0,
+            'candidate_source': str(source.get('candidate_source') or 'UNAVAILABLE')[:40],
+            'thesis_quality': source.get('thesis_quality'),
+            'thesis_families': list(source.get('thesis_families') or [])[:12],
+            'default_strategy_id': str(source.get('default_strategy_id') or '')[:220],
+            'default_archetype_id': str(source.get('default_archetype_id') or '')[:120],
+            'mtf_alignment': str(source.get('mtf_alignment') or 'UNAVAILABLE')[:20],
+            'risk_class': str(source.get('risk_class') or '')[:20],
+        }
+
+    @staticmethod
+    def _evaluate_counterfactual_geometry(eval_df, geometry: Dict) -> Dict:
+        """Causally evaluate Entry -> TP/SL and MFE/MAE for an abstained candidate."""
+        if not geometry.get('valid'):
+            return {'status': 'NO_GEOMETRY', 'entry_reached': False}
+        entry = float(geometry['entry'])
+        sl = float(geometry['stop_loss'])
+        tp = float(geometry['take_profit'])
+        risk = float(geometry['risk_r'])
+        direction = geometry.get('direction')
+        if risk <= 0:
+            return {'status': 'NO_GEOMETRY', 'entry_reached': False}
+
+        touch_pos = None
+        rows = list(eval_df.iterrows())
+        for pos, (_, row) in enumerate(rows):
+            lo = float(row['low']); hi = float(row['high'])
+            if lo <= entry <= hi:
+                touch_pos = pos
+                break
+        if touch_pos is None:
+            return {'status': 'ENTRY_NOT_REACHED', 'entry_reached': False, 'mfe_r': 0.0, 'mae_r': 0.0}
+
+        after = rows[touch_pos:]
+        tp_pos = sl_pos = None
+        high_after = entry
+        low_after = entry
+        ambiguous_same_bar = False
+        for rel, (_, row) in enumerate(after):
+            lo = float(row['low']); hi = float(row['high'])
+            high_after = max(high_after, hi)
+            low_after = min(low_after, lo)
+            if direction == 'LONG':
+                tp_hit = hi >= tp
+                sl_hit = lo <= sl
+            else:
+                tp_hit = lo <= tp
+                sl_hit = hi >= sl
+            if tp_hit and tp_pos is None:
+                tp_pos = rel
+            if sl_hit and sl_pos is None:
+                sl_pos = rel
+            if tp_hit and sl_hit and tp_pos == sl_pos == rel:
+                ambiguous_same_bar = True
+                break
+            if tp_pos is not None or sl_pos is not None:
+                # Once the first unambiguous terminal level is hit, later bars
+                # must not rewrite causal order.
+                if not (tp_pos is not None and sl_pos is not None and tp_pos == sl_pos):
+                    break
+
+        if direction == 'LONG':
+            mfe_r = max(0.0, (high_after - entry) / risk)
+            mae_r = max(0.0, (entry - low_after) / risk)
+        else:
+            mfe_r = max(0.0, (entry - low_after) / risk)
+            mae_r = max(0.0, (high_after - entry) / risk)
+
+        if ambiguous_same_bar or (tp_pos is not None and sl_pos is not None and tp_pos == sl_pos):
+            outcome = 'AMBIGUOUS'
+        elif tp_pos is not None and (sl_pos is None or tp_pos < sl_pos):
+            outcome = 'TP_FIRST'
+        elif sl_pos is not None and (tp_pos is None or sl_pos < tp_pos):
+            outcome = 'SL_FIRST'
+        else:
+            outcome = 'OPEN'
+        return {
+            'status': outcome,
+            'entry_reached': True,
+            'entry_touch_candle': int(touch_pos + 1),
+            'tp_candle_after_entry': None if tp_pos is None else int(tp_pos + 1),
+            'sl_candle_after_entry': None if sl_pos is None else int(sl_pos + 1),
+            'mfe_r': round(float(mfe_r), 4),
+            'mae_r': round(float(mae_r), 4),
+        }
+
     def detect_missed_opportunities(self, price_fetcher) -> int:
-        """RC9.1 — aprendizaje contrafactual separado de las operaciones.
+        """RC9.7 — Opportunity Capture Audit V2.
 
-        Evalúa NO_OPERAR / ESPERAR / CAUTION normalizados como NO_OPERAR.
-        - Si después aparece un desplazamiento unilateral > umbral, registra una
-          oportunidad perdida en la tabla diagnóstica existente.
-        - Si no aparece desplazamiento o el precio barre ambos lados, cierra la
-          observación con un estado counterfactual que NO cuenta como TP/SL.
+        NO_OPERAR / ESPERAR / PRECAUCION are evaluated as counterfactuals.
+        A *missed opportunity* is now counted only when an actual candidate
+        Entry/SL/TP existed, Entry was reachable, and TP was hit before SL.
 
-        Esta evidencia jamás entra al win rate oficial ni convierte por sí sola
-        una abstención en LONG/SHORT; sirve para aprender si la prudencia fue
-        adecuada o si faltó detectar una oportunidad.
+        Without executable geometry the method may flag a timeframe-aware
+        directional move for review, but it explicitly does NOT call it a
+        missed trade.  This avoids hindsight based on a universal >2% move.
         """
         if not self.db.enabled:
             return 0
@@ -7644,9 +7839,13 @@ class ReviewTrader:
                 hours_old_max=168,
                 directional=False
             )
-            print("\n🔍 [REVIEW] Evaluando decisiones de espera/no-operar")
+            print("\n🔍 [REVIEW] Opportunity Capture V2 · espera/no-operar/precaución")
             missed = 0
             resolved_observations = 0
+            review_moves = 0
+            not_executable = 0
+            losses_avoided = 0
+            ambiguous = 0
             evaluation_horizon = max(6, MISSED_OPP_MIN_CANDLES)
 
             for signal in no_op_signals:
@@ -7686,113 +7885,141 @@ class ReviewTrader:
                     if len(df_after) < evaluation_horizon:
                         continue
 
-                    # Ventana fija y causal: sólo las primeras N velas posteriores.
                     eval_df = df_after.iloc[:evaluation_horizon]
                     max_high = float(eval_df['high'].max())
                     min_low = float(eval_df['low'].min())
                     pct_up = ((max_high - price_at_signal) / price_at_signal) * 100.0
                     pct_down = ((price_at_signal - min_low) / price_at_signal) * 100.0
-                    threshold = float(MISSED_OPP_THRESHOLD_PCT)
-                    up_miss = pct_up > threshold
-                    down_miss = pct_down > threshold
                     strategies = self._get_signal_strategies(signal['id'])
                     indicators = signal.get('indicators_snapshot', {}) or {}
+                    geometry = self._counterfactual_candidate_geometry(signal)
+                    geometric = self._evaluate_counterfactual_geometry(eval_df, geometry)
+                    threshold = self._counterfactual_move_floor_pct(system_type, timeframe, indicators)
 
-                    if up_miss and not down_miss:
-                        idx = eval_df['high'].idxmax()
-                        try:
-                            candles_to = int(eval_df.index.get_loc(idx)) + 1
-                        except Exception:
-                            candles_to = evaluation_horizon
-                        self.db.insert_missed_opportunity({
-                            'symbol': symbol,
-                            'timeframe': timeframe,
-                            'action_should': self._scoped_action('LONG', system_type),
-                            'confidence': signal.get('confidence', 0),
-                            'strategies': strategies,
-                            'indicators_snapshot': indicators,
-                            'price_at_signal': price_at_signal,
-                            'max_favorable_price': max_high,
-                            'max_favorable_pct': pct_up,
-                            'candles_to_max': candles_to,
-                            'candle_timestamp': signal.get('candle_timestamp')
-                        })
-                        self.db.update_signal_result(signal['id'], {
-                            'status': 'missed_opportunity',
-                            'exit_price': max_high,
-                            'exit_timestamp': datetime.utcnow().isoformat(),
-                            'pnl_pct': pct_up,
-                            'candles_to_result': evaluation_horizon,
-                            'notes': (
-                                f'counterfactual=missed_up;original_action={original_action};'
-                                f'up={pct_up:.4f};down={pct_down:.4f};threshold={threshold:.4f}'
+                    audit = {
+                        'version': 'RC9_7_OPPORTUNITY_CAPTURE_V2',
+                        'original_action': original_action,
+                        'candidate_source': geometry.get('candidate_source'),
+                        'candidate_action': geometry.get('action'),
+                        'entry': geometry.get('entry'),
+                        'stop_loss': geometry.get('stop_loss'),
+                        'take_profit': geometry.get('take_profit'),
+                        'entry_reached': geometric.get('entry_reached', False),
+                        'geometry_outcome': geometric.get('status'),
+                        'mfe_r': geometric.get('mfe_r'),
+                        'mae_r': geometric.get('mae_r'),
+                        'thesis_quality': geometry.get('thesis_quality'),
+                        'thesis_families': geometry.get('thesis_families'),
+                        'default_strategy_id': geometry.get('default_strategy_id'),
+                        'default_archetype_id': geometry.get('default_archetype_id'),
+                        'mtf_alignment': geometry.get('mtf_alignment'),
+                        'risk_class': geometry.get('risk_class'),
+                        'move_up_pct': round(pct_up, 4),
+                        'move_down_pct': round(pct_down, 4),
+                        'diagnostic_move_floor_pct': threshold,
+                        'evaluation_horizon_bars': evaluation_horizon,
+                    }
+
+                    status = ''
+                    pnl_pct = 0.0
+                    exit_price = float(eval_df['close'].iloc[-1])
+                    if geometry.get('valid'):
+                        outcome = geometric.get('status')
+                        if outcome == 'TP_FIRST':
+                            status = 'missed_opportunity'
+                            pnl_pct = (
+                                ((geometry['take_profit'] - geometry['entry']) / geometry['entry']) * 100.0
+                                if geometry.get('direction') == 'LONG'
+                                else ((geometry['entry'] - geometry['take_profit']) / geometry['entry']) * 100.0
                             )
-                        })
-                        missed += 1
-                        resolved_observations += 1
-                        print(f"   ⚠️ Oportunidad alcista perdida: {symbol} {timeframe} +{pct_up:.2f}%")
-
-                    elif down_miss and not up_miss:
-                        idx = eval_df['low'].idxmin()
-                        try:
-                            candles_to = int(eval_df.index.get_loc(idx)) + 1
-                        except Exception:
-                            candles_to = evaluation_horizon
-                        self.db.insert_missed_opportunity({
-                            'symbol': symbol,
-                            'timeframe': timeframe,
-                            'action_should': self._scoped_action('SHORT', system_type),
-                            'confidence': signal.get('confidence', 0),
-                            'strategies': strategies,
-                            'indicators_snapshot': indicators,
-                            'price_at_signal': price_at_signal,
-                            'max_favorable_price': min_low,
-                            'max_favorable_pct': pct_down,
-                            'candles_to_max': candles_to,
-                            'candle_timestamp': signal.get('candle_timestamp')
-                        })
-                        self.db.update_signal_result(signal['id'], {
-                            'status': 'missed_opportunity',
-                            'exit_price': min_low,
-                            'exit_timestamp': datetime.utcnow().isoformat(),
-                            'pnl_pct': pct_down,
-                            'candles_to_result': evaluation_horizon,
-                            'notes': (
-                                f'counterfactual=missed_down;original_action={original_action};'
-                                f'up={pct_up:.4f};down={pct_down:.4f};threshold={threshold:.4f}'
+                            exit_price = float(geometry['take_profit'])
+                            missed += 1
+                            print(
+                                f"   ⚠️ Oportunidad ejecutable perdida: {symbol} {timeframe} "
+                                f"{geometry.get('action')} · MFE {geometric.get('mfe_r', 0):.2f}R"
                             )
-                        })
-                        missed += 1
-                        resolved_observations += 1
-                        print(f"   ⚠️ Oportunidad bajista perdida: {symbol} {timeframe} -{pct_down:.2f}%")
-
+                        elif outcome == 'SL_FIRST':
+                            status = 'counterfactual_loss_avoided'
+                            losses_avoided += 1
+                        elif outcome == 'ENTRY_NOT_REACHED':
+                            status = 'counterfactual_not_executable'
+                            not_executable += 1
+                        elif outcome == 'AMBIGUOUS':
+                            status = 'counterfactual_ambiguous'
+                            ambiguous += 1
+                        else:
+                            # Reached Entry but neither TP nor SL. A favourable
+                            # excursion is useful evidence, but not enough to
+                            # claim a completed missed trade.
+                            status = 'counterfactual_executable_open'
+                            if float(geometric.get('mfe_r') or 0) >= 1.0:
+                                review_moves += 1
                     else:
-                        # Ambos lados > umbral = mercado de barridas/whipsaw; ninguno
-                        # > umbral = abstención defendible. En ambos casos NO es trade.
-                        classification = (
-                            'counterfactual_whipsaw_both_sides'
-                            if up_miss and down_miss
-                            else 'counterfactual_abstention_correct'
-                        )
-                        self.db.update_signal_result(signal['id'], {
-                            'status': classification,
-                            'exit_price': float(eval_df['close'].iloc[-1]),
-                            'exit_timestamp': datetime.utcnow().isoformat(),
-                            'pnl_pct': 0.0,
-                            'candles_to_result': evaluation_horizon,
-                            'notes': (
-                                f'counterfactual={classification};original_action={original_action};'
-                                f'up={pct_up:.4f};down={pct_down:.4f};threshold={threshold:.4f}'
-                            )
+                        up_review = pct_up >= threshold
+                        down_review = pct_down >= threshold
+                        if up_review and down_review:
+                            status = 'counterfactual_whipsaw_both_sides'
+                        elif up_review or down_review:
+                            status = 'counterfactual_directional_move_review'
+                            review_moves += 1
+                        else:
+                            status = 'counterfactual_abstention_correct'
+
+                    audit['classification'] = status
+                    persisted_indicators = dict(indicators) if isinstance(indicators, dict) else {}
+                    persisted_indicators['_opportunity_capture_v2'] = audit
+
+                    if status == 'missed_opportunity':
+                        direction = geometry.get('direction')
+                        self.db.insert_missed_opportunity({
+                            'symbol': symbol,
+                            'timeframe': timeframe,
+                            'action_should': self._scoped_action(direction, system_type),
+                            'confidence': signal.get('confidence', 0),
+                            'strategies': strategies,
+                            'indicators_snapshot': persisted_indicators,
+                            'price_at_signal': price_at_signal,
+                            'max_favorable_price': max_high if direction == 'LONG' else min_low,
+                            'max_favorable_pct': pct_up if direction == 'LONG' else pct_down,
+                            'candles_to_max': int(geometric.get('tp_candle_after_entry') or evaluation_horizon),
+                            'candle_timestamp': signal.get('candle_timestamp')
                         })
-                        resolved_observations += 1
+
+                    note = (
+                        f"counterfactual={status};original_action={original_action};"
+                        f"candidate={geometry.get('action') or 'NONE'};source={geometry.get('candidate_source')};"
+                        f"entry_reached={bool(geometric.get('entry_reached'))};"
+                        f"mfe_r={float(geometric.get('mfe_r') or 0):.4f};"
+                        f"mae_r={float(geometric.get('mae_r') or 0):.4f};"
+                        f"up={pct_up:.4f};down={pct_down:.4f};review_floor={threshold:.4f}"
+                    )
+                    self.db.update_signal_result(signal['id'], {
+                        'status': status,
+                        'exit_price': exit_price,
+                        'exit_timestamp': datetime.utcnow().isoformat(),
+                        'pnl_pct': pnl_pct,
+                        'candles_to_result': evaluation_horizon,
+                        'notes': note[:1000]
+                    })
+                    resolved_observations += 1
 
                 except Exception as e:
                     logger.error(f"Error evaluando abstención {signal.get('id')}: {e}")
 
+            summary = {
+                'version': 'RC9_7_OPPORTUNITY_CAPTURE_V2',
+                'resolved': resolved_observations,
+                'missed_executable': missed,
+                'directional_review': review_moves,
+                'not_executable': not_executable,
+                'losses_avoided': losses_avoided,
+                'ambiguous': ambiguous,
+            }
+            self._last_opportunity_capture_summary = summary
             print(
-                f"\n📊 [REVIEW] Contrafactual: {resolved_observations} observaciones "
-                f"resueltas · {missed} oportunidades perdidas"
+                f"\n📊 [REVIEW] Opportunity Capture V2: {resolved_observations} resueltas · "
+                f"{missed} perdidas ejecutables · {review_moves} movimientos a revisar · "
+                f"{not_executable} Entry no alcanzado · {losses_avoided} pérdidas evitadas"
             )
             return missed
         except Exception as e:

@@ -2904,7 +2904,7 @@ async function loadResearchFederationAnalytics(){
             const parts=['4H','12H','1D','1W'].map(tf=>`${tf}: ${Number(strategic[tf]||0)}`);
             const missing=(coverage.missing_strategic_timeframes||[]);
             covEl.className=`small mb-2 ${missing.length?'text-warning':'text-success'}`;
-            const causal=`Contrato Research 9.6 ${RF96_RESEARCH_TARGET} celdas · Champions activos ${activeChampionCount}/${RF96_RESEARCH_TARGET} · pendientes ${activePending} · OOS+ activos ${rf96Stats.oosPositive}`;
+            const causal=`Contrato Research 9.7 ${RF96_RESEARCH_TARGET} celdas · Champions activos ${activeChampionCount}/${RF96_RESEARCH_TARGET} · pendientes ${activePending} · OOS+ activos ${rf96Stats.oosPositive}`;
             covEl.textContent=`Cobertura estratégica · ${parts.join(' · ')} · ${causal}${missing.length?` · Sin evidencia actual: ${missing.join(', ')}`:''}${data.degraded?' · ⚠ datos cacheados':''}`;
         }
         const sm=new Map(shadow.map(x=>[x.candidate_key,x]));
@@ -3049,7 +3049,7 @@ async function loadResearchFederationAnalytics(){
                 return `<tr><td>${label}</td><td>${ok}/${target}</td><td class="${ok===target?'text-success':ok>0?'text-info':'text-muted'}">${ok===target?'✅ Completa':ok>0?'🟡 Parcial':'🔎 Buscando'}</td></tr>`;
             }).join('');
         }
-        const coverageLabel = ` · Research 9.6 ${activeChampionCount}/${RF96_RESEARCH_TARGET} Champions activos · ${activePending} pendientes`;
+        const coverageLabel = ` · Research 9.7 ${activeChampionCount}/${RF96_RESEARCH_TARGET} Champions activos · ${activePending} pendientes`;
         body.innerHTML=actionable.slice(0,80).map(x=>{const l=sm.get(x.candidate_key)||{};return `<tr>
           <td><span class="badge bg-secondary">${x.stage||'--'}</span></td>
           <td><b>${x.source_engine||'--'}</b><br><span class="text-muted small">${x.experiment||'--'}</span></td>

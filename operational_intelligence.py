@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-VERSION = "COMMIT9_6_MULTI_RISK_FUTURES_V1"
+VERSION = "RC9_7_THESIS_CONTINGENCY_RESILIENCE_V1"
 
 DIRECTIONAL_ACTIONS = {"LONG", "SHORT", "COMPRA_SPOT", "VENTA_SPOT"}
 NON_DIRECTIONAL_ACTIONS = {"ESPERAR", "PRECAUCION", "NO_OPERAR"}
@@ -447,7 +447,7 @@ def _indicator_value(container: Mapping[str, Any], *keys: str, default: Any = No
     return default
 
 
-def build_independent_thesis(*, layers: Mapping[str, Any], mtf_context: Mapping[str, Any], market: Any) -> Dict[str, Any]:
+def build_independent_thesis(*, layers: Mapping[str, Any], mtf_context: Mapping[str, Any], market: Any, symbol: Any = "", timeframe: Any = "") -> Dict[str, Any]:
     trend = dict(layers.get("trend") or {})
     momentum = dict(layers.get("momentum") or {})
     volume = dict(layers.get("volume") or {})
@@ -541,15 +541,20 @@ def build_independent_thesis(*, layers: Mapping[str, Any], mtf_context: Mapping[
     short_score = sum(max(0.0, -row["score"]) * row["weight"] for row in families.values())
     long_families = [k for k,v in families.items() if v["score"] >= 0.45]
     short_families = [k for k,v in families.items() if v["score"] <= -0.45]
-    min_families = 4 if _u(market) == "FUTURES" else 3
+    market_u = _u(market)
+    risk_class = futures_risk_class_for(symbol) if market_u == "FUTURES" else "SPOT"
+    # Anti-overfitting differentiation is structural, not symbol-optimized:
+    # faster/higher-risk Futures require one more independent family or margin.
+    min_families = 3 if market_u == "SPOT" else (5 if risk_class == "HIGH" else 4)
+    margin_required = 0.9 if market_u == "SPOT" else (1.45 if risk_class == "HIGH" else 1.25 if risk_class == "MEDIUM" else 1.15)
     margin = abs(long_score - short_score)
     direction = "NEUTRAL"
     active = long_families if long_score > short_score else short_families
-    if len(active) >= min_families and margin >= (1.15 if _u(market) == "FUTURES" else 0.9):
+    if len(active) >= min_families and margin >= margin_required:
         direction = "BULLISH" if long_score > short_score else "BEARISH"
-    if bool(mtf_context.get("conflict")) and _u(market) == "FUTURES":
+    if bool(mtf_context.get("conflict")) and market_u == "FUTURES":
         # A conflict does not erase the thesis, but it cannot be called strong.
-        if margin < 2.0:
+        if margin < max(2.0, margin_required + 0.7):
             direction = "NEUTRAL"
 
     quality = min(100.0, 45.0 + 9.0 * len(active) + 7.0 * min(2.5, margin)) if direction != "NEUTRAL" else min(69.0, 35.0 + 7.0 * max(len(long_families), len(short_families)))
@@ -567,6 +572,11 @@ def build_independent_thesis(*, layers: Mapping[str, Any], mtf_context: Mapping[
         "families": families,
         "mtf_conflict": bool(mtf_context.get("conflict")),
         "macro_risk": macro_risk,
+        "risk_class": risk_class,
+        "timeframe": _u(timeframe),
+        "required_independent_families": min_families,
+        "required_direction_margin": round(margin_required, 3),
+        "anti_overfit_rule": "ONE_REPRESENTATIVE_EFFECT_PER_CORRELATED_FAMILY",
     }
 
 
@@ -605,7 +615,7 @@ def prepare_operational_intelligence(
     raw_regime = (layers.get("market_regime") or {}).get("regime")
     regime = canonical_regime(raw_regime)
     vol_state = canonical_volatility(layers.get("volatility") or {}, raw_regime)
-    thesis = build_independent_thesis(layers=layers, mtf_context=mtf_context, market=market)
+    thesis = build_independent_thesis(layers=layers, mtf_context=mtf_context, market=market, symbol=symbol, timeframe=timeframe)
     research_map = {
         canonical_action(key, market): dict(value or {})
         for key, value in dict(research_candidates or {}).items()
@@ -634,7 +644,7 @@ def prepare_operational_intelligence(
     thesis_action = thesis.get("action") or "NO_OPERAR"
     selected_action = thesis_action
     selected_prior: Dict[str, Any] = {}
-    specialist_source = "DEFAULT"
+    specialist_source = "THESIS"
 
     # If the purely live thesis is neutral, a validated learned specialist may
     # open a *candidate* only when current independent families already support
@@ -691,38 +701,63 @@ def prepare_operational_intelligence(
         selected_action in DIRECTIONAL_ACTIONS
         and is_official_cell(market, symbol, timeframe, selected_action)
     )
+    risk_profile = futures_exit_profile_for(symbol) if market == "FUTURES" else {"risk_class": "SPOT", "name": "PORTFOLIO", "risk_budget_multiplier": 1.0}
+    risk_class = str(risk_profile.get("risk_class") or ("SPOT" if market == "SPOT" else "CORE1"))
+    # A default strategy is a technical contingency path, not a prerequisite
+    # for market intelligence. An autonomous thesis may proceed to the existing
+    # Entry/SL/TP/Safety gates at a stricter quality threshold.
     min_quality = 78.0 if market == "FUTURES" else 70.0
+    autonomous_min_quality = (
+        76.0 if market == "SPOT"
+        else 87.0 if risk_class == "HIGH"
+        else 84.0 if risk_class == "MEDIUM"
+        else 82.0
+    )
     mtf_usable = not bool((mtf_context or {}).get("conflict"))
     support_count = (
         long_support if action_direction(selected_action) == "BULLISH" else short_support
     )
-    # Learned specialists still need live independent support. Defaults need the
-    # full thesis-quality threshold as before.
     thesis_ok = bool(
         thesis.get("direction") in {"BULLISH", "BEARISH"}
         and float(thesis.get("quality") or 0) >= min_quality
     )
+    autonomous_thesis_ok = bool(
+        thesis.get("direction") in {"BULLISH", "BEARISH"}
+        and float(thesis.get("quality") or 0) >= autonomous_min_quality
+        and support_count >= int(thesis.get("required_independent_families") or (4 if market == "FUTURES" else 3))
+        and mtf_usable
+    )
     learned_live_ok = bool(
         specialist_source == "LEARNED"
         and support_count >= learned_support_min
-        and not bool((mtf_context or {}).get("conflict"))
+        and mtf_usable
     )
     strategy_ok = bool(
         float(strategy.get("quality") or 0) >= min_quality
         and strategy.get("regime_match", True)
         and strategy.get("volatility_match", True)
     )
+    default_path_ok = bool(thesis_ok and strategy_ok)
+    candidate_source = "NONE"
+    if learned_live_ok and strategy_ok:
+        candidate_source = "LEARNED+DEFAULT"
+    elif learned_live_ok:
+        candidate_source = "LEARNED+LIVE"
+    elif default_path_ok:
+        candidate_source = "THESIS+DEFAULT"
+    elif autonomous_thesis_ok:
+        candidate_source = "THESIS_AUTONOMOUS"
+
     candidate_ready = bool(
         official
         and selected_action in DIRECTIONAL_ACTIONS
         and not blocked_by_research
-        and (thesis_ok or learned_live_ok)
-        and strategy_ok
+        and candidate_source != "NONE"
         and mtf_usable
         and not (market == "FUTURES" and _u(thesis.get("macro_risk")) == "CRITICAL")
     )
 
-    risk_profile = futures_exit_profile_for(symbol) if market == "FUTURES" else {"risk_class": "SPOT", "name": "PORTFOLIO", "risk_budget_multiplier": 1.0}
+
     return {
         "version": VERSION,
         "market": market,
@@ -745,8 +780,15 @@ def prepare_operational_intelligence(
             "selected_indicators": list(strategy.get("indicators") or []),
             "functional_evidence": list(strategy.get("functional_evidence") or []),
             "independent_families": list(strategy.get("independent_functional_families") or []),
+            "thesis_families": list(thesis.get("independent_support_families") or []),
+            "candidate_source": candidate_source,
+            "default_archetype_id": strategy.get("archetype_id"),
+            "default_specialization_key": strategy.get("specialization_key"),
         },
         "selected_specialist_source": specialist_source,
+        "candidate_source": candidate_source,
+        "autonomous_thesis_min_quality": autonomous_min_quality,
+        "default_strategy_required": False,
         "selected_research_prior": selected_prior,
         "group_prior_advisory": dict(research_map.get(selected_action) or {}) if str((research_map.get(selected_action) or {}).get("state") or "") == "GROUP_PRIOR" else {},
         "research_candidates": research_map,
@@ -781,8 +823,15 @@ def moderator_candidate(operational: Mapping[str, Any], votes: Iterable[Mapping[
         return {"use": False, "action": "PRECAUCION", "reason": "SPECIALIST_CONTRADICTION", "same":same, "opposite":opposite, "caution":caution}
     if same < 1:
         return {"use": False, "action": "ESPERAR", "reason": "NO_INDEPENDENT_SPECIALIST_CONFIRMATION", "same":same, "opposite":opposite, "caution":caution}
-    confidence = min(88.0, max(60.0, (_f((operational.get("thesis") or {}).get("quality")) + _f((operational.get("default_strategy") or {}).get("quality"))) / 2.0))
-    return {"use": True, "action": action, "confidence": round(confidence,2), "reason":"THESIS_AND_SPECIALIST_ALIGNED", "same":same, "opposite":opposite, "caution":caution}
+    thesis_quality = _f((operational.get("thesis") or {}).get("quality"))
+    strategy_quality = _f((operational.get("default_strategy") or {}).get("quality"))
+    source = str(operational.get("candidate_source") or "")
+    if source == "THESIS_AUTONOMOUS" or strategy_quality <= 0:
+        confidence_base = thesis_quality
+    else:
+        confidence_base = 0.60 * thesis_quality + 0.40 * strategy_quality
+    confidence = min(88.0, max(60.0, confidence_base))
+    return {"use": True, "action": action, "confidence": round(confidence,2), "reason":"THESIS_AND_SPECIALIST_ALIGNED", "candidate_source":source, "same":same, "opposite":opposite, "caution":caution}
 
 
 def execution_setup_guard(*, action: Any, levels: Mapping[str, Any] | None, setup_family: Any, market: Any, timeframe: Any) -> Dict[str, Any]:

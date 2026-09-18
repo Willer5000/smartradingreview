@@ -5,6 +5,13 @@ import threading
 import requests
 from flask import Blueprint, jsonify, render_template, Response
 
+try:
+    from supabase_egress_guard import allows as _egress_allows, track_http_response as _track_http_response, mark_restricted as _mark_restricted
+except Exception:
+    _egress_allows = lambda priority='optional': True
+    _track_http_response = lambda response: None
+    _mark_restricted = lambda reason='HTTP_402': None
+
 _bp = Blueprint('research_federation_bridge', __name__)
 _session = requests.Session()
 _CACHE = {'ts': 0.0, 'payload': None, 'error': None, 'watermark': None}
@@ -14,6 +21,7 @@ _CACHE_TTL = max(300, int(os.getenv('RESEARCH_BRIDGE_CACHE_SECONDS','900') or 90
 _BRIDGE_FAILURES = 0
 _BRIDGE_CIRCUIT_UNTIL = 0.0
 _BRIDGE_STATE_LOCK = threading.Lock()
+_BRIDGE_402_COOLDOWN = max(900, int(os.getenv('SUPABASE_402_COOLDOWN_SECONDS','21600') or 21600))
 
 def _cfg():
     url = str(
@@ -36,12 +44,16 @@ def _bridge_circuit_open():
 
 def _bridge_failure(exc):
     global _BRIDGE_FAILURES, _BRIDGE_CIRCUIT_UNTIL
+    status = int(getattr(getattr(exc, 'response', None), 'status_code', 0) or 0)
     with _BRIDGE_STATE_LOCK:
         _BRIDGE_FAILURES += 1
-        if _BRIDGE_FAILURES >= 2:
+        if status == 402:
+            _BRIDGE_CIRCUIT_UNTIL = time.monotonic() + float(_BRIDGE_402_COOLDOWN)
+        elif _BRIDGE_FAILURES >= 2:
             _BRIDGE_CIRCUIT_UNTIL = time.monotonic() + 60.0
     with _CACHE_LOCK:
-        _CACHE['error'] = f'{type(exc).__name__}: {str(exc)[:180]}'
+        prefix = 'SUPABASE_402_FAIR_USE' if status == 402 else type(exc).__name__
+        _CACHE['error'] = f'{prefix}: {str(exc)[:180]}'
 
 
 def _bridge_success():
@@ -54,6 +66,9 @@ def _bridge_success():
 def _get(table, params):
     if _bridge_circuit_open():
         raise RuntimeError('SUPABASE_BRIDGE_CIRCUIT_OPEN')
+    priority = 'important' if table in {'research_governance_snapshot_v1','research_engine_state_v1'} else 'diagnostic'
+    if not _egress_allows(priority):
+        raise RuntimeError('SUPABASE_EGRESS_GUARD_OPEN')
     url,key=_cfg()
     if not url or not key:
         raise RuntimeError('Supabase Research Bridge no configurado')
@@ -62,6 +77,10 @@ def _get(table, params):
         h['Authorization']=f'Bearer {key}'
     try:
         r=_session.get(f'{url}/rest/v1/{table}',params=params,headers=h,timeout=5)
+        _track_http_response(r)
+        if int(r.status_code or 0) == 402:
+            _mark_restricted('HTTP_402_RESEARCH_BRIDGE')
+            raise requests.HTTPError('Supabase HTTP 402 Fair Use restriction', response=r)
         if int(r.status_code or 0) in {500,502,503,504,520,521,522,523,524}:
             raise requests.HTTPError(f'Supabase transient HTTP {r.status_code}',response=r)
         r.raise_for_status()
@@ -358,9 +377,9 @@ def _compact(force=False):
                 states=[]
             coverage=_coverage([{'scope':x.get('scope') or {},'source_engine':x.get('source_engine')} for x in candidates])
             coverage.update({
-                'target_cells':int(snap.get('target_cells') or 92),
+                'target_cells':int(snap.get('target_cells') or 60),
                 'champion_count':int(snap.get('champion_count') or len(candidates)),
-                'pending_count':int(snap.get('pending_count') or max(0,92-len(candidates))),
+                'pending_count':int(snap.get('pending_count') or max(0,60-len(candidates))),
                 'knowledge_core':True,
                 'snapshot_updated_at':snap.get('updated_at'),
             })
@@ -482,7 +501,7 @@ def _degraded_empty_payload(exc):
         'coverage': {'by_timeframe':{},'by_engine':{},'by_market':{},'strategic_timeframes':{},'missing_strategic_timeframes':[],'total_current':0},
         'profitability_evidence': _PROFIT_CACHE.get('payload') or {'state':'UNAVAILABLE','degraded':True},
         'error': f'{type(exc).__name__}: {str(exc)[:180]}',
-        'retry_after_seconds': 60,
+        'retry_after_seconds': _BRIDGE_402_COOLDOWN if '402' in str(exc) else 60,
     }
 
 

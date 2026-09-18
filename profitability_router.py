@@ -20,6 +20,13 @@ from typing import Any, Dict, List
 
 import requests
 
+try:
+    from supabase_egress_guard import allows as _egress_allows, track_http_response as _track_http_response, mark_restricted as _mark_restricted
+except Exception:
+    _egress_allows = lambda priority='optional': True
+    _track_http_response = lambda response: None
+    _mark_restricted = lambda reason='HTTP_402': None
+
 from research_shadow_bridge import runtime_research_features, matches_research_scope
 
 _SESSION = requests.Session()
@@ -63,6 +70,10 @@ def _load_evidence(force: bool = False):
         if (not force) and _CACHE["promotions"] and (now - _CACHE["ts"]) < _TTL:
             return list(_CACHE["promotions"]), list(_CACHE["shadow"])
 
+    if not _egress_allows('diagnostic'):
+        with _LOCK:
+            return list(_CACHE["promotions"]), list(_CACHE["shadow"])
+
     url, headers = _headers()
     pr = _SESSION.get(
         f"{url}/rest/v1/research_promotions_v1",
@@ -75,6 +86,9 @@ def _load_evidence(force: bool = False):
         headers=headers,
         timeout=6,
     )
+    _track_http_response(pr)
+    if int(pr.status_code or 0) == 402:
+        _mark_restricted('HTTP_402_PROFITABILITY_ROUTER')
     pr.raise_for_status()
     promotions = pr.json() if isinstance(pr.json(), list) else []
     promotions = [
@@ -91,6 +105,9 @@ def _load_evidence(force: bool = False):
             headers=headers,
             timeout=6,
         )
+        _track_http_response(sr)
+        if int(sr.status_code or 0) == 402:
+            _mark_restricted('HTTP_402_PROFITABILITY_ROUTER_SHADOW')
         sr.raise_for_status()
         raw = sr.json()
         if isinstance(raw, list):

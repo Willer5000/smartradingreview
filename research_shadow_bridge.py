@@ -5,6 +5,13 @@ import threading
 from typing import Any, Dict, List
 import requests
 
+try:
+    from supabase_egress_guard import allows as _egress_allows, track_http_response as _track_http_response, mark_restricted as _mark_restricted
+except Exception:
+    _egress_allows = lambda priority='optional': True
+    _track_http_response = lambda response: None
+    _mark_restricted = lambda reason='HTTP_402': None
+
 _CACHE = {'ts': 0.0, 'items': []}
 _LOCK = threading.Lock()
 _TTL = max(300, int(os.getenv('RESEARCH_SHADOW_CANDIDATE_TTL_SECONDS','600') or 600))
@@ -34,6 +41,9 @@ def _load_candidates() -> List[Dict[str,Any]]:
     with _LOCK:
         if _CACHE['items'] and now-_CACHE['ts'] < _TTL:
             return list(_CACHE['items'])
+    if not _egress_allows('diagnostic'):
+        with _LOCK:
+            return list(_CACHE['items'])
     url,headers=_headers()
     params={
         'select':'candidate_key,source_engine,experiment,stage,scope,meta,research_version,updated_at',
@@ -42,6 +52,9 @@ def _load_candidates() -> List[Dict[str,Any]]:
         'limit':'120',
     }
     r=_SESSION.get(f'{url}/rest/v1/research_promotions_v1',params=params,headers=headers,timeout=8)
+    _track_http_response(r)
+    if int(r.status_code or 0) == 402:
+        _mark_restricted('HTTP_402_RESEARCH_SHADOW')
     r.raise_for_status()
     raw=r.json()
     items=[]
@@ -172,6 +185,8 @@ def track_research_shadow_signal(signal_id: str, analysis_result: Dict[str,Any],
             })
         url,headers=_headers(); headers=dict(headers); headers['Prefer']='resolution=merge-duplicates,return=minimal'
         r=_SESSION.post(f'{url}/rest/v1/research_shadow_live_v1',params={'on_conflict':'candidate_key,signal_id'},headers=headers,json=rows,timeout=8)
+        if int(r.status_code or 0) == 402:
+            _mark_restricted('HTTP_402_RESEARCH_SHADOW_WRITE')
         r.raise_for_status()
         print(f"🧪 [RESEARCH SHADOW] {len(rows)} candidato(s) reproducibles vinculados · {feat['symbol']} {feat['timeframe']} {feat['direction']}")
         return len(rows)

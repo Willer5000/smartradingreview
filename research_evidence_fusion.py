@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-"""RC8.1 — profitability evidence fusion for 92 market×symbol×TF×action specialist cells.
+"""RC9.7 — profitability evidence fusion for the 60-cell active Research contract.
 
 Rules:
 - causal OOS is a historical prior, never a live trade;
 - Shadow/live is current confirmation, never merged into historical N;
 - a positive OOS candidate may support an already-existing setup;
 - negative OOS or materially diverged Shadow can protect/block;
-- every market×symbol×TF×action cell is tracked separately; Spot buy/sell never inherit Futures-style LONG/SHORT authority.
+- every active Research market×symbol×TF×action cell is tracked separately; group priors never become local symbol authority.
 """
 
 import math
@@ -17,6 +17,13 @@ import time
 from typing import Any, Dict, List, Optional
 
 import requests
+
+try:
+    from supabase_egress_guard import allows as _egress_allows, track_http_response as _track_http_response, mark_restricted as _mark_restricted
+except Exception:
+    _egress_allows = lambda priority='optional': True
+    _track_http_response = lambda response: None
+    _mark_restricted = lambda reason='HTTP_402': None
 
 try:
     from research_strategy_card import build_strategy_card as _build_strategy_card
@@ -30,13 +37,16 @@ _TTL = max(300, int(os.getenv("RESEARCH_EVIDENCE_CACHE_SECONDS", "900") or 900))
 _POSITIVE = {"SHADOW_READY", "SHADOW_READY_FAST"}
 _VISIBLE = _POSITIVE | {"OBSERVE", "VALIDATION_REQUIRED", "REJECTED_OOS", "VALIDATED_SINGLE_ASSET"}
 _EXPERIMENTS = {"CAUSAL_COVERAGE_STRATEGY", "CAUSAL_REGISTRY_RETEST", "CAUSAL_SHADOW_RECYCLE"}
-_COVERAGE_TARGET = 92
-_RESEARCH_VERSION_PREFIX = "RFV1_13_RC8_1_ACTION_EDGE_92CELL"
-_FUTURES_SYMBOLS = ("BTC-USDT","ETH-USDT","SOL-USDT","XRP-USDT","ADA-USDT","LINK-USDT","BNB-USDT")
-_FUTURES_CORE_TFS = ("30M","1H","2H","4H")
-_FUTURES_HIGH_TFS = ("12H","1D")
-_FUTURES_HIGH_TF_SYMBOLS = ("BTC-USDT","ETH-USDT","SOL-USDT")
-_FUTURES_TFS = _FUTURES_CORE_TFS + _FUTURES_HIGH_TFS
+_COVERAGE_TARGET = 60
+_RESEARCH_VERSION_PREFIX = "RFV1_15_RC9_7_CONTINGENCY_COLDSTART_60CELL"
+_FUTURES_RESEARCH_TFS = {
+    "BTC-USDT": ("30M","1H","2H","4H","12H","1D"),
+    "XRP-USDT": ("30M","1H","2H","4H","12H"),
+    "LINK-USDT": ("30M","1H","2H","4H"),
+    "SUI-USDT": ("30M","1H","2H"),
+}
+_FUTURES_SYMBOLS = tuple(_FUTURES_RESEARCH_TFS)
+_FUTURES_TFS = ("30M","1H","2H","4H","12H","1D")
 _SPOT_SYMBOLS = ("BTC-USDT","PAXG-USDT","PAXG-BTC")
 _SPOT_TFS = ("4H","12H","1D","1W")
 
@@ -57,7 +67,7 @@ def _scope_action(scope: Dict[str, Any]) -> str:
 
 
 def _canonical_cell_key(row: Dict[str, Any]) -> Optional[str]:
-    """Return one of the 92 market×symbol×TF×action cells, otherwise None."""
+    """Return one of the 60 active Research action cells, otherwise None."""
     scope = row.get("scope") or {}
     fam = str(scope.get("market_family") or "")
     sym = str(scope.get("symbol") or "").upper().replace("/", "-")
@@ -66,9 +76,7 @@ def _canonical_cell_key(row: Dict[str, Any]) -> Optional[str]:
     if fam == "CRYPTO_FUTURES":
         if action not in {"LONG","SHORT"} or sym not in _FUTURES_SYMBOLS:
             return None
-        if tf in _FUTURES_CORE_TFS:
-            return f"FUTURES|{sym}|{tf}|{action}"
-        if tf in _FUTURES_HIGH_TFS and sym in _FUTURES_HIGH_TF_SYMBOLS:
+        if tf in _FUTURES_RESEARCH_TFS.get(sym, ()):
             return f"FUTURES|{sym}|{tf}|{action}"
         return None
     if fam in {"CRYPTO_SPOT","PAXG_USDT","PAXG_BTC"}:
@@ -146,11 +154,23 @@ def _snapshot_as_promotion(c: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _guarded_get(url: str, *, params: Dict[str, Any], headers: Dict[str, str], timeout: float, priority: str = "diagnostic"):
+    if not _egress_allows(priority):
+        raise RuntimeError("SUPABASE_EGRESS_GUARD_OPEN")
+    r = _SESSION.get(url, params=params, headers=headers, timeout=timeout)
+    _track_http_response(r)
+    if int(r.status_code or 0) == 402:
+        _mark_restricted("HTTP_402_RESEARCH_EVIDENCE")
+        raise requests.HTTPError("Supabase HTTP 402 Fair Use restriction", response=r)
+    r.raise_for_status()
+    return r
+
+
 def _watermark(url: str, h: Dict[str, str]):
-    r=_SESSION.get(
+    r=_guarded_get(
         f"{url}/rest/v1/research_governance_snapshot_v1",
         params={'select':'id,updated_at,champion_count,pending_count','id':'eq.1','limit':'1'},
-        headers=h,timeout=4,
+        headers=h,timeout=4,priority='important',
     )
     if r.ok:
         data=r.json()
@@ -158,8 +178,8 @@ def _watermark(url: str, h: Dict[str, str]):
             row=data[0]
             return ('KNOWLEDGE_CORE',str(row.get('updated_at') or ''),str(row.get('champion_count') or 0),str(row.get('pending_count') or 0))
     def one(table):
-        rr=_SESSION.get(f"{url}/rest/v1/{table}",params={'select':'candidate_key,updated_at','order':'updated_at.desc','limit':'1'},headers=h,timeout=4)
-        rr.raise_for_status(); data=rr.json(); row=data[0] if isinstance(data,list) and data else {}
+        rr=_guarded_get(f"{url}/rest/v1/{table}",params={'select':'candidate_key,updated_at','order':'updated_at.desc','limit':'1'},headers=h,timeout=4,priority='important')
+        data=rr.json(); row=data[0] if isinstance(data,list) and data else {}
         return str(row.get('candidate_key') or ''),str(row.get('updated_at') or '')
     return one('research_promotions_v1')+one('research_shadow_live_metrics_v1')
 
@@ -193,11 +213,10 @@ def _load(force: bool = False):
     # Knowledge Core: one tiny row contains every active Champion + its Shadow.
     # This is the normal path; laboratory tables are only a backward-compatible fallback.
     try:
-        kr=_SESSION.get(
+        kr=_guarded_get(
             f"{url}/rest/v1/research_governance_snapshot_v1",
-            params={'select':'*','id':'eq.1','limit':'1'},headers=h,timeout=5,
+            params={'select':'*','id':'eq.1','limit':'1'},headers=h,timeout=5,priority='important',
         )
-        kr.raise_for_status()
         kd=kr.json()
         if isinstance(kd,list) and kd:
             snap=kd[0]
@@ -211,7 +230,7 @@ def _load(force: bool = False):
         if cached_prom:
             return cached_prom,cached_shadow
 
-    r = _SESSION.get(
+    r = _guarded_get(
         f"{url}/rest/v1/research_promotions_v1",
         params={
             "select": "candidate_key,source_engine,experiment,stage,reason,scope,metrics,meta,research_version,updated_at",
@@ -222,8 +241,8 @@ def _load(force: bool = False):
         },
         headers=h,
         timeout=7,
+        priority='diagnostic',
     )
-    r.raise_for_status()
     raw=r.json()
     promotions = raw if isinstance(raw, list) else []
     promotions = [
@@ -235,7 +254,7 @@ def _load(force: bool = False):
     ]
     shadow: List[Dict[str, Any]] = []
     try:
-        sr = _SESSION.get(
+        sr = _guarded_get(
             f"{url}/rest/v1/research_shadow_live_metrics_v1",
             params={
                 "select": (
@@ -249,8 +268,8 @@ def _load(force: bool = False):
             },
             headers=h,
             timeout=7,
+            priority='diagnostic',
         )
-        sr.raise_for_status()
         raw_shadow = sr.json()
         if isinstance(raw_shadow, list):
             shadow = raw_shadow

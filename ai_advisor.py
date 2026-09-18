@@ -3143,16 +3143,27 @@ Una estrategia propuesta:
 Una estrategia propuesta debe indicar:
 
 1. mercado: SPOT o FUTURES;
-2. tesis;
-3. régimen donde debería funcionar;
-4. setup técnico;
-5. condiciones de entrada observables;
-6. invalidación;
-7. lógica de target;
-8. métrica principal de éxito;
-9. cantidad mínima de muestras;
-10. por qué merece ser probada;
-11. research_filters: filtros ESTRUCTURADOS que Research Federation pueda medir.
+2. scope_key: par Spot exacto o grupo Futures CORE/MEDIUM/HIGH;
+3. temporalidad exacta permitida por contrato;
+4. acción/dirección: COMPRA_SPOT, VENTA_SPOT, LONG o SHORT;
+5. tesis y régimen donde debería funcionar;
+6. setup técnico;
+7. familias de indicadores independientes (evita contar indicadores correlacionados como votos distintos);
+8. condiciones de entrada observables;
+9. invalidación;
+10. lógica de target;
+11. métrica principal de éxito y cantidad mínima de muestras;
+12. regla de falsificación;
+13. por qué merece ser probada;
+14. research_filters: filtros ESTRUCTURADOS que Research Federation pueda medir.
+
+Nunca presentes una hipótesis RESEARCH_ONLY como una oportunidad operativa.
+En LEARNING están prohibidas frases como "considerar una posición", "entrar LONG",
+"abrir SHORT", "comprar ahora" o "vender ahora". Debes decir "validar en Research",
+"hipótesis a comprobar" o equivalente. Separa SIEMPRE Discovery de Validation/OOS.
+Si Validation tiene menos de 10 resultados, dilo explícitamente y no la llames edge validado.
+Una hipótesis agregada de Futures debe validarse después por grupo y símbolo local antes
+de adquirir autoridad; un prior CORE/MEDIUM/HIGH nunca se convierte en Champion local.
 
 research_filters sólo puede usar estas claves cuando exista evidencia para ellas:
 market_family, symbol, timeframe, direction, regime, micro_alignment, orderbook_imbalance_band, recent_buy_share_band,
@@ -3577,6 +3588,21 @@ def _normalize_strategy_proposals(
             "market":
                 market,
 
+            "scope_key":
+                _ai_clean_text(item.get("scope_key") or item.get("risk_group_or_spot_pair"), "", 120).upper(),
+
+            "timeframe":
+                _ai_clean_text(item.get("timeframe"), "", 24).upper(),
+
+            "direction":
+                _ai_clean_text(item.get("direction") or item.get("action"), "", 32).upper(),
+
+            "indicator_families":
+                _ai_clean_list(item.get("indicator_families"), 8),
+
+            "falsification_rule":
+                _ai_clean_text(item.get("falsification_rule"), "", 800),
+
             "thesis":
                 _ai_clean_text(
                     item.get(
@@ -3905,6 +3931,57 @@ def _normalize_ai_advice(
 
     return normalized
 
+def _apply_scientist_learning_guard(advice, context):
+    """Deterministic semantic guard for the Scientist AI.
+
+    The model may *describe* Research evidence but may never convert it into an
+    operational recommendation. This also prevents a strong Discovery split from
+    being quoted without its much smaller Validation split.
+    """
+    out=dict(advice or {})
+    ctx=dict(context or {})
+    edge=dict(ctx.get('edge_discovery_v1') or {})
+    priority=list(edge.get('priority') or [])
+    top=priority[0] if priority and isinstance(priority[0],dict) else {}
+    if top:
+        label=str(top.get('label') or 'hipótesis prioritaria')[:220]
+        disc=dict(top.get('discovery') or {})
+        val=dict(top.get('validation') or {})
+        out['headline']=f"Investigación · {label}"[:300]
+        d_n=int(disc.get('resolved') or 0); v_n=int(val.get('resolved') or 0)
+        d_exp=disc.get('expectancy_r'); v_exp=val.get('expectancy_r')
+        out['advice']=(
+            f"Validar en Research la hipótesis «{label}». "
+            f"Discovery: N={d_n}, Exp.R={d_exp if d_exp is not None else '--'}; "
+            f"Validation: N={v_n}, Exp.R={v_exp if v_exp is not None else '--'}. "
+            "No es una señal operativa ni modifica Safety, Entry, SL, TP o leverage. "
+            "Antes de cualquier autoridad debe separarse por grupo/par, temporalidad, acción y símbolo local, "
+            "y superar Holdout/OOS, costes y Shadow."
+        )[:3000]
+        risks=list(out.get('risks') or [])
+        if v_n < 10:
+            risks.insert(0, f"Validation insuficiente: {v_n}/10 resultados mínimos para una lectura preliminar robusta.")
+        out['risks']=risks[:5]
+        watch=list(out.get('what_to_watch') or [])
+        scope_note="Separar la evidencia por CORE/MEDIUM/HIGH y luego por símbolo local antes de promover."
+        if scope_note not in watch:
+            watch.insert(0,scope_note)
+        out['what_to_watch']=watch[:5]
+    else:
+        headline=str(out.get('headline') or 'Investigación')
+        for old in ('Oportunidad de compra','Oportunidad de venta','Comprar','Vender'):
+            headline=headline.replace(old,'Hipótesis Research')
+        out['headline']=('Investigación · '+headline)[:300] if not headline.startswith('Investigación') else headline[:300]
+        out['advice']=(
+            "Formular y validar la hipótesis en Research/Holdout/OOS. "
+            "Este resultado científico no constituye una señal operativa."
+        )
+    out['verdict']='INFO'
+    out['authority']='ADVISORY_ONLY'
+    out['affect_decision']=False; out['affect_safety']=False; out['affect_levels']=False
+    out['affect_leverage']=False; out['affect_weights']=False
+    return out
+
 def _call_groq(
     context,
     question=None,
@@ -4007,7 +4084,8 @@ why, risks, what_to_watch y learning_hypotheses
 deben ser listas de textos.
 
 strategy_proposals debe ser [] salvo que el contexto
-corresponda específicamente a LEARNING.
+corresponda específicamente a LEARNING. En LEARNING ninguna salida puede
+recomendar abrir/cerrar una posición; sólo hipótesis Research.
 
 Cuando incluyas strategy_proposals, cada propuesta debe contener además
 research_filters con únicamente dimensiones medibles del contexto:
@@ -4205,6 +4283,8 @@ en el contexto recibido.
             generated
         )
     )
+    if str(context_type or '').upper() == 'LEARNING':
+        advice = _apply_scientist_learning_guard(advice, context)
 
 
     return (
@@ -4433,6 +4513,11 @@ Usa exactamente esta estructura:
     {
       "name": "",
       "market": "FUTURES",
+      "scope_key": "CORE",
+      "timeframe": "30M",
+      "direction": "SHORT",
+      "indicator_families": [],
+      "falsification_rule": "",
       "thesis": "",
       "setup": "",
       "entry_conditions": [],
@@ -4621,6 +4706,7 @@ y preservación de capital, no Win Rate aislado.
             generated
         )
     )
+    advice = _apply_scientist_learning_guard(advice, context)
 
     usage_raw = (
         raw.get(

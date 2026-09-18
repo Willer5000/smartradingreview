@@ -15,7 +15,7 @@ from collections import Counter, defaultdict
 from futures_universe import all_symbols as _fut_all_symbols, risk_class_for as _fut_risk_class, exit_profile_for as _fut_exit_profile
 from typing import Any, Dict, List, Mapping
 
-VERSION = "COMMIT9_4_DEFAULT_STRATEGY_BANK_V1"
+VERSION = "RC9_7_SPECIALIZED_CONTINGENCY_BANK_V1"
 
 INDICATOR_UNIVERSE = {
     "sma", "ema_stack", "adx_dmi", "supertrend", "ichimoku", "psar",
@@ -30,9 +30,11 @@ INDICATOR_UNIVERSE = {
     "market_session",
 }
 
-# Sixteen compact families remain the stable default bank.  Commit 9.4 does
-# not create hundreds of symbol-specific rules.  The same indicator may be
-# useful in several playbooks but its actual value must pass a functional rule.
+# RC9.7: these rows are *archetypes*, not the final contingency inventory.
+# They are deterministic technical playbooks.  A specialization layer below
+# projects them over every valid production cell (market × pair/risk group ×
+# timeframe × action) without optimizing parameters from outcomes.  This gives
+# broad contingency coverage without p-hacking or hundreds of hand-tuned rules.
 STRATEGIES: List[Dict[str, Any]] = [
     {"id":"SPOT_FLOOR_LIQUIDITY_ACCUMULATION","actions":["COMPRA_SPOT"],"family":"SWEEP_REVERSAL","indicators":["rsi","rsi_maverick","regular_divergence","liquidity_sweep","stop_hunt","order_block","volume_ratio","mfi","whale_proxy","atr","support_resistance"]},
     {"id":"SPOT_VALUE_RECLAIM","actions":["COMPRA_SPOT"],"family":"MEAN_REVERSION","indicators":["vwap","bollinger","rsi","stochastic","williams_r","mfi","obv","volume_profile_poc","hvn_lvn","candlestick_patterns","support_resistance"]},
@@ -42,6 +44,14 @@ STRATEGIES: List[Dict[str, Any]] = [
     {"id":"SPOT_OVEREXTENSION_EXIT","actions":["VENTA_SPOT"],"family":"MEAN_REVERSION","indicators":["vwap","bollinger","cci","stochastic","williams_r","mfi","volume_profile_poc","hvn_lvn","candlestick_patterns","support_resistance","sentiment"]},
     {"id":"SPOT_TREND_BREAK_EXIT","actions":["VENTA_SPOT"],"family":"TREND_BREAK","indicators":["ema_stack","adx_dmi","supertrend","ichimoku","psar","macd","hidden_divergence","fvg","volume_ratio","obv","macro_context","correlation_rotation"]},
     {"id":"SPOT_BTC_PAXG_ROTATION","actions":["COMPRA_SPOT","VENTA_SPOT"],"family":"ROTATION","indicators":["correlation_rotation","macro_context","sentiment","sma","ema_stack","adx_dmi","rsi","vwap","volume_profile_poc","hvn_lvn","market_session"]},
+    {"id":"SPOT_MOMENTUM_EXHAUSTION_EXIT","actions":["VENTA_SPOT"],"family":"MOMENTUM_EXIT","indicators":["rsi","rsi_maverick","macd","regular_divergence","volume_ratio","force_index","mfi","obv","bollinger","atr","support_resistance","candlestick_patterns","sentiment"]},
+    # Whale-specific archetypes requested by the desk.  The event is sourced
+    # only from 12H/1D/1W anomalous-volume context and remains valid for a
+    # maximum of seven source bars.  A lower-TF reaction is still required.
+    {"id":"SPOT_WHALE_HTF_REACTION_ACCUMULATION","actions":["COMPRA_SPOT"],"family":"WHALE_REACTION","indicators":["whale_proxy","volume_ratio","mfi","obv","rsi_maverick","regular_divergence","order_block","fvg","support_resistance","vwap","atr","candlestick_patterns"],"whale_mode":"HTF_DIRECT"},
+    {"id":"SPOT_WHALE_4H_REACTION_ACCUMULATION","actions":["COMPRA_SPOT"],"family":"WHALE_REACTION","indicators":["whale_proxy","volume_ratio","mfi","obv","rsi_maverick","regular_divergence","order_block","fvg","liquidity_sweep","support_resistance","vwap","atr","candlestick_patterns"],"whale_mode":"HTF_TO_4H"},
+    {"id":"FUT_WHALE_HTF_REACTION_LONG","actions":["LONG"],"family":"WHALE_REACTION","indicators":["whale_proxy","volume_ratio","mfi","obv","rsi_maverick","regular_divergence","order_block","fvg","liquidity_sweep","stop_hunt","liquidation_map","atr","support_resistance"],"whale_mode":"HTF_DIRECT"},
+    {"id":"FUT_WHALE_4H_REACTION_LONG","actions":["LONG"],"family":"WHALE_REACTION","indicators":["whale_proxy","volume_ratio","mfi","obv","rsi_maverick","regular_divergence","order_block","fvg","liquidity_sweep","stop_hunt","liquidation_map","atr","support_resistance"],"whale_mode":"HTF_TO_4H"},
     {"id":"FUT_LONG_SWEEP_MSS","actions":["LONG"],"family":"SWEEP_REVERSAL","indicators":["liquidity_sweep","stop_hunt","order_block","fvg","regular_divergence","hidden_divergence","rsi_maverick","volume_ratio","whale_proxy","iceberg","liquidation_map","atr","support_resistance"]},
     {"id":"FUT_LONG_BREAKOUT_RETEST","actions":["LONG"],"family":"BREAKOUT_RETEST","indicators":["squeeze","ftmaverick","bollinger","macd","adx_dmi","volume_ratio","force_index","obv","hvn_lvn","volume_profile_poc","fibonacci","candlestick_patterns","liquidation_map","market_session"]},
     {"id":"FUT_LONG_TREND_PULLBACK","actions":["LONG"],"family":"TREND_PULLBACK","indicators":["ema_stack","adx_dmi","supertrend","ichimoku","psar","rsi","hidden_divergence","atr","order_block","fvg","volume_ratio","macro_context","whale_proxy"]},
@@ -73,12 +83,15 @@ _FAMILY_TIMEFRAMES = {
         "BREAKOUT_RETEST": ["4H", "12H", "1D"],
         "TREND_BREAK": ["4H", "12H", "1D", "1W"],
         "ROTATION": ["4H", "12H", "1D", "1W"],
+        "MOMENTUM_EXIT": ["4H", "12H", "1D", "1W"],
+        "WHALE_REACTION": ["4H", "12H", "1D"],
     },
     "FUTURES": {
         "SWEEP_REVERSAL": ["30M", "1H", "2H", "4H"],
         "MEAN_REVERSION": ["30M", "1H", "2H"],
         "TREND_PULLBACK": ["1H", "2H", "4H", "12H", "1D"],
         "BREAKOUT_RETEST": ["30M", "1H", "2H", "4H", "12H"],
+        "WHALE_REACTION": ["4H", "12H", "1D"],
     },
 }
 
@@ -89,6 +102,8 @@ _FAMILY_REGIMES = {
     "BREAKOUT_RETEST": ["BALANCE", "RANGE", "RANGING", "TRANSITION", "TREND_UP", "TREND_DOWN", "VOLATILITY_SHOCK"],
     "TREND_BREAK": ["TREND_UP", "TREND_DOWN", "TRANSITION", "VOLATILITY_SHOCK"],
     "ROTATION": ["BALANCE", "TREND_UP", "TREND_DOWN", "TRANSITION", "VOLATILITY_SHOCK"],
+    "MOMENTUM_EXIT": ["TREND_UP", "TREND_DOWN", "TRANSITION", "VOLATILITY_SHOCK", "BALANCE"],
+    "WHALE_REACTION": ["BALANCE", "TRANSITION", "TREND_UP", "TREND_DOWN"],
 }
 _FAMILY_VOLATILITY = {
     "SWEEP_REVERSAL": ["LOW", "NORMAL", "EXPANSION", "COMPRESSION"],
@@ -97,6 +112,8 @@ _FAMILY_VOLATILITY = {
     "BREAKOUT_RETEST": ["COMPRESSION", "NORMAL", "EXPANSION", "SHOCK"],
     "TREND_BREAK": ["NORMAL", "EXPANSION", "SHOCK"],
     "ROTATION": ["LOW", "NORMAL", "EXPANSION", "SHOCK"],
+    "MOMENTUM_EXIT": ["LOW", "NORMAL", "EXPANSION", "SHOCK"],
+    "WHALE_REACTION": ["LOW", "NORMAL", "EXPANSION", "COMPRESSION"],
 }
 
 # Correlated tools share a cap.  This is the anti-overfitting contract: e.g.
@@ -456,6 +473,85 @@ def _rc9_enrich_strategy(row: Dict[str, Any]) -> None:
 
 for _row in STRATEGIES: _rc9_enrich_strategy(_row)
 
+# Immutable archetypes are retained for audit/backtest attribution.  Runtime
+# selection uses the specialized instances below.
+ARCHETYPES: List[Dict[str, Any]] = [dict(row) for row in STRATEGIES]
+
+def _strategy_scope_group(market: str, symbol: str) -> str:
+    if market == "SPOT":
+        return symbol
+    rc = _fut_risk_class(symbol)
+    return "CORE" if rc in {"CORE1", "CORE2"} else rc
+
+def _specialization_entry_policy(market: str, symbol: str, timeframe: str) -> str:
+    if market == "SPOT":
+        return "FIRST_CONFIRMED_REACTION_AT_NEAREST_SMARTMONEY_ZONE"
+    rc = _fut_risk_class(symbol)
+    if rc == "HIGH":
+        return "PRECISE_SWEEP_MSS_DISPLACEMENT_POI_VERY_FAST"
+    if rc == "MEDIUM":
+        return "PRECISE_SWEEP_MSS_DISPLACEMENT_POI_FAST"
+    return "PRECISE_SWEEP_MSS_DISPLACEMENT_POI"
+
+def _archetype_allowed_in_cell(row: Mapping[str, Any], market: str, symbol: str, timeframe: str, action: str) -> bool:
+    if action not in row.get("actions", []):
+        return False
+    rid = str(row.get("id") or "")
+    # Rotation is meaningful only for the PAXG portfolio legs.
+    if row.get("family") == "ROTATION" and market == "SPOT" and "PAXG" not in symbol:
+        return False
+    if row.get("family") == "WHALE_REACTION":
+        mode = str(row.get("whale_mode") or "")
+        if mode == "HTF_TO_4H" and timeframe != "4H":
+            return False
+        if mode == "HTF_DIRECT" and timeframe not in {"12H", "1D"}:
+            return False
+        if market == "FUTURES" and timeframe not in set(_fut_allowed_timeframes_safe(symbol)):
+            return False
+    return True
+
+def _fut_allowed_timeframes_safe(symbol: str) -> List[str]:
+    try:
+        from futures_universe import allowed_timeframes
+        return [_u(x) for x in allowed_timeframes(symbol)]
+    except Exception:
+        return ["30M", "1H", "2H", "4H", "12H", "1D"]
+
+def _specialize_bank() -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    try:
+        from operational_intelligence import official_universe_cells
+        cells = list(official_universe_cells())
+    except Exception:
+        cells = []
+    for market, symbol, timeframe, action in cells:
+        for archetype in ARCHETYPES:
+            if not _archetype_allowed_in_cell(archetype, market, symbol, timeframe, action):
+                continue
+            row = dict(archetype)
+            scope_group = _strategy_scope_group(market, symbol)
+            row.update({
+                "archetype_id": archetype.get("id"),
+                "id": f"{archetype.get('id')}__{market}__{scope_group}__{timeframe}__{action}",
+                "markets": [market], "symbols": [symbol], "timeframes": [timeframe], "actions": [action],
+                "scope_group": scope_group,
+                "specialization_key": f"{market}|{scope_group}|{timeframe}|{action}|{archetype.get('id')}",
+                "cell_key": f"{market}|{symbol}|{timeframe}|{action}",
+                "entry_policy": _specialization_entry_policy(market, symbol, timeframe),
+                "exit_policy": (_fut_exit_profile(symbol).get("name") if market == "FUTURES" else "PORTFOLIO_SNOWBALL"),
+                "parameter_source": "STATIC_CONTEXT_PROFILE_NOT_OUTCOME_TUNED",
+                "contingency_status": "ACTIVE_UNTIL_NEGATIVE_EVIDENCE",
+            })
+            if market == "SPOT":
+                row["portfolio_objective"] = {
+                    "BTC-USDT": "ACCUMULATE_SATOSHIS_AND_USDT",
+                    "PAXG-USDT": "ACCUMULATE_GOLD_AND_USDT",
+                    "PAXG-BTC": "ROTATE_BTC_GOLD_TO_GROW_RELATIVE_UNITS",
+                }.get(symbol, "PORTFOLIO_SNOWBALL")
+            rows.append(row)
+    return rows
+
+STRATEGIES = _specialize_bank()
 
 def _tf(value: Any) -> str: return _u(value)
 
@@ -466,11 +562,19 @@ def coverage_matrix() -> Dict[str, Any]:
         cells=official_universe_cells()
     except Exception:
         cells=[]
-    missing=[]
+    missing=[]; per_cell={}; minimum=999
     for market,symbol,timeframe,action in cells:
         rows=[r for r in STRATEGIES if market in r.get("markets",[]) and symbol in r.get("symbols",[]) and timeframe in r.get("timeframes",[]) and action in r.get("actions",[])]
-        if not rows: missing.append({"market":market,"symbol":symbol,"timeframe":timeframe,"action":action})
-    return {"ok":len(cells)==150 and not missing,"checked":len(cells),"missing":missing}
+        n=len(rows); per_cell[f"{market}|{symbol}|{timeframe}|{action}"]=n; minimum=min(minimum,n)
+        if n < 4:
+            missing.append({"market":market,"symbol":symbol,"timeframe":timeframe,"action":action,"strategies":n})
+    return {
+        "ok":len(cells)==150 and not missing and len(STRATEGIES)>=600,
+        "checked":len(cells), "specialized_strategies":len(STRATEGIES),
+        "minimum_strategies_per_cell":0 if minimum==999 else minimum,
+        "missing":missing, "per_cell":per_cell,
+        "policy":"MIN_4_CONTEXT_SPECIALIZED_PLAYBOOKS_PER_VALID_CELL_NO_HARD_MAX",
+    }
 
 
 def _choose_family(action: str, regime: str, vol_state: str, groups: Mapping[str, Any], symbol: str) -> str:
@@ -486,12 +590,13 @@ def _choose_family(action: str, regime: str, vol_state: str, groups: Mapping[str
     # never an automatic trade. Current-TF momentum/structure still has to pass.
     whale_reaction=bool(whale.get("active"))
     if action in {"COMPRA_SPOT","VENTA_SPOT"} and rotation and "PAXG" in symbol: return "ROTATION"
-    if whale_reaction and direction>0 and regime in {"BALANCE","TRANSITION","TREND_UP"}: return "SWEEP_REVERSAL" if has_reversal or extreme else "TREND_PULLBACK"
+    if whale_reaction and direction>0 and regime in {"BALANCE","TRANSITION","TREND_UP"}: return "WHALE_REACTION"
     if vol_state in {"SQUEEZE","COMPRESSION"}: return "BREAKOUT_RETEST"
     if regime in {"RANGING","BALANCE","RANGE"} and (has_reversal or extreme): return "SWEEP_REVERSAL"
     if regime in {"RANGING","BALANCE","RANGE"}: return "MEAN_REVERSION"
     if vol_state in {"EXPANSION","SHOCK","HIGH_EXPANSION","VOLATILITY_SHOCK"}: return "BREAKOUT_RETEST"
     if action=="VENTA_SPOT" and regime in {"TREND_DOWN","TRANSITION"}: return "TREND_BREAK"
+    if action=="VENTA_SPOT" and (extreme or has_reversal): return "MOMENTUM_EXIT"
     return "TREND_PULLBACK"
 
 
@@ -522,46 +627,77 @@ def select_strategy(action: str, regime: str, vol_state: str, groups: Dict[str, 
         elif risk_class == "HIGH" and family == "TREND_PULLBACK" and timeframe == "30M":
             family = "BREAKOUT_RETEST"
     preferred=[r for r in candidates if _u(r.get("family"))==family]
-    chosen=preferred[0] if preferred else candidates[0]
+    ranked_pool = preferred + [r for r in candidates if r not in preferred]
     side=1 if action in {"LONG","COMPRA_SPOT"} else -1
-    effects=[_indicator_effect(name,groups,side=side,family=_u(chosen.get("family")),market=market,timeframe=timeframe) for name in chosen.get("indicators",[]) if name in INDICATOR_RULES]
-    available=[e for e in effects if e.get("available")]
-    # Cap correlated evidence: at most the strongest positive and strongest
-    # negative observation per family matter to quality.
-    per_family=defaultdict(list)
-    for e in available: per_family[e["family"]].append(e)
-    family_effects={}
-    for fam,rows in per_family.items():
-        strongest=max(rows,key=lambda r:abs(float(r.get("effect") or 0)))
-        family_effects[fam]=strongest
-    positive=[e for e in family_effects.values() if float(e.get("effect") or 0)>=.25]
-    negative=[e for e in family_effects.values() if float(e.get("effect") or 0)<=-.25]
-    regime_match=regime in chosen.get("regimes",[]) or regime in {"","UNKNOWN"}
-    vol_match=vol_state in chosen.get("volatility",[]) or vol_state in {"","UNKNOWN"}
-    # Base + context + independent family alignment. Missing values never score.
-    score=48.0 + (8.0 if regime_match else -12.0) + (7.0 if vol_match else -10.0)
-    score += sum(max(-1.0,min(1.0,float(e["effect"]))) * 7.0 for e in family_effects.values())
-    # Futures needs at least four independent positive families; Spot three.
-    minimum=(5 if market=="FUTURES" and risk_class=="HIGH" else 4 if market=="FUTURES" else 3)
-    if len(positive)<minimum: score-=8.0*(minimum-len(positive))
-    score=max(0.0,min(100.0,score))
-    confirmations=[e["detail"] for e in positive if e.get("detail")][:6]
-    conflicts=[e["detail"] for e in negative if e.get("detail")][:4]
-    return {
-        "id":chosen["id"],"family":chosen["family"],"quality":round(score,2),
-        "confirmations":confirmations,"conflicts":conflicts,"indicators":list(chosen.get("indicators") or []),
-        "functional_evidence":available,"independent_functional_families":sorted(family_effects),
-        "positive_functional_families":len(positive),"negative_functional_families":len(negative),
-        "market":market,"symbol":symbol,"timeframe":timeframe,"regime_match":regime_match,"volatility_match":vol_match,
-        "risk_class":risk_class,
-        "exit_profile":(_fut_exit_profile(symbol).get("name") if market=="FUTURES" else "PORTFOLIO"),
-        "required_independent_families":minimum,
-    }
+
+    def evaluate_row(chosen: Dict[str, Any]) -> Dict[str, Any]:
+        effects=[_indicator_effect(name,groups,side=side,family=_u(chosen.get("family")),market=market,timeframe=timeframe) for name in chosen.get("indicators",[]) if name in INDICATOR_RULES]
+        available=[e for e in effects if e.get("available")]
+        per_family=defaultdict(list)
+        for e in available:
+            per_family[e["family"]].append(e)
+        family_effects={}
+        for fam,rows in per_family.items():
+            strongest=max(rows,key=lambda r:abs(float(r.get("effect") or 0)))
+            family_effects[fam]=strongest
+        positive=[e for e in family_effects.values() if float(e.get("effect") or 0)>=.25]
+        negative=[e for e in family_effects.values() if float(e.get("effect") or 0)<=-.25]
+        regime_match=regime in chosen.get("regimes",[]) or regime in {"","UNKNOWN"}
+        vol_match=vol_state in chosen.get("volatility",[]) or vol_state in {"","UNKNOWN"}
+        score=48.0 + (8.0 if regime_match else -12.0) + (7.0 if vol_match else -10.0)
+        score += sum(max(-1.0,min(1.0,float(e["effect"]))) * 7.0 for e in family_effects.values())
+        minimum=(5 if market=="FUTURES" and risk_class=="HIGH" else 4 if market=="FUTURES" else 3)
+        if len(positive)<minimum:
+            score-=8.0*(minimum-len(positive))
+        # Whale playbooks require actual higher-TF anomalous-volume context; the
+        # archetype cannot win merely because other indicators are aligned.
+        if _u(chosen.get("family")) == "WHALE_REACTION":
+            whale=dict((groups.get("multi_timeframe") or {}).get("whale_context") or {})
+            if not whale.get("active"):
+                score-=35.0
+            elif side < 0:
+                score-=8.0  # anomalous-volume context is intentionally LONG-biased
+        score=max(0.0,min(100.0,score))
+        return {
+            "id":chosen["id"], "archetype_id":chosen.get("archetype_id") or chosen.get("id"),
+            "family":chosen["family"], "quality":round(score,2),
+            "confirmations":[e["detail"] for e in positive if e.get("detail")][:6],
+            "conflicts":[e["detail"] for e in negative if e.get("detail")][:4],
+            "indicators":list(chosen.get("indicators") or []), "functional_evidence":available,
+            "independent_functional_families":sorted(family_effects),
+            "positive_functional_families":len(positive), "negative_functional_families":len(negative),
+            "market":market,"symbol":symbol,"timeframe":timeframe,"regime_match":regime_match,"volatility_match":vol_match,
+            "risk_class":risk_class, "scope_group":chosen.get("scope_group"),
+            "specialization_key":chosen.get("specialization_key"), "cell_key":chosen.get("cell_key"),
+            "entry_policy":chosen.get("entry_policy"), "exit_policy":chosen.get("exit_policy"),
+            "portfolio_objective":chosen.get("portfolio_objective"),
+            "contingency_status":chosen.get("contingency_status"),
+            "exit_profile":(_fut_exit_profile(symbol).get("name") if market=="FUTURES" else "PORTFOLIO"),
+            "required_independent_families":minimum,
+        }
+
+    evaluated=[evaluate_row(row) for row in ranked_pool]
+    evaluated.sort(key=lambda row:(float(row.get("quality") or 0), int(row.get("positive_functional_families") or 0)), reverse=True)
+    preferred_evaluated=[row for row in evaluated if _u(row.get("family"))==family]
+    # Context chooses the playbook family first; quality chooses among playbooks
+    # inside that family. Only a clearly weak context-family candidate (<55)
+    # may fall back to the globally best alternative.
+    if preferred_evaluated and float(preferred_evaluated[0].get("quality") or 0) >= 55.0:
+        chosen=preferred_evaluated[0]
+    else:
+        chosen=evaluated[0]
+    chosen["alternatives"]=[
+        {k:r.get(k) for k in ("id","archetype_id","family","quality","specialization_key")}
+        for r in evaluated[1:5]
+    ]
+    chosen["eligible_strategy_count"] = len(candidates)
+    return chosen
+
 
 
 _BANK_VALIDATION=functional_coverage_audit()
 if not _BANK_VALIDATION["ok"]:
-    raise RuntimeError(f"Commit 9.6 strategy bank invalid: {_BANK_VALIDATION}")
+    raise RuntimeError(f"RC9.7 strategy bank invalid: {_BANK_VALIDATION}")
 _RC9_MATRIX=coverage_matrix()
 if not _RC9_MATRIX["ok"]:
-    raise RuntimeError(f"Commit 9.6 default coverage incomplete: {_RC9_MATRIX}")
+    raise RuntimeError(f"RC9.7 contingency coverage incomplete: {_RC9_MATRIX}")

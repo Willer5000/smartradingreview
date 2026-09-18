@@ -24,6 +24,27 @@ import threading
 import uuid
 import requests
 from datetime import datetime, timedelta
+
+try:
+    from local_resilience import (
+        enqueue_rest as _local_enqueue_rest, pending_outbox as _local_pending_outbox,
+        mark_outbox_done as _local_mark_outbox_done, mark_outbox_error as _local_mark_outbox_error,
+        status as _local_resilience_status,
+    )
+except Exception:
+    _local_enqueue_rest = _local_pending_outbox = None
+    _local_mark_outbox_done = _local_mark_outbox_error = None
+    _local_resilience_status = None
+
+try:
+    from supabase_egress_guard import (
+        track_payload as _global_track_payload, status as _global_egress_status,
+        allows as _global_egress_allows, restricted as _global_provider_restricted,
+        mark_restricted as _global_mark_restricted,
+    )
+except Exception:
+    _global_track_payload = _global_egress_status = _global_egress_allows = None
+    _global_provider_restricted = _global_mark_restricted = None
 from typing import Optional, Dict, List, Any
 
 # ============================================================================
@@ -74,13 +95,13 @@ else:
 # keep database traffic far below that ceiling. These guards are deliberately
 # conservative and can be overridden in Render without another deploy.
 FREE_PLAN_LOCKDOWN = str(os.environ.get('FREE_PLAN_LOCKDOWN', '1')).strip().lower() not in {'0','false','no','off'}
-MAIN_SUPABASE_DAILY_BUDGET_MB = max(12.0, float(os.environ.get('MAIN_SUPABASE_DAILY_BUDGET_MB', '30') or 30))
+MAIN_SUPABASE_DAILY_BUDGET_MB = max(6.0, float(os.environ.get('MAIN_SUPABASE_DAILY_BUDGET_MB', '12') or 12))
 # RC9.2: FREE_PLAN_LOCKDOWN is a hard cap as well as a default. This protects
 # old Render env values (for example 60 MB/day) from silently restoring the
 # previous egress envelope after this deploy. Research has its own much smaller
 # cap; together they leave large headroom below Supabase Free monthly egress.
 if FREE_PLAN_LOCKDOWN:
-    MAIN_SUPABASE_DAILY_BUDGET_MB = min(MAIN_SUPABASE_DAILY_BUDGET_MB, 30.0)
+    MAIN_SUPABASE_DAILY_BUDGET_MB = min(MAIN_SUPABASE_DAILY_BUDGET_MB, 12.0)
 MAIN_SUPABASE_DIAGNOSTIC_GUARD = max(0.10, min(0.95, float(os.environ.get('MAIN_SUPABASE_DIAGNOSTIC_GUARD', '0.70') or 0.70)))
 MAIN_SUPABASE_OPTIONAL_GUARD = max(MAIN_SUPABASE_DIAGNOSTIC_GUARD, min(0.98, float(os.environ.get('MAIN_SUPABASE_OPTIONAL_GUARD', '0.85') or 0.85)))
 MAIN_SUPABASE_IMPORTANT_GUARD = max(MAIN_SUPABASE_OPTIONAL_GUARD, min(0.995, float(os.environ.get('MAIN_SUPABASE_IMPORTANT_GUARD', '0.95') or 0.95)))
@@ -104,6 +125,15 @@ print("=" * 60)
 # ============================================================================
 # LÍMITES DE ROTACIÓN FIFO (para no colapsar Supabase gratuito - 500MB)
 # ============================================================================
+# RC9.7 — when Supabase returns 402/Fair-Use restriction, trading remains
+# functional. Only data-plane writes are queued locally; coordination/locks are
+# never faked because that could create duplicate scheduled jobs.
+LOCAL_OUTBOX_TABLES = {
+    'signals', 'signal_results', 'signal_indicators', 'missed_opportunities',
+    'runtime_snapshots_v1', 'macro_context_events_v1', 'saved_signals',
+}
+SUPABASE_RESTRICTED_COOLDOWN_SECONDS = max(900, int(os.environ.get('SUPABASE_402_COOLDOWN_SECONDS', '21600') or 21600))
+
 LIMITS = {
     'signals': 20000,                    # Máximo de señales históricas
     'signal_indicators': 40000,          # RC8.2: sólo relación señal↔estrategia; sin snapshot JSON duplicado
@@ -118,6 +148,16 @@ LIMITS = {
 # ============================================================================
 # CLASE PRINCIPAL: SUPABASE CLIENT
 # ============================================================================
+
+class _LocalQueuedResponse:
+    status_code = 202
+    content = b''
+    text = ''
+    headers = {'x-smartradingreview-storage': 'local-outbox'}
+
+    def raise_for_status(self):
+        return None
+
 
 class SupabaseClient:
     """
@@ -139,6 +179,10 @@ class SupabaseClient:
         self._transient_lock = threading.Lock()
         self._transient_failures = 0
         self._read_circuit_until = 0.0
+        self._provider_restricted_until = 0.0
+        self._provider_restricted_reason = ''
+        self._outbox_flush_lock = threading.Lock()
+        self._last_outbox_flush = 0.0
         self._preferences_cache = {}
         self._recommendations_cache = {}
         self._review_logs_cache = {}
@@ -182,6 +226,11 @@ class SupabaseClient:
                     f"presupuesto local Main {MAIN_SUPABASE_DAILY_BUDGET_MB:.0f} MB/día · "
                     "diagnóstico y lecturas opcionales se degradan antes que trading crítico"
                 )
+            if _local_pending_outbox is not None:
+                threading.Thread(
+                    target=lambda: (time.sleep(3.0), self.flush_local_outbox(limit=40)),
+                    daemon=True, name='supabase-local-outbox-replay',
+                ).start()
         except ImportError:
             print("❌ Librería 'supabase' no instalada. Ejecutar: pip install supabase")
         except Exception as e:
@@ -268,6 +317,88 @@ class SupabaseClient:
         with self._transient_lock:
             return time.monotonic() < self._read_circuit_until
 
+    def provider_restricted(self) -> bool:
+        local = False
+        with self._transient_lock:
+            local = time.monotonic() < self._provider_restricted_until
+        try:
+            return bool(local or (_global_provider_restricted and _global_provider_restricted()))
+        except Exception:
+            return bool(local)
+
+    def _mark_provider_restricted(self, reason: str = 'HTTP_402') -> None:
+        with self._transient_lock:
+            self._provider_restricted_until = max(
+                self._provider_restricted_until,
+                time.monotonic() + float(SUPABASE_RESTRICTED_COOLDOWN_SECONDS),
+            )
+            self._provider_restricted_reason = str(reason or 'HTTP_402')[:160]
+            self._read_circuit_until = max(self._read_circuit_until, self._provider_restricted_until)
+        try:
+            if _global_mark_restricted:
+                _global_mark_restricted(reason)
+        except Exception:
+            pass
+        logger.error(
+            'Supabase restringido (%s). Trading sigue en modo local/contingencia; '
+            'Research remoto queda degradado durante %ss.',
+            self._provider_restricted_reason, SUPABASE_RESTRICTED_COOLDOWN_SECONDS,
+        )
+
+    def resilience_status(self) -> Dict[str, Any]:
+        local = {}
+        try:
+            local = _local_resilience_status() if _local_resilience_status else {}
+        except Exception:
+            local = {}
+        return {
+            'provider_restricted': self.provider_restricted(),
+            'provider_reason': self._provider_restricted_reason,
+            'remote_enabled': bool(self.enabled),
+            'local': local,
+        }
+
+    def _queue_local_write(self, method: str, table: str, payload=None, params=None, prefer='return=minimal') -> bool:
+        if str(table) not in LOCAL_OUTBOX_TABLES or _local_enqueue_rest is None:
+            return False
+        try:
+            _local_enqueue_rest(method, table, payload=payload, params=params or {}, prefer=prefer)
+            return True
+        except Exception:
+            return False
+
+    def flush_local_outbox(self, limit: int = 40) -> Dict[str, int]:
+        if not self.enabled or self.provider_restricted() or _local_pending_outbox is None:
+            return {'attempted': 0, 'flushed': 0}
+        if not self._outbox_flush_lock.acquire(blocking=False):
+            return {'attempted': 0, 'flushed': 0}
+        attempted = flushed = 0
+        try:
+            for row in _local_pending_outbox(limit=max(1, min(100, int(limit or 40)))):
+                attempted += 1
+                try:
+                    # Direct request: do not recursively queue a failing replay.
+                    url=f"{self.url.rstrip('/')}/rest/v1/{row['table']}"
+                    r=self._rest_session.request(
+                        str(row['method']).upper(), url, params=row.get('params') or {},
+                        json=row.get('payload'), headers=self._rest_headers(row.get('prefer') or 'return=minimal'),
+                        timeout=(1.5, 3.0),
+                    )
+                    if int(r.status_code or 0) == 402:
+                        self._mark_provider_restricted('HTTP_402_OUTBOX_REPLAY')
+                        break
+                    r.raise_for_status()
+                    if _local_mark_outbox_done:
+                        _local_mark_outbox_done(row['op_key'])
+                    flushed += 1
+                except Exception as exc:
+                    if _local_mark_outbox_error:
+                        _local_mark_outbox_error(row['op_key'], exc)
+                    break
+        finally:
+            self._outbox_flush_lock.release()
+        return {'attempted': attempted, 'flushed': flushed}
+
     @staticmethod
     def _is_origin_unavailable(exc: Exception) -> bool:
         msg = str(exc)
@@ -294,6 +425,9 @@ class SupabaseClient:
             return
         try:
             data = getattr(result, 'data', None)
+            if _global_track_payload:
+                _global_track_payload(data)
+                return
             size = self._estimate_json_bytes(data)
         except Exception:
             size = 0
@@ -303,6 +437,11 @@ class SupabaseClient:
             self._free_plan_requests += 1
 
     def free_plan_status(self) -> Dict[str, Any]:
+        try:
+            if _global_egress_status:
+                return dict(_global_egress_status())
+        except Exception:
+            pass
         self._free_plan_roll_day()
         with self._free_plan_lock:
             used = int(self._free_plan_response_bytes)
@@ -322,6 +461,13 @@ class SupabaseClient:
         }
 
     def free_plan_allows(self, priority: str = 'optional') -> bool:
+        if self.provider_restricted():
+            return False
+        try:
+            if _global_egress_allows:
+                return bool(_global_egress_allows(priority))
+        except Exception:
+            pass
         if not FREE_PLAN_LOCKDOWN:
             return True
         ratio = float(self.free_plan_status().get('ratio') or 0.0)
@@ -384,10 +530,22 @@ class SupabaseClient:
 
     def _rest_minimal(self, method: str, table: str, *, payload=None,
                       params=None, timeout=(1.5, 2.5), prefer="return=minimal"):
-        """Write through PostgREST without echoing large JSON rows."""
+        """Minimal PostgREST write with explicit 402 fail-open behaviour.
+
+        Critical market/learning rows are queued locally while Supabase is
+        restricted. Coordination tables are never faked.
+        """
         if not self.enabled:
+            if self._queue_local_write(method, table, payload, params, prefer):
+                return _LocalQueuedResponse()
             return None
+        if self.provider_restricted():
+            if self._queue_local_write(method, table, payload, params, prefer):
+                return _LocalQueuedResponse()
+            raise RuntimeError("SUPABASE_PROVIDER_RESTRICTED")
         if self.read_circuit_open():
+            if self._queue_local_write(method, table, payload, params, prefer):
+                return _LocalQueuedResponse()
             raise RuntimeError("SUPABASE_CIRCUIT_OPEN")
         url=f"{self.url.rstrip('/')}/rest/v1/{table}"
         try:
@@ -395,6 +553,10 @@ class SupabaseClient:
                 method.upper(), url, params=params or {}, json=payload,
                 headers=self._rest_headers(prefer), timeout=timeout,
             )
+            if int(r.status_code or 0) == 402:
+                self._mark_provider_restricted('HTTP_402_FAIR_USE')
+                if self._queue_local_write(method, table, payload, params, prefer):
+                    return _LocalQueuedResponse()
             if r.status_code >= 400:
                 body=(r.text or "")[:500]
                 err=requests.HTTPError(
@@ -405,10 +567,17 @@ class SupabaseClient:
                     self._mark_transient_failure()
                 raise err
             self._mark_transport_success()
+            now_m=time.monotonic()
+            if _local_pending_outbox is not None and now_m-self._last_outbox_flush>300:
+                self._last_outbox_flush=now_m
+                threading.Thread(target=self.flush_local_outbox, kwargs={'limit':20}, daemon=True, name='supabase-local-outbox-drain').start()
             return r
         except (requests.RequestException, RuntimeError) as exc:
             if self._is_connection_error(exc) or "SUPABASE_CIRCUIT_OPEN" in str(exc):
                 self._mark_transient_failure()
+            # A transport outage may also use the local data-plane outbox.
+            if self._queue_local_write(method, table, payload, params, prefer):
+                return _LocalQueuedResponse()
             raise
 
     @staticmethod
@@ -496,9 +665,6 @@ class SupabaseClient:
         
         Retorna: ID de la señal insertada o None si falla.
         """
-        if not self.enabled:
-            return None
-        
         try:
             normalized_action = self.normalize_action(signal_data.get('action', ''))
             
@@ -612,9 +778,6 @@ class SupabaseClient:
     
     def _insert_signal_indicators(self, signal_id: str, strategies: List[str], indicators_snapshot: Dict):
         """Guarda las estrategias detectadas asociadas a la señal"""
-        if not self.enabled:
-            return
-        
         try:
             # RC9.6.2 — idempotencia real. El motor puede reportar la misma
             # estrategia desde más de un especialista; la relación N:M sólo
@@ -678,9 +841,6 @@ class SupabaseClient:
             'notes': ''
         }
         """
-        if not self.enabled:
-            return False
-        
         try:
             # Update en la tabla signals
             update_signal = {
@@ -921,9 +1081,6 @@ class SupabaseClient:
         Guarda una oportunidad perdida: señal NO_OPERAR/ESPERAR cuyo precio 
         se movió a favor >2% en las siguientes N velas.
         """
-        if not self.enabled:
-            return None
-        
         try:
             payload = {
                 'symbol': data.get('symbol'),
