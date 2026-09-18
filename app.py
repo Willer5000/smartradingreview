@@ -34979,6 +34979,9 @@ def api_futures_signals_previous():
                 'lifecycle_status': lifecycle_status,
                 'publication_status': publication_status,
                 'execution_safety': levels.get('execution_safety'),
+                # RC9.7.2: procedencia explícita. El POST de saved_signals
+                # sólo acepta señales nacidas de la vela cerrada anterior.
+                'source_context': 'PREVIOUS_CONFIRMED',
                 'message': _msg_short,   # justificación futures (mismo campo que spot)
                 'decision_audit': _futures_decision_audit_for_api(result),
             })
@@ -45968,26 +45971,21 @@ def api_user_futures_risk_profile():
             }), 500
 
 
-        refreshed = (
-            supabase_client
-            .get_user_futures_risk_profile(
-                user
-            )
+        # RC9.7.2: no volver a consultar Supabase inmediatamente después
+        # del upsert. El perfil ya fue validado por el servidor y la segunda
+        # llamada añadía latencia/egress sin aportar autoridad adicional.
+        # En Render Free, mantener este endpoint acotado evita que un problema
+        # de transporte termine apareciendo al navegador como HTTP 502.
+        profile_response = dict(profile)
+        profile_response['futures_risk_updated_at'] = (
+            datetime.now(timezone.utc).isoformat()
         )
 
-
         return jsonify({
-            'success':
-                True,
-
-            'authenticated':
-                True,
-
-            'user':
-                user,
-
-            'profile':
-                refreshed,
+            'success': True,
+            'authenticated': True,
+            'user': user,
+            'profile': profile_response,
         })
 
 

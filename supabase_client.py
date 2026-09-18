@@ -2282,217 +2282,116 @@ class SupabaseClient:
         """
         Perfil PERSONAL de sizing Futures.
 
-        No modifica:
-        - Safety
-        - Entry
-        - SL
-        - TP
-        - RR
-        - Publication Gate
+        RC9.7.2:
+        - lectura REST acotada por timeout;
+        - compatible con sb_secret_ (apikey header);
+        - no puede dejar un worker Flask esperando indefinidamente;
+        - fail-open a valores por defecto si Supabase no responde.
+
+        No modifica Safety / Entry / SL / TP / RR / Publication Gate.
         """
 
         defaults = {
-            'futures_risk_mode':
-                'MANUAL',
-
-            'futures_margin_policy':
-                'FIXED_USDT',
-
-            'futures_equity_usdt':
-                None,
-
-            'futures_max_allocation_pct':
-                None,
-
-            'futures_max_loss_pct_equity_per_trade':
-                None,
-
-            'futures_preferred_margin_usdt':
-                None,
-
-            'futures_personal_max_leverage':
-                None,
-
-            'futures_risk_updated_at':
-                None,
+            'futures_risk_mode': 'MANUAL',
+            'futures_margin_policy': 'FIXED_USDT',
+            'futures_equity_usdt': None,
+            'futures_max_allocation_pct': None,
+            'futures_max_loss_pct_equity_per_trade': None,
+            'futures_preferred_margin_usdt': None,
+            'futures_personal_max_leverage': None,
+            'futures_risk_updated_at': None,
         }
 
         if not self.enabled:
-            return dict(
-                defaults
-            )
+            return dict(defaults)
 
-        def _number_or_none(
-            value
-        ):
-
+        def _number_or_none(value):
             try:
-
-                if value is None:
-                    return None
-
-                return float(
-                    value
-                )
-
-            except (
-                TypeError,
-                ValueError
-            ):
-
+                return None if value is None else float(value)
+            except (TypeError, ValueError):
                 return None
 
         try:
+            if self.provider_restricted():
+                return dict(defaults)
 
-            response = self._with_retry(
-                lambda: (
-                    self.client
-                    .table(
-                        'user_preferences'
-                    )
-                    .select(
-                        (
-                            'futures_risk_mode,'
-                            'futures_margin_policy,'
-                            'futures_equity_usdt,'
-                            'futures_max_allocation_pct,'
-                            'futures_max_loss_pct_equity_per_trade,'
-                            'futures_preferred_margin_usdt,'
-                            'futures_personal_max_leverage,'
-                            'futures_risk_updated_at'
-                        )
-                    )
-                    .eq(
-                        'user_name',
-                        user_name
-                    )
-                    .limit(
-                        1
-                    )
-                    .execute()
+            url = f"{self.url.rstrip('/')}/rest/v1/user_preferences"
+            fields = (
+                'futures_risk_mode,'
+                'futures_margin_policy,'
+                'futures_equity_usdt,'
+                'futures_max_allocation_pct,'
+                'futures_max_loss_pct_equity_per_trade,'
+                'futures_preferred_margin_usdt,'
+                'futures_personal_max_leverage,'
+                'futures_risk_updated_at'
+            )
+            response = self._rest_session.get(
+                url,
+                params={
+                    'select': fields,
+                    'user_name': f'eq.{str(user_name).strip()}',
+                    'limit': '1',
+                },
+                headers=self._rest_headers('return=representation'),
+                timeout=(1.5, 3.5),
+            )
+
+            if int(response.status_code or 0) == 402:
+                self._mark_provider_restricted('HTTP_402_FAIR_USE')
+                return dict(defaults)
+            if response.status_code >= 400:
+                raise requests.HTTPError(
+                    f"Supabase HTTP {response.status_code}: {(response.text or '')[:300]}",
+                    response=response,
                 )
-            )
 
-            rows = (
-                response.data
-                or []
-            )
-
+            rows = response.json() if response.content else []
+            if _global_track_payload:
+                try:
+                    _global_track_payload(rows)
+                except Exception:
+                    pass
             if not rows:
-                return dict(
-                    defaults
-                )
+                return dict(defaults)
 
             row = rows[0]
-
-            mode = str(
-                row.get(
-                    'futures_risk_mode'
-                )
-                or 'MANUAL'
-            ).upper()
-
-            if mode not in (
-                'MANUAL',
-                'PROFILE_ADVISORY'
-            ):
+            mode = str(row.get('futures_risk_mode') or 'MANUAL').upper()
+            if mode not in ('MANUAL', 'PROFILE_ADVISORY'):
                 mode = 'MANUAL'
-
-            margin_policy = str(
-                row.get(
-                    'futures_margin_policy'
-                )
-                or 'FIXED_USDT'
-            ).upper()
-
-            if margin_policy not in (
-                'FIXED_USDT',
-                'EQUITY_PCT'
-            ):
-                margin_policy = (
-                    'FIXED_USDT'
-                )
-
-            raw_max_leverage = (
-                row.get(
-                    'futures_personal_max_leverage'
-                )
-            )
+            margin_policy = str(row.get('futures_margin_policy') or 'FIXED_USDT').upper()
+            if margin_policy not in ('FIXED_USDT', 'EQUITY_PCT'):
+                margin_policy = 'FIXED_USDT'
 
             try:
-
                 personal_max_leverage = (
-                    int(
-                        raw_max_leverage
-                    )
-                    if raw_max_leverage
-                    is not None
+                    int(row.get('futures_personal_max_leverage'))
+                    if row.get('futures_personal_max_leverage') is not None
                     else None
                 )
-
-            except (
-                TypeError,
-                ValueError
-            ):
-
-                personal_max_leverage = (
-                    None
-                )
+            except (TypeError, ValueError):
+                personal_max_leverage = None
 
             return {
-                'futures_risk_mode':
-                    mode,
-
-                'futures_margin_policy':
-                    margin_policy,
-
-                'futures_equity_usdt':
-                    _number_or_none(
-                        row.get(
-                            'futures_equity_usdt'
-                        )
-                    ),
-
-                'futures_max_allocation_pct':
-                    _number_or_none(
-                        row.get(
-                            'futures_max_allocation_pct'
-                        )
-                    ),
-
-                'futures_max_loss_pct_equity_per_trade':
-                    _number_or_none(
-                        row.get(
-                            'futures_max_loss_pct_equity_per_trade'
-                        )
-                    ),
-
-                'futures_preferred_margin_usdt':
-                    _number_or_none(
-                        row.get(
-                            'futures_preferred_margin_usdt'
-                        )
-                    ),
-
-                'futures_personal_max_leverage':
-                    personal_max_leverage,
-
-                'futures_risk_updated_at':
-                    row.get(
-                        'futures_risk_updated_at'
-                    ),
+                'futures_risk_mode': mode,
+                'futures_margin_policy': margin_policy,
+                'futures_equity_usdt': _number_or_none(row.get('futures_equity_usdt')),
+                'futures_max_allocation_pct': _number_or_none(row.get('futures_max_allocation_pct')),
+                'futures_max_loss_pct_equity_per_trade': _number_or_none(
+                    row.get('futures_max_loss_pct_equity_per_trade')
+                ),
+                'futures_preferred_margin_usdt': _number_or_none(
+                    row.get('futures_preferred_margin_usdt')
+                ),
+                'futures_personal_max_leverage': personal_max_leverage,
+                'futures_risk_updated_at': row.get('futures_risk_updated_at'),
             }
 
         except Exception as e:
-
             logger.warning(
-                "get_user_futures_risk_profile "
-                f"({user_name}): {e}"
+                f"get_user_futures_risk_profile ({user_name}): {e}"
             )
-
-            return dict(
-                defaults
-            )
+            return dict(defaults)
 
 
     def upsert_user_futures_risk_profile(
@@ -2501,99 +2400,76 @@ class SupabaseClient:
         profile: Dict
     ) -> bool:
         """
-        Guarda exclusivamente preferencias PERSONALES
-        de sizing Futures.
+        Guarda exclusivamente preferencias PERSONALES de sizing Futures.
+
+        RC9.7.2 usa PostgREST directo con timeout estricto. El SDK genérico
+        sigue disponible para el resto del sistema, pero este endpoint de UI
+        debe responder rápido incluso si hay degradación de transporte.
         """
 
         if not self.enabled:
             return False
 
         try:
-
-            now_iso = (
-                datetime.utcnow()
-                .isoformat()
-            )
-
+            now_iso = datetime.utcnow().isoformat() + 'Z'
             payload = {
-                'user_name':
-                    str(
-                        user_name
-                    ).strip(),
-
-                'futures_risk_mode':
-                    profile.get(
-                        'futures_risk_mode',
-                        'MANUAL'
-                    ),
-
-                'futures_margin_policy':
-                    profile.get(
-                        'futures_margin_policy',
-                        'FIXED_USDT'
-                    ),
-
-                'futures_equity_usdt':
-                    profile.get(
-                        'futures_equity_usdt'
-                    ),
-
-                'futures_max_allocation_pct':
-                    profile.get(
-                        'futures_max_allocation_pct'
-                    ),
-
-                'futures_max_loss_pct_equity_per_trade':
-                    profile.get(
-                        'futures_max_loss_pct_equity_per_trade'
-                    ),
-
-                'futures_preferred_margin_usdt':
-                    profile.get(
-                        'futures_preferred_margin_usdt'
-                    ),
-
-                'futures_personal_max_leverage':
-                    profile.get(
-                        'futures_personal_max_leverage'
-                    ),
-
-                'futures_risk_updated_at':
-                    now_iso,
-
-                'updated_at':
-                    now_iso,
+                'user_name': str(user_name).strip(),
+                'futures_risk_mode': profile.get('futures_risk_mode', 'MANUAL'),
+                'futures_margin_policy': profile.get('futures_margin_policy', 'FIXED_USDT'),
+                'futures_equity_usdt': profile.get('futures_equity_usdt'),
+                'futures_max_allocation_pct': profile.get('futures_max_allocation_pct'),
+                'futures_max_loss_pct_equity_per_trade': profile.get(
+                    'futures_max_loss_pct_equity_per_trade'
+                ),
+                'futures_preferred_margin_usdt': profile.get('futures_preferred_margin_usdt'),
+                'futures_personal_max_leverage': profile.get('futures_personal_max_leverage'),
+                'futures_risk_updated_at': now_iso,
+                'updated_at': now_iso,
             }
 
-            response = self._with_retry(
-                lambda: (
-                    self.client
-                    .table(
-                        'user_preferences'
-                    )
-                    .upsert(
-                        payload,
-                        on_conflict='user_name'
-                    )
-                    .execute()
-                )
+            if not payload['user_name']:
+                return False
+            if self.provider_restricted():
+                return False
+
+            url = f"{self.url.rstrip('/')}/rest/v1/user_preferences"
+            response = self._rest_session.post(
+                url,
+                params={'on_conflict': 'user_name'},
+                json=payload,
+                headers=self._rest_headers(
+                    'resolution=merge-duplicates,return=representation'
+                ),
+                timeout=(1.5, 3.5),
             )
 
-            return (
-                response.data
-                is not None
-            )
+            if int(response.status_code or 0) == 402:
+                self._mark_provider_restricted('HTTP_402_FAIR_USE')
+                return False
+            if response.status_code >= 400:
+                raise requests.HTTPError(
+                    f"Supabase HTTP {response.status_code}: {(response.text or '')[:500]}",
+                    response=response,
+                )
+
+            try:
+                data = response.json() if response.content else []
+                if _global_track_payload:
+                    _global_track_payload(data)
+            except Exception:
+                pass
+            self._mark_transport_success()
+            return True
 
         except Exception as e:
-
+            if self._is_connection_error(e):
+                self._mark_transient_failure()
             logger.error(
-                "upsert_user_futures_risk_profile "
-                f"({user_name}): {e}"
+                f"upsert_user_futures_risk_profile ({user_name}): {e}"
             )
+            return False
 
-            return False    
 
-    
     # ========================================================================
     # USER PORTFOLIO
     # ========================================================================

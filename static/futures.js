@@ -309,6 +309,10 @@ window.openManualAnalysisSave = function(
         execution_origin:
             'USER_MANUAL_ANALYSIS',
 
+        source_context:
+            candidate.source_context
+            || 'CURRENT_ANALYSIS_ONLY',
+
         manual_risk_class:
             riskClass,
 
@@ -442,7 +446,14 @@ function futRenderAnalysisDiagnostics(json, context) {
 
             window._manualAnalysisCandidates[
                 manualKey
-            ] = candidate;
+            ] = {
+                ...candidate,
+                source_context: (
+                    context === 'previous'
+                        ? 'PREVIOUS_ANALYSIS_ONLY'
+                        : 'CURRENT_ANALYSIS_ONLY'
+                ),
+            };
 
             const riskClass = String(
                 candidate.manual_risk_class
@@ -1343,6 +1354,7 @@ function _decodeFuturesSignal(encodedSignal) {
 window.openSaveSignalFromCard = function(event, encodedSignal, alreadyInPosition) {
     if (event) event.stopPropagation();
     const sig = _decodeFuturesSignal(encodedSignal);
+    if (sig) sig.source_context = 'PREVIOUS_CONFIRMED';
     window.openSaveSignalModal(sig, Boolean(alreadyInPosition));
 };
 
@@ -3170,6 +3182,10 @@ window._currentSavedSignal = null;
     if (typeof original !== 'function') return;
 
     window.showFuturesPrevJustif = function(sig) {
+        // Esta ruta nace exclusivamente de /api/futures/signals/previous.
+        // El backend exige esta procedencia para impedir que un análisis actual
+        // se guarde accidentalmente como si fuera una señal de vela cerrada.
+        if (sig) sig.source_context = 'PREVIOUS_CONFIRMED';
         // Guardar la señal en una variable global PERO también pasarla directamente al botón
         window._currentPrevSignal = sig;
         original(sig);
@@ -3455,8 +3471,13 @@ window.confirmSaveSignal = async function() {
             sig.manual_risk_class
             || 'PREMIUM',
 
+        source_context:
+            sig.source_context
+            || null,
+
         source_signal_id:
             sig.source_signal_id
+            || sig.signal_id
             || null,
 
         manual_override_ack:
