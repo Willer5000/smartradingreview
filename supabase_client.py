@@ -46,8 +46,28 @@ try:
 except ImportError:
     pass  # python-dotenv no está instalado, se usarán solo os.environ
 
-SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
-SUPABASE_KEY = os.environ.get('SUPABASE_KEY', '')
+# HOTFIX 9.6.1 — credencial backend explícita para tablas protegidas por RLS.
+# El servidor prefiere la secret/service-role; SUPABASE_KEY queda sólo como
+# fallback de compatibilidad. Nunca se expone esta selección al navegador.
+SUPABASE_URL_SOURCE = (
+    'CENTRAL_SUPABASE_URL'
+    if os.environ.get('CENTRAL_SUPABASE_URL')
+    else 'SUPABASE_URL'
+)
+SUPABASE_URL = (
+    os.environ.get('CENTRAL_SUPABASE_URL')
+    or os.environ.get('SUPABASE_URL', '')
+)
+
+if os.environ.get('CENTRAL_SUPABASE_SERVICE_KEY'):
+    SUPABASE_KEY_SOURCE = 'CENTRAL_SUPABASE_SERVICE_KEY'
+    SUPABASE_KEY = os.environ.get('CENTRAL_SUPABASE_SERVICE_KEY', '')
+elif os.environ.get('SUPABASE_SERVICE_ROLE_KEY'):
+    SUPABASE_KEY_SOURCE = 'SUPABASE_SERVICE_ROLE_KEY'
+    SUPABASE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
+else:
+    SUPABASE_KEY_SOURCE = 'SUPABASE_KEY'
+    SUPABASE_KEY = os.environ.get('SUPABASE_KEY', '')
 
 # RC8.3 — FREE PLAN LOCKDOWN
 # Supabase Free includes 5 GB/month uncached egress. The hard objective is to
@@ -144,6 +164,16 @@ class SupabaseClient:
             self._create_client()
             self.enabled = True
             print(f"✅ SUPABASE conectado a: {self.url[:40]}...")
+            print(
+                "🔐 SUPABASE backend: "
+                f"url={SUPABASE_URL_SOURCE} · key={SUPABASE_KEY_SOURCE}"
+            )
+            if SUPABASE_KEY_SOURCE == 'SUPABASE_KEY':
+                print(
+                    "⚠️ SUPABASE backend usa SUPABASE_KEY de compatibilidad. "
+                    "Si esa clave es anon/public, las tablas RLS internas "
+                    "(por ejemplo q6_job_runs) pueden rechazar escrituras."
+                )
             if FREE_PLAN_LOCKDOWN:
                 print(
                     "🛡️ FREE PLAN LOCKDOWN activo · "

@@ -2,6 +2,9 @@
 from datetime import datetime, timedelta, timezone
 import json
 import time
+import logging
+
+logger = logging.getLogger('Q6_INTEGRITY')
 
 SPOT_SOURCE = 'KUCOIN_SPOT_REST'
 SPOT_COHORT = 'SPOT_REAL_CLOSED_Q6'
@@ -215,7 +218,17 @@ def claim_daily_job(
     try:
         db.client.table('q6_job_runs').insert(payload).execute()
         return True
-    except Exception:
+    except Exception as exc:
+        # HOTFIX 9.6.1: antes el error real de RLS/credencial/transporte se
+        # descartaba y Analytics sólo veía MISSING. Registramos el motivo sin
+        # imprimir credenciales ni payloads sensibles.
+        logger.warning(
+            'q6_job_runs claim insert failed job=%s slot=%s error=%s: %s',
+            job_name,
+            slot,
+            type(exc).__name__,
+            str(exc)[:240],
+        )
         if not retry:
             return False
         try:
@@ -233,7 +246,14 @@ def claim_daily_job(
                 return False
             claimed = db.client.table('q6_job_runs').update(payload).eq('job_key', key).eq('updated_at', previous).execute()
             return bool(claimed.data)
-        except Exception:
+        except Exception as retry_exc:
+            logger.warning(
+                'q6_job_runs claim retry failed job=%s slot=%s error=%s: %s',
+                job_name,
+                slot,
+                type(retry_exc).__name__,
+                str(retry_exc)[:240],
+            )
             return False
 
 
@@ -266,6 +286,13 @@ def finish_daily_job(db, job_name, slot, success):
     try:
         db.client.table('q6_job_runs').update({'status': 'DONE' if success else 'FAILED',
             'updated_at': datetime.now(timezone.utc).isoformat()}).eq('job_key', f'{job_name}:{slot}').execute()
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            'q6_job_runs finish failed job=%s slot=%s error=%s: %s',
+            job_name,
+            slot,
+            type(exc).__name__,
+            str(exc)[:240],
+        )
         return False
     return True

@@ -1291,18 +1291,66 @@ function renderSelfCalibrationV1(data) {
     }
 }
 
+// HOTFIX 9.6.1 — contrato Research pesado actual: 60 celdas.
+const RF96_RESEARCH_TARGET = 60;
+
+function rf96NormTf(value) {
+    const raw = String(value || '').trim().toUpperCase();
+    if (raw === '30MIN' || raw === '30M') return '30M';
+    if (raw === '1D' || raw === '1DAY') return '1D';
+    if (raw === '1W' || raw === '1WEEK') return '1W';
+    return raw;
+}
+
+function rf96CandidateInActiveContract(row) {
+    row = row || {};
+    const symbol = String(row.symbol || row.scope?.symbol || '').toUpperCase().replace('/', '-');
+    const tf = rf96NormTf(row.timeframe || row.scope?.timeframe);
+    const family = String(row.market_family || row.scope?.market_family || '').toUpperCase();
+    const isFutures = family === 'CRYPTO_FUTURES';
+    if (isFutures) {
+        const allowed = {
+            'BTC-USDT': new Set(['30M','1H','2H','4H','12H','1D']),
+            'XRP-USDT': new Set(['30M','1H','2H','4H','12H']),
+            'LINK-USDT': new Set(['30M','1H','2H','4H']),
+            'SUI-USDT': new Set(['30M','1H','2H']),
+        };
+        return Boolean(allowed[symbol] && allowed[symbol].has(tf));
+    }
+    const spotFamilies = new Set(['CRYPTO_SPOT','PAXG_BTC','PAXG_USDT','SPOT']);
+    return spotFamilies.has(family)
+        && new Set(['BTC-USDT','PAXG-USDT','PAXG-BTC']).has(symbol)
+        && new Set(['4H','12H','1D','1W']).has(tf);
+}
+
+function rf96ActiveChampionStats(candidates) {
+    const rows = (Array.isArray(candidates) ? candidates : []).filter(rf96CandidateInActiveContract);
+    const champions = rows.filter(row => ['SHADOW_READY','SHADOW_READY_FAST'].includes(String(row.stage || '').toUpperCase()));
+    const unique = new Set(champions.map(row => [
+        String(row.market_family || row.scope?.market_family || ''),
+        String(row.symbol || row.scope?.symbol || ''),
+        rf96NormTf(row.timeframe || row.scope?.timeframe),
+        String(row.action || row.scope?.action || row.direction || row.scope?.direction || row.candidate_key || '')
+    ].join('|')));
+    const oosPositive = champions.filter(row => {
+        const exp = Number(row.oos_exp_r);
+        const pf = Number(row.oos_pf);
+        return Number.isFinite(exp) && exp > 0 && (!Number.isFinite(pf) || pf > 1);
+    }).length;
+    return { rows, champions, championCount: unique.size, oosPositive };
+}
+
 function updateV1ReviewTraderNote() {
-    const observatory = (window.__v1LastAnalytics || {}).learning_observatory_v1 || {};
-    const learnedResolved = observatory.resolved || {};
-    const governance = window.__v1LastGovernance || {};
-    const spotResolved = Number(learnedResolved.spot || 0);
-    const futuresResolved = Number(
-        governance.futuresResolved ?? learnedResolved.futures_official ?? 0
-    );
-    const authorityText = governance.positiveAuthority ? 'habilitada' : 'bloqueada';
+    const research = window.__v1LastResearchSummary || {};
+    const stats = rf96ActiveChampionStats(research.candidates || []);
+    const scientist = (window.__v1LastAnalytics || {}).ai_learning_runtime || {};
+    const scientistState = String(scientist.status || '').toUpperCase();
+    const scientistText = scientistState && scientistState !== 'DONE'
+        ? ` · Científico ${scientistState}`
+        : '';
     v1Set(
         'v1-reviewtrader-note',
-        `Spot: ${spotResolved} resueltas · Futures gobernables: ${futuresResolved}/25 · autoridad positiva ${authorityText}`
+        `Backtest/OOS primario · Champions activos ${stats.championCount}/${RF96_RESEARCH_TARGET} · OOS+ activos ${stats.oosPositive} · LIVE/Shadow sólo confirma continuidad y alpha decay${scientistText}`
     );
 }
 
@@ -2841,21 +2889,26 @@ async function loadResearchFederationAnalytics(){
             return;
         }
         const candidates=data.candidates||[], shadow=data.shadow_live||[];
+        window.__v1LastResearchSummary = data || {};
+        updateV1ReviewTraderNote();
         body.dataset.hasResearchData='1';
         const coverage=data.coverage||{};
         const profitability=data.profitability_evidence||{};
+        const rf96Stats=rf96ActiveChampionStats(candidates);
+        const activeCandidates=rf96Stats.rows;
+        const activeChampionCount=rf96Stats.championCount;
+        const activePending=Math.max(0, RF96_RESEARCH_TARGET-activeChampionCount);
         const strategic=coverage.strategic_timeframes||{};
         const covEl=document.getElementById('rf-analytics-coverage');
         if(covEl){
             const parts=['4H','12H','1D','1W'].map(tf=>`${tf}: ${Number(strategic[tf]||0)}`);
             const missing=(coverage.missing_strategic_timeframes||[]);
             covEl.className=`small mb-2 ${missing.length?'text-warning':'text-success'}`;
-            const causalInfo=data.profitability_evidence||{};
-            const causal=`Causal ${Number(causalInfo.coverage_cells||0)}/${Number(causalInfo.coverage_target||92)} · Validadas ${Number(causalInfo.validated_cells||0)}/${Number(causalInfo.coverage_target||92)} · OOS+ vigente ${Number(causalInfo.oos_positive_cells||0)} · OOS+ evidencia ${Number(causalInfo.oos_positive_evidence_cells ?? causalInfo.oos_positive_cells ?? 0)}`;
+            const causal=`Contrato Research 9.6 ${RF96_RESEARCH_TARGET} celdas · Champions activos ${activeChampionCount}/${RF96_RESEARCH_TARGET} · pendientes ${activePending} · OOS+ activos ${rf96Stats.oosPositive}`;
             covEl.textContent=`Cobertura estratégica · ${parts.join(' · ')} · ${causal}${missing.length?` · Sin evidencia actual: ${missing.join(', ')}`:''}${data.degraded?' · ⚠ datos cacheados':''}`;
         }
         const sm=new Map(shadow.map(x=>[x.candidate_key,x]));
-        const actionable=candidates.filter(x=>['SHADOW_READY_FAST','SHADOW_READY','VALIDATED_SINGLE_ASSET','VALIDATION_REQUIRED','REJECTED_OOS','OBSERVE'].includes(String(x.stage||'')));
+        const actionable=activeCandidates.filter(x=>['SHADOW_READY_FAST','SHADOW_READY','VALIDATED_SINGLE_ASSET','VALIDATION_REQUIRED','REJECTED_OOS','OBSERVE'].includes(String(x.stage||'')));
         const fmt=(v,d=2)=>Number.isFinite(Number(v))?Number(v).toFixed(d):'--';
         const pct=v=>Number.isFinite(Number(v))?`${Number(v).toFixed(1)}%`:'--';
         const safe=v=>String(v??'').replace(/[&<>"']/g,ch=>({
@@ -2923,8 +2976,8 @@ async function loadResearchFederationAnalytics(){
         if(shadowBt) shadowBt.innerHTML=renderBt(profitability.futures_evaluation,'Sin challengers causales disponibles.');
         const simpleCoverage=document.getElementById('v1-coverage');
         const simpleCoverageNote=document.getElementById('v1-coverage-note');
-        if(simpleCoverage) simpleCoverage.textContent=`${Number(profitability.validated_cells||0)}/${Number(profitability.coverage_target||92)} con Champion · ${Math.max(0, Number(profitability.coverage_target||92)-Number(profitability.validated_cells||0))} pendientes`;
-        if(simpleCoverageNote) simpleCoverageNote.textContent=`OOS+ vigente ${Number(profitability.oos_positive_cells||0)} · evidencia OOS+ ${Number(profitability.oos_positive_evidence_cells ?? profitability.oos_positive_cells ?? 0)} · celdas aún sin Champion ${Number(profitability.searching_cells||0)}`;
+        if(simpleCoverage) simpleCoverage.textContent=`${activeChampionCount}/${RF96_RESEARCH_TARGET} con Champion · ${activePending} pendientes`;
+        if(simpleCoverageNote) simpleCoverageNote.textContent=`OOS+ en contrato activo ${rf96Stats.oosPositive} · Champions Legacy fuera del contrato se conservan, pero no llenan las 60 celdas nuevas.`;
         const simpleBucket=(id,noteId,bucket)=>{
             const el=document.getElementById(id), note=document.getElementById(noteId);
             if(!el) return;
@@ -2953,7 +3006,8 @@ async function loadResearchFederationAnalytics(){
         setOosRow('spot', profitability.spot||{});
         setOosRow('fut', profitability.futures_official||{});
 
-        const matrix=Array.isArray(profitability.coverage_matrix)?profitability.coverage_matrix:[];
+        const matrixRaw=Array.isArray(profitability.coverage_matrix)?profitability.coverage_matrix:[];
+        const matrix=matrixRaw.filter(row=>rf96CandidateInActiveContract(row));
         const validatedRows=matrix.filter(row=>['SHADOW_READY','SHADOW_READY_FAST'].includes(String(row.stage||'')) && !row.recycle_required);
         const liveBody=document.getElementById('v1-validated-live-body');
         if(liveBody){
@@ -2978,9 +3032,16 @@ async function loadResearchFederationAnalytics(){
         const covBody=document.getElementById('v1-coverage-matrix-body');
         if(covBody){
             const groups=[
-                ['Futures 30m · LONG/SHORT','30M',14,'CRYPTO_FUTURES'],['Futures 1h · LONG/SHORT','1H',14,'CRYPTO_FUTURES'],['Futures 2h · LONG/SHORT','2H',14,'CRYPTO_FUTURES'],['Futures 4h · LONG/SHORT','4H',14,'CRYPTO_FUTURES'],
-                ['Futures 12h · BTC/ETH/SOL · LONG/SHORT','12H',6,'CRYPTO_FUTURES'],['Futures 1D · BTC/ETH/SOL · LONG/SHORT','1D',6,'CRYPTO_FUTURES'],
-                ['Spot 4h · COMPRA/VENTA','4H',6,'SPOT'],['Spot 12h · COMPRA/VENTA','12H',6,'SPOT'],['Spot 1D · COMPRA/VENTA','1D',6,'SPOT'],['Spot 1W · COMPRA/VENTA','1W',6,'SPOT']
+                ['Futures 30m · reps CORE1/CORE2/MEDIUM/HIGH','30M',8,'CRYPTO_FUTURES'],
+                ['Futures 1h · reps CORE1/CORE2/MEDIUM/HIGH','1H',8,'CRYPTO_FUTURES'],
+                ['Futures 2h · reps CORE1/CORE2/MEDIUM/HIGH','2H',8,'CRYPTO_FUTURES'],
+                ['Futures 4h · BTC/XRP/LINK','4H',6,'CRYPTO_FUTURES'],
+                ['Futures 12h · BTC/XRP','12H',4,'CRYPTO_FUTURES'],
+                ['Futures 1D · BTC','1D',2,'CRYPTO_FUTURES'],
+                ['Spot 4h · COMPRA/VENTA','4H',6,'SPOT'],
+                ['Spot 12h · COMPRA/VENTA','12H',6,'SPOT'],
+                ['Spot 1D · COMPRA/VENTA','1D',6,'SPOT'],
+                ['Spot 1W · COMPRA/VENTA','1W',6,'SPOT']
             ];
             covBody.innerHTML=groups.map(([label,tf,target,fam])=>{
                 const rows=matrix.filter(r=>String(r.timeframe||'').toUpperCase()===tf && (fam==='SPOT'?String(r.market_family||'')!=='CRYPTO_FUTURES':String(r.market_family||'')==='CRYPTO_FUTURES'));
@@ -2988,7 +3049,7 @@ async function loadResearchFederationAnalytics(){
                 return `<tr><td>${label}</td><td>${ok}/${target}</td><td class="${ok===target?'text-success':ok>0?'text-info':'text-muted'}">${ok===target?'✅ Completa':ok>0?'🟡 Parcial':'🔎 Buscando'}</td></tr>`;
             }).join('');
         }
-        const coverageLabel = profitability.coverage_target ? ` · Causal ${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||92)} · Validadas ${Number(profitability.validated_cells||0)} · Reciclar ${Number(profitability.recycle_required_cells||0)}` : '';
+        const coverageLabel = ` · Research 9.6 ${activeChampionCount}/${RF96_RESEARCH_TARGET} Champions activos · ${activePending} pendientes`;
         body.innerHTML=actionable.slice(0,80).map(x=>{const l=sm.get(x.candidate_key)||{};return `<tr>
           <td><span class="badge bg-secondary">${x.stage||'--'}</span></td>
           <td><b>${x.source_engine||'--'}</b><br><span class="text-muted small">${x.experiment||'--'}</span></td>
@@ -2997,9 +3058,9 @@ async function loadResearchFederationAnalytics(){
           <td>${x.oos_n??0} / ${pct(x.oos_wr)} / ${fmt(x.oos_exp_r,3)}R / ${fmt(x.oos_pf,2)}</td>
           <td>${l.resolved_n??0}/${l.signals_n??0} / ${pct(l.win_rate_pct)} / ${fmt(l.expectancy_r,3)}R / ${fmt(l.profit_factor,2)}</td>
           <td>${fmt(l.avg_safety,1)}</td></tr>`}).join('') || `<tr><td colspan="7" class="text-muted text-center">${data.connected===false?'Research Bridge sin conexión':'Bridge conectado, pero todavía no hay filas visibles para esta cuenta/clave.'}</td></tr>`;
-        const stages={}; candidates.forEach(x=>stages[x.stage]=(stages[x.stage]||0)+1);
+        const stages={}; activeCandidates.forEach(x=>stages[x.stage]=(stages[x.stage]||0)+1);
         const kp=document.getElementById('rf-analytics-kpis');
-        if(kp) kp.innerHTML=[['Cobertura causal',`${Number(profitability.coverage_cells||0)}/${Number(profitability.coverage_target||92)}`],['Celdas validadas',Number(profitability.validated_cells||0)],['Shadow con actividad',`${Number(profitability.shadow_live_candidates||0)}/${Number(profitability.shadow_ready_cells||profitability.validated_cells||0)}`],['♻️ Reciclar',Number(profitability.recycle_required_cells||0)]].map(([k,v])=>`<div class="col-6 col-md-3"><div class="border rounded p-2 h-100"><div class="text-muted small">${k}</div><div class="h5 mb-0">${v}</div></div></div>`).join('');
+        if(kp) kp.innerHTML=[['Contrato Research',`${activeChampionCount}/${RF96_RESEARCH_TARGET}`],['Champions activos',activeChampionCount],['OOS+ activos',rf96Stats.oosPositive],['Pendientes',activePending]].map(([k,v])=>`<div class="col-6 col-md-3"><div class="border rounded p-2 h-100"><div class="text-muted small">${k}</div><div class="h5 mb-0">${v}</div></div></div>`).join('');
     }catch(err){body.innerHTML=`<tr><td colspan="7" class="text-warning">${err.message}</td></tr>`;}
 }
 window.loadResearchFederationAnalytics=loadResearchFederationAnalytics;

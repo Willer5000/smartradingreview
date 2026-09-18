@@ -35185,10 +35185,27 @@ def api_review_recommendations(symbol, timeframe, action):
         if review is None:
             return jsonify({'success': False, 'error': 'ReviewTrader no disponible'}), 503
         
-        recommendations = review.get_recommendations_for(symbol, timeframe, action)
+        # HOTFIX 9.6.1 — el endpoint diagnóstico no puede asumir Spot.
+        # LONG/SHORT pertenecen a Futures por defecto; COMPRA/VENTA a Spot.
+        requested_market = str(request.args.get('system_type') or '').strip().lower()
+        if requested_market not in ('spot', 'futures'):
+            requested_market = (
+                'futures'
+                if str(action or '').upper() in ('LONG', 'SHORT')
+                else 'spot'
+            )
+
+        recommendations = review.get_recommendations_for(
+            symbol,
+            timeframe,
+            action,
+            system_type=requested_market,
+        )
         
         return jsonify({
             'success': True,
+            'system_type': requested_market,
+            'learning_mode': 'BACKTEST_OOS_PRIMARY_LIVE_ALPHA_DECAY',
             'data': recommendations,
             'timestamp': datetime.now(bolivia_tz).isoformat()
         })
