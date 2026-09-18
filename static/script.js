@@ -1682,6 +1682,10 @@ async function doLogin() {
             window.loadSavedSignals();
         }
 
+        if (typeof window.loadFuturesRiskProfile === 'function') {
+            await window.loadFuturesRiskProfile({silent: true});
+        }
+
         // Ahora sí se puede iniciar el análisis privado.
         // El flujo global de autenticación controla la carga inicial.
         // Aquí sólo actualizamos la interfaz y las señales privadas.
@@ -1740,6 +1744,9 @@ async function doLogout() {
     } finally {
         clearPrivateUserState();
         updatePortfolioUI();
+        if (typeof window.clearFuturesRiskProfileUI === 'function') {
+            window.clearFuturesRiskProfileUI();
+        }
 
         showToast(
             'Sesión cerrada.',
@@ -1924,7 +1931,11 @@ function toggleIndicator(indicator, show) {
     
     setInterval(updateBoliviaClock, 1000);
     setInterval(updateCalendarInfo, 60000);
-    setInterval(updateSystemStatus, 60000);
+    // RC9.7.1 Render bandwidth guard: the template owns the normal /health poll.
+    // Keep only a slow visible-tab fallback here to avoid duplicate requests.
+    setInterval(() => {
+        if (!document.hidden) updateSystemStatus();
+    }, 300000);
     
 // ====== FUNCIONES DEL GUARDIÁN DE PORTAFOLIO (TGP) ======
 
@@ -11348,8 +11359,8 @@ function _startMacroTicker() {
     if (!window.__macroContextState.pollTimer) {
         // El endpoint está cacheado; 5 min es suficiente para UI y muy barato.
         window.__macroContextState.pollTimer = window.setInterval(
-            () => refreshMacroContext(false),
-            300000
+            () => { if (!document.hidden) refreshMacroContext(false); },
+            600000
         );
     }
 }

@@ -2601,7 +2601,7 @@
 
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI-2"></script>
     <script
-        src="{{ url_for('static', filename='script.js') }}?v=20260918-RC9-6-2-STABILITY"
+        src="{{ url_for('static', filename='script.js') }}?v=20260918-RC9-7-1-COLDSTART-HOTFIX"
     ></script>
 
 
@@ -2612,7 +2612,7 @@
     {% if is_futures %}
 
     <script
-        src="{{ url_for('static', filename='futures.js') }}?v=20260918-RC9-6-2-STABILITY"
+        src="{{ url_for('static', filename='futures.js') }}?v=20260918-RC9-7-1-COLDSTART-HOTFIX"
     ></script>
 
     {% endif %}
@@ -3161,7 +3161,7 @@
         function startUpdateIntervals() {
             // 1. ANÁLISIS COMPLETO - Cada 5 minutos
             setInterval(function() {
-                if (typeof window.runCompleteAnalysis === 'function') {
+                if (!document.hidden && typeof window.runCompleteAnalysis === 'function') {
                     window.runCompleteAnalysis();
                 }
             }, 300000);
@@ -3195,6 +3195,7 @@
             // saturaba Render Free con 502 Bad Gateway. Ahora usa /api/price que solo
             // consulta velas (con caché HTTP) y responde en <50ms.
             setInterval(function() {
+                if (document.hidden) return;
                 const symbol = window.currentSymbol || (window.PAGE_CONFIG?.defaultSymbol || 'BTC-USDT');
                 const interval = window.currentInterval || (window.PAGE_CONFIG?.defaultTimeframe || '1D');
                 
@@ -3807,8 +3808,8 @@
             setInterval(window.updateBoliviaClock, 1000);
             setInterval(window.updateCalendarInfo, 60000);
             setInterval(window.updateMarketSessionInfo, 60000); // ← NUEVA: Cada minuto
-            setInterval(window.updateSystemStatus, 120000);  // 2 minutos (antes 60s)
-            setInterval(window.updateSystemKPIs, 300000);  // KPIs del sistema cada 5 min
+            setInterval(() => { if (!document.hidden) window.updateSystemStatus(); }, 300000);
+            setInterval(() => { if (!document.hidden) window.updateSystemKPIs(); }, 600000);
             
             // ============ INICIAR INTERVALOS DE VELAS Y PRECIO ============
             if (typeof window.startUpdateIntervals === 'function') {
@@ -3816,6 +3817,16 @@
             } else {
                 console.warn('⚠️ startUpdateIntervals no está disponible');
             }
+
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden) return;
+                window.updateSystemStatus?.();
+                window.updateSystemKPIs?.();
+                if (window.IS_FUTURES_PAGE) {
+                    window.loadFuturesRiskProfile?.({silent: true});
+                    window.updateActiveSignals?.();
+                }
+            });
             
              
             });

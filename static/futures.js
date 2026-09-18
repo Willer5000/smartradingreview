@@ -2978,7 +2978,9 @@ document.addEventListener('DOMContentLoaded', function() {
     }, true);
     setTimeout(() => window.loadFuturesUniverse96(), 150);
     setTimeout(() => window.loadFuturesOpportunities96(), 2500);
-    setInterval(() => window.loadFuturesOpportunities96(), 120000);
+    setInterval(() => {
+        if (!document.hidden) window.loadFuturesOpportunities96();
+    }, 300000);
     // =========================================================================
     // RESTAURAR LAS FUNCIONES DE FUTUROS
     // =========================================================================
@@ -3082,13 +3084,13 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Refrescar panel review cada 3 min (v15: reduce carga en Render Free)
     setInterval(() => {
-        if (typeof window.refreshReviewPanel === 'function') window.refreshReviewPanel();
-    }, 180000);
+        if (!document.hidden && typeof window.refreshReviewPanel === 'function') window.refreshReviewPanel();
+    }, 300000);
     
     // Refrescar stats globales cada 5 min
     setInterval(() => {
-        if (typeof window.loadGlobalStats === 'function') window.loadGlobalStats();
-    }, 300000);
+        if (!document.hidden && typeof window.loadGlobalStats === 'function') window.loadGlobalStats();
+    }, 600000);
     
     // Cargar señales activas y anteriores inmediatamente (con delay para que
     // futures.js termine de sobrescribir window.updateActiveSignals y updatePreviousSignals)
@@ -3112,13 +3114,13 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Refrescar señales activas cada 2 min (v15: reduce carga)
     setInterval(() => {
-        if (typeof window.updateActiveSignals === 'function') window.updateActiveSignals();
-    }, 120000);
+        if (!document.hidden && typeof window.updateActiveSignals === 'function') window.updateActiveSignals();
+    }, 300000);
     
     // Refrescar señales anteriores cada 10 min
     setInterval(() => {
-        if (typeof window.updatePreviousSignals === 'function') window.updatePreviousSignals();
-    }, 600000);
+        if (!document.hidden && typeof window.updatePreviousSignals === 'function') window.updatePreviousSignals();
+    }, 1800000);
     
     // Cargar correlación al inicio
     setTimeout(() => {
@@ -5141,6 +5143,181 @@ window.deleteSavedSignal = async function() {
 if (window.IS_FUTURES_PAGE) {
     document.addEventListener('DOMContentLoaded', () => {
         setTimeout(() => window.updateSavedSignalsList(), 1500);
-        setInterval(() => window.updateSavedSignalsList(), 5 * 60 * 1000);
+        setInterval(() => {
+            if (!document.hidden) window.updateSavedSignalsList();
+        }, 10 * 60 * 1000);
     });
 }
+// ============================================================================
+// RC9.7.1 — PERFIL PERSONAL DE RIESGO FUTURES · FRONTEND RESTAURADO
+// ============================================================================
+// RC9.7 conservó el endpoint backend pero el JS que enlazaba el panel fue
+// retirado accidentalmente. El resultado era un panel visual sin eventos:
+// Usuario "—" y botones Guardar/Refrescar inertes incluso con sesión válida.
+(function initFuturesRiskProfile97_1() {
+    if (!window.IS_FUTURES_PAGE) return;
+    if (window.__FUTURES_RISK_PROFILE_97_1_BOUND__) return;
+    window.__FUTURES_RISK_PROFILE_97_1_BOUND__ = true;
+
+    const byId = id => document.getElementById(id);
+    const nullableNumber = id => {
+        const raw = String(byId(id)?.value ?? '').trim();
+        if (!raw) return null;
+        const n = Number(raw);
+        return Number.isFinite(n) ? n : null;
+    };
+
+    function renderMessage(text, type = 'secondary') {
+        const el = byId('futures-risk-message');
+        if (!el) return;
+        el.className = `alert alert-${type} py-2 px-2 small mb-3`;
+        el.textContent = text;
+    }
+
+    function renderProfile(profile = {}, user = null) {
+        const mode = String(profile.futures_risk_mode || 'MANUAL').toUpperCase();
+        const policy = String(profile.futures_margin_policy || 'FIXED_USDT').toUpperCase();
+        if (byId('futures-risk-mode')) byId('futures-risk-mode').value = mode;
+        if (byId('futures-margin-policy')) byId('futures-margin-policy').value = policy;
+        if (byId('futures-risk-equity')) byId('futures-risk-equity').value = profile.futures_equity_usdt ?? '';
+        if (byId('futures-risk-allocation')) byId('futures-risk-allocation').value = profile.futures_max_allocation_pct ?? '';
+        if (byId('futures-risk-max-loss')) byId('futures-risk-max-loss').value = profile.futures_max_loss_pct_equity_per_trade ?? '';
+        if (byId('futures-risk-preferred-margin')) byId('futures-risk-preferred-margin').value = profile.futures_preferred_margin_usdt ?? '';
+        if (byId('futures-risk-max-leverage')) byId('futures-risk-max-leverage').value = profile.futures_personal_max_leverage ?? '';
+
+        const userEl = byId('futures-risk-user-label');
+        if (userEl) userEl.textContent = user || '—';
+
+        const badge = byId('futures-risk-status-badge');
+        if (badge) {
+            badge.textContent = mode === 'PROFILE_ADVISORY' ? 'PERFIL' : 'MANUAL';
+            badge.className = `badge ${mode === 'PROFILE_ADVISORY' ? 'bg-info text-dark' : 'bg-secondary'}`;
+        }
+
+        if (mode === 'PROFILE_ADVISORY') {
+            renderMessage(
+                'Perfil personal activo: el sistema puede reducir margen/leverage según tus límites; nunca aumenta el riesgo permitido por el setup.',
+                'info'
+            );
+        } else {
+            renderMessage(
+                'Modo manual: tú eliges el margen y el leverage. El sistema no ajusta automáticamente el tamaño según tus límites personales.',
+                'secondary'
+            );
+        }
+    }
+
+    window.clearFuturesRiskProfileUI = function() {
+        renderProfile({futures_risk_mode: 'MANUAL', futures_margin_policy: 'FIXED_USDT'}, null);
+        const badge = byId('futures-risk-status-badge');
+        if (badge) {
+            badge.textContent = 'LOGIN';
+            badge.className = 'badge bg-warning text-dark';
+        }
+        renderMessage('Inicia sesión para cargar o guardar tu perfil Futures.', 'warning');
+    };
+
+    window.loadFuturesRiskProfile = async function({silent = false} = {}) {
+        try {
+            const response = await fetch('/api/user/futures-risk-profile', {
+                method: 'GET',
+                credentials: 'same-origin',
+                cache: 'no-store',
+            });
+            let data = {};
+            try { data = await response.json(); } catch (_) {}
+
+            if (response.status === 401 || data.authenticated === false) {
+                window.clearFuturesRiskProfileUI();
+                return false;
+            }
+            if (!response.ok || data.success !== true) {
+                throw new Error(data.error || `HTTP ${response.status}`);
+            }
+
+            renderProfile(data.profile || {}, data.user || null);
+            if (!silent && typeof window.showToast === 'function') {
+                window.showToast('Perfil Futures actualizado', 'success');
+            }
+            return true;
+        } catch (error) {
+            console.error('❌ loadFuturesRiskProfile:', error);
+            renderMessage(`No se pudo cargar el perfil Futures: ${error.message}`, 'danger');
+            return false;
+        }
+    };
+
+    window.saveFuturesRiskProfile = async function() {
+        const button = byId('btn-save-futures-risk');
+        if (button) button.disabled = true;
+        try {
+            const payload = {
+                futures_risk_mode: String(byId('futures-risk-mode')?.value || 'MANUAL').toUpperCase(),
+                futures_margin_policy: String(byId('futures-margin-policy')?.value || 'FIXED_USDT').toUpperCase(),
+                futures_equity_usdt: nullableNumber('futures-risk-equity'),
+                futures_max_allocation_pct: nullableNumber('futures-risk-allocation'),
+                futures_max_loss_pct_equity_per_trade: nullableNumber('futures-risk-max-loss'),
+                futures_preferred_margin_usdt: nullableNumber('futures-risk-preferred-margin'),
+                futures_personal_max_leverage: nullableNumber('futures-risk-max-leverage'),
+            };
+
+            const response = await fetch('/api/user/futures-risk-profile', {
+                method: 'POST',
+                credentials: 'same-origin',
+                cache: 'no-store',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload),
+            });
+            let data = {};
+            try { data = await response.json(); } catch (_) {}
+
+            if (response.status === 401 || data.authenticated === false) {
+                window.clearFuturesRiskProfileUI();
+                throw new Error('Debes iniciar sesión antes de guardar el perfil Futures.');
+            }
+            if (!response.ok || data.success !== true) {
+                throw new Error(data.error || `HTTP ${response.status}`);
+            }
+
+            renderProfile(data.profile || payload, data.user || null);
+            if (typeof window.showToast === 'function') {
+                window.showToast('✅ Perfil de riesgo Futures guardado', 'success');
+            }
+            return true;
+        } catch (error) {
+            console.error('❌ saveFuturesRiskProfile:', error);
+            renderMessage(error.message || 'No se pudo guardar el perfil Futures.', 'danger');
+            if (typeof window.showToast === 'function') {
+                window.showToast(error.message || 'No se pudo guardar el perfil Futures', 'danger');
+            }
+            return false;
+        } finally {
+            if (button) button.disabled = false;
+        }
+    };
+
+    const bind = () => {
+        byId('btn-save-futures-risk')?.addEventListener('click', window.saveFuturesRiskProfile);
+        byId('btn-refresh-futures-risk')?.addEventListener('click', () => window.loadFuturesRiskProfile({silent: false}));
+        byId('futures-risk-mode')?.addEventListener('change', () => {
+            const mode = String(byId('futures-risk-mode')?.value || 'MANUAL').toUpperCase();
+            const currentUser = byId('futures-risk-user-label')?.textContent?.trim();
+            renderProfile({
+                futures_risk_mode: mode,
+                futures_margin_policy: byId('futures-margin-policy')?.value || 'FIXED_USDT',
+                futures_equity_usdt: nullableNumber('futures-risk-equity'),
+                futures_max_allocation_pct: nullableNumber('futures-risk-allocation'),
+                futures_max_loss_pct_equity_per_trade: nullableNumber('futures-risk-max-loss'),
+                futures_preferred_margin_usdt: nullableNumber('futures-risk-preferred-margin'),
+                futures_personal_max_leverage: nullableNumber('futures-risk-max-leverage'),
+            }, currentUser && currentUser !== '—' ? currentUser : null);
+        });
+        window.setTimeout(() => window.loadFuturesRiskProfile({silent: true}), 2200);
+    };
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', bind, {once: true});
+    } else {
+        bind();
+    }
+})();
