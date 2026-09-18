@@ -148,19 +148,19 @@
             <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
                 <div>
                     <h5 class="mb-1"><i class="fas fa-gauge-high me-2 text-success"></i>Estado del sistema · lectura rápida</h5>
-                    <div class="small text-muted">Lo necesario para saber si el sistema está aprendiendo, si tiene edge histórico y si ese edge continúa vivo.</div>
+                    <div class="small text-muted">Lo necesario para saber si el sistema aprende, si las estrategias muestran ventaja y si esa ventaja sigue vigente.</div>
                 </div>
-                <button class="btn btn-outline-secondary btn-sm" id="v1-toggle-advanced" type="button">Ver diagnóstico avanzado</button>
+                <button class="btn btn-outline-secondary btn-sm d-none" id="v1-toggle-advanced" type="button" aria-hidden="true">Detalles técnicos</button>
             </div>
             <div class="row g-2">
-                <div class="col-lg-3 col-md-4 col-6"><div class="v1-simple-card"><div class="small text-muted">Cobertura Research</div><div class="v1-simple-value" id="v1-coverage">--</div><div class="small text-muted" id="v1-coverage-note">60 celdas Research · 150 operativas</div></div></div>
-                <div class="col-lg-3 col-md-4 col-6"><div class="v1-simple-card"><div class="small text-muted">Spot · LIVE</div><div class="v1-simple-value" id="v1-spot-live">--</div><div class="small text-muted" id="v1-spot-live-note">Lo que realmente está ocurriendo ahora</div></div></div>
-                <div class="col-lg-3 col-md-4 col-6"><div class="v1-simple-card"><div class="small text-muted">Spot · Backtest/OOS</div><div class="v1-simple-value" id="v1-spot-oos">--</div><div class="small text-muted" id="v1-spot-oos-note">WR y PnL histórico</div></div></div>
-                <div class="col-lg-3 col-md-4 col-6"><div class="v1-simple-card"><div class="small text-muted">Futures · LIVE</div><div class="v1-simple-value" id="v1-futures-live">--</div><div class="small text-muted" id="v1-futures-live-note">Lo que realmente está ocurriendo ahora</div></div></div>
-                <div class="col-lg-3 col-md-4 col-6"><div class="v1-simple-card"><div class="small text-muted">Futures · Backtest/OOS</div><div class="v1-simple-value" id="v1-futures-oos">--</div><div class="small text-muted" id="v1-futures-oos-note">WR y PnL histórico</div></div></div>
-                <div class="col-lg-3 col-md-4 col-6"><div class="v1-simple-card"><div class="small text-muted">Shadow live</div><div class="v1-simple-value" id="v1-shadow">--</div><div class="small text-muted" id="v1-shadow-note">Confirma continuidad del edge</div></div></div>
-                <div class="col-lg-3 col-md-6"><div class="v1-simple-card"><div class="small text-muted">Científico IA</div><div class="v1-simple-value" id="v1-scientist">--</div><div class="small text-muted" id="v1-scientist-note">Debe mostrar intento reciente, éxito o error.</div></div></div>
-                <div class="col-lg-3 col-md-6"><div class="v1-simple-card"><div class="small text-muted">Política del sistema</div><div class="v1-simple-value text-success">Safety protegido</div><div class="small text-muted">Backtest demuestra edge; Shadow/live decide continuidad; leverage no rescata estrategias malas.</div></div></div>
+                <div class="col-lg-3 col-md-4 col-6"><div class="v1-simple-card"><div class="small text-muted">Cobertura de estrategias</div><div class="v1-simple-value" id="v1-coverage">--</div><div class="small text-muted" id="v1-coverage-note">60 grupos de prueba histórica · 150 casos operativos</div></div></div>
+                <div class="col-lg-3 col-md-4 col-6"><div class="v1-simple-card"><div class="small text-muted">Spot · Actual</div><div class="v1-simple-value" id="v1-spot-live">--</div><div class="small text-muted" id="v1-spot-live-note">Lo que realmente está ocurriendo ahora</div></div></div>
+                <div class="col-lg-3 col-md-4 col-6"><div class="v1-simple-card"><div class="small text-muted">Spot · Evidencia histórica</div><div class="v1-simple-value" id="v1-spot-oos">--</div><div class="small text-muted" id="v1-spot-oos-note">Resultados de pruebas históricas</div></div></div>
+                <div class="col-lg-3 col-md-4 col-6"><div class="v1-simple-card"><div class="small text-muted">Futures · Actual</div><div class="v1-simple-value" id="v1-futures-live">--</div><div class="small text-muted" id="v1-futures-live-note">Lo que realmente está ocurriendo ahora</div></div></div>
+                <div class="col-lg-3 col-md-4 col-6"><div class="v1-simple-card"><div class="small text-muted">Futures · Evidencia histórica</div><div class="v1-simple-value" id="v1-futures-oos">--</div><div class="small text-muted" id="v1-futures-oos-note">Resultados de pruebas históricas</div></div></div>
+                <div class="col-lg-3 col-md-4 col-6"><div class="v1-simple-card"><div class="small text-muted">Pruebas sin operar</div><div class="v1-simple-value" id="v1-shadow">--</div><div class="small text-muted" id="v1-shadow-note">Comprueba si la ventaja sigue vigente</div></div></div>
+                <div class="col-lg-3 col-md-6"><div class="v1-simple-card"><div class="small text-muted">Investigación con IA</div><div class="v1-simple-value" id="v1-scientist">--</div><div class="small text-muted" id="v1-scientist-note">Propone hipótesis para investigar; no ejecuta operaciones.</div></div></div>
+                <div class="col-lg-3 col-md-6"><div class="v1-simple-card"><div class="small text-muted">Política del sistema</div><div class="v1-simple-value text-success">Seguridad protegida</div><div class="small text-muted">La evidencia histórica propone una ventaja; los resultados recientes confirman si sigue vigente. El apalancamiento no rescata estrategias malas.</div></div></div>
             </div>
         </div>
 
@@ -169,13 +169,13 @@
             <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
                 <div>
                     <h5 class="mb-1"><i class="fas fa-chart-line me-2 text-info"></i>Monitoreo de rentabilidad y continuidad</h5>
-                    <div class="small text-muted">Live dice qué ocurre hoy; OOS dice qué demostró la estrategia fuera de entrenamiento. No se mezclan.</div>
+                    <div class="small text-muted">Los resultados recientes y las pruebas históricas se muestran por separado para no confundir aprendizaje con rendimiento real.</div>
                 </div>
                 <span class="badge bg-dark border border-info text-info">Cobertura de mercados y temporalidades</span>
             </div>
             <div class="table-responsive mb-3">
                 <table class="table table-dark table-sm align-middle mb-0">
-                    <thead><tr><th>Mercado</th><th>LIVE N</th><th>WR LIVE</th><th>PnL LIVE</th><th>OOS N</th><th>WR OOS</th><th>PnL OOS</th><th>Lectura</th></tr></thead>
+                    <thead><tr><th>Mercado</th><th>Muestra actual</th><th>Acierto actual</th><th>Resultado actual</th><th>Pruebas</th><th>WR histórico</th><th>Resultado histórico</th><th>Lectura</th></tr></thead>
                     <tbody>
                         <tr><td><b>SPOT</b></td><td id="v1-op-spot-live-n">--</td><td id="v1-op-spot-live-wr">--</td><td id="v1-op-spot-live-pnl">--</td><td id="v1-op-spot-oos-n">--</td><td id="v1-op-spot-oos-wr">--</td><td id="v1-op-spot-oos-pnl">--</td><td id="v1-op-spot-state" class="text-muted">Cargando…</td></tr>
                         <tr><td><b>FUTURES</b></td><td id="v1-op-fut-live-n">--</td><td id="v1-op-fut-live-wr">--</td><td id="v1-op-fut-live-pnl">--</td><td id="v1-op-fut-oos-n">--</td><td id="v1-op-fut-oos-wr">--</td><td id="v1-op-fut-oos-pnl">--</td><td id="v1-op-fut-state" class="text-muted">Cargando…</td></tr>
@@ -184,16 +184,16 @@
             </div>
             <div class="row g-3">
                 <div class="col-xl-8">
-                    <div class="small fw-semibold mb-2">Estrategias validadas que deben comprobarse en Shadow/live</div>
+                    <div class="small fw-semibold mb-2">Estrategias con evidencia histórica que aún deben demostrar vigencia</div>
                     <div class="table-responsive" style="max-height:360px;overflow:auto">
                         <table class="table table-dark table-sm align-middle mb-0">
-                            <thead class="sticky-top"><tr><th>Mercado</th><th>TF</th><th>Estrategia</th><th>WR OOS</th><th>PnL OOS</th><th>PF</th><th>Guardian ΔExp</th><th>Certificación</th><th>Shadow</th><th>Estado</th></tr></thead>
+                            <thead class="sticky-top"><tr><th>Mercado</th><th>TF</th><th>Estrategia</th><th>WR histórico</th><th>Resultado histórico</th><th>Relación ganancia/pérdida</th><th>Cambio de ventaja</th><th>Validación</th><th>Prueba actual</th><th>Estado</th></tr></thead>
                             <tbody id="v1-validated-live-body"><tr><td colspan="10" class="text-muted text-center">Cargando estrategias validadas…</td></tr></tbody>
                         </table>
                     </div>
                 </div>
                 <div class="col-xl-4">
-                    <div class="small fw-semibold mb-2">Cobertura rentable por temporalidad</div>
+                    <div class="small fw-semibold mb-2">Cobertura de estrategias por temporalidad</div>
                     <div class="table-responsive">
                         <table class="table table-dark table-sm align-middle mb-0">
                             <thead><tr><th>Mercado · TF</th><th>Validadas</th><th>Estado</th></tr></thead>
@@ -203,14 +203,14 @@
                 </div>
             </div>
             <!-- RC4: salud fuera de la columna lateral. Evita superposición con tablas. -->
-            <div class="small fw-semibold mt-3 mb-2">Salud del aprendizaje e integridad</div>
+            <div class="small fw-semibold mt-3 mb-2">Salud del aprendizaje</div>
             <div class="row g-2">
-                <div class="col-xl-2 col-md-4"><div class="v1-simple-card h-100"><div class="small text-muted">ReviewTrader</div><div class="v1-simple-value" id="v1-reviewtrader-health">--</div><div class="small text-muted" id="v1-reviewtrader-note">Esperando scheduler.</div></div></div>
+                <div class="col-xl-2 col-md-4"><div class="v1-simple-card h-100"><div class="small text-muted">Aprendizaje del sistema</div><div class="v1-simple-value" id="v1-reviewtrader-health">--</div><div class="small text-muted" id="v1-reviewtrader-note">Esperando nuevo ciclo de aprendizaje.</div></div></div>
                 <div class="col-xl-2 col-md-4"><div class="v1-simple-card h-100"><div class="small text-muted">Macro</div><div class="v1-simple-value" id="v1-macro-health">--</div><div class="small text-muted" id="v1-macro-note">Contexto actual y próximo evento.</div></div></div>
-                <div class="col-xl-2 col-md-4"><div class="v1-simple-card h-100"><div class="small text-muted">Cohorte estadística</div><div class="v1-simple-value" id="v1-cohort-health">--</div><div class="small text-muted" id="v1-cohort-note">Sólo celdas activas verificadas calibran.</div></div></div>
-                <div class="col-xl-2 col-md-4"><div class="v1-simple-card h-100"><div class="small text-muted">Trader IA</div><div class="v1-simple-value" id="v1-trader-ai-health">--</div><div class="small text-muted" id="v1-trader-ai-note">Decision Control read-only.</div></div></div>
+                <div class="col-xl-2 col-md-4"><div class="v1-simple-card h-100"><div class="small text-muted">Muestra válida</div><div class="v1-simple-value" id="v1-cohort-health">--</div><div class="small text-muted" id="v1-cohort-note">Sólo resultados verificables influyen en el aprendizaje.</div></div></div>
+                <div class="col-xl-2 col-md-4"><div class="v1-simple-card h-100"><div class="small text-muted">Control IA</div><div class="v1-simple-value" id="v1-trader-ai-health">--</div><div class="small text-muted" id="v1-trader-ai-note">Revisa contradicciones sin cambiar niveles por sí solo.</div></div></div>
                 <div class="col-xl-2 col-md-4"><div class="v1-simple-card h-100"><div class="small text-muted">Telegram</div><div class="v1-simple-value" id="v1-telegram-health">--</div><div class="small text-muted" id="v1-telegram-note">Sin llamadas de prueba automáticas.</div></div></div>
-                <div class="col-xl-2 col-md-4"><div class="v1-simple-card h-100"><div class="small text-muted">Carga de página</div><div class="v1-simple-value text-success">Acotada</div><div class="small text-muted">Timeouts independientes; diagnóstico pesado a pedido.</div></div></div>
+                <div class="col-xl-2 col-md-4"><div class="v1-simple-card h-100"><div class="small text-muted">Carga de página</div><div class="v1-simple-value text-success">Acotada</div><div class="small text-muted">Carga limitada para proteger memoria y ancho de banda.</div></div></div>
             </div>
         </div>
 
@@ -218,37 +218,37 @@
         <div class="chart-container mb-3" id="v1-entry-audit" style="border-color: rgba(32,201,151,.42);">
             <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
                 <div>
-                    <h5 class="mb-1"><i class="fas fa-crosshairs me-2 text-success"></i>Auditoría de Entry</h5>
-                    <div class="small text-muted">El Entry se juzga por mercado y muestra verificable. Futures usa una vara más estricta que Spot.</div>
+                    <h5 class="mb-1"><i class="fas fa-crosshairs me-2 text-success"></i>Calidad de las entradas</h5>
+                    <div class="small text-muted">Cada entrada se evalúa por mercado y con resultados verificables. Futures exige mayor precisión que Spot.</div>
                 </div>
-                <span class="badge bg-dark border border-success text-success">Calidad y precisión del Entry</span>
+                <span class="badge bg-dark border border-success text-success">Calidad y precisión de entrada</span>
             </div>
             <div class="row g-2">
                 <div class="col-xl-6">
                     <div class="v1-simple-card h-100">
                         <div class="d-flex justify-content-between align-items-center mb-2">
-                            <div class="fw-semibold">Futures · Entry operativo</div>
+                            <div class="fw-semibold">Futures · Entrada operativa</div>
                             <span class="badge bg-warning text-dark">mayor precisión</span>
                         </div>
                         <div class="row g-2 small">
                             <div class="col-4"><span class="text-muted">Muestra</span><div class="fw-semibold" id="v1-entry-fut-n">--</div></div>
-                            <div class="col-4"><span class="text-muted">Entry tocado</span><div class="fw-semibold" id="v1-entry-fut-reach">--</div></div>
-                            <div class="col-4"><span class="text-muted">SL inmediato</span><div class="fw-semibold" id="v1-entry-fut-direct-stop">--</div></div>
-                            <div class="col-6"><span class="text-muted">MFE medio</span><div class="fw-semibold" id="v1-entry-fut-mfe">--</div></div>
-                            <div class="col-6"><span class="text-muted">MAE medio</span><div class="fw-semibold" id="v1-entry-fut-mae">--</div></div>
+                            <div class="col-4"><span class="text-muted">Entrada alcanzada</span><div class="fw-semibold" id="v1-entry-fut-reach">--</div></div>
+                            <div class="col-4"><span class="text-muted">Stop casi inmediato</span><div class="fw-semibold" id="v1-entry-fut-direct-stop">--</div></div>
+                            <div class="col-6"><span class="text-muted">Mejor avance tras entrar</span><div class="fw-semibold" id="v1-entry-fut-mfe">--</div></div>
+                            <div class="col-6"><span class="text-muted">Peor movimiento contra la entrada</span><div class="fw-semibold" id="v1-entry-fut-mae">--</div></div>
                         </div>
                         <div class="small text-muted mt-2" id="v1-entry-fut-note">Esperando evidencia verificable.</div>
                     </div>
                 </div>
                 <div class="col-xl-6">
                     <div class="v1-simple-card h-100">
-                        <div class="fw-semibold mb-2">Spot · Entry operativo</div>
+                        <div class="fw-semibold mb-2">Spot · Entrada operativa</div>
                         <div class="row g-2 small">
                             <div class="col-4"><span class="text-muted">Muestra</span><div class="fw-semibold" id="v1-entry-spot-n">--</div></div>
-                            <div class="col-4"><span class="text-muted">Entry tocado</span><div class="fw-semibold" id="v1-entry-spot-reach">--</div></div>
-                            <div class="col-4"><span class="text-muted">SL inmediato</span><div class="fw-semibold" id="v1-entry-spot-direct-stop">--</div></div>
-                            <div class="col-6"><span class="text-muted">MFE medio</span><div class="fw-semibold" id="v1-entry-spot-mfe">--</div></div>
-                            <div class="col-6"><span class="text-muted">MAE medio</span><div class="fw-semibold" id="v1-entry-spot-mae">--</div></div>
+                            <div class="col-4"><span class="text-muted">Entrada alcanzada</span><div class="fw-semibold" id="v1-entry-spot-reach">--</div></div>
+                            <div class="col-4"><span class="text-muted">Stop casi inmediato</span><div class="fw-semibold" id="v1-entry-spot-direct-stop">--</div></div>
+                            <div class="col-6"><span class="text-muted">Mejor avance tras entrar</span><div class="fw-semibold" id="v1-entry-spot-mfe">--</div></div>
+                            <div class="col-6"><span class="text-muted">Peor movimiento contra la entrada</span><div class="fw-semibold" id="v1-entry-spot-mae">--</div></div>
                         </div>
                         <div class="small text-muted mt-2" id="v1-entry-spot-note">Spot se audita por separado.</div>
                     </div>
@@ -1199,11 +1199,11 @@
                             <strong class="h5" id="lo-direct-stop">--</strong>
                         </div>
                         <div class="col-6 col-lg-3">
-                            <div class="text-muted small">MFE medio</div>
+                            <div class="text-muted small">Mejor avance tras entrar</div>
                             <strong id="lo-mfe">--</strong>
                         </div>
                         <div class="col-6 col-lg-3">
-                            <div class="text-muted small">MAE medio</div>
+                            <div class="text-muted small">Peor movimiento contra la entrada</div>
                             <strong id="lo-mae">--</strong>
                         </div>
                         <div class="col-6 col-lg-3">
@@ -1585,11 +1585,11 @@
         </div> <!-- /legacy-analytics-section -->
 
         <!-- ============ COMMIT 16: RESEARCH FEDERATION / SHADOW LIVE ============ -->
-        <div class="chart-container" id="research-federation-analytics">
+        <div class="chart-container v1-advanced" id="research-federation-analytics">
             <div class="d-flex justify-content-between align-items-center mb-2">
                 <div>
-                    <h5 class="mb-1"><i class="fas fa-flask me-2 text-info"></i>Evidencia externa · Research Federation</h5>
-                    <div class="text-muted small">Discovery → Selection Holdout → OOS final → Shadow live. Commit J fusiona evidencia sin mezclar muestras.</div>
+                    <h5 class="mb-1"><i class="fas fa-flask me-2 text-info"></i>Investigación histórica de estrategias</h5>
+                    <div class="text-muted small">Discovery → Selection Holdout → OOS final → Pruebas sin operar. Commit J fusiona evidencia sin mezclar muestras.</div>
                 </div>
                 <button class="btn btn-outline-info btn-sm" id="rf-analytics-refresh">Refrescar</button>
             </div>
@@ -1597,7 +1597,7 @@
             <div id="rf-analytics-coverage" class="small text-muted mb-2">Comprobando cobertura 4H · 12H · 1D · 1W...</div>
             <div class="table-responsive v1-advanced" style="max-height:420px;overflow:auto">
                 <table class="table table-dark table-sm table-hover align-middle">
-                    <thead><tr><th>Estado</th><th>Motor / experimento</th><th>Mercado · TF</th><th>Backtest N / WR / Exp.R</th><th>OOS N / WR / Exp.R / PF</th><th>Shadow live N / WR / Exp.R / PF</th><th>Safety</th></tr></thead>
+                    <thead><tr><th>Estado</th><th>Motor / experimento</th><th>Mercado · TF</th><th>Backtest N / WR / Exp.R</th><th>OOS N / WR / Exp.R / PF</th><th>Pruebas sin operar N / WR / Exp.R / PF</th><th>Safety</th></tr></thead>
                     <tbody id="rf-analytics-body"><tr><td colspan="7" class="text-muted text-center">Cargando evidencia...</td></tr></tbody>
                 </table>
             </div>
@@ -1652,6 +1652,6 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI"></script>
-    <script src="{{ url_for('static', filename='analytics.js') }}?v=20260918-RC9-7-COLDSTART"></script>
+    <script src="{{ url_for('static', filename='analytics.js') }}?v=20260918-RC9-7-4-SIMPLE-FINAL"></script>
 </body>
 </html>

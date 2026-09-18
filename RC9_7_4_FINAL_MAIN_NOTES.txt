@@ -1,0 +1,25 @@
+RC9.7.4 FINAL MAIN FREEZE
+=========================
+
+Goal: close development and leave the system collecting evidence.
+
+Final changes
+- Futures lifecycle made unambiguous:
+  * "Nuevas señales confirmadas" = signals born on the latest closed candle.
+  * "Señales vigentes" = older confirmed signals whose Entry lifecycle is still open.
+  * The same signal_id is not rendered in both lists at the same time.
+  * After Entry is touched, the UI no longer shows the Entry-expiry countdown.
+- Analytics default view simplified for a normal user. Internal names/jargon remain hidden in the technical DOM/report, not in the normal screen.
+- Learning PDF wording updated to the current Opportunity Capture V2 and modeled-cost architecture.
+- Fresh-Supabase saved_signals schema now includes the full persistence contract that Main actually writes.
+- No Safety, leverage, Entry, SL, TP, Guardian or profitability thresholds were relaxed.
+
+Database
+- If RC9_7_3_SAVED_SIGNALS_SCHEMA_HOTFIX.sql was already run successfully, no new DB migration is required.
+- Otherwise run schema_rc9_7_4_saved_signals_contract.sql once.
+
+Expected after deploy
+- New confirmed Futures signals appear only in the new-confirmation list.
+- Older still-valid signals move to the active/vigency list on the next candle.
+- Saved signals remain personal tracking records.
+- Analytics normal view shows plain-language status only.

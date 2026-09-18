@@ -2078,17 +2078,17 @@
                 <!-- NUEVO: SEÑALES ACTIVAS EN EL SISTEMA -->
                 <div class="card bg-dark border-success mb-4">
                     <div class="card-header signal-header-active d-flex justify-content-between align-items-center">
-                        <h5 class="mb-0"><i class="fas fa-bell me-2"></i>Señales Activas</h5>
+                        <h5 class="mb-0"><i class="fas fa-bell me-2"></i>Señales vigentes</h5>
                         <span class="badge bg-dark" id="active-signals-count">0</span>
                     </div>
                     <div class="card-body p-0">
                         <div class="list-group list-group-flush bg-dark" id="active-signals-list">
                             <div class="list-group-item bg-dark text-muted text-center py-3">
-                                Cargando señales activas...
+                                Cargando señales vigentes...
                             </div>
                         </div>
                         <div class="p-2 text-center">
-                            <small class="text-muted">Click en cualquier señal para cambiar a ese par/temporalidad</small>
+                            <small class="text-muted">Confirmaciones de cierres anteriores que aún esperan entrada o siguen en seguimiento.</small>
                         </div>
                     </div>
                 </div>
@@ -2097,7 +2097,7 @@
                     <div class="card-header signal-header-previous d-flex justify-content-between align-items-center">
                         <h5 class="mb-0">
                             <i class="fas fa-history me-2"></i>
-                            Señales de la Vela Anterior
+                            Nuevas señales confirmadas
                         </h5>
                         <span class="badge bg-dark" id="prev-signals-count">0</span>
                     </div>
@@ -2105,11 +2105,11 @@
                         <div class="list-group list-group-flush bg-dark" id="prev-signals-list">
                             <div class="list-group-item bg-dark text-muted text-center py-3">
                                 <div class="spinner-border spinner-border-sm text-warning me-2"></div>
-                                Cargando señales anteriores...
+                                Cargando nuevas confirmaciones...
                             </div>
                         </div>
                         <div class="p-2 text-center">
-                            <small class="text-muted">Click en cualquier señal para ver justificación</small>
+                            <small class="text-muted">Sólo muestra señales nacidas del último cierre confirmado. Click para ver justificación.</small>
                         </div>
                     </div>
                 </div>
@@ -2165,7 +2165,7 @@
                         <div class="list-group list-group-flush bg-dark" id="saved-signals-list">
                             <div class="list-group-item bg-dark text-muted text-center py-3">
                                 <i class="fas fa-info-circle me-1"></i>
-                                Aún no has guardado ninguna señal. Ábrelas desde "Señales de la Vela Anterior" y usa el botón GUARDAR.
+                                Aún no has guardado ninguna señal. Ábrela desde "Nuevas señales confirmadas" y usa GUARDAR.
                             </div>
                         </div>
                         <div class="p-2 text-center">
@@ -2181,7 +2181,7 @@
                             <div class="modal-header">
                                 <h5 class="modal-title">
                                     <i class="fas fa-history me-2 text-warning"></i>
-                                    Justificación de Señal Anterior
+                                    Justificación de señal confirmada
                                 </h5>
                                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
                             </div>
@@ -2189,7 +2189,7 @@
                                 <div id="prev-signal-details">
                                     <div class="text-center py-4">
                                         <div class="spinner-border text-warning"></div>
-                                        <p class="mt-3">Cargando justificación...</p>
+                                        <p class="mt-3">Cargando justificación de la señal...</p>
                                     </div>
                                 </div>
                             </div>
@@ -2601,7 +2601,7 @@
 
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI-2"></script>
     <script
-        src="{{ url_for('static', filename='script.js') }}?v=20260918-RC9-7-2-FUTURES-PERSISTENCE"
+        src="{{ url_for('static', filename='script.js') }}?v=20260918-RC9-7-4-FINAL-FREEZE"
     ></script>
 
 
@@ -2612,7 +2612,7 @@
     {% if is_futures %}
 
     <script
-        src="{{ url_for('static', filename='futures.js') }}?v=20260918-RC9-7-2-FUTURES-PERSISTENCE"
+        src="{{ url_for('static', filename='futures.js') }}?v=20260918-RC9-7-4-FINAL-FREEZE"
     ></script>
 
     {% endif %}

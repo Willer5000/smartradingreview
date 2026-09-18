@@ -764,7 +764,7 @@ window.loadGlobalStats = async function() {
 
 
 // ============================================================================
-// SOBREESCRIBIR: updateActiveSignals (vela ACTUAL — dinámica)
+// SEÑALES VIGENTES: confirmaciones anteriores cuyo ciclo sigue abierto
 // ============================================================================
 // Solo se ejecuta si estamos en /futures. Usa /api/futures/signals/active
 // que retorna SOLO las 5 cripto × 6 TF × LONG/SHORT
@@ -827,7 +827,7 @@ window.updateActiveSignals = async function() {
     signalsList.innerHTML = `
         <div class="list-group-item bg-dark text-info text-center py-3">
             <div class="spinner-border spinner-border-sm me-2"></div>
-            Consultando servidor de Futuros...
+            Consultando señales vigentes...
         </div>
     `;
 
@@ -1024,8 +1024,7 @@ window.updateActiveSignals = async function() {
                     <br>
 
                     <small>
-                        No hay señales LONG/SHORT que superen
-                        los filtros actuales.
+                        No hay señales vigentes de cierres anteriores en este momento.
                         ${
                             filterStats
                                 ? `
@@ -1127,7 +1126,7 @@ window.updateActiveSignals = async function() {
                             mt-1
                         "
                     >
-                        ⏳ Esperando que el precio toque Entry · vigente por:
+                        ⏳ Esperando que el precio toque la entrada · vigente por:
                         <strong>
                             ${validityText}
                         </strong>
@@ -1138,8 +1137,7 @@ window.updateActiveSignals = async function() {
 
                 validityHtml = `
                     <div class="small text-info mt-1">
-                        📍 Entry tocado: operación en seguimiento ·
-                        <strong>${validityText}</strong> restantes
+                        📍 Entrada alcanzada · seguimiento hasta objetivo, stop o cierre
                     </div>
                 `;
 
@@ -1437,7 +1435,7 @@ window.updatePreviousSignals = async function() {
 
             <div class="spinner-border spinner-border-sm me-2"></div>
 
-            Consultando vela anterior...
+            Consultando último cierre confirmado...
 
         </div>
     `;
@@ -1588,7 +1586,7 @@ window.updatePreviousSignals = async function() {
                     <div class="spinner-border spinner-border-sm me-2"></div>
 
                     <strong>
-                        Analizando vela anterior:
+                        Analizando último cierre:
                         ${completed}/${total}
                     </strong>
 
@@ -1666,9 +1664,7 @@ window.updatePreviousSignals = async function() {
                 }`;
         
             signalsCount.title =
-                `${activeCount} señal(es) `
-                + 'de vela anterior '
-                + 'todavía vigente(s)';
+                `${activeCount} nueva(s) señal(es) confirmada(s) en el último cierre`;
         }
 
         // ------------------------------------------------------------
@@ -1686,8 +1682,7 @@ window.updatePreviousSignals = async function() {
                     <br>
 
                     <small>
-                        No hay señales LONG/SHORT ejecutables
-                        para la vela anterior.
+                        No hay nuevas señales confirmadas en el último cierre.
                     </small>
 
                     ${filterStats ? `
@@ -1753,9 +1748,12 @@ window.updatePreviousSignals = async function() {
                 sig.roi_sl == null ? null : Number(sig.roi_sl);
 
             let statusBadge =
-                '<span class="badge bg-warning text-dark">⏱️ Activa</span>';
+                '<span class="badge bg-warning text-dark">✅ Nueva confirmada</span>';
 
-            if (
+            if (sig.lifecycle_status === 'entry_touched') {
+                statusBadge =
+                    '<span class="badge bg-info text-dark">📍 Entrada alcanzada</span>';
+            } else if (
                 sig.resultado === 'tp_hit'
             ) {
 
@@ -1911,7 +1909,7 @@ window.updatePreviousSignals = async function() {
             <div class="list-group-item bg-dark text-danger text-center py-3">
 
                 <strong>
-                    ❌ No se pudo consultar la vela anterior
+                    ❌ No se pudo consultar el último cierre confirmado
                 </strong>
 
                 <br>

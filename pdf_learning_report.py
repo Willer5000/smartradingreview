@@ -4472,11 +4472,12 @@ def generate_learning_pdf() -> bytes:
     # ============ 9. OPORTUNIDADES PERDIDAS - ANÁLISIS DE INDICADORES ============
     story.append(Paragraph("Análisis de oportunidades perdidas", style_h2))
     story.append(Paragraph(
-        f"Se han detectado <b>{missed_analysis['total']}</b> oportunidades perdidas — "
-        f"casos donde el sistema decidió NO_OPERAR pero el precio se movió >2% en una "
-        f"dirección clara. La tabla histórica no identifica de forma fiable Spot/Futuros "
-        f"ni demuestra que la entrada hubiese sido ejecutable. Por eso se usa sólo para "
-        f"formular hipótesis y no para subir pesos automáticamente.",
+        f"El registro histórico heredado contiene <b>{missed_analysis['total']}</b> casos marcados como "
+        f"oportunidad no tomada. Ese contador antiguo usaba movimiento posterior como pista y no prueba "
+        f"por sí solo que una entrada hubiese sido ejecutable. La instrumentación actual (Opportunity Capture V2) "
+        f"evalúa, cuando existe geometría persistida, Entry, orden TP/SL y excursiones favorables/adversas antes de "
+        f"clasificar una abstención como defendible, no ejecutable u oportunidad realmente perdida. Ninguna de estas "
+        f"observaciones modifica automáticamente Safety, Entry, SL, TP o leverage.",
         style_body
     ))
     
@@ -4580,10 +4581,11 @@ def generate_learning_pdf() -> bytes:
         f"Separa Backtest/OOS de LIVE/Shadow y reduce autoridad cuando detecta deterioro."
         f"<br/>• Las estrategias Default, Champions Research y tesis autónomas se atribuyen por "
         f"mercado, símbolo/grupo, temporalidad y acción; ninguna evidencia histórica salta Safety."
-        f"<br/>• Las 'oportunidades perdidas' se registran para futura calibración pero "
-        f"aún no ajustan automáticamente las decisiones — es información para el operador humano."
-        f"<br/>• El PnL de este informe es bruto. Comisión, slippage y funding se "
-        f"incorporarán en la siguiente fase económica.",
+        f"<br/>• Las oportunidades no tomadas se auditan con geometría Entry/SL/TP y MFE/MAE cuando está disponible; "
+        f"siguen siendo evidencia para calibración y no ajustan automáticamente una decisión."
+        f"<br/>• El sistema ya modela comisión, slippage y funding cuando dispone de cobertura suficiente. "
+        f"El PnL bruto se mantiene separado y la autoridad positiva exige evidencia neta verificable; los costes "
+        f"realizados del exchange sólo se consideran reales cuando existe una fuente de ejecución verificable.",
         style_body
     ))
     

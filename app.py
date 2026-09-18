@@ -34419,11 +34419,11 @@ def _build_futures_analysis_visibility(cache, min_confidence):
 
 
 # ============================================================================
-# ENDPOINT: Señales LONG/SHORT ACTIVAS (ciclo de vida persistente)
+# ENDPOINT: Señales VIGENTES (ciclo de vida persistente, excluye nuevas confirmadas)
 # ============================================================================
 @app.route('/api/futures/signals/active')
 def api_futures_signals_active():
-    """Señales cerradas que aún esperan Entry o ya tocaron Entry."""
+    """Señales confirmadas de cierres anteriores cuyo ciclo sigue abierto."""
     try:
         min_conf = int(request.args.get('min_confidence', 60))
 
@@ -34434,10 +34434,32 @@ def api_futures_signals_active():
             min_confidence=min_conf
         )
 
+        # RC9.7.4 final lifecycle contract:
+        # - /previous = newly confirmed setup from the latest CLOSED candle.
+        # - /active   = older confirmed setup whose lifecycle is still open.
+        # A fresh confirmation must not be rendered twice as if it were two
+        # different opportunities. It moves to /active only after a newer
+        # candle replaces it in the canonical analysis snapshot.
+        fresh_confirmed_ids = set()
+        for (_symbol, _tf), _latest in (cache.get('analysis') or {}).items():
+            if not isinstance(_latest, dict) or not _latest.get('success'):
+                continue
+            _decision = _latest.get('decision') or {}
+            _levels = _latest.get('levels') or {}
+            _action = str(_decision.get('action') or '').upper()
+            _publication = str(
+                _levels.get('publication_status')
+                or ('ANALYSIS_ONLY' if _levels.get('is_rejected') else 'EXECUTABLE_SIGNAL')
+            )
+            _signal_id = str(_latest.get('signal_id') or '')
+            if _signal_id and _action in ('LONG', 'SHORT') and _publication == 'EXECUTABLE_SIGNAL':
+                fresh_confirmed_ids.add(_signal_id)
+
         active_signals = []
         filter_stats = {
             'total_processed': 0,
             'not_active': 0,
+            'new_confirmation': 0,
             'outside_active_contract': 0,
             'low_confidence': 0,
             'invalid_levels': 0,
@@ -34456,6 +34478,9 @@ def api_futures_signals_active():
             )
             if lifecycle_status not in ('waiting_entry', 'entry_touched'):
                 filter_stats['not_active'] += 1
+                continue
+            if str(signal_id) in fresh_confirmed_ids:
+                filter_stats['new_confirmation'] += 1
                 continue
 
             symbol = record.get('symbol')
@@ -34493,19 +34518,24 @@ def api_futures_signals_active():
             except Exception:
                 pass
 
-            tiempo_restante = 0
-            try:
-                valid_until = pd.Timestamp(record.get('valid_until'))
-                if valid_until.tz is None:
-                    valid_until = valid_until.tz_localize('UTC')
-                else:
-                    valid_until = valid_until.tz_convert('UTC')
-                tiempo_restante = int(max(
-                    0,
-                    (valid_until - pd.Timestamp.now(tz='UTC')).total_seconds()
-                ))
-            except Exception:
-                pass
+            # ``valid_until`` limits only how long we wait for Entry. Once
+            # Entry is touched the trade lifecycle continues until TP/SL/manual
+            # close and must not display a misleading entry-expiry countdown.
+            tiempo_restante = None
+            if lifecycle_status == 'waiting_entry':
+                tiempo_restante = 0
+                try:
+                    valid_until = pd.Timestamp(record.get('valid_until'))
+                    if valid_until.tz is None:
+                        valid_until = valid_until.tz_localize('UTC')
+                    else:
+                        valid_until = valid_until.tz_convert('UTC')
+                    tiempo_restante = int(max(
+                        0,
+                        (valid_until - pd.Timestamp.now(tz='UTC')).total_seconds()
+                    ))
+                except Exception:
+                    pass
 
             filter_stats['accepted'] += 1
             active_signals.append({
@@ -34652,7 +34682,7 @@ def api_futures_signals_active():
 
 
 # ============================================================================
-# ENDPOINT: Señales de la VELA ANTERIOR (estáticas)
+# ENDPOINT: NUEVAS señales confirmadas por la última vela cerrada
 # ============================================================================
 @app.route('/api/futures/debug')
 def api_futures_debug():
@@ -34767,8 +34797,10 @@ def api_futures_signals_previous():
     """
     Setup nacido de la última vela cerrada de cada símbolo/timeframe.
 
-    /previous lee el análisis canónico de la vela. /active, en cambio, lee
-    registros persistentes cuyo ciclo de vida sigue abierto.
+    /previous = nueva confirmación del cierre más reciente.
+    /active = confirmaciones anteriores que todavía esperan Entry o siguen
+    abiertas tras tocar Entry. La interfaz no debe presentarlas como señales
+    diferentes cuando comparten el mismo signal_id.
     """
     try:
         min_conf = int(request.args.get('min_confidence', 55))

@@ -818,6 +818,36 @@ CREATE INDEX IF NOT EXISTS idx_saved_signals_status ON saved_signals(status);
 CREATE INDEX IF NOT EXISTS idx_saved_signals_symbol_tf ON saved_signals(symbol, timeframe);
 CREATE INDEX IF NOT EXISTS idx_saved_signals_created ON saved_signals(created_at DESC);
 -- ============================================================================
+-- RC9.7.4 FINAL — CONTRATO COMPLETO DE SAVED FUTURES
+-- ============================================================================
+-- RC9.7.3 — saved_signals contract completion for fresh Supabase
+-- Safe/idempotent. Does not delete or overwrite trading data.
+
+ALTER TABLE public.saved_signals
+    ADD COLUMN IF NOT EXISTS user_name TEXT,
+    ADD COLUMN IF NOT EXISTS execution_origin TEXT NOT NULL DEFAULT 'SYSTEM_EXECUTABLE',
+    ADD COLUMN IF NOT EXISTS risk_class TEXT NOT NULL DEFAULT 'PREMIUM',
+    ADD COLUMN IF NOT EXISTS system_executable BOOLEAN NOT NULL DEFAULT TRUE,
+    ADD COLUMN IF NOT EXISTS engine_publication_status TEXT,
+    ADD COLUMN IF NOT EXISTS execution_safety_at_save NUMERIC,
+    ADD COLUMN IF NOT EXISTS execution_safety_minimum_at_save NUMERIC,
+    ADD COLUMN IF NOT EXISTS original_risk_reward NUMERIC,
+    ADD COLUMN IF NOT EXISTS source_signal_id TEXT,
+    ADD COLUMN IF NOT EXISTS source_context TEXT,
+    ADD COLUMN IF NOT EXISTS manual_override_ack BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS original_rejection_reason TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_saved_signals_user_status_created
+ON public.saved_signals(user_name, status, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_saved_signals_source_signal_id
+ON public.saved_signals(source_signal_id)
+WHERE source_signal_id IS NOT NULL;
+
+-- Ask PostgREST to refresh its schema cache immediately.
+NOTIFY pgrst, 'reload schema';
+
+-- ============================================================================
 -- COMMIT 36Q
 -- GUARDIAN LEARNING EVENT LEDGER
 -- ============================================================================

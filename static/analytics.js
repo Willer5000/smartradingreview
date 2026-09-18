@@ -1346,11 +1346,11 @@ function updateV1ReviewTraderNote() {
     const scientist = (window.__v1LastAnalytics || {}).ai_learning_runtime || {};
     const scientistState = String(scientist.status || '').toUpperCase();
     const scientistText = scientistState && scientistState !== 'DONE'
-        ? ` · Científico ${scientistState}`
+        ? ` · IA ${scientistStatusLabel(scientistState)}`
         : '';
     v1Set(
         'v1-reviewtrader-note',
-        `Backtest/OOS primario · Champions activos ${stats.championCount}/${RF96_RESEARCH_TARGET} · OOS+ activos ${stats.oosPositive} · Prioridad Research: 30m/1h/2h + Spot 4h/12h · Safety intacto · LIVE/Shadow confirma continuidad/alpha decay${scientistText}`
+        `Pruebas históricas activas ${stats.championCount}/${RF96_RESEARCH_TARGET} · con ventaja positiva ${stats.oosPositive} · prioridad: 30m/1h/2h y Spot 4h/12h · seguridad intacta · los resultados recientes comprueban si la ventaja sigue vigente${scientistText}`
     );
 }
 
@@ -1377,8 +1377,8 @@ function renderV1EntryAudit(data) {
         const note = document.getElementById(`${prefix}-note`);
         if (note) {
             note.textContent = stricter
-                ? 'Futures exige más precisión: vela cerrada, Entry real, MAE/MFE y estructura; no se mezcla entre símbolos ni TF.'
-                : 'Spot se evalúa aparte; el aprendizaje no concede autoridad a Futures ni a otra celda.';
+                ? 'Futures exige más precisión: vela cerrada, entrada real, comportamiento posterior y estructura; cada símbolo y temporalidad se evalúan por separado.'
+                : 'Spot se evalúa por separado; sus resultados no autorizan decisiones de Futures ni de otro mercado.';
         }
     };
 
@@ -1780,7 +1780,7 @@ async function loadLearningGovernanceStatus() {
             if (simpleScientistNote) {
                 const runtimeError = String(scheduler.runtime_error || json.data?.scheduler_runtime?.last_error || '').trim();
                 simpleScientistNote.textContent = schedulerAt === '--'
-                    ? (runtimeError ? `Error: ${runtimeError}` : 'Sin intento persistido todavía; watchdog independiente en espera.')
+                    ? (runtimeError ? `Error: ${runtimeError}` : 'Todavía no hay un ciclo de investigación registrado.')
                     : `Último intento: ${formatDate(schedulerAt)}${lastText !== '--' ? ` · último éxito: ${formatDate(lastText)}` : ''}${runtimeError ? ` · ${runtimeError}` : ''}`;
             }
         }
@@ -1790,7 +1790,7 @@ async function loadLearningGovernanceStatus() {
             const state = String(d.status || 'NO_DATA').toUpperCase();
             q5SetText('v1-trader-ai-health', state === 'ACTIVE' ? 'ACTIVO' : state === 'WAITING_EVENT' ? 'ESPERANDO' : uiHumanLabel(state));
             const last = d.last_event || {};
-            q5SetText('v1-trader-ai-note', `24h: ${Number(d.total_recent||0)} revisiones · ${Number(d.blocked_signals_recent||0)} bloqueos · ${Number(d.guardian_interventions_recent||0)} Guardian${last.updated_at ? ` · último ${formatDate(last.updated_at)}` : ''}`);
+            q5SetText('v1-trader-ai-note', `24h: ${Number(d.total_recent||0)} revisiones · ${Number(d.blocked_signals_recent||0)} bloqueos · ${Number(d.guardian_interventions_recent||0)} protecciones${last.updated_at ? ` · último ${formatDate(last.updated_at)}` : ''}`);
         }
 
         if (kind === 'telegram' && json.success) {
@@ -1983,8 +1983,8 @@ async function loadQualityV2() {
                 if (note) note.textContent = `N ${Number((cohort || {}).total_directional || 0)} · esperando resultados`;
                 return;
             }
-            el.textContent = `WR ${q5FormatUnsignedPct(cohort.win_rate,1)} · PnL ${q5FormatSignedPct(cohort.pnl_total_pct,2)}`;
-            if (note) note.textContent = `Resueltas ${resolved} · Exp ${q5FormatSignedR(cohort.expectancy_r,3)} · PF ${q5FormatNumber(cohort.profit_factor,2)}`;
+            el.textContent = `Acierto ${q5FormatUnsignedPct(cohort.win_rate,1)} · Resultado ${q5FormatSignedPct(cohort.pnl_total_pct,2)}`;
+            if (note) note.textContent = `Resueltas ${resolved} · resultado medio ${q5FormatSignedR(cohort.expectancy_r,3)} · relación ganancia/pérdida ${q5FormatNumber(cohort.profit_factor,2)}`;
         };
         renderSimpleLive('v1-spot-live','v1-spot-live-note',spot);
         renderSimpleLive('v1-futures-live','v1-futures-live-note',futures);
@@ -2976,22 +2976,22 @@ async function loadResearchFederationAnalytics(){
         if(shadowBt) shadowBt.innerHTML=renderBt(profitability.futures_evaluation,'Sin challengers causales disponibles.');
         const simpleCoverage=document.getElementById('v1-coverage');
         const simpleCoverageNote=document.getElementById('v1-coverage-note');
-        if(simpleCoverage) simpleCoverage.textContent=`${activeChampionCount}/${RF96_RESEARCH_TARGET} con Champion · ${activePending} pendientes`;
-        if(simpleCoverageNote) simpleCoverageNote.textContent=`OOS+ en contrato activo ${rf96Stats.oosPositive} · Champions Legacy fuera del contrato se conservan, pero no llenan las 60 celdas nuevas.`;
+        if(simpleCoverage) simpleCoverage.textContent=`${activeChampionCount}/${RF96_RESEARCH_TARGET} validadas · ${activePending} pendientes`;
+        if(simpleCoverageNote) simpleCoverageNote.textContent=`Con ventaja histórica positiva ${rf96Stats.oosPositive} · las pruebas antiguas se conservan como referencia, pero no cuentan para la cobertura nueva.`;
         const simpleBucket=(id,noteId,bucket)=>{
             const el=document.getElementById(id), note=document.getElementById(noteId);
             if(!el) return;
-            if(!bucket || bucket.state==='NO_EVIDENCE'){ el.textContent='Sin evidencia'; if(note) note.textContent='Research continúa buscando edge.'; return; }
+            if(!bucket || bucket.state==='NO_EVIDENCE'){ el.textContent='Sin evidencia'; if(note) note.textContent='La investigación continúa buscando una ventaja estadística.'; return; }
             const wr=bucket.oos_wr_weighted==null?'--':`${fmt(bucket.oos_wr_weighted,1)}%`;
             const pnl=bucket.oos_total_r==null?'--':`${Number(bucket.oos_total_r)>=0?'+':''}${fmt(bucket.oos_total_r,2)}R`;
-            el.textContent=`WR ${wr} · PnL ${pnl}`;
-            if(note) note.textContent=`${Number(bucket.validated_strategies||0)}/${Number(bucket.cells||0)} validadas · OOS N ${Number(bucket.oos_n||0)} · Exp ${fmt(bucket.oos_exp_r_weighted,3)}R`;
+            el.textContent=`Acierto ${wr} · Resultado ${pnl}`;
+            if(note) note.textContent=`${Number(bucket.validated_strategies||0)}/${Number(bucket.cells||0)} validadas · pruebas ${Number(bucket.oos_n||0)} · resultado medio ${fmt(bucket.oos_exp_r_weighted,3)}R`;
         };
         simpleBucket('v1-spot-oos','v1-spot-oos-note',profitability.spot);
         simpleBucket('v1-futures-oos','v1-futures-oos-note',profitability.futures_official);
         const simpleShadow=document.getElementById('v1-shadow'), simpleShadowNote=document.getElementById('v1-shadow-note');
-        if(simpleShadow) simpleShadow.textContent=`${Number(profitability.shadow_live_candidates||0)}/${Number(profitability.shadow_ready_cells||profitability.validated_cells||0)} con actividad`;
-        if(simpleShadowNote) simpleShadowNote.textContent=`Señales ${Number(profitability.shadow_live_signals||0)} · resueltas ${Number(profitability.shadow_live_resolved||0)} · esperando mercado ${Number(profitability.shadow_waiting_market||0)} · errores de tracking ${Number(profitability.shadow_tracking_errors||0)} · reciclar ${Number(profitability.recycle_required_cells||0)}`;
+        if(simpleShadow) simpleShadow.textContent=`${Number(profitability.shadow_live_candidates||0)}/${Number(profitability.shadow_ready_cells||profitability.validated_cells||0)} en seguimiento`;
+        if(simpleShadowNote) simpleShadowNote.textContent=`Casos ${Number(profitability.shadow_live_signals||0)} · resueltos ${Number(profitability.shadow_live_resolved||0)} · esperando mercado ${Number(profitability.shadow_waiting_market||0)} · seguimiento pendiente ${Number(profitability.shadow_tracking_errors||0)} · requieren nueva validación ${Number(profitability.recycle_required_cells||0)}`;
         // RC2: tabla comprensible de continuidad LIVE/OOS.
         const setOosRow=(prefix,bucket)=>{
             v1Set(`v1-op-${prefix}-oos-n`, Number(bucket?.oos_n||0).toLocaleString());
@@ -3000,7 +3000,7 @@ async function loadResearchFederationAnalytics(){
             const validated=Number(bucket?.validated_strategies||0);
             const liveResolved=Number(bucket?.shadow_resolved||0);
             const recycle=Number(bucket?.recycle_required||0);
-            const state = recycle>0 ? '♻️ RECICLAR' : liveResolved>0 ? '🟢 LIVE EN CURSO' : validated>0 ? '⏳ ESPERANDO LIVE' : '🔎 BUSCANDO EDGE';
+            const state = recycle>0 ? '⚠️ REVALIDAR' : liveResolved>0 ? '🟢 RESULTADOS EN CURSO' : validated>0 ? '⏳ ESPERANDO RESULTADOS' : '🔎 BUSCANDO VENTAJA';
             v1Set(`v1-op-${prefix}-state`, state, `small ${recycle>0?'text-warning':validated>0?'text-info':'text-muted'}`);
         };
         setOosRow('spot', profitability.spot||{});
@@ -3024,10 +3024,10 @@ async function loadResearchFederationAnalytics(){
                 const certState=String(cert.certification_state||'SIN CERTIFICAR');
                 const certText=certState.includes('POSITIVE')?'🧩 Backtest histórico positivo · confirmar ejecución real':certState.includes('INCOMPLETE')?'🟡 Ejecución incompleta':'🔎 Pendiente';
                 const shadowState=String(row.shadow_state||'WAITING');
-                const status=row.recycle_required?'♻️ RECICLAR':shadowState==='CONFIRMED'?'✅ CONFIRMANDO':shadowState==='DIVERGED'||shadowState==='EARLY_DIVERGENCE'?'⚠️ DIVERGIENDO':signals>0?'👀 OBSERVANDO':String(row.shadow_diagnostic||'')==='WAITING_MARKET_SETUP'?'⏳ ESPERANDO MERCADO':'⚠️ REVISAR TRACKING';
+                const status=row.recycle_required?'⚠️ REVALIDAR':shadowState==='CONFIRMED'?'✅ CONFIRMANDO':shadowState==='DIVERGED'||shadowState==='EARLY_DIVERGENCE'?'⚠️ DIVERGIENDO':signals>0?'👀 OBSERVANDO':String(row.shadow_diagnostic||'')==='WAITING_MARKET_SETUP'?'⏳ ESPERANDO MERCADO':'⚠️ REVISAR TRACKING';
                 const waitReason=safe(row.shadow_wait_reason_es||'');
                 return `<tr><td>${row.symbol||'--'}</td><td>${row.timeframe||'--'}</td><td>${strategyCardHtml(row)}</td><td>${row.oos_wr==null?'--':fmt(row.oos_wr,1)+'%'}</td><td>${oosPnl==null?'--':(oosPnl>=0?'+':'')+fmt(oosPnl,2)+'R'}</td><td>${row.oos_pf==null?'--':fmt(row.oos_pf,2)}</td><td class="${guardianDelta==null?'text-muted':Number(guardianDelta)>=0?'text-success':'text-warning'}">${guardianDeltaText}</td><td class="small">${certText}</td><td>${resolved}/${signals}</td><td>${status}${waitReason?`<div class="text-muted small mt-1">${waitReason}</div>`:''}</td></tr>`;
-            }).join(''):'<tr><td colspan="10" class="text-muted text-center">Aún no hay especialistas que hayan superado el OOS Guard.</td></tr>';
+            }).join(''):'<tr><td colspan="10" class="text-muted text-center">Aún no hay estrategias que hayan superado todas las pruebas históricas requeridas.</td></tr>';
         }
         const covBody=document.getElementById('v1-coverage-matrix-body');
         if(covBody){
@@ -3049,7 +3049,7 @@ async function loadResearchFederationAnalytics(){
                 return `<tr><td>${label}</td><td>${ok}/${target}</td><td class="${ok===target?'text-success':ok>0?'text-info':'text-muted'}">${ok===target?'✅ Completa':ok>0?'🟡 Parcial':'🔎 Buscando'}</td></tr>`;
             }).join('');
         }
-        const coverageLabel = ` · Research 9.7 ${activeChampionCount}/${RF96_RESEARCH_TARGET} Champions activos · ${activePending} pendientes`;
+        const coverageLabel = ` · Investigación ${activeChampionCount}/${RF96_RESEARCH_TARGET} estrategias validadas · ${activePending} pendientes`;
         body.innerHTML=actionable.slice(0,80).map(x=>{const l=sm.get(x.candidate_key)||{};return `<tr>
           <td><span class="badge bg-secondary">${x.stage||'--'}</span></td>
           <td><b>${x.source_engine||'--'}</b><br><span class="text-muted small">${x.experiment||'--'}</span></td>
@@ -3060,7 +3060,7 @@ async function loadResearchFederationAnalytics(){
           <td>${fmt(l.avg_safety,1)}</td></tr>`}).join('') || `<tr><td colspan="7" class="text-muted text-center">${data.connected===false?'Research Bridge sin conexión':'Bridge conectado, pero todavía no hay filas visibles para esta cuenta/clave.'}</td></tr>`;
         const stages={}; activeCandidates.forEach(x=>stages[x.stage]=(stages[x.stage]||0)+1);
         const kp=document.getElementById('rf-analytics-kpis');
-        if(kp) kp.innerHTML=[['Contrato Research',`${activeChampionCount}/${RF96_RESEARCH_TARGET}`],['Champions activos',activeChampionCount],['OOS+ activos',rf96Stats.oosPositive],['Pendientes',activePending]].map(([k,v])=>`<div class="col-6 col-md-3"><div class="border rounded p-2 h-100"><div class="text-muted small">${k}</div><div class="h5 mb-0">${v}</div></div></div>`).join('');
+        if(kp) kp.innerHTML=[['Cobertura de pruebas',`${activeChampionCount}/${RF96_RESEARCH_TARGET}`],['Estrategias validadas',activeChampionCount],['Con ventaja positiva',rf96Stats.oosPositive],['Pendientes',activePending]].map(([k,v])=>`<div class="col-6 col-md-3"><div class="border rounded p-2 h-100"><div class="text-muted small">${k}</div><div class="h5 mb-0">${v}</div></div></div>`).join('');
     }catch(err){body.innerHTML=`<tr><td colspan="7" class="text-warning">${err.message}</td></tr>`;}
 }
 window.loadResearchFederationAnalytics=loadResearchFederationAnalytics;
