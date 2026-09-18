@@ -12,6 +12,7 @@ Commit 9.4 closes two old gaps:
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from futures_universe import all_symbols as _fut_all_symbols, risk_class_for as _fut_risk_class, exit_profile_for as _fut_exit_profile
 from typing import Any, Dict, List, Mapping
 
 VERSION = "COMMIT9_4_DEFAULT_STRATEGY_BANK_V1"
@@ -58,7 +59,7 @@ RC9_SUPPORTED = {
         "actions": ["COMPRA_SPOT", "VENTA_SPOT"],
     },
     "FUTURES": {
-        "symbols": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "ADA-USDT", "BNB-USDT", "LINK-USDT"],
+        "symbols": list(_fut_all_symbols()),
         "timeframes": ["30M", "1H", "2H", "4H", "12H", "1D"],
         "actions": ["LONG", "SHORT"],
     },
@@ -469,7 +470,7 @@ def coverage_matrix() -> Dict[str, Any]:
     for market,symbol,timeframe,action in cells:
         rows=[r for r in STRATEGIES if market in r.get("markets",[]) and symbol in r.get("symbols",[]) and timeframe in r.get("timeframes",[]) and action in r.get("actions",[])]
         if not rows: missing.append({"market":market,"symbol":symbol,"timeframe":timeframe,"action":action})
-    return {"ok":len(cells)==92 and not missing,"checked":len(cells),"missing":missing}
+    return {"ok":len(cells)==150 and not missing,"checked":len(cells),"missing":missing}
 
 
 def _choose_family(action: str, regime: str, vol_state: str, groups: Mapping[str, Any], symbol: str) -> str:
@@ -494,7 +495,7 @@ def _choose_family(action: str, regime: str, vol_state: str, groups: Mapping[str
     return "TREND_PULLBACK"
 
 
-def select_strategy(action: str, regime: str, vol_state: str, groups: Dict[str, Any], symbol: str="", timeframe: str="", market: str="") -> Dict[str, Any]:
+def select_strategy(action: str, regime: str, vol_state: str, groups: Dict[str, Any], symbol: str="", timeframe: str="", market: str="", preferred_family: str="") -> Dict[str, Any]:
     action=_u(action); regime=_u(regime) or "BALANCE"; vol_state=_u(vol_state) or "NORMAL"
     market=_u(market) or ("FUTURES" if action in {"LONG","SHORT"} else "SPOT"); symbol=_u(symbol); timeframe=_tf(timeframe)
     try:
@@ -507,6 +508,19 @@ def select_strategy(action: str, regime: str, vol_state: str, groups: Dict[str, 
     if not candidates:
         return {"id":"NO_PLAYBOOK","family":"NONE","quality":0.0,"confirmations":[],"indicators":[],"coverage_reason":"unsupported_cell"}
     family=_choose_family(action,regime,vol_state,groups,symbol)
+    risk_class = _fut_risk_class(symbol) if market == "FUTURES" else "SPOT"
+    advisory_family = _u(preferred_family)
+    if advisory_family and any(_u(r.get("family")) == advisory_family for r in candidates):
+        # Group Research only chooses which already-eligible playbook to test.
+        # Live indicator quality still decides whether it is usable.
+        family = advisory_family
+    # Commit 9.6: MEDIUM/HIGH favour quicker-resolution playbooks.  This changes
+    # eligibility/priority, never Safety or publication thresholds.
+    if market == "FUTURES":
+        if risk_class == "HIGH" and family == "MEAN_REVERSION":
+            family = "SWEEP_REVERSAL" if regime in {"BALANCE","RANGE","RANGING","TRANSITION"} else "BREAKOUT_RETEST"
+        elif risk_class == "HIGH" and family == "TREND_PULLBACK" and timeframe == "30M":
+            family = "BREAKOUT_RETEST"
     preferred=[r for r in candidates if _u(r.get("family"))==family]
     chosen=preferred[0] if preferred else candidates[0]
     side=1 if action in {"LONG","COMPRA_SPOT"} else -1
@@ -528,7 +542,7 @@ def select_strategy(action: str, regime: str, vol_state: str, groups: Dict[str, 
     score=48.0 + (8.0 if regime_match else -12.0) + (7.0 if vol_match else -10.0)
     score += sum(max(-1.0,min(1.0,float(e["effect"]))) * 7.0 for e in family_effects.values())
     # Futures needs at least four independent positive families; Spot three.
-    minimum=4 if market=="FUTURES" else 3
+    minimum=(5 if market=="FUTURES" and risk_class=="HIGH" else 4 if market=="FUTURES" else 3)
     if len(positive)<minimum: score-=8.0*(minimum-len(positive))
     score=max(0.0,min(100.0,score))
     confirmations=[e["detail"] for e in positive if e.get("detail")][:6]
@@ -539,12 +553,15 @@ def select_strategy(action: str, regime: str, vol_state: str, groups: Dict[str, 
         "functional_evidence":available,"independent_functional_families":sorted(family_effects),
         "positive_functional_families":len(positive),"negative_functional_families":len(negative),
         "market":market,"symbol":symbol,"timeframe":timeframe,"regime_match":regime_match,"volatility_match":vol_match,
+        "risk_class":risk_class,
+        "exit_profile":(_fut_exit_profile(symbol).get("name") if market=="FUTURES" else "PORTFOLIO"),
+        "required_independent_families":minimum,
     }
 
 
 _BANK_VALIDATION=functional_coverage_audit()
 if not _BANK_VALIDATION["ok"]:
-    raise RuntimeError(f"Commit 9.4 strategy bank invalid: {_BANK_VALIDATION}")
+    raise RuntimeError(f"Commit 9.6 strategy bank invalid: {_BANK_VALIDATION}")
 _RC9_MATRIX=coverage_matrix()
 if not _RC9_MATRIX["ok"]:
-    raise RuntimeError(f"Commit 9.4 default coverage incomplete: {_RC9_MATRIX}")
+    raise RuntimeError(f"Commit 9.6 default coverage incomplete: {_RC9_MATRIX}")

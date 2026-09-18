@@ -2142,7 +2142,7 @@ function renderFuturesCorrelation(payload) {
     
     // HTML de los 5 pares
     let pairsHTML = '';
-    const orderedSymbols = ['BTC-USDT', 'ETH-USDT', 'SOL-USDT', 'XRP-USDT', 'ADA-USDT'];
+    const orderedSymbols = Object.keys(pairs).sort();
     orderedSymbols.forEach(sym => {
         const d = pairs[sym];
         if (!d) return;
@@ -2156,7 +2156,7 @@ function renderFuturesCorrelation(payload) {
         const symbolName = sym.replace('-', '/');
         pairsHTML += `
             <div class="d-flex justify-content-between align-items-center mb-2">
-                <span class="fw-bold" style="color: ${colorMap[sym]};">${symbolName}</span>
+                <span class="fw-bold" style="color: ${colorMap[sym] || 'inherit'};">${symbolName}</span>
                 <div class="text-end">
                     ${dirBadge(d.direction, d.adx)}
                     <span class="badge bg-dark ms-1">ADX: ${d.adx.toFixed(1)}</span>
@@ -2853,10 +2853,132 @@ function _futDetectBrowserTimezone() {
 
 
 // ============================================================================
+// COMMIT 9.6 — UNIVERSO MULTI-RIESGO + OPPORTUNITY ROUTER
+// ============================================================================
+window._fut96Universe = null;
+
+function _fut96GroupLabel(group) {
+    return ({CORE1:'CORE 1 · BTC/ETH/SOL', CORE2:'CORE 2 · XRP/ADA', MEDIUM:'MEDIUM · salida rápida', HIGH:'HIGH · salida muy rápida'})[group] || group;
+}
+
+function _fut96ApplyTimeframes(symbol) {
+    const select = document.getElementById('interval-select');
+    const data = window._fut96Universe;
+    if (!select || !data?.groups) return;
+    let groupName = null;
+    for (const [group, cfg] of Object.entries(data.groups)) {
+        if ((cfg.symbols || []).includes(symbol)) { groupName = group; break; }
+    }
+    if (!groupName) return;
+    const allowed = data.groups[groupName].timeframes || [];
+    const labels = {'30m':'30 Minutos','1h':'1 Hora','2h':'2 Horas','4h':'4 Horas','12h':'12 Horas','1D':'1 Día'};
+    const previous = select.value;
+    select.innerHTML = allowed.map(tf => `<option value="${tf}">${labels[tf] || tf}</option>`).join('');
+    select.value = allowed.includes(previous) ? previous : (allowed.includes('1h') ? '1h' : allowed[0]);
+    select.dataset.riskClass = groupName;
+}
+
+window.loadFuturesUniverse96 = async function() {
+    try {
+        const response = await fetch('/api/futures/universe', {cache:'no-store'});
+        const data = await response.json();
+        if (!data?.success) return false;
+        window._fut96Universe = data;
+        const select = document.getElementById('symbol-select');
+        if (!select) return true;
+        const previous = select.value || 'BTC-USDT';
+        let html = '';
+        for (const group of ['CORE1','CORE2','MEDIUM','HIGH']) {
+            const cfg = data.groups[group];
+            if (!cfg) continue;
+            html += `<optgroup label="${_fut96GroupLabel(group)}">`;
+            for (const symbol of (cfg.symbols || [])) {
+                const label = data.symbols?.[symbol]?.name || symbol.replace('-', '/');
+                html += `<option value="${symbol}">${label}</option>`;
+            }
+            html += '</optgroup>';
+        }
+        select.innerHTML = html;
+        const all = Object.keys(data.symbols || {});
+        select.value = all.includes(previous) ? previous : 'BTC-USDT';
+        _fut96ApplyTimeframes(select.value);
+        return true;
+    } catch (error) {
+        console.warn('FUTURES 9.6 universe:', error);
+        return false;
+    }
+};
+
+function _fut96EnsureOpportunityPanel() {
+    let panel = document.getElementById('futures-opportunity-router');
+    if (panel) return panel;
+    const active = document.getElementById('active-signals-list');
+    if (!active) return null;
+    panel = document.createElement('div');
+    panel.id = 'futures-opportunity-router';
+    panel.className = 'mb-3 p-3 border rounded bg-dark bg-opacity-25';
+    panel.innerHTML = '<div class="small text-muted">Buscando mejores oportunidades ejecutables…</div>';
+    active.parentElement?.insertBefore(panel, active);
+    return panel;
+}
+
+window.loadFuturesOpportunities96 = async function() {
+    const panel = _fut96EnsureOpportunityPanel();
+    if (!panel) return;
+    try {
+        const response = await fetch('/api/futures/opportunities?limit=5', {cache:'no-store'});
+        const data = await response.json();
+        const rows = data?.opportunities || [];
+        if (!rows.length) {
+            panel.innerHTML = '<div class="fw-bold">🎯 Mejores oportunidades Futures</div><div class="small text-muted mt-1">No hay una señal ejecutable Premium en el universo actual. El sistema no fuerza una entrada.</div>';
+            return;
+        }
+        panel.innerHTML = `<div class="fw-bold mb-2">🎯 Mejores oportunidades Futures</div>${rows.map((r,i)=>`
+            <button type="button" class="btn btn-sm btn-outline-light w-100 text-start mb-1 fut96-opportunity" data-symbol="${r.symbol}" data-timeframe="${r.timeframe}">
+                <b>${i+1}. ${r.symbol.replace('-','/')} · ${r.timeframe} · ${r.action}</b>
+                <span class="ms-2 badge bg-secondary">${r.risk_class}</span>
+                <span class="ms-2">Calidad ${Number(r.quality_score||0).toFixed(0)}/100 · RR ${Number(r.risk_reward||0).toFixed(2)}</span>
+            </button>`).join('')}`;
+        panel.querySelectorAll('.fut96-opportunity').forEach(btn => btn.addEventListener('click', () => {
+            const symbolSelect = document.getElementById('symbol-select');
+            const intervalSelect = document.getElementById('interval-select');
+            if (symbolSelect) symbolSelect.value = btn.dataset.symbol;
+            _fut96ApplyTimeframes(btn.dataset.symbol);
+            if (intervalSelect) intervalSelect.value = btn.dataset.timeframe;
+            symbolSelect?.dispatchEvent(new Event('change', {bubbles:true}));
+            intervalSelect?.dispatchEvent(new Event('change', {bubbles:true}));
+        }));
+    } catch (error) {
+        panel.innerHTML = '<div class="small text-muted">Opportunity Router temporalmente no disponible.</div>';
+    }
+};
+
+// ============================================================================
 // INICIALIZACIÓN
 // ============================================================================
 
 document.addEventListener('DOMContentLoaded', function() {
+    // Commit 9.6 — una sola experiencia Futures. 5m/15m scalping dejó de ser
+    // producto operativo; se elimina su formulario y todas las alertas válidas
+    // utilizan el mismo monitor de zona de Entry.
+    try {
+        const scalpingBody = document.getElementById('futures-scalping-settings-body');
+        if (scalpingBody) {
+            const container = scalpingBody.closest('.accordion-item, .card, .panel, section') || scalpingBody;
+            container.remove();
+        }
+        window.loadFuturesScalpingPreferences = async () => null;
+        window.saveFuturesScalpingPreferences = async () => false;
+    } catch (e) {
+        console.warn('FUTURES 9.6 scalping cleanup:', e);
+    }
+    const _fut96SymbolSelect = document.getElementById('symbol-select');
+    _fut96SymbolSelect?.addEventListener('change', (event) => {
+        _fut96ApplyTimeframes(event.target.value);
+    }, true);
+    setTimeout(() => window.loadFuturesUniverse96(), 150);
+    setTimeout(() => window.loadFuturesOpportunities96(), 2500);
+    setInterval(() => window.loadFuturesOpportunities96(), 120000);
     // =========================================================================
     // RESTAURAR LAS FUNCIONES DE FUTUROS
     // =========================================================================

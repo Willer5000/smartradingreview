@@ -12356,56 +12356,133 @@ class ReviewTrader:
     # 5. CONSULTAS PARA EL FRONTEND
     # ========================================================================
     
+    def get_backtest_learning_profile(self, symbol: str, timeframe: str, action: str,
+                                      system_type: Optional[str] = None) -> Dict:
+        """Commit 9.6 — aprendizaje primario por Backtest/OOS.
+
+        ReviewTrader ya no espera decenas de operaciones LIVE para formar su
+        criterio inicial. Research Federation hace el replay/backtest continuo
+        y este método consume únicamente evidencia temporalmente separada/OOS.
+        LIVE/Shadow se conserva como validación de continuidad (alpha decay),
+        nunca se suma a OOS como una sola muestra.
+        """
+        market = str(system_type or '').strip().lower()
+        if market not in ('spot', 'futures'):
+            return {'available': False, 'authority': 'NEUTRAL'}
+        try:
+            from research_evidence_fusion import edge_prior
+            prior = dict(edge_prior(symbol, timeframe, action, market) or {})
+            authority = 'LOCAL_OOS'
+            if market == 'futures':
+                try:
+                    from futures_universe import risk_class_for, learning_bucket_for
+                    prior.setdefault('risk_class', risk_class_for(symbol))
+                    prior.setdefault('learning_bucket', learning_bucket_for(symbol))
+                except Exception:
+                    pass
+            else:
+                prior.setdefault('learning_bucket', str(symbol or '').upper())
+            # Para Futures ampliado se permite un prior de CLASE si el símbolo
+            # aún no tiene OOS local. Nunca se presenta como Champion local.
+            if market == 'futures' and str(prior.get('state') or '').upper() in (
+                'NO_CAUSAL_EVIDENCE','UNAVAILABLE','NO_EVIDENCE'
+            ):
+                try:
+                    from futures_universe import representative_for, risk_class_for
+                    rep = representative_for(symbol)
+                    if rep and rep != str(symbol or '').upper():
+                        group_prior = dict(edge_prior(rep, timeframe, action, market) or {})
+                        if str(group_prior.get('state') or '').upper() not in (
+                            'NO_CAUSAL_EVIDENCE','UNAVAILABLE','NO_EVIDENCE'
+                        ):
+                            prior = group_prior
+                            authority = 'GROUP_PRIOR_ONLY'
+                            prior['group_prior_symbol'] = rep
+                            prior['risk_class'] = risk_class_for(symbol)
+                            try:
+                                from futures_universe import learning_bucket_for
+                                prior['learning_bucket'] = learning_bucket_for(symbol)
+                            except Exception:
+                                prior['learning_bucket'] = prior.get('risk_class')
+                except Exception:
+                    pass
+            best = dict(prior.get('best_positive') or {})
+            state = str(prior.get('state') or 'UNAVAILABLE').upper()
+            oos_n = int(best.get('oos_n') or prior.get('oos_n') or 0)
+            exp_r = float(best.get('oos_exp_r') or prior.get('oos_exp_r') or 0.0)
+            pf = float(best.get('oos_pf') or prior.get('oos_pf') or 0.0)
+            support = float(prior.get('support_score') or 0.0)
+            penalty = float(prior.get('penalty_score') or 0.0)
+            negative = state in ('NEGATIVE_OOS','SHADOW_DIVERGED','DEGRADED','REVOKED','ALPHA_DECAY')
+            validated = state in ('OOS_VALIDATED','OOS_PLUS_SHADOW','SHADOW_READY','SHADOW_READY_FAST','GROUP_PRIOR')
+            return {
+                'available': bool(oos_n or support or negative),
+                'authority': authority,
+                'state': state,
+                'validated': validated,
+                'negative': negative,
+                'oos_n': oos_n,
+                'oos_exp_r': exp_r,
+                'oos_pf': pf,
+                'support_score': support,
+                'penalty_score': penalty,
+                'strategy_family': best.get('strategy_family'),
+                'strategy_id': best.get('strategy_id'),
+                'risk_class': prior.get('risk_class'),
+                'learning_bucket': prior.get('learning_bucket') or ('SPOT_PAIR' if market == 'spot' else None),
+                'entry_rule': best.get('entry_rule') or best.get('entry_mode'),
+                'stop_rule': best.get('stop_rule'),
+                'take_profit_rule': best.get('take_profit_rule'),
+                'alpha_decay_guard': state in ('SHADOW_DIVERGED','DEGRADED','REVOKED','ALPHA_DECAY'),
+            }
+        except Exception as exc:
+            return {'available': False, 'authority': 'NEUTRAL', 'error': str(exc)[:120]}
+
     def get_confidence_adjustment(self, symbol: str, timeframe: str, action: str,
                                   min_sample_size: int = 10,
                                   system_type: Optional[str] = None) -> float:
-        """
-        Devuelve el multiplicador de confianza que el ReviewTrader recomienda
-        para un trader que vote (action) en (symbol, timeframe).
-        
-        Ejemplo: si históricamente COMPRA_SPOT en BTC-USDT 4h tiene win_rate 70%
-        con 50 muestras, el multiplicador será 1.3 (amplificar convicción).
-        Si tiene win_rate 25% con 30 muestras, será 0.7 (atenuar).
-        
-        Retorna:
-          1.0 si no hay datos suficientes (min_sample_size no alcanzado) o
-              Supabase no está conectado (comportamiento neutral).
-          0.5 a 1.5 según el historial (con clip).
-        
-        Uso desde el Moderador: aplicar este multiplicador ANTES del peso del
-        régimen, para que el ReviewTrader ejerza su rol de juez del comité.
+        """Backtest-first multiplier; LIVE is only a continuity/decay guard.
+
+        This deliberately replaces the old LIVE-first learning path. OOS can
+        improve or attenuate a current thesis; it still cannot bypass current
+        market evidence, Entry/SL/TP or Safety.
         """
         try:
-            if not self.db.enabled:
-                return 1.0
             if action not in ('LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT'):
-                return 1.0  # solo ajustamos direccionales
-
+                return 1.0
             market = str(system_type or '').strip().lower()
             if market not in ('spot', 'futures'):
-                return 1.0  # mercado no identificado = autoridad neutral
+                return 1.0
+            profile = self.get_backtest_learning_profile(symbol, timeframe, action, market)
+            if not profile.get('available'):
+                return 1.0
+            if profile.get('negative'):
+                return 0.70
+            n = int(profile.get('oos_n') or 0)
+            exp_r = float(profile.get('oos_exp_r') or 0.0)
+            pf = float(profile.get('oos_pf') or 0.0)
+            support = float(profile.get('support_score') or 0.0)
+            # OOS-primary calibration. Group priors are intentionally weaker.
+            mult = 1.0
+            if n >= 3:
+                mult += max(-0.18, min(0.18, exp_r * 0.18))
+            if pf > 1.0:
+                mult += max(0.0, min(0.10, (pf - 1.0) * 0.05))
+            if support > 0:
+                mult += max(0.0, min(0.08, (support - 50.0) / 500.0))
+            if profile.get('authority') == 'GROUP_PRIOR_ONLY':
+                mult = min(mult, 1.10)
 
-            direction = (
-                'LONG'
-                if action in ('LONG', 'COMPRA_SPOT')
-                else 'SHORT'
-            )
-            rec = self._get_market_recommendation(
-                symbol,
-                timeframe,
-                direction,
-                market
-            )
-            if not rec:
-                return 1.0  # sin recomendación cacheada = neutral
-            
-            sample = int(rec.get('sample_size', 0) or 0)
-            if sample < min_sample_size:
-                return 1.0  # muestra insuficiente para ejercer autoridad
-            
-            mult = float(rec.get('recommended_confidence_multiplier', 1.0) or 1.0)
-            # Clip defensivo
-            return max(0.5, min(1.5, mult))
+            # LIVE/Shadow no entrena el multiplicador: sólo vigila alpha decay.
+            if self.db.enabled:
+                direction = 'LONG' if action in ('LONG','COMPRA_SPOT') else 'SHORT'
+                rec = self._get_market_recommendation(symbol, timeframe, direction, market)
+                if rec:
+                    live_n = int(rec.get('sample_size', 0) or 0)
+                    live_exp = float(rec.get('expectancy', 0.0) or 0.0)
+                    if live_n >= max(5, min_sample_size // 2) and live_exp < -0.15:
+                        mult *= 0.85
+            return max(0.65, min(1.30, mult))
         except Exception:
             return 1.0
     
@@ -12435,17 +12512,31 @@ class ReviewTrader:
             system_type
         )
         if not rec:
+            backtest_profile = self.get_backtest_learning_profile(
+                symbol, timeframe, action, system_type
+            )
             return {
-                'available': False,
-                'message': 'Aún no hay suficientes datos históricos para esta combinación',
+                'available': bool(backtest_profile.get('available')),
+                'learning_mode': 'BACKTEST_OOS_PRIMARY_LIVE_ALPHA_DECAY',
+                'backtest_profile': backtest_profile,
+                'message': (
+                    'Aprendizaje disponible desde Backtest/OOS; LIVE se usa para alpha decay.'
+                    if backtest_profile.get('available') else
+                    'Aún no hay evidencia Backtest/OOS suficiente para esta combinación.'
+                ),
                 'symbol': symbol,
                 'timeframe': timeframe,
                 'action': self._scoped_action(direction, system_type),
                 'system_type': self._normalize_system_type(system_type)
             }
         
+        backtest_profile = self.get_backtest_learning_profile(
+            symbol, timeframe, action, system_type
+        )
         return {
             'available': True,
+            'learning_mode': 'BACKTEST_OOS_PRIMARY_LIVE_ALPHA_DECAY',
+            'backtest_profile': backtest_profile,
             'system_type': self._normalize_system_type(system_type),
             'symbol': rec['symbol'],
             'timeframe': rec['timeframe'],
@@ -12562,39 +12653,61 @@ class ReviewTrader:
             long_score = self._evaluate_match(active_strategies, rec_long)
             short_score = self._evaluate_match(active_strategies, rec_short)
 
-            # COMMIT J — Backtest causal/OOS como PRIOR, no como muestra live.
-            # Puede reforzar/atenuar un voto que ya tiene estrategias activas,
-            # pero jamás inventa LONG/SHORT por sí solo ni toca Entry/SL/TP.
+            # Commit 9.6 — ReviewTrader aprende primero del backtest/OOS continuo.
+            # LIVE/Shadow no entrena pesos: sólo confirma continuidad/alpha decay.
             research_long = {'state': 'UNAVAILABLE', 'support_score': 0.0, 'penalty_score': 0.0}
             research_short = {'state': 'UNAVAILABLE', 'support_score': 0.0, 'penalty_score': 0.0}
             try:
-                from research_evidence_fusion import edge_prior
-                regime = str(
-                    (capas.get('futures_quantitative_context') or {}).get('regime')
-                    or (capas.get('market_regime') or {}).get('regime')
-                    or ''
-                ).upper() or None
-                strategy_blob = ' | '.join(str(x).upper() for x in active_strategies)
-                runtime_features = {
-                    'has_pullback': 'YES' if ('PULLBACK' in strategy_blob or 'RETEST' in strategy_blob) else 'NO',
-                    'has_sweep': 'YES' if ('SWEEP' in strategy_blob or 'LIQUIDITY' in strategy_blob) else 'NO',
-                    'has_order_block': 'YES' if ('ORDER_BLOCK' in strategy_blob or 'ORDER BLOCK' in strategy_blob) else 'NO',
+                profile_long = self.get_backtest_learning_profile(
+                    symbol, timeframe, 'LONG' if explicit_market == 'futures' else 'COMPRA_SPOT', explicit_market
+                )
+                profile_short = self.get_backtest_learning_profile(
+                    symbol, timeframe, 'SHORT' if explicit_market == 'futures' else 'VENTA_SPOT', explicit_market
+                )
+
+                research_long = {
+                    'state': profile_long.get('state'),
+                    'support_score': profile_long.get('support_score', 0.0),
+                    'penalty_score': profile_long.get('penalty_score', 0.0),
+                    'best_positive': {
+                        'strategy_family': profile_long.get('strategy_family'),
+                        'strategy_id': profile_long.get('strategy_id'),
+                        'oos_exp_r': profile_long.get('oos_exp_r'),
+                        'oos_pf': profile_long.get('oos_pf'),
+                        'oos_n': profile_long.get('oos_n'),
+                    },
+                    'authority': profile_long.get('authority'),
                 }
-                research_long = edge_prior(symbol, timeframe, 'LONG', explicit_market, regime=regime, runtime_features=runtime_features)
-                research_short = edge_prior(symbol, timeframe, 'SHORT', explicit_market, regime=regime, runtime_features=runtime_features)
+                research_short = {
+                    'state': profile_short.get('state'),
+                    'support_score': profile_short.get('support_score', 0.0),
+                    'penalty_score': profile_short.get('penalty_score', 0.0),
+                    'best_positive': {
+                        'strategy_family': profile_short.get('strategy_family'),
+                        'strategy_id': profile_short.get('strategy_id'),
+                        'oos_exp_r': profile_short.get('oos_exp_r'),
+                        'oos_pf': profile_short.get('oos_pf'),
+                        'oos_n': profile_short.get('oos_n'),
+                    },
+                    'authority': profile_short.get('authority'),
+                }
 
                 def _fuse(existing, prior):
                     support=float(prior.get('support_score') or 0.0)
                     penalty=float(prior.get('penalty_score') or 0.0)
-                    # With no local score, causal evidence alone tops out below
-                    # the 60-point voting gate: evidence supports, never creates.
-                    fused=(0.65*float(existing) + 0.35*support) if existing > 0 else (0.35*support)
+                    state=str(prior.get('state') or '').upper()
+                    # Backtest/OOS is primary once a current strategy exists.
+                    # OOS alone still stays below the voting gate, so it cannot
+                    # manufacture direction without current-market evidence.
+                    fused=(0.35*float(existing) + 0.65*support) if existing > 0 else (0.55*support)
+                    if state in ('NEGATIVE_OOS','SHADOW_DIVERGED','DEGRADED','REVOKED','ALPHA_DECAY'):
+                        penalty=max(penalty, 25.0)
                     return max(0.0, min(100.0, fused-penalty))
 
                 long_score = _fuse(long_score, research_long)
                 short_score = _fuse(short_score, research_short)
             except Exception as research_error:
-                logger.debug('Research evidence prior no disponible: %s', research_error)
+                logger.debug('Backtest/OOS ReviewTrader no disponible: %s', research_error)
 
             print(f"   📈 Score LONG fusionado: {long_score:.1f} | Research={research_long.get('state')}")
             print(f"   📉 Score SHORT fusionado: {short_score:.1f} | Research={research_short.get('state')}")

@@ -20,16 +20,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-VERSION = "COMMIT9_5_OPERATIONAL_INTELLIGENCE_V1"
+VERSION = "COMMIT9_6_MULTI_RISK_FUTURES_V1"
 
 DIRECTIONAL_ACTIONS = {"LONG", "SHORT", "COMPRA_SPOT", "VENTA_SPOT"}
 NON_DIRECTIONAL_ACTIONS = {"ESPERAR", "PRECAUCION", "NO_OPERAR"}
 
 SPOT_SYMBOLS = ("BTC-USDT", "PAXG-USDT", "PAXG-BTC")
-FUTURES_SYMBOLS = ("BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "ADA-USDT", "BNB-USDT", "LINK-USDT")
+from futures_universe import (
+    all_symbols as _futures_all_symbols,
+    allowed_timeframes as _futures_allowed_timeframes,
+    risk_class_for as futures_risk_class_for,
+    exit_profile_for as futures_exit_profile_for,
+)
+
+FUTURES_SYMBOLS = tuple(_futures_all_symbols())
 SPOT_EXECUTION_TFS = ("4H", "12H", "1D", "1W")
-FUTURES_CORE_TFS = ("30M", "1H", "2H", "4H")
-FUTURES_HTF_CELLS = {"BTC-USDT": ("12H", "1D"), "ETH-USDT": ("12H", "1D"), "SOL-USDT": ("12H", "1D")}
 
 
 def _u(value: Any) -> str:
@@ -114,13 +119,9 @@ def official_universe_cells() -> List[Tuple[str, str, str, str]]:
             for action in ("COMPRA_SPOT", "VENTA_SPOT"):
                 cells.append(("SPOT", symbol, tf, action))
     for symbol in FUTURES_SYMBOLS:
-        for tf in FUTURES_CORE_TFS:
+        for tf in _futures_allowed_timeframes(symbol):
             for action in ("LONG", "SHORT"):
-                cells.append(("FUTURES", symbol, tf, action))
-    for symbol, tfs in FUTURES_HTF_CELLS.items():
-        for tf in tfs:
-            for action in ("LONG", "SHORT"):
-                cells.append(("FUTURES", symbol, tf, action))
+                cells.append(("FUTURES", symbol, _u(tf), action))
     return cells
 
 
@@ -131,8 +132,8 @@ def official_universe_audit() -> Dict[str, Any]:
     return {
         "version": VERSION,
         "cells": len(_OFFICIAL_CELL_SET),
-        "expected_cells": 92,
-        "ok": len(_OFFICIAL_CELL_SET) == 92,
+        "expected_cells": 150,
+        "ok": len(_OFFICIAL_CELL_SET) == 150,
         "spot_cells": sum(1 for c in _OFFICIAL_CELL_SET if c[0] == "SPOT"),
         "futures_cells": sum(1 for c in _OFFICIAL_CELL_SET if c[0] == "FUTURES"),
     }
@@ -163,8 +164,33 @@ _MTF_ROLE_PROFILES: Dict[str, Dict[str, Dict[str, Sequence[str]]]] = {
 }
 
 
-def mtf_required_timeframes(market: Any, timeframe: Any) -> List[str]:
-    roles = _MTF_ROLE_PROFILES.get(_u(market), {}).get(_u(timeframe), {})
+_RISK_MTF_PROFILES: Dict[str, Dict[str, Dict[str, Sequence[str]]]] = {
+    "CORE2": {
+        "12H": {"context": ("12H",), "structure": ("12H",), "setup": ("12H",), "timing": ("4H",)},
+    },
+    "MEDIUM": {
+        "30M": {"context": ("4H",), "structure": ("2H",), "setup": ("1H",), "timing": ("30M",)},
+        "1H": {"context": ("4H",), "structure": ("2H",), "setup": ("1H",), "timing": ("30M",)},
+        "2H": {"context": ("4H",), "structure": ("4H",), "setup": ("2H",), "timing": ("1H",)},
+        "4H": {"context": ("4H",), "structure": ("4H",), "setup": ("4H",), "timing": ("2H",)},
+    },
+    "HIGH": {
+        "30M": {"context": ("2H",), "structure": ("1H",), "setup": ("30M",), "timing": ("30M",)},
+        "1H": {"context": ("2H",), "structure": ("2H",), "setup": ("1H",), "timing": ("30M",)},
+        "2H": {"context": ("2H",), "structure": ("2H",), "setup": ("2H",), "timing": ("1H",)},
+    },
+}
+
+def _mtf_profile_for(market: Any, timeframe: Any, symbol: Any = "") -> Dict[str, Sequence[str]]:
+    market_u, timeframe_u = _u(market), _u(timeframe)
+    if market_u == "FUTURES":
+        rc = futures_risk_class_for(symbol)
+        if timeframe_u in _RISK_MTF_PROFILES.get(rc, {}):
+            return dict(_RISK_MTF_PROFILES[rc][timeframe_u])
+    return dict(_MTF_ROLE_PROFILES.get(market_u, {}).get(timeframe_u, {"setup": (timeframe_u,), "timing": (timeframe_u,)}))
+
+def mtf_required_timeframes(market: Any, timeframe: Any, symbol: Any = "") -> List[str]:
+    roles = _mtf_profile_for(market, timeframe, symbol)
     out: List[str] = []
     for values in roles.values():
         for tf in values:
@@ -238,10 +264,10 @@ def _analysis_snapshot(tf: str, analysis: Mapping[str, Any] | None, *, current_l
         "source": "CACHE",
     }
 
-def build_multiframe_context(*, market: Any, timeframe: Any, current_layers: Mapping[str, Any], peer_analyses: Mapping[str, Mapping[str, Any]] | None = None) -> Dict[str, Any]:
+def build_multiframe_context(*, market: Any, timeframe: Any, current_layers: Mapping[str, Any], peer_analyses: Mapping[str, Mapping[str, Any]] | None = None, symbol: Any = "") -> Dict[str, Any]:
     market = _u(market)
     timeframe = _u(timeframe)
-    profile = _MTF_ROLE_PROFILES.get(market, {}).get(timeframe, {"setup": (timeframe,), "timing": (timeframe,)})
+    profile = _mtf_profile_for(market, timeframe, symbol)
     peers = { _u(k): v for k, v in dict(peer_analyses or {}).items() }
     role_rows: Dict[str, Any] = {}
     all_dirs: List[str] = []
@@ -649,9 +675,11 @@ def prepare_operational_intelligence(
     if selected_action in DIRECTIONAL_ACTIONS:
         try:
             from default_strategy_bank import select_strategy
+            _selected_prior_for_strategy = research_map.get(selected_action) or {}
             strategy = select_strategy(
                 selected_action, regime, vol_state, indicator_groups,
                 symbol=_u(symbol), timeframe=_u(timeframe), market=market,
+                preferred_family=str(_selected_prior_for_strategy.get("group_prior_strategy_family") or ""),
             )
         except Exception as exc:
             strategy = {
@@ -694,9 +722,14 @@ def prepare_operational_intelligence(
         and not (market == "FUTURES" and _u(thesis.get("macro_risk")) == "CRITICAL")
     )
 
+    risk_profile = futures_exit_profile_for(symbol) if market == "FUTURES" else {"risk_class": "SPOT", "name": "PORTFOLIO", "risk_budget_multiplier": 1.0}
     return {
         "version": VERSION,
         "market": market,
+        "risk_class": risk_profile.get("risk_class"),
+        "exit_profile": risk_profile.get("name"),
+        "risk_budget_multiplier": risk_profile.get("risk_budget_multiplier", 1.0),
+        "max_entry_wait_bars": risk_profile.get("max_entry_wait_bars"),
         "symbol": _u(symbol),
         "timeframe": _u(timeframe),
         "context": {"regime": regime, "volatility": vol_state},
@@ -715,6 +748,7 @@ def prepare_operational_intelligence(
         },
         "selected_specialist_source": specialist_source,
         "selected_research_prior": selected_prior,
+        "group_prior_advisory": dict(research_map.get(selected_action) or {}) if str((research_map.get(selected_action) or {}).get("state") or "") == "GROUP_PRIOR" else {},
         "research_candidates": research_map,
         "research_blocks_selected_action": blocked_by_research,
         "candidate_action": selected_action if candidate_ready else "NO_OPERAR",

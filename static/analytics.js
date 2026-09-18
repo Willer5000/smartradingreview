@@ -2654,88 +2654,10 @@ window.showOperationDetail = async function(signalId) {
 // ============================================================================
 
 window.loadLogs = async function() {
+    // Commit 9.6: logs históricos ya no se cargan en Analytics. Se preservan en
+    // BD sólo para auditoría técnica/retención; no calibran el sistema actual.
     const container = document.getElementById('logs-container');
-    container.innerHTML = '<div class="text-center text-muted py-3"><div class="spinner-border spinner-border-sm text-info"></div> Cargando logs...</div>';
-    
-    try {
-        const res = await fetch('/api/review/logs?limit=30');
-        
-        // v22.6: manejar caso de HTML de error (502/504 del gunicorn).
-        // Antes: res.json() lanzaba "Unexpected token '<'" y todo caía sin
-        // mensaje claro. Ahora: leer como texto primero y validar.
-        const text = await res.text();
-        let json;
-        try {
-            json = JSON.parse(text);
-        } catch (parseErr) {
-            container.innerHTML = `
-                <div class="alert alert-warning py-3">
-                    <i class="fas fa-exclamation-triangle me-2"></i>
-                    El servidor respondió con un error (status ${res.status}). Es probable que estuviera saturado. Recarga la página en unos segundos.
-                </div>
-            `;
-            console.error('loadLogs: respuesta no-JSON', text.slice(0, 200));
-            return;
-        }
-        
-        if (!json.success || !json.logs || json.logs.length === 0) {
-            const errMsg = json.error ? ` (${json.error})` : '';
-            container.innerHTML = `
-                <div class="text-center text-muted py-4">
-                    <i class="fas fa-info-circle me-1"></i>
-                    Aún no hay logs${errMsg}. Ejecuta el ReviewTrader manualmente o espera al ciclo diario (20:00 Bolivia).
-                </div>
-            `;
-            return;
-        }
-        
-        let html = '';
-        json.logs.forEach(log => {
-            const statusClass = log.status === 'failed' ? 'log-error' : log.status === 'partial' ? 'log-partial' : '';
-            const statusIcon = log.status === 'success' ? '✅' : log.status === 'partial' ? '⚠️' : '❌';
-            const triggerIcon = log.trigger_source === 'scheduler' ? '⏰' : '👤';
-            
-            const errorsHTML = (log.errors && log.errors.length > 0) 
-                ? `<div class="mt-2 text-danger small">❌ Errores: ${log.errors.join(' · ')}</div>`
-                : '';
-            
-            const storage = log.storage_stats || {};
-            const totalRows = Object.values(storage).reduce((a, b) => a + (b > 0 ? b : 0), 0);
-            
-            html += `
-                <div class="log-entry ${statusClass}">
-                    <div class="d-flex justify-content-between align-items-start">
-                        <div>
-                            <strong>${statusIcon} ${formatDate(log.run_started_at)}</strong>
-                            <span class="badge bg-secondary ms-2">${triggerIcon} ${log.trigger_source}</span>
-                            <span class="badge bg-dark ms-1">${log.duration_seconds}s</span>
-                        </div>
-                        <small class="text-muted">${log.status.toUpperCase()}</small>
-                    </div>
-                    <div class="mt-2 small">
-                        <span class="me-3">📊 Evaluadas: <strong>${log.signals_evaluated}</strong></span>
-                        <span class="me-3 text-success">✅ TP: <strong>${log.tp_hits}</strong></span>
-                        <span class="me-3 text-danger">❌ SL: <strong>${log.sl_hits}</strong></span>
-                        <span class="me-3 text-warning">⏰ Exp: <strong>${log.expired}</strong></span>
-                        <span class="me-3 text-info">💡 Oport. perdidas: <strong>${log.missed_opportunities_found}</strong></span>
-                    </div>
-                    <div class="mt-1 small text-muted">
-                        📈 Stats: ${log.stats_specific_updated} específicas · ${log.stats_general_updated} generales
-                        · 🧹 TTL: ${log.ttl_deleted} borradas · Compresión: ${log.low_sample_deleted}
-                        · 💾 Total BD: ${totalRows} filas
-                    </div>
-                    ${log.notes ? `<div class="mt-1 small">📝 ${log.notes}</div>` : ''}
-                    ${errorsHTML}
-                </div>
-            `;
-        });
-        
-        container.innerHTML = html;
-        
-    } catch (err) {
-        console.error('Error logs:', err);
-        container.innerHTML = `<div class="alert alert-danger">Error cargando logs: ${err.message}</div>`;
-    }
+    if (container) container.innerHTML = '<div class="text-muted small py-2">Histórico técnico archivado; no participa del aprendizaje actual.</div>';
 };
 
 
@@ -2773,7 +2695,6 @@ window.runReviewManually = async function() {
         
         // Refrescar todos los datos
         window.loadAllAnalytics();
-        window.loadLogs();
         
     } catch (err) {
         showToast('Error de conexión: ' + err.message, 'danger');
@@ -2785,20 +2706,43 @@ window.runReviewManually = async function() {
 // FASE FINAL V1 — VISTA SIMPLE / DIAGNÓSTICO AVANZADO
 // ============================================================================
 window.__V1_ADVANCED_ANALYTICS__ = false;
+function hideLegacyAnalyticsNoise(){
+    const obsoleteTitles = [
+        'Histórico / Analytics Legacy',
+        'Ranking de Estrategias por Win Rate',
+        'Heatmap Símbolo × Timeframe',
+        'Evolución Temporal',
+        'Distribución de PnL',
+        'Top 10 Mejores Operaciones',
+        'Top 10 Peores Operaciones',
+        'Logs del ReviewTrader'
+    ];
+    document.querySelectorAll('h2,h3,h4,h5,h6').forEach(h => {
+        const text = String(h.textContent || '').trim();
+        if (!obsoleteTitles.some(t => text.includes(t))) return;
+        const box = h.closest('.chart-container,.card,.row') || h.parentElement;
+        if (box) box.style.display = 'none';
+    });
+}
+
 window.setAdvancedAnalytics = async function(enabled) {
+    // Commit 9.6: el histórico legacy deja de formar parte de la UX normal y
+    // tampoco dispara queries pesadas. La auditoría útil vive en Quality V2,
+    // Research/OOS, Shadow/live y gobernanza.
     window.__V1_ADVANCED_ANALYTICS__ = Boolean(enabled);
     document.body.classList.toggle('analytics-advanced', window.__V1_ADVANCED_ANALYTICS__);
     const button = document.getElementById('v1-toggle-advanced');
-    if (button) button.textContent = window.__V1_ADVANCED_ANALYTICS__ ? 'Ocultar diagnóstico avanzado' : 'Ver diagnóstico avanzado';
+    if (button) button.textContent = window.__V1_ADVANCED_ANALYTICS__ ? 'Ocultar auditoría técnica' : 'Ver auditoría técnica';
+    hideLegacyAnalyticsNoise();
     if (window.__V1_ADVANCED_ANALYTICS__) {
         const tasks = [
-            () => loadSummary(), () => loadStrategiesRanking(), () => loadHeatmap(),
-            () => loadTimeline(), () => loadPnLDistribution(),
-            () => loadTopOperations('best'), () => loadTopOperations('worst'),
-            () => window.loadLogs()
+            () => loadQualityV2(),
+            () => loadLearningGovernanceStatus(),
+            () => loadResearchFederationAnalytics(),
+            () => loadV1MacroStatus()
         ];
         for (const task of tasks) {
-            try { await task(); } catch (err) { console.warn('Diagnóstico avanzado parcial:', err); }
+            try { await task(); } catch (err) { console.warn('Auditoría técnica parcial:', err); }
             await new Promise(resolve => setTimeout(resolve, 70));
         }
     }
@@ -2855,6 +2799,7 @@ window.loadAllAnalytics = async function() {
 document.addEventListener('DOMContentLoaded', function() {
     console.log('📈 Página Analytics V1 RC inicializada');
     document.body.classList.remove('analytics-advanced');
+    hideLegacyAnalyticsNoise();
     const toggle = document.getElementById('v1-toggle-advanced');
     if (toggle) toggle.addEventListener('click', () => window.setAdvancedAnalytics(!window.__V1_ADVANCED_ANALYTICS__));
 

@@ -21956,6 +21956,7 @@ class TradingExpertSystem:
             return SYMBOLS[symbol].get('name', symbol)
         # Segundo intentar en FUTURES_SYMBOLS
         try:
+            _configured_futures_module()
             from futures_system import FUTURES_SYMBOLS
             if symbol in FUTURES_SYMBOLS:
                 return FUTURES_SYMBOLS[symbol].get('name', symbol)
@@ -21972,6 +21973,7 @@ class TradingExpertSystem:
         if timeframe in TIMEFRAMES:
             return TIMEFRAMES[timeframe].get('name', timeframe)
         try:
+            _configured_futures_module()
             from futures_system import FUTURES_TIMEFRAMES
             if timeframe in FUTURES_TIMEFRAMES:
                 return FUTURES_TIMEFRAMES[timeframe].get('name', timeframe)
@@ -25460,14 +25462,14 @@ def _build_operational_mtf_context(symbol, timeframe, system_type, current_layer
         from operational_intelligence import mtf_required_timeframes, build_multiframe_context
         market = 'FUTURES' if str(system_type or '').lower() == 'futures' else 'SPOT'
         peers = {}
-        for tf in mtf_required_timeframes(market, timeframe):
+        for tf in mtf_required_timeframes(market, timeframe, symbol):
             if str(tf).upper() == str(timeframe).upper():
                 continue
             row = _get_operational_mtf_peer(symbol, tf, system_type)
             if row:
                 peers[str(tf).upper()] = row
         return build_multiframe_context(
-            market=market, timeframe=timeframe, current_layers=current_layers, peer_analyses=peers
+            market=market, timeframe=timeframe, current_layers=current_layers, peer_analyses=peers, symbol=symbol
         )
     except Exception as exc:
         return {
@@ -25537,7 +25539,38 @@ def _load_operational_research_candidates(symbol, timeframe, system_type, layers
                     regime=str(regime or '').upper() or None,
                     runtime_features=dict(features),
                 )
-                result[action] = dict(prior or {})
+                prior = dict(prior or {})
+                # Commit 9.6: non-representative Futures symbols may use the
+                # validated representative as a *family prior*. It never becomes
+                # a local Champion and never creates direction or blocks a local
+                # trade. Local Shadow/ReviewTrader remains symbol-specific.
+                if market == 'FUTURES' and str(prior.get('state') or '') in ('NO_CAUSAL_EVIDENCE','UNAVAILABLE'):
+                    try:
+                        from futures_universe import representative_for, risk_class_for
+                        representative = representative_for(symbol)
+                        if representative and representative != str(symbol or '').upper():
+                            gp = dict(edge_prior(
+                                representative, timeframe, action, system_type,
+                                regime=str(regime or '').upper() or None,
+                                runtime_features=dict(features),
+                            ) or {})
+                            best = gp.get('best_positive') or {}
+                            prior.update({
+                                'state': 'GROUP_PRIOR',
+                                'authority': 'GROUP_PRIOR_ONLY',
+                                'group_prior_symbol': representative,
+                                'group_prior_risk_class': risk_class_for(symbol),
+                                'group_prior_state': gp.get('state'),
+                                'group_prior_support_score': gp.get('support_score'),
+                                'group_prior_penalty_score': gp.get('penalty_score'),
+                                'group_prior_strategy_family': best.get('strategy_family'),
+                                'group_prior_strategy_id': best.get('strategy_id'),
+                                'group_prior_oos_exp_r': best.get('oos_exp_r'),
+                                'group_prior_oos_n': best.get('oos_n'),
+                            })
+                    except Exception as gp_exc:
+                        prior['group_prior_error'] = str(gp_exc)[:120]
+                result[action] = prior
             except Exception as exc:
                 result[action] = {
                     'state': 'UNAVAILABLE', 'support_score': 0.0,
@@ -25581,6 +25614,18 @@ def _get_higher_tf_analysis_from_cache(symbol, current_timeframe, system_type='s
         '1h': '4h', '2h': '4h', '4h': '1D',
         '12h': '1D', '1D': '1W', '1W': None,
     }
+    if str(system_type or '').lower() == 'futures':
+        try:
+            from futures_universe import risk_class_for
+            rc = risk_class_for(symbol)
+            higher_tf_map = {
+                'CORE1': {'30m':'1h','1h':'2h','2h':'4h','4h':'12h','12h':'1D','1D':None},
+                'CORE2': {'30m':'1h','1h':'2h','2h':'4h','4h':'12h','12h':None},
+                'MEDIUM': {'30m':'1h','1h':'2h','2h':'4h','4h':None},
+                'HIGH': {'30m':'1h','1h':'2h','2h':None},
+            }.get(rc, higher_tf_map)
+        except Exception:
+            pass
     higher_tf = higher_tf_map.get(current_timeframe)
     if not higher_tf:
         return None
@@ -26987,10 +27032,14 @@ def api_strategy_lab_research():
     payload = request.get_json(silent=True) or {}
     symbol = str(payload.get('symbol') or 'BTC-USDT').upper()
     timeframe = str(payload.get('timeframe') or '1h')
-    allowed_symbols = {'BTC-USDT','ETH-USDT','SOL-USDT','XRP-USDT','ADA-USDT'}
-    allowed_timeframes = {'30m','1h','2h','4h'}
-    if symbol not in allowed_symbols or timeframe not in allowed_timeframes:
-        return jsonify({'success': False, 'error': 'Símbolo/timeframe fuera del laboratorio'}), 400
+    try:
+        from futures_universe import timeframe_allowed, all_symbols
+        allowed_symbols = set(all_symbols())
+        allowed = symbol in allowed_symbols and timeframe_allowed(symbol, timeframe)
+    except Exception:
+        allowed = symbol in {'BTC-USDT','ETH-USDT','SOL-USDT','XRP-USDT','ADA-USDT'} and timeframe in {'30m','1h','2h','4h'}
+    if not allowed:
+        return jsonify({'success': False, 'error': 'Símbolo/timeframe fuera del universo operativo 9.6'}), 400
 
     if not _acquire_heavy_analysis(f'historical-research:{symbol}:{timeframe}', timeout=1):
         return jsonify({'success': False, 'busy': True, 'error': 'Hay otro análisis pesado en curso'}), 409
@@ -29083,6 +29132,7 @@ def _collect_frontend_signals():
 
             leverage = int(levels.get('leverage', 1) or 1)
             try:
+                _configured_futures_module()
                 from futures_system import _leverage_in_valid_range
                 if not _leverage_in_valid_range(leverage, tf):
                     continue
@@ -29445,6 +29495,8 @@ def api_saved_signals_create():
         # ==============================================================
 
         try:
+
+            _configured_futures_module()
 
             from futures_system import (
                 FUTURES_RISK_CONFIG
@@ -30854,11 +30906,23 @@ def api_run_scheduled():
 
 
 # --- HELPER: Instanciar sistemas de forma tolerante ---
-def _get_futures_system():
-    """Obtiene la instancia de FuturesAnalysis o None si no está disponible"""
+_FUTURES_UNIVERSE_CONFIG_LOCK = threading.Lock()
+
+def _configured_futures_module():
+    """Apply Commit 9.6 universe lazily after app.py has finished importing."""
+    import futures_system as futures_module
     try:
-        from futures_system import futures_system
-        return futures_system
+        from futures_universe import configure_futures_module
+        with _FUTURES_UNIVERSE_CONFIG_LOCK:
+            configure_futures_module(futures_module)
+    except Exception as exc:
+        print(f"⚠️ Commit 9.6 Futures universe no pudo aplicarse: {exc}")
+    return futures_module
+
+def _get_futures_system():
+    """Obtiene FuturesAnalysis con el universo multi-riesgo ya configurado."""
+    try:
+        return _configured_futures_module().futures_system
     except Exception as e:
         print(f"⚠️ FuturesSystem no disponible: {e}")
         return None
@@ -30875,6 +30939,87 @@ def _get_review_trader():
 
 
 # ============================================================================
+# COMMIT 9.6 — FUTURES UNIVERSE + OPPORTUNITY ROUTER
+# ============================================================================
+@app.route('/api/futures/universe', methods=['GET'])
+def api_futures_universe():
+    try:
+        from futures_universe import (
+            RISK_CLASS_SYMBOLS, RISK_CLASS_TIMEFRAMES, SYMBOL_META,
+            EXIT_PROFILES, universe_audit,
+        )
+        return jsonify({
+            'success': True,
+            'version': universe_audit().get('version'),
+            'audit': universe_audit(),
+            'groups': {
+                rc: {
+                    'symbols': list(symbols),
+                    'timeframes': list(RISK_CLASS_TIMEFRAMES.get(rc) or ()),
+                    'exit_profile': dict(EXIT_PROFILES.get(rc) or {}),
+                }
+                for rc, symbols in RISK_CLASS_SYMBOLS.items()
+            },
+            'symbols': {k: dict(v) for k, v in SYMBOL_META.items()},
+        })
+    except Exception as exc:
+        return jsonify({'success': False, 'error': str(exc)[:180]}), 500
+
+
+def _futures_opportunity_quality(result):
+    levels = (result or {}).get('levels') or {}
+    try:
+        safety = float(levels.get('execution_safety') or 0)
+        entry = float(levels.get('entry_score') or levels.get('entry_quality_score') or 0)
+        tpq = float(levels.get('tp_quality_score') or 0)
+        slq = float(levels.get('sl_reliability') or levels.get('sl_quality_score') or 0)
+        if 0 < slq <= 1.5: slq *= 100.0
+        rr = float(levels.get('risk_reward') or 0)
+        rr_score = max(0.0, min(100.0, (rr / 3.0) * 100.0))
+        return round(0.30*safety + 0.30*entry + 0.15*tpq + 0.10*slq + 0.15*rr_score, 1)
+    except Exception:
+        return 0.0
+
+
+@app.route('/api/futures/opportunities', methods=['GET'])
+def api_futures_opportunities():
+    """Rank only already-published executable signals. Never manufactures one."""
+    try:
+        limit = max(1, min(10, int(request.args.get('limit', 5) or 5)))
+        cache = _get_or_refresh_futures_analysis()
+        rows = []
+        from futures_universe import risk_class_for, exit_profile_for, timeframe_allowed
+        for (symbol, timeframe), result in (cache.get('analysis') or {}).items():
+            if not timeframe_allowed(symbol, timeframe) or not isinstance(result, dict) or not result.get('success'):
+                continue
+            decision = result.get('decision') or {}; levels = result.get('levels') or {}
+            action = str(decision.get('action') or '').upper()
+            publication = str(levels.get('publication_status') or result.get('publication_status') or '').upper()
+            if action not in ('LONG','SHORT') or publication != 'EXECUTABLE_SIGNAL':
+                continue
+            if min(float(levels.get('entry') or 0), float(levels.get('stop_loss') or 0), float(levels.get('take_profit') or 0)) <= 0:
+                continue
+            validity = _futures_signal_validity(result, timeframe, (cache.get('lifecycle') or {}).get(str(result.get('signal_id') or '')) or {})
+            if validity.get('expired'):
+                continue
+            profile = exit_profile_for(symbol)
+            rows.append({
+                'symbol': symbol, 'timeframe': timeframe, 'action': action,
+                'risk_class': risk_class_for(symbol), 'exit_profile': profile.get('name'),
+                'quality_score': _futures_opportunity_quality(result),
+                'execution_safety': levels.get('execution_safety'),
+                'entry_quality': levels.get('entry_score') or levels.get('entry_quality_score'),
+                'risk_reward': levels.get('risk_reward'),
+                'entry': levels.get('entry'), 'stop_loss': levels.get('stop_loss'), 'take_profit': levels.get('take_profit'),
+                'validity': validity, 'signal_id': result.get('signal_id'),
+            })
+        rows.sort(key=lambda r: float(r.get('quality_score') or 0), reverse=True)
+        return jsonify({'success': True, 'count': len(rows), 'opportunities': rows[:limit], 'only_executable': True})
+    except Exception as exc:
+        return jsonify({'success': False, 'error': str(exc)[:180], 'opportunities': []}), 200
+
+
+# ============================================================================
 # COMMIT 15B — MICROSTRUCTURE INDICATOR (PUBLIC, LIGHTWEIGHT DATA)
 # ============================================================================
 @app.route('/api/futures/microstructure', methods=['GET'])
@@ -30884,6 +31029,7 @@ def api_futures_microstructure():
         return user
     symbol = str(request.args.get('symbol') or 'BTC-USDT').strip().upper()
     try:
+        _configured_futures_module()
         from futures_system import get_futures_microstructure_snapshot
         snapshot = get_futures_microstructure_snapshot(symbol)
         orderbook = snapshot.get('orderbook') or {}
@@ -31035,6 +31181,7 @@ def api_futures_analyze_all(timeframe):
         
         if _LOW_MEMORY_MODE:
             cache = _get_or_refresh_futures_analysis()
+            _configured_futures_module()
             from futures_system import FUTURES_SYMBOLS
             results = {
                 symbol: (cache.get('analysis') or {}).get((symbol, timeframe))
@@ -31119,6 +31266,8 @@ _FUTURES_TF_SECONDS = {
     '1h': 60 * 60,
     '2h': 2 * 60 * 60,
     '4h': 4 * 60 * 60,
+    '12h': 12 * 60 * 60,
+    '1D': 24 * 60 * 60,
 }
 
 
@@ -31189,6 +31338,8 @@ def _compact_futures_runtime_result(result):
         'market_data_source', 'market_data_is_synthetic', 'contract_symbol',
         'market_data_fetched_at', 'market_data_candles', 'publication_status',
         'rejected_reason', 'timestamp', 'research_only', 'research_universe',
+        'risk_class', 'exit_profile', 'risk_budget_multiplier', 'entry_zone_pct',
+        'max_entry_wait_bars', 'research_representative', 'operational_timeframe_allowed',
     )
     for key in simple_keys:
         if key in result:
@@ -31653,6 +31804,7 @@ def _start_futures_ui_analysis_async(symbol, timeframe):
                 raise RuntimeError('Análisis Futures vacío')
 
             result = _apply_profitability_router(result, symbol, timeframe)
+            result = _apply_96_futures_risk_policy(result, symbol, timeframe)
             result = _apply_36s_futures_ai_control(result, symbol, timeframe)
             result = _enrich_futures_public_message(result)
             ui_result = _compact_futures_ui_result(result)
@@ -31851,8 +32003,14 @@ def _futures_entry_wait_bars(result, timeframe):
     elif score >= 70: bars=5
     elif score >= 50: bars=6
     else: bars=8
-    # Una señal publicada nunca queda abierta indefinidamente.
-    return max(4,min(8,int(bars)))
+    # Commit 9.6: MEDIUM/HIGH need faster opportunity decay, without moving
+    # Entry/SL/TP or relaxing Safety.
+    try:
+        from futures_universe import exit_profile_for
+        cap = int(exit_profile_for((result or {}).get('symbol')).get('max_entry_wait_bars') or 8)
+        return max(2, min(8, int(bars), cap))
+    except Exception:
+        return max(4,min(8,int(bars)))
 
 
 def _human_duration(seconds):
@@ -32226,6 +32384,98 @@ def _apply_profitability_router(result, symbol, timeframe):
         return result
     except Exception as exc:
         print(f"⚠️ [EDGE] router fail-open {symbol} {timeframe}: {str(exc)[:160]}")
+        return result
+
+
+# ============================================================================
+# COMMIT 9.6 — MULTI-RISK FUTURES EXECUTION POLICY
+# ============================================================================
+
+def _apply_96_futures_risk_policy(result, symbol, timeframe):
+    """Annotate risk class and add protection without lowering existing Safety.
+
+    CORE classes keep the current engine. MEDIUM/HIGH get faster pre-entry TTL;
+    HIGH also requires a usable microstructure snapshot before a published trade
+    remains executable. This layer may only preserve or downgrade publication.
+    """
+    if not isinstance(result, dict) or not result.get('success'):
+        return result
+    try:
+        from futures_universe import annotate_result, exit_profile_for, timeframe_allowed
+        result = annotate_result(result, symbol, timeframe)
+        profile = exit_profile_for(symbol)
+        risk_class = str(profile.get('risk_class') or 'UNKNOWN')
+        levels = dict(result.get('levels') or {})
+        decision = dict(result.get('decision') or {})
+        levels['risk_class'] = risk_class
+        levels['exit_profile'] = profile.get('name')
+        levels['risk_budget_multiplier'] = profile.get('risk_budget_multiplier')
+        levels['max_entry_wait_bars'] = profile.get('max_entry_wait_bars')
+        levels['entry_zone_pct'] = profile.get('entry_zone_pct')
+        # Class risk budget reduces exposure, never Safety. Existing strategy or
+        # conviction sizing may already be smaller; keep the more conservative.
+        try:
+            base_size = float(levels.get('suggested_size') if levels.get('suggested_size') is not None else 1.0)
+            budget = float(profile.get('risk_budget_multiplier') or 1.0)
+            levels['suggested_size'] = max(0.0, min(base_size, budget))
+        except Exception:
+            pass
+        result['levels'] = levels
+        decision['risk_class'] = risk_class
+        decision['exit_profile'] = profile.get('name')
+        result['decision'] = decision
+
+        if not timeframe_allowed(symbol, timeframe):
+            levels['publication_status'] = 'ANALYSIS_ONLY'
+            levels['is_rejected'] = True
+            levels['risk_class_block_reason'] = 'OUTSIDE_RISK_CLASS_TIMEFRAME'
+            result['publication_status'] = 'ANALYSIS_ONLY'
+            result['publication_eligible'] = False
+            return result
+
+        action = str(decision.get('action') or '').upper()
+        publication = str(levels.get('publication_status') or result.get('publication_status') or '').upper()
+        if action not in ('LONG','SHORT') or publication != 'EXECUTABLE_SIGNAL':
+            return result
+
+        # Extra microstructure protection is intentionally asymmetric: HIGH is
+        # fail-closed; MEDIUM only blocks objectively poor available liquidity.
+        if risk_class in ('MEDIUM','HIGH'):
+            micro = None
+            try:
+                fs = _configured_futures_module()
+                micro = fs.get_futures_microstructure_snapshot(symbol)
+            except Exception as exc:
+                result['risk_microstructure_error'] = str(exc)[:160]
+            available = bool(isinstance(micro, dict) and micro.get('available'))
+            if available:
+                orderbook = micro.get('orderbook') or {}
+                liquidity = micro.get('liquidity') or {}
+                spread = float(orderbook.get('spread_pct') or 0)
+                band = str(liquidity.get('band') or liquidity.get('liquidity_band') or '').upper()
+                score = float(liquidity.get('score') or liquidity.get('liquidity_score') or 0)
+                result['risk_microstructure'] = {
+                    'available': True, 'spread_pct': spread,
+                    'liquidity_band': band, 'liquidity_score': score,
+                }
+                poor = bool(band in ('LOW','VERY_LOW','ILLIQUID') or (spread > (0.25 if risk_class=='MEDIUM' else 0.18)))
+                if poor:
+                    levels['publication_status'] = 'ANALYSIS_ONLY'
+                    levels['is_rejected'] = True
+                    levels['risk_class_block_reason'] = 'LIQUIDITY_EXECUTION_RISK'
+                    result['publication_status'] = 'ANALYSIS_ONLY'
+                    result['publication_eligible'] = False
+            elif risk_class == 'HIGH':
+                levels['publication_status'] = 'ANALYSIS_ONLY'
+                levels['is_rejected'] = True
+                levels['risk_class_block_reason'] = 'HIGH_REQUIRES_MICROSTRUCTURE'
+                result['publication_status'] = 'ANALYSIS_ONLY'
+                result['publication_eligible'] = False
+        return result
+    except Exception as exc:
+        # Fail closed only for the new class-specific checks; legacy CORE signal
+        # logic remains untouched if metadata enrichment itself fails.
+        print(f"⚠️ [9.6 RISK] {symbol} {timeframe}: {str(exc)[:180]}")
         return result
 
 
@@ -32668,6 +32918,8 @@ def _analyze_futures_all_parallel(combos_override=None):
             'lifecycle': {}
         }
 
+    _configured_futures_module()
+
     from futures_system import FUTURES_SYMBOLS, FUTURES_TIMEFRAMES, futures_timeframe_allowed
 
     all_combos = [
@@ -32852,6 +33104,7 @@ def _analyze_futures_all_parallel(combos_override=None):
             ):
 
                 r = _apply_profitability_router(r, symbol, timeframe)
+                r = _apply_96_futures_risk_policy(r, symbol, timeframe)
                 r = (
                     _apply_36s_futures_ai_control(
                         r,
@@ -32938,6 +33191,7 @@ def _analyze_futures_all_parallel(combos_override=None):
                 clear_fn(include_microstructure=True)
         except Exception:
             try:
+                _configured_futures_module()
                 from futures_system import clear_futures_runtime_caches
                 clear_futures_runtime_caches(include_microstructure=True)
             except Exception:
@@ -32989,12 +33243,12 @@ _FUTURES_INCREMENTAL_CURSOR_LOCK = threading.Lock()
 _FUTURES_INCREMENTAL_INTERVAL_SECONDS = max(10, int(os.environ.get('FUTURES_INCREMENTAL_INTERVAL_SECONDS', '30') or 30))
 _FUTURES_INCREMENTAL_START_DELAY_SECONDS = max(60, int(os.environ.get('FUTURES_INCREMENTAL_START_DELAY_SECONDS', '180') or 180))
 if _LOW_MEMORY_MODE:
-    # Hotfix 16.1: 30s seguía encadenando análisis casi de forma continua en
-    # Render Free. 60s conserva actualización incremental sin monopolizar la
-    # instancia central. Los análisis elegidos por el usuario siguen siendo
-    # interactivos y no esperan este intervalo.
+    # Commit 9.6: 15 activos requieren latencia operativa razonable. Seguimos
+    # procesando UNA sola combinación a la vez y sólo cuando cerró vela; por
+    # tanto el aumento es de cadencia/CPU, no de DataFrames residentes en RAM.
+    # La prioridad interactiva y el memory guard siguen pudiendo posponerlo.
     _FUTURES_INCREMENTAL_INTERVAL_SECONDS = max(
-        120,
+        30,
         _FUTURES_INCREMENTAL_INTERVAL_SECONDS,
     )
 
@@ -33036,6 +33290,7 @@ def _futures_combo_due_for_closed_candle(symbol, timeframe, now_ts=None):
 def _next_futures_incremental_combo():
     """Round-robin one symbol/timeframe at a time; bounded for 512 MB RAM."""
     global _FUTURES_INCREMENTAL_CURSOR
+    _configured_futures_module()
     from futures_system import (
         FUTURES_SYMBOLS,
         FUTURES_TIMEFRAMES,
@@ -33351,7 +33606,7 @@ def _start_futures_warmup():
     if _LOW_MEMORY_MODE:
         print(
             "🛡️ [MEM] Futures LOW_MEMORY_MODE: "
-            "sin barrido 30/30 al arranque; refresh incremental activado."
+            "sin barrido masivo al arranque; refresh incremental 63-combos activado."
         )
 
         def _incremental_loop():
@@ -33360,7 +33615,7 @@ def _start_futures_warmup():
             while True:
                 try:
                     if _futures_interactive_priority_active():
-                        # UI priority prevents the 15-second round-robin from
+                        # UI priority prevents the incremental round-robin from
                         # repeatedly winning the lock while the user waits.
                         pass
                     elif not _futures_analysis_cache['running']:
@@ -33879,6 +34134,7 @@ def _classify_futures_analysis_result(
         reason = 'Entry, Stop Loss o Take Profit no son válidos.'
     else:
         try:
+            _configured_futures_module()
             from futures_system import _leverage_in_valid_range
 
             if not _leverage_in_valid_range(leverage, timeframe):
@@ -34024,6 +34280,7 @@ def _classify_futures_analysis_result(
 def _build_futures_analysis_visibility(cache, min_confidence):
     """Construye el resumen compacto de todas las combinaciones analizadas."""
     cache = cache or {}
+    _configured_futures_module()
     from futures_system import futures_timeframe_allowed
     lifecycle = cache.get('lifecycle') or {}
     candidates = []
@@ -34152,6 +34409,7 @@ def api_futures_signals_active():
 
             symbol = record.get('symbol')
             tf = record.get('timeframe')
+            _configured_futures_module()
             from futures_system import futures_timeframe_allowed
             if not futures_timeframe_allowed(symbol, tf):
                 filter_stats['outside_active_contract'] += 1
@@ -34176,6 +34434,7 @@ def api_futures_signals_active():
             # FILTRO POR RANGO DE LEVERAGE (regla del usuario):
             # No mostrar señales con apalancamiento insuficiente para el TF.
             try:
+                _configured_futures_module()
                 from futures_system import _leverage_in_valid_range
                 if not _leverage_in_valid_range(leverage, tf):
                     filter_stats['leverage_out_of_range'] += 1
@@ -34385,6 +34644,7 @@ def api_futures_debug():
                     or result.get('current_price')
                 )
                 try:
+                    _configured_futures_module()
                     from futures_system import _leverage_in_valid_range
                     entry['leverage_ok'] = _leverage_in_valid_range(
                         int(lv.get('leverage', 1)), tf)
@@ -34483,6 +34743,7 @@ def api_futures_signals_previous():
         }        
         for (symbol, tf), result in cache['analysis'].items(): 
             filter_stats['total_processed'] += 1
+            _configured_futures_module()
             from futures_system import futures_timeframe_allowed
             if not futures_timeframe_allowed(symbol, tf):
                 filter_stats['outside_active_contract'] += 1
@@ -34565,6 +34826,7 @@ def api_futures_signals_previous():
             # FILTRO POR RANGO DE LEVERAGE (regla del usuario):
             # Descartar señales con apalancamiento insuficiente para el TF.
             try:
+                _configured_futures_module()
                 from futures_system import _leverage_in_valid_range
                 if not _leverage_in_valid_range(
                     leverage,
@@ -34804,9 +35066,11 @@ def api_futures_correlation():
         analysis_cache = _get_or_refresh_futures_analysis()
         warming_up = analysis_cache.get('warming_up', False)
         
-        # Filtrar solo el TF solicitado
+        # Filtrar sólo los activos donde este TF es operativo.
+        from futures_universe import all_symbols, timeframe_allowed
+        correlation_symbols = [s for s in all_symbols() if timeframe_allowed(s, timeframe)]
         pairs_data = {}
-        for symbol in ['BTC-USDT', 'ETH-USDT', 'SOL-USDT', 'XRP-USDT', 'ADA-USDT']:
+        for symbol in correlation_symbols:
             r = analysis_cache['analysis'].get((symbol, timeframe))
             if not r or not r.get('success'):
                 pairs_data[symbol] = {
@@ -34829,8 +35093,8 @@ def api_futures_correlation():
         # Correlación
         try:
             futures = _get_futures_system()
-            all_results = {s: analysis_cache['analysis'].get((s, timeframe), {}) 
-                          for s in ['BTC-USDT', 'ETH-USDT', 'SOL-USDT', 'XRP-USDT', 'ADA-USDT']}
+            all_results = {s: analysis_cache['analysis'].get((s, timeframe), {})
+                           for s in correlation_symbols}
             correlation = futures.analyze_futures_correlation(all_results) if futures else {}
         except Exception as e:
             correlation = {'rotation_signal': 'MIXED', 'description': f'Error: {str(e)[:100]}'}
@@ -36229,25 +36493,27 @@ def _entry_alert_mark_sent(symbol, timeframe, candle_ts):
     _save_entry_alerts_to_disk()
 
 
-def _price_touches_entry(current_price, entry, action):
-    """
-    Determina si el precio ha 'tocado' el entry.
-    
-    Para LONG/COMPRA_SPOT: alertamos cuando el precio actual está en zona entry
-      (dentro de tolerancia o ligeramente por debajo — mejor entrada).
-    Para SHORT/VENTA_SPOT: alertamos cuando está en entry o ligeramente por
-      encima.
-    
-    Retorna True si el precio está dentro de la tolerancia del entry.
-    """
+def _entry_zone_tolerance_pct(signal=None):
+    """Reaction-zone tolerance. Entry price remains engine-defined."""
+    try:
+        sig = signal or {}
+        if str(sig.get('system') or sig.get('system_type') or '').lower() == 'futures':
+            from futures_universe import exit_profile_for
+            return float(exit_profile_for(sig.get('symbol')).get('entry_zone_pct') or MONITOR_ENTRY_TOLERANCE_PCT)
+    except Exception:
+        pass
+    return float(MONITOR_ENTRY_TOLERANCE_PCT)
+
+def _price_touches_entry(current_price, entry, action, signal=None):
+    """True when price enters the opportunity-specific reaction zone."""
     if not entry or entry <= 0 or not current_price or current_price <= 0:
         return False
     try:
+        tolerance = _entry_zone_tolerance_pct(signal)
         diff_pct = abs(current_price - entry) / entry * 100
-        return diff_pct <= MONITOR_ENTRY_TOLERANCE_PCT
+        return diff_pct <= tolerance
     except Exception:
         return False
-
 
 def _build_entry_alert_message(signal, current_price):
     """
@@ -36286,7 +36552,7 @@ def _build_entry_alert_message(signal, current_price):
     action_label = icon_map.get(action, action)
     
     lines = [
-        f'🚨 <b>ENTRY TOCADO</b> · {action_label}',
+        f'🎯 <b>ZONA DE ENTRADA ACTIVA</b> · {action_label}',
         f'<b>{symbol}</b> · {timeframe}',
         '',
         f'💰 Entry: <b>{entry:.4f}</b>',
@@ -36302,7 +36568,22 @@ def _build_entry_alert_message(signal, current_price):
                 lines.append(f'⚖️ R/R: {rr_val:.2f}')
         except Exception:
             pass
-    lines.append(f'🎯 Confianza: {confidence:.0f}%')
+    try:
+        if str(signal.get('system') or signal.get('system_type') or '').lower() == 'futures':
+            from futures_universe import exit_profile_for
+            profile = exit_profile_for(symbol)
+            lines.append(
+                f"🧩 Clase: {profile.get('risk_class')} · salida {profile.get('name')}"
+            )
+            lines.append(
+                f"📍 Zona activa: ±{float(profile.get('entry_zone_pct') or MONITOR_ENTRY_TOLERANCE_PCT):.2f}% alrededor del Entry"
+            )
+    except Exception:
+        pass
+    source = signal.get('entry_source') or signal.get('entry_reason')
+    if source:
+        lines.append(f'🧭 Entrada: {str(source)[:120]}')
+    lines.append(f'🎯 Calidad/convicción: {confidence:.0f}/100')
     
     return '\n'.join(lines)
 
@@ -36327,6 +36608,7 @@ def _get_signals_for_entry_monitor():
             tf = sig.get('timeframe')
             system_type = str(sig.get('system_type') or 'spot').lower()
             if system_type == 'futures':
+                _configured_futures_module()
                 from futures_system import futures_timeframe_allowed
                 if tf not in FUTURES_ENTRY_MONITOR_TIMEFRAMES or not futures_timeframe_allowed(symbol, tf):
                     continue
@@ -36410,7 +36692,7 @@ def _spot_setup_ready(signal,current):
         action=str(signal.get('action') or signal.get('decision') or '').upper()
         if min(entry,sl,tp,current) <= 0:
             return False
-        if _price_touches_entry(current, entry, action):
+        if _price_touches_entry(current, entry, action, signal):
             return False
         if action in ('LONG','COMPRA_SPOT'):
             return current > sl and current < tp
@@ -36444,7 +36726,7 @@ def monitor_entries_loop():
     print("🔔 MONITOR DE ENTRIES iniciado")
     print(f"   TF Spot: {', '.join(SPOT_ENTRY_MONITOR_TIMEFRAMES)}")
     print(f"   TF Futures: {', '.join(FUTURES_ENTRY_MONITOR_TIMEFRAMES)}")
-    print(f"   Tolerancia: ±{MONITOR_ENTRY_TOLERANCE_PCT}%")
+    print(f"   Zona Entry: Spot ±{MONITOR_ENTRY_TOLERANCE_PCT}% · Futures dinámica por clase")
     print(f"   Chequeo cada: {MONITOR_CHECK_INTERVAL}s")
     print("=" * 60)
     
@@ -36472,7 +36754,7 @@ def monitor_entries_loop():
                 # "Señal de la Vela Anterior". Se envía una sola vez por
                 # source candle, siempre que siga activa y todavía NO haya
                 # tocado Entry. ENTRY mantiene su alerta posterior con imagen.
-                if (not _spot_preentry_sent(sig)) and _spot_setup_ready(sig, current):
+                if (str(sig.get('system') or '').lower() == 'spot' and (not _spot_preentry_sent(sig)) and _spot_setup_ready(sig, current)):
                     try:
                         pre_message = _build_spot_preentry_message(sig)
                         if expert_system.send_telegram_alert(pre_message, None):
@@ -36486,7 +36768,7 @@ def monitor_entries_loop():
                     continue
                 
                 # ¿El precio actual toca el entry?
-                if not _price_touches_entry(current, entry, sig.get('action')):
+                if not _price_touches_entry(current, entry, sig.get('action'), sig):
                     continue
                 
                 # DISPARAR ALERTA
@@ -38731,6 +39013,63 @@ def _guardian_futures_level_bucket(
 
 
 # ============================================================================
+# COMMIT 9.6 — GUARDIAN POR CLASE DE RIESGO
+# ============================================================================
+
+def _apply_96_guardian_risk_policy(advice, signal):
+    if not isinstance(advice, dict):
+        return advice
+    try:
+        from futures_universe import exit_profile_for
+        out = dict(advice)
+        profile = exit_profile_for((signal or {}).get('symbol'))
+        risk_class = str(profile.get('risk_class') or 'UNKNOWN')
+        out['risk_class'] = risk_class
+        out['exit_profile'] = profile.get('name')
+        out['risk_budget_multiplier'] = profile.get('risk_budget_multiplier')
+        if risk_class not in ('MEDIUM','HIGH'):
+            return out
+        deterioration = float(out.get('deterioration_score') or 0)
+        action = str(out.get('management_action') or out.get('action') or 'HOLD').upper()
+        reason_bits = []
+
+        # Fast/high-beta portfolios never add to risk through Guardian.
+        if not bool(profile.get('allow_scale_in')) and 'ADD' in action:
+            if out.get('suggested_stop_loss'):
+                action = 'PROTECT'
+                out['action'] = 'PROTECT'
+                reason_bits.append('se desactiva el aumento de exposición por clase de riesgo')
+            else:
+                action = 'HOLD'
+                out['action'] = 'HOLD'
+                reason_bits.append('se evita aumentar exposición sin protección adicional')
+            out['suggested_add_position_pct'] = 0
+            out['suggested_add_position_usdt'] = 0
+
+        exit_score = float(profile.get('guardian_exit_score') or 100)
+        reduce_score = float(profile.get('guardian_reduce_score') or 100)
+        if deterioration >= exit_score:
+            action = 'EXIT'
+            out['action'] = 'EXIT'
+            reason_bits.append(f'deterioro {deterioration:.0f}/100 supera umbral protector {exit_score:.0f}')
+        elif deterioration >= reduce_score and action != 'EXIT':
+            action = 'REDUCE'
+            out['action'] = 'REDUCE'
+            out['suggested_reduce_pct'] = max(float(out.get('suggested_reduce_pct') or 0), 35.0 if risk_class=='HIGH' else 25.0)
+            reason_bits.append(f'deterioro {deterioration:.0f}/100 exige reducir exposición {risk_class}')
+
+        out['management_action'] = action
+        if reason_bits:
+            base = str(out.get('management_reason') or out.get('reason') or '').strip()
+            extra = '; '.join(reason_bits)
+            out['management_reason'] = f"{base}; {extra}".strip('; ')
+        return out
+    except Exception as exc:
+        print(f"⚠️ [9.6 GUARDIAN] {str(exc)[:160]}")
+        return advice
+
+
+# ============================================================================
 # MENSAJE FUTURES GUARDIAN
 # ============================================================================
 
@@ -38856,6 +39195,18 @@ def _build_futures_guardian_telegram_message(
             f"· {timeframe} · {direction}"
         )
     ]
+
+    try:
+        from futures_universe import exit_profile_for
+        _risk_profile = exit_profile_for(symbol)
+        _risk_class = str(_risk_profile.get('risk_class') or 'UNKNOWN')
+        if _risk_class != 'UNKNOWN':
+            lines.append(
+                f"🧩 Riesgo: <b>{_telegram_escape(_risk_class)}</b> · "
+                f"salida {_telegram_escape(str(_risk_profile.get('name') or 'NORMAL'))}"
+            )
+    except Exception:
+        pass
 
     if leverage:
 
@@ -41809,7 +42160,7 @@ def _build_ai_learning_context():
             'shadow_live': (rf_shadow or [])[:24],
             'engines': (rf_states or [])[:10],
             'learning_rule': (
-                'Backtest/OOS is a historical profitability prior; Shadow/live is '
+                'Backtest/OOS is the primary learning source; Shadow/live is '
                 'current confirmation. Never sum both samples or manufacture a '
                 'positive strategy for a cell with no validated edge.'
             ),
@@ -41829,9 +42180,32 @@ def _build_ai_learning_context():
 
             'goal':
                 (
-                    'find testable hypotheses that improve '
-                    'net expectancy and secondarily win rate'
+                    'find testable strategy hypotheses that improve '
+                    'net expectancy first, then win rate and execution quality'
                 ),
+
+            'learning_mode':
+                'BACKTEST_OOS_PRIMARY_LIVE_ALPHA_DECAY',
+
+            'required_hypotheses': {
+                'min': 1,
+                'max': 3,
+                'must_name': [
+                    'market', 'risk_class_or_spot_pair', 'timeframe',
+                    'direction', 'strategy_family', 'entry_rule',
+                    'stop_rule', 'take_profit_rule', 'falsification_rule'
+                ],
+                'rule': (
+                    'Every hypothesis must be testable in Research backtest/OOS. '
+                    'AI cannot promote it directly to production.'
+                )
+            },
+
+            'differentiation': {
+                'spot': ['BTC-USDT','PAXG-USDT','PAXG-BTC'],
+                'futures_groups': ['CORE1','CORE2','MEDIUM','HIGH'],
+                'components': ['strategy','entry','stop_loss','take_profit','timeframe','risk','execution']
+            },
 
             'no_parameter_changes':
                 True,
@@ -42106,6 +42480,8 @@ def monitor_guardian_telegram_loop():
                             ):
 
                                 continue
+
+                            advice = _apply_96_guardian_risk_policy(advice, sig)
 
                             base_action = str(
                                 advice.get(
@@ -44149,42 +44525,127 @@ def _build_futures_standard_message(user, symbol, timeframe, result, lifecycle_r
     ]
     return '\n'.join(lines)
 
+def _futures_live_mark_price(symbol):
+    """One lightweight public request; never allocates an OHLCV DataFrame."""
+    try:
+        fs = _configured_futures_module()
+        contract = str((getattr(fs, 'FUTURES_CONTRACT_SYMBOLS', {}) or {}).get(symbol) or '')
+        if not contract:
+            return None
+        session = fs._get_futures_http_session()
+        url = fs.KUCOIN_FUTURES_MARK_PRICE_URL.format(symbol=contract)
+        response = session.get(url, timeout=4)
+        response.raise_for_status()
+        payload = response.json() or {}
+        if str(payload.get('code')) != '200000':
+            return None
+        data = payload.get('data') or {}
+        price = float(data.get('value') or 0)
+        return price if price > 0 else None
+    except Exception as exc:
+        print(f'⚠️ [9.6 ENTRY ZONE] mark price {symbol}: {str(exc)[:120]}')
+        return None
+
+
 def futures_standard_alert_loop():
-    print('📈 FUTURES notifier normal iniciado (30m–1D; sólo EXECUTABLE_SIGNAL)')
-    time.sleep(95)
+    """Commit 9.6 — one Futures Telegram path: alert at the reaction Entry zone.
+
+    We deliberately DO NOT alert when a setup is merely born. The message is
+    timed when live mark price reaches the engine-defined Entry reaction zone.
+    This is closer to an actionable order-zone alert and avoids the old
+    normal/scalping duplicate channels. It never changes Entry/SL/TP/Safety.
+    """
+    print('🎯 FUTURES Telegram: monitor de zona Entry iniciado')
+    time.sleep(120)
     while True:
         try:
-            users=sorted(_telegram_market_users('futures'))
+            users = sorted(_telegram_market_users('futures'))
             if not users:
-                time.sleep(_FUTURES_STANDARD_ALERT_LOOP_INTERVAL); continue
+                time.sleep(20)
+                continue
             with _futures_analysis_cache['lock']:
-                raw=dict(_futures_analysis_cache.get('data') or {})
-            analyses=dict(raw.get('analysis') or {}); lifecycle=dict(raw.get('lifecycle') or {})
-            for (symbol,timeframe), result in analyses.items():
-                if timeframe not in _FUTURES_STANDARD_ALERT_TFS or not isinstance(result,dict) or not result.get('success'):
+                raw = dict(_futures_analysis_cache.get('data') or {})
+            analyses = dict(raw.get('analysis') or {})
+            lifecycle = dict(raw.get('lifecycle') or {})
+            # Only symbols that already have an executable candidate trigger a
+            # mark-price call. Fifteen supported assets therefore do NOT imply
+            # fifteen requests every cycle.
+            candidates = []
+            for (symbol, timeframe), result in analyses.items():
+                if not isinstance(result, dict) or not result.get('success'):
                     continue
-                if str(result.get('analysis_mode') or '').upper()!='CLOSED_CANDLE' or not bool(result.get('source_candle_closed',False)):
+                try:
+                    from futures_universe import timeframe_allowed, exit_profile_for
+                    if not timeframe_allowed(symbol, timeframe):
+                        continue
+                    profile = exit_profile_for(symbol)
+                except Exception:
                     continue
-                action=str(((result.get('decision') or {}).get('action') or '')).upper()
-                if action not in ('LONG','SHORT'): continue
-                levels=result.get('levels') or {}
-                publication_status=str(levels.get('publication_status') or result.get('publication_status') or '').upper()
-                if publication_status!='EXECUTABLE_SIGNAL': continue
-                signal_id=str(result.get('signal_id') or '')
-                lc=lifecycle.get(signal_id) or {}
-                validity=_futures_signal_validity(result,timeframe,lc)
-                if str(lc.get('lifecycle_status') or 'waiting_entry')!='waiting_entry' or validity.get('expired'): continue
+                if str(result.get('analysis_mode') or '').upper() != 'CLOSED_CANDLE' or not bool(result.get('source_candle_closed', False)):
+                    continue
+                decision = result.get('decision') or {}
+                levels = result.get('levels') or {}
+                action = str(decision.get('action') or '').upper()
+                publication = str(levels.get('publication_status') or result.get('publication_status') or '').upper()
+                if action not in ('LONG', 'SHORT') or publication != 'EXECUTABLE_SIGNAL':
+                    continue
+                entry = float(levels.get('entry') or 0)
+                sl = float(levels.get('stop_loss') or 0)
+                tp = float(levels.get('take_profit') or 0)
+                if min(entry, sl, tp) <= 0:
+                    continue
+                signal_id = str(result.get('signal_id') or '')
+                lc = lifecycle.get(signal_id) or {}
+                validity = _futures_signal_validity(result, timeframe, lc)
+                if str(lc.get('lifecycle_status') or 'waiting_entry') != 'waiting_entry' or validity.get('expired'):
+                    continue
+                candidates.append((symbol, timeframe, result, profile, entry, sl, tp, action, validity))
+
+            if not candidates:
+                time.sleep(20)
+                continue
+
+            live_by_symbol = {}
+            for symbol in sorted({row[0] for row in candidates}):
+                live_by_symbol[symbol] = _futures_live_mark_price(symbol)
+
+            for symbol, timeframe, result, profile, entry, sl, tp, action, validity in candidates:
+                current = live_by_symbol.get(symbol)
+                if not current:
+                    continue
+                signal_for_zone = {
+                    'system': 'futures', 'system_type': 'futures', 'symbol': symbol,
+                    'timeframe': timeframe, 'action': action, 'entry': entry,
+                    'stop_loss': sl, 'take_profit': tp,
+                }
+                if not _price_touches_entry(current, entry, action, signal_for_zone):
+                    continue
+                levels = result.get('levels') or {}
+                confidence = float((result.get('decision') or {}).get('confidence') or result.get('confidence') or 0)
+                signal_for_zone.update({
+                    'confidence': confidence,
+                    'leverage': levels.get('leverage') or result.get('leverage'),
+                    'risk_reward': levels.get('risk_reward'),
+                    'entry_source': levels.get('entry_source') or levels.get('entry_reason'),
+                })
+                base_message = _build_entry_alert_message(signal_for_zone, current)
+                link = _futures_signal_public_url(symbol, timeframe, result)
+                message = '\n'.join([
+                    base_message,
+                    f"⏳ Vigencia restante: <b>{escape(str(validity.get('duration_text') or ''))}</b>",
+                    f"🔗 <a href=\"{escape(link)}\">Abrir análisis completo</a>",
+                ])
                 for user in users:
-                    key=_futures_scalping_alert_key(user,result,symbol,timeframe)
-                    key='NORMAL|'+key
-                    if _futures_scalping_alert_already_sent(key): continue
-                    msg=_build_futures_standard_message(user,symbol,timeframe,result,lc)
-                    if expert_system.send_telegram_alert(msg,None,category='FUTURES_SETUP'):
+                    key = 'ENTRYZONE|' + _futures_scalping_alert_key(user, result, symbol, timeframe)
+                    if _futures_scalping_alert_already_sent(key):
+                        continue
+                    if expert_system.send_telegram_alert(message, None, category='FUTURES_ENTRY_ZONE'):
                         _mark_futures_scalping_alert_sent(key)
-                        print(f'✅ Futures Telegram normal: {user} · {symbol} {timeframe} {action}')
+                        print(f'✅ Futures Entry-zone Telegram: {user} · {symbol} {timeframe} {action} @ {current:.8g}')
         except Exception as exc:
             print(f'❌ futures_standard_alert_loop: {exc}')
-        time.sleep(_FUTURES_STANDARD_ALERT_LOOP_INTERVAL)
+        time.sleep(20)
+
 
 # ============================================================================
 # COMMIT 36K — ALERTAS PERSONALIZADAS DE SCALPING FUTURES
@@ -45777,6 +46238,9 @@ def api_user_futures_scalping_preferences():
 
 
 def futures_scalping_alert_loop():
+    """Legacy notifier retained only for API compatibility; Commit 9.6 disables it."""
+    print("🔕 Scalping legacy desactivado: todas las alertas usan el flujo Futures común")
+    return
     """
     Monitor liviano de SETUP LISTO.
 

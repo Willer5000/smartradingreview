@@ -751,6 +751,18 @@ def compose_professional_recommendation(
         if vol_state in vol_names: readable.append(vol_names[vol_state])
         _append_unique(evidence, 'Contexto de mercado: ' + ' con '.join(readable))
 
+    risk_class = str((operational_context or {}).get('risk_class') or '').upper() if isinstance(operational_context, dict) else ''
+    exit_profile = str((operational_context or {}).get('exit_profile') or '').upper() if isinstance(operational_context, dict) else ''
+    if risk_class in {'CORE1','CORE2','MEDIUM','HIGH'}:
+        risk_explain = {
+            'CORE1': 'activo CORE 1: permite marcos más amplios y gestión normal del setup',
+            'CORE2': 'activo CORE 2: operativa hasta 12H con control reforzado de liquidez',
+            'MEDIUM': 'activo MEDIUM: se priorizan oportunidades de resolución rápida y la vigencia del Entry es menor',
+            'HIGH': 'activo HIGH: exige ejecución más precisa, microestructura utilizable y salida muy rápida',
+        }.get(risk_class)
+        if risk_explain:
+            _append_unique(evidence, 'Perfil operativo: ' + risk_explain + (f' ({exit_profile})' if exit_profile else ''))
+
     # RC9.2.1 — preserve the independent-family thesis that actually drove the
     # decision. The details are market observations (ADX/DMI, structure, RSI/MACD,
     # volume, MTF, macro/liquidity), not internal votes or scores. This is the
