@@ -1,0 +1,12 @@
+RC9.7.8 · LIVE VISUALS + FUTURES ACTIVE SAVE
+
+Incluye RC9.7.7 (vela/indicadores visuales en formación) y añade:
+- orden UI: Nuevas señales confirmadas -> Señales vigentes -> Señales guardadas;
+- señales vigentes guardables igual que las recién confirmadas;
+- ACTIVE_CONFIRMED como procedencia explícita;
+- señales waiting_entry conservan la fecha de vigencia ORIGINAL: guardar no reinicia el reloj;
+- si Entry ya fue tocado, Guardar en operación arma directamente Guardian;
+- una vez Entry es tocado, la caducidad pre-Entry deja de aplicar; sigue hasta TP/SL/cierre manual;
+- lifecycle Telegram y Guardian existentes se reutilizan, sin duplicar motores.
+
+SQL requerido una sola vez: RC9_7_8_SAVED_SIGNALS_VALIDITY.sql

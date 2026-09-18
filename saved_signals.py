@@ -4959,6 +4959,20 @@ def create_saved_signal(data: Dict) -> Optional[Dict]:
 
         }
         
+        # RC9.7.8 — heredar la caducidad pre-Entry del lifecycle original.
+        # Es opcional para compatibilidad con guardados anteriores.
+        raw_source_valid_until = data.get('source_valid_until')
+        if raw_source_valid_until:
+            try:
+                import pandas as pd
+                payload['source_valid_until'] = pd.Timestamp(
+                    raw_source_valid_until
+                ).isoformat()
+            except Exception as e:
+                logger.warning(
+                    f"source_valid_until no parseable ({raw_source_valid_until}): {e}"
+                )
+
         # ============ INSERT ============
         def _op():
             return db.client.table('saved_signals').insert(payload).execute()
@@ -5490,7 +5504,62 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                 # más abajo mientras la señal siga vigente.
                 # ============================================================
 
-                if not already_touched:
+                source_valid_until = sig.get('source_valid_until')
+                exact_source_expiry = None
+                if not already_touched and source_valid_until:
+                    try:
+                        exact_source_expiry = pd.Timestamp(source_valid_until)
+                        if exact_source_expiry.tz is None:
+                            exact_source_expiry = exact_source_expiry.tz_localize('UTC')
+                        else:
+                            exact_source_expiry = exact_source_expiry.tz_convert('UTC')
+                    except Exception:
+                        exact_source_expiry = None
+
+                # RC9.7.8: una señal guardada desde Previous/Vigentes hereda
+                # la fecha exacta de caducidad del setup original. Guardarla
+                # nunca concede tiempo adicional para alcanzar Entry.
+                if (
+                    not already_touched
+                    and exact_source_expiry is not None
+                    and pd.Timestamp.now(tz='UTC') >= exact_source_expiry
+                ):
+                    expiry_window = df_after[
+                        pd.to_datetime(df_after['time'], utc=True) <= exact_source_expiry
+                    ]
+                    entry_touched_before_expiry = False
+                    for _, validity_row in expiry_window.iterrows():
+                        if _check_entry_touched(
+                            entry,
+                            float(validity_row['high']),
+                            float(validity_row['low']),
+                            action
+                        ):
+                            entry_touched_before_expiry = True
+                            break
+
+                    if not entry_touched_before_expiry:
+                        now_iso = datetime.utcnow().isoformat()
+                        try:
+                            expiry_price = float(df['close'].iloc[-1] or 0)
+                        except Exception:
+                            expiry_price = 0.0
+                        db.client.table('saved_signals').update({
+                            'status': 'expired',
+                            'closed_at': now_iso,
+                            'closed_price': expiry_price if expiry_price > 0 else None,
+                            'pnl_pct': 0.0,
+                            'pnl_usdt': 0.0,
+                            'close_reason': 'expired_source_validity_no_entry',
+                            'updated_at': now_iso,
+                        }).eq('id', sig['id']).execute()
+                        stats['expired'] += 1
+                        logger.info(
+                            f"⌛ Señal expirada por vigencia original: {symbol} {tf} {action}"
+                        )
+                        continue
+
+                if not already_touched and exact_source_expiry is None:
 
                     completed_after = (
                         df_after.iloc[:-1]

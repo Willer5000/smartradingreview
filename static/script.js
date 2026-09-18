@@ -4341,36 +4341,124 @@ window.updateCandleChart = function(data) {
         });
 }
 
-// RC9.7.5 — vela actual únicamente visual.
-// El análisis, indicadores y niveles siguen usando exclusivamente velas cerradas.
-window.updateLiveCandleOverlay = function(payload) {
-    const chartDiv = document.getElementById('candle-chart');
+// RC9.7.7 — VISUAL ACTUAL COMPLETO, SIN CONTAMINAR EL MOTOR.
+//
+// Principio:
+// - `window.currentAnalysis` conserva SIEMPRE la cohorte de velas cerradas.
+// - `/api/price` aporta una vela abierta DISPLAY_ONLY.
+// - Se crea una COPIA efímera del dataframe para dibujar la vela actual y
+//   recalcular sólo la representación visual de los indicadores.
+// - Esa copia jamás vuelve al backend, no cambia Entry/SL/TP, Safety,
+//   publicación, Research ni aprendizaje.
+
+function _liveVisualTimestamp(value) {
+    const ts = new Date(value).getTime();
+    return Number.isFinite(ts) ? ts : null;
+}
+
+function _sameLiveVisualContext(base, payload) {
+    if (!base || !payload) return false;
+    const clean = value => String(value || '').trim().toUpperCase();
+    const baseSymbol = clean(base.symbol || window.currentSymbol);
+    const liveSymbol = clean(payload.symbol || window.currentSymbol);
+    const baseTf = clean(base.timeframe || window.currentInterval);
+    const liveTf = clean(payload.timeframe || window.currentInterval);
+    return (!baseSymbol || !liveSymbol || baseSymbol === liveSymbol)
+        && (!baseTf || !liveTf || baseTf === liveTf);
+}
+
+function _buildLiveVisualData(payload) {
+    const base = window.currentAnalysis || currentAnalysis;
     const candle = payload && payload.current_candle;
-    if (!chartDiv || !candle || !window.Plotly) return;
+    if (!base || !base.df || !candle || !_sameLiveVisualContext(base, payload)) return null;
+
+    const values = {
+        open: Number(candle.open),
+        high: Number(candle.high),
+        low: Number(candle.low),
+        close: Number(candle.close),
+        volume: Number(candle.volume || 0)
+    };
+    if (!candle.time || ['open', 'high', 'low', 'close'].some(k => !Number.isFinite(values[k]) || values[k] <= 0)) {
+        return null;
+    }
+
+    // Copia profunda sólo de las series del dataframe. El análisis original
+    // permanece intocable y sigue representando exclusivamente velas cerradas.
+    const df = {};
+    Object.entries(base.df || {}).forEach(([key, value]) => {
+        df[key] = Array.isArray(value) ? value.slice() : value;
+    });
+
+    ['time', 'open', 'high', 'low', 'close'].forEach(key => {
+        if (!Array.isArray(df[key])) df[key] = [];
+    });
+    if (!Array.isArray(df.volume)) df.volume = [];
+
+    const liveMs = _liveVisualTimestamp(candle.time);
+    const lastMs = df.time.length ? _liveVisualTimestamp(df.time[df.time.length - 1]) : null;
+    if (liveMs === null) return null;
+
+    // Si el snapshot ya contiene el mismo timestamp, sustituir sólo en la
+    // COPIA visual. Si es una nueva vela abierta, anexarla.
+    const replaceLast = lastMs !== null && Math.abs(liveMs - lastMs) < 1000;
+    if (lastMs !== null && liveMs < lastMs - 1000) return null;
+
+    const idx = replaceLast ? Math.max(0, df.time.length - 1) : df.time.length;
+    if (replaceLast) {
+        df.time[idx] = candle.time;
+        df.open[idx] = values.open;
+        df.high[idx] = values.high;
+        df.low[idx] = values.low;
+        df.close[idx] = values.close;
+        if (df.volume.length > idx) df.volume[idx] = values.volume;
+        else {
+            while (df.volume.length < idx) df.volume.push(null);
+            df.volume.push(values.volume);
+        }
+    } else {
+        df.time.push(candle.time);
+        df.open.push(values.open);
+        df.high.push(values.high);
+        df.low.push(values.low);
+        df.close.push(values.close);
+        while (df.volume.length < idx) df.volume.push(null);
+        df.volume.push(values.volume);
+    }
+
+    return {
+        ...base,
+        df,
+        current_price: values.close,
+        __display_only_live_preview: true,
+        __live_preview_timestamp: candle.time
+    };
+}
+
+function _liveVisualCardNote(chartId) {
+    const chartDiv = document.getElementById(chartId);
+    if (!chartDiv || !chartDiv.parentElement) return;
+    const parent = chartDiv.parentElement;
+    let note = parent.querySelector(':scope > .live-visual-preview-note');
+    if (!note) {
+        note = document.createElement('div');
+        note.className = 'live-visual-preview-note text-end mb-1';
+        parent.insertBefore(note, chartDiv);
+    }
+    note.innerHTML = '<small class="text-info"><i class="fas fa-eye me-1"></i>Actual · vela en formación · sólo visual</small>';
+}
+
+function _upsertLiveOpenCandle(chartId, candle, traceName = 'Vela actual · en formación') {
+    const chartDiv = document.getElementById(chartId);
+    if (!chartDiv || !candle || !window.Plotly || !Array.isArray(chartDiv.data) || chartDiv.data.length === 0) return;
+
+    const hasCandles = chartDiv.data.some(t => String(t?.type || '').toLowerCase() === 'candlestick');
+    if (!hasCandles) return;
 
     const values = ['open', 'high', 'low', 'close'].map(k => Number(candle[k]));
     if (!candle.time || values.some(v => !Number.isFinite(v) || v <= 0)) return;
 
-    window.__lastLiveCandlePayload = payload;
-    const liveTrace = {
-        x: [new Date(candle.time)],
-        open: [values[0]],
-        high: [values[1]],
-        low: [values[2]],
-        close: [values[3]],
-        type: 'candlestick',
-        name: 'Vela actual · en formación',
-        meta: 'LIVE_OPEN_CANDLE',
-        opacity: 0.72,
-        increasing: {line: {color: '#35D7C8', width: 2}, fillcolor: 'rgba(53,215,200,0.45)'},
-        decreasing: {line: {color: '#FFB347', width: 2}, fillcolor: 'rgba(255,179,71,0.45)'},
-        showlegend: true,
-        yaxis: 'y',
-        hovertemplate: '<b>Vela actual · en formación</b><br>Open: %{open}<br>High: %{high}<br>Low: %{low}<br>Precio: %{close}<extra></extra>'
-    };
-
-    const data = Array.isArray(chartDiv.data) ? chartDiv.data : [];
-    const idx = data.findIndex(t => t && t.meta === 'LIVE_OPEN_CANDLE');
+    const idx = chartDiv.data.findIndex(t => t && t.meta === 'LIVE_OPEN_CANDLE');
     if (idx >= 0) {
         Plotly.restyle(chartDiv, {
             x: [[new Date(candle.time)]],
@@ -4379,12 +4467,132 @@ window.updateLiveCandleOverlay = function(payload) {
             low: [[values[2]]],
             close: [[values[3]]]
         }, [idx]);
-    } else if (data.length > 0) {
-        Plotly.addTraces(chartDiv, liveTrace);
+        return;
     }
+
+    Plotly.addTraces(chartDiv, {
+        x: [new Date(candle.time)],
+        open: [values[0]],
+        high: [values[1]],
+        low: [values[2]],
+        close: [values[3]],
+        type: 'candlestick',
+        name: traceName,
+        meta: 'LIVE_OPEN_CANDLE',
+        opacity: 0.72,
+        increasing: {line: {color: '#35D7C8', width: 2}, fillcolor: 'rgba(53,215,200,0.45)'},
+        decreasing: {line: {color: '#FFB347', width: 2}, fillcolor: 'rgba(255,179,71,0.45)'},
+        showlegend: true,
+        yaxis: 'y',
+        hovertemplate: '<b>Vela actual · en formación</b><br>Open: %{open}<br>High: %{high}<br>Low: %{low}<br>Precio: %{close}<extra></extra>'
+    });
+}
+
+function _liveVisualShouldRender(id, chartId) {
+    const workspace = window.ChartWorkspace;
+    if (workspace?.shouldRender && !workspace.shouldRender(id)) return false;
+    const chart = document.getElementById(chartId);
+    if (!chart) return false;
+    const card = chart.closest('.indicator-card');
+    if (card && (card.classList.contains('d-none') || card.hidden)) return false;
+    return true;
+}
+
+function _separateLiveCandleFromBaseTrace(chartId, candle) {
+    const chartDiv = document.getElementById(chartId);
+    if (!chartDiv || !window.Plotly || !Array.isArray(chartDiv.data) || !candle?.time) return;
+    const liveMs = _liveVisualTimestamp(candle.time);
+    if (liveMs === null) return;
+
+    chartDiv.data.forEach((trace, idx) => {
+        if (String(trace?.type || '').toLowerCase() !== 'candlestick') return;
+        if (trace?.meta === 'LIVE_OPEN_CANDLE') return;
+        const xs = Array.isArray(trace.x) ? trace.x : [];
+        if (!xs.length) return;
+        const lastMs = _liveVisualTimestamp(xs[xs.length - 1]);
+        if (lastMs === null || Math.abs(lastMs - liveMs) >= 1000) return;
+
+        const restyle = {};
+        ['x', 'open', 'high', 'low', 'close'].forEach(key => {
+            if (Array.isArray(trace[key])) restyle[key] = [trace[key].slice(0, -1)];
+        });
+        if (Object.keys(restyle).length) Plotly.restyle(chartDiv, restyle, [idx]);
+    });
+}
+
+function _decorateLiveRenderedChart(chartId, candle) {
+    // newPlot/react puede resolver en microtarea. Un tick garantiza que la traza
+    // exista antes de separar la vela abierta y volverla a dibujar destacada.
+    setTimeout(() => {
+        try {
+            _separateLiveCandleFromBaseTrace(chartId, candle);
+            _upsertLiveOpenCandle(chartId, candle);
+            _liveVisualCardNote(chartId);
+        } catch (error) {
+            console.debug(`Decoración live omitida para ${chartId}:`, error?.message || error);
+        }
+    }, 0);
+}
+
+window.updateLiveVisualIndicators = function(payload) {
+    const visual = _buildLiveVisualData(payload);
+    if (!visual) return;
+
+    // Sólo renderizadores derivados del OHLCV actual. No se llama a endpoints,
+    // no se modifica `currentAnalysis` y no se recalcula la decisión del sistema.
+    const renderers = [
+        ['ftm', 'ftm-chart', updateFTMChart],
+        ['liquidation-heatmap', 'liquidation-heatmap-chart', updateLiquidationHeatmap],
+        ['whale', 'whale-chart', updateWhaleChart],
+        ['rsi_maverick', 'rsi-maverick-chart', updateRSIMaverickChart],
+        ['ichimoku', 'ichimoku-chart', updateIchimokuChart],
+        ['squeeze', 'squeeze-chart', updateSqueezeChart],
+        ['adx', 'adx-chart', updateADXChart],
+        ['macd', 'macd-chart', updateMACDChart],
+        ['rsi', 'rsi-chart', updateRSIChart],
+        ['stochastic', 'stochastic-chart', updateStochasticChart],
+        ['volume', 'volume-chart', updateVolumeChart],
+        ['supertrend', 'supertrend-chart', updateSuperTrendChart],
+        ['bollinger', 'bollinger-chart', updateBollingerChart],
+        ['atr', 'atr-chart', updateATRChart],
+        ['volume-profile', 'volume-profile-chart', updateVolumeProfileChart],
+        ['fvg-ob', 'fvg-ob-chart', updateFVGAOBChart],
+        ['williams-cci', 'williams-cci-chart', updateWilliamsCCIChart],
+        ['mfi-force', 'mfi-force-chart', updateMFIForceChart],
+        ['fibonacci', 'fibonacci-chart', updateFibonacciChart],
+        ['vwap', 'vwap-chart', updateVWAPChart],
+        ['trading-zones', 'trading-zones-chart', updateTradingZones]
+    ];
+
+    renderers.forEach(([id, chartId, fn]) => {
+        if (typeof fn !== 'function' || !_liveVisualShouldRender(id, chartId)) return;
+        try {
+            fn(visual);
+            _decorateLiveRenderedChart(chartId, payload.current_candle);
+        } catch (error) {
+            console.debug(`Vista actual omitida para ${id}:`, error?.message || error);
+        }
+    });
+
+    // Patrones/formaciones mantienen sus detecciones de vela cerrada; sólo se
+    // superpone la vela abierta para que el eje de precio llegue al mercado actual.
+    const candle = payload.current_candle;
+    _upsertLiveOpenCandle('pattern-4-chart', candle);
+    _upsertLiveOpenCandle('formation-40-chart', candle);
 };
 
-// ============ FAIR VALUE GAPS + ORDER BLOCKS + LIQUIDITY SWEEPS + STOP HUNTS ============
+window.updateLiveCandleOverlay = function(payload) {
+    const candle = payload && payload.current_candle;
+    if (!candle || !window.Plotly) return;
+
+    window.__lastLiveCandlePayload = payload;
+    _upsertLiveOpenCandle('candle-chart', candle);
+
+    // Misma filosofía visual para los indicadores: la última lectura es
+    // provisional; la decisión oficial sigue basada en vela cerrada.
+    window.updateLiveVisualIndicators(payload);
+};
+
 function updateFVGAOBChart(data) {
     console.log('🟣🟣🟣 EJECUTANDO updateFVGAOBChart');
     

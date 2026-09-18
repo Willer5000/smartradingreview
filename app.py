@@ -27287,12 +27287,23 @@ def api_price():
             last_time_iso = last_time.isoformat()
         except Exception:
             last_time_iso = str(last_time)
+        current_volume = 0.0
+        try:
+            current_volume = float(last_row.get('volume') or 0.0)
+            if not math.isfinite(current_volume):
+                current_volume = 0.0
+        except Exception:
+            current_volume = 0.0
+
         current_candle = {
             'time': last_time_iso,
             'open': float(last_row.get('open')),
             'high': float(last_row.get('high')),
             'low': float(last_row.get('low')),
             'close': float(last_row.get('close')),
+            # RC9.7.7: volumen de la vela abierta exclusivamente para la
+            # previsualización de indicadores. Nunca entra al análisis cerrado.
+            'volume': current_volume,
             'display_only': True,
             'is_forming': True,
         }
@@ -29354,13 +29365,14 @@ def api_saved_signals_create():
 
         if source_context not in (
             'PREVIOUS_CONFIRMED',
-            'PREVIOUS_ANALYSIS_ONLY'
+            'PREVIOUS_ANALYSIS_ONLY',
+            'ACTIVE_CONFIRMED'
         ):
             return jsonify({
                 'success': False,
                 'error': (
-                    'Sólo las señales de Vela Anterior '
-                    'pueden guardarse.'
+                    'Sólo las señales confirmadas del último cierre o '
+                    'las señales vigentes pueden guardarse.'
                 )
             }), 403
 
@@ -29526,32 +29538,99 @@ def api_saved_signals_create():
 
         else:
         
-                    if (
-                        source_context
-                        != 'PREVIOUS_CONFIRMED'
+                    if source_context not in (
+                        'PREVIOUS_CONFIRMED',
+                        'ACTIVE_CONFIRMED'
                     ):
                         return jsonify({
                             'success': False,
                             'error': (
-                                'La señal ejecutable sólo puede '
-                                'guardarse desde Vela Anterior.'
+                                'La señal ejecutable sólo puede guardarse '
+                                'desde una confirmación del último cierre o '
+                                'desde una señal vigente.'
                             )
                         }), 403
-        
-                    # Guardado ejecutable legítimo desde Previous.
-                    data['execution_origin'] = (
-                        'SYSTEM_EXECUTABLE'
+
+                    # RC9.7.8 — una señal vigente conserva SU vigencia original.
+                    # Guardarla no reinicia el reloj pre-Entry. Una vez tocado
+                    # Entry, la caducidad pre-Entry deja de aplicar y Guardian
+                    # continúa hasta TP/SL/cierre manual.
+                    source_signal_id = str(
+                        data.get('source_signal_id')
+                        or ''
+                    ).strip()
+
+                    current_cache = _get_or_refresh_futures_analysis()
+                    lifecycle_map = current_cache.get('lifecycle') or {}
+                    lifecycle_record = (
+                        lifecycle_map.get(source_signal_id)
+                        if source_signal_id
+                        else None
                     )
-        
-                    data.setdefault(
-                        'risk_class',
-                        'PREMIUM'
-                    )
-        
-                    data.setdefault(
-                        'system_executable',
-                        True
-                    )
+
+                    if source_context == 'ACTIVE_CONFIRMED':
+                        if not source_signal_id or not isinstance(lifecycle_record, dict):
+                            return jsonify({
+                                'success': False,
+                                'error': (
+                                    'La señal vigente ya no está disponible en el ciclo operativo. '
+                                    'Actualiza Futuros y vuelve a intentarlo.'
+                                )
+                            }), 409
+
+                        lifecycle_status = str(
+                            lifecycle_record.get('lifecycle_status') or ''
+                        )
+                        if lifecycle_status not in ('waiting_entry', 'entry_touched'):
+                            return jsonify({
+                                'success': False,
+                                'error': 'La señal ya no está vigente.'
+                            }), 409
+
+                        source_valid_until = lifecycle_record.get('valid_until')
+                        if lifecycle_status == 'waiting_entry' and source_valid_until:
+                            try:
+                                _valid_until = pd.Timestamp(source_valid_until)
+                                if _valid_until.tz is None:
+                                    _valid_until = _valid_until.tz_localize('UTC')
+                                else:
+                                    _valid_until = _valid_until.tz_convert('UTC')
+                                if pd.Timestamp.now(tz='UTC') >= _valid_until:
+                                    return jsonify({
+                                        'success': False,
+                                        'error': (
+                                            'La vigencia para esperar Entry ya finalizó. '
+                                            'No se puede guardar como señal pendiente.'
+                                        )
+                                    }), 409
+                            except Exception:
+                                pass
+
+                        # Canonicalizar la procedencia y niveles del ciclo real.
+                        data['symbol'] = lifecycle_record.get('symbol') or data.get('symbol')
+                        data['timeframe'] = lifecycle_record.get('timeframe') or data.get('timeframe')
+                        data['action'] = lifecycle_record.get('action') or data.get('action')
+                        data['confidence'] = lifecycle_record.get('confidence') or data.get('confidence')
+                        data['source_valid_until'] = source_valid_until
+                        data['candle_timestamp'] = (
+                            lifecycle_record.get('source_candle_timestamp')
+                            or data.get('candle_timestamp')
+                        )
+                        data['source_signal_id'] = source_signal_id
+
+                        # Si el sistema ya sabe que Entry fue tocado, el guardado
+                        # queda armado directamente como operación en seguimiento.
+                        if lifecycle_status == 'entry_touched':
+                            data['already_in_position'] = True
+
+                    elif isinstance(lifecycle_record, dict):
+                        # Previous también hereda la vigencia canónica cuando
+                        # el lifecycle está disponible.
+                        data['source_valid_until'] = lifecycle_record.get('valid_until')
+
+                    data['execution_origin'] = 'SYSTEM_EXECUTABLE'
+                    data.setdefault('risk_class', 'PREMIUM')
+                    data.setdefault('system_executable', True)
         
         # Asegurar que el campo candle_timestamp esté presente
         if not data.get('candle_timestamp'):
@@ -34650,6 +34729,7 @@ def api_futures_signals_active():
                 'entry_touched': lifecycle_status == 'entry_touched',
                 'publication_status': record.get('publication_status'),
                 'execution_safety': record.get('execution_safety'),
+                'source_context': 'ACTIVE_CONFIRMED',
                 # F.2: snapshot canónico de la recomendación que originó
                 # esta señal. El frontend puede mostrarlo sin reanalizar ni
                 # sustituirlo por la recomendación de una vela posterior.

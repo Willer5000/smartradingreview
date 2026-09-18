@@ -1216,7 +1216,14 @@
                     </div>
                 </div>
 
-                <!-- ============ CONTENEDOR DE INDICADORES (EXACTAMENTE COMO ESTABA) ============ -->
+                <!-- ============ CONTENEDOR DE INDICADORES ============ -->
+                <div class="alert alert-info py-2 px-3 mb-3" id="live-indicators-visual-note" role="note" style="background: rgba(13,202,240,.08); border-color: rgba(13,202,240,.25);">
+                    <small>
+                        <i class="fas fa-eye me-1"></i>
+                        Los gráficos e indicadores incorporan provisionalmente la vela actual en formación para mostrar valores actuales.
+                        Las señales, Entry, SL, TP y Safety siguen calculándose únicamente con velas cerradas.
+                    </small>
+                </div>
                 <div id="indicators-container">
                     <!-- FTMaverick -->
                     <div class="card bg-dark border-warning mb-4 indicator-card" data-indicator="ftm">
@@ -2076,23 +2083,6 @@
                         </div>
                     </div>
                 </div>
-                <!-- NUEVO: SEÑALES ACTIVAS EN EL SISTEMA -->
-                <div class="card bg-dark border-success mb-4">
-                    <div class="card-header signal-header-active d-flex justify-content-between align-items-center">
-                        <h5 class="mb-0"><i class="fas fa-bell me-2"></i>Señales vigentes</h5>
-                        <span class="badge bg-dark" id="active-signals-count">0</span>
-                    </div>
-                    <div class="card-body p-0">
-                        <div class="list-group list-group-flush bg-dark" id="active-signals-list">
-                            <div class="list-group-item bg-dark text-muted text-center py-3">
-                                Cargando señales vigentes...
-                            </div>
-                        </div>
-                        <div class="p-2 text-center">
-                            <small class="text-muted">Confirmaciones de cierres anteriores que aún esperan entrada o siguen en seguimiento.</small>
-                        </div>
-                    </div>
-                </div>
                 <!-- NUEVO: SEÑALES DE LA VELA ANTERIOR -->
                 <div class="card bg-dark border-warning mt-4">
                     <div class="card-header signal-header-previous d-flex justify-content-between align-items-center">
@@ -2115,6 +2105,24 @@
                     </div>
                 </div>
                 
+
+                <!-- NUEVO: SEÑALES ACTIVAS EN EL SISTEMA -->
+                <div class="card bg-dark border-success mb-4">
+                    <div class="card-header signal-header-active d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="fas fa-bell me-2"></i>Señales vigentes</h5>
+                        <span class="badge bg-dark" id="active-signals-count">0</span>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="list-group list-group-flush bg-dark" id="active-signals-list">
+                            <div class="list-group-item bg-dark text-muted text-center py-3">
+                                Cargando señales vigentes...
+                            </div>
+                        </div>
+                        <div class="p-2 text-center">
+                            <small class="text-muted">Confirmaciones de cierres anteriores que aún esperan entrada o siguen en seguimiento.</small>
+                        </div>
+                    </div>
+                </div>
                 <!-- v22.9: SEÑALES GUARDADAS (solo visible en FUTUROS) -->
                 <div class="card bg-dark border-success mt-4" id="saved-signals-card" style="display: none;">
                     <div class="card-header bg-success bg-opacity-25 d-flex justify-content-between align-items-center flex-wrap">
@@ -2166,7 +2174,7 @@
                         <div class="list-group list-group-flush bg-dark" id="saved-signals-list">
                             <div class="list-group-item bg-dark text-muted text-center py-3">
                                 <i class="fas fa-info-circle me-1"></i>
-                                Aún no has guardado ninguna señal. Ábrela desde "Nuevas señales confirmadas" y usa GUARDAR.
+                                Aún no has guardado ninguna señal. Puedes guardarla desde "Nuevas señales confirmadas" o "Señales vigentes".
                             </div>
                         </div>
                         <div class="p-2 text-center">
@@ -2602,7 +2610,7 @@
 
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI-2"></script>
     <script
-        src="{{ url_for('static', filename='script.js') }}?v=20260918-RC9-7-6-FUTURES-SIGNALS"
+        src="{{ url_for('static', filename='script.js') }}?v=20260918-RC9-7-8-LIVE-ACTIVE-SAVE"
     ></script>
 
 
@@ -2613,7 +2621,7 @@
     {% if is_futures %}
 
     <script
-        src="{{ url_for('static', filename='futures.js') }}?v=20260918-RC9-7-6-FUTURES-SIGNALS"
+        src="{{ url_for('static', filename='futures.js') }}?v=20260918-RC9-7-8-LIVE-ACTIVE-SAVE"
     ></script>
 
     {% endif %}

@@ -1040,6 +1040,32 @@ window.updateActiveSignals = async function() {
                     </div>
                 `;
             }
+
+            const signalData = _encodeFuturesSignal({
+                ...sig,
+                source_context: 'ACTIVE_CONFIRMED'
+            });
+
+            const saveButtons = sig.lifecycle_status === 'entry_touched'
+                ? `
+                    <div class="d-flex flex-wrap gap-2 mt-2">
+                        <button type="button" class="btn btn-sm btn-success"
+                            onclick="window.openSaveActiveSignalFromCard(event, '${signalData}', true)">
+                            ✅ Guardar en operación
+                        </button>
+                    </div>`
+                : `
+                    <div class="d-flex flex-wrap gap-2 mt-2">
+                        <button type="button" class="btn btn-sm btn-outline-success"
+                            onclick="window.openSaveActiveSignalFromCard(event, '${signalData}', false)">
+                            🔖 Guardar
+                        </button>
+                        <button type="button" class="btn btn-sm btn-success"
+                            onclick="window.openSaveActiveSignalFromCard(event, '${signalData}', true)">
+                            ✅ Guardar en operación
+                        </button>
+                    </div>`;
+
             html += `
                 <div
                     class="list-group-item bg-dark text-white border-secondary"
@@ -1116,6 +1142,8 @@ window.updateActiveSignals = async function() {
                     </div>
 
                     ${validityHtml}
+
+                    ${saveButtons}
 
                     ${futRenderDecisionAudit(sig.decision_audit)}
 
@@ -1239,6 +1267,18 @@ window.openSaveSignalFromCard = function(event, encodedSignal, alreadyInPosition
     const sig = _decodeFuturesSignal(encodedSignal);
     if (sig) sig.source_context = 'PREVIOUS_CONFIRMED';
     window.openSaveSignalModal(sig, Boolean(alreadyInPosition));
+};
+
+// RC9.7.8 — señales vigentes también son guardables sin reiniciar
+// su vigencia original. Si Entry ya fue tocado, se guardan directamente
+// como operación en seguimiento para activar Guardian.
+window.openSaveActiveSignalFromCard = function(event, encodedSignal, alreadyInPosition) {
+    if (event) event.stopPropagation();
+    const sig = _decodeFuturesSignal(encodedSignal);
+    if (!sig) return;
+    sig.source_context = 'ACTIVE_CONFIRMED';
+    const inPosition = Boolean(alreadyInPosition || sig.entry_touched || sig.lifecycle_status === 'entry_touched');
+    window.openSaveSignalModal(sig, inPosition);
 };
 
 
@@ -3336,6 +3376,11 @@ window.confirmSaveSignal = async function() {
         source_signal_id:
             sig.source_signal_id
             || sig.signal_id
+            || null,
+
+        source_valid_until:
+            sig.valid_until
+            || sig.source_valid_until
             || null,
 
         manual_override_ack:
