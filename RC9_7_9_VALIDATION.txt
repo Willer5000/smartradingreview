@@ -1,0 +1,15 @@
+RC9.7.9 validation
+- Supersedes RC9.7.7 and RC9.7.8 if not deployed.
+- Python compile: app.py, saved_signals.py OK
+- JavaScript syntax: static/script.js, static/futures.js OK
+- Jinja parse: templates/index.html OK
+- Tests: 7 passed
+- Futures UI order: Señales activas -> Señales confirmadas -> Señales vigentes -> Señales Guardadas
+- Señales activas: green header, navigation-only to symbol/timeframe/charts/recommendation; no save controls in this lane
+- Señales confirmadas: latest confirmed close; guardable
+- Señales vigentes: red header; older still-valid lifecycle; guardable without resetting valid_until
+- Current directional diagnostics are shown with Señales activas, not mixed into Señales vigentes
+- Previous/confirmed diagnostics remain in Señales confirmadas
+- RC9.7.7 live visuals preserved
+- RC9.7.8 source_valid_until/Guardian lifecycle preserved
+- No Research, Safety, Entry, SL, TP, leverage or OOS gate changes

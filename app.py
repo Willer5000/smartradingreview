@@ -31145,7 +31145,7 @@ def _futures_opportunity_quality(result):
 def api_futures_opportunities():
     """Rank only already-published executable signals. Never manufactures one."""
     try:
-        limit = max(1, min(10, int(request.args.get('limit', 5) or 5)))
+        limit = max(1, min(63, int(request.args.get('limit', 10) or 10)))
         cache = _get_or_refresh_futures_analysis()
         rows = []
         from futures_universe import risk_class_for, exit_profile_for, timeframe_allowed

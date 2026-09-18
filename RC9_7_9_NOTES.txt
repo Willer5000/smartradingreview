@@ -1,0 +1,17 @@
+RC9.7.9 — TRES CARRILES DE SEÑALES FUTURES
+
+SUPERCEDES RC9.7.7 y RC9.7.8. Si no fueron desplegados, usar sólo este commit.
+
+Orden UI Futures:
+1) Señales activas — barra verde. Atajos del análisis actual; sólo navegación a par/TF/gráficos/recomendación. NO se guardan desde esta lista.
+2) Señales confirmadas — último cierre confirmado; guardables.
+3) Señales vigentes — barra roja. Confirmaciones de cierres anteriores que mantienen lifecycle; guardables sin reiniciar valid_until.
+4) Señales Guardadas.
+
+Se conserva:
+- live visuals de RC9.7.7;
+- source_valid_until y Guardian de RC9.7.8;
+- Entry/SL/TP/Safety/Research sin cambios;
+- diagnósticos "Por qué no aparecen otras señales" en carril actual y en confirmadas, no como ruido dentro de vigentes.
+
+SQL: ejecutar RC9_7_9_SAVED_SIGNALS_VALIDITY.sql si todavía no se ejecutó. Es idempotente (ADD COLUMN IF NOT EXISTS).

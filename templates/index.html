@@ -2083,12 +2083,33 @@
                         </div>
                     </div>
                 </div>
-                <!-- NUEVO: SEÑALES DE LA VELA ANTERIOR -->
-                <div class="card bg-dark border-warning mt-4">
-                    <div class="card-header signal-header-previous d-flex justify-content-between align-items-center">
+                <!-- RC9.7.9: SEÑALES ACTIVAS DEL ANÁLISIS ACTUAL -->
+                <div class="card bg-dark border-success mb-4">
+                    <div class="card-header bg-success bg-opacity-25 d-flex justify-content-between align-items-center">
                         <h5 class="mb-0">
-                            <i class="fas fa-history me-2"></i>
-                            Nuevas señales confirmadas
+                            <i class="fas fa-bolt me-2"></i>Señales activas
+                        </h5>
+                        <span class="badge bg-dark" id="current-active-signals-count">0</span>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="list-group list-group-flush bg-dark" id="current-active-signals-list">
+                            <div class="list-group-item bg-dark text-muted text-center py-3">
+                                Cargando señales activas...
+                            </div>
+                        </div>
+                        <div id="current-active-diagnostics"></div>
+                        <div class="p-2 text-center">
+                            <small class="text-muted">Atajos del análisis actual. Al hacer clic abre el par, temporalidad, gráficos, indicadores y recomendación técnica. Esta lista es de navegación y no guarda operaciones.</small>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- RC9.7.9: SEÑALES CONFIRMADAS EN EL ÚLTIMO CIERRE -->
+                <div class="card bg-dark border-warning mb-4">
+                    <div class="card-header bg-warning bg-opacity-25 d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">
+                            <i class="fas fa-check-circle me-2"></i>
+                            Señales confirmadas
                         </h5>
                         <span class="badge bg-dark" id="prev-signals-count">0</span>
                     </div>
@@ -2096,20 +2117,19 @@
                         <div class="list-group list-group-flush bg-dark" id="prev-signals-list">
                             <div class="list-group-item bg-dark text-muted text-center py-3">
                                 <div class="spinner-border spinner-border-sm text-warning me-2"></div>
-                                Cargando nuevas confirmaciones...
+                                Cargando señales confirmadas...
                             </div>
                         </div>
                         <div class="p-2 text-center">
-                            <small class="text-muted">Sólo muestra señales nacidas del último cierre confirmado. Click para ver justificación.</small>
+                            <small class="text-muted">Señales nacidas del último cierre confirmado. Pueden guardarse y, una vez alcanzado Entry, quedan bajo seguimiento y Guardian.</small>
                         </div>
                     </div>
                 </div>
-                
 
-                <!-- NUEVO: SEÑALES ACTIVAS EN EL SISTEMA -->
-                <div class="card bg-dark border-success mb-4">
-                    <div class="card-header signal-header-active d-flex justify-content-between align-items-center">
-                        <h5 class="mb-0"><i class="fas fa-bell me-2"></i>Señales vigentes</h5>
+                <!-- RC9.7.9: SEÑALES VIGENTES DE CIERRES ANTERIORES -->
+                <div class="card bg-dark border-danger mb-4">
+                    <div class="card-header bg-danger bg-opacity-25 d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="fas fa-hourglass-half me-2"></i>Señales vigentes</h5>
                         <span class="badge bg-dark" id="active-signals-count">0</span>
                     </div>
                     <div class="card-body p-0">
@@ -2119,7 +2139,7 @@
                             </div>
                         </div>
                         <div class="p-2 text-center">
-                            <small class="text-muted">Confirmaciones de cierres anteriores que aún esperan entrada o siguen en seguimiento.</small>
+                            <small class="text-muted">Señales confirmadas en cierres anteriores que todavía conservan vigencia. Pueden guardarse sin reiniciar su reloj; si Entry ya fue alcanzado, el Guardian continúa hasta TP, SL o cierre.</small>
                         </div>
                     </div>
                 </div>
@@ -2174,7 +2194,7 @@
                         <div class="list-group list-group-flush bg-dark" id="saved-signals-list">
                             <div class="list-group-item bg-dark text-muted text-center py-3">
                                 <i class="fas fa-info-circle me-1"></i>
-                                Aún no has guardado ninguna señal. Puedes guardarla desde "Nuevas señales confirmadas" o "Señales vigentes".
+                                Aún no has guardado ninguna señal. Puedes guardarla desde "Señales confirmadas" o "Señales vigentes".
                             </div>
                         </div>
                         <div class="p-2 text-center">
@@ -2610,7 +2630,7 @@
 
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI-2"></script>
     <script
-        src="{{ url_for('static', filename='script.js') }}?v=20260918-RC9-7-8-LIVE-ACTIVE-SAVE"
+        src="{{ url_for('static', filename='script.js') }}?v=20260918-RC9-7-9-THREE-SIGNAL-LANES"
     ></script>
 
 
@@ -2621,7 +2641,7 @@
     {% if is_futures %}
 
     <script
-        src="{{ url_for('static', filename='futures.js') }}?v=20260918-RC9-7-8-LIVE-ACTIVE-SAVE"
+        src="{{ url_for('static', filename='futures.js') }}?v=20260918-RC9-7-9-THREE-SIGNAL-LANES"
     ></script>
 
     {% endif %}

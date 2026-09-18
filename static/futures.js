@@ -833,6 +833,14 @@ window.updateActiveSignals = async function() {
                 'active'
             );
 
+        // RC9.7.9 — el diagnóstico del análisis ACTUAL pertenece a
+        // "Señales activas", no a las señales persistentes/vigentes.
+        const currentDiagnostics =
+            document.getElementById('current-active-diagnostics');
+        if (currentDiagnostics) {
+            currentDiagnostics.innerHTML = diagnosticsHtml;
+        }
+
         const completed = Number(
             progress.completed || 0
         );
@@ -940,7 +948,6 @@ window.updateActiveSignals = async function() {
                     <br>
                     <small>No hay señales vigentes de cierres anteriores en este momento.</small>
                 </div>
-                ${diagnosticsHtml}
             `;
 
             return;
@@ -1151,7 +1158,7 @@ window.updateActiveSignals = async function() {
             `;
         });
 
-        signalsList.innerHTML = html + diagnosticsHtml;
+        signalsList.innerHTML = html;
 
     } catch (err) {
 
@@ -2820,46 +2827,92 @@ window.loadFuturesUniverse96 = async function() {
 };
 
 function _fut96EnsureOpportunityPanel() {
-    let panel = document.getElementById('futures-opportunity-router');
-    if (panel) return panel;
-    const active = document.getElementById('active-signals-list');
-    if (!active) return null;
-    panel = document.createElement('div');
-    panel.id = 'futures-opportunity-router';
-    panel.className = 'mb-3 p-3 border rounded bg-dark bg-opacity-25';
-    panel.innerHTML = '<div class="small text-muted">Buscando mejores oportunidades ejecutables…</div>';
-    active.parentElement?.insertBefore(panel, active);
-    return panel;
+    // RC9.7.9 — "Señales activas" vuelve a ser una vía separada de
+    // navegación hacia el análisis actual. Nunca se mezcla con el lifecycle
+    // de confirmadas/vigentes y no ofrece Guardar desde esta lista.
+    return document.getElementById('current-active-signals-list');
 }
 
 window.loadFuturesOpportunities96 = async function() {
     const panel = _fut96EnsureOpportunityPanel();
+    const countEl = document.getElementById('current-active-signals-count');
     if (!panel) return;
+
+    panel.innerHTML = `
+        <div class="list-group-item bg-dark text-info text-center py-3">
+            <div class="spinner-border spinner-border-sm me-2"></div>
+            Buscando señales activas del análisis actual...
+        </div>`;
+
     try {
-        const response = await fetch('/api/futures/opportunities?limit=5', {cache:'no-store'});
+        const response = await fetch('/api/futures/opportunities?limit=63', {cache:'no-store'});
         const data = await response.json();
-        const rows = data?.opportunities || [];
+        const rows = Array.isArray(data?.opportunities) ? data.opportunities : [];
+        const total = Number.isFinite(Number(data?.count)) ? Number(data.count) : rows.length;
+
+        if (countEl) {
+            countEl.textContent = String(total);
+            countEl.className = `badge bg-${total > 0 ? 'success' : 'secondary'}`;
+            countEl.title = `${total} señal(es) activa(s) en el análisis actual`;
+        }
+
         if (!rows.length) {
-            panel.innerHTML = '<div class="fw-bold">🎯 Mejores oportunidades Futures</div><div class="small text-muted mt-1">No hay una señal ejecutable Premium en el universo actual. El sistema no fuerza una entrada.</div>';
+            panel.innerHTML = `
+                <div class="list-group-item bg-dark text-muted text-center py-3">
+                    <strong>No hay señales activas ejecutables en este momento.</strong>
+                    <br>
+                    <small>El análisis continúa; no se fuerza una entrada.</small>
+                </div>`;
             return;
         }
-        panel.innerHTML = `<div class="fw-bold mb-2">🎯 Mejores oportunidades Futures</div>${rows.map((r,i)=>`
-            <button type="button" class="btn btn-sm btn-outline-light w-100 text-start mb-1 fut96-opportunity" data-symbol="${r.symbol}" data-timeframe="${r.timeframe}">
-                <b>${i+1}. ${r.symbol.replace('-','/')} · ${r.timeframe} · ${r.action}</b>
-                <span class="ms-2 badge bg-secondary">${r.risk_class}</span>
-                <span class="ms-2">Calidad ${Number(r.quality_score||0).toFixed(0)}/100 · RR ${Number(r.risk_reward||0).toFixed(2)}</span>
-            </button>`).join('')}`;
-        panel.querySelectorAll('.fut96-opportunity').forEach(btn => btn.addEventListener('click', () => {
-            const symbolSelect = document.getElementById('symbol-select');
-            const intervalSelect = document.getElementById('interval-select');
-            if (symbolSelect) symbolSelect.value = btn.dataset.symbol;
-            _fut96ApplyTimeframes(btn.dataset.symbol);
-            if (intervalSelect) intervalSelect.value = btn.dataset.timeframe;
-            symbolSelect?.dispatchEvent(new Event('change', {bubbles:true}));
-            intervalSelect?.dispatchEvent(new Event('change', {bubbles:true}));
-        }));
+
+        panel.innerHTML = rows.map((r) => {
+            const action = String(r.action || '').toUpperCase();
+            const isLong = action === 'LONG';
+            const badge = isLong ? 'success' : 'danger';
+            const icon = isLong ? '📈' : '📉';
+            const symbol = String(r.symbol || '').replace('-', '/');
+            const tf = String(r.timeframe || '--');
+            const quality = Number(r.quality_score || 0);
+            const rr = Number(r.risk_reward || 0);
+            const safety = Number(r.execution_safety || 0);
+            const riskClass = String(r.risk_class || '');
+
+            return `
+                <button
+                    type="button"
+                    class="list-group-item list-group-item-action bg-dark text-white border-secondary text-start"
+                    onclick="window.changeToSignal('${String(r.symbol || '').replace(/'/g, "\\'")}', '${String(r.timeframe || '').replace(/'/g, "\\'")}')"
+                    title="Abrir gráficos, indicadores y recomendación técnica"
+                >
+                    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+                        <div>
+                            <span class="badge bg-${badge} me-2">${icon} ${action}</span>
+                            <strong>${symbol}</strong>
+                            <span class="badge bg-dark ms-1">${tf}</span>
+                        </div>
+                        <div>
+                            ${riskClass ? `<span class="badge bg-secondary me-1">${riskClass}</span>` : ''}
+                            <span class="badge bg-success">Activa</span>
+                        </div>
+                    </div>
+                    <div class="small text-muted mt-2">
+                        Calidad ${quality.toFixed(0)}/100 · Seguridad ${safety.toFixed(0)} · R/R 1:${rr.toFixed(2)}
+                    </div>
+                    <div class="small text-info mt-1">
+                        Abrir par/temporalidad → gráficos → indicadores → recomendación técnica
+                    </div>
+                </button>`;
+        }).join('');
     } catch (error) {
-        panel.innerHTML = '<div class="small text-muted">Opportunity Router temporalmente no disponible.</div>';
+        if (countEl) {
+            countEl.textContent = 'ERR';
+            countEl.className = 'badge bg-danger';
+        }
+        panel.innerHTML = `
+            <div class="list-group-item bg-dark text-muted text-center py-3">
+                Señales activas temporalmente no disponibles.
+            </div>`;
     }
 };
 
