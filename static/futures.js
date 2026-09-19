@@ -964,24 +964,14 @@ window.updateActiveSignals = async function() {
         const filterStats =
             json.filter_stats || null;
 
-        const diagnosticsHtml =
-            futRenderAnalysisDiagnostics(
-                json,
-                'active'
-            );
-
+        // Este endpoint conserva el lifecycle de cierres anteriores.
+        // Nunca debe poblar el diagnóstico de Activas, que pertenece al
+        // preview INTRABAR de /api/futures/opportunities.
         const vigentDiagnosticsHtml =
             futRenderAnalysisDiagnostics(
                 json,
                 'vigent'
             );
-
-        // El diagnóstico del análisis ACTUAL pertenece a "Señales activas".
-        const currentDiagnostics =
-            document.getElementById('current-active-diagnostics');
-        if (currentDiagnostics) {
-            currentDiagnostics.innerHTML = diagnosticsHtml;
-        }
 
         // RC9.7.9 FINAL — cada carril tiene su propio "Por qué no aparecen".
         // Aquí sólo MEDIUM/HIGH de cierres anteriores que siguen vigentes.
@@ -3006,6 +2996,13 @@ window.loadFuturesOpportunities96 = async function() {
         const rows = Array.isArray(data?.opportunities) ? data.opportunities : [];
         const total = Number.isFinite(Number(data?.count)) ? Number(data.count) : rows.length;
 
+        // RC9.7.13 — Activas y su diagnóstico salen de la MISMA vela abierta.
+        // Nunca reutilizar el snapshot CLOSED_CANDLE de Confirmadas/Vigentes.
+        const currentDiagnostics = document.getElementById('current-active-diagnostics');
+        if (currentDiagnostics) {
+            currentDiagnostics.innerHTML = futRenderAnalysisDiagnostics(data, 'active');
+        }
+
         if (countEl) {
             countEl.textContent = String(total);
             countEl.className = `badge bg-${total > 0 ? 'success' : 'secondary'}`;
@@ -3073,6 +3070,54 @@ window.loadFuturesOpportunities96 = async function() {
 };
 
 // ============================================================================
+// RC9.7.13 — REFRESCO REAL DE LA VELA EN FORMACIÓN (PAR/TF SELECCIONADO)
+// ============================================================================
+window.__FUT_INTRABAR_REFRESH_TIMER__ = window.__FUT_INTRABAR_REFRESH_TIMER__ || null;
+
+function _futIntrabarRefreshMs(timeframe) {
+    const map = {
+        '30m': 90000,
+        '1h': 120000,
+        '2h': 180000,
+        '4h': 240000,
+        '12h': 300000,
+        '1D': 300000
+    };
+    return map[String(timeframe || '')] || 300000;
+}
+
+function _futScheduleSelectedIntrabarRefresh(resetOnly = false) {
+    clearTimeout(window.__FUT_INTRABAR_REFRESH_TIMER__);
+    const tf = document.getElementById('interval-select')?.value || '1h';
+    const delay = _futIntrabarRefreshMs(tf);
+
+    window.__FUT_INTRABAR_REFRESH_TIMER__ = setTimeout(async () => {
+        try {
+            if (document.hidden) {
+                _futScheduleSelectedIntrabarRefresh();
+                return;
+            }
+            const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
+            const timeframe = document.getElementById('interval-select')?.value || '1h';
+            await fetch('/api/futures/opportunities/refresh', {
+                method: 'POST',
+                cache: 'no-store',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({symbol, timeframe})
+            });
+            // El cálculo es async. Darle un margen corto y releer el carril verde.
+            setTimeout(() => {
+                if (!document.hidden) window.loadFuturesOpportunities96?.();
+            }, 5000);
+        } catch (error) {
+            console.warn('FUTURES intrabar refresh:', error);
+        } finally {
+            _futScheduleSelectedIntrabarRefresh();
+        }
+    }, resetOnly ? delay : delay);
+}
+
+// ============================================================================
 // INICIALIZACIÓN
 // ============================================================================
 
@@ -3097,6 +3142,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }, true);
     setTimeout(() => window.loadFuturesUniverse96(), 150);
     setTimeout(() => window.loadFuturesOpportunities96(), 2500);
+    _futScheduleSelectedIntrabarRefresh(true);
     setInterval(() => {
         if (!document.hidden) window.loadFuturesOpportunities96();
     }, 300000);
@@ -3257,6 +3303,10 @@ document.addEventListener('DOMContentLoaded', function() {
             if (typeof window.updateActiveSignals === 'function') {
                 window.updateActiveSignals();
             }
+            // runCompleteAnalysis() ya disparó el preview del nuevo par/TF;
+            // releer Activas después de que termine y reiniciar su reloj.
+            setTimeout(() => window.loadFuturesOpportunities96?.(), 5000);
+            _futScheduleSelectedIntrabarRefresh(true);
         }, 500);
     };
     document.getElementById('interval-select')?.addEventListener('change', refreshFuturesContext);

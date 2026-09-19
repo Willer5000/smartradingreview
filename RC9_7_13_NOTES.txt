@@ -1,0 +1,60 @@
+RC9.7.13 — ACTIVE / CONFIRMED SOURCE INTEGRITY + TELEGRAM CONFIRMED/ENTRY LIFECYCLE
+19-09-2026
+
+MAIN only. No Research. No SQL. No bootstrap.
+
+A) SEMÁNTICA DE SEÑALES
+- ACTIVA = vela abierta/intrabar, provisional y efímera.
+- CONFIRMADA = última vela cerrada, snapshot oficial congelado.
+- VIGENTE = confirmación anterior que conserva valid_until/lifecycle.
+- Activa intrabar nunca crea lifecycle, nunca alimenta ReviewTrader como señal oficial
+  y nunca envía Telegram de confirmación.
+
+B) INTEGRIDAD ACTIVE vs CONFIRMED
+- Futures Activas usa caché/diagnóstico intrabar independiente.
+- El bloque verde "Por qué no aparecen otras señales" ya no reutiliza CLOSED_CANDLE.
+- Confirmadas/Vigentes siguen usando cierre/lifecycle.
+- Refresco intrabar real del par/TF seleccionado sin barrido pesado de 63 celdas.
+- Spot recibe la misma separación semántica para el par/TF seleccionado.
+
+C) TELEGRAM AL CONFIRMAR
+- Spot y Futures envían Telegram inmediatamente al nacer una CONFIRMADA.
+- Futures sólo LONG/SHORT oficiales con publication_status=EXECUTABLE_SIGNAL.
+- Deduplicación durable en runtime_persistence/Supabase y protección anti-backfill.
+- El mensaje de confirmación incluye Entry/SL/TP/RR y apalancamiento Futures.
+
+D) TELEGRAM CUANDO TOCA ENTRY — SPOT
+- Se monitorizan DOS fuentes oficiales:
+  1. CONFIRMED (barra amarilla; último cierre).
+  2. VIGENT (barra roja; cierres anteriores aún válidos).
+- No hace falta guardar manualmente la señal para recibir el aviso de Entry.
+- El monitor usa precio Spot level1 ligero de KuCoin; no espera otro análisis pesado.
+- Respeta las mismas preferencias Telegram Spot/timeframe de la confirmación.
+- Se elimina el aviso intermedio legacy "SPOT · SEÑAL VIGENTE (VELA CERRADA)" para
+  evitar tres mensajes. El contrato queda CONFIRMADA -> ENTRY.
+
+E) TELEGRAM CUANDO TOCA ENTRY — FUTURES
+- El monitor ya no depende sólo del análisis CLOSED_CANDLE más reciente.
+- Lee el lifecycle oficial completo y monitoriza señales EXECUTABLE_SIGNAL en
+  waiting_entry o entry_touched.
+- Por ello una señal puede tocar Entry mientras todavía está en CONFIRMADAS o después
+  de pasar a VIGENTES y el aviso se conserva.
+- Para waiting_entry usa mark price Futures ligero; si lifecycle ya registró
+  entry_touched, usa entry_touched_price para no perder el evento aunque el precio
+  se haya alejado antes del siguiente ciclo Telegram.
+- Dedup de Entry oficial persiste en runtime_persistence/Supabase.
+
+F) SEÑALES GUARDADAS FUTURES
+- El lifecycle personal guardado conserva TP/SL/expired y Guardian.
+- Si una señal guardada proviene de una señal oficial y el Entry oficial ya fue
+  notificado, no se envía un segundo Telegram duplicado de Entry; se marca el evento
+  personal como ya notificado y continúan TP/SL normalmente.
+
+CONTRATO FINAL TELEGRAM
+ACTIVA intrabar -> sin Telegram
+CONFIRMADA al cierre -> Telegram 1
+CONFIRMADA/VIGENTE toca Entry -> Telegram 2
+TP/SL/expired personales -> lifecycle correspondiente
+
+No se modifica Entry/SL/TP, leverage, Safety, Strategy Bank, ReviewTrader,
+Governance, Research ni esquema SQL de Supabase.

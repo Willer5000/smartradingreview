@@ -1,0 +1,29 @@
+RC9.7.13 VALIDATION
+
+PASS python -m py_compile app.py
+PASS node --check static/futures.js
+PASS node --check static/script.js
+PASS 50/50 relevant regression tests across RC9.7.10 + RC9.7.11 + RC9.7.12 + RC9.7.13
+
+Validated:
+- Active/Confirmed/Vigent source integrity.
+- Selected intrabar refresh Spot/Futures.
+- AI assistant universe/comparison.
+- Canonical leverage/manual save consistency.
+- Guardian preference cache fix.
+- Technical leverage V5 regressions.
+- CONFIRMADA Telegram durable dedup + anti-backfill.
+- Futures confirmed-only EXECUTABLE_SIGNAL gate.
+- Spot confirmed Telegram + timeframe preference path.
+- Intrabar never emits confirmed Telegram.
+- Spot Entry monitor reads BOTH prev_signals_cache (CONFIRMED) and
+  spot_vigent_signals_cache (VIGENT).
+- Spot Entry uses lightweight live market price and removes the legacy intermediate
+  pre-entry setup Telegram.
+- Futures Entry monitor reads canonical lifecycle, not only latest analysis.
+- Futures waiting_entry and entry_touched are both eligible for the official Entry event.
+- Futures official Entry dedup is persisted through entry_alerts_dedup.
+- Saved Futures source_signal_id avoids duplicate Entry Telegram after official alert.
+
+No real Render deploy was performed from this environment.
+No Research. No SQL. No bootstrap.

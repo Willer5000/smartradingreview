@@ -28681,6 +28681,8 @@ _SPOT_INTRABAR_PREVIEW_TTLS = {
     '1D': 240,
     '1W': 300,
 }
+_SPOT_INTRABAR_REFRESH_RUNNING = set()
+_SPOT_INTRABAR_REFRESH_LOCK = threading.Lock()
 
 
 def _spot_intrabar_preview_cached(symbol, timeframe):
@@ -28764,6 +28766,32 @@ def _run_spot_intrabar_preview(symbol, timeframe, owner):
     finally:
         _release_heavy_analysis(str(owner))
         _mark_system_interactive_priority(seconds=8)
+
+
+def _start_spot_intrabar_refresh_async(symbol, timeframe):
+    key = (str(symbol), str(timeframe))
+    with _SPOT_INTRABAR_REFRESH_LOCK:
+        if key in _SPOT_INTRABAR_REFRESH_RUNNING:
+            return 'RUNNING'
+        _SPOT_INTRABAR_REFRESH_RUNNING.add(key)
+
+    def _worker():
+        try:
+            _run_spot_intrabar_preview(
+                symbol, timeframe, f'spot-active-refresh:{symbol}:{timeframe}'
+            )
+        except Exception as exc:
+            print(f'⚠️ [SPOT INTRABAR REFRESH] {symbol} {timeframe}: {exc}', flush=True)
+        finally:
+            with _SPOT_INTRABAR_REFRESH_LOCK:
+                _SPOT_INTRABAR_REFRESH_RUNNING.discard(key)
+
+    threading.Thread(
+        target=_worker,
+        daemon=True,
+        name=f'spot-intrabar-{symbol}-{timeframe}',
+    ).start()
+    return 'STARTED'
 
 
 def _run_scheduled_spot_analysis(timeframe):
@@ -29325,6 +29353,21 @@ def _compute_previous_signals():
                     'ui_context': 'CONFIRMED',
                     'timestamp': str(tiempo_actual.isoformat())
                 }
+
+                # RC9.7.13 — Spot CONFIRMADA se avisa al cierre, no espera
+                # al toque de Entry. El monitor de Entry conserva su segundo
+                # evento Telegram independiente.
+                try:
+                    _send_confirmed_signal_telegram(
+                        'spot',
+                        resultados[clave],
+                    )
+                except Exception as confirmed_spot_telegram_error:
+                    print(
+                        "⚠️ [SPOT] Telegram CONFIRMADA "
+                        f"{symbol} {timeframe}: {confirmed_spot_telegram_error}"
+                    )
+
                 estado = "🟢 ACTIVA" if activa == 1 else "⚪ inactiva"
                 print(f"   ✅ {symbol} {timeframe}: {decision} ({confianza:.0f}%) - {estado}")
                 
@@ -29488,6 +29531,38 @@ def api_spot_signals_active():
             'error': str(e),
             'signals': []
         })
+
+
+@app.route('/api/spot/signals/active/refresh', methods=['POST'])
+def api_spot_signals_active_refresh():
+    """Refresh only the selected Spot forming-candle preview."""
+    try:
+        data = request.get_json(silent=True) or {}
+        symbol = str(data.get('symbol') or 'BTC-USDT').strip().upper()
+        timeframe = str(data.get('timeframe') or '4h').strip()
+        if symbol not in ('BTC-USDT', 'PAXG-USDT', 'PAXG-BTC'):
+            return jsonify({'success': False, 'error': 'Símbolo Spot inválido'}), 400
+        if timeframe not in ('4h', '12h', '1D', '1W'):
+            return jsonify({'success': False, 'error': 'Temporalidad Spot inválida'}), 400
+
+        cached = _spot_intrabar_preview_cached(symbol, timeframe)
+        if cached is not None:
+            return jsonify({
+                'success': True,
+                'scheduled': False,
+                'fresh': True,
+                'refresh_seconds': int(_SPOT_INTRABAR_PREVIEW_TTLS.get(timeframe, 180)),
+            })
+
+        state = _start_spot_intrabar_refresh_async(symbol, timeframe)
+        return jsonify({
+            'success': True,
+            'scheduled': state in ('SCHEDULED', 'RUNNING'),
+            'job_state': state,
+            'refresh_seconds': int(_SPOT_INTRABAR_PREVIEW_TTLS.get(timeframe, 180)),
+        }), 202
+    except Exception as exc:
+        return jsonify({'success': False, 'error': str(exc)[:180]}), 500
 
 
 @app.route('/api/spot/signals/vigent')
@@ -31742,10 +31817,12 @@ def api_futures_opportunities():
                 row['exit_profile'] = (exit_profile_for(symbol) or {}).get('name')
         except Exception:
             pass
+        diagnostics = _list_futures_intrabar_diagnostics()
         return jsonify({
             'success': True,
             'count': len(rows),
             'opportunities': rows[:limit],
+            'other_directional_signals': diagnostics[:limit],
             'only_executable': True,
             'intrabar': True,
             'source_candle_closed': False,
@@ -31760,6 +31837,48 @@ def api_futures_opportunities():
             'error': str(exc)[:180],
             'opportunities': [],
         }), 200
+
+
+@app.route('/api/futures/opportunities/refresh', methods=['POST'])
+def api_futures_opportunities_refresh():
+    """Schedule one selected symbol/TF intrabar preview without a universe scan."""
+    try:
+        data = request.get_json(silent=True) or {}
+        symbol = str(data.get('symbol') or 'BTC-USDT').strip().upper()
+        timeframe = str(data.get('timeframe') or '1h').strip()
+        _configured_futures_module()
+        from futures_system import futures_timeframe_allowed
+        if not futures_timeframe_allowed(symbol, timeframe):
+            return jsonify({
+                'success': False,
+                'error': f'Combinación Futures fuera del universo productivo: {symbol} {timeframe}'
+            }), 400
+
+        cadence = int(_FUTURES_INTRABAR_REFRESH_SECONDS.get(timeframe, 300))
+        key = (symbol, timeframe)
+        now = time.time()
+        with _FUTURES_INTRABAR_ACTIVE_LOCK:
+            runtime = _FUTURES_INTRABAR_RUNTIME_CACHE.get(key)
+            last_ts = float((runtime or {}).get('ts') or 0)
+        age = now - last_ts if last_ts else None
+        if age is not None and age < cadence * 0.85:
+            return jsonify({
+                'success': True,
+                'scheduled': False,
+                'fresh': True,
+                'age_seconds': int(max(0, age)),
+                'refresh_seconds': cadence,
+            })
+
+        state = _start_futures_ui_analysis_async(symbol, timeframe)
+        return jsonify({
+            'success': True,
+            'scheduled': state in ('STARTED', 'RUNNING'),
+            'job_state': state,
+            'refresh_seconds': cadence,
+        }), 202
+    except Exception as exc:
+        return jsonify({'success': False, 'error': str(exc)[:180]}), 500
 
 
 # ============================================================================
@@ -32330,11 +32449,149 @@ _FUTURES_UI_CACHE = {
 # RC9.7.12 — caché COMPACTO de señales activas intrabar.
 # No se persiste a Supabase/disk y no participa en lifecycle.
 _FUTURES_INTRABAR_ACTIVE_CACHE = {}
+_FUTURES_INTRABAR_DIAGNOSTIC_CACHE = {}
 _FUTURES_INTRABAR_ACTIVE_LOCK = threading.Lock()
 _FUTURES_INTRABAR_ACTIVE_TTL_SECONDS = max(180, int(os.environ.get(
     'FUTURES_INTRABAR_ACTIVE_TTL_SECONDS', '420'
 ) or 420))
 _FUTURES_INTRABAR_RUNTIME_CACHE = {}
+_FUTURES_INTRABAR_REFRESH_SECONDS = {
+    '30m': 90,
+    '1h': 120,
+    '2h': 180,
+    '4h': 240,
+    '12h': 300,
+    '1D': 300,
+}
+
+
+def _futures_intrabar_ttl_seconds(timeframe):
+    cadence = int(_FUTURES_INTRABAR_REFRESH_SECONDS.get(str(timeframe), 300))
+    return max(180, min(_FUTURES_INTRABAR_ACTIVE_TTL_SECONDS, cadence * 2))
+
+
+def _futures_intrabar_diagnostic_candidate(symbol, timeframe, result):
+    """Return a provisional MEDIUM/HIGH directional hypothesis.
+
+    Unlike the manual-save classifier, this helper explicitly accepts the
+    forming candle. It is DISPLAY ONLY: no signal_id, no lifecycle and no
+    manual save permission. The same structural rejection bands are reused so
+    the active diagnostic does not become a weaker backdoor around Safety.
+    """
+    if not isinstance(result, dict) or not result.get('success'):
+        return None
+    if str(result.get('analysis_mode') or '').upper() != 'INTRABAR_PREVIEW':
+        return None
+    if result.get('source_candle_closed') is not False:
+        return None
+    if result.get('market_data_is_synthetic') is not False:
+        return None
+
+    decision = result.get('decision') or {}
+    levels = result.get('levels') or {}
+    action = str(decision.get('action') or '').upper()
+    if action not in ('LONG', 'SHORT'):
+        return None
+
+    publication = str(
+        levels.get('publication_status')
+        or result.get('publication_status')
+        or ('ANALYSIS_ONLY' if levels.get('is_rejected') else 'EXECUTABLE_SIGNAL')
+    ).upper()
+    if publication == 'EXECUTABLE_SIGNAL':
+        return None
+
+    def _num(value, default=None):
+        try:
+            number = float(value)
+            if not math.isfinite(number):
+                return default
+            return number
+        except (TypeError, ValueError):
+            return default
+
+    entry = _num(levels.get('entry'))
+    stop_loss = _num(levels.get('stop_loss'))
+    take_profit = _num(levels.get('take_profit'))
+    safety = _num(levels.get('execution_safety'))
+    minimum = _num(levels.get('execution_safety_operational_min'), 65.0)
+    rr = _num(levels.get('risk_reward'))
+    if not all(v is not None and v > 0 for v in (entry, stop_loss, take_profit)):
+        return None
+    geometry_ok = (
+        (action == 'LONG' and stop_loss < entry < take_profit)
+        or (action == 'SHORT' and take_profit < entry < stop_loss)
+    )
+    if not geometry_ok:
+        return None
+    if rr is None:
+        risk_distance = abs(entry - stop_loss)
+        reward_distance = abs(take_profit - entry)
+        if risk_distance <= 0:
+            return None
+        rr = reward_distance / risk_distance
+    if not (1.8 <= rr <= 3.5):
+        return None
+    if safety is None or minimum is None:
+        return None
+
+    trace = levels.get('futures_filter_trace') or {}
+    stage = str(trace.get('stage') or levels.get('futures_filter_stage') or '').upper()
+    raw_codes = trace.get('reason_codes') or levels.get('futures_filter_reason_codes') or []
+    if not isinstance(raw_codes, (list, tuple, set)):
+        raw_codes = [raw_codes]
+    codes = {str(code or '').strip().upper() for code in raw_codes if str(code or '').strip()}
+    if not stage or not codes:
+        return None
+
+    risk_class = None
+    reason = None
+    if stage == 'PUBLICATION_GATE' and codes.issubset({'SAFETY', 'TP_QUALITY'}) and safety >= minimum:
+        risk_class = 'MEDIUM'
+        reason = (
+            'Hipótesis provisional de la vela en formación: superó el Safety mínimo duro, '
+            'pero todavía no alcanza publicación Premium.'
+        )
+    elif stage == 'PRE_GATE' and codes == {'HARD_SAFETY'} and 55.0 <= safety < minimum:
+        risk_class = 'HIGH'
+        reason = (
+            'Hipótesis provisional de la vela en formación con Safety en banda BAJA '
+            '(55–64.9). Puede cambiar o desaparecer antes del cierre.'
+        )
+    else:
+        return None
+
+    try:
+        confidence = float(decision.get('confidence') or 0)
+    except Exception:
+        confidence = 0.0
+
+    return {
+        'symbol': str(symbol),
+        'timeframe': str(timeframe),
+        'action': action,
+        'confidence': confidence,
+        'classification': 'ANALYSIS_ONLY',
+        'manual_risk_class': risk_class,
+        'manual_risk_reason': reason,
+        'manual_save_allowed': False,
+        'source_context': 'INTRABAR_ANALYSIS_ONLY',
+        'preview_only': True,
+        'source_candle_closed': False,
+        'signal_id': None,
+        'entry': entry,
+        'stop_loss': stop_loss,
+        'take_profit': take_profit,
+        'leverage': levels.get('leverage'),
+        'risk_reward': rr,
+        'execution_safety': safety,
+        'execution_safety_minimum': minimum,
+        'source_candle_timestamp': result.get('source_candle_timestamp'),
+        'source_candle_close_timestamp': result.get('source_candle_close_timestamp'),
+        'analysis_price': result.get('analysis_price'),
+        'current_price': result.get('live_price') or result.get('current_price'),
+        'preview_ts': time.time(),
+    }
 
 
 def _store_futures_intrabar_preview(symbol, timeframe, result, runtime_result=None):
@@ -32386,6 +32643,14 @@ def _store_futures_intrabar_preview(symbol, timeframe, result, runtime_result=No
             # La señal provisional desapareció o dejó de ser ejecutable.
             _FUTURES_INTRABAR_ACTIVE_CACHE.pop(key, None)
 
+        diagnostic = _futures_intrabar_diagnostic_candidate(
+            symbol, timeframe, result
+        )
+        if diagnostic is not None:
+            _FUTURES_INTRABAR_DIAGNOSTIC_CACHE[key] = diagnostic
+        else:
+            _FUTURES_INTRABAR_DIAGNOSTIC_CACHE.pop(key, None)
+
         if isinstance(runtime_result, dict):
             _FUTURES_INTRABAR_RUNTIME_CACHE[key] = {
                 'ts': now,
@@ -32400,9 +32665,10 @@ def _get_futures_intrabar_runtime(symbol, timeframe):
         item = _FUTURES_INTRABAR_RUNTIME_CACHE.get(key)
         if not isinstance(item, dict):
             return None
-        if now - float(item.get('ts') or 0) > _FUTURES_INTRABAR_ACTIVE_TTL_SECONDS:
+        if now - float(item.get('ts') or 0) > _futures_intrabar_ttl_seconds(timeframe):
             _FUTURES_INTRABAR_RUNTIME_CACHE.pop(key, None)
             _FUTURES_INTRABAR_ACTIVE_CACHE.pop(key, None)
+            _FUTURES_INTRABAR_DIAGNOSTIC_CACHE.pop(key, None)
             return None
         data = item.get('data')
         return dict(data) if isinstance(data, dict) else None
@@ -32417,16 +32683,48 @@ def _list_futures_intrabar_active():
             try:
                 age = now - float((row or {}).get('preview_ts') or 0)
             except Exception:
-                age = _FUTURES_INTRABAR_ACTIVE_TTL_SECONDS + 1
-            if age > _FUTURES_INTRABAR_ACTIVE_TTL_SECONDS:
+                age = _futures_intrabar_ttl_seconds((row or {}).get('timeframe')) + 1
+            if age > _futures_intrabar_ttl_seconds((row or {}).get('timeframe')):
                 stale.append(key)
                 continue
             rows.append(dict(row))
         for key in stale:
             _FUTURES_INTRABAR_ACTIVE_CACHE.pop(key, None)
             _FUTURES_INTRABAR_RUNTIME_CACHE.pop(key, None)
+            _FUTURES_INTRABAR_DIAGNOSTIC_CACHE.pop(key, None)
     rows.sort(key=lambda r: float(r.get('quality_score') or 0), reverse=True)
     return rows
+
+
+def _list_futures_intrabar_diagnostics():
+    now = time.time()
+    rows = []
+    with _FUTURES_INTRABAR_ACTIVE_LOCK:
+        stale = []
+        for key, row in _FUTURES_INTRABAR_DIAGNOSTIC_CACHE.items():
+            try:
+                age = now - float((row or {}).get('preview_ts') or 0)
+            except Exception:
+                age = _futures_intrabar_ttl_seconds((row or {}).get('timeframe')) + 1
+            if age > _futures_intrabar_ttl_seconds((row or {}).get('timeframe')):
+                stale.append(key)
+                continue
+            rows.append(dict(row))
+        for key in stale:
+            _FUTURES_INTRABAR_DIAGNOSTIC_CACHE.pop(key, None)
+            _FUTURES_INTRABAR_ACTIVE_CACHE.pop(key, None)
+            _FUTURES_INTRABAR_RUNTIME_CACHE.pop(key, None)
+    rows.sort(
+        key=lambda r: (
+            0 if str(r.get('manual_risk_class') or '').upper() == 'MEDIUM' else 1,
+            -float(r.get('confidence') or 0),
+            str(r.get('symbol') or ''),
+            str(r.get('timeframe') or ''),
+        )
+    )
+    return rows
+
+
 _FUTURES_INTERACTIVE_PRIORITY_SECONDS = max(15, int(os.environ.get(
     'FUTURES_INTERACTIVE_PRIORITY_SECONDS', '45'
 ) or 45))
@@ -34217,6 +34515,19 @@ def _analyze_futures_all_parallel(combos_override=None):
                     r
                 )
             )
+
+            # RC9.7.13 — Telegram sólo para la confirmación CLOSED_CANDLE
+            # oficial. El dedup durable impide repetirla por refresh/deploy.
+            try:
+                _send_confirmed_signal_telegram(
+                    'futures',
+                    r,
+                )
+            except Exception as confirmed_telegram_error:
+                print(
+                    "⚠️ [FUT] Telegram CONFIRMADA "
+                    f"{combo_name}: {confirmed_telegram_error}"
+                )
 
             # ---------------------------------------------------------
             # PUBLICAR EL RESULTADO INMEDIATAMENTE
@@ -37879,6 +38190,333 @@ def _normalize_candle_start(timeframe, candle_ts):
         return str(candle_ts)
 
 
+# ============================================================================
+# RC9.7.13 — TELEGRAM DE SEÑAL CONFIRMADA (SPOT + FUTURES)
+# ============================================================================
+#
+# Contrato temporal:
+# - ACTIVA intrabar: jamás dispara Telegram.
+# - CONFIRMADA: una alerta inmediata al cierre, una sola vez.
+# - ENTRY: conserva su alerta operativa posterior cuando el precio toca Entry.
+#
+# La deduplicación es durable en Supabase y la barrera de arranque evita
+# "backfill" de confirmaciones viejas cuando Render recicla el worker.
+# ============================================================================
+
+_CONFIRMED_SIGNAL_ALERT_RETENTION = 14 * 24 * 3600
+_CONFIRMED_SIGNAL_PROCESS_STARTED_AT = time.time()
+_confirmed_signal_alerts_sent = {}
+_confirmed_signal_alerts_lock = threading.Lock()
+
+
+def _load_confirmed_signal_alerts_from_disk():
+    """Restaura dedup durable de alertas CONFIRMADAS desde Supabase."""
+    global _confirmed_signal_alerts_sent
+    try:
+        from runtime_persistence import load_runtime_snapshot
+        stored = load_runtime_snapshot(
+            'telegram',
+            'confirmed_signal_alerts_dedup',
+            allow_expired=False,
+        )
+        data = ((stored or {}).get('payload') or {}).get('events') or {}
+        cutoff = time.time() - _CONFIRMED_SIGNAL_ALERT_RETENTION
+        _confirmed_signal_alerts_sent = {
+            str(key): float(value)
+            for key, value in data.items()
+            if isinstance(value, (int, float)) and float(value) >= cutoff
+        } if isinstance(data, dict) else {}
+        if _confirmed_signal_alerts_sent:
+            print(
+                "📂 CONFIRMED Telegram dedup Supabase: "
+                f"{len(_confirmed_signal_alerts_sent)} eventos."
+            )
+    except Exception as exc:
+        print(f"⚠️ CONFIRMED Telegram dedup no disponible: {exc}")
+        _confirmed_signal_alerts_sent = {}
+
+
+def _save_confirmed_signal_alerts_to_disk():
+    """Persiste dedup acotado de confirmaciones Telegram."""
+    try:
+        from runtime_persistence import save_runtime_snapshot
+        with _confirmed_signal_alerts_lock:
+            snapshot = dict(_confirmed_signal_alerts_sent)
+        return save_runtime_snapshot(
+            'telegram',
+            'confirmed_signal_alerts_dedup',
+            {'events': snapshot},
+            ttl_seconds=_CONFIRMED_SIGNAL_ALERT_RETENTION + 86400,
+        )
+    except Exception as exc:
+        print(f"⚠️ CONFIRMED Telegram persistencia: {exc}")
+        return False
+
+
+def _confirmed_signal_tf_seconds(timeframe):
+    return {
+        '30m': 30 * 60,
+        '1h': 60 * 60,
+        '2h': 2 * 60 * 60,
+        '4h': 4 * 60 * 60,
+        '12h': 12 * 60 * 60,
+        '1D': 24 * 60 * 60,
+        '1W': 7 * 24 * 60 * 60,
+    }.get(str(timeframe or ''), 0)
+
+
+def _confirmed_signal_close_timestamp(signal, timeframe):
+    """Timestamp UTC del cierre que originó la confirmación."""
+    raw_close = (signal or {}).get('source_candle_close_timestamp')
+    raw_open = (
+        (signal or {}).get('source_candle_timestamp')
+        or (signal or {}).get('candle_timestamp')
+        or (signal or {}).get('previous_candle_timestamp')
+    )
+    try:
+        if raw_close:
+            ts = pd.Timestamp(raw_close)
+        elif raw_open:
+            ts = pd.Timestamp(raw_open)
+            seconds = _confirmed_signal_tf_seconds(timeframe)
+            if seconds <= 0:
+                return None
+            ts = ts + pd.Timedelta(seconds=seconds)
+        else:
+            return None
+        return ts.tz_localize('UTC') if ts.tz is None else ts.tz_convert('UTC')
+    except Exception:
+        return None
+
+
+def _confirmed_signal_event_key(market, signal):
+    signal = signal or {}
+    market = str(market or '').strip().lower()
+    symbol = str(signal.get('symbol') or '').upper().replace('/', '-')
+    timeframe = str(signal.get('timeframe') or '')
+    decision = signal.get('decision') or {}
+    if isinstance(decision, dict):
+        action = str(decision.get('action') or '').upper()
+    else:
+        action = str(decision or signal.get('action') or '').upper()
+    candle = (
+        signal.get('source_candle_timestamp')
+        or signal.get('candle_timestamp')
+        or signal.get('previous_candle_timestamp')
+        or ''
+    )
+    try:
+        candle_ts = pd.Timestamp(candle)
+        if candle_ts.tz is None:
+            candle_ts = candle_ts.tz_localize('UTC')
+        else:
+            candle_ts = candle_ts.tz_convert('UTC')
+        normalized = candle_ts.isoformat()
+    except Exception:
+        normalized = str(candle or 'unknown')
+    return f"{market}|{symbol}|{timeframe}|{action}|{normalized}"
+
+
+def _confirmed_signal_recent_enough(signal, timeframe):
+    """Anti-backfill: sólo anunciar cierres ocurridos con este proceso vivo."""
+    close_ts = _confirmed_signal_close_timestamp(signal, timeframe)
+    if close_ts is None:
+        return False
+    # Dos minutos de gracia cubren pequeñas diferencias reloj/exchange sin
+    # convertir el primer arranque tras deploy en un backfill histórico.
+    return close_ts.timestamp() >= (_CONFIRMED_SIGNAL_PROCESS_STARTED_AT - 120.0)
+
+
+def _confirmed_signal_rr(action, entry, stop_loss, take_profit):
+    try:
+        entry = float(entry)
+        stop_loss = float(stop_loss)
+        take_profit = float(take_profit)
+        if action in ('LONG', 'COMPRA_SPOT'):
+            risk = entry - stop_loss
+            reward = take_profit - entry
+        else:
+            risk = stop_loss - entry
+            reward = entry - take_profit
+        if risk <= 0 or reward <= 0:
+            return None
+        return reward / risk
+    except Exception:
+        return None
+
+
+def _build_confirmed_signal_telegram_message(market, signal):
+    """Mensaje compacto de una señal que acaba de confirmarse al cierre."""
+    signal = signal or {}
+    market = str(market or '').strip().lower()
+    decision = signal.get('decision') or {}
+    levels = signal.get('levels') or {}
+
+    if isinstance(decision, dict):
+        action = str(decision.get('action') or '').upper()
+        confidence = float(decision.get('confidence') or 0)
+    else:
+        action = str(decision or signal.get('action') or '').upper()
+        confidence = float(signal.get('confidence') or 0)
+
+    symbol = str(signal.get('symbol') or '').upper().replace('/', '-')
+    timeframe = str(signal.get('timeframe') or '')
+    entry = levels.get('entry', signal.get('entry'))
+    stop_loss = levels.get('stop_loss', signal.get('stop_loss'))
+    take_profit = levels.get('take_profit', signal.get('take_profit'))
+    leverage = levels.get('leverage', signal.get('leverage'))
+    risk_class = (
+        signal.get('risk_class')
+        or levels.get('risk_class')
+        or levels.get('safety_band')
+        or 'PREMIUM'
+    )
+    valid_until = (
+        signal.get('valid_until')
+        or signal.get('source_valid_until')
+        or levels.get('valid_until')
+    )
+    rr = _confirmed_signal_rr(action, entry, stop_loss, take_profit)
+
+    lines = [
+        '✅ <b>NUEVA SEÑAL CONFIRMADA</b>',
+        f"📊 Mercado: <b>{'FUTURES' if market == 'futures' else 'SPOT'}</b>",
+        f"💱 <b>{_telegram_escape(symbol)}</b> · {_telegram_escape(timeframe)}",
+        f"Dirección: <b>{_telegram_escape(action)}</b>",
+        f"Confianza: <b>{confidence:.0f}%</b>",
+    ]
+
+    if risk_class:
+        lines.append(f"Riesgo/Safety: <b>{_telegram_escape(risk_class)}</b>")
+
+    lines.extend([
+        '',
+        f"💰 Entry: {_telegram_price(entry)}",
+        f"🎯 TP: {_telegram_price(take_profit)}",
+        f"🛑 SL: {_telegram_price(stop_loss)}",
+    ])
+
+    if rr is not None:
+        lines.append(f"⚖️ R/R: <b>1:{rr:.2f}</b>")
+
+    if market == 'futures' and leverage is not None:
+        try:
+            lines.append(f"⚡ Apalancamiento: <b>{int(float(leverage))}x</b>")
+        except Exception:
+            pass
+
+    if valid_until:
+        try:
+            vu = pd.Timestamp(valid_until)
+            if vu.tz is None:
+                vu = vu.tz_localize('UTC')
+            vu = vu.tz_convert(bolivia_tz)
+            lines.append(f"🕒 Vigente hasta: <b>{vu.strftime('%Y-%m-%d %H:%M')}</b> Hora Bolivia")
+        except Exception:
+            pass
+
+    lines.extend([
+        '',
+        'Esta señal quedó confirmada al cierre de vela.',
+        'La alerta de Entry se enviará aparte si el precio alcanza la zona de entrada.',
+    ])
+    return '\n'.join(lines)
+
+
+def _confirmed_signal_preferences_allow(market, timeframe):
+    """Respeta permisos de mercado y, en Spot, TF elegidos por usuarios."""
+    market = str(market or '').strip().lower()
+    users = sorted(_telegram_market_users(market))
+    if not users:
+        return False
+    if market != 'spot':
+        return True
+
+    # Un solo chat Telegram compartido: basta con que al menos un usuario
+    # autorizado tenga habilitada esa temporalidad Spot.
+    for user in users:
+        try:
+            prefs = _get_spot_telegram_preferences(user)
+            if (
+                prefs.get('spot_telegram_enabled', True)
+                and str(timeframe) in (prefs.get('spot_telegram_timeframes') or [])
+            ):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _send_confirmed_signal_telegram(market, signal):
+    """Envía una confirmación oficial; nunca una hipótesis intrabar/manual."""
+    signal = signal or {}
+    market = str(market or '').strip().lower()
+    symbol = str(signal.get('symbol') or '').upper().replace('/', '-')
+    timeframe = str(signal.get('timeframe') or '')
+    decision = signal.get('decision') or {}
+    levels = signal.get('levels') or {}
+
+    if isinstance(decision, dict):
+        action = str(decision.get('action') or '').upper()
+        confidence = float(decision.get('confidence') or 0)
+    else:
+        action = str(decision or signal.get('action') or '').upper()
+        confidence = float(signal.get('confidence') or 0)
+
+    if not symbol or not timeframe:
+        return False
+    if market == 'futures':
+        if action not in ('LONG', 'SHORT'):
+            return False
+        publication_status = str(
+            levels.get('publication_status')
+            or signal.get('publication_status')
+            or ('ANALYSIS_ONLY' if levels.get('is_rejected') else 'EXECUTABLE_SIGNAL')
+        )
+        if publication_status != 'EXECUTABLE_SIGNAL':
+            return False
+    else:
+        if action not in ('COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT'):
+            return False
+
+    if confidence < 60:
+        return False
+    if not _confirmed_signal_preferences_allow(market, timeframe):
+        return False
+    if not _confirmed_signal_recent_enough(signal, timeframe):
+        return False
+
+    key = _confirmed_signal_event_key(market, signal)
+    with _confirmed_signal_alerts_lock:
+        if key in _confirmed_signal_alerts_sent:
+            return False
+
+    message = _build_confirmed_signal_telegram_message(market, signal)
+    sent = expert_system.send_telegram_alert(
+        message,
+        None,
+        category='CONFIRMED_SIGNAL',
+    )
+    if not sent:
+        return False
+
+    now = time.time()
+    with _confirmed_signal_alerts_lock:
+        _confirmed_signal_alerts_sent[key] = now
+        if len(_confirmed_signal_alerts_sent) > 1200:
+            cutoff = now - _CONFIRMED_SIGNAL_ALERT_RETENTION
+            for old_key, old_ts in list(_confirmed_signal_alerts_sent.items()):
+                if float(old_ts or 0) < cutoff:
+                    _confirmed_signal_alerts_sent.pop(old_key, None)
+
+    _save_confirmed_signal_alerts_to_disk()
+    print(
+        f"✅📱 CONFIRMADA {market.upper()}: "
+        f"{action} {symbol} {timeframe}"
+    )
+    return True
+
+
 # Deduplicación ENTRY — HOTFIX 14.6
 # Persistencia durable en Supabase; RAM sólo conserva la ventana caliente.
 _entry_alerts_sent = {}
@@ -38061,134 +38699,115 @@ def _get_signals_for_entry_monitor():
     """
     signals = []
     
-    # 1. Spot: leer DIRECTAMENTE el caché RAM. Antes se construía un
-    # app.test_client() en cada ciclo sólo para llamar a otro endpoint del mismo
-    # proceso. Eso añadía contexts/cookies/serialización sin aportar datos.
+    # 1. Spot: monitorizar TODA señal oficial que siga esperando Entry:
+    #    - CONFIRMED: último cierre confirmado (barra amarilla)
+    #    - VIGENT: confirmaciones anteriores aún válidas (barra roja)
+    #
+    # RC9.7.13: una señal no necesita estar guardada manualmente para recibir
+    # el aviso operativo de Entry. El guardado personal conserva su lifecycle
+    # separado, pero no es condición para la alerta oficial del sistema.
     try:
-        cached_previous = getattr(expert_system, 'prev_signals_cache', None) or {}
-        for _key, sig in cached_previous.items():
-            tf = sig.get('timeframe')
-            system_type = str(sig.get('system_type') or 'spot').lower()
-            if system_type == 'futures':
-                _configured_futures_module()
-                from futures_system import futures_timeframe_allowed
-                if tf not in FUTURES_ENTRY_MONITOR_TIMEFRAMES or not futures_timeframe_allowed(symbol, tf):
+        spot_sources = (
+            ('CONFIRMED', getattr(expert_system, 'prev_signals_cache', None) or {}),
+            ('VIGENT', getattr(expert_system, 'spot_vigent_signals_cache', None) or {}),
+        )
+        seen = set()
+        for ui_context, cache in spot_sources:
+            if not isinstance(cache, dict):
+                continue
+            for _key, sig in cache.items():
+                if not isinstance(sig, dict):
                     continue
-            elif tf not in SPOT_ENTRY_MONITOR_TIMEFRAMES:
-                continue
-            action = sig.get('decision', '')
-            if action not in ('LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT'):
-                continue
-            if sig.get('activa') != 1:
-                continue
-            signals.append({
-                'system': 'spot',
-                'symbol': sig.get('symbol'),
-                'timeframe': tf,
-                'action': action,
-                'entry': sig.get('entry'),
-                'stop_loss': sig.get('stop_loss'),
-                'take_profit': sig.get('take_profit'),
-                'confidence': sig.get('confidence'),
-                'current_price': sig.get('precio_actual'),
-                'candle_timestamp': sig.get('candle_timestamp') or sig.get('timestamp'),
-                'message': sig.get('message', ''),
-                'tiempo_restante': sig.get('tiempo_restante'),
-            })
+                symbol = str(sig.get('symbol') or '')
+                tf = str(sig.get('timeframe') or '')
+                if not symbol or tf not in SPOT_ENTRY_MONITOR_TIMEFRAMES:
+                    continue
+                action = str(sig.get('decision') or sig.get('action') or '').upper()
+                if action not in ('LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT'):
+                    continue
+                if sig.get('activa') != 1:
+                    continue
+                candle_ts = (
+                    sig.get('source_candle_timestamp')
+                    or sig.get('candle_timestamp')
+                    or sig.get('timestamp')
+                )
+                identity = (symbol, tf, action, str(candle_ts or 'unknown'))
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                signals.append({
+                    'system': 'spot',
+                    'system_type': 'spot',
+                    'ui_context': ui_context,
+                    'symbol': symbol,
+                    'timeframe': tf,
+                    'action': action,
+                    'entry': sig.get('entry'),
+                    'stop_loss': sig.get('stop_loss'),
+                    'take_profit': sig.get('take_profit'),
+                    'confidence': sig.get('confidence'),
+                    'current_price': sig.get('precio_actual'),
+                    'candle_timestamp': candle_ts,
+                    'source_candle_timestamp': candle_ts,
+                    'valid_until': sig.get('valid_until') or sig.get('source_valid_until'),
+                    'message': sig.get('message', ''),
+                    'tiempo_restante': sig.get('tiempo_restante'),
+                })
     except Exception as e:
-        print(f"⚠️ monitor_entries: error leyendo caché Spot: {e}")
+        print(f"⚠️ monitor_entries: error leyendo cachés Spot Confirmed/Vigent: {e}")
     
-    # ================================================================
-    # COMMIT 36N
-    # ================================================================
-    #
-    # FUTURES YA NO SE MONITOREA DESDE Previous.
-    #
-    # Una Previous no guardada:
-    # - NO genera Entry Telegram personal;
-    # - NO entra al Guardian personal;
-    # - NO genera TP/SL personales.
-    #
-    # El lifecycle Futures vive exclusivamente en saved_signals.
-    #
-    # Spot conserva este monitor antiguo.
-    # ================================================================
-
-    
+    # Futures usa su lifecycle oficial en futures_standard_alert_loop().
+    # Este helper queda dedicado a Spot Confirmed + Vigent.
     return signals
 
 
-def _spot_preentry_key(signal):
-    return "PREENTRY|" + _entry_alert_key(
-        str(signal.get('symbol') or ''),
-        str(signal.get('timeframe') or ''),
-        str(signal.get('candle_timestamp') or 'unknown')
-    )
+def _spot_live_market_price(symbol):
+    """Precio Spot ligero para detectar Entry sin recalcular indicadores.
 
-
-def _spot_preentry_sent(signal):
-    key = _spot_preentry_key(signal)
-    with _entry_alerts_lock:
-        return key in _entry_alerts_sent
-
-
-def _mark_spot_preentry(signal):
-    key = _spot_preentry_key(signal)
-    with _entry_alerts_lock:
-        _entry_alerts_sent[key] = time.time()
-    _save_entry_alerts_to_disk()
-
-
-def _spot_setup_ready(signal,current):
-    """Spot: aviso al nacer la señal de VELA ANTERIOR, no sólo cerca del Entry.
-
-    La propia caché previous_signals ya exige que la señal siga activa. Aquí
-    sólo evitamos avisar si el precio ya tocó Entry (en ese caso corresponde
-    directamente la alerta ENTRY con imagen) o si ya cruzó SL/TP.
+    Usa KuCoin level1; no carga OHLCV ni ejecuta traders. Si falla, el monitor
+    puede conservar el precio cacheado de la señal y reintentar en el próximo
+    ciclo.
     """
     try:
-        entry=float(signal.get('entry') or 0)
-        sl=float(signal.get('stop_loss') or 0)
-        tp=float(signal.get('take_profit') or 0)
-        current=float(current or 0)
-        action=str(signal.get('action') or signal.get('decision') or '').upper()
-        if min(entry,sl,tp,current) <= 0:
-            return False
-        if _price_touches_entry(current, entry, action, signal):
-            return False
-        if action in ('LONG','COMPRA_SPOT'):
-            return current > sl and current < tp
-        if action in ('SHORT','VENTA_SPOT'):
-            return current < sl and current > tp
-        return False
+        response = requests.get(
+            'https://api.kucoin.com/api/v1/market/orderbook/level1',
+            params={'symbol': str(symbol or '').replace('/', '-')},
+            timeout=4,
+        )
+        response.raise_for_status()
+        payload = response.json() or {}
+        if str(payload.get('code')) != '200000':
+            return None
+        data = payload.get('data') or {}
+        price = float(data.get('price') or 0)
+        return price if price > 0 else None
+    except Exception as exc:
+        print(f"⚠️ monitor_entries: precio Spot {symbol}: {str(exc)[:120]}")
+        return None
+
+
+def _spot_entry_alert_allowed(timeframe):
+    """Respeta las mismas preferencias Telegram Spot que la CONFIRMADA."""
+    try:
+        return bool(_confirmed_signal_preferences_allow('spot', timeframe))
     except Exception:
-        return False
-
-
-def _build_spot_preentry_message(signal):
-    action=str(signal.get('action') or signal.get('decision') or '').upper(); icon='🟢' if action in ('LONG','COMPRA_SPOT') else '🔴'
-    symbol=str(signal.get('symbol') or '?'); tf=str(signal.get('timeframe') or '?')
-    entry=float(signal.get('entry') or 0); sl=float(signal.get('stop_loss') or 0); tp=float(signal.get('take_profit') or 0)
-    base=(os.getenv('PUBLIC_APP_URL') or os.getenv('RENDER_EXTERNAL_URL') or 'https://smartradingreview.onrender.com').rstrip('/')
-    from urllib.parse import urlencode
-    link=f"{base}/?{urlencode({'symbol':symbol,'timeframe':tf})}"
-    return '\n'.join([f"⚡ <b>SPOT · SEÑAL VIGENTE (VELA CERRADA)</b>",f"{icon} <b>{symbol} · {tf} · {action}</b>",'',f"💰 Entry: <b>{entry:.8g}</b>",f"🎯 TP: {tp:.8g}",f"🛑 SL: {sl:.8g}",'',f"🔗 <a href=\"{link}\">Abrir análisis</a>"])
+        return True
 
 
 def monitor_entries_loop():
     """
-    Bucle principal del monitor de entries.
-    Se ejecuta indefinidamente en un thread daemon.
-    Cada MONITOR_CHECK_INTERVAL segundos:
-      1. Obtiene señales activas elegibles (spot + futures)
-      2. Para cada una, verifica si el precio actual "toca" el entry
-      3. Si toca Y no se envió antes para esta vela → envía alerta Telegram
+    Monitor oficial de Entry para Spot.
+
+    Revisa tanto la señal CONFIRMADA del último cierre como las señales VIGENTES
+    de cierres anteriores. No requiere guardado manual. La alerta se envía una
+    sola vez por source candle cuando el precio vivo toca la zona de Entry.
     """
     print("=" * 60)
     print("🔔 MONITOR DE ENTRIES iniciado")
     print(f"   TF Spot: {', '.join(SPOT_ENTRY_MONITOR_TIMEFRAMES)}")
-    print(f"   TF Futures: {', '.join(FUTURES_ENTRY_MONITOR_TIMEFRAMES)}")
-    print(f"   Zona Entry: Spot ±{MONITOR_ENTRY_TOLERANCE_PCT}% · Futures dinámica por clase")
+    print(f"   Fuente: Spot CONFIRMADAS + VIGENTES")
+    print(f"   Zona Entry: Spot ±{MONITOR_ENTRY_TOLERANCE_PCT}%")
     print(f"   Chequeo cada: {MONITOR_CHECK_INTERVAL}s")
     print("=" * 60)
     
@@ -38208,22 +38827,22 @@ def monitor_entries_loop():
                 candle_ts = sig.get('candle_timestamp') or 'unknown'
                 entry = sig.get('entry')
                 current = sig.get('current_price')
-                
-                if not symbol or not tf or entry is None or current is None:
+
+                if not symbol or not tf or entry is None:
                     continue
-                
-                # Spot SETUP: nace cuando la vela cerrada pasa a
-                # "Señal de la Vela Anterior". Se envía una sola vez por
-                # source candle, siempre que siga activa y todavía NO haya
-                # tocado Entry. ENTRY mantiene su alerta posterior con imagen.
-                if (str(sig.get('system') or '').lower() == 'spot' and (not _spot_preentry_sent(sig)) and _spot_setup_ready(sig, current)):
-                    try:
-                        pre_message = _build_spot_preentry_message(sig)
-                        if expert_system.send_telegram_alert(pre_message, None):
-                            _mark_spot_preentry(sig)
-                            print(f"   ⚡ SETUP Spot vela cerrada enviado: {symbol} {tf}")
-                    except Exception as pre_err:
-                        print(f"   ⚠️ SETUP Spot vela cerrada: {pre_err}")
+
+                # Las preferencias de Telegram de Spot aplican tanto al aviso
+                # CONFIRMADA como al segundo evento operativo de Entry.
+                if not _spot_entry_alert_allowed(tf):
+                    continue
+
+                # Precio vivo ligero: Confirmadas/Vigentes no deben depender de
+                # que vuelva a ejecutarse el análisis pesado para detectar Entry.
+                live_price = _spot_live_market_price(symbol)
+                if live_price is not None:
+                    current = live_price
+                if current is None:
+                    continue
 
                 # ¿Ya enviamos alerta ENTRY para esta señal/vela?
                 if _entry_alert_already_sent(symbol, tf, candle_ts):
@@ -38608,47 +39227,79 @@ def _send_saved_futures_lifecycle_notifications():
                 )
             ):
 
-                message = (
-                    _build_saved_futures_lifecycle_message(
-                        user=user,
-                        signal=sig,
-                        event='ENTRY'
-                    )
-                )
-
-                sent = (
-                    expert_system
-                    .send_telegram_alert(
-                        message,
-                        None
-                    )
-                )
-
-                if sent:
-
-                    now_iso = (
-                        datetime.utcnow()
-                        .isoformat()
+                # RC9.7.13: si esta señal guardada proviene de una señal oficial
+                # del sistema y el Telegram oficial de Entry ya fue enviado,
+                # no duplicar el mismo evento en el mismo chat. El lifecycle
+                # personal queda marcado como notificado y continúa con TP/SL.
+                source_signal_id = str(sig.get('source_signal_id') or '').strip()
+                official_entry_sent = False
+                if source_signal_id:
+                    official_record = {
+                        'signal_id': source_signal_id,
+                        'symbol': sig.get('symbol'),
+                        'timeframe': sig.get('timeframe'),
+                        'action': sig.get('action'),
+                        'source_candle_timestamp': sig.get('candle_timestamp'),
+                        'entry': sig.get('entry'),
+                    }
+                    official_entry_sent = _futures_official_entry_already_sent(
+                        user,
+                        official_record,
                     )
 
+                if official_entry_sent:
+                    now_iso = datetime.utcnow().isoformat()
                     update_saved_signal_telegram_state(
                         signal_id,
-                        {
-                            'telegram_entry_notified_at':
-                                now_iso
-                        }
+                        {'telegram_entry_notified_at': now_iso}
                     )
-
-                    sig[
-                        'telegram_entry_notified_at'
-                    ] = now_iso
-
+                    sig['telegram_entry_notified_at'] = now_iso
                     print(
-                        "📍📱 Saved Futures ENTRY: "
-                        f"{user} "
-                        f"{sig.get('symbol')} "
-                        f"{sig.get('timeframe')}"
+                        "📍📱 Saved Futures ENTRY deduplicado contra señal oficial: "
+                        f"{user} {sig.get('symbol')} {sig.get('timeframe')}"
                     )
+                else:
+                    message = (
+                        _build_saved_futures_lifecycle_message(
+                            user=user,
+                            signal=sig,
+                            event='ENTRY'
+                        )
+                    )
+
+                    sent = (
+                        expert_system
+                        .send_telegram_alert(
+                            message,
+                            None
+                        )
+                    )
+
+                    if sent:
+
+                        now_iso = (
+                            datetime.utcnow()
+                            .isoformat()
+                        )
+
+                        update_saved_signal_telegram_state(
+                            signal_id,
+                            {
+                                'telegram_entry_notified_at':
+                                    now_iso
+                            }
+                        )
+
+                        sig[
+                            'telegram_entry_notified_at'
+                        ] = now_iso
+
+                        print(
+                            "📍📱 Saved Futures ENTRY: "
+                            f"{user} "
+                            f"{sig.get('symbol')} "
+                            f"{sig.get('timeframe')}"
+                        )
 
             # --------------------------------------------------------
             # TAKE PROFIT
@@ -39699,29 +40350,18 @@ def ejecutar_analisis_completo(timeframe):
                     confianza = resultado['decision']['confidence']
                     print(f"   ✅ {par}: {decision} ({confianza:.0f}%)")
                     # ======================================================
-                    # TELEGRAM v23 — SPOT SÓLO CUANDO TOCA ENTRY
+                    # RC9.7.13 — TELEGRAM SPOT: DOS EVENTOS DIFERENTES
                     # ======================================================
-                    #
-                    # Este scheduler debe seguir analizando Spot normalmente:
-                    # - BTC-USDT
-                    # - PAXG-USDT
-                    # - PAXG-BTC
-                    #
-                    # También conserva los resultados para que los siguientes
-                    # pares puedan utilizar BTC/PAXG como contexto.
-                    #
-                    # Lo único que se elimina es la alerta PREMATURA que antes
-                    # se enviaba apenas aparecía COMPRA/VENTA.
-                    #
-                    # La alerta operativa correcta la gestiona
-                    # monitor_entries_loop() cuando el precio alcanza Entry.
-                    #
-                    # NO modifica la señal ni su análisis.
+                    # Este scheduler conserva su análisis normal. La alerta de
+                    # CONFIRMACIÓN se emite desde _compute_previous_signals(),
+                    # que representa exactamente la última vela cerrada. Luego
+                    # monitor_entries_loop() puede emitir el segundo evento al
+                    # tocar Entry. La vela en formación nunca alerta Telegram.
                     # ======================================================
 
                     print(
-                        f"   🔕 Telegram Spot: análisis registrado; "
-                        f"se esperará toque de Entry para alertar."
+                        f"   📌 Telegram Spot: análisis corriente registrado; "
+                        f"CONFIRMADA se gestiona al cierre y ENTRY por separado."
                     )
 
                     continue                    
@@ -45770,6 +46410,7 @@ def _restore_runtime_snapshots_after_bind():
         ('spot-signals', _load_spot_signals_cache_from_disk),
         ('futures-cache', _load_futures_cache_from_disk),
         ('telegram-entry-dedup', _load_entry_alerts_from_disk),
+        ('telegram-confirmed-dedup', _load_confirmed_signal_alerts_from_disk),
         ('telegram-guardian-dedup', _load_guardian_telegram_events),
     )
 
@@ -46190,15 +46831,53 @@ def _futures_live_mark_price(symbol):
         return None
 
 
-def futures_standard_alert_loop():
-    """Commit 9.6 — one Futures Telegram path: alert at the reaction Entry zone.
+def _futures_official_entry_event_key(user, record):
+    """Persistent key for the official Futures Entry event."""
+    signal_id = str((record or {}).get('signal_id') or '').strip()
+    if signal_id:
+        identity = signal_id
+    else:
+        identity = '|'.join([
+            str((record or {}).get('symbol') or ''),
+            str((record or {}).get('timeframe') or ''),
+            str((record or {}).get('action') or ''),
+            str((record or {}).get('source_candle_timestamp') or ''),
+            str((record or {}).get('entry') or ''),
+        ])
+    return f"FUTURES_ENTRY|{str(user or '')}|{identity}"
 
-    We deliberately DO NOT alert when a setup is merely born. The message is
-    timed when live mark price reaches the engine-defined Entry reaction zone.
-    This is closer to an actionable order-zone alert and avoids the old
-    normal/scalping duplicate channels. It never changes Entry/SL/TP/Safety.
+
+def _futures_official_entry_already_sent(user, record):
+    key = _futures_official_entry_event_key(user, record)
+    with _entry_alerts_lock:
+        return key in _entry_alerts_sent
+
+
+def _mark_futures_official_entry_sent(user, record):
+    key = _futures_official_entry_event_key(user, record)
+    with _entry_alerts_lock:
+        _entry_alerts_sent[key] = time.time()
+        if len(_entry_alerts_sent) > 1000:
+            cutoff = time.time() - 7 * 86400
+            for old_key, old_ts in list(_entry_alerts_sent.items()):
+                if float(old_ts or 0) < cutoff:
+                    _entry_alerts_sent.pop(old_key, None)
+    _save_entry_alerts_to_disk()
+
+
+def futures_standard_alert_loop():
+    """Official Futures Entry monitor for CONFIRMED + VIGENT signals.
+
+    RC9.7.13 contract:
+      - ACTIVE intrabar previews never notify Telegram.
+      - CONFIRMED notifies once at candle close (separate path).
+      - The same official signal remains eligible for a second ENTRY alert while
+        it is in the yellow Confirmed lane OR later in the red Vigent lane.
+      - Manual saving is NOT required for this official Entry alert.
+      - Once Entry has been recorded by the canonical lifecycle, the alert can
+        still be emitted even if price already moved away before this loop runs.
     """
-    print('🎯 FUTURES Telegram: monitor de zona Entry iniciado')
+    print('🎯 FUTURES Telegram: monitor CONFIRMADAS + VIGENTES hasta Entry')
     time.sleep(120)
     while True:
         try:
@@ -46206,17 +46885,43 @@ def futures_standard_alert_loop():
             if not users:
                 time.sleep(20)
                 continue
+
             with _futures_analysis_cache['lock']:
                 raw = dict(_futures_analysis_cache.get('data') or {})
             analyses = dict(raw.get('analysis') or {})
             lifecycle = dict(raw.get('lifecycle') or {})
-            # Only symbols that already have an executable candidate trigger a
-            # mark-price call. Fifteen supported assets therefore do NOT imply
-            # fifteen requests every cycle.
-            candidates = []
-            for (symbol, timeframe), result in analyses.items():
-                if not isinstance(result, dict) or not result.get('success'):
+
+            analysis_by_signal_id = {}
+            for (_cell, result) in analyses.items():
+                if not isinstance(result, dict):
                     continue
+                sid = str(result.get('signal_id') or '').strip()
+                if sid:
+                    analysis_by_signal_id[sid] = result
+
+            candidates = []
+            for signal_id, record in lifecycle.items():
+                if not isinstance(record, dict):
+                    continue
+
+                status = str(record.get('lifecycle_status') or '').lower()
+                if status not in ('waiting_entry', 'entry_touched'):
+                    continue
+
+                publication = str(
+                    record.get('publication_status')
+                    or record.get('engine_publication_status')
+                    or ''
+                ).upper()
+                if publication != 'EXECUTABLE_SIGNAL' or record.get('system_executable') is False:
+                    continue
+
+                symbol = str(record.get('symbol') or '')
+                timeframe = str(record.get('timeframe') or '')
+                action = str(record.get('action') or '').upper()
+                if not symbol or action not in ('LONG', 'SHORT'):
+                    continue
+
                 try:
                     from futures_universe import timeframe_allowed, exit_profile_for
                     if not timeframe_allowed(symbol, timeframe):
@@ -46224,67 +46929,108 @@ def futures_standard_alert_loop():
                     profile = exit_profile_for(symbol)
                 except Exception:
                     continue
-                if str(result.get('analysis_mode') or '').upper() != 'CLOSED_CANDLE' or not bool(result.get('source_candle_closed', False)):
-                    continue
-                decision = result.get('decision') or {}
-                levels = result.get('levels') or {}
-                action = str(decision.get('action') or '').upper()
-                publication = str(levels.get('publication_status') or result.get('publication_status') or '').upper()
-                if action not in ('LONG', 'SHORT') or publication != 'EXECUTABLE_SIGNAL':
-                    continue
-                entry = float(levels.get('entry') or 0)
-                sl = float(levels.get('stop_loss') or 0)
-                tp = float(levels.get('take_profit') or 0)
+
+                entry = float(record.get('entry') or 0)
+                sl = float(record.get('stop_loss') or 0)
+                tp = float(record.get('take_profit') or 0)
                 if min(entry, sl, tp) <= 0:
                     continue
-                signal_id = str(result.get('signal_id') or '')
-                lc = lifecycle.get(signal_id) or {}
-                validity = _futures_signal_validity(result, timeframe, lc)
-                if str(lc.get('lifecycle_status') or 'waiting_entry') != 'waiting_entry' or validity.get('expired'):
+
+                result = analysis_by_signal_id.get(str(signal_id)) or record
+                validity = _futures_signal_validity(result, timeframe, record)
+                if status == 'waiting_entry' and validity.get('expired'):
                     continue
-                candidates.append((symbol, timeframe, result, profile, entry, sl, tp, action, validity))
+
+                canonical = dict(record)
+                canonical['signal_id'] = str(record.get('signal_id') or signal_id or '')
+                candidates.append((
+                    symbol, timeframe, canonical, result, profile,
+                    entry, sl, tp, action, status, validity,
+                ))
 
             if not candidates:
                 time.sleep(20)
                 continue
 
-            live_by_symbol = {}
-            for symbol in sorted({row[0] for row in candidates}):
-                live_by_symbol[symbol] = _futures_live_mark_price(symbol)
+            # Only waiting-entry symbols need a fresh mark-price request. A
+            # lifecycle already marked entry_touched carries its touch price.
+            waiting_symbols = sorted({
+                row[0] for row in candidates if row[9] == 'waiting_entry'
+            })
+            live_by_symbol = {
+                symbol: _futures_live_mark_price(symbol)
+                for symbol in waiting_symbols
+            }
 
-            for symbol, timeframe, result, profile, entry, sl, tp, action, validity in candidates:
-                current = live_by_symbol.get(symbol)
-                if not current:
+            for (
+                symbol, timeframe, record, result, profile,
+                entry, sl, tp, action, status, validity,
+            ) in candidates:
+                if status == 'entry_touched':
+                    current = float(record.get('entry_touched_price') or entry or 0)
+                    touched = current > 0
+                else:
+                    current = live_by_symbol.get(symbol)
+                    touched = bool(
+                        current
+                        and _price_touches_entry(
+                            current,
+                            entry,
+                            action,
+                            {
+                                'system': 'futures',
+                                'system_type': 'futures',
+                                'symbol': symbol,
+                                'timeframe': timeframe,
+                            },
+                        )
+                    )
+
+                if not touched:
                     continue
+
                 signal_for_zone = {
-                    'system': 'futures', 'system_type': 'futures', 'symbol': symbol,
-                    'timeframe': timeframe, 'action': action, 'entry': entry,
-                    'stop_loss': sl, 'take_profit': tp,
+                    'system': 'futures',
+                    'system_type': 'futures',
+                    'symbol': symbol,
+                    'timeframe': timeframe,
+                    'action': action,
+                    'entry': entry,
+                    'stop_loss': sl,
+                    'take_profit': tp,
+                    'confidence': float(record.get('confidence') or 0),
+                    'leverage': record.get('leverage'),
+                    'risk_reward': record.get('risk_reward'),
+                    'entry_source': record.get('entry_source') or record.get('entry_reason'),
+                    'signal_id': record.get('signal_id'),
                 }
-                if not _price_touches_entry(current, entry, action, signal_for_zone):
-                    continue
-                levels = result.get('levels') or {}
-                confidence = float((result.get('decision') or {}).get('confidence') or result.get('confidence') or 0)
-                signal_for_zone.update({
-                    'confidence': confidence,
-                    'leverage': levels.get('leverage') or result.get('leverage'),
-                    'risk_reward': levels.get('risk_reward'),
-                    'entry_source': levels.get('entry_source') or levels.get('entry_reason'),
-                })
                 base_message = _build_entry_alert_message(signal_for_zone, current)
                 link = _futures_signal_public_url(symbol, timeframe, result)
                 message = '\n'.join([
                     base_message,
-                    f"⏳ Vigencia restante: <b>{escape(str(validity.get('duration_text') or ''))}</b>",
+                    (
+                        '📌 Origen: <b>CONFIRMADA</b>'
+                        if str(record.get('signal_id') or '') in analysis_by_signal_id
+                        else '📌 Origen: <b>VIGENTE</b>'
+                    ),
+                    f"⏳ Vigencia Entry: <b>{escape(str(validity.get('duration_text') or ''))}</b>",
                     f"🔗 <a href=\"{escape(link)}\">Abrir análisis completo</a>",
                 ])
+
                 for user in users:
-                    key = 'ENTRYZONE|' + _futures_scalping_alert_key(user, result, symbol, timeframe)
-                    if _futures_scalping_alert_already_sent(key):
+                    if _futures_official_entry_already_sent(user, record):
                         continue
-                    if expert_system.send_telegram_alert(message, None, category='FUTURES_ENTRY_ZONE'):
-                        _mark_futures_scalping_alert_sent(key)
-                        print(f'✅ Futures Entry-zone Telegram: {user} · {symbol} {timeframe} {action} @ {current:.8g}')
+                    if expert_system.send_telegram_alert(
+                        message,
+                        None,
+                        category='FUTURES_ENTRY_ZONE',
+                    ):
+                        _mark_futures_official_entry_sent(user, record)
+                        print(
+                            '✅ Futures ENTRY Telegram: '
+                            f'{user} · {symbol} {timeframe} {action} @ {current:.8g} '
+                            f'[{status}]'
+                        )
         except Exception as exc:
             print(f'❌ futures_standard_alert_loop: {exc}')
         time.sleep(20)

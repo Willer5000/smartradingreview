@@ -10188,6 +10188,57 @@ window.changeToSignal = function(symbol, timeframe) {
     }
 };
 
+// ============================================================================
+// RC9.7.13 — SPOT: REFRESCO REAL DE ACTIVA INTRABAR DEL PAR/TF SELECCIONADO
+// ============================================================================
+window.__SPOT_INTRABAR_REFRESH_TIMER__ = window.__SPOT_INTRABAR_REFRESH_TIMER__ || null;
+
+function _spotIntrabarRefreshMs(timeframe) {
+    const map = {
+        '4h': 90000,
+        '12h': 150000,
+        '1D': 240000,
+        '1W': 300000
+    };
+    return map[String(timeframe || '')] || 240000;
+}
+
+function _scheduleSpotIntrabarRefresh() {
+    if (window.IS_FUTURES_PAGE) return;
+    clearTimeout(window.__SPOT_INTRABAR_REFRESH_TIMER__);
+    const tf = document.getElementById('interval-select')?.value || '4h';
+    const delay = _spotIntrabarRefreshMs(tf);
+
+    window.__SPOT_INTRABAR_REFRESH_TIMER__ = setTimeout(async () => {
+        try {
+            if (!document.hidden) {
+                const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
+                const timeframe = document.getElementById('interval-select')?.value || '4h';
+                await fetch('/api/spot/signals/active/refresh', {
+                    method: 'POST',
+                    cache: 'no-store',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({symbol, timeframe})
+                });
+                setTimeout(() => {
+                    if (!document.hidden) window.updateActiveSignals?.();
+                }, 5000);
+            }
+        } catch (error) {
+            console.warn('SPOT intrabar refresh:', error);
+        } finally {
+            _scheduleSpotIntrabarRefresh();
+        }
+    }, delay);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    if (window.IS_FUTURES_PAGE) return;
+    _scheduleSpotIntrabarRefresh();
+    document.getElementById('symbol-select')?.addEventListener('change', _scheduleSpotIntrabarRefresh);
+    document.getElementById('interval-select')?.addEventListener('change', _scheduleSpotIntrabarRefresh);
+});
+
 // ============ ACTUALIZAR SEÑALES PERIÓDICAMENTE ============
 // Único setInterval del sistema para refrescar señales activas.
 // Antes había dos (uno a 60s aquí + otro a 120s en la inicialización),
