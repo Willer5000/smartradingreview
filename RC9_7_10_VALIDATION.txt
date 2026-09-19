@@ -1,0 +1,38 @@
+RC9.7.10 — VALIDATION
+Fecha: 2026-09-19
+
+VALIDACIÓN EJECUTADA SOBRE FULL STAGING REPO + PATCH RC9.7.10
+
+Python syntax:
+- python -m py_compile app.py saved_signals.py futures_system.py leverage_policy.py -> PASS
+
+JavaScript syntax:
+- node --check static/script.js -> PASS
+- node --check static/futures.js -> PASS
+
+Template:
+- Jinja parse templates/index.html -> PASS
+
+Regression/policy tests:
+- test_rc9_7_9_signal_sections.py
+- test_rc9_7_10_finalization.py
+- test_commit9_net_edge_leverage.py
+Resultado: 27 passed
+
+Checks cubiertos:
+- Spot Activa / Confirmada / Vigente usan semánticas distintas.
+- Vigente Spot conserva valid_until/Entry/SL/TP originales y no recalcula niveles.
+- Live-price stale response se invalida por AbortController + sequence + symbol/timeframe exactos.
+- LIVE_OPEN_CANDLE previo se elimina y el gráfico usa autorange.
+- Futures context envía selected symbol y no contiene copy PAXG/rotación obsoleto.
+- Technical leverage aumenta sólo si la geometría estrecha y los caps lo permiten.
+- Public contract max/MMR + liquidation-buffer cap están conectados.
+- Contingency leverage cap 10x permanece como protección para celdas no validadas.
+
+LIMITACIONES DE ESTA VALIDACIÓN
+- No se realizó deploy real a Render desde este entorno.
+- No se verificó una señal real de producción post-deploy.
+- Un import runtime completo de futures_system no se usó como test de integración porque el contenedor de construcción no incluye Flask; py_compile y los tests puros/estructurales sí pasaron.
+- La distancia de liquidación es una estimación conservadora; la liquidación real depende de la cuenta, margin mode, position/risk tier y reglas actuales del exchange.
+
+NO SQL NUEVO. NO RESEARCH DEPLOY. NO BOOTSTRAP.

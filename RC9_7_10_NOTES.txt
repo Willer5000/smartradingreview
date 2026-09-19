@@ -1,0 +1,80 @@
+RC9.7.10 — FINALIZATION
+Fecha: 2026-09-19
+Repositorio: Main / smartradingreview
+
+OBJETIVO
+Cerrar cuatro problemas finales observados en producción RC9.7.9 sin cambiar Research, gates OOS, Safety ni la geometría técnica ya validada de Entry/SL/TP.
+
+1) SPOT — SEMÁNTICA CORRECTA DE ACTIVA / CONFIRMADA / VIGENTE
+- Sólo "Señales activas" navega al análisis actual.
+- "Señales confirmadas" abre el snapshot congelado del último cierre: Entry/SL/TP/confianza/justificación originales.
+- Nuevo endpoint GET /api/spot/signals/vigent.
+- "Señales vigentes" conserva señales confirmadas anteriores mientras mantengan el valid_until original y no exista invalidación obvia por SL.
+- Vigentes NO recalcula Entry/SL/TP/message y NO reinicia su reloj.
+- Legacy sin valid_until explícito no se convierte en señal vigente permanente.
+
+2) GRÁFICOS LIVE — CARRERA ASÍNCRONA + AUTOSCALE
+- El bug BTC→ETH/SOL/etc. se debía a una respuesta /api/price antigua que podía llegar después del cambio de símbolo/TF y superponer un LIVE_OPEN_CANDLE de otro activo.
+- Se añadió AbortController + request sequence + validación exacta symbol/timeframe.
+- Se elimina el overlay live anterior al cambiar símbolo/TF.
+- Se fuerza Plotly xaxis.autorange/yaxis.autorange al cambiar contexto y al aplicar la vela live válida.
+- La corrección es genérica para Futures y Spot, incluyendo PAXG-USDT y PAXG-BTC.
+- La vela live sigue siendo DISPLAY ONLY; las señales usan velas cerradas.
+
+3) FUTURES — CONTEXTO DE MERCADO LEGIBLE
+- Se elimina la referencia visible a PAXG/rotación en Futures.
+- El frontend envía el símbolo seleccionado al endpoint /api/futures/correlation.
+- El panel usa intermarket_context y muestra BTC 12H/1D, amplitud Futures, funding, OI, flujo/orderbook, régimen, liquidez y fuerza relativa cuando existen datos.
+- No existe selector adicional: utiliza el selector principal de la página.
+- El panel es contexto, no una señal y no reemplaza Entry/SL/TP/Safety.
+
+4) FUTURES — TECHNICAL LEVERAGE V4
+- El fallback normal deja de ser MINIMUM_SAFE_VIABLE y pasa a TECHNICAL_RISK_BUDGET.
+- La geometría Entry→SL puede justificar leverage superior si el riesgo, ATR, Safety y demás techos lo permiten.
+- El objetivo normal de pérdida sobre margen es 5%, siempre subordinado a límites independientes.
+- Se consulta metadata pública del contrato KuCoin (maxLeverage, maintainMargin, takerFeeRate, status) con caché acotada.
+- Se añade un cap conservador por distancia estimada de liquidación: SL + buffer de volatilidad + MMR + proxy de fee deben quedar por delante de la liquidación estimada.
+- La distancia de liquidación es una ESTIMACIÓN de seguridad para recomendación, NO el precio exacto de liquidación de la cuenta real.
+- Si la metadata pública falla, el sistema usa fallbacks conservadores y nunca aumenta leverage por la falla.
+- Los caps por timeframe permanecen: 30m 30x, 1h 20x, 2h 15x, 4h 10x, 12h 7x, 1D 5x.
+- La protección de contingencia NO se eliminó: sin Champion validado, el Strategy Bank conserva leverage_cap=10x por defecto.
+
+ARCHIVOS A SOBRESCRIBIR
+- app.py
+- futures_system.py
+- leverage_policy.py
+- static/script.js
+- static/futures.js
+- templates/index.html
+
+ARCHIVOS DE VALIDACIÓN INCLUIDOS
+- test_rc9_7_9_signal_sections.py
+- test_rc9_7_10_finalization.py
+- test_commit9_net_edge_leverage.py
+
+NO CAMBIA
+- Research repo / Research deploy
+- Supabase schema
+- bootstrap RC9.7
+- OOS thresholds
+- Strategy Bank definitions
+- 9 specialists
+- Trader IA / Scientist authority contracts
+- Safety floors
+- Entry/SL/TP technical construction
+- Guardian lifecycle
+
+SQL
+RC9.7.10 NO REQUIERE SQL NUEVO.
+Si RC9.7.9 ya está funcionando, NO repetir RC9_7_9_SAVED_SIGNALS_VALIDITY.sql y NO ejecutar bootstrap.
+
+DEPLOY
+1. Sobrescribir sólo los archivos listados; no borrar otros archivos del repositorio.
+2. Un solo commit Main sugerido:
+   RC9.7.10 final Spot lifecycle autoscale Futures context and technical leverage
+3. Esperar deploy exitoso de Render.
+4. Ctrl+F5.
+5. Verificar Spot Activa/Confirmada/Vigente, BTC→ETH/SOL/PAXG autoscale, contexto Futures y leverage en una señal real.
+
+DESPUÉS
+Si estas correcciones funcionan, congelar desarrollo y dejar acumular evidencia LIVE/Shadow/Research. No abrir nuevos commits salvo regresión concreta o evidencia estadística suficiente.

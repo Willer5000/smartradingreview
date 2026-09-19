@@ -27761,7 +27761,8 @@ def _save_spot_signals_cache_to_disk():
         from runtime_persistence import save_runtime_snapshot
         previous = getattr(expert_system, 'prev_signals_cache', None)
         active = getattr(expert_system, 'spot_active_signals_cache', None)
-        if previous is None and active is None:
+        vigent = getattr(expert_system, 'spot_vigent_signals_cache', None)
+        if previous is None and active is None and vigent is None:
             return False
         now_ts = time.time()
         previous_ts = float(
@@ -27770,14 +27771,19 @@ def _save_spot_signals_cache_to_disk():
         active_ts = float(
             getattr(expert_system, 'spot_active_signals_cache_time', 0) or 0
         )
+        vigent_ts = float(
+            getattr(expert_system, 'spot_vigent_signals_cache_time', 0) or 0
+        )
         payload = {
             'ts': now_ts,
             # H.3: timestamps separados. Una actualización interactiva del
             # panel Activas no puede rejuvenecer artificialmente Vela Anterior.
             'previous_ts': previous_ts,
             'active_ts': active_ts,
+            'vigent_ts': vigent_ts,
             'previous': previous if isinstance(previous, dict) else None,
             'active': active if isinstance(active, dict) else None,
+            'vigent': vigent if isinstance(vigent, dict) else None,
             'active_complete': bool(
                 getattr(expert_system, 'spot_active_signals_cache_complete', False)
             ),
@@ -27806,6 +27812,7 @@ def _load_spot_signals_cache_from_disk():
             return False
         previous_ts = float(payload.get('previous_ts') or cache_ts or 0)
         active_ts = float(payload.get('active_ts') or cache_ts or 0)
+        vigent_ts = float(payload.get('vigent_ts') or cache_ts or 0)
         loaded_any = False
         previous = payload.get('previous')
         if isinstance(previous, dict):
@@ -27822,6 +27829,11 @@ def _load_spot_signals_cache_from_disk():
                 bool(payload.get('active_complete', False)),
             )
             loaded_any = True
+        vigent = payload.get('vigent')
+        if isinstance(vigent, dict):
+            setattr(expert_system, 'spot_vigent_signals_cache', vigent)
+            setattr(expert_system, 'spot_vigent_signals_cache_time', vigent_ts)
+            loaded_any = True
         if loaded_any:
             print(f"📂 [SPOT CACHE] Snapshot Supabase restaurado ({int(age)}s).")
         return loaded_any
@@ -27836,6 +27848,10 @@ def _spot_previous_cache_present():
 
 def _spot_active_cache_present():
     return getattr(expert_system, 'spot_active_signals_cache', None) is not None
+
+
+def _spot_vigent_cache_present():
+    return getattr(expert_system, 'spot_vigent_signals_cache', None) is not None
 
 
 def _spot_cache_present():
@@ -28482,6 +28498,128 @@ def _run_scheduled_spot_analysis(timeframe):
         _release_heavy_analysis(owner)
 
 
+def _spot_signal_snapshot_identity(signal):
+    """Stable identity for a frozen Spot confirmation/lifecycle snapshot."""
+    if not isinstance(signal, dict):
+        return None
+    symbol = str(signal.get('symbol') or '').upper().replace('/', '-')
+    timeframe = str(signal.get('timeframe') or '')
+    action = str(signal.get('decision') or signal.get('action') or '').upper()
+    candle = str(signal.get('candle_timestamp') or signal.get('source_candle_timestamp') or '')
+    if not symbol or not timeframe or not action or not candle:
+        return None
+    return (symbol, timeframe, action, candle)
+
+
+def _build_spot_vigent_cache(old_confirmed, old_vigent, current_confirmed, observed_prices):
+    """Carry forward only still-valid frozen Spot signals.
+
+    RC9.7.10 separates three semantics:
+      - Active: current analysis navigation.
+      - Confirmed: latest closed-candle frozen snapshot.
+      - Vigent: an older confirmed snapshot whose original validity has not
+        expired or been clearly invalidated by the current observed price.
+
+    Entry/SL/TP/message are NEVER recalculated here.
+    """
+    try:
+        now_utc = pd.Timestamp.now(tz='UTC')
+        current_ids = {
+            ident for ident in (
+                _spot_signal_snapshot_identity(row)
+                for row in (current_confirmed or {}).values()
+            ) if ident
+        }
+        candidates = []
+        for source_name, cache in (
+            ('PREVIOUS_CONFIRMED', old_confirmed or {}),
+            ('VIGENT_CARRY', old_vigent or {}),
+        ):
+            if not isinstance(cache, dict):
+                continue
+            for row in cache.values():
+                if not isinstance(row, dict):
+                    continue
+                item = dict(row)
+                action = str(item.get('decision') or item.get('action') or '').upper()
+                if action not in ('COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT'):
+                    continue
+                ident = _spot_signal_snapshot_identity(item)
+                if not ident or ident in current_ids:
+                    continue
+                valid_until_raw = item.get('valid_until') or item.get('source_valid_until')
+                if not valid_until_raw:
+                    # Fail closed: legacy rows without an explicit expiry must
+                    # not become permanent "vigent" signals.
+                    continue
+                try:
+                    valid_until = pd.Timestamp(valid_until_raw)
+                    valid_until = (
+                        valid_until.tz_localize('UTC')
+                        if valid_until.tz is None
+                        else valid_until.tz_convert('UTC')
+                    )
+                except Exception:
+                    continue
+                remaining = int(max(0, (valid_until - now_utc).total_seconds()))
+                if remaining <= 0:
+                    continue
+                if str(item.get('resultado') or 'pending').lower() not in ('pending', 'active', 'waiting_entry'):
+                    continue
+
+                # If the current directional snapshot exists for the same cell,
+                # use only its observed price to detect an obvious invalidation.
+                cell_key = f"{ident[0]}_{ident[1]}"
+                current = (observed_prices or {}).get(cell_key) or {}
+                current_price = current.get('current_price')
+                try:
+                    current_price = float(current_price) if current_price is not None else None
+                except Exception:
+                    current_price = None
+                try:
+                    stop = float(item.get('stop_loss')) if item.get('stop_loss') is not None else None
+                except Exception:
+                    stop = None
+                if current_price and stop and stop > 0:
+                    if action in ('COMPRA_SPOT', 'LONG') and current_price <= stop:
+                        continue
+                    if action in ('VENTA_SPOT', 'SHORT') and current_price >= stop:
+                        continue
+                    item['precio_actual'] = current_price
+
+                item['valid_until'] = valid_until.isoformat()
+                item['source_valid_until'] = valid_until.isoformat()
+                item['tiempo_restante'] = remaining
+                item['activa'] = 1
+                item['resultado'] = 'pending'
+                item['ui_context'] = 'VIGENT'
+                item['lifecycle_source'] = source_name
+                candidates.append(item)
+
+        # Deduplicate by exact source candle/action. Keep the row with the
+        # furthest explicit original validity. Bound the UI cache defensively.
+        best = {}
+        for item in candidates:
+            ident = _spot_signal_snapshot_identity(item)
+            if not ident:
+                continue
+            previous = best.get(ident)
+            if previous is None or int(item.get('tiempo_restante') or 0) > int(previous.get('tiempo_restante') or 0):
+                best[ident] = item
+        ordered = sorted(
+            best.values(),
+            key=lambda row: int(row.get('tiempo_restante') or 0),
+            reverse=True,
+        )[:36]
+        return {
+            f"{row.get('symbol')}_{row.get('timeframe')}_{idx}": row
+            for idx, row in enumerate(ordered)
+        }
+    except Exception as exc:
+        print(f"⚠️ [SPOT VIGENT] No se pudo construir lifecycle: {exc}")
+        return {}
+
+
 def _compute_previous_signals():
     """
     v22: EXTRAÍDO del endpoint web para poder ejecutar en background.
@@ -28497,8 +28635,19 @@ def _compute_previous_signals():
     Retorna dict {clave: {...}} con las señales, o None si falla catastróficamente.
     """
     import gc
+    old_confirmed_cache = {
+        key: dict(value)
+        for key, value in (getattr(expert_system, 'prev_signals_cache', None) or {}).items()
+        if isinstance(value, dict)
+    }
+    old_vigent_cache = {
+        key: dict(value)
+        for key, value in (getattr(expert_system, 'spot_vigent_signals_cache', None) or {}).items()
+        if isinstance(value, dict)
+    }
     resultados = {}
     active_results = {}
+    spot_price_snapshots = {}
     tiempo_actual = datetime.now(bolivia_tz)
     temporalidades = ['4h', '12h', '1D', '1W']
     pares = ['BTC-USDT', 'PAXG-USDT', 'PAXG-BTC']
@@ -28715,6 +28864,9 @@ def _compute_previous_signals():
                 
                 from q6_integrity import prepare_spot_frame
                 precio_actual = float(df['close'].iloc[-1])
+                spot_price_snapshots[f"{symbol}_{timeframe}"] = {
+                    'current_price': precio_actual
+                }
                 df_anterior = prepare_spot_frame(df, timeframe, previous=True)
                 precio_cierre_anterior = float(df_anterior['close'].iloc[-1])
                 
@@ -28796,6 +28948,7 @@ def _compute_previous_signals():
                 # ============================================================
 
                 tiempo_restante = 0
+                valid_until = None
 
                 try:
 
@@ -28903,6 +29056,11 @@ def _compute_previous_signals():
                     'tiempo_restante': int(tiempo_restante),
                     'message': str(mensaje_corto),
                     'candle_timestamp': candle_ts,
+                    'source_candle_timestamp': candle_ts,
+                    'source_candle_close_timestamp': analisis.get('source_candle_close_timestamp'),
+                    'valid_until': (valid_until.isoformat() if valid_until is not None else analisis.get('source_valid_until')),
+                    'source_valid_until': (valid_until.isoformat() if valid_until is not None else analisis.get('source_valid_until')),
+                    'ui_context': 'CONFIRMED',
                     'timestamp': str(tiempo_actual.isoformat())
                 }
                 estado = "🟢 ACTIVA" if activa == 1 else "⚪ inactiva"
@@ -28920,10 +29078,21 @@ def _compute_previous_signals():
             time.sleep(0.2)
     
     # ============ GUARDAR EN CACHÉ ============
+    # Antes de reemplazar Confirmadas, conservar las que todavía mantienen la
+    # vigencia ORIGINAL. Esto alimenta el carril rojo sin recalcular niveles.
+    vigent_results = _build_spot_vigent_cache(
+        old_confirmed_cache,
+        old_vigent_cache,
+        resultados,
+        spot_price_snapshots,
+    )
+
     setattr(expert_system, 'prev_signals_cache', resultados)
     setattr(expert_system, 'prev_signals_cache_time', time.time())
     setattr(expert_system, 'spot_active_signals_cache', active_results)
     setattr(expert_system, 'spot_active_signals_cache_time', time.time())
+    setattr(expert_system, 'spot_vigent_signals_cache', vigent_results)
+    setattr(expert_system, 'spot_vigent_signals_cache_time', time.time())
 
     _save_spot_signals_cache_to_disk()
 
@@ -29080,6 +29249,51 @@ def api_spot_signals_active():
             'error': str(e),
             'signals': []
         })
+
+
+@app.route('/api/spot/signals/vigent')
+def api_spot_signals_vigent():
+    """Frozen older Spot confirmations that still retain original validity."""
+    try:
+        now = time.time()
+        cache_data = getattr(expert_system, 'spot_vigent_signals_cache', None)
+        cache_time = float(
+            getattr(expert_system, 'spot_vigent_signals_cache_time', 0) or 0
+        )
+        age = now - cache_time if cache_time else 999999
+
+        if cache_data is not None:
+            return jsonify({
+                'success': True,
+                'processing': False,
+                'cached': True,
+                'cache_age_seconds': int(age),
+                'total': len(cache_data),
+                'data': cache_data,
+                'timestamp': datetime.now(bolivia_tz).isoformat(),
+            })
+
+        _trigger_spot_fast_restore()
+        if (
+            not _LOW_MEMORY_MODE
+            and not _PREV_SIGNALS_COMPUTING['running']
+        ):
+            threading.Thread(
+                target=_run_previous_signals_background,
+                daemon=True,
+            ).start()
+
+        return jsonify({
+            'success': True,
+            'processing': True,
+            'total': 0,
+            'data': {},
+            'message': 'Preparando señales vigentes Spot en segundo plano.',
+            'timestamp': datetime.now(bolivia_tz).isoformat(),
+        })
+    except Exception as exc:
+        print(f"❌ Error api_spot_signals_vigent: {exc}")
+        return jsonify({'success': False, 'error': str(exc), 'data': {}}), 200
 
 
 @app.route('/api/previous_signals')

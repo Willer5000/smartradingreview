@@ -124,8 +124,9 @@ class Commit9NetEdgeLeverageTests(unittest.TestCase):
         )
         self.assertIsNotNone(policy)
         self.assertLessEqual(policy['leverage'], 20)
-        self.assertEqual(policy['timeframe_cap_mode'], 'HARD_STATIC_FALLBACK')
-        self.assertEqual(policy['selection_policy'], 'MINIMUM_SAFE_VIABLE')
+        self.assertEqual(policy['leverage'], 20)
+        self.assertEqual(policy['timeframe_cap_mode'], 'HARD_TECHNICAL_CAP')
+        self.assertEqual(policy['selection_policy'], 'TECHNICAL_RISK_BUDGET')
 
     def test_governed_risk_budget_can_exceed_old_1h_cap_when_geometry_supports_it(self):
         policy = select_risk_budget_leverage(
@@ -140,6 +141,21 @@ class Commit9NetEdgeLeverageTests(unittest.TestCase):
         self.assertEqual(policy['leverage'], 25)
         self.assertEqual(policy['timeframe_cap_mode'], 'SOFT_REFERENCE')
         self.assertLessEqual(policy['leverage'] * 0.20, 5.0 + 1e-9)
+
+    def test_liquidation_buffer_is_a_hard_ceiling(self):
+        policy = select_risk_budget_leverage(
+            minimum_required=2.0, sl_distance_pct=0.20,
+            max_by_risk=50.0, max_by_atr_stress=50.0,
+            safety_score=99.0, timeframe_static_max=30.0,
+            fallback_exchange_max=50.0, verified_exchange_max=50.0,
+            max_by_liquidation_buffer=12.8, adaptive_enabled=False,
+            target_loss_budget_pct_margin=5.0,
+        )
+        self.assertIsNotNone(policy)
+        self.assertLessEqual(policy['leverage'], 12)
+        self.assertTrue(policy['liquidation_cap_available'])
+        self.assertEqual(policy['selection_policy'], 'TECHNICAL_RISK_BUDGET')
+
 
     def test_wide_stop_does_not_force_high_leverage(self):
         policy = select_risk_budget_leverage(

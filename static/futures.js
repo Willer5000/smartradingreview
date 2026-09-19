@@ -2112,144 +2112,150 @@ window.showFuturesPrevJustif = function(sig) {
 // ============================================================================
 
 window.updateCorrelationInfo = function(data) {
-    if (!window.IS_FUTURES_PAGE) {
-        // No es futuros → dejamos la implementación de script.js
-        // Pero como el objeto window.updateCorrelationInfo lo estamos redefiniendo,
-        // aquí retornamos y no hacemos nada (script.js ya fue reemplazado).
-        return;
-    }
-    
-    // En futuros: ignoramos el 'data' pasado desde script.js y consultamos
-    // directamente /api/futures/correlation
-    const tf = document.getElementById('interval-select')?.value || '1h';
-    
-    fetch(`/api/futures/correlation?timeframe=${tf}`)
+    if (!window.IS_FUTURES_PAGE) return;
+
+    const tf = document.getElementById('interval-select')?.value || window.currentInterval || '1h';
+    const symbol = document.getElementById('symbol-select')?.value || window.currentSymbol || 'BTC-USDT';
+    const requestKey = `${symbol}|${tf}`;
+    window.__FUTURES_CONTEXT_REQUEST_KEY__ = requestKey;
+
+    fetch(`/api/futures/correlation?timeframe=${encodeURIComponent(tf)}&symbol=${encodeURIComponent(symbol)}`, {
+        cache: 'no-store'
+    })
         .then(r => r.json())
         .then(json => {
             if (!json.success) return;
+            const currentSymbol = document.getElementById('symbol-select')?.value || window.currentSymbol || 'BTC-USDT';
+            const currentTf = document.getElementById('interval-select')?.value || window.currentInterval || '1h';
+            if (`${currentSymbol}|${currentTf}` !== requestKey) return;
             renderFuturesCorrelation(json);
         })
-        .catch(err => console.error('Error correlación futuros:', err));
+        .catch(err => console.error('Error contexto Futures:', err));
 };
 
 
 function renderFuturesCorrelation(payload) {
-    const pairs = payload.pairs || {};
-    const ranking = payload.ranking || [];
-    const topLong = payload.top_long_candidates || [];
-    const topShort = payload.top_short_candidates || [];
-    
-    // Reemplazar el contenido de la sección correlation-info si existe
     const container = document.getElementById('correlation-info');
     if (!container) return;
-    
-    // Badge del timeframe
+
+    const ctx = payload.intermarket_context || {};
+    const pairs = payload.pairs || {};
+    const selectedSymbol = String(ctx.selected_symbol || window.currentSymbol || 'BTC-USDT').toUpperCase().replace('/', '-');
+    const selected = pairs[selectedSymbol] || {};
+    const tf = payload.timeframe || window.currentInterval || '1h';
+    const symbolLabel = selectedSymbol.replace('-', '/');
+
+    const title = document.getElementById('correlation-panel-title');
+    if (title) {
+        title.innerHTML = `<i class="fas fa-network-wired me-2" aria-hidden="true"></i>Contexto de mercado Futures · ${futEscapeHtml(symbolLabel)} ${futEscapeHtml(tf)}`;
+    }
     const tfBadge = document.getElementById('correlation-timeframe');
-    if (tfBadge) tfBadge.textContent = payload.timeframe || '1h';
-    
-    // Helper para colorear dirección
-    const dirBadge = (dir, adx) => {
-        if (dir === 'bullish') return `<span class="badge bg-success">ALCISTA</span>`;
-        if (dir === 'bearish') return `<span class="badge bg-danger">BAJISTA</span>`;
-        return `<span class="badge bg-secondary">NEUTRAL</span>`;
+    if (tfBadge) tfBadge.textContent = tf;
+
+    const directionBadge = value => {
+        const dir = String(value || '').toLowerCase();
+        if (dir === 'bullish') return '<span class="badge bg-success">ALCISTA</span>';
+        if (dir === 'bearish') return '<span class="badge bg-danger">BAJISTA</span>';
+        return '<span class="badge bg-secondary">NEUTRAL</span>';
     };
-    
-    // HTML de los 5 pares
-    let pairsHTML = '';
-    const orderedSymbols = Object.keys(pairs).sort();
-    orderedSymbols.forEach(sym => {
-        const d = pairs[sym];
-        if (!d) return;
-        const colorMap = {
-            'BTC-USDT': '#FFD700',
-            'ETH-USDT': '#3A8BFF',
-            'SOL-USDT': '#8A63D2',
-            'XRP-USDT': '#00C076',
-            'ADA-USDT': '#FF69B4'
-        };
-        const symbolName = sym.replace('-', '/');
-        pairsHTML += `
-            <div class="d-flex justify-content-between align-items-center mb-2">
-                <span class="fw-bold" style="color: ${colorMap[sym] || 'inherit'};">${symbolName}</span>
-                <div class="text-end">
-                    ${dirBadge(d.direction, d.adx)}
-                    <span class="badge bg-dark ms-1">ADX: ${d.adx.toFixed(1)}</span>
-                    ${d.action !== 'NO_OPERAR' ? `<span class="badge bg-info ms-1">${d.action}</span>` : ''}
-                </div>
-            </div>
-        `;
-    });
-    
-    // Top LONG y Top SHORT candidatos
-    let topHTML = '<div class="mt-3 pt-3 border-top border-secondary">';
-    
-    if (topLong.length > 0) {
-        topHTML += `
-            <div class="mb-2">
-                <small class="text-success fw-bold">
-                    <i class="fas fa-arrow-up me-1"></i>🚀 Mayor fuerza ALCISTA (LONG):
-                </small>
-                <div class="mt-1">
-                    ${topLong.map((r, idx) => {
-                        const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : '🥉';
-                        return `
-                            <div class="d-flex justify-content-between small">
-                                <span>${medal} ${r.symbol.replace('-', '/')}</span>
-                                <span class="text-success">ADX ${r.adx.toFixed(1)}</span>
-                            </div>
-                        `;
-                    }).join('')}
-                </div>
-            </div>
-        `;
+    const fmtNum = (value, digits = 2, suffix = '') => {
+        const n = Number(value);
+        return Number.isFinite(n) ? `${n.toFixed(digits)}${suffix}` : '--';
+    };
+    const fmtFunding = value => {
+        const n = Number(value);
+        return Number.isFinite(n) ? `${(n * 100).toFixed(4)}%` : '--';
+    };
+    const htf = row => {
+        if (!row || !row.available) return '<span class="badge bg-secondary">SIN DATO</span>';
+        return `${directionBadge(row.direction)} <small class="text-muted">ADX ${fmtNum(row.adx, 1)}</small>`;
+    };
+
+    const breadth = ctx.breadth || {};
+    const available = Number(breadth.available || 0);
+    const bulls = Number(breadth.bullish || 0);
+    const bears = Number(breadth.bearish || 0);
+    const neutral = Math.max(0, available - bulls - bears);
+    const selectedDir = String(selected.direction || 'neutral').toLowerCase();
+    const breadthDir = bulls > bears ? 'bullish' : (bears > bulls ? 'bearish' : 'neutral');
+    const btc12 = String(ctx.btc_12h?.direction || 'neutral').toLowerCase();
+    const btc1d = String(ctx.btc_1d?.direction || 'neutral').toLowerCase();
+
+    let readingClass = 'secondary';
+    let reading = 'Contexto mixto o sin tesis direccional actual.';
+    if (selectedDir === 'bullish' || selectedDir === 'bearish') {
+        const opposite = selectedDir === 'bullish' ? 'bearish' : 'bullish';
+        const aligned = [btc12, btc1d, breadthDir].filter(v => v === selectedDir).length;
+        const opposed = [btc12, btc1d, breadthDir].filter(v => v === opposite).length;
+        if (aligned >= 2 && opposed === 0) {
+            readingClass = 'success';
+            reading = `Contexto general favorable para la tesis ${selectedDir === 'bullish' ? 'LONG' : 'SHORT'} actual.`;
+        } else if (opposed >= 2) {
+            readingClass = 'danger';
+            reading = `Contexto general adverso a la tesis ${selectedDir === 'bullish' ? 'LONG' : 'SHORT'} actual; exige mayor confirmación.`;
+        } else {
+            readingClass = 'warning text-dark';
+            reading = 'Contexto mixto: hay alineaciones y contradicciones entre BTC HTF y amplitud.';
+        }
     }
-    
-    if (topShort.length > 0) {
-        topHTML += `
-            <div class="mb-2">
-                <small class="text-danger fw-bold">
-                    <i class="fas fa-arrow-down me-1"></i>📉 Mayor fuerza BAJISTA (SHORT):
-                </small>
-                <div class="mt-1">
-                    ${topShort.map((r, idx) => {
-                        const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : '🥉';
-                        return `
-                            <div class="d-flex justify-content-between small">
-                                <span>${medal} ${r.symbol.replace('-', '/')}</span>
-                                <span class="text-danger">ADX ${r.adx.toFixed(1)}</span>
-                            </div>
-                        `;
-                    }).join('')}
-                </div>
-            </div>
-        `;
-    }
-    
-    if (topLong.length === 0 && topShort.length === 0) {
-        topHTML += '<div class="text-muted small text-center">Ninguna cripto muestra tendencia fuerte (ADX < 20 en todas)</div>';
-    }
-    
-    topHTML += '</div>';
-    
-    // Explicación
-    const corr = payload.correlation || {};
-    const explanation = `
-        <div class="mt-3 p-3 bg-dark rounded" style="border-left: 4px solid #17a2b8;">
-            <small>
-                <i class="fas fa-info-circle me-1 text-info"></i>
-                <strong>${corr.rotation_signal || 'MIXED'}:</strong> 
-                ${corr.description || 'Sin descripción'}
-            </small>
-        </div>
-    `;
-    
+
+    const imbalance = Number(ctx.orderbook_imbalance);
+    const flow = Number.isFinite(imbalance)
+        ? (imbalance > 0.08 ? 'COMPRADOR' : (imbalance < -0.08 ? 'VENDEDOR' : 'NEUTRAL'))
+        : 'SIN DATO';
+    const flowClass = flow === 'COMPRADOR' ? 'success' : (flow === 'VENDEDOR' ? 'danger' : 'secondary');
+    const regime = futEscapeHtml(String(ctx.regime || '--').replaceAll('_', ' '));
+    const liquidity = futEscapeHtml(String(ctx.liquidity_band || '--').replaceAll('_', ' '));
+
+    const topLong = (payload.top_long_candidates || [])[0];
+    const topShort = (payload.top_short_candidates || [])[0];
+    const strengthHtml = (topLong || topShort) ? `
+        <div class="small text-muted mt-2">
+            Fuerza relativa: ${topLong ? `<span class="text-success">LONG ${futEscapeHtml(topLong.symbol.replace('-', '/'))} · ADX ${fmtNum(topLong.adx, 1)}</span>` : '--'}
+            ${topLong && topShort ? ' · ' : ''}
+            ${topShort ? `<span class="text-danger">SHORT ${futEscapeHtml(topShort.symbol.replace('-', '/'))} · ADX ${fmtNum(topShort.adx, 1)}</span>` : ''}
+        </div>` : '';
+
     container.innerHTML = `
-        <div class="mb-2">
-            <small class="text-muted">Direcciones y fuerza de las 5 cripto de futuros en <strong>${payload.timeframe}</strong>:</small>
+        <div class="small text-muted mb-2">
+            Lectura contextual de <strong>${futEscapeHtml(symbolLabel)} ${futEscapeHtml(tf)}</strong>. No sustituye Entry, SL, TP ni Safety.
         </div>
-        ${pairsHTML}
-        ${topHTML}
-        ${explanation}
+        <div class="row g-2">
+            <div class="col-md-6 col-xl-3">
+                <div class="p-2 border border-secondary rounded h-100">
+                    <div class="small text-muted">BTC 12H / 1D</div>
+                    <div class="mt-1">12H ${htf(ctx.btc_12h)} · 1D ${htf(ctx.btc_1d)}</div>
+                </div>
+            </div>
+            <div class="col-md-6 col-xl-3">
+                <div class="p-2 border border-secondary rounded h-100">
+                    <div class="small text-muted">Amplitud Futures</div>
+                    <div class="mt-1"><span class="text-success">${bulls} alcistas</span> · <span class="text-danger">${bears} bajistas</span> · ${neutral} neutrales</div>
+                </div>
+            </div>
+            <div class="col-md-6 col-xl-3">
+                <div class="p-2 border border-secondary rounded h-100">
+                    <div class="small text-muted">Derivados ${futEscapeHtml(symbolLabel)}</div>
+                    <div class="mt-1">Funding <strong>${fmtFunding(ctx.funding_rate)}</strong> · OI <strong>${fmtNum(ctx.oi_change_pct, 2, '%')}</strong></div>
+                </div>
+            </div>
+            <div class="col-md-6 col-xl-3">
+                <div class="p-2 border border-secondary rounded h-100">
+                    <div class="small text-muted">Flujo / régimen</div>
+                    <div class="mt-1"><span class="badge bg-${flowClass}">${flow}</span> · ${regime}<br><small class="text-muted">Liquidez: ${liquidity}</small></div>
+                </div>
+            </div>
+        </div>
+        ${strengthHtml}
+        <div class="alert alert-${readingClass} py-2 px-3 mt-2 mb-0 small">
+            <strong>Lectura:</strong> ${reading}
+        </div>
+        <details class="correlation-details mt-2">
+            <summary><i class="fas fa-circle-info me-1"></i>Qué significa</summary>
+            <div class="small text-muted pt-2">
+                BTC 12H/1D aporta el contexto de mercado mayor; amplitud resume cuántos contratos del universo están alcistas o bajistas; funding, interés abierto, order book y liquidez describen el entorno del contrato seleccionado. Esta sección sólo contextualiza la tesis y nunca genera LONG/SHORT por sí sola.
+            </div>
+        </details>
     `;
 }
 
@@ -3189,8 +3195,8 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }, 1500);
     
-    // Refrescar correlación cuando cambia el timeframe
-    document.getElementById('interval-select')?.addEventListener('change', () => {
+    // Refrescar contexto cuando cambia temporalidad O símbolo.
+    const refreshFuturesContext = () => {
         setTimeout(() => {
             if (typeof window.updateCorrelationInfo === 'function') {
                 window.updateCorrelationInfo({});
@@ -3199,7 +3205,9 @@ document.addEventListener('DOMContentLoaded', function() {
                 window.updateActiveSignals();
             }
         }, 500);
-    });
+    };
+    document.getElementById('interval-select')?.addEventListener('change', refreshFuturesContext);
+    document.getElementById('symbol-select')?.addEventListener('change', refreshFuturesContext);
 });
 
 

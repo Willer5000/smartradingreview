@@ -114,6 +114,12 @@ FUTURES_GRANULARITY_MINUTES = {
 KUCOIN_FUTURES_KLINES_URL = (
     'https://api-futures.kucoin.com/api/v1/kline/query'
 )
+# RC9.7.10 — metadata pública del contrato. KuCoin expone aquí, entre
+# otros, maxLeverage, maintainMargin y takerFeeRate. Se usa únicamente como
+# techo/guard de riesgo; nunca crea una señal ni cambia Entry/SL/TP.
+KUCOIN_FUTURES_CONTRACT_URL = (
+    'https://api-futures.kucoin.com/api/v1/contracts/{symbol}'
+)
 KUCOIN_FUTURES_DATA_SOURCE = 'KUCOIN_FUTURES_PERPETUAL_REST'
 FUTURES_MIN_REAL_CANDLES = 100
 
@@ -134,6 +140,16 @@ _futures_fetch_inflight = {}
 _futures_fetch_inflight_lock = threading.Lock()
 _futures_http_session = None
 _futures_http_session_lock = threading.Lock()
+
+# RC9.7.10 — bounded contract-risk metadata cache. Public metadata changes
+# much less frequently than price, but it must not be hard-coded because
+# exchanges can change leverage/risk tiers.
+FUTURES_CONTRACT_SPEC_TTL_SECONDS = max(120, int(
+    os.environ.get('FUTURES_CONTRACT_SPEC_TTL_SECONDS', '600') or 600
+))
+FUTURES_CONTRACT_SPEC_CACHE_MAX_ENTRIES = 20
+_futures_contract_spec_cache = {}
+_futures_contract_spec_lock = threading.Lock()
 
 # Commit 10.1 — Render Free memory guard.  The raw OHLCV cache is useful
 # inside one refresh but it must never grow without a bound.  Twelve entries
@@ -234,6 +250,89 @@ def _get_futures_http_session() -> requests.Session:
             _futures_http_session = session
 
     return _futures_http_session
+
+
+def _get_futures_contract_risk_spec(symbol: str) -> Dict:
+    """Return bounded public KuCoin contract-risk metadata.
+
+    This is intentionally fail-safe: failure to retrieve metadata never raises
+    leverage. Callers must apply conservative fallbacks. The public contract
+    endpoint is not a substitute for the user's exact live position tier.
+    """
+    normalized = str(symbol or '').upper().replace('/', '-')
+    contract_symbol = FUTURES_CONTRACT_SYMBOLS.get(normalized)
+    base = {
+        'symbol': normalized,
+        'contract_symbol': contract_symbol,
+        'verified': False,
+        'max_leverage': None,
+        'maintenance_margin_rate': None,
+        'initial_margin_rate': None,
+        'taker_fee_rate': None,
+        'status': 'UNAVAILABLE',
+        'source': 'KUCOIN_PUBLIC_CONTRACT',
+    }
+    if not contract_symbol:
+        base['status'] = 'CONTRACT_NOT_MAPPED'
+        return base
+
+    now = time.monotonic()
+    with _futures_contract_spec_lock:
+        cached = _futures_contract_spec_cache.get(contract_symbol)
+        if cached and (now - float(cached.get('stored_at', 0))) < FUTURES_CONTRACT_SPEC_TTL_SECONDS:
+            return dict(cached.get('data') or base)
+
+    try:
+        response = _get_futures_http_session().get(
+            KUCOIN_FUTURES_CONTRACT_URL.format(symbol=contract_symbol),
+            timeout=4,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if str(payload.get('code')) != '200000':
+            raise ValueError('KuCoin contract code ' + str(payload.get('code')))
+        data = payload.get('data') or {}
+
+        def _positive_float(key):
+            try:
+                value = float(data.get(key))
+                return value if math.isfinite(value) and value > 0 else None
+            except (TypeError, ValueError):
+                return None
+
+        max_leverage = _positive_float('maxLeverage')
+        mmr = _positive_float('maintainMargin')
+        imr = _positive_float('initialMargin')
+        taker = _positive_float('takerFeeRate')
+        verified = bool(max_leverage and mmr and taker is not None)
+        result = {
+            **base,
+            'verified': verified,
+            'max_leverage': max_leverage,
+            'maintenance_margin_rate': mmr,
+            'initial_margin_rate': imr,
+            'taker_fee_rate': taker,
+            'status': str(data.get('status') or 'UNKNOWN'),
+            'mark_price': _positive_float('markPrice'),
+        }
+
+        with _futures_contract_spec_lock:
+            _futures_contract_spec_cache[contract_symbol] = {
+                'stored_at': now,
+                'data': dict(result),
+            }
+            while len(_futures_contract_spec_cache) > FUTURES_CONTRACT_SPEC_CACHE_MAX_ENTRIES:
+                oldest = min(
+                    _futures_contract_spec_cache,
+                    key=lambda key: _futures_contract_spec_cache[key].get('stored_at', 0),
+                )
+                _futures_contract_spec_cache.pop(oldest, None)
+        return result
+
+    except Exception as exc:
+        logger.debug('Contract risk metadata unavailable for %s: %s', normalized, exc)
+        base['status'] = 'FETCH_FAILED'
+        return base
 
 
 def _get_cached_futures_data(symbol: str, interval: str):
@@ -1460,6 +1559,11 @@ FUTURES_RISK_CONFIG = {
     # Slippage, gaps y liquidación pueden producir diferencias.
     'max_loss_pct_margin': 10.0,
 
+    # RC9.7.10: presupuesto OBJETIVO, no pérdida máxima. Un SL estructural
+    # más estrecho puede justificar más exposición sin elevar este objetivo.
+    # Los techos duros de riesgo/ATR/Safety/liquidación siguen mandando.
+    'technical_target_loss_pct_margin': 5.0,
+
     # Un movimiento adverso equivalente a 1.5 ATR no debería consumir más
     # de este porcentaje del margen. Es una prueba de estrés adicional para
     # evitar que un SL muy estrecho justifique leverage excesivo.
@@ -1473,6 +1577,15 @@ FUTURES_RISK_CONFIG = {
     # Leverage máximo absoluto que el sistema permitirá.
     # Después también se aplicará el máximo específico del TF.
     'absolute_max_leverage': 50,
+
+    # RC9.7.10 — colchón entre SL y una liquidación estimada. El cálculo
+    # usa metadata pública del contrato cuando está disponible y adopta
+    # defaults conservadores si no lo está. No representa un precio exacto
+    # de liquidación de la cuenta real (depende de modo/tier/margen efectivo).
+    'liquidation_min_buffer_pct': 0.75,
+    'liquidation_atr_buffer_multiplier': 1.0,
+    'fallback_maintenance_margin_rate': 0.0100,
+    'fallback_liquidation_fee_rate': 0.0006,
 
     # Porcentaje mínimo del score de seguridad necesario para
     # poder abrir futuros.
@@ -3356,15 +3469,19 @@ class FuturesAnalysis(TradingExpertSystem):
         atr_pct,
         execution_safety,
         timeframe,
-        adaptive_profile=None
+        adaptive_profile=None,
+        symbol=None,
     ):
-        """
-        Selecciona leverage desde viabilidad económica + límites de riesgo.
+        """Select technical leverage under independent risk ceilings.
 
-        Commit 9 conserva EXACTAMENTE la filosofía estática cuando el gate de
-        riesgo está cerrado. Sólo con net-edge robusto y gobernanza abierta la
-        temporalidad pasa de techo duro a referencia blanda, y el leverage se
-        deriva de un presupuesto de pérdida sobre el SL estructural.
+        RC9.7.10 no longer stops at the *minimum* economically viable integer.
+        Once Entry/SL/TP and Safety are already valid, it targets a bounded
+        loss budget over the structural Entry→SL distance.  The result is still
+        capped by ATR stress, Safety, timeframe policy, public KuCoin contract
+        limits and a conservative liquidation-distance buffer.
+
+        The liquidation distance is an estimate for recommendation safety, not
+        the exact liquidation price of a user's live account/position tier.
         """
         try:
             margin = float(margin_usdt or FUTURES_RISK_CONFIG['default_margin_usdt'])
@@ -3396,6 +3513,90 @@ class FuturesAnalysis(TradingExpertSystem):
             min_leverage_tf, tf_max = LEVERAGE_RANGES.get(timeframe, (1, 10))
             absolute_max = float(FUTURES_RISK_CONFIG['absolute_max_leverage'])
 
+            # ----------------------------------------------------------
+            # RC9.7.10 — exchange contract + liquidation buffer
+            # ----------------------------------------------------------
+            contract_spec = (
+                _get_futures_contract_risk_spec(symbol)
+                if symbol
+                else {
+                    'verified': False,
+                    'status': 'SYMBOL_NOT_SUPPLIED',
+                    'max_leverage': None,
+                    'maintenance_margin_rate': None,
+                    'taker_fee_rate': None,
+                    'source': 'KUCOIN_PUBLIC_CONTRACT',
+                }
+            )
+            contract_status = str(contract_spec.get('status') or '').upper()
+            if contract_spec.get('verified') and contract_status not in ('OPEN', 'UNKNOWN'):
+                logger.info('FUTURES %s contract status=%s; leverage rejected', symbol, contract_status)
+                return None
+
+            fallback_mmr = float(FUTURES_RISK_CONFIG.get(
+                'fallback_maintenance_margin_rate', 0.0100
+            ))
+            fallback_liq_fee = float(FUTURES_RISK_CONFIG.get(
+                'fallback_liquidation_fee_rate', 0.0006
+            ))
+            try:
+                raw_mmr = float(contract_spec.get('maintenance_margin_rate') or 0)
+            except Exception:
+                raw_mmr = 0.0
+            try:
+                raw_taker = float(contract_spec.get('taker_fee_rate') or 0)
+            except Exception:
+                raw_taker = 0.0
+
+            # Using at least the configured fallback is intentionally
+            # conservative because the exact position risk tier is private and
+            # can have a higher MMR than the public base contract snapshot.
+            effective_mmr = max(fallback_mmr, raw_mmr if raw_mmr > 0 else 0.0)
+            effective_liq_fee = max(fallback_liq_fee, raw_taker if raw_taker > 0 else 0.0)
+            mmr_pct = effective_mmr * 100.0
+            liq_fee_pct = effective_liq_fee * 100.0
+
+            min_liq_buffer_pct = float(FUTURES_RISK_CONFIG.get(
+                'liquidation_min_buffer_pct', 0.75
+            ))
+            liq_atr_mult = float(FUTURES_RISK_CONFIG.get(
+                'liquidation_atr_buffer_multiplier', 1.0
+            ))
+            liquidation_buffer_pct = max(
+                min_liq_buffer_pct,
+                normalized_atr_pct * liq_atr_mult,
+            )
+            liquidation_denominator_pct = (
+                sl_pct + liquidation_buffer_pct + mmr_pct + liq_fee_pct
+            )
+            max_by_liquidation_buffer = (
+                100.0 / liquidation_denominator_pct
+                if liquidation_denominator_pct > 0
+                else 0.0
+            )
+
+            # Prefer public contract maxLeverage. Preserve the old explicit env
+            # override only as a fallback when public metadata is unavailable.
+            verified_exchange_max = None
+            if contract_spec.get('verified'):
+                try:
+                    candidate = float(contract_spec.get('max_leverage') or 0)
+                    if 1.0 <= candidate <= 200.0:
+                        verified_exchange_max = candidate
+                except Exception:
+                    verified_exchange_max = None
+            if verified_exchange_max is None:
+                raw_verified_max = str(os.environ.get(
+                    'FUTURES_VERIFIED_EXCHANGE_MAX_LEVERAGE', ''
+                ) or '').strip()
+                if raw_verified_max:
+                    try:
+                        candidate = float(raw_verified_max)
+                        if 1.0 <= candidate <= 200.0:
+                            verified_exchange_max = candidate
+                    except Exception:
+                        verified_exchange_max = None
+
             adaptive_profile = adaptive_profile if isinstance(adaptive_profile, dict) else {}
             adaptive_config = adaptive_profile.get('config', {}) or {}
             adaptive_authority = bool(adaptive_profile.get('production_authority', False))
@@ -3408,38 +3609,39 @@ class FuturesAnalysis(TradingExpertSystem):
                 leverage_cap_factor = 1.0
             leverage_cap_factor = max(0.75, min(1.0, leverage_cap_factor))
 
-            static_policy_max = max(1.0, min(float(tf_max), absolute_max) * leverage_cap_factor)
+            static_policy_max = max(
+                1.0,
+                min(float(tf_max), absolute_max) * leverage_cap_factor,
+            )
             risk_based_max_without_timeframe_cap = min(
-                max_leverage_by_risk, max_leverage_by_atr_stress
+                max_leverage_by_risk,
+                max_leverage_by_atr_stress,
+                max_by_liquidation_buffer,
             )
 
             allow_leverage_growth = bool(
                 adaptive_authority
                 and adaptive_config.get('allow_leverage_growth', False)
-                and str(adaptive_config.get('leverage_policy_mode') or '').upper() == 'RISK_BUDGET_V3'
+                and str(adaptive_config.get('leverage_policy_mode') or '').upper()
+                in ('RISK_BUDGET_V3', 'TECHNICAL_RISK_BUDGET_V4')
             )
             try:
                 target_loss_budget = float(
-                    adaptive_config.get('target_loss_budget_pct_margin', 5.0) or 5.0
+                    adaptive_config.get(
+                        'target_loss_budget_pct_margin',
+                        FUTURES_RISK_CONFIG.get('technical_target_loss_pct_margin', 5.0),
+                    ) or 5.0
                 )
             except Exception:
-                target_loss_budget = 5.0
+                target_loss_budget = float(FUTURES_RISK_CONFIG.get(
+                    'technical_target_loss_pct_margin', 5.0
+                ))
             target_loss_budget = max(2.0, min(6.0, target_loss_budget))
 
-            # A value here must be explicitly operator/exchange verified.  When
-            # absent, the old 50x system maximum remains the safe fallback.
-            verified_exchange_max = None
-            raw_verified_max = str(os.environ.get('FUTURES_VERIFIED_EXCHANGE_MAX_LEVERAGE', '') or '').strip()
-            if raw_verified_max:
-                try:
-                    candidate = float(raw_verified_max)
-                    if 1.0 <= candidate <= 125.0:
-                        verified_exchange_max = candidate
-                except Exception:
-                    verified_exchange_max = None
-
             minimum_required = max(
-                float(min_leverage_tf), min_leverage_economic, min_leverage_by_roi
+                float(min_leverage_tf),
+                min_leverage_economic,
+                min_leverage_by_roi,
             )
             policy = select_risk_budget_leverage(
                 minimum_required=minimum_required,
@@ -3447,21 +3649,20 @@ class FuturesAnalysis(TradingExpertSystem):
                 max_by_risk=max_leverage_by_risk,
                 max_by_atr_stress=max_leverage_by_atr_stress,
                 safety_score=safety,
-                # Passing the already-reduced static cap preserves PROTECT.
                 timeframe_static_max=static_policy_max,
                 fallback_exchange_max=absolute_max,
                 verified_exchange_max=verified_exchange_max,
+                max_by_liquidation_buffer=max_by_liquidation_buffer,
                 adaptive_enabled=allow_leverage_growth,
                 target_loss_budget_pct_margin=target_loss_budget,
-                # Even a verified runtime value cannot exceed this emergency
-                # application guard without a future reviewed code change.
-                emergency_max_leverage=100.0,
+                emergency_max_leverage=50.0,
                 high_safety_threshold=float(FUTURES_RISK_CONFIG['high_safety_threshold']),
             )
             if not policy:
                 logger.info(
-                    f'FUTURES {timeframe} sin leverage viable: '
-                    f'mínimo rentable {minimum_required:.2f}x no cabe bajo riesgo/ATR/seguridad'
+                    'FUTURES %s %s sin leverage viable: mínimo %.2fx no cabe '
+                    'bajo riesgo/ATR/Safety/liquidación',
+                    symbol or '?', timeframe, minimum_required,
                 )
                 return None
 
@@ -3470,15 +3671,24 @@ class FuturesAnalysis(TradingExpertSystem):
             if safety >= FUTURES_RISK_CONFIG['high_safety_threshold']:
                 security_factor = min(1.0, security_factor + 0.05)
 
+            estimated_liquidation_distance_pct = max(
+                0.0,
+                (100.0 / max(1.0, float(leverage))) - mmr_pct - liq_fee_pct,
+            )
+            buffer_beyond_sl_pct = estimated_liquidation_distance_pct - sl_pct
+
             return {
                 'leverage': leverage,
                 'min_economic': round(min_leverage_economic, 2),
                 'min_by_roi': round(min_leverage_by_roi, 2),
                 'max_by_risk': round(max_leverage_by_risk, 2),
                 'max_by_atr_stress': round(max_leverage_by_atr_stress, 2),
+                'max_by_liquidation_buffer': round(max_by_liquidation_buffer, 2),
                 'max_by_security': round(float(policy['max_by_security']), 2),
                 'max_safe': round(float(policy['max_safe']), 2),
-                'risk_based_max_without_timeframe_cap': round(risk_based_max_without_timeframe_cap, 2),
+                'risk_based_max_without_timeframe_cap': round(
+                    risk_based_max_without_timeframe_cap, 2
+                ),
                 'adaptive_profile_state': str(adaptive_profile.get('state', 'OBSERVE')),
                 'adaptive_profile_authority': adaptive_authority,
                 'adaptive_leverage_cap_factor': round(leverage_cap_factor, 3),
@@ -3489,22 +3699,45 @@ class FuturesAnalysis(TradingExpertSystem):
                 'leverage_policy_version': policy.get('version'),
                 'leverage_policy_mode': policy.get('selection_policy'),
                 'target_loss_budget_pct_margin': policy.get('target_loss_budget_pct_margin'),
+                'target_by_loss_budget': policy.get('target_by_loss_budget'),
                 'timeframe_cap_mode': policy.get('timeframe_cap_mode'),
                 'exchange_limit_verified': bool(policy.get('exchange_limit_verified')),
                 'exchange_limit_source': policy.get('exchange_limit_source'),
                 'exchange_cap': policy.get('exchange_cap'),
+                'contract_spec_verified': bool(contract_spec.get('verified')),
+                'contract_spec_status': contract_spec.get('status'),
+                'contract_symbol': contract_spec.get('contract_symbol'),
+                'contract_max_leverage': contract_spec.get('max_leverage'),
+                'maintenance_margin_rate': round(effective_mmr, 6),
+                'maintenance_margin_source': (
+                    'KUCOIN_PUBLIC_CONTRACT_CONSERVATIVE_FLOOR'
+                    if raw_mmr > 0 else 'CONSERVATIVE_FALLBACK'
+                ),
+                'liquidation_fee_proxy_rate': round(effective_liq_fee, 6),
+                'liquidation_buffer_required_pct': round(liquidation_buffer_pct, 4),
+                'estimated_liquidation_distance_pct': round(
+                    estimated_liquidation_distance_pct, 4
+                ),
+                'estimated_liquidation_buffer_beyond_sl_pct': round(
+                    buffer_beyond_sl_pct, 4
+                ),
+                'liquidation_distance_is_estimate': True,
                 'min_by_timeframe': int(min_leverage_tf),
                 'max_by_timeframe': int(tf_max),
                 'atr_pct': round(normalized_atr_pct, 4),
                 'atr_stress_move_pct': round(atr_stress_move_pct, 4),
-                'estimated_atr_stress_loss_pct_margin': round(atr_stress_move_pct * leverage, 2),
+                'estimated_atr_stress_loss_pct_margin': round(
+                    atr_stress_move_pct * leverage, 2
+                ),
                 'estimated_sl_loss_pct_margin': round(sl_pct * leverage, 2),
                 'security_factor': round(security_factor, 3),
-                'selection_policy': policy.get('selection_policy', 'MINIMUM_SAFE_VIABLE'),
-                'economically_viable': True
+                'selection_policy': policy.get(
+                    'selection_policy', 'TECHNICAL_RISK_BUDGET'
+                ),
+                'economically_viable': True,
             }
         except Exception as e:
-            logger.warning(f"Error en cálculo económico de leverage: {e}")
+            logger.warning('Error calculando leverage económico: %s', e)
             return None
 
     def calculate_optimal_leverage(
@@ -6280,6 +6513,7 @@ class FuturesAnalysis(TradingExpertSystem):
             execution_safety=leverage_safety_score,
             timeframe=timeframe,
             adaptive_profile=adaptive_profile,
+            symbol=symbol,
         )
 
         optimal_leverage = int(
@@ -6634,8 +6868,20 @@ class FuturesAnalysis(TradingExpertSystem):
             ),
             
             'leverage_policy': (
-                'MINIMUM_SAFE_VIABLE '
+                'TECHNICAL_RISK_BUDGET '
                 f"(1x-{LEVERAGE_RANGES[timeframe][1]}x)"
+            ),
+            'leverage_policy_version': leverage_evaluation.get(
+                'leverage_policy_version'
+            ),
+            'leverage_policy_mode': leverage_evaluation.get(
+                'leverage_policy_mode'
+            ),
+            'target_loss_budget_pct_margin': leverage_evaluation.get(
+                'target_loss_budget_pct_margin'
+            ),
+            'target_by_loss_budget': leverage_evaluation.get(
+                'target_by_loss_budget'
             ),
             'minimum_economic_leverage': leverage_evaluation.get(
                 'min_economic'
@@ -6648,6 +6894,9 @@ class FuturesAnalysis(TradingExpertSystem):
             ),
             'maximum_leverage_by_atr_stress': leverage_evaluation.get(
                 'max_by_atr_stress'
+            ),
+            'maximum_leverage_by_liquidation_buffer': leverage_evaluation.get(
+                'max_by_liquidation_buffer'
             ),
             'maximum_leverage_by_execution_safety': (
                 leverage_evaluation.get('max_by_security')
@@ -6664,6 +6913,29 @@ class FuturesAnalysis(TradingExpertSystem):
                     'estimated_atr_stress_loss_pct_margin'
                 )
             ),
+            'estimated_sl_loss_pct_margin': leverage_evaluation.get(
+                'estimated_sl_loss_pct_margin'
+            ),
+            'contract_spec_verified': leverage_evaluation.get(
+                'contract_spec_verified'
+            ),
+            'contract_symbol': leverage_evaluation.get('contract_symbol'),
+            'contract_max_leverage': leverage_evaluation.get(
+                'contract_max_leverage'
+            ),
+            'maintenance_margin_rate': leverage_evaluation.get(
+                'maintenance_margin_rate'
+            ),
+            'liquidation_buffer_required_pct': leverage_evaluation.get(
+                'liquidation_buffer_required_pct'
+            ),
+            'estimated_liquidation_distance_pct': leverage_evaluation.get(
+                'estimated_liquidation_distance_pct'
+            ),
+            'estimated_liquidation_buffer_beyond_sl_pct': leverage_evaluation.get(
+                'estimated_liquidation_buffer_beyond_sl_pct'
+            ),
+            'liquidation_distance_is_estimate': True,
             'margin_usdt': float(
                 FUTURES_RISK_CONFIG[
                     'default_margin_usdt'

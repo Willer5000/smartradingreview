@@ -2121,7 +2121,7 @@
                             </div>
                         </div>
                         <div class="p-2 text-center">
-                            <small class="text-muted">Señales nacidas del último cierre confirmado. Pueden guardarse y, una vez alcanzado Entry, quedan bajo seguimiento y Guardian.</small>
+                            <small class="text-muted">{% if is_futures %}Señales nacidas del último cierre confirmado. Pueden guardarse y, una vez alcanzado Entry, quedan bajo seguimiento y Guardian.{% else %}Señales nacidas del último cierre confirmado. Al hacer clic se abre su snapshot original con Entry, SL, TP y justificación; no recalcula la señal con el mercado actual.{% endif %}</small>
                         </div>
                     </div>
                 </div>
@@ -2140,7 +2140,7 @@
                         </div>
                         <div id="vigent-signals-diagnostics"></div>
                         <div class="p-2 text-center">
-                            <small class="text-muted">Señales confirmadas en cierres anteriores que todavía conservan vigencia. Pueden guardarse sin reiniciar su reloj; las hipótesis LONG/SHORT de riesgo medio/alto vigentes aparecen en “Por qué no aparecen otras señales”. Si Entry ya fue alcanzado, el Guardian continúa hasta TP, SL o cierre.</small>
+                            <small class="text-muted">{% if is_futures %}Señales confirmadas en cierres anteriores que todavía conservan vigencia. Pueden guardarse sin reiniciar su reloj; las hipótesis LONG/SHORT de riesgo medio/alto vigentes aparecen en “Por qué no aparecen otras señales”. Si Entry ya fue alcanzado, el Guardian continúa hasta TP, SL o cierre.{% else %}Señales confirmadas en cierres anteriores que aún conservan su vigencia original. Al hacer clic se abre el Entry, SL, TP, justificación y tiempo restante de aquella señal; sólo “Señales activas” navega al análisis actual.{% endif %}</small>
                         </div>
                     </div>
                 </div>
@@ -2559,16 +2559,18 @@
 <!-- V1.0 UX — CORRELACIÓN / ROTACIÓN COMPACTA -->
 <div class="card bg-dark border-secondary mt-3 correlation-compact">
     <div class="card-header correlation-compact-header">
-        <h6 class="mb-0" id="correlation-panel-title">{% if is_futures %}<i class="fas fa-network-wired me-2" aria-hidden="true"></i>Contexto intermercado Futures{% else %}<i class="fas fa-arrows-rotate me-2" aria-hidden="true"></i>Correlación y rotación Spot{% endif %}</h6>
+        <h6 class="mb-0" id="correlation-panel-title">{% if is_futures %}<i class="fas fa-network-wired me-2" aria-hidden="true"></i>Contexto de mercado Futures{% else %}<i class="fas fa-arrows-rotate me-2" aria-hidden="true"></i>Correlación y rotación Spot{% endif %}</h6>
         <span class="badge bg-info" id="correlation-timeframe">1D</span>
     </div>
     <div class="card-body correlation-compact-body">
         <div id="correlation-info">
             {% if is_futures %}
-            <div class="small text-muted mb-2">Contexto de BTC, amplitud del mercado, derivados y liquidez. No representa una rotación BTC/PAXG.</div>
+            <div class="small text-muted mb-2">
+                Contexto del símbolo seleccionado frente a BTC de temporalidad superior, amplitud del universo Futures, derivados y liquidez. Es contexto; no crea una señal por sí solo.
+            </div>
             <div class="correlation-chip-row">
                 <div class="correlation-chip"><strong>BTC 12H / 1D</strong><span class="badge bg-secondary">Esperando contexto…</span></div>
-                <div class="correlation-chip"><strong>Mercado Futures</strong><span class="badge bg-secondary">Esperando amplitud…</span></div>
+                <div class="correlation-chip"><strong>Amplitud Futures</strong><span class="badge bg-secondary">Esperando datos…</span></div>
             </div>
             {% else %}
             <div class="correlation-chip-row">
@@ -2631,7 +2633,7 @@
 
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI-2"></script>
     <script
-        src="{{ url_for('static', filename='script.js') }}?v=20260918-RC9-7-9-VIGENT-MEDHIGH-FINAL"
+        src="{{ url_for('static', filename='script.js') }}?v=20260919-RC9-7-10-FINALIZATION"
     ></script>
 
 
@@ -2642,7 +2644,7 @@
     {% if is_futures %}
 
     <script
-        src="{{ url_for('static', filename='futures.js') }}?v=20260918-RC9-7-9-VIGENT-MEDHIGH-FINAL"
+        src="{{ url_for('static', filename='futures.js') }}?v=20260919-RC9-7-10-FINALIZATION"
     ></script>
 
     {% endif %}
@@ -3228,13 +3230,53 @@
                 if (document.hidden) return;
                 const symbol = window.currentSymbol || (window.PAGE_CONFIG?.defaultSymbol || 'BTC-USDT');
                 const interval = window.currentInterval || (window.PAGE_CONFIG?.defaultTimeframe || '1D');
+                const market = window.IS_FUTURES_PAGE ? 'futures' : 'spot';
+                const normalizeSymbol = value => String(value || '').trim().toUpperCase().replace('/', '-');
+                const normalizeTf = value => {
+                    const raw = String(value || '').trim();
+                    if (raw.toUpperCase() === '1D') return '1D';
+                    if (raw.toUpperCase() === '1W') return '1W';
+                    return raw.toLowerCase();
+                };
 
-                fetch(`/api/price?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&market=${window.IS_FUTURES_PAGE ? 'futures' : 'spot'}`)
+                // RC9.7.10 — abort and generation guard. A late BTC response can
+                // never paint over ETH/SOL/PAXG after the selector changes.
+                if (window.__LIVE_PRICE_ABORT_CONTROLLER__) {
+                    try { window.__LIVE_PRICE_ABORT_CONTROLLER__.abort(); } catch (_) {}
+                }
+                const controller = new AbortController();
+                window.__LIVE_PRICE_ABORT_CONTROLLER__ = controller;
+                const requestSeq = Number(window.__LIVE_PRICE_REQUEST_SEQ__ || 0) + 1;
+                window.__LIVE_PRICE_REQUEST_SEQ__ = requestSeq;
+                const requestedSymbol = normalizeSymbol(symbol);
+                const requestedTf = normalizeTf(interval);
+
+                fetch(
+                    `/api/price?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&market=${market}`,
+                    {signal: controller.signal, cache: 'no-store'}
+                )
                     .then(response => {
                         if (!response.ok) throw new Error('HTTP ' + response.status);
                         return response.json();
                     })
                     .then(data => {
+                        if (requestSeq !== Number(window.__LIVE_PRICE_REQUEST_SEQ__ || 0)) return;
+                        const currentSymbol = normalizeSymbol(window.currentSymbol);
+                        const currentTf = normalizeTf(window.currentInterval);
+                        const responseSymbol = normalizeSymbol(data.symbol);
+                        const responseTf = normalizeTf(data.timeframe);
+                        if (
+                            requestedSymbol !== currentSymbol
+                            || requestedTf !== currentTf
+                            || responseSymbol !== requestedSymbol
+                            || responseTf !== requestedTf
+                        ) {
+                            console.debug('live price stale response ignored', {
+                                requestedSymbol, requestedTf, responseSymbol, responseTf,
+                                currentSymbol, currentTf
+                            });
+                            return;
+                        }
                         if (data.success && data.current_price) {
                             const formatted = `$${Number(data.current_price).toFixed(2)}`;
                             const livePriceEl = document.getElementById('live-price');
@@ -3243,13 +3285,13 @@
                             if (opLivePriceEl) opLivePriceEl.textContent = formatted;
                             if (typeof window.updateLiveCandleOverlay === 'function') {
                                 window.updateLiveCandleOverlay(data);
-                            } else {
-                                window.__lastLiveCandlePayload = data;
                             }
                         }
                     })
                     .catch(error => {
-                        console.debug('price refresh skipped:', error.message);
+                        if (error?.name !== 'AbortError') {
+                            console.debug('price refresh skipped:', error.message);
+                        }
                     });
             };
             window.refreshLivePriceAndCandle();
@@ -3799,7 +3841,11 @@
                     window.currentSymbol = this.value;
                     applyFuturesResearchTimeframeGuard();
                     window.currentInterval = document.getElementById('interval-select')?.value || '1D';
+                    if (typeof window.resetLiveVisualContext === 'function') {
+                        window.resetLiveVisualContext(window.currentSymbol, window.currentInterval);
+                    }
                     window.runCompleteAnalysis();
+                    window.refreshLivePriceAndCandle?.();
                 });
             }
             
@@ -3807,7 +3853,11 @@
                 intervalSelect.addEventListener('change', function() {
                     window.currentInterval = this.value;
                     window.currentSymbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
+                    if (typeof window.resetLiveVisualContext === 'function') {
+                        window.resetLiveVisualContext(window.currentSymbol, window.currentInterval);
+                    }
                     window.runCompleteAnalysis();
+                    window.refreshLivePriceAndCandle?.();
                 });
             }
             

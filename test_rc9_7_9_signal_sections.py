@@ -84,4 +84,4 @@ def test_current_diagnostics_remain_attached_to_active_lane():
 
 def test_live_visuals_still_included():
     assert 'live-indicators-visual-note' in html
-    assert 'RC9-7-9-VIGENT-MEDHIGH-FINAL' in html
+    assert 'RC9-7-10-FINALIZATION' in html

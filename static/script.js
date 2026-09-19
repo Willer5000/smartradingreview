@@ -2791,6 +2791,12 @@ window.runCompleteAnalysis = function() {
     const symbol = document.getElementById('symbol-select')?.value || cfg.defaultSymbol;
     const interval = document.getElementById('interval-select')?.value || cfg.defaultTimeframe;
 
+    // RC9.7.10 — changing pair/TF invalidates every prior live overlay.
+    // This is generic for Futures and Spot, including PAXG-USDT / PAXG-BTC.
+    if (typeof window.resetLiveVisualContext === 'function') {
+        window.resetLiveVisualContext(symbol, interval);
+    }
+
     // RC7: retries belong to one exact view in BOTH Spot and Futures.
     // Changing pair/TF must never inherit an old busy loop.
     const retryKey = `${symbol}|${interval}`;
@@ -4335,13 +4341,18 @@ window.updateCandleChart = function(data) {
     
     Plotly.newPlot('candle-chart', traces, layout, {responsive: true, displaylogo: false})
         .then(() => {
+            // Always re-fit the newly selected market. This prevents a BTC
+            // range from surviving when the user moves to ETH/PAXG/etc.
+            if (typeof window.forceTradingChartAutoScale === 'function') {
+                window.forceTradingChartAutoScale('candle-chart');
+            }
             if (window.__lastLiveCandlePayload && typeof window.updateLiveCandleOverlay === 'function') {
                 window.updateLiveCandleOverlay(window.__lastLiveCandlePayload);
             }
         });
 }
 
-// RC9.7.7 — VISUAL ACTUAL COMPLETO, SIN CONTAMINAR EL MOTOR.
+// RC9.7.7/10 — VISUAL ACTUAL COMPLETO, SIN CONTAMINAR EL MOTOR.
 //
 // Principio:
 // - `window.currentAnalysis` conserva SIEMPRE la cohorte de velas cerradas.
@@ -4356,15 +4367,71 @@ function _liveVisualTimestamp(value) {
     return Number.isFinite(ts) ? ts : null;
 }
 
+function _normalizeLiveVisualSymbol(value) {
+    return String(value || '').trim().toUpperCase().replace('/', '-');
+}
+
+function _normalizeLiveVisualTf(value) {
+    const raw = String(value || '').trim();
+    if (raw.toUpperCase() === '1D') return '1D';
+    if (raw.toUpperCase() === '1W') return '1W';
+    return raw.toLowerCase();
+}
+
+window.forceTradingChartAutoScale = function(chartId = 'candle-chart') {
+    const chart = document.getElementById(chartId);
+    if (!chart || !window.Plotly || !Array.isArray(chart.data)) return;
+    try {
+        Plotly.relayout(chart, {
+            'xaxis.autorange': true,
+            'yaxis.autorange': true
+        });
+    } catch (_) {}
+};
+
+window.clearLiveOpenCandleOverlays = function() {
+    if (!window.Plotly) return;
+    document.querySelectorAll('.js-plotly-plot').forEach(chart => {
+        if (!Array.isArray(chart.data)) return;
+        const indexes = [];
+        chart.data.forEach((trace, idx) => {
+            if (trace?.meta === 'LIVE_OPEN_CANDLE') indexes.push(idx);
+        });
+        if (indexes.length) {
+            try { Plotly.deleteTraces(chart, indexes); } catch (_) {}
+        }
+    });
+};
+
+window.resetLiveVisualContext = function(symbol, timeframe) {
+    const key = `${_normalizeLiveVisualSymbol(symbol)}|${_normalizeLiveVisualTf(timeframe)}`;
+    if (window.__LIVE_VISUAL_CONTEXT_KEY__ === key) return;
+    window.__LIVE_VISUAL_CONTEXT_KEY__ = key;
+    window.__lastLiveCandlePayload = null;
+    window.__LIVE_PRICE_REQUEST_SEQ__ = Number(window.__LIVE_PRICE_REQUEST_SEQ__ || 0) + 1;
+    if (window.__LIVE_PRICE_ABORT_CONTROLLER__) {
+        try { window.__LIVE_PRICE_ABORT_CONTROLLER__.abort(); } catch (_) {}
+        window.__LIVE_PRICE_ABORT_CONTROLLER__ = null;
+    }
+    window.clearLiveOpenCandleOverlays();
+    window.forceTradingChartAutoScale('candle-chart');
+};
+
 function _sameLiveVisualContext(base, payload) {
     if (!base || !payload) return false;
-    const clean = value => String(value || '').trim().toUpperCase();
-    const baseSymbol = clean(base.symbol || window.currentSymbol);
-    const liveSymbol = clean(payload.symbol || window.currentSymbol);
-    const baseTf = clean(base.timeframe || window.currentInterval);
-    const liveTf = clean(payload.timeframe || window.currentInterval);
-    return (!baseSymbol || !liveSymbol || baseSymbol === liveSymbol)
-        && (!baseTf || !liveTf || baseTf === liveTf);
+    const currentSymbol = _normalizeLiveVisualSymbol(window.currentSymbol);
+    const currentTf = _normalizeLiveVisualTf(window.currentInterval);
+    const liveSymbol = _normalizeLiveVisualSymbol(payload.symbol);
+    const liveTf = _normalizeLiveVisualTf(payload.timeframe);
+    // Fail closed. A response without its own identity is never allowed to
+    // inherit the identity of the currently selected chart.
+    if (!currentSymbol || !currentTf || !liveSymbol || !liveTf) return false;
+    if (liveSymbol !== currentSymbol || liveTf !== currentTf) return false;
+    const baseSymbol = _normalizeLiveVisualSymbol(base.symbol);
+    const baseTf = _normalizeLiveVisualTf(base.timeframe);
+    if (baseSymbol && baseSymbol !== currentSymbol) return false;
+    if (baseTf && baseTf !== currentTf) return false;
+    return true;
 }
 
 function _buildLiveVisualData(payload) {
@@ -4466,7 +4533,9 @@ function _upsertLiveOpenCandle(chartId, candle, traceName = 'Vela actual · en f
             high: [[values[1]]],
             low: [[values[2]]],
             close: [[values[3]]]
-        }, [idx]);
+        }, [idx]).then(() => {
+            if (chartId === 'candle-chart') window.forceTradingChartAutoScale(chartId);
+        });
         return;
     }
 
@@ -4485,6 +4554,8 @@ function _upsertLiveOpenCandle(chartId, candle, traceName = 'Vela actual · en f
         showlegend: true,
         yaxis: 'y',
         hovertemplate: '<b>Vela actual · en formación</b><br>Open: %{open}<br>High: %{high}<br>Low: %{low}<br>Precio: %{close}<extra></extra>'
+    }).then(() => {
+        if (chartId === 'candle-chart') window.forceTradingChartAutoScale(chartId);
     });
 }
 
@@ -4583,7 +4654,8 @@ window.updateLiveVisualIndicators = function(payload) {
 
 window.updateLiveCandleOverlay = function(payload) {
     const candle = payload && payload.current_candle;
-    if (!candle || !window.Plotly) return;
+    const base = window.currentAnalysis || currentAnalysis;
+    if (!candle || !window.Plotly || !_sameLiveVisualContext(base, payload)) return;
 
     window.__lastLiveCandlePayload = payload;
     _upsertLiveOpenCandle('candle-chart', candle);
@@ -9943,8 +10015,10 @@ window.updateActiveSignals = function updateActiveSignals() {
         return;
     }
 
-    const signalsList = document.getElementById('active-signals-list');
-    const signalsCount = document.getElementById('active-signals-count');
+    // RC9.7.10 — Spot ACTIVE is navigation to the current analysis only.
+    // The red active-signals-* ids are reserved for older still-vigent snapshots.
+    const signalsList = document.getElementById('current-active-signals-list');
+    const signalsCount = document.getElementById('current-active-signals-count');
 
     if (!signalsList || window.__spotActiveSignalsLoading) {
         return;
@@ -10107,6 +10181,9 @@ window.changeToSignal = function(symbol, timeframe) {
     // Actualizar variables globales
     window.currentSymbol = symbol;
     window.currentInterval = timeframe;
+    if (typeof window.resetLiveVisualContext === 'function') {
+        window.resetLiveVisualContext(symbol, timeframe);
+    }
     
     // Ejecutar análisis
     if (typeof window.runCompleteAnalysis === 'function') {
@@ -10142,7 +10219,14 @@ setInterval(() => {
     ) {
         window.updatePreviousSignals();
     }
-}, 300000); // RC8.3 Free Plan: cada 5 minutos
+
+    if (
+        !window.IS_FUTURES_PAGE
+        && typeof window.updateSpotVigentSignals === 'function'
+    ) {
+        window.updateSpotVigentSignals();
+    }
+}, 300000); // RC9.7.10: tres carriles Spot cada 5 minutos
 
 
 function updateMarketAlerts(data) {
@@ -10170,6 +10254,109 @@ function updateMarketAlerts(data) {
 }
 
 
+
+// ============ RC9.7.10 — SEÑALES VIGENTES SPOT (SNAPSHOT CONGELADO) ============
+window.updateSpotVigentSignals = function updateSpotVigentSignals() {
+    if (window.IS_FUTURES_PAGE || !isAuthenticated()) return;
+
+    const signalsList = document.getElementById('active-signals-list');
+    const signalsCount = document.getElementById('active-signals-count');
+    if (!signalsList || window.__spotVigentSignalsLoading) return;
+
+    window.__spotVigentSignalsLoading = true;
+    if (!window.spotVigentSignalsLoaded) {
+        signalsList.innerHTML = `
+            <div class="list-group-item bg-dark text-muted text-center py-3">
+                <div class="spinner-border spinner-border-sm text-danger me-2"></div>
+                Cargando señales vigentes...
+            </div>`;
+    }
+
+    _h3FetchJson('/api/spot/signals/vigent', 10000, {cache: 'no-store'})
+        .then(data => {
+            if (!data.success) throw new Error(data.error || 'No se pudieron cargar');
+            if (data.processing) {
+                if (!window.spotVigentSignalsLoaded) {
+                    signalsList.innerHTML = `
+                        <div class="list-group-item bg-dark text-muted text-center py-3">
+                            Preparando señales vigentes...
+                        </div>`;
+                }
+                if (signalsCount) {
+                    signalsCount.textContent = '...';
+                    signalsCount.className = 'badge bg-secondary';
+                }
+                return;
+            }
+
+            const rows = Object.values(data.data || {})
+                .filter(row => Number(row.activa || 0) === 1)
+                .filter(row => ['COMPRA_SPOT','VENTA_SPOT','LONG','SHORT']
+                    .includes(String(row.decision || row.action || '').toUpperCase()))
+                .sort((a, b) => Number(a.tiempo_restante || 0) - Number(b.tiempo_restante || 0));
+
+            if (signalsCount) {
+                signalsCount.textContent = String(rows.length);
+                signalsCount.className = `badge bg-${rows.length ? 'danger' : 'secondary'}`;
+            }
+
+            if (!rows.length) {
+                signalsList.innerHTML = `
+                    <div class="list-group-item bg-dark text-muted text-center py-3">
+                        No hay señales anteriores que conserven vigencia técnica.
+                    </div>`;
+                window.spotVigentSignalsLoaded = true;
+                return;
+            }
+
+            signalsList.innerHTML = rows.map(raw => {
+                const signal = {...raw, ui_context: 'VIGENT'};
+                const action = String(signal.decision || signal.action || '').toUpperCase();
+                const isSell = action.includes('VENTA') || action.includes('SHORT');
+                const badge = isSell ? 'danger' : 'success';
+                const emoji = isSell ? '🔴' : '🟢';
+                const tfName = {'4h':'4H','12h':'12H','1D':'1D','1W':'1W'}[signal.timeframe] || signal.timeframe;
+                const remaining = Number(signal.tiempo_restante || 0);
+                const h = Math.floor(remaining / 3600);
+                const m = Math.floor((remaining % 3600) / 60);
+                const encoded = encodeURIComponent(JSON.stringify(signal)).replace(/'/g, '%27');
+                return `
+                    <div class="list-group-item bg-dark text-white border-secondary signal-item"
+                         style="cursor:pointer;transition:all .2s"
+                         onclick="window.showPreviousSignalJustification(JSON.parse(decodeURIComponent('${encoded}')))"
+                         onmouseover="this.style.backgroundColor='#1a1e24'"
+                         onmouseout="this.style.backgroundColor=''">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div><span class="badge bg-${badge} me-2">${emoji}</span>
+                                <strong>${action.replace('_',' ')}</strong>
+                                <span class="badge bg-dark ms-2">${tfName}</span>
+                            </div>
+                            <span class="badge bg-dark">${fmtConfidence(signal.confidence)}%</span>
+                        </div>
+                        <div class="d-flex justify-content-between mt-1">
+                            <small class="text-muted">${String(signal.symbol || '').replace('-', '/')}</small>
+                            <small class="text-danger">⏱️ ${h}h ${m}m</small>
+                        </div>
+                        <div class="mt-1 small">
+                            E: ${formatTradingLevel(signal.entry, signal.symbol)} ·
+                            SL: ${formatTradingLevel(signal.stop_loss, signal.symbol)} ·
+                            TP: ${formatTradingLevel(signal.take_profit, signal.symbol)}
+                        </div>
+                    </div>`;
+            }).join('');
+            window.spotVigentSignalsLoaded = true;
+        })
+        .catch(error => {
+            console.error('Error cargando señales vigentes Spot:', error);
+            if (!window.spotVigentSignalsLoaded) {
+                signalsList.innerHTML = `
+                    <div class="list-group-item bg-dark text-warning text-center py-3">
+                        ⚠️ Señales vigentes temporalmente no disponibles.
+                    </div>`;
+            }
+        })
+        .finally(() => { window.__spotVigentSignalsLoading = false; });
+};
 
 // ============ SEÑALES DE VELA ANTERIOR - VERSIÓN CORREGIDA ============
 // NOTA: se asigna a window para que futures.js pueda sobreescribirla
@@ -10385,7 +10572,8 @@ window.updatePreviousSignals = function updatePreviousSignals() {
 
 // ============ MOSTRAR JUSTIFICACIÓN DE SEÑAL ANTERIOR ============
 window.showPreviousSignalJustification = function(senal) {
-    // Guardar la señal seleccionada para poder guardarla después
+    // Snapshot congelado: Confirmada o Vigente. Nunca recalcula Entry/SL/TP.
+    const snapshotContext = String(senal?.ui_context || 'CONFIRMED').toUpperCase();
     window.selectedPreviousSignal = senal;
     
     const modalBody = document.getElementById('prev-signal-details');
@@ -10401,6 +10589,9 @@ window.showPreviousSignalJustification = function(senal) {
     // Construir HTML de justificación
     setTimeout(() => {
         const symbolName = senal.symbol.replace('-', '/');
+        const snapshotLabel = snapshotContext === 'VIGENT'
+            ? 'SEÑAL VIGENTE · SNAPSHOT ORIGINAL'
+            : 'SEÑAL CONFIRMADA · ÚLTIMO CIERRE';
         const timeframeName = {
             '4h': '4 Horas', 
             '12h': '12 Horas', 
@@ -10462,6 +10653,7 @@ window.showPreviousSignalJustification = function(senal) {
         
         const html = `
             <div class="recommendation-content">
+                <div class="small text-uppercase text-info fw-semibold mb-2">${snapshotLabel}</div>
                 <div class="d-flex align-items-center mb-3">
                     <span class="badge bg-${bgColor} p-3 me-3" style="font-size: 1.2rem;">
                         ${emoji} ${senal.decision.replace('_', ' ')}
@@ -10477,7 +10669,7 @@ window.showPreviousSignalJustification = function(senal) {
                 <div class="row mt-3 mb-3">
                     <div class="col-md-4">
                         <div class="border-start border-3 border-primary ps-3">
-                            <small class="text-muted d-block">ENTRADA (cierre vela)</small>
+                            <small class="text-muted d-block">ENTRY ORIGINAL</small>
                             <strong class="h5">${formatTradingLevel(senal.entry, senal.symbol)}</strong>
                         </div>
                     </div>
@@ -10498,14 +10690,14 @@ window.showPreviousSignalJustification = function(senal) {
                 <div class="mt-3 pt-3 border-top border-secondary">
                     <div class="row">
                         <div class="col-6">
-                            <small class="text-muted">Precio actual:</small>
+                            <small class="text-muted">Precio observado:</small>
                             <strong class="ms-1 text-${senal.activa === 1 ? bgColor : 'secondary'}">
                                 ${formatTradingLevel(senal.precio_actual, senal.symbol)}
                             </strong>
                         </div>
                         <div class="col-6">
-                            <small class="text-muted">Vela cerrada en:</small>
-                            <strong class="ms-1">${new Date(senal.timestamp).toLocaleString('es-BO')}</strong>
+                            <small class="text-muted">Cierre fuente:</small>
+                            <strong class="ms-1">${new Date(senal.source_candle_close_timestamp || senal.candle_timestamp || senal.timestamp).toLocaleString('es-BO')}</strong>
                         </div>
                     </div>
                 </div>
@@ -10516,8 +10708,8 @@ window.showPreviousSignalJustification = function(senal) {
                 
                 <div class="mt-3 text-end">
                     <small class="text-muted">
-                        <i class="fas fa-history me-1"></i>
-                        Señal de vela anterior - No se actualiza
+                        <i class="fas fa-snowflake me-1"></i>
+                        Snapshot original: Entry, SL, TP y justificación no se recalculan con el mercado actual.
                     </small>
                 </div>
             </div>
@@ -11931,6 +12123,14 @@ if (!window.__SMARTTRADING_AUTH_FLOW_INITIALIZED__) {
                     );
 
                     window.updatePreviousSignals();
+                }
+
+                if (
+                    !window.IS_FUTURES_PAGE
+                    && typeof window.updateSpotVigentSignals === 'function'
+                ) {
+                    console.log('📊 Cargando señales vigentes Spot...');
+                    window.updateSpotVigentSignals();
                 }
             }, 500);
         })
