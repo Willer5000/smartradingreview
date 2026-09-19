@@ -1,0 +1,58 @@
+RC9.7.11 — VALIDATION
+2026-09-19
+
+STATIC / SYNTAX
+PASS  python -m py_compile app.py futures_system.py leverage_policy.py supabase_client.py
+PASS  node --check static/script.js
+PASS  node --check static/futures.js
+PASS  Jinja parse templates/index.html
+
+REGRESSION TESTS
+PASS  27 tests during build against the RC9.7.10 baseline, including the
+      unchanged RC9.7.9 signal-section regression dependency.
+PASS  15 affected tests re-run on the FINAL trimmed ready-tree:
+      - test_rc9_7_10_finalization.py
+      - test_rc9_7_11_release.py
+
+      The unchanged saved_signals.py and its RC9.7.9 test are intentionally
+      not included in the final ZIP because RC9.7.11 does not modify them.
+
+TARGETED CHECKS
+PASS  LINK example arithmetic:
+      Entry 12.40 / SL 12.26 -> SL distance 1.129032%
+      size 35% -> V5 target ceiling 12x before later caps
+      contingency 10x -> planned SL risk ≈ 3.952% of reference margin
+
+PASS  Full-size same geometry remains 4x under 5% target.
+PASS  Contingency leverage cap 10x remains present.
+PASS  Frontend conviction no longer recalculates leverage.
+PASS  No visible Leverage/Lev labels in changed frontend surfaces.
+PASS  Guardian preference mock: saving ['4h'] updates local cache to ['4h'].
+PASS  Spot pre-save merges missing previous/vigent lanes from persisted snapshot.
+PASS  Futures cold-start attempts restore before incremental refresh.
+PASS  Futures partial snapshot merges old lifecycle/coverage before save.
+PASS  Restore changes do not assign/reset valid_until.
+
+LIMITATIONS / POST-DEPLOY
+- No real Render deploy was performed from this build environment.
+- No live exchange order is placed by these tests.
+- KuCoin contract metadata, current ATR/Safety and actual Strategy/Champion state
+  can make the production leverage lower than the arithmetic example.
+- Liquidation price remains an estimate; actual exchange liquidation depends on
+  account margin mode, risk tier, position size and maintenance margin.
+
+POST-DEPLOY CHECKLIST
+1) Deploy this ready-tree as ONE Main commit. No Research deploy and no SQL.
+2) Ctrl+F5.
+3) LINK-USDT 30m or another 30m setup:
+   - only one apalancamiento value should appear;
+   - it may rise above 4x when sizing + geometry justify it;
+   - contingency still cannot exceed 10x by default.
+4) Guardian Spot:
+   - select only 4h;
+   - save;
+   - reopen/reload; only 4h must remain selected.
+5) Record at least one Spot and one Futures signal with valid_until.
+6) Redeploy/restart worker.
+7) Confirm both still appear if their ORIGINAL valid_until has not expired.
+8) Confirm valid_until did not move forward after deploy.

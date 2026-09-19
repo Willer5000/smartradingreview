@@ -1,0 +1,139 @@
+RC9.7.11 — MAX TECHNICAL LEVERAGE + FRONTEND + PERSISTENCE
+MAIN ONLY · 2026-09-19
+
+OBJETIVO
+Corregir cuatro problemas observados después de RC9.7.10 sin bajar Safety,
+sin mover Entry/SL/TP y sin tocar Research:
+1) Apalancamientos 2x/3x/4x demasiado condicionados por el target fijo de 5%
+   aun cuando el propio sistema recomendaba usar sólo una fracción del tamaño.
+2) Dos apalancamientos distintos en la misma UI (backend vs convicción frontend)
+   y terminología visible "Leverage/Lev".
+3) Preferencia Guardian Spot (ej. sólo 4h) que reaparecía como todos los TF.
+4) Señales Confirmadas/Vigentes que podían perderse durante un deploy por una
+   carrera entre polling inicial, refresh incremental y restauración diferida.
+
+1. APALANCAMIENTO TÉCNICO V5 — POSITION AWARE
+POLICY_VERSION = RC9_7_11_POSITION_AWARE_TECHNICAL_LEVERAGE_V5
+
+RC9.7.10 calculaba el target aproximadamente como:
+    leverage_target = target_loss_pct / distancia_SL_pct
+Eso asumía implícitamente 100% del margen de referencia.
+
+RC9.7.11 usa:
+    leverage_target = target_loss_pct /
+                      (distancia_SL_pct * fracción_tamaño_planificada)
+
+La fracción planificada es la misma que luego se muestra como Tamaño sugerido y
+ya incorpora, cuando corresponde:
+- convicción;
+- ajuste de sentimiento existente;
+- size_cap de Strategy Bank de contingencia;
+- risk_budget_multiplier por clase CORE/MEDIUM/HIGH.
+
+IMPORTANTE: un tamaño menor NO relaja:
+- Safety;
+- Entry/SL/TP;
+- cap de timeframe;
+- maxLeverage público del contrato;
+- colchón estimado de liquidación;
+- cap de contingencia (10x por defecto sin Champion validado);
+- emergency cap.
+
+El target normal de pérdida planificada sigue en 5% del margen de referencia.
+El sistema busca el mayor entero dentro de ese target y de todos los caps.
+No existe un mínimo artificial 15x/20x para 30m.
+
+EJEMPLO DEL USUARIO — LINK-USDT 30m
+Entry 12.40 / SL 12.26:
+- distancia SL ≈ 1.129%
+- con tamaño 100%: target 5% -> ~4.42x -> 4x
+- con tamaño 35%: target 5% -> ~12.65x -> 12x antes de caps adicionales
+- si la celda está en contingencia con cap 10x -> recomendación final máxima 10x
+- riesgo planificado al SL con 10x y 35% ≈ 1.129% * 10 * 0.35 = 3.95%
+
+El valor real puede ser menor por ATR, Safety, liquidación, contrato, perfil
+adaptativo, rentabilidad neta o cualquier gate existente. Nunca se promete que
+un apalancamiento sea "seguro" ni que el SL sea imposible de tocar.
+
+Se recalculan con el apalancamiento FINAL las métricas de pérdida planificada,
+estrés ATR y distancia estimada de liquidación, para no mostrar metadata de un
+12x si un cap posterior terminó en 10x.
+
+2. UNA SOLA FUENTE DE VERDAD PARA APALANCAMIENTO
+static/script.js ya NO multiplica levels.leverage por
+conviction.suggested_leverage_modifier.
+
+Antes podía ocurrir:
+- recomendación/backend: 4x
+- tarjeta de convicción: 3x
+
+Ahora toda la UI toma data.levels.leverage como valor canónico. La convicción
+puede reducir tamaño, no inventar otro apalancamiento en JavaScript.
+
+3. TERMINOLOGÍA DE FRONTEND
+Se reemplazaron textos visibles:
+- Leverage -> Apalancamiento
+- Lev. -> Apal.
+- Máx. leverage -> Máx. apalancamiento
+
+Los nombres internos/API/variables continúan como leverage para no romper
+contratos existentes.
+
+4. GUARDIAN SPOT — PREFERENCIA 4h
+Causa: upsert_user_preferences() invalidaba la caché ANTES del merge. El merge
+leía la fila vieja y volvía a cachearla por hasta 6 horas. Tras el upsert, el
+endpoint podía devolver inmediatamente el valor viejo y el frontend marcaba
+otra vez 4h/12h/1D/1W.
+
+Corrección: después de un upsert exitoso, supabase_client.py publica en la
+caché local exactamente el payload normalizado recién persistido. Guardar sólo
+['4h'] devuelve y conserva ['4h'].
+
+5. SEÑALES VIGENTES A TRAVÉS DE DEPLOYS
+SPOT:
+- antes de guardar un snapshot parcial, si previous/vigent aún no fueron
+  restaurados, se recuperan esos carriles del snapshot Supabase anterior;
+- no se modifica valid_until ni se rejuvenecen timestamps originales.
+
+FUTURES:
+- el primer polling sin caché intenta fast-restore del snapshot antes de lanzar
+  un refresh incremental;
+- mientras el restore está en curso no se permite al primer combo sobrescribir
+  el lifecycle anterior;
+- al persistir, si Supabase contiene más cobertura que el snapshot actual de
+  arranque, ambos se fusionan y los datos nuevos ganan por clave.
+
+Resultado esperado: un deploy puede reciclar RAM, pero una señal todavía vigente
+continúa con su Entry/SL/TP/valid_until originales. El deploy NO reinicia su TTL.
+Una señal realmente vencida, invalidada, TP/SL o cerrada sigue dejando de ser
+vigente según las reglas existentes.
+
+ARCHIVOS DE CÓDIGO CAMBIADOS
+- app.py
+- futures_system.py
+- leverage_policy.py
+- supabase_client.py
+- static/script.js
+- static/futures.js
+- templates/index.html
+
+TESTS / DOCUMENTACIÓN
+- test_rc9_7_10_finalization.py (expectativa V5 actualizada)
+- test_rc9_7_11_release.py
+- RC9_7_11_NOTES.txt
+- RC9_7_11_VALIDATION.txt
+
+NO CAMBIA
+- Research
+- SQL / esquema Supabase
+- saved_signals.py
+- runtime_persistence.py
+- Entry/SL/TP geometry
+- Safety thresholds
+- TF hard maxima: 30m 30x, 1h 20x, 2h 15x, 4h 10x, 12h 7x, 1D 5x
+- contingency leverage_cap=10x por defecto sin autoridad validada
+
+APLICACIÓN
+Un solo commit MAIN.
+Mensaje sugerido:
+RC9.7.11 position-aware technical leverage and durable signal restore

@@ -84,8 +84,8 @@ class RC9710FinalizationTests(unittest.TestCase):
         self.assertIsNotNone(wide)
         self.assertGreater(tight['leverage'], 2)
         self.assertLess(wide['leverage'], tight['leverage'])
-        self.assertEqual(tight['selection_policy'], 'TECHNICAL_RISK_BUDGET')
-        self.assertEqual(tight['version'], 'RC9_7_10_TECHNICAL_LEVERAGE_V4')
+        self.assertEqual(tight['selection_policy'], 'POSITION_AWARE_TECHNICAL_MAX')
+        self.assertEqual(tight['version'], 'RC9_7_11_POSITION_AWARE_TECHNICAL_LEVERAGE_V5')
 
     def test_liquidation_and_contract_caps_are_wired(self):
         fs = read('futures_system.py')

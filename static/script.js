@@ -11548,9 +11548,12 @@ window.updateConvictionInfo = function(data) {
     if (descriptionEl) descriptionEl.textContent = conviction.description || '';
     if (sizeEl) sizeEl.textContent = `${Math.round((conviction.suggested_size || 1.0) * 100)}%`;
     if (leverageEl && data.levels) {
-        const baseLeverage = data.levels.leverage || 10;
-        const modifiedLeverage = Math.round(baseLeverage * (conviction.suggested_leverage_modifier || 1.0));
-        leverageEl.textContent = `${modifiedLeverage}x`;
+        // RC9.7.11: una sola fuente de verdad. Convicción puede reducir el
+        // tamaño, pero el frontend nunca recalcula ni modifica apalancamiento.
+        const canonicalLeverage = Number(data.levels.leverage || 1);
+        leverageEl.textContent = Number.isFinite(canonicalLeverage) && canonicalLeverage > 0
+            ? `${Math.round(canonicalLeverage)}x`
+            : '--';
     }
     
     // Factores positivos y negativos

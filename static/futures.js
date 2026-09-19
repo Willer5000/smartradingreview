@@ -715,7 +715,7 @@ window.refreshReviewPanel = async function() {
                         <strong style="color: #FFD700;">${(rec.multiplier || 1).toFixed(2)}x</strong>
                     </div>
                     <div>
-                        <small class="text-muted d-block">Leverage</small>
+                        <small class="text-muted d-block">Apalancamiento</small>
                         <strong>${rec.leverage || 1}x</strong>
                     </div>
                 </div>
@@ -1218,7 +1218,7 @@ window.updateActiveSignals = async function() {
                         <div>
 
                             <span class="badge bg-secondary me-1">
-                                Lev ${leverage}x
+                                Apal. ${leverage}x
                             </span>
 
                             <span class="badge bg-dark">
@@ -1865,7 +1865,7 @@ window.updatePreviousSignals = async function() {
                         <div>
 
                             <span class="badge bg-dark me-1">
-                                Lev ${leverage}x
+                                Apal. ${leverage}x
                             </span>
 
                             <span class="badge bg-dark">
@@ -4757,7 +4757,7 @@ window.updateSavedSignalsList = async function() {
                                 </div>
                 
                                 <div class="mb-1">
-                                    ⚡ <strong>Leverage:</strong>
+                                    ⚡ <strong>Apalancamiento:</strong>
                                     ${Number(
                                         guardian.leverage || 0
                                     ).toFixed(0)}x
@@ -5278,12 +5278,12 @@ if (window.IS_FUTURES_PAGE) {
 
         if (mode === 'PROFILE_ADVISORY') {
             renderMessage(
-                'Perfil personal activo: el sistema puede reducir margen/leverage según tus límites; nunca aumenta el riesgo permitido por el setup.',
+                'Perfil personal activo: el sistema puede reducir margen/apalancamiento según tus límites; nunca aumenta el riesgo permitido por el setup.',
                 'info'
             );
         } else {
             renderMessage(
-                'Modo manual: tú eliges el margen y el leverage. El sistema no ajusta automáticamente el tamaño según tus límites personales.',
+                'Modo manual: tú eliges el margen y el apalancamiento. El sistema no ajusta automáticamente el tamaño según tus límites personales.',
                 'secondary'
             );
         }

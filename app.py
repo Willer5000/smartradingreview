@@ -16637,7 +16637,7 @@ class TradingExpertSystem:
             print(
                 f"   ✅ R/R: 1:{rr:.2f} "
                 f"| TP quality: {tp_score:.0f}/100 "
-                f"| Leverage: {leverage}x "
+                f"| Apalancamiento: {leverage}x "
                 f"| Size: {suggested_size*100:.0f}%"
             )
             
@@ -19344,12 +19344,71 @@ class TradingExpertSystem:
             if isinstance(structure, dict):
                 structure['_contingency_playbook'] = contingency_playbook
 
+            # RC9.7.11 — resolver tamaño y apalancamiento como un único problema
+            # de riesgo. La fracción NO cambia Entry/SL/TP; sólo informa cuánto
+            # del margen de referencia se planea exponer. FuturesSystem puede
+            # entonces buscar el mayor apalancamiento que mantenga el mismo
+            # presupuesto monetario bajo SL/ATR/Safety/liquidación.
+            futures_risk_allocation_fraction = 1.0
+            if analysis_system_type == 'futures':
+                try:
+                    if confianza_consenso < 70:
+                        futures_risk_allocation_fraction = 0.50
+                    elif confianza_consenso < 85:
+                        futures_risk_allocation_fraction = 0.75
+                    else:
+                        futures_risk_allocation_fraction = 1.00
+
+                    if sentiment.get('sentiment_bias') in (
+                        'bullish_opportunity',
+                        'bearish_opportunity',
+                    ):
+                        futures_risk_allocation_fraction = min(
+                            1.0,
+                            futures_risk_allocation_fraction * 1.2,
+                        )
+
+                    if contingency_playbook.get('active'):
+                        contingency_size_cap = float(
+                            ((contingency_playbook.get('risk') or {}).get('size_cap'))
+                            or 1.0
+                        )
+                        futures_risk_allocation_fraction = min(
+                            futures_risk_allocation_fraction,
+                            contingency_size_cap,
+                        )
+
+                    # El presupuesto por clase (CORE/MEDIUM/HIGH) también es
+                    # conocido antes del cálculo. Sólo puede reducir exposición.
+                    try:
+                        from futures_universe import exit_profile_for
+                        class_budget = float(
+                            exit_profile_for(symbol).get('risk_budget_multiplier')
+                            or 1.0
+                        )
+                        futures_risk_allocation_fraction = min(
+                            futures_risk_allocation_fraction,
+                            class_budget,
+                        )
+                    except Exception:
+                        pass
+
+                    futures_risk_allocation_fraction = max(
+                        0.05,
+                        min(1.0, futures_risk_allocation_fraction),
+                    )
+                except Exception:
+                    futures_risk_allocation_fraction = 1.0
+
             if analysis_system_type == 'futures' and isinstance(structure, dict):
                 structure['_adaptive_strategy_lab'] = strategy_lab
                 structure['_adaptive_market_regime'] = str(
                     market_regime.get('regime', '*')
                     if isinstance(market_regime, dict)
                     else '*'
+                )
+                structure['_futures_risk_allocation_fraction'] = (
+                    futures_risk_allocation_fraction
                 )
 
             # ============ NIVELES ============
@@ -19368,23 +19427,43 @@ class TradingExpertSystem:
                         liquidation=liquidation_data
                     )
                     
-                    # Ajustar tamaño por convicción
-                    if confianza_consenso < 70:
-                        levels['suggested_size'] = 0.5
-                    elif confianza_consenso < 85:
-                        levels['suggested_size'] = 0.75
+                    # RC9.7.11: Futures reutiliza EXACTAMENTE la fracción
+                    # que ya participó en el cálculo del apalancamiento. Spot
+                    # conserva su sizing histórico.
+                    if analysis_system_type == 'futures':
+                        levels['suggested_size'] = float(
+                            futures_risk_allocation_fraction
+                        )
+                        levels['risk_allocation_fraction'] = float(
+                            futures_risk_allocation_fraction
+                        )
                     else:
-                        levels['suggested_size'] = 1.0
-                    
-                    # Ajustar por sentimiento
-                    if sentiment.get('sentiment_bias') in ['bullish_opportunity', 'bearish_opportunity']:
-                        levels['suggested_size'] = min(1.0, levels['suggested_size'] * 1.2)
+                        if confianza_consenso < 70:
+                            levels['suggested_size'] = 0.5
+                        elif confianza_consenso < 85:
+                            levels['suggested_size'] = 0.75
+                        else:
+                            levels['suggested_size'] = 1.0
 
-                    # RC8.2: an unvalidated contingency cell uses reduced capital.
+                        if sentiment.get('sentiment_bias') in [
+                            'bullish_opportunity',
+                            'bearish_opportunity',
+                        ]:
+                            levels['suggested_size'] = min(
+                                1.0,
+                                levels['suggested_size'] * 1.2,
+                            )
+
                     if contingency_playbook.get('active'):
                         try:
-                            contingency_size_cap = float(((contingency_playbook.get('risk') or {}).get('size_cap')) or 1.0)
-                            levels['suggested_size'] = min(float(levels.get('suggested_size', 1.0) or 1.0), contingency_size_cap)
+                            contingency_size_cap = float(
+                                ((contingency_playbook.get('risk') or {}).get('size_cap'))
+                                or 1.0
+                            )
+                            levels['suggested_size'] = min(
+                                float(levels.get('suggested_size', 1.0) or 1.0),
+                                contingency_size_cap,
+                            )
                             levels['contingency_size_cap'] = contingency_size_cap
                             levels['contingency_authority'] = contingency_playbook.get('authority')
                         except Exception:
@@ -19403,6 +19482,7 @@ class TradingExpertSystem:
             if isinstance(structure, dict):
                 structure.pop('_adaptive_strategy_lab', None)
                 structure.pop('_adaptive_market_regime', None)
+                structure.pop('_futures_risk_allocation_fraction', None)
                 structure.pop('_contingency_playbook', None)
 
             # ==========================================================
@@ -27758,7 +27838,7 @@ _SPOT_FAST_RESTORE_RETRY_SECONDS = 15
 def _save_spot_signals_cache_to_disk():
     """Compat name: persistence is Supabase, not Render disk."""
     try:
-        from runtime_persistence import save_runtime_snapshot
+        from runtime_persistence import load_runtime_snapshot, save_runtime_snapshot
         previous = getattr(expert_system, 'prev_signals_cache', None)
         active = getattr(expert_system, 'spot_active_signals_cache', None)
         vigent = getattr(expert_system, 'spot_vigent_signals_cache', None)
@@ -27774,6 +27854,46 @@ def _save_spot_signals_cache_to_disk():
         vigent_ts = float(
             getattr(expert_system, 'spot_vigent_signals_cache_time', 0) or 0
         )
+
+        # RC9.7.11 — anti-overwrite de arranque. Un análisis interactivo puede
+        # llegar antes del bootstrap diferido y tener sólo el carril Activas.
+        # Recuperamos únicamente los carriles ausentes antes de guardar.
+        # valid_until y timestamps originales se conservan sin rejuvenecerlos.
+        if previous is None or vigent is None:
+            try:
+                stored = load_runtime_snapshot(
+                    'spot', 'signals_cache', allow_expired=False
+                )
+                persisted = (stored or {}).get('payload') or {}
+                if previous is None and isinstance(persisted.get('previous'), dict):
+                    previous = persisted.get('previous')
+                    previous_ts = float(
+                        persisted.get('previous_ts')
+                        or persisted.get('ts')
+                        or previous_ts
+                        or 0
+                    )
+                if vigent is None and isinstance(persisted.get('vigent'), dict):
+                    vigent = persisted.get('vigent')
+                    vigent_ts = float(
+                        persisted.get('vigent_ts')
+                        or persisted.get('ts')
+                        or vigent_ts
+                        or 0
+                    )
+                if active is None and isinstance(persisted.get('active'), dict):
+                    active = persisted.get('active')
+                    active_ts = float(
+                        persisted.get('active_ts')
+                        or persisted.get('ts')
+                        or active_ts
+                        or 0
+                    )
+            except Exception as merge_error:
+                print(
+                    f"⚠️ [SPOT CACHE] merge pre-save omitido: {merge_error}",
+                    flush=True,
+                )
         payload = {
             'ts': now_ts,
             # H.3: timestamps separados. Una actualización interactiva del
@@ -31767,6 +31887,15 @@ _futures_analysis_cache = {
 }
 _futures_correlation_cache = {'data': None, 'ts': 0, 'key': None}
 
+# RC9.7.11 — el primer polling web no puede iniciar un refresh incremental
+# antes de intentar restaurar el lifecycle persistido del proceso anterior.
+_FUTURES_FAST_RESTORE_LOCK = threading.Lock()
+_FUTURES_FAST_RESTORE_STATE = {
+    'running': False,
+    'attempted': False,
+    'last_attempt': 0.0,
+}
+
 _FUTURES_CACHE_SCHEMA_VERSION = 4
 _FUTURES_SIGNAL_MAX_WAIT_BARS = 6
 _FUTURES_TF_SECONDS = {
@@ -32430,25 +32559,57 @@ def _load_futures_cache_from_disk():
         payload = (stored or {}).get('payload') or {}
         if not payload:
             print('📂 [FUT] Sin snapshot persistido — se hará warmup acotado')
-            return
+            return False
         schema_version = int(payload.get('schema_version', 0) or 0)
         if schema_version != _FUTURES_CACHE_SCHEMA_VERSION:
             print(f'📂 [FUT] Snapshot Supabase con contrato v{schema_version}; ignorado')
-            return
+            return False
         ts = float(payload.get('ts', 0) or 0)
         age = time.time() - ts if ts else 999999
         if age > 24 * 3600:
             print(f'📂 [FUT] Snapshot Supabase muy viejo ({int(age/3600)}h); ignorado')
-            return
+            return False
         data = _deserialize_futures_cache(payload.get('data'))
         if not data or not (data.get('analysis') or {}):
             print('📂 [FUT] Snapshot Supabase vacío; ignorado')
-            return
-        _futures_analysis_cache['data'] = data
-        _futures_analysis_cache['ts'] = ts
-        print(f"✅ [FUT] Snapshot Supabase aplicado: {len(data.get('analysis') or {})} pares ({int(age)}s)")
+            return False
+        with _futures_analysis_cache['lock']:
+            _futures_analysis_cache['data'] = data
+            _futures_analysis_cache['ts'] = ts
+        print(
+            f"✅ [FUT] Snapshot Supabase aplicado: "
+            f"{len(data.get('analysis') or {})} pares ({int(age)}s)"
+        )
+        return True
     except Exception as e:
         print(f'⚠️ [FUT] No se pudo restaurar snapshot Supabase: {e}')
+        return False
+
+
+def _trigger_futures_fast_restore():
+    """Try one compact restore before a cold-start analysis can overwrite it."""
+    with _FUTURES_FAST_RESTORE_LOCK:
+        if _FUTURES_FAST_RESTORE_STATE['running']:
+            return False
+        if _FUTURES_FAST_RESTORE_STATE['attempted']:
+            return False
+        _FUTURES_FAST_RESTORE_STATE['running'] = True
+        _FUTURES_FAST_RESTORE_STATE['last_attempt'] = time.monotonic()
+
+    def _restore():
+        try:
+            _load_futures_cache_from_disk()
+        finally:
+            with _FUTURES_FAST_RESTORE_LOCK:
+                _FUTURES_FAST_RESTORE_STATE['running'] = False
+                _FUTURES_FAST_RESTORE_STATE['attempted'] = True
+
+    threading.Thread(
+        target=_restore,
+        daemon=True,
+        name='futures-fast-restore',
+    ).start()
+    return True
 
 
 _FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS = max(30, int(os.environ.get(
@@ -32459,7 +32620,7 @@ _FUTURES_SNAPSHOT_SAVE_LOCK = threading.Lock()
 
 
 def _save_futures_cache_to_disk(force=False):
-    """Persist compact Futures state without writing Supabase every 15s."""
+    """Persist compact Futures state without destructive cold-start overwrite."""
     global _FUTURES_LAST_SNAPSHOT_SAVE_AT
     try:
         now_mono = time.monotonic()
@@ -32471,13 +32632,44 @@ def _save_futures_cache_to_disk(force=False):
                     < _FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS
                 ):
                     return True
-        from runtime_persistence import save_runtime_snapshot
+        from runtime_persistence import load_runtime_snapshot, save_runtime_snapshot
         cache = _futures_analysis_cache
         if not cache.get('data'):
             return False
         serial_data = _serialize_futures_cache(cache['data'])
         if not serial_data:
             return False
+
+        # RC9.7.11: an incremental request can finish before the deferred boot
+        # restore. If the previous-process snapshot has broader coverage, merge
+        # it instead of replacing it with one combo. Current keys always win,
+        # so a newly analysed combo is never rolled back.
+        try:
+            stored = load_runtime_snapshot(
+                'futures', 'analysis_cache', allow_expired=False
+            )
+            old_payload = (stored or {}).get('payload') or {}
+            if int(old_payload.get('schema_version', 0) or 0) == _FUTURES_CACHE_SCHEMA_VERSION:
+                old_serial = old_payload.get('data') or {}
+                old_analysis = dict(old_serial.get('analysis_serial') or {})
+                new_analysis = dict(serial_data.get('analysis_serial') or {})
+                if len(old_analysis) > len(new_analysis):
+                    merged_analysis = dict(old_analysis)
+                    merged_analysis.update(new_analysis)
+                    old_lifecycle = dict(old_serial.get('lifecycle') or {})
+                    new_lifecycle = dict(serial_data.get('lifecycle') or {})
+                    merged_lifecycle = dict(old_lifecycle)
+                    merged_lifecycle.update(new_lifecycle)
+                    serial_data['analysis_serial'] = merged_analysis
+                    serial_data['lifecycle'] = merged_lifecycle
+                    print(
+                        '🛡️ [FUT] Snapshot parcial fusionado con estado persistido '
+                        f'({len(new_analysis)}→{len(merged_analysis)} análisis)',
+                        flush=True,
+                    )
+        except Exception as merge_error:
+            print(f'⚠️ [FUT] merge pre-save omitido: {merge_error}', flush=True)
+
         payload = {
             'schema_version': _FUTURES_CACHE_SCHEMA_VERSION,
             'ts': cache.get('ts', time.time()),
@@ -32489,7 +32681,10 @@ def _save_futures_cache_to_disk(force=False):
         if ok:
             with _FUTURES_SNAPSHOT_SAVE_LOCK:
                 _FUTURES_LAST_SNAPSHOT_SAVE_AT = now_mono
-            print(f"💾 [FUT] Snapshot Supabase guardado ({len(serial_data.get('analysis_serial', {}))} pares)")
+            print(
+                f"💾 [FUT] Snapshot Supabase guardado "
+                f"({len(serial_data.get('analysis_serial', {}))} pares)"
+            )
         return ok
     except Exception as e:
         print(f'⚠️ [FUT] Error persistiendo snapshot Supabase: {e}')
@@ -34064,7 +34259,28 @@ def _get_or_refresh_futures_analysis(force_wait=False):
         d['stale'] = True
         return d
     
-    # No hay caché aún → disparar refresh async y devolver vacío
+    # No hay caché aún. RC9.7.11: intentar primero restaurar lifecycle y
+    # señales vigentes del proceso anterior. Mientras esa lectura compacta está
+    # en curso NO arrancamos un combo que pueda sobrescribir el snapshot viejo.
+    with _FUTURES_FAST_RESTORE_LOCK:
+        restore_running = bool(_FUTURES_FAST_RESTORE_STATE['running'])
+        restore_attempted = bool(_FUTURES_FAST_RESTORE_STATE['attempted'])
+
+    if not restore_attempted:
+        if not restore_running:
+            _trigger_futures_fast_restore()
+        return {
+            'analysis': {},
+            'errors': [],
+            'lifecycle': {},
+            'refreshing': False,
+            'restoring_snapshot': True,
+            'warming_up': True,
+            'cache_age': 0
+        }
+
+    # Ya se intentó restaurar y no quedó un snapshot utilizable: sólo ahora
+    # corresponde producir análisis nuevo.
     if not cache['running']:
         if _LOW_MEMORY_MODE:
             _trigger_futures_combo_refresh_async()
@@ -34076,6 +34292,7 @@ def _get_or_refresh_futures_analysis(force_wait=False):
         'errors': [],
         'lifecycle': {},
         'refreshing': True,
+        'restoring_snapshot': False,
         'warming_up': True,
         'cache_age': 0
     }
@@ -34749,7 +34966,7 @@ def _classify_futures_analysis_result(
             if not _leverage_in_valid_range(leverage, timeframe):
                 classification = 'ANALYSIS_ONLY'
                 reason = (
-                    f'Leverage recomendado {leverage}x fuera del rango '
+                    f'Apalancamiento recomendado {leverage}x fuera del rango '
                     f'operativo actual para {timeframe}.'
                 )
         except Exception:
@@ -37502,7 +37719,7 @@ def _build_entry_alert_message(signal, current_price):
         f'🛑 SL: {sl:.4f}',
     ]
     if leverage and leverage > 1:
-        lines.append(f'⚡ Leverage: x{leverage}')
+        lines.append(f'⚡ Apalancamiento: x{leverage}')
     if rr:
         try:
             rr_val = float(rr)
@@ -46680,7 +46897,7 @@ def api_user_futures_risk_profile():
 
                     'error':
                         (
-                            'El leverage personal máximo '
+                            'El apalancamiento personal máximo '
                             'debe ser un entero entre 1 y 50.'
                         )
                 }), 400

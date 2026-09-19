@@ -3471,6 +3471,7 @@ class FuturesAnalysis(TradingExpertSystem):
         timeframe,
         adaptive_profile=None,
         symbol=None,
+        risk_allocation_fraction=1.0,
     ):
         """Select technical leverage under independent risk ceilings.
 
@@ -3489,7 +3490,18 @@ class FuturesAnalysis(TradingExpertSystem):
             sl_pct = abs(float(sl_distance_pct or 0))
             normalized_atr_pct = abs(float(atr_pct or 0))
             safety = max(0.0, min(100.0, float(execution_safety or 0)))
-            if margin <= 0 or tp_pct <= 0 or sl_pct <= 0 or normalized_atr_pct <= 0:
+            try:
+                risk_fraction = max(0.05, min(1.0, float(risk_allocation_fraction or 1.0)))
+            except (TypeError, ValueError):
+                risk_fraction = 1.0
+            effective_margin = margin * risk_fraction
+            if (
+                margin <= 0
+                or effective_margin <= 0
+                or tp_pct <= 0
+                or sl_pct <= 0
+                or normalized_atr_pct <= 0
+            ):
                 return None
 
             round_trip_cost = float(FUTURES_RISK_CONFIG['round_trip_cost_pct'])
@@ -3498,17 +3510,23 @@ class FuturesAnalysis(TradingExpertSystem):
                 return None
 
             target_profit = float(FUTURES_RISK_CONFIG['target_net_profit_usdt'])
-            min_leverage_economic = target_profit / (margin * edge_after_cost)
+            min_leverage_economic = target_profit / (effective_margin * edge_after_cost)
             minimum_roi_tp = float(FUTURES_RISK_CONFIG['minimum_roi_tp_pct'])
             min_leverage_by_roi = minimum_roi_tp / tp_pct
 
+            # RC9.7.11: monetary risk belongs to leverage × SL distance ×
+            # planned position allocation. A smaller suggested position may
+            # justify more leverage without increasing the configured risk
+            # budget. Liquidation/Safety/timeframe caps remain unscaled.
             max_loss_pct = float(FUTURES_RISK_CONFIG['max_loss_pct_margin'])
-            max_leverage_by_risk = max_loss_pct / sl_pct
+            max_leverage_by_risk = max_loss_pct / (sl_pct * risk_fraction)
 
             atr_stress_multiplier = float(FUTURES_RISK_CONFIG['atr_stress_multiplier'])
             atr_stress_move_pct = max(sl_pct, normalized_atr_pct * atr_stress_multiplier)
             max_atr_stress_loss = float(FUTURES_RISK_CONFIG['max_atr_stress_loss_pct_margin'])
-            max_leverage_by_atr_stress = max_atr_stress_loss / atr_stress_move_pct
+            max_leverage_by_atr_stress = (
+                max_atr_stress_loss / (atr_stress_move_pct * risk_fraction)
+            )
 
             min_leverage_tf, tf_max = LEVERAGE_RANGES.get(timeframe, (1, 10))
             absolute_max = float(FUTURES_RISK_CONFIG['absolute_max_leverage'])
@@ -3655,6 +3673,7 @@ class FuturesAnalysis(TradingExpertSystem):
                 max_by_liquidation_buffer=max_by_liquidation_buffer,
                 adaptive_enabled=allow_leverage_growth,
                 target_loss_budget_pct_margin=target_loss_budget,
+                risk_allocation_fraction=risk_fraction,
                 emergency_max_leverage=50.0,
                 high_safety_threshold=float(FUTURES_RISK_CONFIG['high_safety_threshold']),
             )
@@ -3699,6 +3718,9 @@ class FuturesAnalysis(TradingExpertSystem):
                 'leverage_policy_version': policy.get('version'),
                 'leverage_policy_mode': policy.get('selection_policy'),
                 'target_loss_budget_pct_margin': policy.get('target_loss_budget_pct_margin'),
+                'risk_allocation_fraction': round(risk_fraction, 4),
+                'reference_margin_usdt': round(margin, 4),
+                'effective_margin_usdt': round(effective_margin, 4),
                 'target_by_loss_budget': policy.get('target_by_loss_budget'),
                 'timeframe_cap_mode': policy.get('timeframe_cap_mode'),
                 'exchange_limit_verified': bool(policy.get('exchange_limit_verified')),
@@ -3727,12 +3749,17 @@ class FuturesAnalysis(TradingExpertSystem):
                 'atr_pct': round(normalized_atr_pct, 4),
                 'atr_stress_move_pct': round(atr_stress_move_pct, 4),
                 'estimated_atr_stress_loss_pct_margin': round(
-                    atr_stress_move_pct * leverage, 2
+                    atr_stress_move_pct * leverage * risk_fraction, 2
                 ),
-                'estimated_sl_loss_pct_margin': round(sl_pct * leverage, 2),
+                'estimated_sl_loss_pct_margin': round(
+                    sl_pct * leverage * risk_fraction, 2
+                ),
+                'estimated_sl_loss_pct_position_margin': round(
+                    sl_pct * leverage, 2
+                ),
                 'security_factor': round(security_factor, 3),
                 'selection_policy': policy.get(
-                    'selection_policy', 'TECHNICAL_RISK_BUDGET'
+                    'selection_policy', 'POSITION_AWARE_TECHNICAL_MAX'
                 ),
                 'economically_viable': True,
             }
@@ -3954,6 +3981,10 @@ class FuturesAnalysis(TradingExpertSystem):
         rr = safe_float(result.get('risk_reward'))
         roi_tp = safe_float(result.get('roi_tp'))
         roi_sl_abs = abs(safe_float(result.get('roi_sl')))
+        planned_sl_loss = safe_float(
+            risk_control.get('estimated_sl_loss_pct_margin'),
+            roi_sl_abs,
+        )
         net_profit = safe_float(result.get('net_profit_tp_usdt'))
         atr_stress_loss = safe_float(
             risk_control.get('estimated_atr_stress_loss_pct_margin')
@@ -4102,14 +4133,14 @@ class FuturesAnalysis(TradingExpertSystem):
         )
 
         require(
-            roi_sl_abs
+            planned_sl_loss
             <= thresholds[
                 'loss_at_sl_max_pct_margin'
             ],
             'LOSS_AT_SL',
             (
                 'pérdida estimada en SL '
-                f"{roi_sl_abs:.1f}% > "
+                f"{planned_sl_loss:.1f}% > "
                 f"{thresholds['loss_at_sl_max_pct_margin']:.1f}% "
                 'del margen'
             )
@@ -4212,7 +4243,8 @@ class FuturesAnalysis(TradingExpertSystem):
         tp: float,
         sl: float,
         leverage: int,
-        direction: str
+        direction: str,
+        margin_usdt: float = None,
     ) -> Dict:
         """
         Calcula el ROI potencial de una operación de futuros.
@@ -4325,7 +4357,9 @@ class FuturesAnalysis(TradingExpertSystem):
         try:
     
             margin_usdt = float(
-                FUTURES_RISK_CONFIG.get(
+                margin_usdt
+                if margin_usdt is not None
+                else FUTURES_RISK_CONFIG.get(
                     'default_margin_usdt',
                     10.0
                 )
@@ -6501,8 +6535,31 @@ class FuturesAnalysis(TradingExpertSystem):
             )
         
         # ==============================================================
-        # LEVERAGE ECONÓMICO
+        # APALANCAMIENTO TÉCNICO + TAMAÑO PLANIFICADO (RC9.7.11)
         # ==============================================================
+        # El tamaño es parte del presupuesto monetario de riesgo. No cambia
+        # Entry/SL/TP y nunca relaja Safety, liquidación ni techos del TF.
+        try:
+            risk_allocation_fraction = max(
+                0.05,
+                min(
+                    1.0,
+                    float(
+                        (structure or {}).get(
+                            '_futures_risk_allocation_fraction',
+                            1.0,
+                        )
+                        or 1.0
+                    ),
+                ),
+            )
+        except (TypeError, ValueError):
+            risk_allocation_fraction = 1.0
+
+        levels['risk_allocation_fraction'] = round(
+            risk_allocation_fraction, 4
+        )
+
         leverage_evaluation = self._calculate_economic_leverage(
             margin_usdt=float(
                 FUTURES_RISK_CONFIG['default_margin_usdt']
@@ -6514,6 +6571,7 @@ class FuturesAnalysis(TradingExpertSystem):
             timeframe=timeframe,
             adaptive_profile=adaptive_profile,
             symbol=symbol,
+            risk_allocation_fraction=risk_allocation_fraction,
         )
 
         optimal_leverage = int(
@@ -6541,11 +6599,56 @@ class FuturesAnalysis(TradingExpertSystem):
             except Exception:
                 pass
         
+        # Si un cap posterior (por ejemplo contingency 10x) reduce el valor
+        # propuesto por V5, recalcular las métricas públicas con el apalancamiento
+        # FINAL. Así no quedan pérdidas/estrés estimados para 12x cuando la
+        # recomendación realmente terminó en 10x.
+        if leverage_evaluation and optimal_leverage > 0:
+            leverage_evaluation['leverage'] = int(optimal_leverage)
+            leverage_evaluation['estimated_sl_loss_pct_margin'] = round(
+                float(sl_distance_pct or 0)
+                * optimal_leverage
+                * risk_allocation_fraction,
+                2,
+            )
+            leverage_evaluation['estimated_sl_loss_pct_position_margin'] = round(
+                float(sl_distance_pct or 0) * optimal_leverage,
+                2,
+            )
+            leverage_evaluation['estimated_atr_stress_loss_pct_margin'] = round(
+                float(leverage_evaluation.get('atr_stress_move_pct') or 0)
+                * optimal_leverage
+                * risk_allocation_fraction,
+                2,
+            )
+            try:
+                _mmr_pct = float(
+                    leverage_evaluation.get('maintenance_margin_rate') or 0
+                ) * 100.0
+                _liq_fee_pct = float(
+                    leverage_evaluation.get('liquidation_fee_proxy_rate') or 0
+                ) * 100.0
+                _liq_distance = max(
+                    0.0,
+                    (100.0 / max(1.0, float(optimal_leverage)))
+                    - _mmr_pct
+                    - _liq_fee_pct,
+                )
+                leverage_evaluation['estimated_liquidation_distance_pct'] = round(
+                    _liq_distance, 4
+                )
+                leverage_evaluation['estimated_liquidation_buffer_beyond_sl_pct'] = round(
+                    _liq_distance - float(sl_distance_pct or 0),
+                    4,
+                )
+            except Exception:
+                pass
+
         if optimal_leverage <= 0:
 
             print(
                 "   ⚠️ FUTUROS ANALYSIS_ONLY: "
-                "No existe leverage simultáneamente "
+                "No existe apalancamiento simultáneamente "
                 "seguro y económicamente viable."
             )
 
@@ -6559,7 +6662,7 @@ class FuturesAnalysis(TradingExpertSystem):
             )
 
             rejection_reason = (
-                "No existe leverage que cumpla "
+                "No existe apalancamiento que cumpla "
                 "seguridad + riesgo + rentabilidad"
             )
 
@@ -6584,12 +6687,21 @@ class FuturesAnalysis(TradingExpertSystem):
         # ============ CALCULAR ROI POTENCIAL ============
         direction = 'long' if decision == 'LONG' else 'short'
         
+        effective_margin_usdt = float(
+            leverage_evaluation.get(
+                'effective_margin_usdt',
+                FUTURES_RISK_CONFIG['default_margin_usdt'],
+            )
+            or FUTURES_RISK_CONFIG['default_margin_usdt']
+        )
+
         roi = self.calculate_roi_futures(
             levels['entry'],
             levels['take_profit'],
             levels['stop_loss'],
             optimal_leverage,
-            direction
+            direction,
+            margin_usdt=effective_margin_usdt,
         )
         
         levels.update(roi)
@@ -6683,12 +6795,13 @@ class FuturesAnalysis(TradingExpertSystem):
             )
         )
         
-        margin_usdt = float(
+        reference_margin_usdt = float(
             FUTURES_RISK_CONFIG.get(
                 'default_margin_usdt',
                 10.0
             )
         )
+        margin_usdt = float(effective_margin_usdt)
         
         notional = (
             margin_usdt
@@ -6880,6 +6993,15 @@ class FuturesAnalysis(TradingExpertSystem):
             'target_loss_budget_pct_margin': leverage_evaluation.get(
                 'target_loss_budget_pct_margin'
             ),
+            'risk_allocation_fraction': leverage_evaluation.get(
+                'risk_allocation_fraction'
+            ),
+            'reference_margin_usdt': leverage_evaluation.get(
+                'reference_margin_usdt'
+            ),
+            'effective_margin_usdt': leverage_evaluation.get(
+                'effective_margin_usdt'
+            ),
             'target_by_loss_budget': leverage_evaluation.get(
                 'target_by_loss_budget'
             ),
@@ -6936,10 +7058,11 @@ class FuturesAnalysis(TradingExpertSystem):
                 'estimated_liquidation_buffer_beyond_sl_pct'
             ),
             'liquidation_distance_is_estimate': True,
-            'margin_usdt': float(
-                FUTURES_RISK_CONFIG[
-                    'default_margin_usdt'
-                ]
+            'margin_usdt': round(
+                effective_margin_usdt, 4
+            ),
+            'reference_margin_usdt': round(
+                reference_margin_usdt, 4
             ),
             'estimated_loss_sl_usdt': round(
                 loss_sl_usdt,
@@ -6968,7 +7091,7 @@ class FuturesAnalysis(TradingExpertSystem):
             )
         
             rejection_reason = (
-                f"Leverage recomendado "
+                f"Apalancamiento recomendado "
                 f"{optimal_leverage}x "
                 f"fuera del rango operativo "
                 f"{min_tf}x-{max_tf}x "
