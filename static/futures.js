@@ -218,6 +218,45 @@ window._manualAnalysisCandidates = (
 );
 
 
+// RC9.7.12 — resolver una sola recomendación de apalancamiento para el
+// seguimiento manual. El lifecycle/backend es la fuente primaria. Como defensa
+// durante la ventana de migración posterior al deploy, sólo se acepta el
+// leverage del análisis actual si símbolo, TF y geometría Entry/SL/TP coinciden.
+function futResolveManualCanonicalLeverage(candidate) {
+    const fallback = Number(candidate?.leverage || 1);
+    const current = window.currentAnalysis || null;
+    const levels = current?.levels || null;
+
+    if (!candidate || !current || !levels) {
+        return Number.isFinite(fallback) && fallback > 0 ? Math.round(fallback) : 1;
+    }
+
+    const normalizeSymbol = value => String(value || '').toUpperCase().replace('/', '-');
+    const sameSymbol = normalizeSymbol(candidate.symbol) === normalizeSymbol(current.symbol || window.currentSymbol);
+    const sameTimeframe = String(candidate.timeframe || '').toLowerCase() === String(current.timeframe || window.currentInterval || '').toLowerCase();
+
+    const sameLevel = (a, b) => {
+        const x = Number(a);
+        const y = Number(b);
+        if (!(x > 0) || !(y > 0)) return false;
+        const tolerance = Math.max(1e-9, Math.abs(y) * 1e-6);
+        return Math.abs(x - y) <= tolerance;
+    };
+
+    const sameGeometry = (
+        sameLevel(candidate.entry, levels.entry)
+        && sameLevel(candidate.stop_loss, levels.stop_loss)
+        && sameLevel(candidate.take_profit, levels.take_profit)
+    );
+
+    const liveLeverage = Number(levels.leverage || 0);
+    if (sameSymbol && sameTimeframe && sameGeometry && Number.isFinite(liveLeverage) && liveLeverage > 0) {
+        return Math.round(liveLeverage);
+    }
+
+    return Number.isFinite(fallback) && fallback > 0 ? Math.round(fallback) : 1;
+}
+
 window.openManualAnalysisSave = function(
     manualKey,
     alreadyInPosition = false
@@ -273,6 +312,8 @@ window.openManualAnalysisSave = function(
         return;
     }
 
+    const canonicalLeverage = futResolveManualCanonicalLeverage(candidate);
+
     const sig = {
         symbol:
             candidate.symbol,
@@ -296,7 +337,19 @@ window.openManualAnalysisSave = function(
             candidate.take_profit,
 
         leverage:
-            candidate.leverage || 1,
+            canonicalLeverage,
+
+        leverage_policy_version:
+            candidate.leverage_policy_version || null,
+
+        leverage_policy_mode:
+            candidate.leverage_policy_mode || null,
+
+        risk_allocation_fraction:
+            candidate.risk_allocation_fraction ?? null,
+
+        suggested_size:
+            candidate.suggested_size ?? null,
 
         risk_reward:
             candidate.risk_reward,
@@ -3332,8 +3385,13 @@ window.openSaveSignalModal = function(sig, alreadyInPosition = false) {
     }
 
     document.getElementById('ss-investment').value = 10;
-    document.getElementById('ss-leverage').value = sig.leverage || 1;
-    document.getElementById('ss-leverage-hint').textContent = `Sugerido por el sistema: ${sig.leverage || 1}x`;
+    const canonicalSaveLeverage = Number(sig.leverage || 1);
+    const safeSaveLeverage = Number.isFinite(canonicalSaveLeverage) && canonicalSaveLeverage > 0
+        ? Math.round(canonicalSaveLeverage)
+        : 1;
+    sig.leverage = safeSaveLeverage;
+    document.getElementById('ss-leverage').value = safeSaveLeverage;
+    document.getElementById('ss-leverage-hint').textContent = `Sugerido por el sistema: ${safeSaveLeverage}x`;
     
     // Fallback: si no hay entry/sl/tp en la señal, usar el precio actual del mercado como base
     const currentPrice = Number(

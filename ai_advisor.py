@@ -625,7 +625,18 @@ TRADING_TERMS = (
     "sol",
     "xrp",
     "ada",
+    "bnb",
+    "link",
+    "avax",
+    "near",
+    "dot",
+    "sui",
+    "hype",
+    "apt",
+    "inj",
+    "sei",
     "paxg",
+    "usdt",
     "señal",
     "senal",
     "long",
@@ -2674,6 +2685,10 @@ no definen dirección; considera crowding, desapalancamiento, absorción y
 si el contexto favorece continuación o reversión. Una pared puede desaparecer.
 No inventes Entry/SL/TP, no aumentes leverage y no conviertas
 NO_OPERAR en LONG/SHORT. Si contradices una señal, explica la evidencia.
+Si manual_comparison existe, compara únicamente los activos solicitados con
+la evidencia disponible para cada uno. No elijas por confidence aislada: prioriza
+calidad de Entry/SL/TP, RR, Safety, estructura, volatilidad, costes y contexto.
+Si ninguno tiene ventaja suficiente, responde que no conviene entrar en ninguno.
 
 SPOT/TGP:
 Spot no es Futures. Considera BTC, PAXG y USDT, reservas,

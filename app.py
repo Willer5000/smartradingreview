@@ -32971,6 +32971,59 @@ def _refresh_futures_signal_lifecycle(
         # niveles y estado operativo permanecen intactos.
         if trackable and signal_id in lifecycle:
             existing_record = lifecycle[signal_id]
+
+            # RC9.7.12 — sincronizar el apalancamiento canónico cuando el
+            # MISMO signal_id vuelve a analizarse con la misma geometría
+            # Entry/SL/TP. Esto migra de forma segura señales creadas bajo una
+            # política anterior (p.ej. V4 4x) hacia la política vigente V5
+            # (p.ej. 10x), sin reiniciar valid_until ni mover Entry/SL/TP.
+            # Nunca se toma el leverage de otra señal o de otra geometría.
+            try:
+                fresh_entry = float(levels.get('entry') or 0)
+                fresh_sl = float(levels.get('stop_loss') or 0)
+                fresh_tp = float(levels.get('take_profit') or 0)
+                fresh_leverage = int(float(levels.get('leverage') or 0))
+
+                old_entry = float(existing_record.get('entry') or 0)
+                old_sl = float(existing_record.get('stop_loss') or 0)
+                old_tp = float(existing_record.get('take_profit') or 0)
+
+                def _same_level(old_value, new_value):
+                    if old_value <= 0 or new_value <= 0:
+                        return False
+                    tolerance = max(1e-9, abs(new_value) * 1e-6)
+                    return abs(old_value - new_value) <= tolerance
+
+                same_geometry = (
+                    _same_level(old_entry, fresh_entry)
+                    and _same_level(old_sl, fresh_sl)
+                    and _same_level(old_tp, fresh_tp)
+                )
+
+                if same_geometry and fresh_leverage > 0:
+                    risk_control = levels.get('risk_control') or {}
+                    existing_record['leverage'] = fresh_leverage
+                    existing_record['leverage_policy_version'] = (
+                        risk_control.get('leverage_policy_version')
+                        or levels.get('leverage_policy_version')
+                    )
+                    existing_record['leverage_policy_mode'] = (
+                        risk_control.get('leverage_policy_mode')
+                        or levels.get('leverage_policy_mode')
+                    )
+                    existing_record['risk_allocation_fraction'] = levels.get(
+                        'risk_allocation_fraction',
+                        risk_control.get('risk_allocation_fraction')
+                    )
+                    existing_record['suggested_size'] = levels.get(
+                        'suggested_size',
+                        existing_record.get('suggested_size')
+                    )
+                    existing_record['leverage_refreshed_at'] = now_iso
+            except Exception:
+                # La migración de metadata nunca debe romper el lifecycle.
+                pass
+
             if decision.get('audit') and not existing_record.get('decision_audit'):
                 existing_record['decision_audit'] = decision.get('audit')
                 existing_record['market_data_source'] = result.get(
@@ -33053,6 +33106,19 @@ def _refresh_futures_signal_lifecycle(
                 'stop_loss': float(levels.get('stop_loss') or 0),
                 'take_profit': float(levels.get('take_profit') or 0),
                 'leverage': int(levels.get('leverage') or 1),
+                'leverage_policy_version': (
+                    (levels.get('risk_control') or {}).get('leverage_policy_version')
+                    or levels.get('leverage_policy_version')
+                ),
+                'leverage_policy_mode': (
+                    (levels.get('risk_control') or {}).get('leverage_policy_mode')
+                    or levels.get('leverage_policy_mode')
+                ),
+                'risk_allocation_fraction': levels.get(
+                    'risk_allocation_fraction',
+                    (levels.get('risk_control') or {}).get('risk_allocation_fraction')
+                ),
+                'suggested_size': levels.get('suggested_size'),
                 'risk_reward': float(levels.get('risk_reward') or 0),
                 'roi_tp': levels.get('roi_tp'),
                 'roi_sl': levels.get('roi_sl'),
@@ -35077,6 +35143,19 @@ def _classify_futures_analysis_result(
         'stop_loss': stop_loss if stop_loss > 0 else None,
         'take_profit': take_profit if take_profit > 0 else None,
         'leverage': leverage if leverage > 0 else None,
+        'leverage_policy_version': (
+            (levels.get('risk_control') or {}).get('leverage_policy_version')
+            or levels.get('leverage_policy_version')
+        ),
+        'leverage_policy_mode': (
+            (levels.get('risk_control') or {}).get('leverage_policy_mode')
+            or levels.get('leverage_policy_mode')
+        ),
+        'risk_allocation_fraction': levels.get(
+            'risk_allocation_fraction',
+            (levels.get('risk_control') or {}).get('risk_allocation_fraction')
+        ),
+        'suggested_size': levels.get('suggested_size'),
         'risk_reward': _safe_float(levels.get('risk_reward')),
         'execution_safety': (
             _safe_float(levels.get('execution_safety'))
@@ -35356,6 +35435,11 @@ def _futures_vigent_manual_candidates(cache, fresh_signal_ids=None):
             'stop_loss': record.get('stop_loss'),
             'take_profit': record.get('take_profit'),
             'leverage': record.get('leverage'),
+            'leverage_policy_version': record.get('leverage_policy_version'),
+            'leverage_policy_mode': record.get('leverage_policy_mode'),
+            'risk_allocation_fraction': record.get('risk_allocation_fraction'),
+            'suggested_size': record.get('suggested_size'),
+            'leverage_refreshed_at': record.get('leverage_refreshed_at'),
             'risk_reward': record.get('risk_reward'),
             'execution_safety': record.get('execution_safety'),
             'execution_safety_minimum': record.get('execution_safety_minimum'),
@@ -41973,78 +42057,58 @@ def _resolve_ai_question_target(
     # ACTIVO
     # ========================================================================
 
+    # RC9.7.12 — universo operativo completo del Asistente IA.
+    # Se registran TODOS los símbolos mencionados y se conserva el orden
+    # en que el usuario los escribió para permitir comparaciones reales.
     asset_rules = (
-
-        (
-            r'\bpaxg\s*[/\-]?\s*btc\b',
-            'PAXG-BTC',
-            'SPOT'
-        ),
-
-        (
-            r'\bpaxg\b',
-            'PAXG-USDT',
-            'SPOT'
-        ),
-
-        (
-            r'\bada\b',
-            'ADA-USDT',
-            'FUTURES'
-        ),
-
-        (
-            r'\bxrp\b',
-            'XRP-USDT',
-            'FUTURES'
-        ),
-
-        (
-            r'\bsol\b',
-            'SOL-USDT',
-            'FUTURES'
-        ),
-
-        (
-            r'\beth\b',
-            'ETH-USDT',
-            'FUTURES'
-        ),
-
-        (
-            r'\bbtc\b',
-            'BTC-USDT',
-            None
-        ),
+        (r'\bpaxg\s*[/\-]?\s*btc\b', 'PAXG-BTC', 'SPOT'),
+        (r'\bpaxg\b(?!\s*[/\-]?\s*btc\b)', 'PAXG-USDT', 'SPOT'),
+        (r'\bbtc\b', 'BTC-USDT', None),
+        (r'\beth\b', 'ETH-USDT', 'FUTURES'),
+        (r'\bsol\b', 'SOL-USDT', 'FUTURES'),
+        (r'\bxrp\b', 'XRP-USDT', 'FUTURES'),
+        (r'\bada\b', 'ADA-USDT', 'FUTURES'),
+        (r'\bbnb\b', 'BNB-USDT', 'FUTURES'),
+        (r'\blink\b', 'LINK-USDT', 'FUTURES'),
+        (r'\bavax\b', 'AVAX-USDT', 'FUTURES'),
+        (r'\bnear\b', 'NEAR-USDT', 'FUTURES'),
+        (r'\bdot\b', 'DOT-USDT', 'FUTURES'),
+        (r'\bsui\b', 'SUI-USDT', 'FUTURES'),
+        (r'\bhype\b', 'HYPE-USDT', 'FUTURES'),
+        (r'\bapt\b', 'APT-USDT', 'FUTURES'),
+        (r'\binj\b', 'INJ-USDT', 'FUTURES'),
+        (r'\bsei\b', 'SEI-USDT', 'FUTURES'),
     )
 
+    asset_matches = []
 
-    for (
-        pattern,
-        resolved_symbol,
-        forced_market
-    ) in asset_rules:
-
-        if re.search(
+    for pattern, resolved_symbol, forced_market in asset_rules:
+        match = re.search(
             pattern,
             text,
             flags=re.IGNORECASE
-        ):
+        )
 
-            symbol = (
-                resolved_symbol
-            )
+        if match:
+            asset_matches.append((
+                match.start(),
+                resolved_symbol,
+                forced_market
+            ))
 
+    asset_matches.sort(key=lambda item: item[0])
 
-            if forced_market:
+    mentioned_symbols = []
 
-                market = (
-                    forced_market
-                )
+    for _, resolved_symbol, forced_market in asset_matches:
+        if resolved_symbol not in mentioned_symbols:
+            mentioned_symbols.append(resolved_symbol)
 
+        if forced_market:
+            market = forced_market
 
-            break
-
+    if mentioned_symbols:
+        symbol = mentioned_symbols[0]
 
     # ========================================================================
     # PALABRAS QUE INDICAN FUTURES
@@ -42065,16 +42129,13 @@ def _resolve_ai_question_target(
         market = 'FUTURES'
 
 
-    # En TU sistema ETH/SOL/XRP/ADA pertenecen
-    # a este selector del Asistente como Futures.
-
+    # Todos los altcoins del universo productivo pertenecen a Futures.
     if symbol in (
-        'ETH-USDT',
-        'SOL-USDT',
-        'XRP-USDT',
-        'ADA-USDT'
+        'ETH-USDT', 'SOL-USDT', 'XRP-USDT', 'ADA-USDT',
+        'BNB-USDT', 'LINK-USDT', 'AVAX-USDT', 'NEAR-USDT',
+        'DOT-USDT', 'SUI-USDT', 'HYPE-USDT', 'APT-USDT',
+        'INJ-USDT', 'SEI-USDT'
     ):
-
         market = 'FUTURES'
 
 
@@ -42089,6 +42150,8 @@ def _resolve_ai_question_target(
     # ========================================================================
     # TIMEFRAME
     # ========================================================================
+
+    timeframe_explicit = False
 
     timeframe_rules = (
 
@@ -42143,6 +42206,7 @@ def _resolve_ai_question_target(
             timeframe = (
                 resolved_timeframe
             )
+            timeframe_explicit = True
 
             break
 
@@ -42153,38 +42217,36 @@ def _resolve_ai_question_target(
 
     if market == 'FUTURES':
 
-        allowed_symbols = (
-            'BTC-USDT',
-            'ETH-USDT',
-            'SOL-USDT',
-            'XRP-USDT',
-            'ADA-USDT',
-            'LINK-USDT',
-            'BNB-USDT'
-        )
+        futures_tf_by_symbol = {
+            'BTC-USDT': ('30m', '1h', '2h', '4h', '12h', '1D'),
+            'ETH-USDT': ('30m', '1h', '2h', '4h', '12h', '1D'),
+            'SOL-USDT': ('30m', '1h', '2h', '4h', '12h', '1D'),
+            'XRP-USDT': ('30m', '1h', '2h', '4h', '12h'),
+            'ADA-USDT': ('30m', '1h', '2h', '4h', '12h'),
+            'BNB-USDT': ('30m', '1h', '2h', '4h'),
+            'LINK-USDT': ('30m', '1h', '2h', '4h'),
+            'AVAX-USDT': ('30m', '1h', '2h', '4h'),
+            'NEAR-USDT': ('30m', '1h', '2h', '4h'),
+            'DOT-USDT': ('30m', '1h', '2h', '4h'),
+            'SUI-USDT': ('30m', '1h', '2h'),
+            'HYPE-USDT': ('30m', '1h', '2h'),
+            'APT-USDT': ('30m', '1h', '2h'),
+            'INJ-USDT': ('30m', '1h', '2h'),
+            'SEI-USDT': ('30m', '1h', '2h'),
+        }
 
-
-        allowed_timeframes = (
-            '30m',
-            '1h',
-            '2h',
-            '4h'
-        )
-
-
-        if symbol not in (
-            allowed_symbols
-        ):
-
+        if symbol not in futures_tf_by_symbol:
             symbol = 'BTC-USDT'
 
+        allowed_timeframes = futures_tf_by_symbol[symbol]
 
-        if timeframe not in (
-            allowed_timeframes
-        ):
-
-            timeframe = '1h'
-
+        if timeframe not in allowed_timeframes:
+            page_tf = str(page_timeframe or '')
+            timeframe = (
+                page_tf
+                if page_tf in allowed_timeframes
+                else '1h'
+            )
 
     else:
 
@@ -42227,7 +42289,139 @@ def _resolve_ai_question_target(
 
         'timeframe':
             timeframe,
+
+        'mentioned_symbols':
+            mentioned_symbols,
+
+        'timeframe_explicit':
+            timeframe_explicit,
     }
+def _build_ai_manual_comparison(target):
+    """Construye contexto compacto para comparar varios Futures solicitados."""
+
+    if not isinstance(target, dict):
+        return {}
+
+    if str(target.get('market') or '').upper() != 'FUTURES':
+        return {}
+
+    requested_symbols = []
+    for item in (target.get('mentioned_symbols') or []):
+        symbol = str(item or '').upper().strip()
+        if symbol and symbol not in requested_symbols:
+            requested_symbols.append(symbol)
+
+    if len(requested_symbols) < 2:
+        return {}
+
+    explicit_tf = bool(target.get('timeframe_explicit'))
+    requested_tf = (
+        str(target.get('timeframe') or '')
+        if explicit_tf
+        else None
+    )
+
+    cache = (
+        _get_or_refresh_futures_analysis(
+            force_wait=False
+        )
+        or {}
+    )
+
+    analysis_map = (
+        cache.get('analysis', {})
+        or {}
+    )
+
+    rows_by_symbol = {
+        symbol: []
+        for symbol in requested_symbols[:5]
+    }
+
+    for key, result in analysis_map.items():
+        if not isinstance(result, dict):
+            continue
+
+        key_symbol = (
+            key[0]
+            if isinstance(key, tuple) and len(key) >= 2
+            else result.get('symbol')
+        )
+        key_tf = (
+            key[1]
+            if isinstance(key, tuple) and len(key) >= 2
+            else result.get('timeframe')
+        )
+
+        compact = _ai_compact_analysis(
+            result,
+            key_symbol,
+            key_tf
+        )
+
+        compact_symbol = str(
+            compact.get('symbol') or ''
+        ).upper()
+        compact_tf = str(
+            compact.get('timeframe') or ''
+        )
+
+        if compact_symbol not in rows_by_symbol:
+            continue
+
+        if requested_tf and compact_tf != requested_tf:
+            continue
+
+        rows_by_symbol[compact_symbol].append(compact)
+
+    comparison_candidates = []
+
+    for symbol in requested_symbols[:5]:
+        rows = rows_by_symbol.get(symbol, [])
+
+        rows.sort(
+            key=lambda item: (
+                1 if str(item.get('action') or '').upper() in ('LONG', 'SHORT') else 0,
+                1 if bool(item.get('publication_eligible')) else 0,
+                float(item.get('execution_safety') or 0),
+                float(item.get('confidence') or 0),
+                float(item.get('risk_reward') or 0),
+            ),
+            reverse=True
+        )
+
+        best = rows[0] if rows else {}
+
+        comparison_candidates.append({
+            'symbol': symbol,
+            'requested_timeframe': requested_tf,
+            'best_current': best,
+            'alternatives': rows[1:3],
+            'reviewtrader': (
+                _ai_review_snapshot(
+                    symbol,
+                    best.get('timeframe'),
+                    best.get('action'),
+                    'futures'
+                )
+                if best
+                else {}
+            )
+        })
+
+    return {
+        'requested_symbols': requested_symbols[:5],
+        'timeframe_explicit': explicit_tf,
+        'requested_timeframe': requested_tf,
+        'selection_rule': (
+            'comparar setup ejecutable, publication eligibility, '
+            'Safety, confianza, RR y evidencia técnica; no elegir '
+            'por confidence aislada'
+        ),
+        'candidates': comparison_candidates
+    }
+
+
 def _build_ai_advisor_context(
     user,
     market,
@@ -49221,6 +49415,19 @@ def api_ai_ask():
             'timeframe':
                 page_timeframe,
         }
+
+
+        manual_comparison = (
+            _build_ai_manual_comparison(
+                target
+            )
+        )
+
+
+        if manual_comparison:
+            context[
+                'manual_comparison'
+            ] = manual_comparison
 
 
         selected = (

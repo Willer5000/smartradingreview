@@ -11544,16 +11544,30 @@ window.updateConvictionInfo = function(data) {
         levelEl.style.color = conviction.level === 'ALTA' ? '#00C076' : 
                               conviction.level === 'MEDIA' ? '#FFD700' : '#FF5B5B';
     }
-    if (percentageEl) percentageEl.textContent = `${fmtConfidence(conviction.raw_conviction || 70)}%`;
+    // RC9.7.12: 0 es un valor válido. `||` convertía PRECAUCIÓN/ESPERAR
+    // (convicción 0, tamaño 0) en 70% y 100%, y además mostraba leverage de
+    // una hipótesis interna aunque no existiera acción ejecutable.
+    const rawConviction = Number(conviction.raw_conviction);
+    const suggestedSize = Number(conviction.suggested_size);
+    const tradableAction = ['LONG', 'SHORT', 'COMPRA_SPOT', 'VENTA_SPOT'].includes(String(action || '').toUpperCase());
+
+    if (percentageEl) {
+        percentageEl.textContent = `${fmtConfidence(Number.isFinite(rawConviction) ? rawConviction : 0)}%`;
+    }
     if (descriptionEl) descriptionEl.textContent = conviction.description || '';
-    if (sizeEl) sizeEl.textContent = `${Math.round((conviction.suggested_size || 1.0) * 100)}%`;
-    if (leverageEl && data.levels) {
-        // RC9.7.11: una sola fuente de verdad. Convicción puede reducir el
-        // tamaño, pero el frontend nunca recalcula ni modifica apalancamiento.
-        const canonicalLeverage = Number(data.levels.leverage || 1);
-        leverageEl.textContent = Number.isFinite(canonicalLeverage) && canonicalLeverage > 0
-            ? `${Math.round(canonicalLeverage)}x`
-            : '--';
+    if (sizeEl) {
+        sizeEl.textContent = `${Math.round((Number.isFinite(suggestedSize) ? suggestedSize : 0) * 100)}%`;
+    }
+    if (leverageEl) {
+        if (tradableAction && data.levels) {
+            // Una sola fuente de verdad: el backend.
+            const canonicalLeverage = Number(data.levels.leverage || 0);
+            leverageEl.textContent = Number.isFinite(canonicalLeverage) && canonicalLeverage > 0
+                ? `${Math.round(canonicalLeverage)}x`
+                : '--';
+        } else {
+            leverageEl.textContent = '--';
+        }
     }
     
     // Factores positivos y negativos

@@ -1,0 +1,21 @@
+RC9.7.12 FINAL VALIDATION
+=========================
+
+Scope:
+- AI Assistant full Futures universe + multi-symbol comparison.
+- Manual-save leverage consistency with RC9.7.11 V5.
+- Non-tradable conviction display correctness (PRECAUCIÓN/ESPERAR).
+
+PASS  python -m py_compile app.py ai_advisor.py futures_system.py leverage_policy.py supabase_client.py
+PASS  node --check static/futures.js
+PASS  node --check static/script.js
+PASS  pytest regression suite RC9.7.10 + RC9.7.11 + RC9.7.12
+RESULT: 23 passed
+
+Safety invariants checked:
+- No Entry/SL/TP mutation for leverage migration.
+- valid_until is not recreated/reset by leverage migration.
+- Leverage refresh requires same signal_id and matching Entry/SL/TP geometry.
+- Frontend fallback may use current-analysis leverage only when symbol, timeframe and geometry match.
+- PRECAUCIÓN/ESPERAR do not display fabricated 70%/100%/leverage values.
+- No Research or SQL changes.

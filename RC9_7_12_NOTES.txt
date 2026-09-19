@@ -1,0 +1,46 @@
+RC9.7.12 — AI Assistant production-universe + multi-symbol comparison hotfix
+
+Causa demostrada del bug reportado:
+- is_trading_question() no reconocía LINK, AVAX ni varios activos del universo RC9.7.
+- La pregunta "Conviene entrar a LINK-USDT y a AVAX-USDT o cual aconsejas?" era rechazada localmente ANTES de Groq y ANTES de consumir cuota.
+- _resolve_ai_question_target() seguía con un universo antiguo: sólo BTC/ETH/SOL/XRP/ADA/LINK/BNB en normalización, sin soporte real multi-activo.
+- Futures 12h/1D también estaban incompletos en el resolver manual.
+
+Cambios:
+1) ai_advisor.py
+   - TRADING_TERMS actualizado a los 15 activos Futures + USDT.
+   - Runtime prompt entiende manual_comparison y compara setups por geometría/edge, no por confidence aislada.
+2) app.py
+   - Resolver actualizado al universo productivo RC9.7 completo.
+   - Preserva el orden de múltiples símbolos escritos por el usuario.
+   - Respeta TF productivos por grupo: CORE1 30m..1D, CORE2 30m..12h, MEDIUM 30m..4h, HIGH 30m..2h.
+   - Nuevo contexto manual_comparison: para preguntas con 2+ Futures reúne el mejor setup actual de cada símbolo y hasta dos alternativas, con ReviewTrader local cuando existe.
+   - Si no se especifica TF, compara el mejor setup actual disponible de cada símbolo; si se especifica TF, compara sólo ese TF.
+
+No cambia:
+- señales de producción;
+- Entry/SL/TP;
+- Safety;
+- apalancamiento;
+- ReviewTrader/Governance;
+- cuotas (siguen máx. 3 preguntas/hora);
+- Research;
+- SQL/Supabase schema.
+
+Commit sugerido:
+RC9.7.12 fix AI assistant full Futures universe and multi-symbol comparisons
+
+RC9.7.12 ADDENDUM — APALANCAMIENTO AL GUARDAR SEGUIMIENTO MANUAL
+===============================================================
+- Corrige lifecycle restaurado con leverage antiguo (ej. V4 4x) cuando el mismo
+  signal_id se recalcula bajo V5 con la misma geometría Entry/SL/TP (ej. 10x).
+- Sólo actualiza leverage/metadata de política si Entry, SL y TP coinciden; no
+  mueve niveles, no reinicia valid_until y no mezcla señales diferentes.
+- El modal manual usa una única recomendación canónica de apalancamiento.
+- Defensa frontend: durante la migración sólo puede tomar leverage del análisis
+  actual si símbolo, timeframe y Entry/SL/TP coinciden exactamente dentro de una
+  tolerancia numérica mínima.
+- Corrige PRECAUCIÓN/ESPERAR: 0% y tamaño 0% ya no se transforman visualmente en
+  70% y 100% por el operador JavaScript `||`; sin acción ejecutable el
+  apalancamiento visible es `--`.
+- No modifica Entry, SL, TP, Safety, Strategy Bank, Research ni SQL.
