@@ -7260,7 +7260,8 @@ class FuturesAnalysis(TradingExpertSystem):
     def analyze_futures_market(self, symbol: str, timeframe: str, 
                                 btc_analysis: Optional[Dict] = None,
                                 closed_candle_only: bool = True,
-                                prepared_context: Optional[Dict] = None) -> Dict:
+                                prepared_context: Optional[Dict] = None,
+                                intrabar_preview: bool = False) -> Dict:
         """
         Análisis completo para futuros.
         
@@ -7302,8 +7303,41 @@ class FuturesAnalysis(TradingExpertSystem):
         # en un commit posterior; mientras tanto el comportamiento no cambia.
         df_override = None
         closed_context = None
+        preview_context = None
 
-        if closed_candle_only:
+        if intrabar_preview:
+            full_df = self.get_kucoin_data(symbol, timeframe)
+            if full_df is None or len(full_df) < 3:
+                return {
+                    'success': False,
+                    'error': 'No hay suficientes velas reales para preview intrabar',
+                    'symbol': symbol,
+                    'timeframe': timeframe,
+                }
+            df_override = full_df
+            try:
+                _preview_open = pd.to_datetime(
+                    full_df['time'].iloc[-1], utc=True, errors='coerce'
+                )
+                _preview_seconds = int(FUTURES_TIMEFRAME_SECONDS.get(timeframe) or 0)
+                preview_context = {
+                    'source_candle_timestamp': (
+                        _preview_open.isoformat() if not pd.isna(_preview_open) else None
+                    ),
+                    'source_candle_close_timestamp': (
+                        (_preview_open + pd.Timedelta(seconds=_preview_seconds)).isoformat()
+                        if _preview_seconds > 0 and not pd.isna(_preview_open) else None
+                    ),
+                    'live_price': float(full_df['close'].iloc[-1]),
+                }
+            except Exception:
+                preview_context = {
+                    'source_candle_timestamp': None,
+                    'source_candle_close_timestamp': None,
+                    'live_price': float(full_df['close'].iloc[-1]),
+                }
+
+        elif closed_candle_only:
             # Commit 10.1: app.py ya consulta la vela cerrada para saber si
             # puede reutilizar el resultado previo.  Reusar ese mismo contexto
             # evita una segunda copia completa del DataFrame en el mismo ciclo.
@@ -7346,7 +7380,8 @@ class FuturesAnalysis(TradingExpertSystem):
                 btc_analysis=btc_analysis,
                 paxg_analysis=None,
                 paxg_btc_analysis=None,
-                df_override=df_override
+                df_override=df_override,
+                intrabar_preview=intrabar_preview
             )
         finally:
             self._skip_supabase_register = False
@@ -7421,6 +7456,26 @@ class FuturesAnalysis(TradingExpertSystem):
             result['market_data_candles'] = closed_context[
                 'market_data_candles'
             ]
+
+        if intrabar_preview:
+            result['analysis_mode'] = 'INTRABAR_PREVIEW'
+            result['analysis_version'] = 'intrabar_preview_v1'
+            result['preview_only'] = True
+            result['source_candle_closed'] = False
+            result['source_candle_timestamp'] = (preview_context or {}).get(
+                'source_candle_timestamp'
+            )
+            result['source_candle_close_timestamp'] = (preview_context or {}).get(
+                'source_candle_close_timestamp'
+            )
+            result['live_price'] = (preview_context or {}).get(
+                'live_price', result.get('current_price')
+            )
+            result['current_price'] = result.get('live_price')
+            result.pop('signal_id', None)
+            _preview_levels = dict(result.get('levels') or {})
+            _preview_levels.pop('signal_id', None)
+            result['levels'] = _preview_levels
 
         # ============ CAPA CUANTITATIVA FUTURES (SHADOW) ============
         #
@@ -7821,7 +7876,10 @@ class FuturesAnalysis(TradingExpertSystem):
         # IMPORTANTE: solo registrar si el análisis fue FRESCO (no vino del caché).
         # Antes se registraba SIEMPRE, causando 5-10 duplicados idénticos por
         # cada TF cada vez que el warm-up paralelo tocaba el mismo par.
-        if result.get('_from_cache'):
+        if intrabar_preview:
+            # Preview efímero: jamás persiste ni alimenta ReviewTrader.
+            pass
+        elif result.get('_from_cache'):
             # Análisis servido desde caché → la señal ya fue registrada antes.
             pass
         else:

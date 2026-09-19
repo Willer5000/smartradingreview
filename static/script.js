@@ -4352,15 +4352,11 @@ window.updateCandleChart = function(data) {
         });
 }
 
-// RC9.7.7/10 — VISUAL ACTUAL COMPLETO, SIN CONTAMINAR EL MOTOR.
+// RC9.7.12 — VELA EN FORMACIÓN.
 //
-// Principio:
-// - `window.currentAnalysis` conserva SIEMPRE la cohorte de velas cerradas.
-// - `/api/price` aporta una vela abierta DISPLAY_ONLY.
-// - Se crea una COPIA efímera del dataframe para dibujar la vela actual y
-//   recalcular sólo la representación visual de los indicadores.
-// - Esa copia jamás vuelve al backend, no cambia Entry/SL/TP, Safety,
-//   publicación, Research ni aprendizaje.
+// La recomendación/Señal Activa se recalcula en backend como INTRABAR_PREVIEW.
+// Entre esos recálculos, /api/price mantiene precio, vela e indicadores visuales
+// actualizados cada 30 s. Confirmadas/Vigentes siguen naciendo sólo del cierre.
 
 function _liveVisualTimestamp(value) {
     const ts = new Date(value).getTime();
@@ -4450,8 +4446,8 @@ function _buildLiveVisualData(payload) {
         return null;
     }
 
-    // Copia profunda sólo de las series del dataframe. El análisis original
-    // permanece intocable y sigue representando exclusivamente velas cerradas.
+    // Copia profunda sólo para interpolar visualmente los cambios ocurridos
+    // entre dos recálculos INTRABAR_PREVIEW del backend.
     const df = {};
     Object.entries(base.df || {}).forEach(([key, value]) => {
         df[key] = Array.isArray(value) ? value.slice() : value;
@@ -4503,16 +4499,11 @@ function _buildLiveVisualData(payload) {
 }
 
 function _liveVisualCardNote(chartId) {
+    // RC9.7.12: sin etiqueta adicional; era ruido visual.
     const chartDiv = document.getElementById(chartId);
-    if (!chartDiv || !chartDiv.parentElement) return;
-    const parent = chartDiv.parentElement;
-    let note = parent.querySelector(':scope > .live-visual-preview-note');
-    if (!note) {
-        note = document.createElement('div');
-        note.className = 'live-visual-preview-note text-end mb-1';
-        parent.insertBefore(note, chartDiv);
-    }
-    note.innerHTML = '<small class="text-info"><i class="fas fa-eye me-1"></i>Actual · vela en formación · sólo visual</small>';
+    const parent = chartDiv?.parentElement;
+    const oldNote = parent?.querySelector(':scope > .live-visual-preview-note');
+    if (oldNote) oldNote.remove();
 }
 
 function _upsertLiveOpenCandle(chartId, candle, traceName = 'Vela actual · en formación') {
@@ -4609,8 +4600,8 @@ window.updateLiveVisualIndicators = function(payload) {
     const visual = _buildLiveVisualData(payload);
     if (!visual) return;
 
-    // Sólo renderizadores derivados del OHLCV actual. No se llama a endpoints,
-    // no se modifica `currentAnalysis` y no se recalcula la decisión del sistema.
+    // Sólo renderizadores derivados del OHLCV actual. La decisión intrabar
+    // oficial se recalcula por el backend en el ciclo principal, no aquí.
     const renderers = [
         ['ftm', 'ftm-chart', updateFTMChart],
         ['liquidation-heatmap', 'liquidation-heatmap-chart', updateLiquidationHeatmap],
@@ -4660,8 +4651,8 @@ window.updateLiveCandleOverlay = function(payload) {
     window.__lastLiveCandlePayload = payload;
     _upsertLiveOpenCandle('candle-chart', candle);
 
-    // Misma filosofía visual para los indicadores: la última lectura es
-    // provisional; la decisión oficial sigue basada en vela cerrada.
+    // Los indicadores acompañan la vela en formación. La Señal Activa también
+    // es provisional y sólo se convierte en Confirmada cuando cierra la vela.
     window.updateLiveVisualIndicators(payload);
 };
 
@@ -10108,7 +10099,7 @@ window.updateActiveSignals = function updateActiveSignals() {
             if (activeSignals.length === 0) {
                 signalsList.innerHTML = `
                     <div class="list-group-item bg-dark text-muted text-center py-3">
-                        No hay señales activas en el último cálculo completo
+                        No hay señales activas en la vela en formación
                     </div>
                 `;
                 window.spotActiveSignalsLoaded = true;

@@ -1,21 +1,39 @@
 RC9.7.12 FINAL VALIDATION
 =========================
 
-Scope:
+Scope validado:
 - AI Assistant full Futures universe + multi-symbol comparison.
 - Manual-save leverage consistency with RC9.7.11 V5.
-- Non-tradable conviction display correctness (PRECAUCIÓN/ESPERAR).
+- PRECAUCIÓN/ESPERAR display correctness.
+- Active = forming-candle intrabar preview.
+- Confirmed = latest fully closed candle.
+- Vigent = frozen confirmed snapshot preserving original valid_until.
+- Intrabar preview does not overwrite closed-candle authority or ReviewTrader lifecycle.
+- Requested frontend noise removed.
 
-PASS  python -m py_compile app.py ai_advisor.py futures_system.py leverage_policy.py supabase_client.py
-PASS  node --check static/futures.js
+Static/syntax validation:
+PASS  python -m py_compile app.py ai_advisor.py futures_system.py
 PASS  node --check static/script.js
-PASS  pytest regression suite RC9.7.10 + RC9.7.11 + RC9.7.12
+PASS  node --check static/futures.js
+PASS  Jinja parse templates/index.html
+
+Relevant regression suite:
+PASS  RC9.7.11 release invariants + RC9.7.12 tests
 RESULT: 23 passed
 
-Safety invariants checked:
-- No Entry/SL/TP mutation for leverage migration.
-- valid_until is not recreated/reset by leverage migration.
-- Leverage refresh requires same signal_id and matching Entry/SL/TP geometry.
-- Frontend fallback may use current-analysis leverage only when symbol, timeframe and geometry match.
-- PRECAUCIÓN/ESPERAR do not display fabricated 70%/100%/leverage values.
-- No Research or SQL changes.
+RC9.7.12-specific assertions include:
+- Spot/Futures intrabar metadata is preview_only / source_candle_closed=False.
+- Spot Active rejects CLOSED_CANDLE results and is not persisted.
+- Spot Confirmed uses prepare_spot_frame(... previous=False).
+- Futures UI preview uses intrabar_preview=True and does not overwrite canonical closed cache.
+- Futures Active opportunities read the intrabar preview cache, not closed analysis.
+- Futures preview skips ReviewTrader registration.
+- AI universe/comparison resolver accepts current production symbols.
+- Manual leverage uses canonical signal leverage only with matching geometry.
+- PRECAUCIÓN/ESPERAR do not fabricate conviction/size/leverage.
+- Removed strings are absent from frontend.
+
+Operational limitation intentionally preserved:
+- To protect Render resources, the system does not run a second high-frequency full 63-cell Futures sweep on every price tick. The selected/current cell is recalculated intrabar at adaptive cadence; the Active list contains recent intrabar previews already evaluated. Closed-candle scanning/lifecycle remains separate and authoritative for Confirmed/Vigent.
+
+No deploy to Render was executed from the validation environment. Post-deploy visual verification remains required.

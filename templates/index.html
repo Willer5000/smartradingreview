@@ -1210,20 +1210,13 @@
                         <div class="mt-2 text-end">
                             <small class="text-muted">
                                 <i class="fas fa-sync-alt me-1"></i>
-                                Precio en vivo cada 30 s · señales basadas en velas cerradas
+                                Precio en vivo cada 30 s
                             </small>
                         </div>
                     </div>
                 </div>
 
                 <!-- ============ CONTENEDOR DE INDICADORES ============ -->
-                <div class="alert alert-info py-2 px-3 mb-3" id="live-indicators-visual-note" role="note" style="background: rgba(13,202,240,.08); border-color: rgba(13,202,240,.25);">
-                    <small>
-                        <i class="fas fa-eye me-1"></i>
-                        Los gráficos e indicadores incorporan provisionalmente la vela actual en formación para mostrar valores actuales.
-                        Las señales, Entry, SL, TP y Safety siguen calculándose únicamente con velas cerradas.
-                    </small>
-                </div>
                 <div id="indicators-container">
                     <!-- FTMaverick -->
                     <div class="card bg-dark border-warning mb-4 indicator-card" data-indicator="ftm">
@@ -2099,7 +2092,7 @@
                         </div>
                         <div id="current-active-diagnostics"></div>
                         <div class="p-2 text-center">
-                            <small class="text-muted">Atajos del análisis actual. Al hacer clic abre el par, temporalidad, gráficos, indicadores y recomendación técnica. Esta lista es de navegación y no guarda operaciones.</small>
+                            <small class="text-muted">Señales provisionales de la vela en formación: pueden aparecer, cambiar o desaparecer antes del cierre. Al hacer clic abre el análisis actual; no se guardan ni alimentan el aprendizaje como señales confirmadas.</small>
                         </div>
                     </div>
                 </div>
@@ -3191,18 +3184,40 @@
 
         // ============ INTERVALOS DE ACTUALIZACIÓN - VERSIÓN CORREGIDA ============
         function startUpdateIntervals() {
-            // 1. ANÁLISIS COMPLETO - Cada 5 minutos
-            setInterval(function() {
-                if (!document.hidden && typeof window.runCompleteAnalysis === 'function') {
-                    window.runCompleteAnalysis();
-                }
-            }, 300000);
+            // 1. SEÑAL ACTIVA INTRABAR — frecuencia adaptada al timeframe.
+            // La vela en formación puede hacer aparecer/desaparecer/cambiar la
+            // señal. Confirmadas/Vigentes siguen dependiendo únicamente del cierre.
+            const scheduleIntrabarAnalysis = function() {
+                const tf = String(
+                    window.currentInterval
+                    || window.PAGE_CONFIG?.defaultTimeframe
+                    || '1h'
+                );
+                const delay = ({
+                    '30m': 90000,
+                    '1h': 120000,
+                    '2h': 180000,
+                    '4h': 240000,
+                    '12h': 300000,
+                    '1D': 300000,
+                    '1W': 300000
+                })[tf] || 300000;
+
+                clearTimeout(window.__INTRABAR_ANALYSIS_TIMER__);
+                window.__INTRABAR_ANALYSIS_TIMER__ = setTimeout(function tick() {
+                    if (!document.hidden && typeof window.runCompleteAnalysis === 'function') {
+                        window.runCompleteAnalysis();
+                    }
+                    scheduleIntrabarAnalysis();
+                }, delay);
+            };
+            scheduleIntrabarAnalysis();
             
             // 2. CONTEXTO / CORRELACIÓN - Cada 90 segundos, SIN análisis pesado
             // RC7: este timer antes lanzaba /api/analyze para el par actual y
             // 2-3 pares adicionales. Eso competía con Spot/Futures por el único
             // slot pesado y provocaba la tormenta 503/502. Los gráficos/patrones
-            // se refrescan con el análisis principal de 5 minutos; aquí sólo se
+            // se refrescan con el análisis intrabar adaptativo; aquí sólo se
             // reutiliza el snapshot ya cargado en el navegador.
             setInterval(function() {
                 const currentSymbol = window.currentSymbol || (window.PAGE_CONFIG?.defaultSymbol || 'BTC-USDT');

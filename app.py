@@ -18714,15 +18714,21 @@ class TradingExpertSystem:
         # Por: trend = self.analyze_trend_layer(df)
         
     def analyze_full_market(self, symbol, timeframe, btc_analysis=None, paxg_analysis=None, 
-                            paxg_btc_analysis=None, df_override=None):
+                            paxg_btc_analysis=None, df_override=None,
+                            intrabar_preview=False):
         # ============ CACHÉ DE ANÁLISIS (in-memory, TTL por TF) ============
         # Solo cacheamos el caso "estándar" (sin overrides ni contextos externos)
         # porque cuando el caller pasa btc_analysis/paxg_analysis/df_override,
         # el resultado depende de esos parámetros y no del par (símbolo, TF).
         _cache_hit = False
         _cache_key = None
-        if (df_override is None and btc_analysis is None 
-                and paxg_analysis is None and paxg_btc_analysis is None):
+        if (
+            not intrabar_preview
+            and df_override is None
+            and btc_analysis is None
+            and paxg_analysis is None
+            and paxg_btc_analysis is None
+        ):
             try:
                 _cache_key = (symbol, timeframe)
                 _cached_result = _analysis_cache_get(_cache_key)
@@ -18760,7 +18766,10 @@ class TradingExpertSystem:
             
             # Q6-A: Futures supplies its own verified closed-frame contract.
             # Spot selects closed candles here, not in the shared raw fetcher.
-            if not getattr(self, '_skip_supabase_register', False):
+            if (
+                not getattr(self, '_skip_supabase_register', False)
+                and not intrabar_preview
+            ):
                 try:
                     from q6_integrity import prepare_spot_frame
                     df = prepare_spot_frame(df, timeframe)
@@ -20226,13 +20235,57 @@ class TradingExpertSystem:
                     'reason': 'FAIL_NEUTRAL',
                 }
 
+            # RC9.7.12 — PREVIEW INTRABAR.
+            # La señal activa puede cambiar mientras la vela está abierta, pero
+            # nunca debe persistirse ni ganar identidad/lifecycle de señal
+            # confirmada hasta que exista un cierre canónico.
+            if intrabar_preview:
+                try:
+                    from q6_integrity import TIMEFRAME_SECONDS
+                    _preview_df = df
+                    _preview_open = pd.to_datetime(
+                        _preview_df['time'].iloc[-1],
+                        utc=True,
+                        errors='coerce'
+                    )
+                    _preview_seconds = int(TIMEFRAME_SECONDS.get(timeframe) or 0)
+                    resultado_final['analysis_mode'] = 'INTRABAR_PREVIEW'
+                    resultado_final['analysis_version'] = 'intrabar_preview_v1'
+                    resultado_final['preview_only'] = True
+                    resultado_final['source_candle_closed'] = False
+                    resultado_final['source_candle_timestamp'] = (
+                        _preview_open.isoformat()
+                        if not pd.isna(_preview_open)
+                        else None
+                    )
+                    resultado_final['source_candle_close_timestamp'] = (
+                        (_preview_open + pd.Timedelta(seconds=_preview_seconds)).isoformat()
+                        if _preview_seconds > 0 and not pd.isna(_preview_open)
+                        else None
+                    )
+                    resultado_final['current_price'] = float(
+                        _preview_df['close'].iloc[-1]
+                    )
+                    resultado_final.pop('signal_id', None)
+                    _preview_levels = dict(resultado_final.get('levels') or {})
+                    _preview_levels.pop('signal_id', None)
+                    resultado_final['levels'] = _preview_levels
+                except Exception as _preview_meta_error:
+                    print(
+                        f"⚠️ [INTRABAR PREVIEW] metadata: {_preview_meta_error}",
+                        flush=True,
+                    )
+
             # === FASE 7: Registrar señal en Supabase (best-effort, no bloqueante) ===
             # Si el subsistema de futuros nos invocó, saltar registro spot
             # (FuturesAnalysis lo registrará después con system_type='futures')
-            if not getattr(
-                self,
-                '_skip_supabase_register',
-                False
+            if (
+                not intrabar_preview
+                and not getattr(
+                    self,
+                    '_skip_supabase_register',
+                    False
+                )
             ):
                 try:
                     from review_trader import (
@@ -27357,10 +27410,9 @@ def api_price():
         previous_close = float(df['close'].iloc[-2]) if len(df) >= 2 else current_price
         change_pct = ((current_price - previous_close) / previous_close * 100) if previous_close > 0 else 0.0
 
-        # RC9.7.5: the trading decision still uses only closed candles, but the
-        # UI may draw the current open candle as a clearly marked visual overlay.
-        # This payload is display-only and is never fed back into indicators,
-        # Entry/SL/TP, Safety or publication logic.
+        # RC9.7.12: /api/price mantiene el tick visual de 30 s. La Señal
+        # Activa se recalcula por una ruta INTRABAR_PREVIEW separada; este
+        # endpoint ligero no decide ni confirma señales por sí solo.
         last_row = df.iloc[-1]
         last_time = last_row.get('time')
         try:
@@ -27384,7 +27436,7 @@ def api_price():
             # RC9.7.7: volumen de la vela abierta exclusivamente para la
             # previsualización de indicadores. Nunca entra al análisis cerrado.
             'volume': current_volume,
-            'display_only': True,
+            'forming': True,
             'is_forming': True,
         }
         
@@ -27397,7 +27449,8 @@ def api_price():
             'previous_close': previous_close,
             'change_pct': change_pct,
             'current_candle': current_candle,
-            'analysis_uses_closed_candles': True,
+            'active_signal_uses_forming_candle': True,
+            'confirmation_uses_closed_candle': True,
             'timestamp': datetime.now(bolivia_tz).isoformat()
         })
     except Exception as e:
@@ -27439,23 +27492,29 @@ def api_analyze():
         _mark_system_interactive_priority()
         print(f"🔍 Ejecutando analyze_full_market...")
         cache_key = (symbol, interval)
-        result = _analysis_cache_get(cache_key)
         cache_only = str(request.args.get('cache_only', '')).strip().lower() in {'1','true','yes','on'}
-        if result is None and cache_only:
-            # RC7: passive UI panels must never launch the 9-trader heavy engine.
-            return jsonify({
-                'success': False,
-                'busy': True,
-                'deferred': True,
-                'cache_only': True,
-                'retry_after_ms': 90000,
-                'error': 'Snapshot aún no disponible; el panel esperará el próximo análisis principal.'
-            }), 202
-        if result is None:
-            result, result_source = _run_spot_analysis_singleflight(
+        if cache_only:
+            # Paneles pasivos: nunca disparan cálculo pesado. Preferir preview
+            # intrabar reciente; si no existe, pueden leer el snapshot cerrado
+            # sólo como contexto pasivo, no como Señal Activa.
+            result = (
+                _spot_intrabar_preview_cached(symbol, interval)
+                or _analysis_cache_get(cache_key)
+            )
+            if result is None:
+                return jsonify({
+                    'success': False,
+                    'busy': True,
+                    'deferred': True,
+                    'cache_only': True,
+                    'retry_after_ms': 90000,
+                    'error': 'Snapshot aún no disponible; el panel esperará el próximo análisis principal.'
+                }), 202
+        else:
+            result, result_source = _run_spot_intrabar_preview(
                 symbol,
                 interval,
-                f'spot-ui:analyze:{symbol}:{interval}',
+                f'spot-ui:intrabar:{symbol}:{interval}',
             )
             if result is None:
                 return jsonify({
@@ -27463,11 +27522,9 @@ def api_analyze():
                     'busy': True,
                     'deferred': True,
                     'retry_after_ms': 1800,
-                    'error': 'El mismo análisis ya está en curso o el sistema está terminando una tarea de mercado.'
+                    'error': 'La señal activa intrabar está esperando el turno de análisis.'
                 }), 202
-            print(f"♻️ [H3] Spot UI {symbol} {interval}: {result_source}", flush=True)
-        else:
-            print(f"⚡ CACHÉ UI: {symbol} {interval}")
+            print(f"♻️ [RC9.7.12] Spot intrabar {symbol} {interval}: {result_source}", flush=True)
         
         # Verificar resultado
         if result is None:
@@ -27547,6 +27604,11 @@ def api_analyze():
             'data': {
                 'symbol': result.get('symbol', symbol),
                 'timeframe': result.get('timeframe', interval),
+                'analysis_mode': result.get('analysis_mode'),
+                'preview_only': bool(result.get('preview_only', False)),
+                'source_candle_closed': bool(result.get('source_candle_closed', False)),
+                'source_candle_timestamp': result.get('source_candle_timestamp'),
+                'source_candle_close_timestamp': result.get('source_candle_close_timestamp'),
                 'decision': {
                     'action': decision.get('action', 'NO_OPERAR'),
                     'confidence': float(decision.get('confidence', 0)),
@@ -27902,11 +27964,10 @@ def _save_spot_signals_cache_to_disk():
             'active_ts': active_ts,
             'vigent_ts': vigent_ts,
             'previous': previous if isinstance(previous, dict) else None,
-            'active': active if isinstance(active, dict) else None,
+            # RC9.7.12: Activas = intrabar efímero; jamás sobrevivir deploy.
+            'active': None,
             'vigent': vigent if isinstance(vigent, dict) else None,
-            'active_complete': bool(
-                getattr(expert_system, 'spot_active_signals_cache_complete', False)
-            ),
+            'active_complete': False,
         }
         return save_runtime_snapshot(
             'spot', 'signals_cache', payload, ttl_seconds=_SPOT_SIGNALS_CACHE_MAX_AGE
@@ -27939,16 +28000,8 @@ def _load_spot_signals_cache_from_disk():
             setattr(expert_system, 'prev_signals_cache', previous)
             setattr(expert_system, 'prev_signals_cache_time', previous_ts)
             loaded_any = True
-        active = payload.get('active')
-        if isinstance(active, dict):
-            setattr(expert_system, 'spot_active_signals_cache', active)
-            setattr(expert_system, 'spot_active_signals_cache_time', active_ts)
-            setattr(
-                expert_system,
-                'spot_active_signals_cache_complete',
-                bool(payload.get('active_complete', False)),
-            )
-            loaded_any = True
+        # RC9.7.12: no restaurar Activas. La vela en formación del proceso
+        # anterior ya no representa necesariamente el mercado actual.
         vigent = payload.get('vigent')
         if isinstance(vigent, dict):
             setattr(expert_system, 'spot_vigent_signals_cache', vigent)
@@ -28003,6 +28056,10 @@ _SPOT_ACTIVE_PERSIST_PENDING = False
 def _spot_active_snapshot_from_result(result):
     if not isinstance(result, dict) or not result.get('success'):
         return None
+    # RC9.7.12: Activas pertenecen exclusivamente a la vela en formación.
+    # Un análisis CLOSED_CANDLE nunca puede poblar este carril.
+    if str(result.get('analysis_mode') or '').upper() != 'INTRABAR_PREVIEW':
+        return None
 
     symbol = str(result.get('symbol') or '').upper()
     timeframe = str(result.get('timeframe') or '')
@@ -28043,15 +28100,18 @@ def _spot_active_snapshot_from_result(result):
         'timeframe': timeframe,
         'action': action,
         'confidence': confidence,
-        'signal_id': result.get('signal_id') or levels.get('signal_id'),
+        'signal_id': None,
         'entry': levels.get('entry'),
         'stop_loss': levels.get('stop_loss'),
         'take_profit': levels.get('take_profit'),
         'current_price': result.get('current_price'),
         'candle_timestamp': candle_timestamp,
         'message': str(result.get('message') or '')[:800],
-        'snapshot_origin': 'INTERACTIVE_CURRENT_ANALYSIS',
+        'snapshot_origin': 'INTRABAR_FORMING_CANDLE',
+        'preview_only': True,
+        'source_candle_closed': False,
         'synced_at': datetime.now(bolivia_tz).isoformat(),
+        'preview_ts': time.time(),
     }
 
 
@@ -28098,7 +28158,8 @@ def _sync_spot_active_signal_from_result(result):
         setattr(expert_system, 'spot_active_signals_cache', cache)
         setattr(expert_system, 'spot_active_signals_cache_time', time.time())
 
-    _persist_spot_active_cache_async()
+    # Activas son efímeras por definición. No se persisten: tras deploy se
+    # reconstruyen desde la vela actualmente en formación.
     return True
 
 
@@ -28603,6 +28664,108 @@ def _run_spot_analysis_singleflight(symbol, timeframe, owner, wait_seconds=18.0)
                 pass
 
 
+
+# ============================================================================
+# RC9.7.12 — SPOT INTRABAR PREVIEW (SEÑALES ACTIVAS)
+# ============================================================================
+# Activa = hipótesis provisional de la vela en formación.
+# No se registra en ReviewTrader, no crea signal_id/lifecycle y no sustituye
+# Confirmadas/Vigentes. La última vela cerrada sigue siendo la única autoridad
+# para confirmar una señal.
+_SPOT_INTRABAR_PREVIEW_CACHE = {}
+_SPOT_INTRABAR_PREVIEW_CACHE_LOCK = threading.Lock()
+_SPOT_INTRABAR_PREVIEW_MAX_ITEMS = 1
+_SPOT_INTRABAR_PREVIEW_TTLS = {
+    '4h': 90,
+    '12h': 150,
+    '1D': 240,
+    '1W': 300,
+}
+
+
+def _spot_intrabar_preview_cached(symbol, timeframe):
+    key = (str(symbol), str(timeframe))
+    ttl = int(_SPOT_INTRABAR_PREVIEW_TTLS.get(str(timeframe), 180))
+    now = time.time()
+    with _SPOT_INTRABAR_PREVIEW_CACHE_LOCK:
+        item = _SPOT_INTRABAR_PREVIEW_CACHE.get(key)
+        if not isinstance(item, dict):
+            return None
+        if now - float(item.get('ts') or 0) > ttl:
+            _SPOT_INTRABAR_PREVIEW_CACHE.pop(key, None)
+            return None
+        data = item.get('data')
+        return dict(data) if isinstance(data, dict) else None
+
+
+def _store_spot_intrabar_preview(symbol, timeframe, result):
+    key = (str(symbol), str(timeframe))
+    with _SPOT_INTRABAR_PREVIEW_CACHE_LOCK:
+        _SPOT_INTRABAR_PREVIEW_CACHE[key] = {
+            'ts': time.time(),
+            'data': result,
+        }
+        if len(_SPOT_INTRABAR_PREVIEW_CACHE) > _SPOT_INTRABAR_PREVIEW_MAX_ITEMS:
+            ordered = sorted(
+                _SPOT_INTRABAR_PREVIEW_CACHE.items(),
+                key=lambda pair: float((pair[1] or {}).get('ts') or 0),
+            )
+            for old_key, _ in ordered[:-_SPOT_INTRABAR_PREVIEW_MAX_ITEMS]:
+                _SPOT_INTRABAR_PREVIEW_CACHE.pop(old_key, None)
+
+
+def _run_spot_intrabar_preview(symbol, timeframe, owner):
+    cached = _spot_intrabar_preview_cached(symbol, timeframe)
+    if cached is not None:
+        return cached, 'INTRABAR_CACHE'
+
+    acquired = _acquire_heavy_analysis(str(owner), timeout=20)
+    if not acquired:
+        return None, 'BUSY'
+
+    try:
+        raw_df = expert_system.get_kucoin_data(symbol, timeframe)
+        if raw_df is None or getattr(raw_df, 'empty', True):
+            return None, 'NO_DATA'
+
+        # Aislar estado mutable: el preview no debe contaminar heatmaps/zonas
+        # de la autoridad de vela cerrada.
+        from copy import copy
+        preview_system = copy(expert_system)
+        preview_system.liquidation_heatmaps = {}
+        preview_system.dynamic_zones = {}
+        preview_system.last_analysis = {}
+        preview_system.voting_history = {}
+
+        # Contexto cruzado: reutiliza únicamente snapshots cerrados ya existentes.
+        # No genera análisis adicionales de otros pares para construir el preview.
+        btc_ctx = _analysis_cache_get(('BTC-USDT', timeframe))
+        paxg_ctx = _analysis_cache_get(('PAXG-USDT', timeframe))
+        ratio_ctx = _analysis_cache_get(('PAXG-BTC', timeframe))
+
+        result = preview_system.analyze_full_market(
+            symbol,
+            timeframe,
+            btc_analysis=btc_ctx,
+            paxg_analysis=paxg_ctx,
+            paxg_btc_analysis=ratio_ctx,
+            df_override=raw_df,
+            intrabar_preview=True,
+        )
+        if not isinstance(result, dict) or not result.get('success'):
+            return result, 'FAILED'
+
+        _store_spot_intrabar_preview(symbol, timeframe, result)
+        try:
+            _sync_spot_active_signal_from_result(result)
+        except Exception as exc:
+            print(f"⚠️ [SPOT INTRABAR] active sync: {exc}", flush=True)
+        return result, 'INTRABAR_COMPUTED'
+    finally:
+        _release_heavy_analysis(str(owner))
+        _mark_system_interactive_priority(seconds=8)
+
+
 def _run_scheduled_spot_analysis(timeframe):
     """Scheduler Spot protegido por el mismo slot de memoria que Futures."""
     owner = f'spot-scheduled-{timeframe}'
@@ -28930,29 +29093,8 @@ def _compute_previous_signals():
                     f"{symbol}-{timeframe}: {e}"
                 )
 
-    # Publicar el panel Activas apenas termina la primera mitad del trabajo.
-    # No esperamos a completar también las 12 reproducciones de vela anterior.
-    setattr(
-        expert_system,
-        'spot_active_signals_cache',
-        dict(active_results)
-    )
-    setattr(
-        expert_system,
-        'spot_active_signals_cache_time',
-        time.time()
-    )
-    setattr(
-        expert_system,
-        'spot_active_signals_cache_complete',
-        True
-    )
-    _save_spot_signals_cache_to_disk()
-
-    print(
-        "📦 [SPOT CACHE] Señales activas publicadas "
-        f"({len(active_results)})."
-    )
+    # RC9.7.12: estos cálculos cerrados ya no alimentan Activas. El carril
+    # dinámico se actualiza exclusivamente desde INTRABAR_PREVIEW.
 
     # ================================================================
     # COMMIT 1 — MEMORY GUARD
@@ -28987,7 +29129,7 @@ def _compute_previous_signals():
                 spot_price_snapshots[f"{symbol}_{timeframe}"] = {
                     'current_price': precio_actual
                 }
-                df_anterior = prepare_spot_frame(df, timeframe, previous=True)
+                df_anterior = prepare_spot_frame(df, timeframe, previous=False)
                 precio_cierre_anterior = float(df_anterior['close'].iloc[-1])
                 
                 historical = previous_correlations.setdefault(timeframe, {})
@@ -29209,8 +29351,7 @@ def _compute_previous_signals():
 
     setattr(expert_system, 'prev_signals_cache', resultados)
     setattr(expert_system, 'prev_signals_cache_time', time.time())
-    setattr(expert_system, 'spot_active_signals_cache', active_results)
-    setattr(expert_system, 'spot_active_signals_cache_time', time.time())
+    # Activas no se sobreescriben con snapshots de vela cerrada.
     setattr(expert_system, 'spot_vigent_signals_cache', vigent_results)
     setattr(expert_system, 'spot_vigent_signals_cache_time', time.time())
 
@@ -29294,73 +29435,51 @@ def _run_previous_signals_background():
 
 @app.route('/api/spot/signals/active')
 def api_spot_signals_active():
-    """Sirve el panel Spot desde el mismo caché liviano del background."""
+    """Señales provisionales de la vela actualmente en formación.
+
+    RC9.7.12: este carril es efímero. Nunca restaura señales de un deploy
+    anterior ni usa snapshots CLOSED_CANDLE. Una señal puede aparecer,
+    desaparecer o cambiar antes del cierre.
+    """
     try:
         now = time.time()
-        cache_data = getattr(
-            expert_system,
-            'spot_active_signals_cache',
-            None
-        )
-        cache_time = getattr(
-            expert_system,
-            'spot_active_signals_cache_time',
-            0
-        )
-        age = now - cache_time if cache_time else 999999
+        cache_data = getattr(expert_system, 'spot_active_signals_cache', None)
+        cache = dict(cache_data) if isinstance(cache_data, dict) else {}
 
-        if cache_data is not None:
-            if (
-                _spot_previous_refresh_due(cache_time, now)
-                and not _PREV_SIGNALS_COMPUTING['running']
-                and not _LOW_MEMORY_MODE
-            ):
-                threading.Thread(
-                    target=_run_previous_signals_background,
-                    daemon=True
-                ).start()
+        # Expirar previews que ya no se han recalculado. El análisis principal
+        # visible se refresca cada 5 minutos; damos una pequeña tolerancia.
+        cleaned = {}
+        for key, signal in cache.items():
+            if not isinstance(signal, dict):
+                continue
+            tf = str(signal.get('timeframe') or '')
+            ttl = max(420, int(_SPOT_INTRABAR_PREVIEW_TTLS.get(tf, 180)) * 2)
+            try:
+                age = now - float(signal.get('preview_ts') or 0)
+            except Exception:
+                age = ttl + 1
+            if age <= ttl:
+                cleaned[key] = signal
 
-            signals = list(cache_data.values())
-            signals.sort(
-                key=lambda signal: -float(signal.get('confidence') or 0)
-            )
+        if cleaned != cache:
+            setattr(expert_system, 'spot_active_signals_cache', cleaned)
+            setattr(expert_system, 'spot_active_signals_cache_time', now)
 
-            return jsonify({
-                'success': True,
-                'processing': False,
-                'cached': True,
-                'cache_age_seconds': int(age),
-                'stale': bool(_spot_previous_refresh_due(cache_time, now)),
-                'background_refresh': bool(_PREV_SIGNALS_COMPUTING['running']),
-                'processing_age_seconds': _spot_previous_processing_age(),
-                'total': len(signals),
-                'signals': signals,
-                'timestamp': datetime.now(bolivia_tz).isoformat()
-            })
-
-        # Hotfix 16.2: primero intentar restaurar el snapshot compacto YA
-        # persistido. Es barato y funciona también en LOW_MEMORY_MODE.
-        _trigger_spot_fast_restore()
-
-        if (
-            not _LOW_MEMORY_MODE
-            and not _PREV_SIGNALS_COMPUTING['running']
-        ):
-            threading.Thread(
-                target=_run_previous_signals_background,
-                daemon=True
-            ).start()
+        signals = list(cleaned.values())
+        signals.sort(key=lambda signal: -float(signal.get('confidence') or 0))
 
         return jsonify({
             'success': True,
-            'processing': True,
-            'processing_age_seconds': _spot_previous_processing_age(),
-            'total': 0,
-            'signals': [],
+            'processing': False,
+            'intrabar': True,
+            'source_candle_closed': False,
+            'total': len(signals),
+            'signals': signals,
             'message': (
-                'El primer cálculo está esperando su turno o sigue en curso.'
+                'Activas = señal provisional de la vela en formación; '
+                'sólo se confirma al cierre.'
             ),
-            'timestamp': datetime.now(bolivia_tz).isoformat()
+            'timestamp': datetime.now(bolivia_tz).isoformat(),
         })
     except Exception as e:
         print(f"❌ Error en api_spot_signals_active: {e}")
@@ -31611,40 +31730,36 @@ def _futures_opportunity_quality(result):
 
 @app.route('/api/futures/opportunities', methods=['GET'])
 def api_futures_opportunities():
-    """Rank only already-published executable signals. Never manufactures one."""
+    """Señales ACTIVAS intrabar. Nunca reutiliza Confirmadas como actuales."""
     try:
         limit = max(1, min(63, int(request.args.get('limit', 10) or 10)))
-        cache = _get_or_refresh_futures_analysis()
-        rows = []
-        from futures_universe import risk_class_for, exit_profile_for, timeframe_allowed
-        for (symbol, timeframe), result in (cache.get('analysis') or {}).items():
-            if not timeframe_allowed(symbol, timeframe) or not isinstance(result, dict) or not result.get('success'):
-                continue
-            decision = result.get('decision') or {}; levels = result.get('levels') or {}
-            action = str(decision.get('action') or '').upper()
-            publication = str(levels.get('publication_status') or result.get('publication_status') or '').upper()
-            if action not in ('LONG','SHORT') or publication != 'EXECUTABLE_SIGNAL':
-                continue
-            if min(float(levels.get('entry') or 0), float(levels.get('stop_loss') or 0), float(levels.get('take_profit') or 0)) <= 0:
-                continue
-            validity = _futures_signal_validity(result, timeframe, (cache.get('lifecycle') or {}).get(str(result.get('signal_id') or '')) or {})
-            if validity.get('expired'):
-                continue
-            profile = exit_profile_for(symbol)
-            rows.append({
-                'symbol': symbol, 'timeframe': timeframe, 'action': action,
-                'risk_class': risk_class_for(symbol), 'exit_profile': profile.get('name'),
-                'quality_score': _futures_opportunity_quality(result),
-                'execution_safety': levels.get('execution_safety'),
-                'entry_quality': levels.get('entry_score') or levels.get('entry_quality_score'),
-                'risk_reward': levels.get('risk_reward'),
-                'entry': levels.get('entry'), 'stop_loss': levels.get('stop_loss'), 'take_profit': levels.get('take_profit'),
-                'validity': validity, 'signal_id': result.get('signal_id'),
-            })
-        rows.sort(key=lambda r: float(r.get('quality_score') or 0), reverse=True)
-        return jsonify({'success': True, 'count': len(rows), 'opportunities': rows[:limit], 'only_executable': True})
+        rows = _list_futures_intrabar_active()
+        try:
+            from futures_universe import risk_class_for, exit_profile_for
+            for row in rows:
+                symbol = row.get('symbol')
+                row['risk_class'] = risk_class_for(symbol)
+                row['exit_profile'] = (exit_profile_for(symbol) or {}).get('name')
+        except Exception:
+            pass
+        return jsonify({
+            'success': True,
+            'count': len(rows),
+            'opportunities': rows[:limit],
+            'only_executable': True,
+            'intrabar': True,
+            'source_candle_closed': False,
+            'message': (
+                'Activas = previews de la vela en formación; pueden aparecer, '
+                'desaparecer o cambiar antes del cierre.'
+            ),
+        })
     except Exception as exc:
-        return jsonify({'success': False, 'error': str(exc)[:180], 'opportunities': []}), 200
+        return jsonify({
+            'success': False,
+            'error': str(exc)[:180],
+            'opportunities': [],
+        }), 200
 
 
 # ============================================================================
@@ -32211,6 +32326,107 @@ _FUTURES_UI_CACHE = {
     'errors': {},
     'lock': threading.Lock(),
 }
+
+# RC9.7.12 — caché COMPACTO de señales activas intrabar.
+# No se persiste a Supabase/disk y no participa en lifecycle.
+_FUTURES_INTRABAR_ACTIVE_CACHE = {}
+_FUTURES_INTRABAR_ACTIVE_LOCK = threading.Lock()
+_FUTURES_INTRABAR_ACTIVE_TTL_SECONDS = max(180, int(os.environ.get(
+    'FUTURES_INTRABAR_ACTIVE_TTL_SECONDS', '420'
+) or 420))
+_FUTURES_INTRABAR_RUNTIME_CACHE = {}
+
+
+def _store_futures_intrabar_preview(symbol, timeframe, result, runtime_result=None):
+    key = (str(symbol), str(timeframe))
+    now = time.time()
+    decision = (result or {}).get('decision') or {}
+    levels = (result or {}).get('levels') or {}
+    action = str(decision.get('action') or '').upper()
+    publication = str(
+        levels.get('publication_status')
+        or (result or {}).get('publication_status')
+        or ''
+    ).upper()
+    try:
+        confidence = float(decision.get('confidence') or 0)
+    except Exception:
+        confidence = 0.0
+
+    with _FUTURES_INTRABAR_ACTIVE_LOCK:
+        if (
+            action in ('LONG', 'SHORT')
+            and publication == 'EXECUTABLE_SIGNAL'
+            and min(
+                float(levels.get('entry') or 0),
+                float(levels.get('stop_loss') or 0),
+                float(levels.get('take_profit') or 0),
+            ) > 0
+        ):
+            _FUTURES_INTRABAR_ACTIVE_CACHE[key] = {
+                'symbol': str(symbol),
+                'timeframe': str(timeframe),
+                'action': action,
+                'confidence': confidence,
+                'quality_score': _futures_opportunity_quality(result),
+                'execution_safety': levels.get('execution_safety'),
+                'entry_quality': levels.get('entry_score') or levels.get('entry_quality_score'),
+                'risk_reward': levels.get('risk_reward'),
+                'entry': levels.get('entry'),
+                'stop_loss': levels.get('stop_loss'),
+                'take_profit': levels.get('take_profit'),
+                'leverage': levels.get('leverage'),
+                'preview_only': True,
+                'source_candle_closed': False,
+                'source_candle_timestamp': (result or {}).get('source_candle_timestamp'),
+                'source_candle_close_timestamp': (result or {}).get('source_candle_close_timestamp'),
+                'preview_ts': now,
+            }
+        else:
+            # La señal provisional desapareció o dejó de ser ejecutable.
+            _FUTURES_INTRABAR_ACTIVE_CACHE.pop(key, None)
+
+        if isinstance(runtime_result, dict):
+            _FUTURES_INTRABAR_RUNTIME_CACHE[key] = {
+                'ts': now,
+                'data': dict(runtime_result),
+            }
+
+
+def _get_futures_intrabar_runtime(symbol, timeframe):
+    key = (str(symbol or '').strip(), str(timeframe or '').strip())
+    now = time.time()
+    with _FUTURES_INTRABAR_ACTIVE_LOCK:
+        item = _FUTURES_INTRABAR_RUNTIME_CACHE.get(key)
+        if not isinstance(item, dict):
+            return None
+        if now - float(item.get('ts') or 0) > _FUTURES_INTRABAR_ACTIVE_TTL_SECONDS:
+            _FUTURES_INTRABAR_RUNTIME_CACHE.pop(key, None)
+            _FUTURES_INTRABAR_ACTIVE_CACHE.pop(key, None)
+            return None
+        data = item.get('data')
+        return dict(data) if isinstance(data, dict) else None
+
+
+def _list_futures_intrabar_active():
+    now = time.time()
+    rows = []
+    with _FUTURES_INTRABAR_ACTIVE_LOCK:
+        stale = []
+        for key, row in _FUTURES_INTRABAR_ACTIVE_CACHE.items():
+            try:
+                age = now - float((row or {}).get('preview_ts') or 0)
+            except Exception:
+                age = _FUTURES_INTRABAR_ACTIVE_TTL_SECONDS + 1
+            if age > _FUTURES_INTRABAR_ACTIVE_TTL_SECONDS:
+                stale.append(key)
+                continue
+            rows.append(dict(row))
+        for key in stale:
+            _FUTURES_INTRABAR_ACTIVE_CACHE.pop(key, None)
+            _FUTURES_INTRABAR_RUNTIME_CACHE.pop(key, None)
+    rows.sort(key=lambda r: float(r.get('quality_score') or 0), reverse=True)
+    return rows
 _FUTURES_INTERACTIVE_PRIORITY_SECONDS = max(15, int(os.environ.get(
     'FUTURES_INTERACTIVE_PRIORITY_SECONDS', '45'
 ) or 45))
@@ -32378,19 +32594,16 @@ def _get_futures_ui_recent_error(symbol, timeframe, max_age_seconds=20):
 
 
 def _get_futures_runtime_cached(symbol, timeframe):
-    """Último análisis compacto persistido/incremental para respuesta inmediata.
+    """Último preview intrabar compacto para respuesta inmediata.
 
-    No contiene DataFrame de gráficos, pero sí decisión/niveles/contexto básico.
-    Permite mostrar la recomendación mientras el payload rico se prepara.
+    RC9.7.12: el snapshot CLOSED_CANDLE canónico pertenece a Confirmadas y
+    nunca se reutiliza como si fuese la señal Activa actual.
     """
     try:
-        key=(str(symbol or '').strip(), str(timeframe or '').strip())
-        with _futures_analysis_cache['lock']:
-            data=_futures_analysis_cache.get('data') or {}
-            item=(data.get('analysis') or {}).get(key)
-            return dict(item) if isinstance(item,dict) else None
+        return _get_futures_intrabar_runtime(symbol, timeframe)
     except Exception:
         return None
+
 
 def _store_futures_ui_cached(symbol, timeframe, payload):
     key = _futures_ui_key(symbol, timeframe)
@@ -32435,8 +32648,23 @@ def _start_futures_ui_analysis_async(symbol, timeframe):
             if futures is None:
                 raise RuntimeError('FuturesSystem no disponible')
 
+            # El preview no comparte heatmaps/zonas mutables con la autoridad
+            # CLOSED_CANDLE. Así una vela que aún está formándose no contamina
+            # la confirmación que nacerá cuando cierre.
+            from copy import copy
+            preview_futures = copy(futures)
+            preview_futures.liquidation_heatmaps = {}
+            preview_futures.dynamic_zones = {}
+            preview_futures.last_analysis = {}
+            preview_futures.voting_history = {}
+
             _log_memory_runtime(f'{owner}:before')
-            result = futures.analyze_futures_market(symbol, timeframe)
+            result = preview_futures.analyze_futures_market(
+                symbol,
+                timeframe,
+                closed_candle_only=False,
+                intrabar_preview=True,
+            )
             if not result:
                 raise RuntimeError('Análisis Futures vacío')
 
@@ -32451,20 +32679,11 @@ def _start_futures_ui_analysis_async(symbol, timeframe):
             )
             runtime_result = _compact_futures_runtime_result(result)
 
-            # Only the small 30-combo summary stays in the normal runtime cache.
-            try:
-                with _futures_analysis_cache['lock']:
-                    current_data = dict(_futures_analysis_cache.get('data') or {})
-                    current_analysis = dict(current_data.get('analysis') or {})
-                    current_analysis[(symbol, timeframe)] = runtime_result
-                    current_data['analysis'] = current_analysis
-                    current_data.setdefault('errors', [])
-                    current_data.setdefault('lifecycle', {})
-                    _futures_analysis_cache['data'] = current_data
-                    _futures_analysis_cache['ts'] = time.time()
-            except Exception as cache_error:
-                print(f'⚠️ [FUT UI] Snapshot compacto no actualizado: {cache_error}')
-
+            # El preview vive en un caché separado. Nunca sustituye el snapshot
+            # CLOSED_CANDLE que alimenta Confirmadas/Vigentes/lifecycle.
+            _store_futures_intrabar_preview(
+                symbol, timeframe, result, runtime_result=runtime_result
+            )
             _store_futures_ui_cached(symbol, timeframe, ui_result)
             _log_memory_runtime(f'{owner}:after')
         except Exception as exc:
@@ -50256,7 +50475,7 @@ def api_analyze_with_portfolio():
         # 7. CACHE HIT
         # ==============================================================
 
-        if (
+        if False and (
             cache_key in cache_ts
             and (
                 now
@@ -50325,11 +50544,38 @@ def api_analyze_with_portfolio():
                 }), 500
 
         # ==============================================================
-        # 9. ACTUALIZAR SNAPSHOT DEL ANÁLISIS ACTUAL
+        # 9. ACTIVA INTRABAR + AUTORIDAD CERRADA PARA GUARDIAN
         # ==============================================================
+        # El Guardian/TGP conserva exclusivamente la última vela cerrada.
+        # La recomendación visible y el carril Activas usan una copia aislada
+        # que incorpora la vela en formación y puede cambiar antes del cierre.
+        guardian_result = result
+        preview_result, preview_source = _run_spot_intrabar_preview(
+            symbol,
+            timeframe,
+            f'spot-ui:tgp-intrabar:{symbol}:{timeframe}',
+        )
+        if preview_result is None:
+            return jsonify({
+                'success': False,
+                'busy': True,
+                'deferred': True,
+                'retry_after_ms': 1800,
+                'error': 'La señal activa intrabar está esperando el turno de análisis.'
+            }), 202
+        if isinstance(preview_result, dict) and preview_result.get('success'):
+            result = preview_result
+            print(
+                f"♻️ [RC9.7.12] Spot TGP preview {symbol} {timeframe}: {preview_source}",
+                flush=True,
+            )
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'No se pudo construir la señal activa intrabar.',
+                'system_result': preview_result,
+            }), 500
 
-        # H.2: mantener coherencia inmediata entre la recomendación que el
-        # usuario está viendo y el panel Spot de Señales Activas.
         try:
             _sync_spot_active_signal_from_result(result)
         except Exception as spot_sync_error:
@@ -50337,7 +50583,7 @@ def api_analyze_with_portfolio():
 
         current_compact = (
             _compact_tgp_snapshot(
-                result
+                guardian_result
             )
         )
 
@@ -50507,7 +50753,7 @@ def api_analyze_with_portfolio():
                         user=user,
                         portfolio=portfolio,
                         prices=prices,
-                        system_analysis=result
+                        system_analysis=guardian_result
                     )
                 )
         
