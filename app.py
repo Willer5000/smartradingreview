@@ -14967,7 +14967,8 @@ class TradingExpertSystem:
         timeframe,
         liquidation=None,
         market_type='spot',
-        setup_family=None
+        setup_family=None,
+        trend=None
     ):
         """
         Selección Smart Money del ENTRY.
@@ -15174,6 +15175,118 @@ class TradingExpertSystem:
             volatility,
             liquidation
         )
+
+        # ==========================================================
+        # RC9.7.15 — STRUCTURAL LOCATION OF PRICE
+        # ==========================================================
+        # Entry is not derived from ATR.  First classify where price is
+        # located inside the nearest real structure (floor / mid-range /
+        # ceiling). ATR is used only to normalize distances when one side of
+        # the structural range is unavailable.  This lets LONG and SHORT
+        # behave symmetrically:
+        #   LONG at ceiling -> prefer pullback reaction zone
+        #   LONG at floor   -> near-market reaction can be valid
+        #   SHORT at floor  -> prefer rebound reaction zone
+        #   SHORT at ceiling-> near-market rejection can be valid
+        trend = trend if isinstance(trend, dict) else {}
+        trend_indicators = trend.get('indicators', {}) if isinstance(trend.get('indicators', {}), dict) else {}
+
+        def _positive_float(value):
+            try:
+                value = float(value)
+                return value if value > 0 else None
+            except Exception:
+                return None
+
+        # Prefer explicit swing/support-resistance arrays for structural
+        # location. `nearest_support/resistance` can also be enriched by POC/HVN
+        # elsewhere in the system, which is useful for confluence but should
+        # not by itself redefine the market floor/ceiling.
+        supports = []
+        for value in structure.get('supports', []) or []:
+            value = _positive_float(value)
+            if value is not None and value <= current_price:
+                supports.append(value)
+        resistances = []
+        for value in structure.get('resistances', []) or []:
+            value = _positive_float(value)
+            if value is not None and value >= current_price:
+                resistances.append(value)
+        nearest_support = max(supports) if supports else _positive_float(structure.get('nearest_support'))
+        nearest_resistance = min(resistances) if resistances else _positive_float(structure.get('nearest_resistance'))
+
+        support_distance_atr = (
+            (current_price - nearest_support) / atr
+            if nearest_support is not None and nearest_support <= current_price and atr > 0
+            else None
+        )
+        resistance_distance_atr = (
+            (nearest_resistance - current_price) / atr
+            if nearest_resistance is not None and nearest_resistance >= current_price and atr > 0
+            else None
+        )
+
+        structural_range_position = None
+        location_basis = 'ATR_NORMALIZED_FALLBACK'
+        market_location = 'MID_RANGE'
+        if (
+            nearest_support is not None
+            and nearest_resistance is not None
+            and nearest_resistance > nearest_support
+        ):
+            structural_range_position = max(0.0, min(1.0,
+                (current_price - nearest_support) / (nearest_resistance - nearest_support)
+            ))
+            location_basis = 'NEAREST_SUPPORT_RESISTANCE_RANGE'
+            if structural_range_position <= 0.30:
+                market_location = 'FLOOR_DEMAND'
+            elif structural_range_position >= 0.70:
+                market_location = 'CEILING_SUPPLY'
+        else:
+            if (
+                support_distance_atr is not None
+                and support_distance_atr <= 0.55
+                and (resistance_distance_atr is None or resistance_distance_atr >= 1.10)
+            ):
+                market_location = 'FLOOR_DEMAND'
+            elif (
+                resistance_distance_atr is not None
+                and resistance_distance_atr <= 0.55
+                and (support_distance_atr is None or support_distance_atr >= 1.10)
+            ):
+                market_location = 'CEILING_SUPPLY'
+
+        try:
+            bb_position = float(volatility.get('bb_position', 0.5) or 0.5)
+        except Exception:
+            bb_position = 0.5
+        directional_extension = False
+        if direction == 'long':
+            directional_extension = bool(
+                market_location == 'CEILING_SUPPLY'
+                or (bb_position >= 0.80 and support_distance_atr is not None and support_distance_atr >= 1.0)
+            )
+            location_context = (
+                'LONG_EXTENDED_OR_AT_CEILING' if directional_extension
+                else 'LONG_AT_FLOOR_DEMAND' if market_location == 'FLOOR_DEMAND'
+                else 'LONG_MID_RANGE'
+            )
+        else:
+            directional_extension = bool(
+                market_location == 'FLOOR_DEMAND'
+                or (bb_position <= 0.20 and resistance_distance_atr is not None and resistance_distance_atr >= 1.0)
+            )
+            location_context = (
+                'SHORT_EXTENDED_OR_AT_FLOOR' if directional_extension
+                else 'SHORT_AT_CEILING_SUPPLY' if market_location == 'CEILING_SUPPLY'
+                else 'SHORT_MID_RANGE'
+            )
+
+        ema_levels = []
+        for ema_name, ema_weight in (('ema9', 2), ('ema21', 4), ('ema50', 5), ('ema200', 6)):
+            ema_price = _positive_float(trend_indicators.get(ema_name))
+            if ema_price is not None:
+                ema_levels.append((ema_name.upper(), ema_price, ema_weight))
     
         # ==========================================================
         # RANGO PERMITIDO
@@ -15184,9 +15297,22 @@ class TradingExpertSystem:
             else 0.5
         )
     
-        min_dist_pct = max(
+        base_min_dist_pct = max(
             0.15,
             0.30 * atr_pct
+        )
+        # RC9.7.15: when price is already reacting from the correct side of
+        # structure, a valid POI may legitimately sit very close to the closed
+        # candle.  Do not force an artificial deeper retracement. Futures will
+        # still require a lower-TF reaction for near-market execution.
+        correct_side_near_reaction = (
+            (direction == 'long' and market_location == 'FLOOR_DEMAND' and not directional_extension)
+            or (direction == 'short' and market_location == 'CEILING_SUPPLY' and not directional_extension)
+        )
+        min_dist_pct = (
+            max(0.03, 0.10 * atr_pct)
+            if correct_side_near_reaction
+            else base_min_dist_pct
         )
     
         # ==========================================================
@@ -15725,6 +15851,72 @@ class TradingExpertSystem:
                 score += 3
     
             # ------------------------------------------------------
+            # RC9.7.15 — LOCATION-AWARE EXECUTION QUALITY
+            # ------------------------------------------------------
+            # A POI near market is desirable when price is already reacting
+            # from the correct structural side; the same near-market POI is
+            # undesirable when it chases a directional extension.
+            current_d_atr_for_location = float(candidate.get('_current_dist_atr', 999) or 999)
+            candidate_type = str(candidate.get('type') or '').lower()
+            primary_reaction_zone = candidate_type in {'ob', 'fvg', 'support', 'resistance', 'poc'}
+            location_adjustment = 0.0
+
+            if direction == 'long':
+                if directional_extension:
+                    if current_d_atr_for_location < 0.45:
+                        location_adjustment -= 18.0
+                    elif primary_reaction_zone and 0.45 <= current_d_atr_for_location <= 1.80:
+                        location_adjustment += 10.0
+                    if candidate_type == 'atr':
+                        location_adjustment -= 8.0
+                elif market_location == 'FLOOR_DEMAND':
+                    if primary_reaction_zone and current_d_atr_for_location <= 0.65:
+                        location_adjustment += 10.0
+                    elif current_d_atr_for_location > 1.80:
+                        location_adjustment -= 5.0
+                else:
+                    if current_d_atr_for_location < 0.30:
+                        location_adjustment -= 8.0
+                    elif primary_reaction_zone and 0.35 <= current_d_atr_for_location <= 1.50:
+                        location_adjustment += 5.0
+            else:
+                if directional_extension:
+                    if current_d_atr_for_location < 0.45:
+                        location_adjustment -= 18.0
+                    elif primary_reaction_zone and 0.45 <= current_d_atr_for_location <= 1.80:
+                        location_adjustment += 10.0
+                    if candidate_type == 'atr':
+                        location_adjustment -= 8.0
+                elif market_location == 'CEILING_SUPPLY':
+                    if primary_reaction_zone and current_d_atr_for_location <= 0.65:
+                        location_adjustment += 10.0
+                    elif current_d_atr_for_location > 1.80:
+                        location_adjustment -= 5.0
+                else:
+                    if current_d_atr_for_location < 0.30:
+                        location_adjustment -= 8.0
+                    elif primary_reaction_zone and 0.35 <= current_d_atr_for_location <= 1.50:
+                        location_adjustment += 5.0
+
+            score += location_adjustment
+            candidate['_location_adjustment'] = round(location_adjustment, 2)
+
+            # EMAs do not create an Entry by themselves. They only add
+            # confluence when an already-valid structural POI sits on a
+            # dynamic support/resistance area.
+            ema_confluence_bonus = 0.0
+            ema_confluence_hits = []
+            if primary_reaction_zone and atr > 0:
+                for ema_name, ema_price, ema_weight in ema_levels:
+                    if abs(candidate['price'] - ema_price) / atr <= 0.22:
+                        ema_confluence_bonus += float(ema_weight)
+                        ema_confluence_hits.append(ema_name)
+            ema_confluence_bonus = min(10.0, ema_confluence_bonus)
+            score += ema_confluence_bonus
+            candidate['_ema_confluence_bonus'] = round(ema_confluence_bonus, 2)
+            candidate['_ema_confluence_hits'] = ema_confluence_hits
+
+            # ------------------------------------------------------
             # LIQUIDITY POOL
             # ------------------------------------------------------
             pool_price = smc.get(
@@ -16017,7 +16209,7 @@ class TradingExpertSystem:
 
         diagnostics = {
             'version':
-                'Q1_ENTRY_REACHABILITY_V1',
+                'RC9_7_15_STRUCTURAL_ENTRY_V1',
 
             'market_type':
                 normalized_market_type,
@@ -16100,6 +16292,28 @@ class TradingExpertSystem:
             'label': reachability_label,
             'smc_weight': smc_weight,
             'reachability_weight': reach_weight,
+            'market_location': market_location,
+            'location_context': location_context,
+            'location_basis': location_basis,
+            'structural_range_position': (
+                round(structural_range_position, 4)
+                if structural_range_position is not None else None
+            ),
+            'nearest_support': nearest_support,
+            'nearest_resistance': nearest_resistance,
+            'support_distance_atr': (
+                round(support_distance_atr, 4)
+                if support_distance_atr is not None else None
+            ),
+            'resistance_distance_atr': (
+                round(resistance_distance_atr, 4)
+                if resistance_distance_atr is not None else None
+            ),
+            'directional_extension': bool(directional_extension),
+            'location_adjustment': float(best.get('_location_adjustment', 0) or 0),
+            'ema_confluence_bonus': float(best.get('_ema_confluence_bonus', 0) or 0),
+            'ema_confluence': list(best.get('_ema_confluence_hits') or []),
+            'atr_role': 'NORMALIZER_NOT_ENTRY_SOURCE',
             # RC4 exposes the same SMC reaction facts used during selection so
             # Futures can demand a more precise reaction without recomputing
             # or inventing another Entry.
@@ -16184,6 +16398,7 @@ class TradingExpertSystem:
                     else 'spot'
                 ),
                 setup_family=setup_family,
+                trend=trend,
             )
             
             # ============ REGLA ANTI-CHASE ESPECÍFICA DEL SETUP ============
@@ -16371,6 +16586,16 @@ class TradingExpertSystem:
                                 'N/A'
                             )
                         ),
+
+                    'entry_market_location': str(entry_quality.get('market_location', 'MID_RANGE')),
+                    'entry_location_context': str(entry_quality.get('location_context', 'UNKNOWN')),
+                    'entry_location_basis': str(entry_quality.get('location_basis', 'UNKNOWN')),
+                    'entry_structural_range_position': entry_quality.get('structural_range_position'),
+                    'entry_directional_extension': bool(entry_quality.get('directional_extension', False)),
+                    'entry_location_adjustment': float(entry_quality.get('location_adjustment', 0) or 0),
+                    'entry_ema_confluence': list(entry_quality.get('ema_confluence') or []),
+                    'entry_ema_confluence_bonus': float(entry_quality.get('ema_confluence_bonus', 0) or 0),
+                    'entry_atr_role': str(entry_quality.get('atr_role', 'NORMALIZER_NOT_ENTRY_SOURCE')),
 
                     'stop_loss':
                         self._round_price(
@@ -16576,6 +16801,16 @@ class TradingExpertSystem:
                             'N/A'
                         )
                     ),
+
+                'entry_market_location': str(entry_quality.get('market_location', 'MID_RANGE')),
+                'entry_location_context': str(entry_quality.get('location_context', 'UNKNOWN')),
+                'entry_location_basis': str(entry_quality.get('location_basis', 'UNKNOWN')),
+                'entry_structural_range_position': entry_quality.get('structural_range_position'),
+                'entry_directional_extension': bool(entry_quality.get('directional_extension', False)),
+                'entry_location_adjustment': float(entry_quality.get('location_adjustment', 0) or 0),
+                'entry_ema_confluence': list(entry_quality.get('ema_confluence') or []),
+                'entry_ema_confluence_bonus': float(entry_quality.get('ema_confluence_bonus', 0) or 0),
+                'entry_atr_role': str(entry_quality.get('atr_role', 'NORMALIZER_NOT_ENTRY_SOURCE')),
 
                 'entry_liquidity_pool_near': bool(entry_quality.get('liquidity_pool_near')),
                 'entry_sweep_confirmed': bool(entry_quality.get('sweep')),

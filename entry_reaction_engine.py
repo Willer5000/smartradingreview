@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-RC4_ENTRY_REACTION_VERSION = "RC9_7_14_ENTRY_REACTION_V2"
+RC4_ENTRY_REACTION_VERSION = "RC9_7_15_ENTRY_REACTION_V3"
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -88,10 +88,15 @@ def evaluate_entry_reaction(
             "12H": 54.0,
             "1D": 54.0,
         }.get(tf, 58.0)
-        # High TF defines the thesis; a lower TF should refine the actual fill.
+        # RC9.7.15: the thesis timeframe may identify the reaction zone,
+        # but a near-market Futures fill on 1H/2H/4H must be confirmed on a
+        # lower closed timeframe.  12H/1D retain the stricter confirmation
+        # requirement. A deeper limit already waiting at a structural POI does
+        # not need a lower-TF trigger before publication.
+        near_market = distance_atr is not None and distance_atr <= 0.60
         lower_tf_confirmation_required = (
             tf in {"12H", "1D"}
-            or (tf == "1H" and distance_atr is not None and distance_atr <= 0.45)
+            or (tf in {"1H", "2H", "4H"} and near_market)
         )
         weak_reaction_hard_block = (
             tf in {"30M", "1H", "2H", "4H"}
@@ -142,7 +147,8 @@ def evaluate_entry_reaction(
             "futures_stricter_than_spot": True,
             "entry_quality_not_win_probability": True,
             "high_tf_uses_lower_tf_trigger": bool(lower_tf_confirmation_required),
-            "near_market_1h_requires_30m_trigger": True,
+            "near_market_1h_2h_4h_requires_lower_tf_trigger": True,
+            "structural_location_precedes_timing": True,
             "does_not_change_direction": True,
             "does_not_change_leverage": True,
         },

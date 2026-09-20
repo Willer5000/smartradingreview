@@ -1,0 +1,56 @@
+RC9.7.15 — STRUCTURAL ENTRY LOCATION + LOWER-TF EXECUTION CONFIRMATION
+Baseline: RC9.7.14 FINAL FINAL already deployed.
+Repository: MAIN only.
+SQL: none.
+Research: none.
+Frontend: none.
+
+PURPOSE
+- Separate "candidate reaction zone" from "executable Entry" more rigorously.
+- Make Entry behavior symmetric by structural location:
+  LONG at ceiling/extension -> wait for pullback/reaction zone.
+  LONG at floor/demand -> a near-market Entry may be valid, but Futures still needs reaction confirmation when near market.
+  SHORT at floor/extension -> wait for rebound/reaction zone.
+  SHORT at ceiling/supply -> a near-market Entry may be valid, with the same confirmation logic.
+
+WHAT CHANGES
+1) app.py
+- Entry selection now classifies structural location using real supports/resistances first.
+- ATR is a distance normalizer/fallback, not the source of the Entry.
+- Order Blocks, FVG, support/resistance and POC remain primary reaction zones.
+- Fibonacci remains a secondary candidate/confluence.
+- EMA9/21/50/200 can add confluence only when already near a valid structural POI; EMA does not create a trade by itself.
+- Near-market Entries are penalized when chasing a LONG at ceiling or SHORT at floor.
+- Near-market structural Entries are allowed when LONG is at floor/demand or SHORT is at ceiling/supply.
+- The artificial minimum pullback is relaxed only on the correct structural side; leveraged Futures still has the lower-TF trigger gate.
+- New diagnostics are persisted in levels: entry_market_location, entry_location_context, entry_location_basis, range position, directional extension, EMA confluence, and ATR role.
+
+2) entry_reaction_engine.py
+- Near-market Futures 1H, 2H and 4H Entries require a lower-TF closed reaction.
+- 12H and 1D keep their stricter lower-TF confirmation requirement.
+- A deeper structural limit remains eligible without requiring a reaction before price reaches it.
+
+3) futures_system.py
+- Lower-TF mapping: 1H->30M, 2H->30M, 4H->1H, 12H->2H, 1D->4H.
+- Timing gate now uses structural location, not ATR extension alone.
+- LONG at ceiling/extension near market => WAIT_PULLBACK_LONG_EXTENDED.
+- SHORT at floor/extension near market => WAIT_REBOUND_SHORT_EXTENDED.
+- Current public order-flow/microstructure remains SHADOW_CONFLUENCE_NOT_AUTHORITY. It is intentionally not promoted to a production veto until OOS calibration proves it.
+
+NOT CHANGED
+- Direction/thesis engine.
+- Strategy Bank / ReviewTrader learning.
+- Guardian.
+- Leverage.
+- Signal validity/lifecycle.
+- Telegram.
+- Supabase schema.
+- Render Free hardening.
+
+TRADING RATIONALE
+A good directional thesis is not enough for a good Entry. Entry is now evaluated as:
+structural location -> reaction zone -> confluence -> timing confirmation -> executable Entry.
+This avoids using ATR as an empirical price generator while retaining ATR for normalization of distance/volatility.
+
+IMPORTANT
+No Entry can be guaranteed to win. RC9.7.15 raises execution quality requirements; it does not convert technical quality scores into TP probabilities.

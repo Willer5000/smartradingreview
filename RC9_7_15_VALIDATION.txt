@@ -1,0 +1,28 @@
+RC9.7.15 VALIDATION
+
+Baseline: RC9.7.14 FINAL FINAL
+Changed production files:
+- app.py
+- futures_system.py
+- entry_reaction_engine.py
+
+Tests:
+- pytest: 71 passed
+- python -m py_compile app.py futures_system.py entry_reaction_engine.py: PASS
+
+Behavior covered:
+- Structural floor / mid-range / ceiling classification.
+- Symmetric LONG/SHORT location policy.
+- LONG floor allows close structural reaction instead of forced deep pullback.
+- SHORT floor prefers rebound zone instead of chasing downside.
+- LONG ceiling near-market POI receives negative location adjustment and Futures timing gate can block it.
+- EMA is confluence only, not an Entry creator.
+- OB/FVG/S/R remain higher-priority structural POIs than ATR fallback.
+- Near-market 2H and 4H Futures Entries now require lower-TF confirmation.
+- Deeper structural 2H/4H limits remain eligible without pre-touch trigger.
+- Lower-TF map: 1H->30M, 2H->30M, 4H->1H, 12H->2H, 1D->4H.
+- Order-flow stays shadow-only pending OOS calibration.
+
+No SQL migration.
+No Research commit.
+No frontend changes.

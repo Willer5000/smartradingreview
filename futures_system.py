@@ -1951,11 +1951,12 @@ class FuturesAnalysis(TradingExpertSystem):
     def _confirm_high_tf_entry_trigger(self, symbol: str, timeframe: str, action: str, entry_price: float) -> Dict:
         """Require a closed lower-TF reaction when execution precision demands it.
 
-        1H near-market Entries use 30M; 12H uses 2H; 1D uses 4H. This is a
-        timing confirmation only: it never changes direction, Entry, SL, TP or
-        leverage. Missing data fails closed.
+        RC9.7.15 mapping: 1H/2H near-market Entries use 30M, 4H uses 1H,
+        12H uses 2H and 1D uses 4H. This is a timing confirmation only: it
+        never changes direction, Entry, SL, TP or leverage. Missing data fails
+        closed whenever the Entry Reaction Engine says confirmation is required.
         """
-        lower_map = {'1h': '30m', '12h': '2h', '1D': '4h'}
+        lower_map = {'1h': '30m', '2h': '30m', '4h': '1h', '12h': '2h', '1D': '4h'}
         lower_tf = lower_map.get(str(timeframe))
         out = {
             'required': bool(lower_tf), 'passed': False, 'lower_timeframe': lower_tf,
@@ -5579,7 +5580,7 @@ class FuturesAnalysis(TradingExpertSystem):
         flipped.
         """
         out = {
-            'version': 'RC9_7_14_FUTURES_TIMING_GATE_V1',
+            'version': 'RC9_7_15_FUTURES_LOCATION_TIMING_V2',
             'passed': True,
             'status': 'TIMING_OK',
             'reason': 'NOT_EXTENDED_OR_ENTRY_ALREADY_WAITS_FOR_PULLBACK',
@@ -5610,6 +5611,11 @@ class FuturesAnalysis(TradingExpertSystem):
             entry = float(levels.get('entry') or 0)
             entry_distance_atr = abs(current_price - entry) / atr if atr > 0 and entry > 0 else None
             out['entry_distance_atr'] = round(entry_distance_atr, 4) if entry_distance_atr is not None else None
+            market_location = str(levels.get('entry_market_location') or 'MID_RANGE').upper()
+            location_context = str(levels.get('entry_location_context') or 'UNKNOWN').upper()
+            out['market_location'] = market_location
+            out['location_context'] = location_context
+            out['structural_location_used'] = bool(levels.get('entry_location_basis'))
             extended_threshold_pct = max(0.35, atr_pct * 1.10)
             # A limit order already >=0.45 ATR away is itself waiting for the
             # pullback, so extension at current price must not block it.
@@ -5626,26 +5632,34 @@ class FuturesAnalysis(TradingExpertSystem):
 
             if action_u == 'LONG' and trend_dir == 'bullish':
                 dist = out['support_distance_pct']
-                extended = dist is not None and bb_position > 0.70 and dist > extended_threshold_pct
+                structurally_at_ceiling = market_location == 'CEILING_SUPPLY'
+                extended = (
+                    structurally_at_ceiling
+                    or (dist is not None and bb_position > 0.70 and dist > extended_threshold_pct)
+                )
                 if extended and not waits_for_pullback:
                     out.update({
                         'passed': False,
                         'status': 'WAIT_PULLBACK_LONG_EXTENDED',
                         'reason': (
-                            f'LONG extendido: {dist:.2f}% sobre soporte > umbral ATR '
-                            f'{extended_threshold_pct:.2f}%; Entry demasiado cerca del mercado'
+                            'LONG en techo/extensión estructural; Entry demasiado cerca del mercado. '
+                            'Esperar retroceso hacia POI de reacción.'
                         ),
                     })
             elif action_u == 'SHORT' and trend_dir == 'bearish':
                 dist = out['resistance_distance_pct']
-                extended = dist is not None and bb_position < 0.30 and dist > extended_threshold_pct
+                structurally_at_floor = market_location == 'FLOOR_DEMAND'
+                extended = (
+                    structurally_at_floor
+                    or (dist is not None and bb_position < 0.30 and dist > extended_threshold_pct)
+                )
                 if extended and not waits_for_pullback:
                     out.update({
                         'passed': False,
-                        'status': 'WAIT_PULLBACK_SHORT_EXTENDED',
+                        'status': 'WAIT_REBOUND_SHORT_EXTENDED',
                         'reason': (
-                            f'SHORT extendido: {dist:.2f}% bajo resistencia > umbral ATR '
-                            f'{extended_threshold_pct:.2f}%; Entry demasiado cerca del mercado'
+                            'SHORT en piso/extensión estructural; Entry demasiado cerca del mercado. '
+                            'Esperar rebote hacia POI de reacción.'
                         ),
                     })
             out['adx'] = round(adx, 2)
@@ -5949,6 +5963,10 @@ class FuturesAnalysis(TradingExpertSystem):
             'required': False, 'passed': True, 'reason': 'NOT_REQUIRED'
         }
         levels['entry_lower_tf_confirmation'] = lower_tf_trigger
+        # Order flow remains an observed execution confluence until its public
+        # proxy is calibrated OOS. RC9.7.15 deliberately does not let an
+        # unvalidated order-book snapshot create or veto a trade by itself.
+        levels['entry_orderflow_role'] = 'SHADOW_CONFLUENCE_NOT_AUTHORITY'
         if levels['entry_lower_tf_confirmation_required'] and not lower_tf_trigger.get('passed'):
             reason = (
                 f"Entry {timeframe} espera confirmación {lower_tf_trigger.get('lower_timeframe')}: "

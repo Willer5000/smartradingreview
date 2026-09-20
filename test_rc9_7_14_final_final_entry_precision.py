@@ -42,7 +42,7 @@ def test_entry_reaction_failure_is_publication_block_not_only_extreme_hard_block
 
 
 def test_futures_has_atr_aware_anti_chase_timing_gate():
-    assert "RC9_7_14_FUTURES_TIMING_GATE_V1" in FUT
+    assert ("RC9_7_14_FUTURES_TIMING_GATE_V1" in FUT or "RC9_7_15_FUTURES_LOCATION_TIMING_V2" in FUT)
     assert "WAIT_PULLBACK_LONG_EXTENDED" in FUT
     assert "FUTURES_ENTRY_TIMING_WAIT" in FUT
     assert "waits_for_pullback" in FUT
