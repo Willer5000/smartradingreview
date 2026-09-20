@@ -4954,6 +4954,229 @@ function _formatPnl(s) {
     return `<div class="small ${cls}"><strong>${sign}${usdt.toFixed(2)} USDT</strong> (${sign}${pct.toFixed(2)}%)</div>`;
 }
 
+
+// ============================================================================
+// RC9.7.16 — FICHA DE SEÑAL ORIENTADA AL USUARIO
+// ============================================================================
+// El backend conserva IDs, familias, fuentes y atribuciones internas para
+// ReviewTrader. Esta capa SOLO traduce esa evidencia a lenguaje de trading
+// entendible para el usuario. No altera señales, scores ni aprendizaje.
+// ============================================================================
+function _futUserStrategyLabel(family, action) {
+    const key = String(family || '').trim().toUpperCase();
+    const direction = String(action || '').toUpperCase() === 'SHORT' ? 'bajista' : 'alcista';
+    const labels = {
+        'BREAKOUT_RETEST': `Ruptura y retesteo ${direction}`,
+        'STRUCTURE_RETEST': `Retesteo de estructura ${direction}`,
+        'TREND_PULLBACK': `Retroceso dentro de tendencia ${direction}`,
+        'SWEEP_REVERSAL': `Reversión tras barrido de liquidez ${direction}`,
+        'MEAN_REVERSION': `Retorno hacia zona de valor ${direction}`,
+        'TREND_BREAK': `Ruptura de tendencia ${direction}`,
+        'ROTATION': 'Rotación de activos',
+    };
+    return labels[key] || `Configuración técnica ${direction}`;
+}
+
+function _futScoreDescriptor(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '';
+    if (n >= 85) return 'Muy alta';
+    if (n >= 70) return 'Alta';
+    if (n >= 55) return 'Media';
+    return 'Baja';
+}
+
+function _futScoreForUser(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '--';
+    return `${n.toFixed(1)}/100 · ${_futScoreDescriptor(n)}`;
+}
+
+function _futUserThesisLabel(direction, quality) {
+    const raw = String(direction || '').trim().toUpperCase();
+    const side = raw === 'BEARISH' || raw === 'SHORT' ? 'Bajista'
+        : raw === 'BULLISH' || raw === 'LONG' ? 'Alcista'
+        : 'Mixto';
+    const q = Number(quality);
+    if (!Number.isFinite(q)) return side;
+    const strength = q >= 85 ? 'muy favorable' : q >= 70 ? 'favorable' : q >= 55 ? 'moderado' : 'débil';
+    return `${side} · contexto ${strength}`;
+}
+
+function _futUserMtfLabel(value) {
+    const key = String(value || '').trim().toUpperCase();
+    const labels = {
+        'SUPPORTIVE': 'Favorable',
+        'ALIGNED': 'Muy favorable',
+        'STRONGLY_ALIGNED': 'Muy favorable',
+        'CONFIRMED': 'Favorable',
+        'MIXED': 'Mixta',
+        'NEUTRAL': 'Neutral',
+        'OPPOSED': 'Desfavorable',
+        'CONFLICTING': 'Mixta / con conflicto',
+        'INCOMPLETE': 'Parcial',
+    };
+    return labels[key] || (key ? 'Disponible' : '--');
+}
+
+function _futUserRegimeLabel(value) {
+    const key = String(value || '').trim().toUpperCase();
+    const labels = {
+        'TRENDING_BULL': 'Tendencia alcista',
+        'TREND_UP': 'Tendencia alcista',
+        'BULLISH': 'Tendencia alcista',
+        'TRENDING_BEAR': 'Tendencia bajista',
+        'TREND_DOWN': 'Tendencia bajista',
+        'BEARISH': 'Tendencia bajista',
+        'RANGING': 'Mercado lateral',
+        'RANGE': 'Mercado lateral',
+        'TRANSITION': 'Transición',
+        'HIGH_VOLATILITY': 'Alta volatilidad',
+        'LOW_VOLATILITY': 'Baja volatilidad',
+    };
+    return labels[key] || '';
+}
+
+function _futUserPatternEvidence(code) {
+    const key = String(code || '').trim().toUpperCase();
+    const labels = {
+        'BAND_WALK_ALCISTA': 'Bandas de Bollinger mostraron continuidad alcista.',
+        'BAND_WALK_BAJISTA': 'Bandas de Bollinger mostraron continuidad bajista.',
+        'HCH_INVERTIDO': 'Se detectó un Hombro-Cabeza-Hombro invertido.',
+        'HCH': 'Se detectó un Hombro-Cabeza-Hombro bajista.',
+        'DOBLE_SUELO': 'Se detectó un doble suelo como zona de reacción alcista.',
+        'DOBLE_TECHO': 'Se detectó un doble techo como zona de reacción bajista.',
+        'PULLBACK_ALCISTA': 'El precio mostraba un retroceso dentro de una estructura alcista.',
+        'PULLBACK_BAJISTA': 'El precio mostraba un rebote dentro de una estructura bajista.',
+        'LIQUIDITY_SWEEP_ALCISTA': 'Se observó un barrido de liquidez con reacción alcista.',
+        'LIQUIDITY_SWEEP_BAJISTA': 'Se observó un barrido de liquidez con reacción bajista.',
+    };
+    return labels[key] || '';
+}
+
+function _futUserMotive(raw, action) {
+    const text = String(raw || '').trim();
+    if (!text) return '';
+
+    // Los IDs de playbook son internos. La estrategia amigable ya se muestra arriba.
+    if (/^Playbook seleccionado:/i.test(text)) return '';
+
+    const mtfMatch = text.match(/^Alineación multitemporal:\s*(.+?)\.?$/i);
+    if (mtfMatch) {
+        const label = _futUserMtfLabel(mtfMatch[1]);
+        return label === '--' ? '' : `Los marcos temporales mostraban una alineación ${label.toLowerCase()} con la señal.`;
+    }
+
+    const thesisMatch = text.match(/^Calidad de tesis al confirmar:\s*([0-9.]+)/i);
+    if (thesisMatch) {
+        const n = Number(thesisMatch[1]);
+        if (Number.isFinite(n)) {
+            const direction = String(action || '').toUpperCase() === 'SHORT' ? 'bajista' : 'alcista';
+            return `El contexto ${direction} al confirmar obtuvo ${n.toFixed(1)}/100 de calidad técnica.`;
+        }
+    }
+
+    // Nunca mostrar nombres de traders internos. Sólo traducir la evidencia técnica.
+    const supportMatch = text.match(/apoyó\s+con\s+([A-Z0-9_\-]+)/i);
+    if (supportMatch) return _futUserPatternEvidence(supportMatch[1]);
+
+    return '';
+}
+
+
+function _futUserReviewState(value) {
+    const key = String(value || '').trim().toUpperCase();
+    const labels = {
+        'ENTRY_DEFENDED_TO_TARGET': 'Entry bien defendido hasta el objetivo',
+        'ENTRY_TIMING_SUSPECTED': 'Timing de entrada mejorable',
+        'FAST_ADVERSE_MOVE': 'Movimiento adverso rápido tras el Entry',
+        'MANAGEMENT_OR_STOP_REVIEW': 'Conviene revisar gestión o ubicación del SL',
+        'MARGINAL_RR_GEOMETRY': 'Relación riesgo/beneficio ajustada',
+        'WEAK_RR_GEOMETRY': 'Relación riesgo/beneficio desfavorable',
+        'GUARDIAN_HELPFUL': 'La gestión protegió valor',
+        'GUARDIAN_HARMFUL': 'La gestión recortó parte del resultado',
+        'MIXED_NO_CHANGE': 'Resultado mixto; sin ajuste',
+        'POSITIVE_ECONOMIC_OUTCOME': 'Resultado económico positivo',
+        'PROTECTED_STOP_WIN': 'Ganancia protegida mediante Stop Loss',
+        'BREAKEVEN': 'Cierre cercano a equilibrio',
+        'WIN': 'Ganadora',
+        'LOSS': 'Perdedora',
+        'UNFLAGGED': 'Sin observaciones relevantes',
+        'UNKNOWN': 'Sin diagnóstico suficiente',
+        'UNRESOLVED': 'Aún sin resolver',
+        'PENDING_OR_NEUTRAL': 'Pendiente / neutral',
+        'SUPPORTED': 'Respaldado por la evidencia',
+        'WEAK': 'Evidencia débil',
+        'MARGINAL': 'Evidencia marginal',
+    };
+    return labels[key] || (key ? key.toLowerCase().replaceAll('_', ' ') : '--');
+}
+
+function _futUserLearningAuthority(value) {
+    const key = String(value || '').trim().toUpperCase();
+    const labels = {
+        'OBSERVE_ONLY': 'Solo observación',
+        'BOUNDED_CALIBRATION': 'Calibración limitada',
+        'BOUNDED_CONTINUITY': 'Evidencia favorable limitada',
+        'REQUIRE_MORE_CONFIRMATION': 'Exige más confirmación',
+    };
+    return labels[key] || (key ? 'En evaluación' : 'Solo observación');
+}
+
+function _futIndicatorEvidence(indicators, action) {
+    const i = indicators && typeof indicators === 'object' ? indicators : {};
+    const side = String(action || '').toUpperCase();
+    const out = [];
+    const num = (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+    };
+
+    const adx = num(i.adx);
+    if (adx !== null) {
+        const label = adx >= 25 ? 'tendencia con fuerza' : adx >= 20 ? 'fuerza de tendencia moderada' : 'tendencia débil';
+        out.push(`ADX ${adx.toFixed(1)}: ${label}.`);
+    }
+
+    const plusDi = num(i.plus_di);
+    const minusDi = num(i.minus_di);
+    if (plusDi !== null && minusDi !== null) {
+        if (plusDi > minusDi) {
+            out.push(`DMI: presión compradora superior (+DI ${plusDi.toFixed(1)} vs -DI ${minusDi.toFixed(1)}).`);
+        } else if (minusDi > plusDi) {
+            out.push(`DMI: presión vendedora superior (-DI ${minusDi.toFixed(1)} vs +DI ${plusDi.toFixed(1)}).`);
+        }
+    }
+
+    const rsi = num(i.rsi);
+    if (rsi !== null) {
+        let note = 'zona neutral';
+        if (rsi >= 70) note = side === 'LONG' ? 'momentum alto, pero precio exigido' : 'zona alta favorable a vigilar para rechazo';
+        else if (rsi <= 30) note = side === 'SHORT' ? 'momentum bajista alto, pero precio exigido' : 'zona deprimida favorable a vigilar para reacción';
+        else if (rsi >= 55) note = 'impulso comprador';
+        else if (rsi <= 45) note = 'impulso vendedor';
+        out.push(`RSI ${rsi.toFixed(1)}: ${note}.`);
+    }
+
+    const macd = num(i.macd_hist);
+    if (macd !== null) {
+        const aligned = (side === 'LONG' && macd > 0) || (side === 'SHORT' && macd < 0);
+        out.push(`MACD: histograma ${macd.toFixed(4)}${aligned ? ', acompañaba la dirección.' : ', no acompañaba plenamente la dirección.'}`);
+    }
+
+    const vol = num(i.volume_ratio);
+    if (vol !== null) {
+        const label = vol >= 1.2 ? 'participación superior al promedio' : vol >= 0.8 ? 'volumen cercano al promedio' : 'participación inferior al promedio';
+        out.push(`Volumen ${vol.toFixed(2)}× el promedio: ${label}.`);
+    }
+
+    const atr = num(i.atr_pct);
+    if (atr !== null) {
+        out.push(`Volatilidad observada (ATR): ${atr.toFixed(2)}%. Se utilizó para calibrar distancia, tolerancia y riesgo del Entry.`);
+    }
+    return out;
+}
+
 // ============ Modal DETALLE con gráfico Plotly + zonas TP/SL ============
 window.openSavedSignalDetail = async function(signalId) {
     const modal = new bootstrap.Modal(document.getElementById('savedSignalDetailModal'));
@@ -5001,27 +5224,39 @@ window.openSavedSignalDetail = async function(signalId) {
             const n = Number(value);
             return Number.isFinite(n) ? n.toFixed(digits) : '--';
         };
-        const strategyLabel = cfgStrategy.id || cfgStrategy.family || 'No recuperada';
-        const strategySource = cfgStrategy.source || '--';
-        const motivesHtml = Array.isArray(cfg.motives) && cfg.motives.length
-            ? `<ul class="mb-0 ps-3">${cfg.motives.slice(0, 6).map(x => `<li>${futEscapeHtml(x)}</li>`).join('')}</ul>`
-            : '<span class="text-muted">No hay motivos históricos compactos disponibles.</span>';
+        // RC9.7.16: la evidencia interna se conserva intacta en `cfg`, pero la UI
+        // muestra una ficha para trader común, sin IDs de playbook ni nombres de
+        // especialistas internos.
+        const strategyLabel = _futUserStrategyLabel(cfgStrategy.family, sig.action);
+        const thesisLabel = _futUserThesisLabel(cfgThesis.direction || sig.action, cfgThesis.quality);
+        const mtfLabel = _futUserMtfLabel(cfgThesis.mtf_alignment);
+        const regimeLabel = _futUserRegimeLabel(cfgRegime.regime);
+        const motiveEvidence = (Array.isArray(cfg.motives) ? cfg.motives : [])
+            .map(x => _futUserMotive(x, sig.action))
+            .filter(Boolean);
+        const indicatorEvidence = _futIndicatorEvidence(cfg.key_indicators || {}, sig.action);
+        const userEvidence = [...new Set([...motiveEvidence, ...indicatorEvidence])].slice(0, 9);
+        const motivesHtml = userEvidence.length
+            ? `<ul class="mb-0 ps-3">${userEvidence.map(x => `<li>${futEscapeHtml(x)}</li>`).join('')}</ul>`
+            : '<span class="text-muted">No hay evidencia histórica suficiente para ampliar esta ficha.</span>';
+        const regimeHtml = regimeLabel
+            ? `<div class="col-md-4"><span class="text-muted">Contexto de mercado:</span> <strong>${futEscapeHtml(regimeLabel)}</strong></div>`
+            : '';
         const configurationHtml = cfg.available ? `
             <details class="mb-3 p-2 border border-secondary rounded bg-black">
-                <summary class="fw-semibold">🧩 Configuración original de la señal</summary>
+                <summary class="fw-semibold">🧩 Ficha técnica de la señal</summary>
                 <div class="row g-2 mt-1 small">
                     <div class="col-md-6"><span class="text-muted">Estrategia:</span> <strong>${futEscapeHtml(strategyLabel)}</strong></div>
-                    <div class="col-md-3"><span class="text-muted">Familia:</span> <strong>${futEscapeHtml(cfgStrategy.family || '--')}</strong></div>
-                    <div class="col-md-3"><span class="text-muted">Fuente:</span> <strong>${futEscapeHtml(strategySource)}</strong></div>
-                    <div class="col-md-4"><span class="text-muted">Tesis:</span> <strong>${futEscapeHtml(cfgThesis.direction || sig.action || '--')}</strong></div>
-                    <div class="col-md-4"><span class="text-muted">MTF:</span> <strong>${futEscapeHtml(cfgThesis.mtf_alignment || '--')}</strong></div>
-                    <div class="col-md-4"><span class="text-muted">Safety:</span> <strong>${fmtScore(cfgExecution.execution_safety)}</strong></div>
-                    <div class="col-md-4"><span class="text-muted">Régimen:</span> <strong>${futEscapeHtml(cfgRegime.regime || '--')}</strong></div>
-                    <div class="col-md-4"><span class="text-muted">Entry quality:</span> <strong>${fmtScore(cfgExecution.entry_score)}</strong></div>
-                    <div class="col-md-4"><span class="text-muted">Alcanzabilidad:</span> <strong>${fmtScore(cfgExecution.entry_reachability_score)}</strong></div>
-                    <div class="col-md-4"><span class="text-muted">Defendibilidad:</span> <strong>${fmtScore(cfgExecution.entry_defensibility_score)}</strong></div>
+                    <div class="col-md-6"><span class="text-muted">Contexto:</span> <strong>${futEscapeHtml(thesisLabel)}</strong></div>
+                    <div class="col-md-4"><span class="text-muted">Alineación temporal:</span> <strong>${futEscapeHtml(mtfLabel)}</strong></div>
+                    <div class="col-md-4"><span class="text-muted">Seguridad técnica:</span> <strong>${_futScoreForUser(cfgExecution.execution_safety)}</strong></div>
+                    ${regimeHtml}
+                    <div class="col-md-4"><span class="text-muted">Calidad de entrada:</span> <strong>${_futScoreForUser(cfgExecution.entry_score)}</strong></div>
+                    <div class="col-md-4"><span class="text-muted">Zona alcanzable:</span> <strong>${_futScoreForUser(cfgExecution.entry_reachability_score)}</strong></div>
+                    <div class="col-md-4"><span class="text-muted">Protección estructural del Entry:</span> <strong>${_futScoreForUser(cfgExecution.entry_defensibility_score)}</strong></div>
                 </div>
-                <div class="small mt-2"><strong>Motivos/evidencias:</strong>${motivesHtml}</div>
+                <div class="small mt-2"><strong>Evidencias técnicas:</strong>${motivesHtml}</div>
+                <div class="small text-muted mt-2">Los puntajes son medidas internas de calidad técnica; no representan una probabilidad garantizada de tocar TP.</div>
             </details>` : '';
 
         const forensicReasons = Array.isArray(forensic.reasons)
@@ -5032,11 +5267,11 @@ window.openSavedSignalDetail = async function(signalId) {
         const guardianReview = forensic.guardian_review || {};
         const reviewHtml = closedStatus ? `
             <details open class="mb-3 p-2 border border-secondary rounded">
-                <summary class="fw-semibold">🔬 ReviewTrader · revisión post-trade</summary>
+                <summary class="fw-semibold">🔬 Revisión técnica de la operación</summary>
                 <div class="small mt-2">
                     ${forensicReasons ? `<ul class="mb-2 ps-3">${forensicReasons}</ul>` : '<span class="text-muted">Sin diagnóstico suficiente.</span>'}
-                    <div>Resultado económico: <strong>${futEscapeHtml(forensic.economic_outcome || '--')}</strong> · R real: <strong>${fmtScore(forensic.actual_r, 2)}</strong> · MFE: <strong>${fmtScore(forensic.mfe_r, 2)}R</strong> · MAE: <strong>${fmtScore(forensic.mae_r, 2)}R</strong></div>
-                    <div class="mt-1">Entry: <strong>${futEscapeHtml((component.entry || {}).state || '--')}</strong> · Geometría: <strong>${futEscapeHtml((component.geometry || {}).state || '--')}</strong> · Guardian: <strong>${futEscapeHtml((component.guardian || {}).state || '--')}</strong></div>
+                    <div>Resultado económico: <strong>${futEscapeHtml(_futUserReviewState(forensic.economic_outcome))}</strong> · R real: <strong>${fmtScore(forensic.actual_r, 2)}</strong> · MFE: <strong>${fmtScore(forensic.mfe_r, 2)}R</strong> · MAE: <strong>${fmtScore(forensic.mae_r, 2)}R</strong></div>
+                    <div class="mt-1">Entry: <strong>${futEscapeHtml(_futUserReviewState((component.entry || {}).state))}</strong> · Geometría: <strong>${futEscapeHtml(_futUserReviewState((component.geometry || {}).state))}</strong> · Guardian: <strong>${futEscapeHtml(_futUserReviewState((component.guardian || {}).state))}</strong></div>
                     ${guardianReview.evaluated ? `<div class="mt-1">Guardian vs HOLD: <strong>${fmtScore(guardianReview.avg_delta_r, 2)}R</strong> (${Number(guardianReview.evaluated || 0)} evento/s evaluados)</div>` : ''}
                     <div class="mt-1 text-muted">Un trade = una muestra de mercado. Entry, estrategia, SL/TP y Guardian se diagnostican por separado sin multiplicar artificialmente N.</div>
                 </div>
@@ -5047,10 +5282,10 @@ window.openSavedSignalDetail = async function(signalId) {
         const guardianGlobalN = Number(guardianGlobal.sample_size || 0);
         const globalHtml = (globalCanonicalN > 0 || globalObservedN > 0 || guardianGlobalN > 0) ? `
             <div class="mb-3 p-2 rounded bg-dark small">
-                <strong>🌐 Ejecución real agregada · todos los usuarios</strong><br>
+                <strong>🌐 Aprendizaje agregado de ejecución</strong><br>
                 ${futEscapeHtml(globalLearning.symbol || sig.symbol)} ${futEscapeHtml(globalLearning.timeframe || sig.timeframe)} ${futEscapeHtml(globalLearning.action || sig.action)} ·
                 Observaciones=${globalObservedN} · N canónico=${globalCanonicalN}${globalCanonicalN > 0 ? ` · WR ${fmtScore(globalLearning.win_rate)}% · Exp ${fmtScore(globalLearning.expectancy_r, 2)}R` : ''} ·
-                <span class="text-muted">${futEscapeHtml(globalLearning.authority || 'OBSERVE_ONLY')}</span>
+                <span class="text-muted">${futEscapeHtml(_futUserLearningAuthority(globalLearning.authority))}</span>
                 ${guardianGlobalN > 0 ? `<br>Guardian EXIT: N=${guardianGlobalN} · ajuste umbral=${fmtScore(guardianGlobal.exit_threshold_delta, 1)} · ${futEscapeHtml(guardianGlobal.reason || '')}` : ''}
             </div>` : '';
         

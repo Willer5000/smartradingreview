@@ -1,0 +1,29 @@
+RC9.7.16 — USER-FACING SIGNAL CARD
+
+Scope: presentation only.
+
+Changed:
+- Saved Futures signal detail no longer exposes internal strategy IDs such as
+  FUT_LONG_BREAKOUT_RETEST__FUTURES__MEDIUM__4H__LONG.
+- Internal strategy families are translated to trader-friendly names.
+- THESIS+DEFAULT / internal source is not shown to users.
+- Internal specialist/trader names are stripped from visible evidence.
+- MTF/Safety/Entry quality/reachability/defensibility labels are translated to
+  clear Spanish for a basic trader.
+- Real indicator evidence is shown when available: ADX, DMI, RSI, MACD,
+  volume ratio and ATR volatility.
+- Internal ReviewTrader post-trade states remain unchanged in backend but are
+  translated in the UI.
+- No score is described as a guaranteed TP probability.
+
+Not changed:
+- Strategy selection.
+- ReviewTrader storage/learning.
+- Entry/SL/TP.
+- Safety.
+- Leverage.
+- Guardian.
+- Signal validity/lifecycle.
+- Telegram.
+- Supabase schema.
+- Research.
