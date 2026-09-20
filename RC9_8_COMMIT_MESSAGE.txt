@@ -1,0 +1,11 @@
+RC9.8 — Execution Geometry Committee audited final
+
+- Context-aware Entry/SL/TP for Spot and Futures
+- Preserve structural POIs; near vs deep pullback execution
+- ATR-normalized SL protection
+- Deep-entry TP reference fix
+- Independent-family confluence
+- CORE/MEDIUM/HIGH target-speed preference
+- ReviewTrader execution learning advisory, not second veto
+- Fixed ROI/USDT targets diagnostic only; Safety/edge guards preserved
+- Backend-only committee; no frontend/internal-weight exposure

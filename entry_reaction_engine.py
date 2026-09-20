@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-RC4_ENTRY_REACTION_VERSION = "RC9_7_15_ENTRY_REACTION_V3"
+RC4_ENTRY_REACTION_VERSION = "RC9_8_ENTRY_REACTION_GEOMETRY_V1"
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -79,6 +79,8 @@ def evaluate_entry_reaction(
         quality = 0.50 * smc + 0.24 * reach + 0.16 * defensibility + 0.10 * reaction
     quality = max(0.0, min(100.0, quality))
 
+    timing_mode = str(levels.get("entry_timing_mode") or "STRUCTURAL_PULLBACK").upper()
+
     if market == "FUTURES":
         threshold = {
             "30M": 62.0,
@@ -88,18 +90,24 @@ def evaluate_entry_reaction(
             "12H": 54.0,
             "1D": 54.0,
         }.get(tf, 58.0)
-        # RC9.7.15: the thesis timeframe may identify the reaction zone,
-        # but a near-market Futures fill on 1H/2H/4H must be confirmed on a
-        # lower closed timeframe.  12H/1D retain the stricter confirmation
-        # requirement. A deeper limit already waiting at a structural POI does
-        # not need a lower-TF trigger before publication.
+        # RC9.8: timing confirmation is conditional on the Entry geometry.
+        # A DEEP_PULLBACK_LIMIT is an already-approved thesis waiting for price
+        # to reach a structural POI; requiring a reaction *before price arrives*
+        # would turn better Entry placement into artificial timidity.
+        # Near-market execution remains stricter because it is effectively a
+        # market/reaction entry and leverage punishes poor timing.
         near_market = distance_atr is not None and distance_atr <= 0.60
+        deep_pending_limit = timing_mode == "DEEP_PULLBACK_LIMIT"
         lower_tf_confirmation_required = (
-            tf in {"12H", "1D"}
-            or (tf in {"1H", "2H", "4H"} and near_market)
+            (not deep_pending_limit)
+            and (
+                tf in {"12H", "1D"}
+                or (tf in {"1H", "2H", "4H"} and near_market)
+            )
         )
         weak_reaction_hard_block = (
-            tf in {"30M", "1H", "2H", "4H"}
+            (not deep_pending_limit)
+            and tf in {"30M", "1H", "2H", "4H"}
             and reaction < 32.0
             and smc < 62.0
         )
@@ -108,9 +116,23 @@ def evaluate_entry_reaction(
         lower_tf_confirmation_required = False
         weak_reaction_hard_block = False
 
-    passed = quality >= threshold and not weak_reaction_hard_block
+    deep_pending_limit = market == "FUTURES" and timing_mode == "DEEP_PULLBACK_LIMIT"
+    # Deep structural limits are judged by the already-selected POI/geometry;
+    # reaction evidence is intentionally deferred until price reaches the zone.
+    # This is NOT a blanket bypass: the zone must still be structural and have
+    # a minimum baseline of SMC + defendibility. Safety/publication gates remain
+    # unchanged downstream.
+    deep_structural_quality_ok = (
+        deep_pending_limit
+        and structural_poi
+        and smc >= max(52.0, threshold - 4.0)
+        and defensibility >= 50.0
+    )
+    passed = (quality >= threshold or deep_structural_quality_ok) and not weak_reaction_hard_block
 
-    if market == "FUTURES" and lower_tf_confirmation_required:
+    if deep_pending_limit and deep_structural_quality_ok:
+        status = "STRUCTURAL_LIMIT_WAITING_PRICE"
+    elif market == "FUTURES" and lower_tf_confirmation_required:
         status = "ZONE_VALID_LOWER_TF_TRIGGER_REQUIRED" if passed else "ENTRY_ZONE_WEAK"
     elif passed:
         status = "ENTRY_CONFIRMED"
@@ -135,6 +157,7 @@ def evaluate_entry_reaction(
             "defensibility": round(defensibility, 2),
             "reaction": round(reaction, 2),
             "distance_atr": round(distance_atr, 4) if distance_atr is not None else None,
+            "timing_mode": timing_mode,
         },
         "reaction_evidence": {
             "structural_poi": structural_poi,
@@ -149,6 +172,8 @@ def evaluate_entry_reaction(
             "high_tf_uses_lower_tf_trigger": bool(lower_tf_confirmation_required),
             "near_market_1h_2h_4h_requires_lower_tf_trigger": True,
             "structural_location_precedes_timing": True,
+            "deep_structural_limit_does_not_need_prearrival_reaction": True,
+            "deep_structural_limit_keeps_minimum_geometry_quality": True,
             "does_not_change_direction": True,
             "does_not_change_leverage": True,
         },

@@ -1,0 +1,59 @@
+RC9.8 — AUDITORÍA FINAL ENTRY / SL / TP
+Fecha: 2026-09-20
+Base auditada: RC9.7.17 reconstruida sobre el árbol Main completo con RC9.7.14 + RC9.7.15 + RC9.7.16 + RC9.7.17.
+
+OBJETIVO
+- No hacer el sistema más tímido por agregar filtros.
+- Mantener tesis/estrategia separada de geometría de ejecución.
+- Mejorar Entry, SL y TP de manera diferenciada por mercado, instrumento/grupo, TF, contexto, volatilidad y setup.
+- Mantener Safety, protección de capital y trazabilidad.
+- No exponer el comité interno al frontend.
+
+HALLAZGOS Y CORRECCIONES
+1) ENTRY — anti-chase podía sustituir un POI estructural real por el cierre previo.
+   RC9.8 conserva OB/FVG/SR/POC/Fib/etc. reales. Anti-chase sólo puede ajustar fallbacks no estructurales.
+
+2) ENTRY — precisión no equivale a proximidad.
+   Se distinguen NEAR_REACTION, STRUCTURAL_PULLBACK y DEEP_PULLBACK_LIMIT.
+   Un Entry profundo técnicamente defendible puede permanecer esperando precio; un Entry cercano requiere reacción/confirmación acorde al TF.
+
+3) ENTRY — confluencia correlacionada.
+   OB/FVG/SMC no fabrican votos independientes. La confluencia se agrupa por familias causales.
+
+4) SL — mínimo porcentual universal de 0.6% no era portable.
+   Se sustituye por invalidación estructural + piso normalizado por ATR y volatilidad/contexto.
+   El SL no se ensancha para cumplir un beneficio objetivo ni se aprieta por TF de forma mecánica.
+
+5) TP — bug con Entry profundo.
+   Los candidatos TP se filtraban desde current_price. En una limit profunda, un TP válido entre Entry y precio actual podía desaparecer.
+   RC9.8 valida los objetivos desde el Entry planificado.
+
+6) TP — confluencia y horizonte.
+   El TP se puntúa por familias independientes y por objetivo natural. CORE=FAST, MEDIUM=FASTER, HIGH=VERY_FAST actúan como preferencia de ranking, no como distancia artificial.
+
+7) FUTURES — ROI/beneficio fijo podía volver tímido el sistema.
+   minimum_roi_tp_pct y target_net_profit_usdt quedan como referencias diagnósticas; no son veto de publicación ni fuerzan leverage.
+   Se mantienen edge neto tras costes, leverage viable, Safety, RR, pérdida en SL y estrés ATR como protecciones reales.
+
+8) REVIEWTRADER — segundo veto de publicación.
+   La evidencia N>=8 puede sesgar la geometría de Entry/SL/TP de forma acotada, pero no vuelve a juzgar LONG/SHORT ni bloquea una tesis aprobada.
+   N<8 sigue OBSERVE_ONLY.
+
+9) REVIEWTRADER — aprendizaje posterior.
+   Se persisten entry_timing_mode e independent_confluence_families como metadatos técnicos para aprender qué geometrías funcionan. No se persisten ni exponen pesos/nombres internos del comité.
+
+10) SPOT vs FUTURES.
+   Spot usa misión ACCUMULATION_ROTATION y perfiles exactos BTC-USDT, PAXG-USDT y PAXG-BTC.
+   Futures usa CORE1, CORE2, MEDIUM y HIGH con misión táctica y horizonte diferenciado.
+   Spot no recibe autoridad ficticia de aprendizaje de ejecución si no existe una muestra canónica comparable; su geometría sí se diferencia en tiempo real por par/TF/contexto/volatilidad/setup.
+
+11) LIFECYCLE / GUARDIAN / VIGENCIA.
+   Compatible: una señal profunda puede permanecer waiting_entry; Guardian entra después de entry_touched. No se cambian las reglas de Guardian ni la persistencia de vigencia multivela.
+
+12) FRONTEND.
+   No se modifica JS/HTML. No salen specialist_weights, votos, nombres del comité ni claves internas. Sólo datos técnicos de Entry/SL/TP/calidad/estado.
+
+REGLA FINAL RC9.8
+COMITÉ DE ESTRATEGIAS = decide SI existe oportunidad.
+COMITÉ DE GEOMETRÍA = decide CÓMO ejecutarla.
+Un Entry aún no listo no equivale a tesis inválida.

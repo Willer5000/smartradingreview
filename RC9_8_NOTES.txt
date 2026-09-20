@@ -1,0 +1,64 @@
+RC9.8 — EXECUTION GEOMETRY COMMITTEE · AUDITED FINAL
+
+MERCADOS
+SPOT
+- BTC-USDT
+- PAXG-USDT
+- PAXG-BTC (rotación)
+- Misión: acumulación/rotación BTC + PAXG + USDT.
+
+FUTURES
+- CORE1: BTC, ETH, SOL — FAST
+- CORE2: XRP, ADA — FAST, perfil separado de CORE1
+- MEDIUM: BNB, LINK, AVAX, NEAR, DOT — FASTER
+- HIGH: SUI, HYPE, APT, INJ, SEI — VERY_FAST
+
+ESPECIALIZACIÓN INTERNA
+market × instrument/group × symbol × timeframe × direction × regime/context × volatility × setup/strategy × bounded learning.
+
+FAMILIAS DE EVIDENCIA
+- structure_liquidity
+- smc_poi
+- pullback_retest
+- trend_ema
+- volume_profile
+- fibonacci
+- orderflow_shadow
+- volatility_risk
+- review_learning
+
+OrderFlow/OrderBook permanece Shadow; no veto independiente hasta evidencia OOS suficiente.
+ATR normaliza distancia/ruido/alcanzabilidad; no es el arquitecto principal del Entry.
+
+ESTADOS ENTRY
+- NEAR_REACTION
+- STRUCTURAL_PULLBACK
+- DEEP_PULLBACK_LIMIT
+
+NEAR_REACTION puede requerir lower-TF trigger.
+DEEP_PULLBACK_LIMIT puede existir como orden pendiente sin exigir reacción antes de que llegue el precio.
+
+PUBLICACIÓN FUTURES
+Siguen siendo hard guards técnicos:
+- Execution Safety
+- TP quality
+- SL avoidance/protection
+- R:R
+- loss-at-SL
+- ATR stress
+- leverage viability / net edge after costs
+- validez de Entry/SL/TP y datos
+
+NO son hard publication gates:
+- ROI fijo sobre margen
+- beneficio USDT fijo de referencia
+- ReviewTrader execution continuity por sí solo
+
+FRONTEND
+Sin cambios. El comité es backend-only. No se exponen especialistas, pesos ni votos.
+
+RESEARCH
+No requiere commit RC9.8. Research sigue aportando evidencia de estrategia/OOS. Duplicar la política de ejecución live en Research ahora crearía dos autoridades y riesgo de divergencia. El aprendizaje de geometría se realiza en Main con outcomes canónicos; una futura validación Research de geometría debe agregarse como fase separada cuando exista muestra suficiente.
+
+SQL
+No requiere migración.

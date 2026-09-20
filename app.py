@@ -8837,6 +8837,28 @@ class TradingExpertSystem:
                 if total_short_bins > 100 and total_short_weight > 200_000_000:
                     condiciones.append('short_extreme')
                     print(f"   ⚠️ Condición: short_extreme ({total_short_bins} bins, {short_weight_m:.1f}M)")
+            # ==============================================================
+            # RC9.8 — CONFLUENCIA POR FAMILIAS INDEPENDIENTES
+            # ==============================================================
+            try:
+                from execution_geometry_committee import entry_family
+            except Exception:
+                entry_family = lambda value: str(value or 'structure')
+            nearby_families = {entry_family(candidate.get('type'))}
+            for other in all_candidates:
+                if other is candidate:
+                    continue
+                try:
+                    other_price = float(other.get('price', 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if other_price <= 0:
+                    continue
+                if abs(other_price - price) / price * 100 <= 0.35:
+                    nearby_families.add(entry_family(other.get('type')))
+            independent_support = max(0, len(nearby_families) - 1)
+            confluence_score = min(100.0, independent_support * (100.0 / 3.0))
+
             # =====================================================================
            
             
@@ -12715,7 +12737,8 @@ class TradingExpertSystem:
         current_price,
         volatility,
         timeframe,
-        liquidation=None
+        liquidation=None,
+        entry_reference=None
     ):
         """
         Recolecta candidatos de TP orientados a estructura y liquidez.
@@ -12745,6 +12768,15 @@ class TradingExpertSystem:
         """
     
         candidates = []
+
+        # RC9.8 audited: pending/deep Entries evaluate targets from the
+        # planned Entry. A valid target may sit between Entry and market.
+        try:
+            reference_price = float(entry_reference or current_price)
+        except (TypeError, ValueError):
+            reference_price = float(current_price or 0)
+        if reference_price <= 0:
+            reference_price = float(current_price or 0)
     
         atr = float(
             volatility.get(
@@ -12808,19 +12840,19 @@ class TradingExpertSystem:
             if (
                 direction == 'long'
                 and side == 'short'
-                and center > current_price
+                and center > reference_price
             ):
     
                 distance_pct = (
-                    (center - current_price)
-                    / current_price
+                    (center - reference_price)
+                    / reference_price
                     * 100
                 )
     
                 # No usar pools excesivamente lejanos.
                 # Hasta ~6 ATR es suficiente para un objetivo operativo.
                 distance_atr = (
-                    (center - current_price)
+                    (center - reference_price)
                     / atr
                     if atr > 0
                     else 999
@@ -12849,17 +12881,17 @@ class TradingExpertSystem:
             elif (
                 direction == 'short'
                 and side == 'long'
-                and center < current_price
+                and center < reference_price
             ):
     
                 distance_pct = (
-                    (current_price - center)
-                    / current_price
+                    (reference_price - center)
+                    / reference_price
                     * 100
                 )
     
                 distance_atr = (
-                    (current_price - center)
+                    (reference_price - center)
                     / atr
                     if atr > 0
                     else 999
@@ -12935,7 +12967,7 @@ class TradingExpertSystem:
                 # del OB bajista, donde puede aparecer rechazo.
                 target_price = ob_low
     
-                if target_price <= current_price:
+                if target_price <= reference_price:
                     continue
     
                 strength = (
@@ -13001,7 +13033,7 @@ class TradingExpertSystem:
                 ):
                     continue
     
-                if target_price <= current_price:
+                if target_price <= reference_price:
                     continue
     
                 candidates.append({
@@ -13048,7 +13080,7 @@ class TradingExpertSystem:
                 ):
                     continue
     
-                if resistance <= current_price:
+                if resistance <= reference_price:
                     continue
     
                 candidates.append({
@@ -13089,7 +13121,7 @@ class TradingExpertSystem:
                     ):
                         continue
     
-                    if pivot_price > current_price:
+                    if pivot_price > reference_price:
     
                         candidates.append({
                             'price': pivot_price,
@@ -13123,7 +13155,7 @@ class TradingExpertSystem:
                 ):
                     continue
     
-                if price <= current_price:
+                if price <= reference_price:
                     continue
     
                 strength = (
@@ -13179,7 +13211,7 @@ class TradingExpertSystem:
                 ):
                     continue
     
-                if hvn_price <= current_price:
+                if hvn_price <= reference_price:
                     continue
     
                 candidates.append({
@@ -13210,7 +13242,7 @@ class TradingExpertSystem:
                 or 0
             )
     
-            if vah > current_price:
+            if vah > reference_price:
     
                 candidates.append({
                     'price': vah,
@@ -13274,7 +13306,7 @@ class TradingExpertSystem:
     
                 target_price = ob_high
     
-                if target_price >= current_price:
+                if target_price >= reference_price:
                     continue
     
                 strength = (
@@ -13340,7 +13372,7 @@ class TradingExpertSystem:
                 ):
                     continue
     
-                if target_price >= current_price:
+                if target_price >= reference_price:
                     continue
     
                 candidates.append({
@@ -13387,7 +13419,7 @@ class TradingExpertSystem:
                 ):
                     continue
     
-                if support >= current_price:
+                if support >= reference_price:
                     continue
     
                 candidates.append({
@@ -13428,7 +13460,7 @@ class TradingExpertSystem:
                     ):
                         continue
     
-                    if pivot_price < current_price:
+                    if pivot_price < reference_price:
     
                         candidates.append({
                             'price': pivot_price,
@@ -13462,7 +13494,7 @@ class TradingExpertSystem:
                 ):
                     continue
     
-                if price >= current_price:
+                if price >= reference_price:
                     continue
     
                 strength = (
@@ -13518,7 +13550,7 @@ class TradingExpertSystem:
                 ):
                     continue
     
-                if hvn_price >= current_price:
+                if hvn_price >= reference_price:
                     continue
     
                 candidates.append({
@@ -13551,7 +13583,7 @@ class TradingExpertSystem:
     
             if (
                 val > 0
-                and val < current_price
+                and val < reference_price
             ):
     
                 candidates.append({
@@ -13826,7 +13858,8 @@ class TradingExpertSystem:
         direction,
         all_candidates,
         min_distance_pct,
-        sl_distance_pct=None
+        sl_distance_pct=None,
+        geometry_profile=None
     ):
         """
         Puntúa la calidad del TP.
@@ -14211,6 +14244,28 @@ class TradingExpertSystem:
                 + far_penalty
                 + rr_penalty
             )
+
+            # ==========================================================
+            # RC9.8 — CONTEXTUAL TARGET GEOMETRY
+            # ==========================================================
+            # The internal geometry policy differentiates Spot/Futures,
+            # instrument family, volatility, regime and timeframe.  It only
+            # re-ranks already-detected structural targets; it never invents
+            # a TP and never changes the directional thesis.
+            # ==========================================================
+            if geometry_profile:
+                try:
+                    from execution_geometry_committee import tp_candidate_adjustment
+                    atr_abs = float((geometry_profile or {}).get('_atr_abs') or 0)
+                    distance_atr = (abs(price - entry) / atr_abs) if atr_abs > 0 else None
+                    score += tp_candidate_adjustment(
+                        geometry_profile,
+                        candidate_type=candidate.get('type'),
+                        rr=rr,
+                        distance_atr=distance_atr,
+                    )
+                except Exception:
+                    pass
     
             return max(
                 0,
@@ -14228,7 +14283,7 @@ class TradingExpertSystem:
     
             return -1
     
-    def _score_sl_candidate(self, candidate, entry, direction, timeframe, max_distance_pct, atr):
+    def _score_sl_candidate(self, candidate, entry, direction, timeframe, max_distance_pct, atr, geometry_profile=None):
         """
         Puntúa un SL: menos probable de ser tocado + protector.
         
@@ -14238,22 +14293,26 @@ class TradingExpertSystem:
         el SL queda fuera del ruido intradía pero aún dentro de un rango
         estructural (invalidación real de la tesis).
         
-        Además elevamos el mínimo de 0.3% a 0.6% para blindar contra
-        SL peligrosamente pegados al entry.
+        RC9.8 sustituye el mínimo porcentual universal por un piso ATR
+        contextual para no castigar mercados tranquilos.
         
         score = (proteccion_score × 0.4) + (baja_probabilidad_score × 0.6)
         """
         price = candidate['price']
         distance_pct = abs(price - entry) / entry * 100 if entry > 0 else 0
-        
-        # v23: mínimo elevado de 0.3% a 0.6% (SL apretados son trampa)
-        if distance_pct < 0.6 or distance_pct > max_distance_pct:
-            return -1
-        
-        # Score de protección: sweet spot 2.0-3.5×ATR (antes 1.0-2.5×ATR)
+        # RC9.8 audited: no universal percentage hard floor. Structural
+        # invalidation is primary; ATR-normalized distance protects normal noise.
         atr_pct = (atr / entry) * 100 if entry > 0 else 1
-        distance_in_atr = distance_pct / atr_pct if atr_pct > 0 else 1
-        
+        distance_in_atr = distance_pct / atr_pct if atr_pct > 0 else 999
+        hard_min_atr = 0.75
+        if geometry_profile:
+            try:
+                hard_min_atr = float((geometry_profile or {}).get('sl_hard_min_atr', hard_min_atr) or hard_min_atr)
+            except (TypeError, ValueError):
+                hard_min_atr = 0.75
+        if distance_pct > max_distance_pct or distance_in_atr < hard_min_atr:
+            return -1
+
         if 2.0 <= distance_in_atr <= 3.5:
             proteccion_score = 100  # Ideal: fuera del ruido, dentro de invalidación
         elif 1.5 <= distance_in_atr < 2.0:
@@ -14334,6 +14393,20 @@ class TradingExpertSystem:
         # aproximadamente 1.16/100 en lugar de 100/100.
         # ==============================================================
 
+        # RC9.8 — contextual SL ranking.  Structural invalidation remains
+        # primary; the profile only gives a bounded preference to the kind of
+        # invalidation/noise buffer that historically fits this cell/context.
+        if geometry_profile:
+            try:
+                from execution_geometry_committee import sl_candidate_adjustment
+                total_score += sl_candidate_adjustment(
+                    geometry_profile,
+                    candidate_type=candidate.get('type'),
+                    distance_atr=distance_in_atr,
+                )
+            except Exception:
+                pass
+
         return max(
             0,
             min(
@@ -14354,7 +14427,8 @@ class TradingExpertSystem:
         leverage=1,
         is_futures=False,
         sl_price=None,
-        liquidation=None
+        liquidation=None,
+        geometry_profile=None
     ):
         """
         Selecciona el TP óptimo: rentable + probable.
@@ -14371,7 +14445,8 @@ class TradingExpertSystem:
             current_price,
             volatility,
             timeframe,
-            liquidation=liquidation
+            liquidation=liquidation,
+            entry_reference=entry
         )
         if not candidates:
             return None, "Sin candidatos de TP", 0
@@ -14411,7 +14486,8 @@ class TradingExpertSystem:
                 direction,
                 candidates,
                 min_distance,
-                sl_distance_pct=sl_distance_pct
+                sl_distance_pct=sl_distance_pct,
+                geometry_profile=geometry_profile
             )
             if score > 0:
                 scored.append((c, score))
@@ -14620,7 +14696,8 @@ class TradingExpertSystem:
         entry,
         volatility,
         timeframe,
-        current_price=None
+        current_price=None,
+        geometry_profile=None
     ):
         """
         Selecciona el SL óptimo usando el ENTRY REAL.
@@ -14688,7 +14765,8 @@ class TradingExpertSystem:
                 direction,
                 timeframe,
                 max_distance,
-                atr
+                atr,
+                geometry_profile=geometry_profile
             )
     
             if score > 0:
@@ -14968,7 +15046,9 @@ class TradingExpertSystem:
         liquidation=None,
         market_type='spot',
         setup_family=None,
-        trend=None
+        trend=None,
+        momentum=None,
+        symbol=None
     ):
         """
         Selección Smart Money del ENTRY.
@@ -15163,7 +15243,54 @@ class TradingExpertSystem:
             reachability_profile[
                 'max_atr'
             ]
-        )    
+        )
+
+        # ==========================================================
+        # RC9.8 — DIFFERENTIATED EXECUTION GEOMETRY PROFILE
+        # ==========================================================
+        # Internal only.  It differentiates market, pair/group, timeframe,
+        # market regime and volatility, then supplies bounded ranking biases
+        # for Entry/SL/TP.  It never changes LONG/SHORT and its specialist
+        # roster is deliberately not returned to the frontend.
+        # ==========================================================
+        geometry_profile = {}
+        try:
+            from execution_geometry_committee import build_profile
+            regime_info = self.detect_market_regime(
+                trend if isinstance(trend, dict) else {},
+                momentum if isinstance(momentum, dict) else {},
+                volatility if isinstance(volatility, dict) else {},
+                structure if isinstance(structure, dict) else {},
+            )
+            geometry_profile = build_profile(
+                market_type=normalized_market_type,
+                symbol=symbol,
+                timeframe=timeframe_key,
+                direction=direction,
+                setup_family=setup_family,
+                market_regime=(regime_info or {}).get('regime'),
+                trend=trend,
+                momentum=momentum,
+                volatility=volatility,
+            )
+            geometry_profile['_atr_abs'] = atr
+        except Exception as geometry_error:
+            geometry_profile = {
+                'version': 'RC9_8_STATIC_FAILOPEN',
+                'hard_max_reach_atr': max_reach_atr,
+                'near_max_atr': 0.60,
+                'deep_min_atr': 0.90,
+                '_atr_abs': atr,
+            }
+
+        # Preferred reachability still influences quality, but a technically
+        # probable prolonged pullback is not discarded solely for exceeding
+        # that preferred band.  A separate hard cap prevents absurd limits.
+        hard_max_reach_atr = max(
+            max_reach_atr,
+            float(geometry_profile.get('hard_max_reach_atr') or max_reach_atr)
+        )
+
         # ==========================================================
         # CONTEXTO SMC
         # ==========================================================
@@ -15327,11 +15454,15 @@ class TradingExpertSystem:
         # y del timeframe.
         # ==========================================================
 
+        # RC9.8: max_reach_atr remains the preferred reachability band, but
+        # hard_max_reach_atr is the absolute sanity cap.  This distinction is
+        # what lets the geometry engine choose a probable prolonged pullback
+        # without making every deep POI automatically executable.
         max_dist_pct = min(
-            5.0,
+            20.0,
             max(
                 min_dist_pct * 1.50,
-                max_reach_atr * atr_pct
+                hard_max_reach_atr * atr_pct
             )
         )
     
@@ -15669,7 +15800,7 @@ class TradingExpertSystem:
             # a otra zona estructural que sea razonablemente alcanzable.
             # ======================================================
 
-            if current_dist_atr > max_reach_atr:
+            if current_dist_atr > hard_max_reach_atr:
                 continue
 
             candidate[
@@ -15755,7 +15886,7 @@ class TradingExpertSystem:
 
             diagnostics = {
                 'version':
-                    'Q1_ENTRY_REACHABILITY_V1',
+                    'RC9_8_EXECUTION_GEOMETRY_V1',
 
                 'market_type':
                     normalized_market_type,
@@ -15796,8 +15927,18 @@ class TradingExpertSystem:
                 'max_reach_atr':
                     max_reach_atr,
 
+                'hard_max_reach_atr':
+                    hard_max_reach_atr,
+
+                'entry_timing_mode':
+                    'SYNTHETIC_DIAGNOSTIC',
+
                 'label':
-                    'SINTETICO_DIAGNOSTICO'
+                    'SINTETICO_DIAGNOSTICO',
+
+                # Internal-only; calculate_entry_levels pops this before
+                # building the technical payload returned by the API/UI.
+                '_geometry_profile_internal': geometry_profile,
             }
 
             return (
@@ -16089,39 +16230,63 @@ class TradingExpertSystem:
                 2
             )    
         # ==========================================================
-        # CONFLUENCIA ENTRE POIs
+        # RC9.8 — CONFLUENCIA ENTRE FAMILIAS INDEPENDIENTES
         # ==========================================================
+        # OB+FVG are not counted as two independent confirmations; they belong
+        # to the same SMC/POI family.  Likewise, repeated levels from one family
+        # cannot manufacture consensus.  The internal geometry profile then
+        # decides whether a near reaction or a deeper pullback is preferable.
+        # ==========================================================
+        try:
+            from execution_geometry_committee import (
+                entry_candidate_adjustment,
+                entry_family,
+            )
+        except Exception:
+            entry_candidate_adjustment = None
+            entry_family = lambda value: str(value or 'structure_liquidity')
+
         for i, candidate in enumerate(valid):
-    
-            confluence = 0
-    
+            nearby_families = {entry_family(candidate.get('type'))}
+
             for j, other in enumerate(valid):
-    
                 if i == j:
                     continue
-    
-                distance = abs(
-                    candidate['price']
-                    - other['price']
-                )
-    
-                if (
-                    atr > 0
-                    and distance <= atr * 0.35
-                ):
-                    confluence += 1
-    
-            if confluence > 0:
-    
-                candidate['_smc_score'] = min(
-                    100,
-                    candidate['_smc_score']
-                    + min(10, confluence * 5)
-                )
+                distance = abs(candidate['price'] - other['price'])
+                if atr > 0 and distance <= atr * 0.35:
+                    nearby_families.add(entry_family(other.get('type')))
 
-            # Confluence is part of the causal POI quality. Recompute the
-            # score used for ranking *after* applying it; older code changed
-            # SMC but ranked with the stale pre-confluence quality.
+            independent_family_count = len(nearby_families)
+            independent_bonus = min(10.0, max(0, independent_family_count - 1) * 4.0)
+            if independent_bonus > 0:
+                candidate['_smc_score'] = min(100.0, candidate['_smc_score'] + independent_bonus)
+
+            geometry_adjustment = 0.0
+            timing_mode = 'STRUCTURAL_PULLBACK'
+            if entry_candidate_adjustment is not None:
+                try:
+                    geometry_eval = entry_candidate_adjustment(
+                        geometry_profile,
+                        candidate_type=candidate.get('type'),
+                        distance_atr=float(candidate.get('_current_dist_atr', 999) or 999),
+                        market_location=market_location,
+                        directional_extension=bool(directional_extension),
+                        correct_side_near_reaction=bool(correct_side_near_reaction),
+                        independent_family_count=independent_family_count,
+                    )
+                    geometry_adjustment = float(geometry_eval.get('adjustment') or 0)
+                    timing_mode = str(geometry_eval.get('timing_mode') or timing_mode)
+                except Exception:
+                    geometry_adjustment = 0.0
+
+            candidate['_geometry_adjustment'] = round(geometry_adjustment, 2)
+            candidate['_entry_timing_mode'] = timing_mode
+            candidate['_independent_family_count'] = independent_family_count
+            candidate['_smc_score'] = max(0.0, min(100.0, candidate['_smc_score'] + geometry_adjustment))
+
+            # Recompute the score used for ranking after confluence + contextual
+            # geometry. Reachability remains useful, but no longer acts as an
+            # accidental veto against a probable deeper pullback.
             candidate['_entry_quality_score'] = round(
                 max(0.0, min(100.0,
                     candidate['_smc_score'] * smc_weight
@@ -16129,7 +16294,7 @@ class TradingExpertSystem:
                 )),
                 2,
             )
-    
+
         # ==========================================================
         # ELEGIR POR SMC SCORE
         # ==========================================================
@@ -16209,7 +16374,7 @@ class TradingExpertSystem:
 
         diagnostics = {
             'version':
-                'RC9_7_15_STRUCTURAL_ENTRY_V1',
+                'RC9_8_EXECUTION_GEOMETRY_V1',
 
             'market_type':
                 normalized_market_type,
@@ -16289,6 +16454,13 @@ class TradingExpertSystem:
             'max_reach_atr':
                 max_reach_atr,
 
+            'hard_max_reach_atr':
+                hard_max_reach_atr,
+
+            'entry_timing_mode': str(best.get('_entry_timing_mode') or 'STRUCTURAL_PULLBACK'),
+            'independent_confluence_families': int(best.get('_independent_family_count') or 1),
+            'geometry_adjustment': float(best.get('_geometry_adjustment', 0) or 0),
+
             'label': reachability_label,
             'smc_weight': smc_weight,
             'reachability_weight': reach_weight,
@@ -16321,6 +16493,11 @@ class TradingExpertSystem:
             'sweep': bool(smc.get('sweep')),
             'mss': bool(smc.get('mss')),
             'displacement': bool(smc.get('displacement')),
+
+            # Never serialize internal specialist weights/learning metadata to
+            # the frontend.  The parent method removes this private key before
+            # constructing levels and uses it only to rank SL/TP.
+            '_geometry_profile_internal': geometry_profile,
         }
 
         return (
@@ -16399,27 +16576,41 @@ class TradingExpertSystem:
                 ),
                 setup_family=setup_family,
                 trend=trend,
+                momentum=momentum,
+                symbol=symbol,
             )
+
+            # RC9.8: keep the specialist roster/weights backend-only.  Only
+            # technical outputs (Entry/SL/TP, source, timing mode, quality) are
+            # allowed to flow into levels/UI.
+            execution_geometry_profile = entry_quality.pop(
+                '_geometry_profile_internal',
+                {}
+            ) if isinstance(entry_quality, dict) else {}
             
             # ============ REGLA ANTI-CHASE ESPECÍFICA DEL SETUP ============
             # Pullback/reversal: no perseguir más allá del cierre previo.
             # Breakout/retest: aceptar el lado roto sólo si sigue siendo un retest
             # cercano (máx. 1.25 ATR) y nunca peor que el precio actual.
             original_selected_entry = float(entry)
-            if setup_family in ('BREAKOUT_RETEST', 'STRUCTURE_RETEST'):
-                if direction == 'long':
-                    entry = min(entry, current_price, previous_close + 1.25 * atr)
+            candidate_type = str(entry_quality.get('candidate_type') or '').lower()
+            structural_entry = candidate_type in {'ob','fvg','support','resistance','poc','fib','liquidity','sweep','hvn','lvn','va','ema','vwap'}
+            # Preserve genuine structural POIs; anti-chase may only move a fallback.
+            if not structural_entry:
+                if setup_family in ('BREAKOUT_RETEST', 'STRUCTURE_RETEST'):
+                    if direction == 'long':
+                        entry = min(entry, current_price, previous_close + 1.25 * atr)
+                    else:
+                        entry = max(entry, current_price, previous_close - 1.25 * atr)
                 else:
-                    entry = max(entry, current_price, previous_close - 1.25 * atr)
+                    if direction == 'long' and entry > previous_close:
+                        entry = previous_close
+                        entry_source = 'Cierre anterior (fallback anti-FOMO)'
+                    elif direction == 'short' and entry < previous_close:
+                        entry = previous_close
+                        entry_source = 'Cierre anterior (fallback anti-FOMO)'
             else:
-                if direction == 'long' and entry > previous_close:
-                    print(f"   ⚠️ Entry LONG {entry:.4f} > cierre anterior {previous_close:.4f}. Forzando a cierre.")
-                    entry = previous_close
-                    entry_source = 'Cierre anterior (anti-FOMO pullback/reversión)'
-                elif direction == 'short' and entry < previous_close:
-                    print(f"   ⚠️ Entry SHORT {entry:.4f} < cierre anterior {previous_close:.4f}. Forzando a cierre.")
-                    entry = previous_close
-                    entry_source = 'Cierre anterior (anti-FOMO pullback/reversión)'
+                entry_quality['structural_entry_preserved_by_anti_chase'] = True
             if abs(float(entry) - original_selected_entry) > max(1e-12, abs(original_selected_entry) * 1e-10):
                 # The displayed/executed price must never inherit the score of
                 # a different POI. Re-grade reachability and cap SMC when the
@@ -16444,6 +16635,16 @@ class TradingExpertSystem:
                     rw = float(entry_quality.get('reachability_weight') or (0.20 if is_futures else 0.18))
                     regraded = max(0.0, min(100.0, smc_raw * sw + reach * rw))
                     entry_score = int(round(regraded))
+                    # Recompute the public technical timing label after anti-chase
+                    # moved the actual Entry.  Internal specialist weights remain private.
+                    near_max = float((execution_geometry_profile or {}).get('near_max_atr') or 0.60)
+                    deep_min = float((execution_geometry_profile or {}).get('deep_min_atr') or 0.90)
+                    if d_atr <= near_max:
+                        timing_mode = 'NEAR_REACTION'
+                    elif d_atr >= max(near_max + 0.05, deep_min):
+                        timing_mode = 'DEEP_PULLBACK_LIMIT'
+                    else:
+                        timing_mode = 'STRUCTURAL_PULLBACK'
                     entry_quality.update({
                         'price_adjusted_by_anti_chase': True,
                         'original_selected_entry': original_selected_entry,
@@ -16451,6 +16652,7 @@ class TradingExpertSystem:
                         'reachability_score': round(reach, 2),
                         'smc_raw_score': round(smc_raw, 2),
                         'entry_quality_score': round(regraded, 2),
+                        'entry_timing_mode': timing_mode,
                     })
                 except Exception:
                     entry_quality['price_adjusted_by_anti_chase'] = True
@@ -16484,7 +16686,8 @@ class TradingExpertSystem:
                 entry,
                 volatility,
                 timeframe,
-                current_price=current_price
+                current_price=current_price,
+                geometry_profile=execution_geometry_profile
             )
             if sl_price is None:
                 print(f"   ⚠️ RECHAZADO: sin SL válido")
@@ -16501,7 +16704,8 @@ class TradingExpertSystem:
                 leverage=leverage,
                 is_futures=is_futures,
                 sl_price=sl_price,
-                liquidation=liquidation
+                liquidation=liquidation,
+                geometry_profile=execution_geometry_profile
             )
             if tp_price is None:
                 print(
@@ -16541,7 +16745,7 @@ class TradingExpertSystem:
                         str(
                             entry_quality.get(
                                 'version',
-                                'Q1_ENTRY_REACHABILITY_V1'
+                                'RC9_8_EXECUTION_GEOMETRY_V1'
                             )
                         ),
 
@@ -16589,6 +16793,8 @@ class TradingExpertSystem:
 
                     'entry_market_location': str(entry_quality.get('market_location', 'MID_RANGE')),
                     'entry_location_context': str(entry_quality.get('location_context', 'UNKNOWN')),
+                    'entry_timing_mode': str(entry_quality.get('entry_timing_mode', 'STRUCTURAL_PULLBACK')),
+                    'entry_independent_confluence_families': int(entry_quality.get('independent_confluence_families', 1) or 1),
                     'entry_location_basis': str(entry_quality.get('location_basis', 'UNKNOWN')),
                     'entry_structural_range_position': entry_quality.get('structural_range_position'),
                     'entry_directional_extension': bool(entry_quality.get('directional_extension', False)),
@@ -16756,7 +16962,7 @@ class TradingExpertSystem:
                     str(
                         entry_quality.get(
                             'version',
-                            'Q1_ENTRY_REACHABILITY_V1'
+                            'RC9_8_EXECUTION_GEOMETRY_V1'
                         )
                     ),
 
@@ -16804,6 +17010,8 @@ class TradingExpertSystem:
 
                 'entry_market_location': str(entry_quality.get('market_location', 'MID_RANGE')),
                 'entry_location_context': str(entry_quality.get('location_context', 'UNKNOWN')),
+                'entry_timing_mode': str(entry_quality.get('entry_timing_mode', 'STRUCTURAL_PULLBACK')),
+                'entry_independent_confluence_families': int(entry_quality.get('independent_confluence_families', 1) or 1),
                 'entry_location_basis': str(entry_quality.get('location_basis', 'UNKNOWN')),
                 'entry_structural_range_position': entry_quality.get('structural_range_position'),
                 'entry_directional_extension': bool(entry_quality.get('directional_extension', False)),

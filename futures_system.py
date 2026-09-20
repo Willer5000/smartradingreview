@@ -1536,7 +1536,7 @@ FUTURES_RISK_CONFIG = {
     # Beneficio neto mínimo deseado por operación.
     # No significa que todas las operaciones deban alcanzar esto:
     # sólo define el mínimo económico para considerar una entrada.
-    'target_net_profit_usdt': 0.75,
+    'target_net_profit_usdt': 0.75,  # referencia diagnóstica RC9.8; no veto
 
     # Coste ida + vuelta estimado.
     #
@@ -1566,7 +1566,7 @@ FUTURES_RISK_CONFIG = {
 
     # ROI bruto mínimo que debe poder producir el TP. Se incorpora desde el
     # cálculo del leverage para elegir el MENOR entero que cumpla el objetivo.
-    'minimum_roi_tp_pct': 12.0,
+    'minimum_roi_tp_pct': 12.0,  # referencia diagnóstica RC9.8; no veto
 
     # Leverage máximo absoluto que el sistema permitirá.
     # Después también se aplicará el máximo específico del TF.
@@ -4111,30 +4111,16 @@ class FuturesAnalysis(TradingExpertSystem):
             )
         )
 
-        require(
-            roi_tp
-            >= thresholds[
-                'roi_tp_min'
-            ],
-            'ROI_TP',
-            (
-                f"ROI TP {roi_tp:.1f}% < "
-                f"{thresholds['roi_tp_min']:.1f}%"
-            )
-        )
-
-        require(
-            net_profit
-            >= thresholds[
-                'net_profit_min_usdt'
-            ],
-            'NET_PROFIT',
-            (
-                'beneficio neto '
-                f"${net_profit:.2f} < "
-                f"${thresholds['net_profit_min_usdt']:.2f}"
-            )
-        )
+        # RC9.8 audited: ROI on margin and a fixed USDT objective are
+        # reference diagnostics, not publication vetoes. They must not force
+        # leverage or reject otherwise sound Entry/SL/TP geometry.
+        economic_diagnostics = {
+            'roi_tp_reference_met': bool(roi_tp >= thresholds['roi_tp_min']),
+            'net_profit_reference_met': bool(net_profit >= thresholds['net_profit_min_usdt']),
+            'roi_tp_reference_pct': thresholds['roi_tp_min'],
+            'net_profit_reference_usdt': thresholds['net_profit_min_usdt'],
+            'publication_veto': False,
+        }
 
         require(
             planned_sl_loss
@@ -4164,10 +4150,10 @@ class FuturesAnalysis(TradingExpertSystem):
             )
         )
 
-        # RC9.7.14 — ReviewTrader execution continuity from de-identified,
-        # all-user saved outcomes.  It never changes LONG/SHORT or the levels.
-        # Only after N>=8 canonical system trades can repeated fast-SL/low-MFE
-        # evidence require a stronger CURRENT Entry before Premium publication.
+        # RC9.8 — ReviewTrader execution continuity is advisory here.
+        # Its N>=8 canonical evidence is consumed upstream by the internal
+        # geometry engine to re-rank Entry/SL/TP.  It no longer acts as a
+        # second publication veto after the strategic thesis is approved.
         global_execution_review = {}
         try:
             from user_execution_learning import get_execution_publication_review
@@ -4175,12 +4161,9 @@ class FuturesAnalysis(TradingExpertSystem):
                 global_execution_review = get_execution_publication_review(
                     symbol, timeframe, action, result
                 )
-                if global_execution_review.get('block_publication'):
-                    require(
-                        False,
-                        'GLOBAL_EXECUTION_ENTRY',
-                        str(global_execution_review.get('reason') or 'Entry requiere revisión por continuidad real')
-                    )
+                # RC9.8 rule: execution learning is geometry authority only.
+                # It can re-rank Entry/SL/TP upstream but cannot add a second
+                # publication veto here after the directional thesis is valid.
         except Exception:
             global_execution_review = {}
 
@@ -4207,6 +4190,7 @@ class FuturesAnalysis(TradingExpertSystem):
             'sl_avoidance_quality_score': round(sl_avoidance_quality, 2),
             'probability_status': 'QUALITY_PROXY_NOT_CALIBRATED',
             'thresholds': thresholds,
+            'economic_diagnostics': economic_diagnostics,
         }
 
         result['futures_publication_gate'] = gate
@@ -4568,7 +4552,9 @@ class FuturesAnalysis(TradingExpertSystem):
         timeframe,
         symbol,
         liquidation=None,
-        adaptive_profile=None
+        adaptive_profile=None,
+        trend=None,
+        momentum=None
     ):
         """
         QUALITY ENGINE Q2 — FUTURES EXECUTION SPECIALIST.
@@ -4770,6 +4756,40 @@ class FuturesAnalysis(TradingExpertSystem):
 
             return result
 
+        # ============================================================
+        # RC9.8 — INTERNAL EXECUTION GEOMETRY PROFILE
+        # ============================================================
+        # Q2 must use the same differentiated market/symbol/TF/context policy
+        # as Q1.  This profile is local-only: specialist weights and learning
+        # metadata are never attached to the API/frontend payload.
+        geometry_profile = {}
+        try:
+            from execution_geometry_committee import build_profile
+            setup_family = str(
+                ((structure.get('_contingency_playbook') or {}).get('setup_family'))
+                or ''
+            ).upper()
+            regime_info = self.detect_market_regime(
+                trend if isinstance(trend, dict) else {},
+                momentum if isinstance(momentum, dict) else {},
+                volatility,
+                structure,
+            )
+            geometry_profile = build_profile(
+                market_type='futures',
+                symbol=symbol,
+                timeframe=timeframe,
+                direction=direction,
+                setup_family=setup_family,
+                market_regime=(regime_info or {}).get('regime') or structure.get('_adaptive_market_regime', '*'),
+                trend=trend if isinstance(trend, dict) else {},
+                momentum=momentum if isinstance(momentum, dict) else {},
+                volatility=volatility,
+            )
+            geometry_profile['_atr_abs'] = atr
+        except Exception:
+            geometry_profile = {'_atr_abs': atr}
+
         diagnostics[
             'evaluated'
         ] = True
@@ -4903,7 +4923,8 @@ class FuturesAnalysis(TradingExpertSystem):
                         direction,
                         timeframe,
                         max_sl_distance,
-                        atr
+                        atr,
+                        geometry_profile=geometry_profile
                     )
                     or 0
                 )
@@ -5100,7 +5121,8 @@ class FuturesAnalysis(TradingExpertSystem):
                             minimum_tp_distance,
                             sl_distance_pct=(
                                 sl_distance_pct
-                            )
+                            ),
+                            geometry_profile=geometry_profile
                         )
                         or 0
                     )
@@ -5571,7 +5593,7 @@ class FuturesAnalysis(TradingExpertSystem):
 
     @staticmethod
     def _futures_entry_timing_gate(action, trend, momentum, volatility, structure, levels):
-        """Reject *near-market* chase Entries when the trend is already extended.
+        """Guard *near-market* chase Entries while preserving approved deep limits.
 
         This mirrors the Pullback specialist's ATR-aware extension logic but is
         applied only to execution. A structurally good limit Entry that already
@@ -5580,7 +5602,7 @@ class FuturesAnalysis(TradingExpertSystem):
         flipped.
         """
         out = {
-            'version': 'RC9_7_15_FUTURES_LOCATION_TIMING_V2',
+            'version': 'RC9_8_FUTURES_ENTRY_TIMING_V1',
             'passed': True,
             'status': 'TIMING_OK',
             'reason': 'NOT_EXTENDED_OR_ENTRY_ALREADY_WAITS_FOR_PULLBACK',
@@ -5613,13 +5635,19 @@ class FuturesAnalysis(TradingExpertSystem):
             out['entry_distance_atr'] = round(entry_distance_atr, 4) if entry_distance_atr is not None else None
             market_location = str(levels.get('entry_market_location') or 'MID_RANGE').upper()
             location_context = str(levels.get('entry_location_context') or 'UNKNOWN').upper()
+            timing_mode = str(levels.get('entry_timing_mode') or 'STRUCTURAL_PULLBACK').upper()
             out['market_location'] = market_location
             out['location_context'] = location_context
+            out['entry_timing_mode'] = timing_mode
             out['structural_location_used'] = bool(levels.get('entry_location_basis'))
             extended_threshold_pct = max(0.35, atr_pct * 1.10)
-            # A limit order already >=0.45 ATR away is itself waiting for the
-            # pullback, so extension at current price must not block it.
-            waits_for_pullback = entry_distance_atr is not None and entry_distance_atr >= 0.45
+            # RC9.8: an Entry explicitly selected as a deep structural limit is
+            # already doing what anti-chase asks: waiting for price to retrace.
+            # Distance remains a fail-open compatibility fallback.
+            waits_for_pullback = (
+                timing_mode == 'DEEP_PULLBACK_LIMIT'
+                or (entry_distance_atr is not None and entry_distance_atr >= 0.45)
+            )
 
             if nearest_support is not None:
                 ns = float(nearest_support)
@@ -5781,13 +5809,13 @@ class FuturesAnalysis(TradingExpertSystem):
         # COMMIT 4 — REVIEWTRADER ADAPTIVE EXECUTION PROFILE
         # ==============================================================
         # Fails open to OBSERVE. No profile means the exact static behavior.
+        _adaptive_market_regime = str(
+            structure.get('_adaptive_market_regime', '*')
+            if isinstance(structure, dict)
+            else '*'
+        )
         try:
             from adaptive_autopilot import get_execution_profile
-            _adaptive_market_regime = str(
-                structure.get('_adaptive_market_regime', '*')
-                if isinstance(structure, dict)
-                else '*'
-            )
             adaptive_profile = get_execution_profile(
                 symbol=symbol,
                 timeframe=timeframe,
@@ -5851,7 +5879,9 @@ class FuturesAnalysis(TradingExpertSystem):
                 timeframe=timeframe,
                 symbol=symbol,
                 liquidation=liquidation,
-                adaptive_profile=adaptive_profile
+                adaptive_profile=adaptive_profile,
+                trend=trend,
+                momentum=momentum
             )
         )
 
@@ -5931,7 +5961,7 @@ class FuturesAnalysis(TradingExpertSystem):
             levels['rejected_reason'] = reason
 
         # ==============================================================
-        # FINAL V1 RC4 — ENTRY REACTION ENGINE
+        # RC9.8 — ENTRY REACTION / TIMING ENGINE
         # ==============================================================
         # Q1 found the POI; Q2 refined SL/TP. RC4 now asks whether the
         # selected Futures entry is a defensible reaction zone with enough
@@ -5990,7 +6020,7 @@ class FuturesAnalysis(TradingExpertSystem):
             )
             levels = self._stamp_futures_filter_trace(
                 levels, stage='PRE_GATE',
-                reason_codes=['RC9_7_14_ENTRY_REACTION_NOT_CONFIRMED'],
+                reason_codes=['RC9_8_ENTRY_REACTION_NOT_CONFIRMED'],
                 reason=reason, reached_publication_gate=False,
                 outcome='ANALYSIS_ONLY'
             )
@@ -5999,24 +6029,27 @@ class FuturesAnalysis(TradingExpertSystem):
             levels['publication_status'] = 'ANALYSIS_ONLY'
             levels['rejected_reason'] = reason
 
+        # RC9.8: learned defendibility is an advisory input, not a second
+        # execution veto.  Structural/Safety/publication gates stay intact; the
+        # execution committee must improve geometry instead of becoming timid.
         if (
             adaptive_profile.get('production_authority', False)
             and entry_min_defensibility > 0
             and entry_defensibility < entry_min_defensibility
         ):
-            reason = (
-                f"Entry defendibility {entry_defensibility:.1f} < "
-                f"learned minimum {entry_min_defensibility:.1f}"
-            )
-            traced = self._stamp_futures_filter_trace(
-                levels,
-                stage='PRE_GATE',
-                reason_codes=['ADAPTIVE_ENTRY_DEFENSIBILITY'],
-                reason=reason,
-                reached_publication_gate=False,
-                outcome='ANALYSIS_ONLY'
-            )
-            return self._mark_levels_non_executable(traced, reason)
+            levels['entry_defensibility_learning_advisory'] = {
+                'status': 'BELOW_LEARNED_REFERENCE',
+                'current': round(entry_defensibility, 2),
+                'reference': round(entry_min_defensibility, 2),
+                'publication_veto': False,
+            }
+        else:
+            levels['entry_defensibility_learning_advisory'] = {
+                'status': 'OK_OR_OBSERVE',
+                'current': round(entry_defensibility, 2),
+                'reference': round(entry_min_defensibility, 2),
+                'publication_veto': False,
+            }
 
         if strategy_registry_diag.get('conflicts'):
             reason = 'Active validated strategy conflicts with committee direction'
@@ -6924,57 +6957,18 @@ class FuturesAnalysis(TradingExpertSystem):
             )
         )
         
+        levels['economic_roi_reference'] = {
+            'minimum_roi_tp_pct': round(min_roi_tp, 4),
+            'roi_tp': round(float(roi.get('roi_tp') or 0.0), 4),
+            'reference_met': bool(float(roi.get('roi_tp') or 0.0) >= min_roi_tp),
+            'publication_veto': False,
+        }
         if roi['roi_tp'] < min_roi_tp:
-
             print(
-                f"   ⚠️ FUTUROS ANALYSIS_ONLY: "
-                f"ROI potencial "
-                f"{roi['roi_tp']:.1f}% "
-                f"< mínimo {min_roi_tp:.1f}%"
+                f"   ℹ️ FUTUROS RC9.8: ROI referencia {roi['roi_tp']:.1f}% "
+                f"< {min_roi_tp:.1f}% (diagnóstico; no veto)."
             )
 
-            levels['leverage'] = int(
-                optimal_leverage
-            )
-
-            levels['execution_safety'] = round(
-                safety_score,
-                1
-            )
-
-            levels['execution_safety_label'] = (
-                safety_label
-            )
-
-            rejection_reason = (
-                f"ROI potencial "
-                f"{roi['roi_tp']:.1f}% "
-                f"< {min_roi_tp:.1f}% mínimo"
-            )
-
-            traced_levels = (
-                self
-                ._stamp_futures_filter_trace(
-                    levels,
-                    stage='PRE_GATE',
-                    reason_codes=[
-                        'ROI_TP'
-                    ],
-                    reason=rejection_reason,
-                    reached_publication_gate=False,
-                    outcome='ANALYSIS_ONLY'
-                )
-            )
-
-            return self._mark_levels_non_executable(
-                traced_levels,
-                rejection_reason,
-                recommended_leverage=(
-                    optimal_leverage
-                )
-            )
-        
-        
         # ==============================================================
         # COSTE ESTIMADO DE LA OPERACIÓN
         # ==============================================================
@@ -7058,59 +7052,19 @@ class FuturesAnalysis(TradingExpertSystem):
             )
         )
         
-        if (
-            net_profit_tp_usdt
-            < target_net_profit
-        ):
+        levels['economic_profit_reference'] = {
+            'target_net_profit_usdt': round(target_net_profit, 4),
+            'net_profit_tp_usdt': round(net_profit_tp_usdt, 4),
+            'reference_met': bool(net_profit_tp_usdt >= target_net_profit),
+            'publication_veto': False,
+        }
+        if net_profit_tp_usdt < target_net_profit:
             print(
-                f"   ⚠️ FUTUROS ANALYSIS_ONLY: "
-                f"beneficio neto estimado "
-                f"${net_profit_tp_usdt:.4f} "
-                f"< objetivo "
-                f"${target_net_profit:.4f}"
+                f"   ℹ️ FUTUROS RC9.8: beneficio neto referencia "
+                f"${net_profit_tp_usdt:.4f} < ${target_net_profit:.4f} "
+                "(diagnóstico; no veto)."
             )
 
-            levels['leverage'] = int(
-                optimal_leverage
-            )
-
-            levels['execution_safety'] = round(
-                safety_score,
-                1
-            )
-
-            levels['execution_safety_label'] = (
-                safety_label
-            )
-
-            rejection_reason = (
-                f"Beneficio neto estimado "
-                f"${net_profit_tp_usdt:.4f} "
-                f"< objetivo "
-                f"${target_net_profit:.4f}"
-            )
-
-            traced_levels = (
-                self
-                ._stamp_futures_filter_trace(
-                    levels,
-                    stage='PRE_GATE',
-                    reason_codes=[
-                        'NET_PROFIT'
-                    ],
-                    reason=rejection_reason,
-                    reached_publication_gate=False,
-                    outcome='ANALYSIS_ONLY'
-                )
-            )
-
-            return self._mark_levels_non_executable(
-                traced_levels,
-                rejection_reason,
-                recommended_leverage=(
-                    optimal_leverage
-                )
-            )
         # ==============================================================
         # OPERACIÓN APROBADA
         # ==============================================================
@@ -7120,9 +7074,8 @@ class FuturesAnalysis(TradingExpertSystem):
         #   ✅ SL válido
         #   ✅ TP válido
         #   ✅ Execution Safety suficiente
-        #   ✅ leverage económicamente viable
-        #   ✅ ROI suficiente
-        #   ✅ beneficio neto suficiente
+        #   ✅ leverage económicamente viable y edge neto tras costes
+        #   ℹ️ ROI/beneficio objetivo quedan como referencias diagnósticas
         #
         # Debemos devolver los niveles calculados.
         # ==============================================================

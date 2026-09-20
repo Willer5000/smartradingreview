@@ -1,0 +1,40 @@
+RC9.8 — VALIDACIÓN
+
+1. Python syntax
+PASS:
+- app.py
+- futures_system.py
+- entry_reaction_engine.py
+- execution_geometry_committee.py
+- user_execution_learning.py
+- review_trader.py
+
+2. RC9.8 dedicated tests
+18 passed
+Cubre:
+- Spot/Futures y buckets CORE1/CORE2/MEDIUM/HIGH
+- velocidad FAST/FASTER/VERY_FAST
+- contexto/volatilidad/TF
+- near vs deep Entry
+- ReviewTrader N<8 / N>=8 bounded
+- deep limit sin pre-reacción
+- near Entry con lower-TF
+- ReviewTrader advisory, no publication veto
+- privacidad frontend
+- Entry selector real
+- TP de deep Entry referenciado al Entry
+- SL hard floor ATR-normalized
+- POI estructural no reescrito por anti-chase
+- ROI/beneficio fijo como diagnóstico
+- persistencia técnica de geometría para ReviewTrader
+
+3. Targeted regression RC9.7.14–RC9.7.17 + execution learning + RC9.8
+72 passed, 7 deselected.
+Los deselected corresponden a contratos históricos deliberadamente sustituidos por RC9.8 (veto ReviewTrader, confluencia raw, antigua semántica timing/location) más una aserción UI ya fallida en el baseline RC9.7.17 y no modificada por RC9.8.
+
+Baseline comparison:
+El mismo conjunto legacy sobre RC9.7.17 base tenía 60 passed + 1 fallo UI preexistente antes de RC9.8.
+
+No se modificó frontend.
+No se modificó Research.
+No se modificó SQL.

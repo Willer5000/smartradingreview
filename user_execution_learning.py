@@ -12,7 +12,7 @@ Guardrails
 * Manual/modified trades are diagnostic only and never change ReviewTrader.
 * N < 8 is OBSERVE_ONLY. A single TP/SL is learned/stored but has zero authority.
 * Positive support is capped at +5 points; negative penalty at -8 points.
-* It never changes direction, Entry, SL, TP, Safety or leverage. After N>=8 canonical samples, repeated bad Entry behavior may add a bounded publication gate that only requires a stronger current Entry.
+* It never changes direction, Entry, SL, TP, Safety or leverage. After N>=8 canonical samples, repeated bad Entry behavior can advise better geometry but never becomes a second publication veto.
 * Backtest/OOS remains primary authority in ReviewTrader.
 * No SQL/schema changes: only existing ``saved_signals`` and ``signals`` fields.
 """
@@ -791,6 +791,8 @@ def get_source_signal_configuration(signal: Dict[str, Any]) -> Dict[str, Any]:
             "entry_distance_atr": execution.get("entry_distance_atr"),
             "entry_distance_pct": execution.get("entry_distance_pct"),
             "entry_source": execution.get("entry_source"),
+            "entry_timing_mode": execution.get("entry_timing_mode"),
+            "entry_independent_confluence_families": execution.get("entry_independent_confluence_families"),
             "sl_source": execution.get("sl_source"),
             "tp_source": execution.get("tp_source"),
             "execution_safety": execution.get("execution_safety"),
@@ -990,72 +992,41 @@ def get_trade_learning_bundle(signal: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def get_execution_publication_review(
-    symbol: str,
-    timeframe: str,
-    action: str,
-    levels: Dict[str, Any],
+    symbol: str, timeframe: str, action: str, levels: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Governed execution-continuity review for Futures publication.
-
-    It never changes levels.  With N>=8 canonical all-user observations and a
-    repeated fast-SL/low-MFE pattern, it can require the *current* Entry to have
-    acceptable defendibility/reachability.  Missing quality metrics fail open.
-    This distinguishes "direction may be right, Entry was poor" from a blanket
-    directional penalty.
-    """
+    """RC9.8: execution learning advises geometry; it never vetoes publication."""
     levels = levels or {}
     profile = get_global_execution_profile(symbol, timeframe, action)
     review = {
-        "version": VERSION,
+        "version": "RC9_8_EXECUTION_GEOMETRY_ADVISORY_V1",
         "authority": profile.get("authority"),
         "sample_size": int(profile.get("sample_size") or 0),
         "block_publication": False,
+        "publication_veto_disabled": True,
+        "geometry_advice": "KEEP_CURRENT_GEOMETRY",
         "reason": "",
         "profile": profile,
         "changes_levels": False,
         "changes_direction": False,
     }
     if profile.get("authority") != "BOUNDED_CONTINUITY":
-        review["reason"] = "OBSERVE_ONLY: muestra insuficiente para endurecer Entry."
+        review["reason"] = "OBSERVE_ONLY: muestra insuficiente; sin autoridad sobre geometría."
         return review
-
     exp_r = float(profile.get("expectancy_r") or 0.0)
     fast_sl = float(profile.get("fast_sl_rate") or 0.0)
     weak_progress = float(profile.get("weak_progress_sl_rate") or 0.0)
-    repeated_entry_problem = (
-        exp_r < 0.0
-        and (fast_sl >= 0.30 or weak_progress >= 0.40)
-    )
-    if not repeated_entry_problem:
-        review["reason"] = "Sin patrón repetido de Entry adverso que justifique un gate adicional."
-        return review
-
-    defensibility = _float(levels.get("entry_defensibility_score"))
-    reachability = _float(levels.get("entry_reachability_score"))
-    weak_current_entry = False
-    evidence = []
-    if defensibility is not None:
-        evidence.append(f"defendibilidad={defensibility:.1f}")
-        weak_current_entry = weak_current_entry or defensibility < 65.0
-    if reachability is not None:
-        evidence.append(f"alcanzabilidad={reachability:.1f}")
-        weak_current_entry = weak_current_entry or reachability < 55.0
-
-    # Fail open when the current setup does not expose the quality fields.
-    if not evidence:
-        review["reason"] = "Patrón histórico adverso, pero el setup actual no expone scores comparables; no se bloquea."
-        return review
-
-    if weak_current_entry:
-        review["block_publication"] = True
+    repeated = exp_r < 0.0 and (fast_sl >= 0.30 or weak_progress >= 0.40)
+    if repeated:
+        defensibility = _float(levels.get("entry_defensibility_score"))
+        reachability = _float(levels.get("entry_reachability_score"))
+        weak = (defensibility is not None and defensibility < 65.0) or (reachability is not None and reachability < 55.0)
+        if weak or (defensibility is None and reachability is None):
+            review["geometry_advice"] = "PREFER_BETTER_PROTECTED_ENTRY_GEOMETRY"
         review["reason"] = (
-            f"ReviewTrader ejecución global: N={review['sample_size']}, Exp={exp_r:.2f}R, "
-            f"fast-SL={fast_sl*100:.0f}%, low-progress-SL={weak_progress*100:.0f}%; "
-            f"Entry actual aún débil ({', '.join(evidence)}). Esperar una ubicación mejor."
+            f"Evidencia ejecución N={review['sample_size']}, Exp={exp_r:.2f}R, "
+            f"fast-SL={fast_sl*100:.0f}%, low-progress-SL={weak_progress*100:.0f}%. "
+            "Ajusta preferencia geométrica; no bloquea publicación."
         )
     else:
-        review["reason"] = (
-            "El histórico de Entry de la celda exige cautela, pero la ubicación actual "
-            f"supera los mínimos adicionales ({', '.join(evidence)})."
-        )
+        review["reason"] = "Sin patrón repetido de Entry adverso; conservar geometría actual."
     return review

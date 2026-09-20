@@ -3154,6 +3154,12 @@ class ReviewTrader:
                 or 'N/A'
             ),
 
+            # RC9.8 technical geometry metadata for post-trade learning.
+            'entry_timing_mode': str(levels.get('entry_timing_mode', '') or ''),
+            'entry_independent_confluence_families': int(
+                _safe_float(levels.get('entry_independent_confluence_families', 0), 0) or 0
+            ),
+
             # ==========================================================
             # QUALITY ENGINE Q2
             # FUTURES EXECUTION SPECIALIST
