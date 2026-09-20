@@ -46,7 +46,7 @@ def test_intrabar_paths_do_not_emit_confirmed_telegram():
     assert '_send_confirmed_signal_telegram' not in app[fut_start:fut_end]
 
     spot_start = app.index('def _run_spot_intrabar_preview')
-    spot_end = app.index('def _start_spot_intrabar_refresh_async', spot_start)
+    spot_end = app.index('def _run_scheduled_spot_analysis', spot_start)
     assert '_send_confirmed_signal_telegram' not in app[spot_start:spot_end]
 
 

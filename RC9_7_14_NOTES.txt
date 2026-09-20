@@ -1,0 +1,174 @@
+RC9.7.14 FINAL PHASE-1 V2 — LEARNING + TECHNICAL VALIDITY + STANDARD LEVERAGE + RENDER FREE
+Date: 2026-09-19
+Repository: MAIN only
+Research: no changes
+SQL/bootstrap: no changes
+
+GOAL
+Close Phase 1 with a governed feedback loop from every official Futures signal and
+real user executions, make Guardian learn from its own management decisions, keep
+confirmed/vigent orders technically valid for a defensible horizon, recommend one
+standard technical leverage per signal independent of the user's wallet/size, and
+protect the ~512 MB Render runtime from self-inflicted heavy work.
+
+1) ONE TRADE = ONE SAMPLE, MANY CAUSAL VIEWS
+- Every closed trade remains ONE market sample. It is not multiplied into six
+  independent observations because it has Entry/SL/TP/strategy/Guardian fields.
+- The same source_signal_id followed by multiple users is deduplicated as one
+  market event for authority. User portfolios remain private.
+- Each sample is decomposed for diagnosis into:
+  * direction/thesis,
+  * strategy/playbook provenance,
+  * Entry/timing and reachability/defensibility,
+  * SL geometry,
+  * TP geometry/reachability and R:R,
+  * Guardian management,
+  * signed economic outcome.
+- This lets the system learn "direction was reasonable but Entry was poor" without
+  falsely penalizing all LONG/SHORT signals.
+
+2) POSITIVE PROTECTED STOPS ARE WINS
+- TP/SL/manual is the EXIT MECHANISM; WIN/LOSS/BREAKEVEN comes from signed realized R.
+- LONG: if Guardian moves SL above Entry and that protected SL later closes the
+  trade with positive R, it is a positive trade even though status=sl_hit.
+- SHORT: symmetric rule when protected SL is below Entry.
+- R is normalized against ORIGINAL Entry→SL risk, never the Guardian-modified SL.
+- Managed-system performance is tracked separately from the unchanged original-plan
+  canonical sample.
+
+3) GUARDIAN LEARNS FROM COUNTERFACTUALS
+- Existing guardian_learning_events are settled against the original HOLD path.
+- Positive delta-R: Guardian improved the result versus holding the original plan.
+- Negative delta-R: HOLD would have done better (for example Guardian exited or
+  tightened protection, then price recovered toward TP without original SL).
+- N<8 comparable source signals: OBSERVE_ONLY.
+- N>=8 repeated harmful EXIT: Guardian becomes slightly more patient (bounded
+  increase of deterioration threshold, max +6 points).
+- N>=8 repeated helpful EXIT: Guardian may defend slightly earlier (bounded -4).
+- N>=8 repeatedly harmful low-urgency PROTECT: protection requires more confirmation;
+  no new SL is invented and urgent REDUCE/EXIT logic still has priority.
+- Guardian never learns by counting the same market signal once per user.
+
+4) REVIEWTRADER / EXECUTION LEARNING THRESHOLDS
+- Official Futures signals are already registered/evaluated by ReviewTrader even
+  if no user enters them. This limits user-selection bias.
+- Real saved executions add management/execution evidence.
+- N<8 canonical comparable executions: OBSERVE_ONLY, zero production authority.
+- N>=8: repeated negative expectancy + fast adverse/low-MFE Entry pattern may gate
+  a CURRENT weak Entry; it does not rewrite direction or move levels.
+- N>=8: Guardian counterfactual calibration can become active as described above.
+- N>=12 with positive expectancy/WR: bounded positive execution support may appear.
+- Strategy profitability/authority remains governed by its local Research/OOS path;
+  one winning/losing user trade never promotes or deletes a strategy by itself.
+
+5) BAD ENTRY LEARNING
+- A negative trade with <0.25R MFE and fast MAE is tagged Entry/timing review.
+- A trade that advanced materially before failing is routed to management/SL review,
+  not automatically blamed on Entry.
+- Protected positive SL exits are excluded from fast-SL/weak-progress loss rates.
+- This directly addresses the BNB-style case: thesis quality and Entry quality are
+  learned as different dimensions.
+
+6) TECHNICAL SIGNAL VALIDITY V3
+- Vigency is anchored to the ORIGINAL source candle; deploy/refresh never restarts it.
+- It is no longer "next candle and disappear".
+- Futures horizon uses Entry-distance-in-ATR, reachability, regime persistence,
+  ADX, MTF alignment, R:R and timeframe. Wider guardrails prevent eternal orders:
+  30m up to 16 bars; 1h 16; 2h 14; 4h 12; 12h 10; 1D 8.
+- Spot is deliberately more patient for accumulation/rotation orders:
+  4h up to 18 bars; 12h 14; 1D 12; 1W 8.
+- These are maximum age guardrails; actual lifetime is calculated from the setup.
+- Original SL/structural invalidation can end a signal early. A target reached before
+  Entry is treated as a missed original opportunity, not an eternal pending order.
+
+7) LIGHT SHADOW-LIVE MONITORING OF CONFIRMED/VIGENT
+- Futures Confirmed/Vigent official signals are mark-price monitored even when no
+  user saved/entered them: Entry touch, TP/SL and compact shadow MFE/MAE.
+- Spot Confirmed/Vigent gets the same lightweight mark-price shadow state.
+- No OHLCV/indicator/AI analysis is launched by this live monitor.
+- Deep Futures TP/SL/MFE/MAE evaluation remains ReviewTrader's 30-minute microbatch
+  process, so live monitoring does not create a 63-cell heavy scanner.
+
+8) STANDARD TECHNICAL LEVERAGE V6 — USER-INDEPENDENT
+- Leverage is now a property of the SIGNAL, not the user's margin/USDT size.
+- Old timeframe bands (e.g. 4h=10x) are references only, never hard caps.
+- Strategy-bank contingency leverage_cap is also diagnostic/reference, not a hard cap.
+- Hard ceilings come only from verified/public contract max, estimated liquidation
+  distance beyond structural SL + ATR buffer/MMR/fees, and emergency absolute max.
+- Safety + TP quality + SL-avoidance quality determine how much technical headroom is
+  used. Quality/confidence is explicitly NOT treated as literal P(TP).
+- If a statistically governed calibrated lower-bound TP probability exists in the
+  future, it may contribute. A mathematical quality/probability limit near 100%
+  approaches the technical contract/liquidation cap, never a fabricated guarantee.
+- Position size is calculated AFTER leverage to keep the standard Entry→SL risk
+  budget bounded. Higher leverage therefore does not automatically mean larger
+  planned monetary loss.
+- Economic publication uses a STANDARD reference margin, not a user's chosen size,
+  so two users receive the same leverage for the same signal.
+
+9) RENDER FREE / ~512 MB HARDENING
+- One heavy-analysis slot; background jobs fail/defer quickly instead of queuing.
+- Interactive requests get bounded priority.
+- RSS preflight/soft/hard guards + cache shedding + malloc_trim remain active.
+- Native OpenBLAS/MKL/OMP/NumExpr/BLIS threads = 1; Gunicorn 1 worker / 2 threads.
+- No autonomous heavy intrabar full-universe polling.
+- Telegram Entry monitor never re-runs full market analysis on cache miss; in
+  LOW_MEMORY_MODE automated Entry alerts are text-only rather than rendering PNG.
+- Guardian compact market snapshots are cached/shared across users and defer under
+  memory pressure instead of duplicating DataFrame fetches per user.
+- Saving Confirmed/Vigent remains read-only and cannot trigger heavy analysis.
+- ReviewTrader learning remains microbatched (8 rows / 6 s default, one batch/cycle).
+
+FILES IN READY TREE
+- app.py
+- futures_system.py
+- leverage_policy.py
+- review_trader.py
+- saved_signals.py
+- supabase_client.py
+- user_execution_learning.py
+- sitecustomize.py
+- render.yaml
+- static/futures.js
+- static/script.js
+- release regression tests
+- RC9_7_14_NOTES.txt
+- RC9_7_14_VALIDATION.txt
+
+IMPORTANT LIMIT
+No application can guarantee that an external Free hosting platform will never
+restart/sleep/outage. This release removes known self-inflicted heavy refresh paths,
+serializes expensive work, defers optional work under pressure, and keeps live signal
+tracking lightweight so the web service has priority.
+
+10) FINAL-FINAL ENTRY PRECISION — FUTURES STRICT / SPOT REACHABLE
+- The first real BNB trade exposed a genuine architecture gap: direction/zone quality
+  could be good while timing was poor. RC9.7.14 final-final separates those dimensions.
+- Futures near-market anti-chase timing gate mirrors the ATR-aware Pullback specialist:
+  an extended LONG/SHORT cannot publish a near-market Entry merely because trend/SMC
+  are strong. If the proposed limit already waits >=0.45 ATR for a pullback, it is not
+  blocked just because current price is extended.
+- Entry Reaction is now a real publication gate in Futures: passed=false => ANALYSIS_ONLY.
+  Previously only the most extreme hard_block subset stopped publication.
+- 1H Futures near-market Entries (<=0.45 ATR from market) require a CLOSED 30M reaction
+  at the Entry zone. A deeper 1H limit order is still allowed to be announced before
+  touch, so the user can place the pending order in advance.
+- Existing 12H->2H and 1D->4H lower-TF reaction confirmation remains.
+- POI confluence is now included BEFORE the final ranking score. Previously SMC was
+  increased after entry_quality_score had already been computed.
+- If anti-FOMO must move an Entry away from the selected POI, reachability/SMC/final
+  quality are recalculated for the ACTUAL execution price; a moved price never inherits
+  the score of a different POI.
+- Spot stays structure-first but reachability weight increases from 12% to 18%. This is
+  deliberately less strict than Futures: a good accumulation/rotation zone may be deeper,
+  but an excessively hard-to-fill limit no longer loses almost all influence in ranking.
+- Spot/Futures technical validity V3 complements Entry selection rather than hiding bad
+  Entries: expiry is multi-candle and source-anchored, while repeated expired_no_entry is
+  observed by ReviewTrader as Entry reachability evidence, not as a directional loss.
+- Existing R:R >=1.8 production geometry remains mandatory. Leverage cannot rescue a bad
+  Entry/SL/TP geometry.
+
+FINAL FREE-RUNTIME RULE
+- No new full-universe intrabar scanner was added for this Entry improvement.
+- Lower-TF confirmation is fetched only when a candidate actually requires it, under the
+  existing single-heavy-work / low-memory guards.

@@ -15868,7 +15868,10 @@ class TradingExpertSystem:
             if normalized_market_type == 'futures':
                 smc_weight, reach_weight = 0.80, 0.20
             else:
-                smc_weight, reach_weight = 0.88, 0.12
+                # Spot remains structure-first, but unreachable deep limits are
+                # less useful. Reachability is meaningful without demanding the
+                # precision of leveraged Futures.
+                smc_weight, reach_weight = 0.82, 0.18
             entry_quality_score = (
                 candidate['_smc_score'] * smc_weight
                 + reachability_score * reach_weight
@@ -15923,6 +15926,17 @@ class TradingExpertSystem:
                     candidate['_smc_score']
                     + min(10, confluence * 5)
                 )
+
+            # Confluence is part of the causal POI quality. Recompute the
+            # score used for ranking *after* applying it; older code changed
+            # SMC but ranked with the stale pre-confluence quality.
+            candidate['_entry_quality_score'] = round(
+                max(0.0, min(100.0,
+                    candidate['_smc_score'] * smc_weight
+                    + float(candidate.get('_reachability_score', 0) or 0) * reach_weight
+                )),
+                2,
+            )
     
         # ==========================================================
         # ELEGIR POR SMC SCORE
@@ -16176,6 +16190,7 @@ class TradingExpertSystem:
             # Pullback/reversal: no perseguir más allá del cierre previo.
             # Breakout/retest: aceptar el lado roto sólo si sigue siendo un retest
             # cercano (máx. 1.25 ATR) y nunca peor que el precio actual.
+            original_selected_entry = float(entry)
             if setup_family in ('BREAKOUT_RETEST', 'STRUCTURE_RETEST'):
                 if direction == 'long':
                     entry = min(entry, current_price, previous_close + 1.25 * atr)
@@ -16190,6 +16205,41 @@ class TradingExpertSystem:
                     print(f"   ⚠️ Entry SHORT {entry:.4f} < cierre anterior {previous_close:.4f}. Forzando a cierre.")
                     entry = previous_close
                     entry_source = 'Cierre anterior (anti-FOMO pullback/reversión)'
+            if abs(float(entry) - original_selected_entry) > max(1e-12, abs(original_selected_entry) * 1e-10):
+                # The displayed/executed price must never inherit the score of
+                # a different POI. Re-grade reachability and cap SMC when the
+                # anti-chase rule had to move the Entry away from the selected
+                # structural candidate.
+                try:
+                    d_atr = abs(float(current_price) - float(entry)) / max(float(atr), 1e-12)
+                    ideal_min = float(entry_quality.get('ideal_min_atr') or 0.35)
+                    ideal_max = float(entry_quality.get('ideal_max_atr') or 1.50)
+                    max_reach = float(entry_quality.get('max_reach_atr') or 2.50)
+                    if d_atr <= ideal_min:
+                        reach = 70.0 + 30.0 * (d_atr / max(ideal_min, 1e-9))
+                    elif d_atr <= ideal_max:
+                        reach = 100.0
+                    elif d_atr <= max_reach:
+                        reach = 100.0 - 60.0 * ((d_atr - ideal_max) / max(0.01, max_reach - ideal_max))
+                    else:
+                        reach = 0.0
+                    reach = max(0.0, min(100.0, reach))
+                    smc_raw = min(60.0, float(entry_quality.get('smc_raw_score') or entry_score or 0))
+                    sw = float(entry_quality.get('smc_weight') or (0.80 if is_futures else 0.82))
+                    rw = float(entry_quality.get('reachability_weight') or (0.20 if is_futures else 0.18))
+                    regraded = max(0.0, min(100.0, smc_raw * sw + reach * rw))
+                    entry_score = int(round(regraded))
+                    entry_quality.update({
+                        'price_adjusted_by_anti_chase': True,
+                        'original_selected_entry': original_selected_entry,
+                        'distance_atr_current': round(d_atr, 4),
+                        'reachability_score': round(reach, 2),
+                        'smc_raw_score': round(smc_raw, 2),
+                        'entry_quality_score': round(regraded, 2),
+                    })
+                except Exception:
+                    entry_quality['price_adjusted_by_anti_chase'] = True
+                    entry_quality['original_selected_entry'] = original_selected_entry
             entry_quality['setup_family'] = setup_family or 'UNSPECIFIED'
 
             print(f"   🎯 Entry: ${entry:.4f} ({entry_source}, score {entry_score:.0f})")
@@ -28280,6 +28330,9 @@ _MEMORY_JOB_START_LIMIT_MB = min(
 )
 _MEMORY_ANALYSIS_CACHE_KEEP = max(1, int(os.environ.get('MEMORY_ANALYSIS_CACHE_KEEP', '2') or 2))
 _LOW_MEMORY_MODE = str(os.environ.get('LOW_MEMORY_MODE', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
+_FREE_RUNTIME_MAX_THREADS = max(8, int(os.environ.get('FREE_RUNTIME_MAX_THREADS', '18') or 18))
+_FREE_RUNTIME_BACKGROUND_LOCK_WAIT_SECONDS = max(0.0, float(os.environ.get('FREE_RUNTIME_BACKGROUND_LOCK_WAIT_SECONDS', '1') or 1))
+_FREE_RUNTIME_INTERACTIVE_LOCK_WAIT_SECONDS = max(1.0, float(os.environ.get('FREE_RUNTIME_INTERACTIVE_LOCK_WAIT_SECONDS', '10') or 10))
 
 # Existing Render dashboard variables may still contain Hotfix 14.6 values.
 # In low-memory mode, clamp them in code so an old env cannot silently restore
@@ -28447,6 +28500,9 @@ def _memory_runtime_state():
         'memory_hard_limit_mb': _MEMORY_HARD_LIMIT_MB,
         'memory_job_start_limit_mb': _MEMORY_JOB_START_LIMIT_MB,
         'low_memory_mode': _LOW_MEMORY_MODE,
+        'free_runtime_max_threads': _FREE_RUNTIME_MAX_THREADS,
+        'background_lock_wait_seconds': _FREE_RUNTIME_BACKGROUND_LOCK_WAIT_SECONDS,
+        'interactive_lock_wait_seconds': _FREE_RUNTIME_INTERACTIVE_LOCK_WAIT_SECONDS,
     }
 
 
@@ -28488,13 +28544,31 @@ def _acquire_heavy_analysis(owner, timeout=None):
     global _HEAVY_ANALYSIS_OWNER
 
     owner = str(owner or 'heavy-analysis')
-    timeout = (
-        _HEAVY_ANALYSIS_WAIT_SECONDS
-        if timeout is None
-        else max(0, float(timeout))
-    )
-
     interactive_owner = owner.startswith(('futures-ui:', 'spot-ui:'))
+
+    # RC9.7.14 FREE-runtime: never let background jobs pile up waiting for the
+    # only heavy slot. On a 512 MB worker a queue of waiting threads can make
+    # the page look hung even when RSS is still below the OOM limit. Explicit
+    # caller timeouts are preserved; only the old 20-minute default changes.
+    if timeout is None:
+        timeout = (
+            _FREE_RUNTIME_INTERACTIVE_LOCK_WAIT_SECONDS
+            if interactive_owner
+            else _FREE_RUNTIME_BACKGROUND_LOCK_WAIT_SECONDS
+        )
+    else:
+        timeout = max(0, float(timeout))
+
+    if (
+        _LOW_MEMORY_MODE
+        and not interactive_owner
+        and threading.active_count() >= _FREE_RUNTIME_MAX_THREADS
+    ):
+        print(
+            f"⏸️ [FREE-RUNTIME] {owner}: threads={threading.active_count()} "
+            f">= {_FREE_RUNTIME_MAX_THREADS}; job de fondo diferido."
+        )
+        return False
     if not interactive_owner:
         priority_fn = globals().get('_system_interactive_priority_active')
         fallback_fn = globals().get('_futures_interactive_priority_active')
@@ -28681,8 +28755,6 @@ _SPOT_INTRABAR_PREVIEW_TTLS = {
     '1D': 240,
     '1W': 300,
 }
-_SPOT_INTRABAR_REFRESH_RUNNING = set()
-_SPOT_INTRABAR_REFRESH_LOCK = threading.Lock()
 
 
 def _spot_intrabar_preview_cached(symbol, timeframe):
@@ -28721,7 +28793,7 @@ def _run_spot_intrabar_preview(symbol, timeframe, owner):
     if cached is not None:
         return cached, 'INTRABAR_CACHE'
 
-    acquired = _acquire_heavy_analysis(str(owner), timeout=20)
+    acquired = _acquire_heavy_analysis(str(owner), timeout=8)
     if not acquired:
         return None, 'BUSY'
 
@@ -28768,32 +28840,6 @@ def _run_spot_intrabar_preview(symbol, timeframe, owner):
         _mark_system_interactive_priority(seconds=8)
 
 
-def _start_spot_intrabar_refresh_async(symbol, timeframe):
-    key = (str(symbol), str(timeframe))
-    with _SPOT_INTRABAR_REFRESH_LOCK:
-        if key in _SPOT_INTRABAR_REFRESH_RUNNING:
-            return 'RUNNING'
-        _SPOT_INTRABAR_REFRESH_RUNNING.add(key)
-
-    def _worker():
-        try:
-            _run_spot_intrabar_preview(
-                symbol, timeframe, f'spot-active-refresh:{symbol}:{timeframe}'
-            )
-        except Exception as exc:
-            print(f'⚠️ [SPOT INTRABAR REFRESH] {symbol} {timeframe}: {exc}', flush=True)
-        finally:
-            with _SPOT_INTRABAR_REFRESH_LOCK:
-                _SPOT_INTRABAR_REFRESH_RUNNING.discard(key)
-
-    threading.Thread(
-        target=_worker,
-        daemon=True,
-        name=f'spot-intrabar-{symbol}-{timeframe}',
-    ).start()
-    return 'STARTED'
-
-
 def _run_scheduled_spot_analysis(timeframe):
     """Scheduler Spot protegido por el mismo slot de memoria que Futures."""
     owner = f'spot-scheduled-{timeframe}'
@@ -28807,6 +28853,87 @@ def _run_scheduled_spot_analysis(timeframe):
         ejecutar_analisis_completo(timeframe)
     finally:
         _release_heavy_analysis(owner)
+
+
+_SPOT_VALIDITY_POLICY_VERSION = 'RC9_7_14_SPOT_TECHNICAL_VALIDITY_V3'
+
+
+def _spot_entry_wait_bars(signal, timeframe):
+    """Technical Spot order horizon in candles.
+
+    The horizon is deliberately patient because a Spot limit order represents
+    accumulation/rotation intent, not a one-candle prediction.  It estimates
+    persistence from Entry distance in ATR, reachability, trend persistence and
+    confidence.  The clock is anchored to the ORIGINAL source candle and never
+    restarts on refresh/deploy.  Original structural invalidation (SL) can end
+    the signal earlier.
+    """
+    signal = signal or {}
+    levels = signal.get('levels') if isinstance(signal.get('levels'), dict) else signal
+    levels = levels or {}
+
+    # Structural-persistence guardrails by TF. These are MAXIMUM ages, not an
+    # automatic fixed TTL. Actual bars are calculated below from the setup.
+    base = {'4h': 8, '12h': 6, '1D': 5, '1W': 4}.get(str(timeframe), 6)
+    maximum = {'4h': 18, '12h': 14, '1D': 12, '1W': 8}.get(str(timeframe), 12)
+    bars = int(base)
+
+    try:
+        distance_atr = abs(float(levels.get('entry_distance_atr') or 0))
+    except Exception:
+        distance_atr = 0.0
+    if distance_atr > 0:
+        # Patient Spot orders: assume ~0.40 ATR of useful retracement/travel per
+        # candle, then add two candles for confirmation/noise.
+        travel_bars = int(math.ceil(distance_atr / 0.40)) + 2
+        bars = max(bars, travel_bars)
+
+    try:
+        reach = float(levels.get('entry_reachability_score') or 0)
+    except Exception:
+        reach = 0.0
+    if 0 < reach < 55:
+        bars += 2
+    elif reach >= 75:
+        bars += 1
+
+    regime = signal.get('market_regime') or levels.get('market_regime') or {}
+    regime_name = str(regime.get('regime') if isinstance(regime, dict) else regime).upper()
+    try:
+        regime_conf = float(regime.get('confidence') or 0) if isinstance(regime, dict) else 0.0
+    except Exception:
+        regime_conf = 0.0
+    if 'TREND' in regime_name and regime_conf >= 60:
+        bars += 2
+
+    try:
+        confidence = float(
+            (signal.get('decision') or {}).get('confidence')
+            if isinstance(signal.get('decision'), dict)
+            else signal.get('confidence') or 0
+        )
+    except Exception:
+        confidence = 0.0
+    if confidence >= 70:
+        bars += 1
+    if confidence >= 82:
+        bars += 1
+
+    return max(4, min(int(maximum), int(bars)))
+
+
+def _spot_valid_until_from_source(signal, timeframe):
+    raw = (signal or {}).get('source_candle_close_timestamp') or (signal or {}).get('source_candle_timestamp')
+    if not raw:
+        return None, None
+    try:
+        source = pd.Timestamp(raw)
+        source = source.tz_localize('UTC') if source.tz is None else source.tz_convert('UTC')
+        seconds = {'4h': 4*3600, '12h': 12*3600, '1D': 24*3600, '1W': 7*24*3600}.get(str(timeframe), 4*3600)
+        bars = _spot_entry_wait_bars(signal, timeframe)
+        return source + pd.Timedelta(seconds=seconds * bars), bars
+    except Exception:
+        return None, None
 
 
 def _spot_signal_snapshot_identity(signal):
@@ -28872,6 +28999,25 @@ def _build_spot_vigent_cache(old_confirmed, old_vigent, current_confirmed, obser
                     )
                 except Exception:
                     continue
+
+                # Migrate old one-candle Spot validity from the ORIGINAL source
+                # close. This extends the technical horizon without resetting
+                # the clock from the current time/deploy.
+                try:
+                    technical_until, technical_bars = _spot_valid_until_from_source(
+                        item, ident[1]
+                    )
+                    if technical_until is not None and (
+                        item.get('validity_policy_version') != _SPOT_VALIDITY_POLICY_VERSION
+                        or technical_until > valid_until
+                    ):
+                        valid_until = max(valid_until, technical_until)
+                        item['validity_bars'] = int(technical_bars or 0)
+                        item['validity_policy_version'] = _SPOT_VALIDITY_POLICY_VERSION
+                        item['validity_basis'] = 'SOURCE_TF+ENTRY_DISTANCE_ATR+REACHABILITY+REGIME+STRUCTURAL_INVALIDATION'
+                except Exception:
+                    pass
+
                 remaining = int(max(0, (valid_until - now_utc).total_seconds()))
                 if remaining <= 0:
                     continue
@@ -29239,79 +29385,60 @@ def _compute_previous_signals():
 
                 tiempo_restante = 0
                 valid_until = None
+                validity_bars = None
 
                 try:
-
-                    tiempo_vida = {
-                        '4h':
-                            4 * 60 * 60,
-
-                        '12h':
-                            12 * 60 * 60,
-
-                        '1D':
-                            24 * 60 * 60,
-
-                        '1W':
-                            7 * 24 * 60 * 60
-                    }.get(
+                    technical_until, validity_bars = _spot_valid_until_from_source(
+                        analisis,
                         timeframe,
-                        4 * 60 * 60
                     )
 
-                    current_candle_open = (
-                        pd.Timestamp(
-                            df['time'].iloc[-1]
-                        )
-                    )
-
-                    if (
-                        current_candle_open.tz
-                        is None
-                    ):
-
-                        current_candle_open = (
-                            current_candle_open
-                            .tz_localize(
-                                'UTC'
+                    # Preserve any longer explicit source validity, but never
+                    # shorten the technical horizon back to a one-candle TTL.
+                    explicit_until = None
+                    if analisis.get('source_valid_until'):
+                        try:
+                            explicit_until = pd.Timestamp(analisis['source_valid_until'])
+                            explicit_until = (
+                                explicit_until.tz_localize('UTC')
+                                if explicit_until.tz is None
+                                else explicit_until.tz_convert('UTC')
                             )
-                        )
+                        except Exception:
+                            explicit_until = None
 
+                    if technical_until is not None and explicit_until is not None:
+                        valid_until = max(technical_until, explicit_until)
                     else:
+                        valid_until = technical_until or explicit_until
 
-                        current_candle_open = (
-                            current_candle_open
-                            .tz_convert(
-                                'UTC'
-                            )
+                    if valid_until is None:
+                        source_close = pd.Timestamp(
+                            analisis.get('source_candle_close_timestamp')
+                            or analisis.get('source_candle_timestamp')
+                        )
+                        source_close = (
+                            source_close.tz_localize('UTC')
+                            if source_close.tz is None
+                            else source_close.tz_convert('UTC')
+                        )
+                        validity_bars = _spot_entry_wait_bars(analisis, timeframe)
+                        seconds = {
+                            '4h': 4 * 3600,
+                            '12h': 12 * 3600,
+                            '1D': 24 * 3600,
+                            '1W': 7 * 24 * 3600,
+                        }.get(timeframe, 4 * 3600)
+                        valid_until = source_close + pd.Timedelta(
+                            seconds=seconds * validity_bars
                         )
 
-                    valid_until = pd.Timestamp(
-                        analisis['source_valid_until']
-                    )
-
-                    now_utc = (
-                        pd.Timestamp.now(
-                            tz='UTC'
-                        )
-                    )
-
+                    now_utc = pd.Timestamp.now(tz='UTC')
                     tiempo_restante = int(
-                        max(
-                            0,
-                            (
-                                valid_until
-                                - now_utc
-                            ).total_seconds()
-                        )
+                        max(0, (valid_until - now_utc).total_seconds())
                     )
 
-                    if (
-                        tiempo_restante <= 0
-                        and
-                        resultado == 'pending'
-                    ):
-
+                    if tiempo_restante <= 0 and resultado == 'pending':
                         activa = 0
                         resultado = 'expired'
 
@@ -29350,6 +29477,9 @@ def _compute_previous_signals():
                     'source_candle_close_timestamp': analisis.get('source_candle_close_timestamp'),
                     'valid_until': (valid_until.isoformat() if valid_until is not None else analisis.get('source_valid_until')),
                     'source_valid_until': (valid_until.isoformat() if valid_until is not None else analisis.get('source_valid_until')),
+                    'validity_bars': int(validity_bars or 0),
+                    'validity_policy_version': _SPOT_VALIDITY_POLICY_VERSION,
+                    'validity_basis': 'SOURCE_TF+ENTRY_DISTANCE_ATR+REACHABILITY+REGIME+STRUCTURAL_INVALIDATION',
                     'ui_context': 'CONFIRMED',
                     'timestamp': str(tiempo_actual.isoformat())
                 }
@@ -29531,38 +29661,6 @@ def api_spot_signals_active():
             'error': str(e),
             'signals': []
         })
-
-
-@app.route('/api/spot/signals/active/refresh', methods=['POST'])
-def api_spot_signals_active_refresh():
-    """Refresh only the selected Spot forming-candle preview."""
-    try:
-        data = request.get_json(silent=True) or {}
-        symbol = str(data.get('symbol') or 'BTC-USDT').strip().upper()
-        timeframe = str(data.get('timeframe') or '4h').strip()
-        if symbol not in ('BTC-USDT', 'PAXG-USDT', 'PAXG-BTC'):
-            return jsonify({'success': False, 'error': 'Símbolo Spot inválido'}), 400
-        if timeframe not in ('4h', '12h', '1D', '1W'):
-            return jsonify({'success': False, 'error': 'Temporalidad Spot inválida'}), 400
-
-        cached = _spot_intrabar_preview_cached(symbol, timeframe)
-        if cached is not None:
-            return jsonify({
-                'success': True,
-                'scheduled': False,
-                'fresh': True,
-                'refresh_seconds': int(_SPOT_INTRABAR_PREVIEW_TTLS.get(timeframe, 180)),
-            })
-
-        state = _start_spot_intrabar_refresh_async(symbol, timeframe)
-        return jsonify({
-            'success': True,
-            'scheduled': state in ('SCHEDULED', 'RUNNING'),
-            'job_state': state,
-            'refresh_seconds': int(_SPOT_INTRABAR_PREVIEW_TTLS.get(timeframe, 180)),
-        }), 202
-    except Exception as exc:
-        return jsonify({'success': False, 'error': str(exc)[:180]}), 500
 
 
 @app.route('/api/spot/signals/vigent')
@@ -29945,7 +30043,15 @@ def api_saved_signals_create():
             # justificar el override. La fuente debe existir en el snapshot
             # canónico del servidor: último cierre (PREVIOUS) o lifecycle
             # persistente (ACTIVE).
-            current_cache = _get_or_refresh_futures_analysis()
+            current_cache = _get_futures_analysis_snapshot_read_only()
+            if current_cache.get('snapshot_available') is not True:
+                return jsonify({
+                    'success': False,
+                    'error': (
+                        'El snapshot de Futuros todavía no está disponible. '
+                        'Actualiza Futuros y vuelve a intentarlo.'
+                    )
+                }), 409
 
             if source_context == 'ACTIVE_ANALYSIS_ONLY':
                 lifecycle_record = (
@@ -30222,7 +30328,15 @@ def api_saved_signals_create():
                         or ''
                     ).strip()
 
-                    current_cache = _get_or_refresh_futures_analysis()
+                    current_cache = _get_futures_analysis_snapshot_read_only()
+                    if current_cache.get('snapshot_available') is not True:
+                        return jsonify({
+                            'success': False,
+                            'error': (
+                                'El snapshot de Futuros todavía no está disponible. '
+                                'Actualiza Futuros y vuelve a intentarlo.'
+                            )
+                        }), 409
                     lifecycle_map = current_cache.get('lifecycle') or {}
                     lifecycle_record = (
                         lifecycle_map.get(source_signal_id)
@@ -30614,37 +30728,81 @@ def api_saved_signals_delete(signal_id):
 # FINAL V1 RC3 — MARKET DATA PARA FUTURES GUARDIAN
 # ============================================================================
 
+# RC9.7.14 Free hardening: compact Guardian snapshots are shared across users.
+# Multiple users following the same BNB 1h position must not create duplicate
+# OHLCV/DataFrame fetches every three minutes.
+_GUARDIAN_MARKET_CACHE_LOCK = threading.Lock()
+_GUARDIAN_MARKET_CACHE = {}
+_GUARDIAN_MARKET_CACHE_TTL_SECONDS = 90
+_GUARDIAN_MARKET_CACHE_STALE_MAX_SECONDS = 10 * 60
+
 def _guardian_prepare_futures_market_data(futures_market, symbol, timeframe):
-    """Devuelve precio live + velas CERRADAS con timestamp para el Guardian.
+    """Compact closed-candle + live-price snapshot for Guardian.
 
-    El precio live sirve para seguimiento. Momentum, estructura, MFE/MAE y
-    deterioro usan únicamente velas cerradas; evaluate_futures_position filtra
-    además cualquier vela anterior al ``entry_touched_at`` de cada operación.
+    Shared across users and guarded by RSS. Under memory pressure Guardian uses
+    a recent compact snapshot or defers the cycle; it never competes with the
+    web worker by building another large market object.
     """
-    prepared = futures_market._prepare_closed_candle_analysis_data(
-        symbol,
-        timeframe,
-    )
-    if not isinstance(prepared, dict) or not prepared.get('success'):
+    key = (str(symbol or ''), str(timeframe or ''))
+    now_mono = time.monotonic()
+    with _GUARDIAN_MARKET_CACHE_LOCK:
+        cached = dict(_GUARDIAN_MARKET_CACHE.get(key) or {})
+    cached_age = now_mono - float(cached.get('_cached_at') or 0.0) if cached else 10**9
+    if cached and cached_age <= _GUARDIAN_MARKET_CACHE_TTL_SECONDS:
+        cached.pop('_cached_at', None)
+        return cached
+
+    rss = _process_rss_mb()
+    if rss is not None and rss >= _MEMORY_JOB_START_LIMIT_MB:
+        if cached and cached_age <= _GUARDIAN_MARKET_CACHE_STALE_MAX_SECONDS:
+            cached.pop('_cached_at', None)
+            return cached
+        print(
+            f"⏸️ [GUARDIAN] {symbol} {timeframe}: ciclo diferido por RSS {rss:.1f}MB"
+        )
         return None
 
-    closed_df = prepared.get('closed_df')
-    if closed_df is None or len(closed_df) < 2:
-        return None
+    try:
+        prepared = futures_market._prepare_closed_candle_analysis_data(
+            symbol,
+            timeframe,
+        )
+        if not isinstance(prepared, dict) or not prepared.get('success'):
+            return None
 
-    recent = closed_df.tail(32).copy()
-    return {
-        'current_price': float(prepared.get('live_price') or recent['close'].iloc[-1]),
-        'candles': {
-            'time': [str(v) for v in recent['time'].tolist()],
-            'close': [float(v) for v in recent['close'].tolist()],
-            'high': [float(v) for v in recent['high'].tolist()],
-            'low': [float(v) for v in recent['low'].tolist()],
-        },
-        'source_candle_timestamp': prepared.get('source_candle_timestamp'),
-        'open_candle_present': bool(prepared.get('open_candle_present')),
-        'market_data_source': prepared.get('market_data_source'),
-    }
+        closed_df = prepared.get('closed_df')
+        if closed_df is None or len(closed_df) < 2:
+            return None
+
+        recent = closed_df.tail(32)
+        compact = {
+            'current_price': float(prepared.get('live_price') or recent['close'].iloc[-1]),
+            'candles': {
+                'time': [str(v) for v in recent['time'].tolist()],
+                'close': [float(v) for v in recent['close'].tolist()],
+                'high': [float(v) for v in recent['high'].tolist()],
+                'low': [float(v) for v in recent['low'].tolist()],
+            },
+            'source_candle_timestamp': prepared.get('source_candle_timestamp'),
+            'open_candle_present': bool(prepared.get('open_candle_present')),
+            'market_data_source': prepared.get('market_data_source'),
+        }
+        with _GUARDIAN_MARKET_CACHE_LOCK:
+            _GUARDIAN_MARKET_CACHE[key] = {**compact, '_cached_at': now_mono}
+            if len(_GUARDIAN_MARKET_CACHE) > 12:
+                oldest = sorted(
+                    _GUARDIAN_MARKET_CACHE.items(),
+                    key=lambda item: float((item[1] or {}).get('_cached_at') or 0),
+                )
+                for old_key, _ in oldest[:-10]:
+                    _GUARDIAN_MARKET_CACHE.pop(old_key, None)
+        return compact
+    except Exception as exc:
+        if cached and cached_age <= _GUARDIAN_MARKET_CACHE_STALE_MAX_SECONDS:
+            cached.pop('_cached_at', None)
+            return cached
+        print(f"⚠️ [GUARDIAN] snapshot {symbol} {timeframe}: {str(exc)[:120]}")
+        return None
 
 
 def _guardian_telegram_cooldown(timeframe, action):
@@ -31196,13 +31354,38 @@ def api_saved_signals_chart_data(signal_id):
             'close': [float(v) for v in df['close'].tolist()],
         }
         current_price = float(df['close'].iloc[-1])
-        
+
+        # RC9.7.14 — post-trade review on demand. This is deliberately read-only
+        # and runs only when the user opens one saved signal. It does not start
+        # a market analysis and it never exposes another user's identity/trades.
+        learning_bundle = {
+            'configuration': {},
+            'forensics': {},
+            'global_profile': {},
+            'guardian_global_profile': {},
+        }
+        try:
+            from user_execution_learning import get_trade_learning_bundle
+            learning_bundle = get_trade_learning_bundle(sig)
+        except Exception as learning_error:
+            print(f"⚠️ RC9.7.14 trade review: {learning_error}")
+
+        # Free-runtime hygiene: the JSON lists are detached from pandas now.
+        try:
+            del df
+        except Exception:
+            pass
+
         return jsonify({
             'success': True,
             'signal': sig,
             'candles': candles,
             'current_price': current_price,
             'market_data_source': 'KUCOIN_FUTURES_PERPETUAL_REST',
+            'signal_configuration': learning_bundle.get('configuration') or {},
+            'trade_forensics': learning_bundle.get('forensics') or {},
+            'global_execution_learning': learning_bundle.get('global_profile') or {},
+            'guardian_global_learning': learning_bundle.get('guardian_global_profile') or {},
         })
     except Exception as e:
         print(f"❌ api_saved_signals_chart_data: {e}")
@@ -31837,48 +32020,6 @@ def api_futures_opportunities():
             'error': str(exc)[:180],
             'opportunities': [],
         }), 200
-
-
-@app.route('/api/futures/opportunities/refresh', methods=['POST'])
-def api_futures_opportunities_refresh():
-    """Schedule one selected symbol/TF intrabar preview without a universe scan."""
-    try:
-        data = request.get_json(silent=True) or {}
-        symbol = str(data.get('symbol') or 'BTC-USDT').strip().upper()
-        timeframe = str(data.get('timeframe') or '1h').strip()
-        _configured_futures_module()
-        from futures_system import futures_timeframe_allowed
-        if not futures_timeframe_allowed(symbol, timeframe):
-            return jsonify({
-                'success': False,
-                'error': f'Combinación Futures fuera del universo productivo: {symbol} {timeframe}'
-            }), 400
-
-        cadence = int(_FUTURES_INTRABAR_REFRESH_SECONDS.get(timeframe, 300))
-        key = (symbol, timeframe)
-        now = time.time()
-        with _FUTURES_INTRABAR_ACTIVE_LOCK:
-            runtime = _FUTURES_INTRABAR_RUNTIME_CACHE.get(key)
-            last_ts = float((runtime or {}).get('ts') or 0)
-        age = now - last_ts if last_ts else None
-        if age is not None and age < cadence * 0.85:
-            return jsonify({
-                'success': True,
-                'scheduled': False,
-                'fresh': True,
-                'age_seconds': int(max(0, age)),
-                'refresh_seconds': cadence,
-            })
-
-        state = _start_futures_ui_analysis_async(symbol, timeframe)
-        return jsonify({
-            'success': True,
-            'scheduled': state in ('STARTED', 'RUNNING'),
-            'job_state': state,
-            'refresh_seconds': cadence,
-        }), 202
-    except Exception as exc:
-        return jsonify({'success': False, 'error': str(exc)[:180]}), 500
 
 
 # ============================================================================
@@ -33212,25 +33353,100 @@ def _save_futures_cache_to_disk(force=False):
 # No tocar Supabase durante import app.
 
 
+_FUTURES_VALIDITY_POLICY_VERSION = 'RC9_7_14_TECHNICAL_VALIDITY_V3'
+
+
 def _futures_entry_wait_bars(result, timeframe):
-    """Vigencia pre-entry: timeframe + alcanzabilidad técnica, sin cambiar Entry/SL/TP."""
-    levels=(result or {}).get('levels') or {}
-    raw=levels.get('entry_reachability_score')
-    try: score=float(raw)
-    except Exception: score=None
-    if score is None: bars=6
-    elif score >= 85: bars=4
-    elif score >= 70: bars=5
-    elif score >= 50: bars=6
-    else: bars=8
-    # Commit 9.6: MEDIUM/HIGH need faster opportunity decay, without moving
-    # Entry/SL/TP or relaxing Safety.
+    """Technical pre-Entry validity in candles.
+
+    A confirmed setup remains order-worthy while its ORIGINAL structural thesis
+    can still reach Entry.  Age is estimated from Entry distance in ATR, Entry
+    reachability, trend/ADX persistence, MTF alignment and R/R.  Time never
+    restarts on deploy.  SL/structural invalidation or a missed target may end
+    the setup earlier.
+    """
+    result = result or {}
+    levels = result.get('levels') if isinstance(result.get('levels'), dict) else result
+    levels = levels or {}
+
+    # Guardrails prevent eternal orders; they are deliberately wider than one
+    # candle and are not the primary decision criterion.
+    base = {
+        '30m': 8, '1h': 8, '2h': 7, '4h': 6, '12h': 5, '1D': 4
+    }.get(str(timeframe), 6)
+    maximum = {
+        '30m': 16, '1h': 16, '2h': 14, '4h': 12, '12h': 10, '1D': 8
+    }.get(str(timeframe), 12)
+    bars = int(base)
+
     try:
-        from futures_universe import exit_profile_for
-        cap = int(exit_profile_for((result or {}).get('symbol')).get('max_entry_wait_bars') or 8)
-        return max(2, min(8, int(bars), cap))
+        distance_atr = abs(float(levels.get('entry_distance_atr') or 0))
     except Exception:
-        return max(4,min(8,int(bars)))
+        distance_atr = 0.0
+    if distance_atr > 0:
+        # ~0.45 ATR of useful retracement/travel per bar + confirmation room.
+        bars = max(bars, int(math.ceil(distance_atr / 0.45)) + 2)
+
+    try:
+        reach = float(levels.get('entry_reachability_score') or 0)
+    except Exception:
+        reach = 0.0
+    if 0 < reach < 55:
+        bars += 2
+    elif reach >= 80:
+        bars += 1
+
+    regime = result.get('market_regime') or levels.get('market_regime') or {}
+    regime_name = str(regime.get('regime') if isinstance(regime, dict) else regime).upper()
+    try:
+        regime_conf = float(regime.get('confidence') or 0) if isinstance(regime, dict) else 0.0
+    except Exception:
+        regime_conf = 0.0
+    if 'TREND' in regime_name and regime_conf >= 65:
+        bars += 2
+
+    indicators = result.get('indicators') or {}
+    try:
+        adx = float(indicators.get('adx') or levels.get('adx') or 0) if isinstance(indicators, dict) else 0.0
+    except Exception:
+        adx = 0.0
+    if adx >= 30:
+        bars += 1
+    if adx >= 40:
+        bars += 1
+
+    # MTF alignment may be represented in several generations of the payload.
+    mtf_text = ' '.join(str(result.get(k) or '') for k in (
+        'multi_timeframe_alignment', 'mtf_alignment', 'timeframe_alignment'
+    )).lower()
+    if mtf_text and ('alcist' in mtf_text or 'bajist' in mtf_text or 'aligned' in mtf_text):
+        bars += 1
+
+    try:
+        rr = float(levels.get('risk_reward') or 0)
+    except Exception:
+        rr = 0.0
+    if rr >= 1.8:
+        bars += 1
+    if rr >= 2.5:
+        bars += 1
+
+    return max(4, min(int(maximum), int(bars)))
+
+
+def _futures_valid_until_from_source(result, timeframe):
+    import pandas as pd
+    raw = (result or {}).get('source_candle_close_timestamp') or (result or {}).get('source_candle_timestamp')
+    if not raw:
+        return None, None
+    try:
+        source = pd.Timestamp(raw)
+        source = source.tz_localize('UTC') if source.tz is None else source.tz_convert('UTC')
+        tf_seconds = _FUTURES_TF_SECONDS.get(timeframe, 1800)
+        bars = _futures_entry_wait_bars(result, timeframe)
+        return source + pd.Timedelta(seconds=tf_seconds * bars), bars
+    except Exception:
+        return None, None
 
 
 def _human_duration(seconds):
@@ -33247,23 +33463,45 @@ def _human_duration(seconds):
 
 def _futures_signal_validity(result,timeframe,record=None):
     import pandas as pd
-    now=pd.Timestamp.now(tz='UTC')
-    valid_until=None
-    if isinstance(record,dict) and record.get('valid_until'):
-        try:
-            valid_until=pd.Timestamp(record.get('valid_until'))
-            valid_until=valid_until.tz_localize('UTC') if valid_until.tz is None else valid_until.tz_convert('UTC')
-        except Exception: valid_until=None
+    now = pd.Timestamp.now(tz='UTC')
+    valid_until = None
+    stored_version = None
+    if isinstance(record, dict):
+        stored_version = record.get('validity_policy_version')
+        if record.get('valid_until'):
+            try:
+                valid_until = pd.Timestamp(record.get('valid_until'))
+                valid_until = valid_until.tz_localize('UTC') if valid_until.tz is None else valid_until.tz_convert('UTC')
+            except Exception:
+                valid_until = None
+
+    technical_until, bars = _futures_valid_until_from_source(result or record or {}, timeframe)
+    # Migration is non-destructive: recompute from the ORIGINAL source close,
+    # never from "now". It may extend an old arbitrary TTL, but never restarts
+    # the clock after a refresh/deploy.
+    if technical_until is not None and (
+        valid_until is None
+        or stored_version != _FUTURES_VALIDITY_POLICY_VERSION
+        or technical_until > valid_until
+    ):
+        valid_until = technical_until if valid_until is None else max(valid_until, technical_until)
+
     if valid_until is None:
-        raw=(result or {}).get('source_candle_close_timestamp') or (result or {}).get('source_candle_timestamp')
-        try:
-            source=pd.Timestamp(raw); source=source.tz_localize('UTC') if source.tz is None else source.tz_convert('UTC')
-            tf_seconds=_FUTURES_TF_SECONDS.get(timeframe,1800)
-            valid_until=source+pd.Timedelta(seconds=tf_seconds*_futures_entry_wait_bars(result,timeframe))
-        except Exception:
-            valid_until=now+pd.Timedelta(seconds=_FUTURES_TF_SECONDS.get(timeframe,1800)*6)
-    remaining=max(0,int((valid_until-now).total_seconds()))
-    return {'valid_until':valid_until.isoformat(),'remaining_seconds':remaining,'duration_text':_human_duration(remaining),'expired':remaining<=0}
+        tf_seconds = _FUTURES_TF_SECONDS.get(timeframe, 1800)
+        fallback_bars = _futures_entry_wait_bars(result or {}, timeframe)
+        valid_until = now + pd.Timedelta(seconds=tf_seconds * fallback_bars)
+        bars = fallback_bars
+
+    remaining = max(0, int((valid_until - now).total_seconds()))
+    return {
+        'valid_until': valid_until.isoformat(),
+        'remaining_seconds': remaining,
+        'duration_text': _human_duration(remaining),
+        'expired': remaining <= 0,
+        'validity_bars': int(bars or 0),
+        'validity_policy_version': _FUTURES_VALIDITY_POLICY_VERSION,
+        'validity_basis': 'SOURCE_TF+ENTRY_DISTANCE_ATR+REACHABILITY+REGIME+ADX+MTF+RR+STRUCTURAL_INVALIDATION',
+    }
 
 
 def _futures_signal_public_url(symbol,timeframe,result):
@@ -33360,6 +33598,34 @@ def _refresh_futures_signal_lifecycle(
 
             if status not in ('waiting_entry', 'entry_touched'):
                 return
+
+            # RC9.7.14 FINAL — migrate old pre-entry TTLs from the original
+            # candle close, never from now. Entry-touched positions no longer
+            # expire by the waiting clock, but preserving metadata is harmless.
+            if status == 'waiting_entry':
+                try:
+                    validity_probe = dict(record)
+                    validity_probe['levels'] = dict(record)
+                    technical_until, technical_bars = _futures_valid_until_from_source(
+                        validity_probe, timeframe
+                    )
+                    old_until = None
+                    if record.get('valid_until'):
+                        old_until = pd.Timestamp(record.get('valid_until'))
+                        old_until = old_until.tz_localize('UTC') if old_until.tz is None else old_until.tz_convert('UTC')
+                    if technical_until is not None and (
+                        old_until is None
+                        or record.get('validity_policy_version') != _FUTURES_VALIDITY_POLICY_VERSION
+                        or technical_until > old_until
+                    ):
+                        record['valid_until'] = max(
+                            technical_until, old_until
+                        ).isoformat() if old_until is not None else technical_until.isoformat()
+                        record['validity_bars'] = int(technical_bars or 0)
+                        record['validity_policy_version'] = _FUTURES_VALIDITY_POLICY_VERSION
+                        record['validity_basis'] = 'SOURCE_TF+ENTRY_DISTANCE_ATR+REACHABILITY+REGIME+ADX+MTF+RR+STRUCTURAL_INVALIDATION'
+                except Exception:
+                    pass
 
             action = str(record.get('action') or '').upper()
             entry = float(record.get('entry') or 0)
@@ -33602,12 +33868,14 @@ def _refresh_futures_signal_lifecycle(
             else:
                 source_close = source_close.tz_convert('UTC')
 
-            valid_until = source_close + pd.Timedelta(
-                seconds=(
-                    tf_seconds
-                    * _futures_entry_wait_bars(result, timeframe)
-                )
+            valid_until, validity_bars = _futures_valid_until_from_source(
+                result, timeframe
             )
+            if valid_until is None:
+                validity_bars = _futures_entry_wait_bars(result, timeframe)
+                valid_until = source_close + pd.Timedelta(
+                    seconds=tf_seconds * validity_bars
+                )
 
             message = str(result.get('message') or '')
             if len(message) > 800:
@@ -33696,6 +33964,13 @@ def _refresh_futures_signal_lifecycle(
                 'analysis_mode': result.get('analysis_mode'),
                 'decision_audit': decision.get('audit'),
                 'valid_until': valid_until.isoformat(),
+                'validity_bars': int(validity_bars or 0),
+                'validity_policy_version': _FUTURES_VALIDITY_POLICY_VERSION,
+                'validity_basis': 'SOURCE_TF+ENTRY_DISTANCE_ATR+REACHABILITY+REGIME+ADX+MTF+RR+STRUCTURAL_INVALIDATION',
+                'entry_reachability_score': levels.get('entry_reachability_score'),
+                'entry_distance_atr': levels.get('entry_distance_atr'),
+                'entry_defensibility_score': levels.get('entry_defensibility_score'),
+                'market_regime': result.get('market_regime'),
                 'analysis_price': float(
                     result.get('analysis_price')
                     or result.get('current_price')
@@ -34795,6 +35070,36 @@ def _trigger_futures_combo_refresh_async(symbol=None, timeframe=None):
         name=f'futures-inc-{symbol}-{timeframe}',
     ).start()
     return True
+
+
+def _get_futures_analysis_snapshot_read_only():
+    """Return the current Futures snapshot without starting any analysis.
+
+    Saving a confirmed/vigent signal is a persistence operation, not a market
+    analysis request.  In particular, it must never start a heavy refresh while
+    the same HTTP request is writing to Supabase: on the small Render worker
+    that can create avoidable memory/latency pressure and may terminate the
+    connection seen by the browser as ``Failed to fetch``.
+
+    The signal card the user clicked was rendered from this same canonical
+    snapshot/lifecycle, so server-side save validation must use it read-only.
+    If no snapshot is available we fail closed and ask the UI to refresh.
+    """
+    cache = _futures_analysis_cache
+    with cache['lock']:
+        data = cache.get('data')
+        if not isinstance(data, dict):
+            return {
+                'analysis': {},
+                'lifecycle': {},
+                'snapshot_available': False,
+            }
+        snapshot = dict(data)
+
+    snapshot.setdefault('analysis', {})
+    snapshot.setdefault('lifecycle', {})
+    snapshot['snapshot_available'] = True
+    return snapshot
 
 
 def _get_or_refresh_futures_analysis(force_wait=False):
@@ -38124,6 +38429,74 @@ FUTURES_ENTRY_MONITOR_TIMEFRAMES = ('30m', '1h', '2h', '4h', '12h', '1D')
 MONITOR_ENTRY_TOLERANCE_PCT = 0.15  # 0.15% de tolerancia para "tocar" entry
 MONITOR_CHECK_INTERVAL = 180        # 3 minutos entre chequeos (antes 60s, reduce carga)
 
+# RC9.7.14 — Shadow live ligero para TODA señal oficial Spot Confirmed/Vigent.
+# No hace OHLCV/indicadores ni escribe BD; sólo mark-price + Entry/TP/SL/MFE/MAE.
+# Permite observar qué habría pasado aunque ningún usuario entre en la señal.
+_SPOT_OFFICIAL_SHADOW_LOCK = threading.Lock()
+_SPOT_OFFICIAL_SHADOW = {}
+
+
+def _update_spot_official_shadow(sig, current_price):
+    try:
+        action = str(sig.get('action') or sig.get('decision') or '').upper()
+        entry = float(sig.get('entry') or 0)
+        sl = float(sig.get('stop_loss') or 0)
+        tp = float(sig.get('take_profit') or 0)
+        current = float(current_price or 0)
+        if action not in ('LONG','SHORT','COMPRA_SPOT','VENTA_SPOT') or min(entry, sl, tp, current) <= 0:
+            return {}
+        candle = str(sig.get('source_candle_timestamp') or sig.get('candle_timestamp') or '')
+        key = '|'.join([str(sig.get('symbol') or ''), str(sig.get('timeframe') or ''), action, candle])
+        risk = abs(entry - sl)
+        if risk <= 0:
+            return {}
+        with _SPOT_OFFICIAL_SHADOW_LOCK:
+            state = dict(_SPOT_OFFICIAL_SHADOW.get(key) or {})
+            status = str(state.get('status') or 'waiting_entry')
+            now_iso = datetime.now(timezone.utc).isoformat()
+            if status == 'waiting_entry':
+                touched = (action in ('LONG','COMPRA_SPOT') and current <= entry) or (action in ('SHORT','VENTA_SPOT') and current >= entry)
+                # If target is reached before a pullback to Entry, the original
+                # order opportunity is missed rather than kept alive forever.
+                missed = (action in ('LONG','COMPRA_SPOT') and current >= tp) or (action in ('SHORT','VENTA_SPOT') and current <= tp)
+                if missed and not touched:
+                    status = 'missed_target_before_entry'
+                    state['closed_at'] = now_iso
+                elif touched:
+                    status = 'entry_touched'
+                    state['entry_touched_at'] = now_iso
+                    state['entry_touched_price'] = current
+            if status == 'entry_touched':
+                favorable = ((current-entry)/risk) if action in ('LONG','COMPRA_SPOT') else ((entry-current)/risk)
+                adverse = ((entry-current)/risk) if action in ('LONG','COMPRA_SPOT') else ((current-entry)/risk)
+                state['mfe_r'] = round(max(float(state.get('mfe_r') or 0), favorable), 4)
+                state['mae_r'] = round(max(float(state.get('mae_r') or 0), adverse), 4)
+                if action in ('LONG','COMPRA_SPOT'):
+                    if current <= sl:
+                        status = 'sl_hit'
+                    elif current >= tp:
+                        status = 'tp_hit'
+                else:
+                    if current >= sl:
+                        status = 'sl_hit'
+                    elif current <= tp:
+                        status = 'tp_hit'
+                if status in ('sl_hit','tp_hit'):
+                    state['closed_at'] = now_iso
+            state.update({
+                'status': status, 'current_price': current, 'last_checked_at': now_iso,
+                'entry': entry, 'stop_loss': sl, 'take_profit': tp,
+                'symbol': sig.get('symbol'), 'timeframe': sig.get('timeframe'), 'action': action,
+            })
+            _SPOT_OFFICIAL_SHADOW[key] = state
+            # Defensive bound; these are recreatable telemetry only.
+            if len(_SPOT_OFFICIAL_SHADOW) > 120:
+                for old_key in list(_SPOT_OFFICIAL_SHADOW)[:-100]:
+                    _SPOT_OFFICIAL_SHADOW.pop(old_key, None)
+            return dict(state)
+    except Exception:
+        return {}
+
 # Duración de cada TF en segundos (para normalizar candle_start)
 _TF_SECONDS = {
     '30m': 1800,
@@ -38831,25 +39204,28 @@ def monitor_entries_loop():
                 if not symbol or not tf or entry is None:
                     continue
 
-                # Las preferencias de Telegram de Spot aplican tanto al aviso
-                # CONFIRMADA como al segundo evento operativo de Entry.
-                if not _spot_entry_alert_allowed(tf):
-                    continue
-
-                # Precio vivo ligero: Confirmadas/Vigentes no deben depender de
-                # que vuelva a ejecutarse el análisis pesado para detectar Entry.
+                # Precio vivo ligero: Confirmadas/Vigentes se siguen aunque
+                # ningún usuario tenga Telegram o haya entrado manualmente.
                 live_price = _spot_live_market_price(symbol)
                 if live_price is not None:
                     current = live_price
                 if current is None:
                     continue
 
+                shadow = _update_spot_official_shadow(sig, current)
+                shadow_status = str(shadow.get('status') or '')
+                # Keep the operational Entry-zone tolerance contract for the
+                # Telegram event while shadow telemetry uses actual path state.
+                touched_for_alert = _price_touches_entry(current, entry, sig.get('action'), sig)
+                if shadow_status not in ('entry_touched', 'tp_hit', 'sl_hit') and not touched_for_alert:
+                    continue
+
+                # Preferencias sólo controlan el AVISO, no el shadow-learning.
+                if not _spot_entry_alert_allowed(tf):
+                    continue
+
                 # ¿Ya enviamos alerta ENTRY para esta señal/vela?
                 if _entry_alert_already_sent(symbol, tf, candle_ts):
-                    continue
-                
-                # ¿El precio actual toca el entry?
-                if not _price_touches_entry(current, entry, sig.get('action'), sig):
                     continue
                 
                 # DISPARAR ALERTA
@@ -38871,21 +39247,23 @@ def monitor_entries_loop():
                     except Exception:
                         analysis = None
                     
-                    # Si no está en caché, reanalizar (evento raro: 1 vez por vela)
+                    # RC9.7.14 FINAL: un monitor Telegram jamás inicia análisis
+                    # pesado. Si no existe snapshot en caché, el aviso sale texto-only.
+                    # En LOW_MEMORY_MODE los avisos automáticos también evitan render
+                    # de PNG para proteger el web worker de 512 MB.
                     if analysis is None or not analysis.get('success'):
-                        try:
-                            if sig.get('system') == 'futures':
-                                futures_sys = _get_futures_system()
-                                if futures_sys is not None:
-                                    analysis = futures_sys.analyze_futures_market(symbol, tf)
-                            else:
-                                analysis = expert_system.analyze_full_market(symbol, tf)
-                        except Exception as an_err:
-                            print(f"   ⚠️ reanálisis falló: {an_err}")
-                            analysis = None
-                    
-                    # Generar imagen COMBINADA (principal + 4 indicadores en 1 PNG)
-                    if analysis and analysis.get('success'):
+                        analysis = None
+
+                    render_background_chart = bool(
+                        analysis
+                        and analysis.get('success')
+                        and not _LOW_MEMORY_MODE
+                        and (_process_rss_mb() is None or _process_rss_mb() < 200.0)
+                    )
+
+                    # Generar imagen sólo desde un snapshot YA calculado y sólo
+                    # cuando hay headroom. Nunca fetch OHLCV/indicadores aquí.
+                    if render_background_chart:
                         try:
                             top_indicators = expert_system.get_top_signal_indicators_for_telegram(
                                 analysis,
@@ -38895,17 +39273,9 @@ def monitor_entries_loop():
                             image_bytes = render_telegram_signal_chart(
                                 symbol, tf, analysis, indicators=top_indicators
                             )
-                            if image_bytes:
-                                print(f"   🖼️ Imagen combinada generada ({sig.get('system')}): principal + {top_indicators}")
-                            else:
-                                # Fallback: solo gráfico principal
-                                image_bytes = expert_system.generate_chart_image(
-                                    symbol, tf, analysis, top_indicators
-                                )
-                                if image_bytes:
-                                    print(f"   🖼️ Fallback: solo gráfico principal")
                         except Exception as chart_err:
-                            print(f"   ⚠️ imagen combinada falló: {chart_err}")
+                            print(f"   ⚠️ imagen Telegram omitida: {chart_err}")
+                            image_bytes = None
                     
                     # Liberar análisis (grande) antes de enviar Telegram
                     del analysis
@@ -41174,6 +41544,28 @@ def _apply_96_guardian_risk_policy(advice, signal):
 
         exit_score = float(profile.get('guardian_exit_score') or 100)
         reduce_score = float(profile.get('guardian_reduce_score') or 100)
+
+        # RC9.7.14 FINAL — Guardian learns from all-user counterfactuals.
+        # N<8 is strictly OBSERVE_ONLY. Repeated harmful EXITs make Guardian
+        # more patient; repeated helpful EXITs allow slightly earlier defense.
+        # This never changes Entry/SL/TP and is bounded to a few score points.
+        guardian_calibration = {}
+        try:
+            from user_execution_learning import get_guardian_policy_adjustment
+            guardian_calibration = get_guardian_policy_adjustment(
+                (signal or {}).get('symbol'),
+                (signal or {}).get('timeframe'),
+                (signal or {}).get('action'),
+            ) or {}
+            exit_score += float(guardian_calibration.get('exit_threshold_delta') or 0)
+            reduce_score += float(guardian_calibration.get('reduce_threshold_delta') or 0)
+            exit_score = max(55.0, min(98.0, exit_score))
+            reduce_score = max(45.0, min(exit_score - 3.0, reduce_score))
+            out['guardian_learning_calibration'] = guardian_calibration
+            out['guardian_exit_score_effective'] = round(exit_score, 2)
+            out['guardian_reduce_score_effective'] = round(reduce_score, 2)
+        except Exception:
+            guardian_calibration = {}
         if deterioration >= exit_score:
             action = 'EXIT'
             out['action'] = 'EXIT'
@@ -41183,6 +41575,21 @@ def _apply_96_guardian_risk_policy(advice, signal):
             out['action'] = 'REDUCE'
             out['suggested_reduce_pct'] = max(float(out.get('suggested_reduce_pct') or 0), 35.0 if risk_class=='HIGH' else 25.0)
             reason_bits.append(f'deterioro {deterioration:.0f}/100 exige reducir exposición {risk_class}')
+        elif (
+            action == 'PROTECT'
+            and str(guardian_calibration.get('protect_policy') or '') == 'REQUIRE_MORE_CONFIRMATION'
+        ):
+            # Counterfactual learning found repeated premature stop tightening.
+            # Do not invent a looser stop: simply keep HOLD for this low-urgency
+            # protection until deterioration reaches the normal reduce/exit
+            # thresholds or the base Guardian produces stronger evidence.
+            action = 'HOLD'
+            out['action'] = 'HOLD'
+            out['management_action'] = 'HOLD'
+            reason_bits.append(
+                'ReviewTrader: PROTECT prematuro se repitió en >=8 muestras; '
+                'se espera confirmación adicional antes de estrechar el stop'
+            )
 
         out['management_action'] = action
         if reason_bits:
@@ -46881,10 +47288,9 @@ def futures_standard_alert_loop():
     time.sleep(120)
     while True:
         try:
+            # Shadow-live runs for every official signal, independent of users.
+            # Telegram recipients are only needed later when an alert must be sent.
             users = sorted(_telegram_market_users('futures'))
-            if not users:
-                time.sleep(20)
-                continue
 
             with _futures_analysis_cache['lock']:
                 raw = dict(_futures_analysis_cache.get('data') or {})
@@ -46952,41 +47358,103 @@ def futures_standard_alert_loop():
                 time.sleep(20)
                 continue
 
-            # Only waiting-entry symbols need a fresh mark-price request. A
-            # lifecycle already marked entry_touched carries its touch price.
-            waiting_symbols = sorted({
-                row[0] for row in candidates if row[9] == 'waiting_entry'
-            })
+            # RC9.7.14: mark-price shadow monitor for ALL Confirmed/Vigent
+            # official signals, even if nobody saved/entered them. This is
+            # deliberately lightweight: no OHLCV, indicators, AI or DB writes.
+            live_symbols = sorted({row[0] for row in candidates})
             live_by_symbol = {
                 symbol: _futures_live_mark_price(symbol)
-                for symbol in waiting_symbols
+                for symbol in live_symbols
             }
 
             for (
                 symbol, timeframe, record, result, profile,
                 entry, sl, tp, action, status, validity,
             ) in candidates:
+                # Compatibility/readability: a Vigent signal already marked
+                # Entry-touched remains eligible even after leaving Confirmed.
                 if status == 'entry_touched':
-                    current = float(record.get('entry_touched_price') or entry or 0)
-                    touched = current > 0
-                else:
-                    current = live_by_symbol.get(symbol)
-                    touched = bool(
-                        current
-                        and _price_touches_entry(
-                            current,
-                            entry,
-                            action,
-                            {
-                                'system': 'futures',
-                                'system_type': 'futures',
-                                'symbol': symbol,
-                                'timeframe': timeframe,
-                            },
-                        )
-                    )
+                    record.setdefault('entry_touched_price', record.get('current_price') or entry)
 
-                if not touched:
+                current = live_by_symbol.get(symbol)
+                if current is None:
+                    current = float(record.get('current_price') or record.get('entry_touched_price') or 0)
+                if not current or current <= 0:
+                    continue
+
+                now_iso = datetime.now(timezone.utc).isoformat()
+                shadow_status = status
+                risk_abs = abs(entry - sl)
+                touched_now = False
+
+                if shadow_status == 'waiting_entry':
+                    if validity.get('expired'):
+                        shadow_status = 'expired'
+                    else:
+                        touched_now = bool(_price_touches_entry(
+                            current, entry, action,
+                            {'system':'futures','system_type':'futures','symbol':symbol,'timeframe':timeframe},
+                        ))
+                        missed_target = (action == 'LONG' and current >= tp) or (action == 'SHORT' and current <= tp)
+                        if missed_target and not touched_now:
+                            shadow_status = 'missed_target_before_entry'
+                        elif touched_now:
+                            shadow_status = 'entry_touched'
+                            record['entry_touched_at'] = now_iso
+                            record['entry_touched_price'] = float(current)
+
+                if shadow_status == 'entry_touched' and risk_abs > 0:
+                    favorable = ((current-entry)/risk_abs) if action == 'LONG' else ((entry-current)/risk_abs)
+                    adverse = ((entry-current)/risk_abs) if action == 'LONG' else ((current-entry)/risk_abs)
+                    record['shadow_mfe_r'] = round(max(float(record.get('shadow_mfe_r') or 0), favorable), 4)
+                    record['shadow_mae_r'] = round(max(float(record.get('shadow_mae_r') or 0), adverse), 4)
+                    if action == 'LONG':
+                        if current <= sl:
+                            shadow_status = 'sl_hit'
+                        elif current >= tp:
+                            shadow_status = 'tp_hit'
+                    else:
+                        if current >= sl:
+                            shadow_status = 'sl_hit'
+                        elif current <= tp:
+                            shadow_status = 'tp_hit'
+
+                record['current_price'] = float(current)
+                record['last_shadow_live_at'] = now_iso
+                record['shadow_live_monitored'] = True
+                record['lifecycle_status'] = shadow_status
+                if shadow_status in ('expired','missed_target_before_entry','tp_hit','sl_hit'):
+                    record['closed_at'] = record.get('closed_at') or now_iso
+                    record['close_reason'] = record.get('close_reason') or shadow_status
+
+                # Write compact telemetry back to the canonical in-memory
+                # lifecycle. Runtime snapshot/deep ReviewTrader persistence keeps
+                # its own cadence; this loop never writes Supabase every 20 s.
+                sid = str(record.get('signal_id') or '')
+                if sid:
+                    with _futures_analysis_cache['lock']:
+                        cache_data = _futures_analysis_cache.get('data') or {}
+                        cache_lifecycle = cache_data.get('lifecycle') or {}
+                        if sid in cache_lifecycle and isinstance(cache_lifecycle.get(sid), dict):
+                            cache_lifecycle[sid].update({
+                                'current_price': record.get('current_price'),
+                                'last_shadow_live_at': record.get('last_shadow_live_at'),
+                                'shadow_live_monitored': True,
+                                'shadow_mfe_r': record.get('shadow_mfe_r'),
+                                'shadow_mae_r': record.get('shadow_mae_r'),
+                                'lifecycle_status': shadow_status,
+                                'entry_touched_at': record.get('entry_touched_at'),
+                                'entry_touched_price': record.get('entry_touched_price'),
+                                'closed_at': record.get('closed_at'),
+                                'close_reason': record.get('close_reason'),
+                            })
+
+                # Telegram is a consumer of the shadow event, not the cause of
+                # monitoring. Only Entry gets this second operational alert.
+                touched = shadow_status in ('entry_touched','tp_hit','sl_hit') and (
+                    touched_now or bool(record.get('entry_touched_at'))
+                )
+                if not touched or not users:
                     continue
 
                 signal_for_zone = {

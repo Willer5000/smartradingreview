@@ -27,13 +27,13 @@ def test_confirmed_and_vigent_sources_remain_closed_lifecycle():
     assert "'source_context': 'ACTIVE_CONFIRMED'" in app
 
 
-def test_selected_futures_intrabar_refresh_is_scheduled_without_universe_scan():
-    assert "@app.route('/api/futures/opportunities/refresh', methods=['POST'])" in app
-    assert '_FUTURES_INTRABAR_REFRESH_SECONDS' in app
-    assert '_futScheduleSelectedIntrabarRefresh' in fut
-    assert "'/api/futures/opportunities/refresh'" in fut
-    assert "'30m': 90000" in fut
-    assert "'1h': 120000" in fut
+def test_free_runtime_does_not_auto_schedule_heavy_futures_intrabar_refresh():
+    assert "@app.route('/api/futures/opportunities/refresh', methods=['POST'])" not in app
+    assert '_futScheduleSelectedIntrabarRefresh' not in fut
+    assert "'/api/futures/opportunities/refresh'" not in fut
+    # Selected analysis can still populate INTRABAR preview; there is simply no
+    # autonomous heavy polling loop on the 512 MB worker.
+    assert '_FUTURES_INTRABAR_DIAGNOSTIC_CACHE = {}' in app
 
 
 def test_futures_stale_intrabar_preview_expires_quickly():
@@ -41,9 +41,9 @@ def test_futures_stale_intrabar_preview_expires_quickly():
     assert 'cadence * 2' in app
 
 
-def test_spot_selected_intrabar_refresh_is_real_and_separate():
-    assert "@app.route('/api/spot/signals/active/refresh', methods=['POST'])" in app
-    assert '_start_spot_intrabar_refresh_async' in app
-    assert '_scheduleSpotIntrabarRefresh' in spot
-    assert "'/api/spot/signals/active/refresh'" in spot
-    assert "'4h': 90000" in spot
+def test_spot_intrabar_preview_is_separate_but_not_auto_polled_on_free_runtime():
+    assert 'def _run_spot_intrabar_preview' in app
+    assert "@app.route('/api/spot/signals/active/refresh', methods=['POST'])" not in app
+    assert '_start_spot_intrabar_refresh_async' not in app
+    assert '_scheduleSpotIntrabarRefresh' not in spot
+    assert "'/api/spot/signals/active/refresh'" not in spot

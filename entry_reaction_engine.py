@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-RC4_ENTRY_REACTION_VERSION = "RC4_ENTRY_REACTION_V1"
+RC4_ENTRY_REACTION_VERSION = "RC9_7_14_ENTRY_REACTION_V2"
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -89,7 +89,10 @@ def evaluate_entry_reaction(
             "1D": 54.0,
         }.get(tf, 58.0)
         # High TF defines the thesis; a lower TF should refine the actual fill.
-        lower_tf_confirmation_required = tf in {"12H", "1D"}
+        lower_tf_confirmation_required = (
+            tf in {"12H", "1D"}
+            or (tf == "1H" and distance_atr is not None and distance_atr <= 0.45)
+        )
         weak_reaction_hard_block = (
             tf in {"30M", "1H", "2H", "4H"}
             and reaction < 32.0
@@ -139,6 +142,7 @@ def evaluate_entry_reaction(
             "futures_stricter_than_spot": True,
             "entry_quality_not_win_probability": True,
             "high_tf_uses_lower_tf_trigger": bool(lower_tf_confirmation_required),
+            "near_market_1h_requires_30m_trigger": True,
             "does_not_change_direction": True,
             "does_not_change_leverage": True,
         },

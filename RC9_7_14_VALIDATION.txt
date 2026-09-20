@@ -1,0 +1,36 @@
+RC9.7.14 FINAL-FINAL PHASE-1 VALIDATION — 2026-09-19
+
+STATIC / SYNTAX
+PASS  python -m py_compile app.py futures_system.py entry_reaction_engine.py leverage_policy.py review_trader.py saved_signals.py supabase_client.py user_execution_learning.py sitecustomize.py
+PASS  node --check static/futures.js
+PASS  node --check static/script.js
+
+FINAL RELEASE SUITE
+PASS  58/58 tests
+- 50 RC9.7.13/RC9.7.14 V1/V2 learning, Guardian, validity, leverage and Free-runtime tests
+- 8 final-final Entry precision/regression tests
+
+FINAL-FINAL ENTRY ASSERTIONS
+PASS  1H near-market Futures Entry requires 30M closed reaction confirmation
+PASS  1H pullback limit farther from market can be announced before Entry touch
+PASS  lower-TF call uses canonical action string (no stale decision.get bug)
+PASS  entry_reaction passed=false blocks Futures Premium publication
+PASS  ATR-aware timing gate blocks extended near-market chase Entries
+PASS  Spot keeps structure priority but reachability rises to 18%
+PASS  POI confluence recomputes the ranking score after confluence
+PASS  anti-FOMO moved Entry is regraded at the actual price
+
+INTENTIONAL POLICY SUPERSESSIONS
+- RC9.7.11 position-size-dependent leverage tests are obsolete: V6 leverage is signal-standard and user-independent.
+- Old hard timeframe/contingency leverage caps are intentionally references, not hard caps.
+- Autonomous heavy intrabar polling assertions are obsolete under the 512 MB Free-runtime hardening; no full-universe autonomous heavy scanner is restored.
+
+POST-DEPLOY SMOKE CHECK
+1. / and /futures must remain responsive; no repeated worker restart/OOM loop.
+2. Inspect one Futures 1H near-market setup: if extended, it must WAIT rather than chase; if near Entry, 30M reaction must be confirmed before executable publication.
+3. Inspect one Futures pullback limit >=0.45 ATR away: it may remain Confirmed/Vigent pending Entry without requiring that the zone has already been touched.
+4. Confirm Spot Confirmed/Vigent persists across multiple candles according to technical valid_until; deploy does not reset the clock.
+5. Observe expired_no_entry separately from SL/TP in ReviewTrader; it must not be counted as a directional loss.
+6. Same official signal across users keeps one canonical market sample for authority.
+7. Guardian protected positive stop remains WIN by signed R; Guardian counterfactual learning still compares with original plan.
+8. Verify leverage is identical for the same signal across users and is not constrained solely by old timeframe caps.

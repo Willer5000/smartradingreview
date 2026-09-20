@@ -2944,6 +2944,17 @@ class ReviewTrader:
             context['sentiment_bias'] = sentiment.get('sentiment_bias', 'neutral')
         
         context['rotation_signal'] = correlation.get('rotation_signal', 'NEUTRAL')
+
+        # RC9.7.14 — preserve the market regime that existed when the signal
+        # was confirmed.  This is JSON context only (no schema change) and lets
+        # post-trade review distinguish strategy failure from regime mismatch.
+        market_regime = analysis.get('market_regime') or {}
+        if isinstance(market_regime, dict):
+            context['market_regime'] = {
+                'regime': str(market_regime.get('regime') or 'UNKNOWN')[:40],
+                'confidence': market_regime.get('confidence'),
+            }
+
         # ==============================================================
         # FASE 6 — CONTEXTO DE EJECUCIÓN
         # ==============================================================
@@ -12969,6 +12980,59 @@ class ReviewTrader:
                 short_score = _fuse(short_score, research_short)
             except Exception as research_error:
                 logger.debug('Backtest/OOS ReviewTrader no disponible: %s', research_error)
+
+            # ==========================================================
+            # RC9.7.14 — CONTINUIDAD REAL AGREGADA DE TODOS LOS USUARIOS
+            # ==========================================================
+            # No se convierte un mal Entry en un castigo direccional. ReviewTrader
+            # observa esta evidencia y la publica como continuidad de ejecución;
+            # FuturesSystem la consume después, en el Publication Gate, donde puede
+            # exigir un Entry actual más defendible/alcanzable tras N>=8 señales
+            # canónicas con fast-SL/low-MFE repetido. OOS sigue siendo autoridad
+            # primaria y una sola pérdida nunca cambia una señal futura.
+            global_execution_long = {'authority': 'UNAVAILABLE', 'sample_size': 0}
+            global_execution_short = {'authority': 'UNAVAILABLE', 'sample_size': 0}
+            if explicit_market == 'futures':
+                try:
+                    from user_execution_learning import get_global_execution_profile
+                    global_execution_long = get_global_execution_profile(
+                        symbol, timeframe, 'LONG'
+                    )
+                    global_execution_short = get_global_execution_profile(
+                        symbol, timeframe, 'SHORT'
+                    )
+
+                    for direction, profile in (
+                        ('LONG', global_execution_long),
+                        ('SHORT', global_execution_short),
+                    ):
+                        n = int(profile.get('sample_size') or 0)
+                        observed = int(profile.get('observed_trade_count_all_users') or 0)
+                        if n <= 0 and observed <= 0:
+                            continue
+                        authority = str(profile.get('authority') or 'OBSERVE_ONLY')
+                        exp_r = float(profile.get('expectancy_r') or 0.0)
+                        wr = float(profile.get('win_rate') or 0.0)
+                        fast_sl = float(profile.get('fast_sl_rate') or 0.0)
+                        if authority == 'OBSERVE_ONLY':
+                            razones.append(
+                                f"Ejecución real agregada {direction}: N canónico={n}, "
+                                f"observaciones={observed}; se aprende en shadow, aún sin autoridad (mínimo N=8)"
+                            )
+                        else:
+                            razones.append(
+                                f"Ejecución real agregada {direction}: N={n}, "
+                                f"Exp={exp_r:.2f}R, WR={wr:.1f}%, fast-SL={fast_sl*100:.0f}%"
+                            )
+                            if exp_r < 0 and fast_sl >= 0.30:
+                                estrategias_detectadas.append(
+                                    f'GLOBAL_EXECUTION_ENTRY_CAUTION_{direction}'
+                                )
+                except Exception as global_execution_error:
+                    logger.debug(
+                        'Continuidad agregada de usuarios no disponible: %s',
+                        global_execution_error
+                    )
 
             print(f"   📈 Score LONG fusionado: {long_score:.1f} | Research={research_long.get('state')}")
             print(f"   📉 Score SHORT fusionado: {short_score:.1f} | Research={research_short.get('state')}")

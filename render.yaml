@@ -11,6 +11,23 @@ services:
         value: "1"
       - key: PYTHONUNBUFFERED
         value: "1"
+      # RC9.7.14 — keep native numeric libraries single-threaded on 512 MB.
+      - key: OMP_NUM_THREADS
+        value: "1"
+      - key: OPENBLAS_NUM_THREADS
+        value: "1"
+      - key: MKL_NUM_THREADS
+        value: "1"
+      - key: NUMEXPR_NUM_THREADS
+        value: "1"
+      - key: BLIS_NUM_THREADS
+        value: "1"
+      - key: FREE_RUNTIME_MAX_THREADS
+        value: "18"
+      - key: FREE_RUNTIME_BACKGROUND_LOCK_WAIT_SECONDS
+        value: "1"
+      - key: FREE_RUNTIME_INTERACTIVE_LOCK_WAIT_SECONDS
+        value: "10"
       - key: MEMORY_SOFT_LIMIT_MB
         value: "250"
       - key: MEMORY_HARD_LIMIT_MB

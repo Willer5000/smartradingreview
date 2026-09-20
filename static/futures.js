@@ -3070,54 +3070,6 @@ window.loadFuturesOpportunities96 = async function() {
 };
 
 // ============================================================================
-// RC9.7.13 — REFRESCO REAL DE LA VELA EN FORMACIÓN (PAR/TF SELECCIONADO)
-// ============================================================================
-window.__FUT_INTRABAR_REFRESH_TIMER__ = window.__FUT_INTRABAR_REFRESH_TIMER__ || null;
-
-function _futIntrabarRefreshMs(timeframe) {
-    const map = {
-        '30m': 90000,
-        '1h': 120000,
-        '2h': 180000,
-        '4h': 240000,
-        '12h': 300000,
-        '1D': 300000
-    };
-    return map[String(timeframe || '')] || 300000;
-}
-
-function _futScheduleSelectedIntrabarRefresh(resetOnly = false) {
-    clearTimeout(window.__FUT_INTRABAR_REFRESH_TIMER__);
-    const tf = document.getElementById('interval-select')?.value || '1h';
-    const delay = _futIntrabarRefreshMs(tf);
-
-    window.__FUT_INTRABAR_REFRESH_TIMER__ = setTimeout(async () => {
-        try {
-            if (document.hidden) {
-                _futScheduleSelectedIntrabarRefresh();
-                return;
-            }
-            const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
-            const timeframe = document.getElementById('interval-select')?.value || '1h';
-            await fetch('/api/futures/opportunities/refresh', {
-                method: 'POST',
-                cache: 'no-store',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({symbol, timeframe})
-            });
-            // El cálculo es async. Darle un margen corto y releer el carril verde.
-            setTimeout(() => {
-                if (!document.hidden) window.loadFuturesOpportunities96?.();
-            }, 5000);
-        } catch (error) {
-            console.warn('FUTURES intrabar refresh:', error);
-        } finally {
-            _futScheduleSelectedIntrabarRefresh();
-        }
-    }, resetOnly ? delay : delay);
-}
-
-// ============================================================================
 // INICIALIZACIÓN
 // ============================================================================
 
@@ -3142,7 +3094,6 @@ document.addEventListener('DOMContentLoaded', function() {
     }, true);
     setTimeout(() => window.loadFuturesUniverse96(), 150);
     setTimeout(() => window.loadFuturesOpportunities96(), 2500);
-    _futScheduleSelectedIntrabarRefresh(true);
     setInterval(() => {
         if (!document.hidden) window.loadFuturesOpportunities96();
     }, 300000);
@@ -3306,8 +3257,7 @@ document.addEventListener('DOMContentLoaded', function() {
             // runCompleteAnalysis() ya disparó el preview del nuevo par/TF;
             // releer Activas después de que termine y reiniciar su reloj.
             setTimeout(() => window.loadFuturesOpportunities96?.(), 5000);
-            _futScheduleSelectedIntrabarRefresh(true);
-        }, 500);
+                }, 500);
     };
     document.getElementById('interval-select')?.addEventListener('change', refreshFuturesContext);
     document.getElementById('symbol-select')?.addEventListener('change', refreshFuturesContext);
@@ -5035,6 +4985,74 @@ window.openSavedSignalDetail = async function(signalId) {
         const badgeClass = sig.action === 'LONG' ? 'success' : 'danger';
         const statusBadge = _statusBadge(sig.status, sig.entry_touched);
         const pnlDisplay = _formatPnl(sig);
+
+        // RC9.7.14 — configuration + post-trade review are read-only.
+        // They are loaded only when this modal is opened, so the main Futures
+        // dashboard stays light on Render Free.
+        const cfg = json.signal_configuration || {};
+        const forensic = json.trade_forensics || {};
+        const globalLearning = json.global_execution_learning || {};
+        const guardianGlobal = json.guardian_global_learning || {};
+        const cfgStrategy = cfg.strategy || {};
+        const cfgThesis = cfg.thesis || {};
+        const cfgExecution = cfg.execution || {};
+        const cfgRegime = cfg.market_regime || {};
+        const fmtScore = (value, digits = 1) => {
+            const n = Number(value);
+            return Number.isFinite(n) ? n.toFixed(digits) : '--';
+        };
+        const strategyLabel = cfgStrategy.id || cfgStrategy.family || 'No recuperada';
+        const strategySource = cfgStrategy.source || '--';
+        const motivesHtml = Array.isArray(cfg.motives) && cfg.motives.length
+            ? `<ul class="mb-0 ps-3">${cfg.motives.slice(0, 6).map(x => `<li>${futEscapeHtml(x)}</li>`).join('')}</ul>`
+            : '<span class="text-muted">No hay motivos históricos compactos disponibles.</span>';
+        const configurationHtml = cfg.available ? `
+            <details class="mb-3 p-2 border border-secondary rounded bg-black">
+                <summary class="fw-semibold">🧩 Configuración original de la señal</summary>
+                <div class="row g-2 mt-1 small">
+                    <div class="col-md-6"><span class="text-muted">Estrategia:</span> <strong>${futEscapeHtml(strategyLabel)}</strong></div>
+                    <div class="col-md-3"><span class="text-muted">Familia:</span> <strong>${futEscapeHtml(cfgStrategy.family || '--')}</strong></div>
+                    <div class="col-md-3"><span class="text-muted">Fuente:</span> <strong>${futEscapeHtml(strategySource)}</strong></div>
+                    <div class="col-md-4"><span class="text-muted">Tesis:</span> <strong>${futEscapeHtml(cfgThesis.direction || sig.action || '--')}</strong></div>
+                    <div class="col-md-4"><span class="text-muted">MTF:</span> <strong>${futEscapeHtml(cfgThesis.mtf_alignment || '--')}</strong></div>
+                    <div class="col-md-4"><span class="text-muted">Safety:</span> <strong>${fmtScore(cfgExecution.execution_safety)}</strong></div>
+                    <div class="col-md-4"><span class="text-muted">Régimen:</span> <strong>${futEscapeHtml(cfgRegime.regime || '--')}</strong></div>
+                    <div class="col-md-4"><span class="text-muted">Entry quality:</span> <strong>${fmtScore(cfgExecution.entry_score)}</strong></div>
+                    <div class="col-md-4"><span class="text-muted">Alcanzabilidad:</span> <strong>${fmtScore(cfgExecution.entry_reachability_score)}</strong></div>
+                    <div class="col-md-4"><span class="text-muted">Defendibilidad:</span> <strong>${fmtScore(cfgExecution.entry_defensibility_score)}</strong></div>
+                </div>
+                <div class="small mt-2"><strong>Motivos/evidencias:</strong>${motivesHtml}</div>
+            </details>` : '';
+
+        const forensicReasons = Array.isArray(forensic.reasons)
+            ? forensic.reasons.slice(0, 6).map(x => `<li>${futEscapeHtml(x)}</li>`).join('')
+            : '';
+        const closedStatus = ['tp_hit', 'sl_hit', 'closed_manual'].includes(String(sig.status || '').toLowerCase());
+        const component = forensic.component_assessment || {};
+        const guardianReview = forensic.guardian_review || {};
+        const reviewHtml = closedStatus ? `
+            <details open class="mb-3 p-2 border border-secondary rounded">
+                <summary class="fw-semibold">🔬 ReviewTrader · revisión post-trade</summary>
+                <div class="small mt-2">
+                    ${forensicReasons ? `<ul class="mb-2 ps-3">${forensicReasons}</ul>` : '<span class="text-muted">Sin diagnóstico suficiente.</span>'}
+                    <div>Resultado económico: <strong>${futEscapeHtml(forensic.economic_outcome || '--')}</strong> · R real: <strong>${fmtScore(forensic.actual_r, 2)}</strong> · MFE: <strong>${fmtScore(forensic.mfe_r, 2)}R</strong> · MAE: <strong>${fmtScore(forensic.mae_r, 2)}R</strong></div>
+                    <div class="mt-1">Entry: <strong>${futEscapeHtml((component.entry || {}).state || '--')}</strong> · Geometría: <strong>${futEscapeHtml((component.geometry || {}).state || '--')}</strong> · Guardian: <strong>${futEscapeHtml((component.guardian || {}).state || '--')}</strong></div>
+                    ${guardianReview.evaluated ? `<div class="mt-1">Guardian vs HOLD: <strong>${fmtScore(guardianReview.avg_delta_r, 2)}R</strong> (${Number(guardianReview.evaluated || 0)} evento/s evaluados)</div>` : ''}
+                    <div class="mt-1 text-muted">Un trade = una muestra de mercado. Entry, estrategia, SL/TP y Guardian se diagnostican por separado sin multiplicar artificialmente N.</div>
+                </div>
+            </details>` : '';
+
+        const globalCanonicalN = Number(globalLearning.sample_size || 0);
+        const globalObservedN = Number(globalLearning.observed_trade_count_all_users || 0);
+        const guardianGlobalN = Number(guardianGlobal.sample_size || 0);
+        const globalHtml = (globalCanonicalN > 0 || globalObservedN > 0 || guardianGlobalN > 0) ? `
+            <div class="mb-3 p-2 rounded bg-dark small">
+                <strong>🌐 Ejecución real agregada · todos los usuarios</strong><br>
+                ${futEscapeHtml(globalLearning.symbol || sig.symbol)} ${futEscapeHtml(globalLearning.timeframe || sig.timeframe)} ${futEscapeHtml(globalLearning.action || sig.action)} ·
+                Observaciones=${globalObservedN} · N canónico=${globalCanonicalN}${globalCanonicalN > 0 ? ` · WR ${fmtScore(globalLearning.win_rate)}% · Exp ${fmtScore(globalLearning.expectancy_r, 2)}R` : ''} ·
+                <span class="text-muted">${futEscapeHtml(globalLearning.authority || 'OBSERVE_ONLY')}</span>
+                ${guardianGlobalN > 0 ? `<br>Guardian EXIT: N=${guardianGlobalN} · ajuste umbral=${fmtScore(guardianGlobal.exit_threshold_delta, 1)} · ${futEscapeHtml(guardianGlobal.reason || '')}` : ''}
+            </div>` : '';
         
         body.innerHTML = `
             <div class="mb-3 d-flex flex-wrap align-items-center gap-2">
@@ -5056,6 +5074,9 @@ window.openSavedSignalDetail = async function(signalId) {
                 <div class="col-md-6"><span class="text-muted">🕒 Ingreso:</span> <strong>${_fmtLocalDate(sig.entry_at || sig.created_at)}</strong></div>
                 ${sig.entry_touched_at ? `<div class="col-md-6"><span class="text-muted">🎯 Entry tocado:</span> <strong>${_fmtLocalDate(sig.entry_touched_at)}</strong></div>` : ''}
             </div>
+            ${configurationHtml}
+            ${reviewHtml}
+            ${globalHtml}
             <div id="saved-signal-chart" style="height: 500px;"></div>
             ${sig.notes ? `<div class="mt-3 p-2 bg-black rounded small"><strong>Notas:</strong> ${sig.notes}</div>` : ''}
         `;

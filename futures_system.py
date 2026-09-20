@@ -1486,23 +1486,20 @@ FUTURES_KUCOIN_INTERVALS = {
 }
 
 # ============================================================================
-# RANGOS DE LEVERAGE POR TEMPORALIDAD
+# REFERENCIAS HISTÓRICAS DE LEVERAGE POR TEMPORALIDAD — NO HARD CAPS
 # ============================================================================
 #
-# IMPORTANTE:
-# Estos valores son TECHOS, NO mínimos obligatorios.
+# RC9.7.14 V6:
+# Estas bandas se conservan para observabilidad/compatibilidad histórica.
+# NO limitan el apalancamiento estándar recomendado. El hard cap real sale de:
 #
-# El leverage final se determinará posteriormente usando:
+#   1. máximo público/verificado del contrato,
+#   2. distancia SL + estrés ATR,
+#   3. colchón conservador de liquidación/MMR/fees,
+#   4. emergency absolute max del sistema.
 #
-#   1. Execution Safety
-#   2. Distancia del SL
-#   3. Calidad del TP
-#   4. RR
-#   5. Costes
-#   6. Temporalidad
-#   7. Viabilidad económica con el margen
-#
-# El mínimo operativo siempre puede ser 1x.
+# La temporalidad sigue influyendo indirectamente en ATR, estructura, calidad
+# de Entry/SL/TP y evidencia; no impone por sí sola un 4h=10x o 1D=5x.
 #
 LEVERAGE_RANGES = {
     '30m': (1, 30),
@@ -1513,9 +1510,6 @@ LEVERAGE_RANGES = {
     '1D':  (1, 5),
 }
 
-# Banda preferida para operaciones con margen pequeño. No es un mínimo ciego:
-# una señal por debajo de la banda puede publicarse si un TP amplio produce
-# suficiente ROI y beneficio neto sin romper los límites de riesgo.
 PREFERRED_LEVERAGE_RANGES = {
     '30m': (15, 30),
     '1h':  (10, 20),
@@ -1718,39 +1712,24 @@ def _leverage_in_valid_range(
     leverage: int,
     timeframe: str
 ) -> bool:
+    """RC9.7.14 V6 — sólo valida el límite técnico/emergencia global.
+
+    Las antiguas bandas por timeframe son referencias, no techos de producción.
+    El cap específico de la operación ya fue resuelto antes por contrato +
+    liquidación estimada + SL/ATR. Esta validación final sólo evita valores
+    corruptos o superiores al emergency absolute max.
     """
-    Valida que el leverage no supere el techo del timeframe.
-
-    Importante:
-    - 1x siempre es válido si la operación supera las demás condiciones.
-    - El máximo sí es una restricción dura.
-    - Rentabilidad, SL, ATR y Execution Safety se validan por separado.
-
-    Ejemplo:
-
-        4h → techo 10x
-        leverage calculado = 4x → válido
-        leverage calculado = 11x → inválido
-    """
-
     try:
         lev = int(leverage)
-    except (
-        TypeError,
-        ValueError
-    ):
+    except (TypeError, ValueError):
         return False
 
-    min_leverage, max_leverage = LEVERAGE_RANGES.get(
-        timeframe,
-        (1, 10)
-    )
+    try:
+        absolute_max = max(1, int(FUTURES_RISK_CONFIG.get('absolute_max_leverage', 50)))
+    except Exception:
+        absolute_max = 50
 
-    return (
-        min_leverage
-        <= lev
-        <= max_leverage
-    )
+    return 1 <= lev <= absolute_max
 
 
 # ============================================================================
@@ -1970,12 +1949,13 @@ class FuturesAnalysis(TradingExpertSystem):
         return None
 
     def _confirm_high_tf_entry_trigger(self, symbol: str, timeframe: str, action: str, entry_price: float) -> Dict:
-        """Require a closed lower-TF reaction before 12H/1D Futures becomes executable.
+        """Require a closed lower-TF reaction when execution precision demands it.
 
-        12H uses 2H; 1D uses 4H.  This is a timing confirmation only: it never
-        changes direction, Entry, SL, TP or leverage.  Missing data fails closed.
+        1H near-market Entries use 30M; 12H uses 2H; 1D uses 4H. This is a
+        timing confirmation only: it never changes direction, Entry, SL, TP or
+        leverage. Missing data fails closed.
         """
-        lower_map = {'12h': '2h', '1D': '4h'}
+        lower_map = {'1h': '30m', '12h': '2h', '1D': '4h'}
         lower_tf = lower_map.get(str(timeframe))
         out = {
             'required': bool(lower_tf), 'passed': False, 'lower_timeframe': lower_tf,
@@ -3472,17 +3452,21 @@ class FuturesAnalysis(TradingExpertSystem):
         adaptive_profile=None,
         symbol=None,
         risk_allocation_fraction=1.0,
+        tp_quality_score=0.0,
+        sl_avoidance_quality=0.0,
     ):
-        """Select technical leverage under independent risk ceilings.
+        """RC9.7.14 FINAL V6 — standard technical leverage, size-decoupled.
 
-        RC9.7.10 no longer stops at the *minimum* economically viable integer.
-        Once Entry/SL/TP and Safety are already valid, it targets a bounded
-        loss budget over the structural Entry→SL distance.  The result is still
-        capped by ATR stress, Safety, timeframe policy, public KuCoin contract
-        limits and a conservative liquidation-distance buffer.
+        Leverage is selected from structural SL distance, ATR stress, execution
+        quality, public contract limits and an estimated liquidation buffer.
+        It does NOT depend on the user's configured margin or chosen USDT size.
+        After leverage is selected, the recommended allocation fraction is
+        reduced independently so the standard Entry→SL monetary-risk target is
+        respected.
 
-        The liquidation distance is an estimate for recommendation safety, not
-        the exact liquidation price of a user's live account/position tier.
+        No confidence percentage is treated as a literal probability of TP.
+        A statistically calibrated lower-bound probability can influence V6
+        only if a governed adaptive profile explicitly marks it as calibrated.
         """
         try:
             margin = float(margin_usdt or FUTURES_RISK_CONFIG['default_margin_usdt'])
@@ -3490,18 +3474,16 @@ class FuturesAnalysis(TradingExpertSystem):
             sl_pct = abs(float(sl_distance_pct or 0))
             normalized_atr_pct = abs(float(atr_pct or 0))
             safety = max(0.0, min(100.0, float(execution_safety or 0)))
+            tp_quality = max(0.0, min(100.0, float(tp_quality_score or 0)))
+            sl_quality = max(0.0, min(100.0, float(sl_avoidance_quality or 0)))
             try:
-                risk_fraction = max(0.05, min(1.0, float(risk_allocation_fraction or 1.0)))
+                initial_risk_fraction = max(
+                    0.01, min(1.0, float(risk_allocation_fraction or 1.0))
+                )
             except (TypeError, ValueError):
-                risk_fraction = 1.0
-            effective_margin = margin * risk_fraction
-            if (
-                margin <= 0
-                or effective_margin <= 0
-                or tp_pct <= 0
-                or sl_pct <= 0
-                or normalized_atr_pct <= 0
-            ):
+                initial_risk_fraction = 1.0
+
+            if margin <= 0 or tp_pct <= 0 or sl_pct <= 0 or normalized_atr_pct <= 0:
                 return None
 
             round_trip_cost = float(FUTURES_RISK_CONFIG['round_trip_cost_pct'])
@@ -3509,31 +3491,17 @@ class FuturesAnalysis(TradingExpertSystem):
             if edge_after_cost <= 0:
                 return None
 
+            # Economic values remain diagnostics only. They no longer force the
+            # leverage setting upward/downward based on a user's USDT margin.
             target_profit = float(FUTURES_RISK_CONFIG['target_net_profit_usdt'])
-            min_leverage_economic = target_profit / (effective_margin * edge_after_cost)
+            min_leverage_economic = target_profit / max(1e-9, margin * edge_after_cost)
             minimum_roi_tp = float(FUTURES_RISK_CONFIG['minimum_roi_tp_pct'])
             min_leverage_by_roi = minimum_roi_tp / tp_pct
 
-            # RC9.7.11: monetary risk belongs to leverage × SL distance ×
-            # planned position allocation. A smaller suggested position may
-            # justify more leverage without increasing the configured risk
-            # budget. Liquidation/Safety/timeframe caps remain unscaled.
-            max_loss_pct = float(FUTURES_RISK_CONFIG['max_loss_pct_margin'])
-            max_leverage_by_risk = max_loss_pct / (sl_pct * risk_fraction)
+            min_leverage_tf, tf_reference_max = LEVERAGE_RANGES.get(timeframe, (1, 10))
+            absolute_max = max(1.0, float(FUTURES_RISK_CONFIG['absolute_max_leverage']))
 
-            atr_stress_multiplier = float(FUTURES_RISK_CONFIG['atr_stress_multiplier'])
-            atr_stress_move_pct = max(sl_pct, normalized_atr_pct * atr_stress_multiplier)
-            max_atr_stress_loss = float(FUTURES_RISK_CONFIG['max_atr_stress_loss_pct_margin'])
-            max_leverage_by_atr_stress = (
-                max_atr_stress_loss / (atr_stress_move_pct * risk_fraction)
-            )
-
-            min_leverage_tf, tf_max = LEVERAGE_RANGES.get(timeframe, (1, 10))
-            absolute_max = float(FUTURES_RISK_CONFIG['absolute_max_leverage'])
-
-            # ----------------------------------------------------------
-            # RC9.7.10 — exchange contract + liquidation buffer
-            # ----------------------------------------------------------
+            # Public contract metadata + conservative risk-tier floor.
             contract_spec = (
                 _get_futures_contract_risk_spec(symbol)
                 if symbol
@@ -3548,7 +3516,10 @@ class FuturesAnalysis(TradingExpertSystem):
             )
             contract_status = str(contract_spec.get('status') or '').upper()
             if contract_spec.get('verified') and contract_status not in ('OPEN', 'UNKNOWN'):
-                logger.info('FUTURES %s contract status=%s; leverage rejected', symbol, contract_status)
+                logger.info(
+                    'FUTURES %s contract status=%s; leverage rejected',
+                    symbol, contract_status
+                )
                 return None
 
             fallback_mmr = float(FUTURES_RISK_CONFIG.get(
@@ -3566,9 +3537,6 @@ class FuturesAnalysis(TradingExpertSystem):
             except Exception:
                 raw_taker = 0.0
 
-            # Using at least the configured fallback is intentionally
-            # conservative because the exact position risk tier is private and
-            # can have a higher MMR than the public base contract snapshot.
             effective_mmr = max(fallback_mmr, raw_mmr if raw_mmr > 0 else 0.0)
             effective_liq_fee = max(fallback_liq_fee, raw_taker if raw_taker > 0 else 0.0)
             mmr_pct = effective_mmr * 100.0
@@ -3577,15 +3545,25 @@ class FuturesAnalysis(TradingExpertSystem):
             min_liq_buffer_pct = float(FUTURES_RISK_CONFIG.get(
                 'liquidation_min_buffer_pct', 0.75
             ))
+            atr_stress_multiplier = float(FUTURES_RISK_CONFIG.get(
+                'atr_stress_multiplier', 1.5
+            ))
             liq_atr_mult = float(FUTURES_RISK_CONFIG.get(
                 'liquidation_atr_buffer_multiplier', 1.0
             ))
+            atr_stress_move_pct = max(
+                sl_pct,
+                normalized_atr_pct * atr_stress_multiplier,
+            )
             liquidation_buffer_pct = max(
                 min_liq_buffer_pct,
                 normalized_atr_pct * liq_atr_mult,
             )
             liquidation_denominator_pct = (
-                sl_pct + liquidation_buffer_pct + mmr_pct + liq_fee_pct
+                atr_stress_move_pct
+                + liquidation_buffer_pct
+                + mmr_pct
+                + liq_fee_pct
             )
             max_by_liquidation_buffer = (
                 100.0 / liquidation_denominator_pct
@@ -3593,8 +3571,6 @@ class FuturesAnalysis(TradingExpertSystem):
                 else 0.0
             )
 
-            # Prefer public contract maxLeverage. Preserve the old explicit env
-            # override only as a fallback when public metadata is unavailable.
             verified_exchange_max = None
             if contract_spec.get('verified'):
                 try:
@@ -3615,80 +3591,98 @@ class FuturesAnalysis(TradingExpertSystem):
                     except Exception:
                         verified_exchange_max = None
 
-            adaptive_profile = adaptive_profile if isinstance(adaptive_profile, dict) else {}
-            adaptive_config = adaptive_profile.get('config', {}) or {}
-            adaptive_authority = bool(adaptive_profile.get('production_authority', False))
-            try:
-                leverage_cap_factor = float(
-                    adaptive_config.get('leverage_cap_factor', 1.0)
-                    if adaptive_authority else 1.0
-                )
-            except Exception:
-                leverage_cap_factor = 1.0
-            leverage_cap_factor = max(0.75, min(1.0, leverage_cap_factor))
-
-            static_policy_max = max(
-                1.0,
-                min(float(tf_max), absolute_max) * leverage_cap_factor,
+            # Timeframe ranges are references only in V6. The actual hard cap
+            # comes from contract/liquidation/ATR geometry, not an arbitrary TF.
+            exchange_cap = (
+                float(verified_exchange_max)
+                if verified_exchange_max is not None
+                else absolute_max
             )
-            risk_based_max_without_timeframe_cap = min(
-                max_leverage_by_risk,
-                max_leverage_by_atr_stress,
+            technical_hard_cap = min(
+                absolute_max,
+                exchange_cap,
                 max_by_liquidation_buffer,
             )
 
-            allow_leverage_growth = bool(
-                adaptive_authority
-                and adaptive_config.get('allow_leverage_growth', False)
-                and str(adaptive_config.get('leverage_policy_mode') or '').upper()
-                in ('RISK_BUDGET_V3', 'TECHNICAL_RISK_BUDGET_V4')
-            )
-            try:
-                target_loss_budget = float(
-                    adaptive_config.get(
-                        'target_loss_budget_pct_margin',
-                        FUTURES_RISK_CONFIG.get('technical_target_loss_pct_margin', 5.0),
-                    ) or 5.0
-                )
-            except Exception:
-                target_loss_budget = float(FUTURES_RISK_CONFIG.get(
-                    'technical_target_loss_pct_margin', 5.0
-                ))
-            target_loss_budget = max(2.0, min(6.0, target_loss_budget))
+            # Combine independent quality dimensions. This is a QUALITY PROXY,
+            # never advertised as P(TP). A score of 100 merely allows use of the
+            # full technical headroom; it does not guarantee the trade.
+            quality_parts = [safety]
+            if tp_quality > 0:
+                quality_parts.append(tp_quality)
+            if sl_quality > 0:
+                quality_parts.append(sl_quality)
+            if len(quality_parts) == 3:
+                quality_score = safety * 0.50 + tp_quality * 0.30 + sl_quality * 0.20
+            elif len(quality_parts) == 2:
+                quality_score = safety * 0.65 + quality_parts[1] * 0.35
+            else:
+                quality_score = safety
 
-            minimum_required = max(
-                float(min_leverage_tf),
-                min_leverage_economic,
-                min_leverage_by_roi,
+            adaptive_profile = adaptive_profile if isinstance(adaptive_profile, dict) else {}
+            adaptive_config = adaptive_profile.get('config', {}) or {}
+            adaptive_authority = bool(adaptive_profile.get('production_authority', False))
+
+            calibrated_tp_lower = None
+            probability_calibrated = bool(
+                adaptive_authority
+                and adaptive_config.get('probability_calibrated', False)
             )
+            if probability_calibrated:
+                try:
+                    _p = float(
+                        adaptive_config.get('tp_probability_lower_bound')
+                        if adaptive_config.get('tp_probability_lower_bound') is not None
+                        else adaptive_profile.get('tp_probability_lower_bound')
+                    )
+                    if 0.0 <= _p <= 1.0:
+                        calibrated_tp_lower = _p
+                except Exception:
+                    calibrated_tp_lower = None
+
+            target_loss_budget = float(
+                FUTURES_RISK_CONFIG.get('technical_target_loss_pct_margin', 5.0)
+            )
+
             policy = select_risk_budget_leverage(
-                minimum_required=minimum_required,
+                minimum_required=1.0,
                 sl_distance_pct=sl_pct,
-                max_by_risk=max_leverage_by_risk,
-                max_by_atr_stress=max_leverage_by_atr_stress,
+                # V6: these are technical headroom caps, not wallet-loss caps.
+                max_by_risk=technical_hard_cap,
+                max_by_atr_stress=technical_hard_cap,
                 safety_score=safety,
-                timeframe_static_max=static_policy_max,
+                timeframe_static_max=float(tf_reference_max),
                 fallback_exchange_max=absolute_max,
                 verified_exchange_max=verified_exchange_max,
                 max_by_liquidation_buffer=max_by_liquidation_buffer,
-                adaptive_enabled=allow_leverage_growth,
+                adaptive_enabled=adaptive_authority,
                 target_loss_budget_pct_margin=target_loss_budget,
-                risk_allocation_fraction=risk_fraction,
-                emergency_max_leverage=50.0,
+                risk_allocation_fraction=initial_risk_fraction,
+                emergency_max_leverage=absolute_max,
                 high_safety_threshold=float(FUTURES_RISK_CONFIG['high_safety_threshold']),
+                quality_score=quality_score,
+                calibrated_tp_probability_lower=calibrated_tp_lower,
             )
             if not policy:
                 logger.info(
-                    'FUTURES %s %s sin leverage viable: mínimo %.2fx no cabe '
-                    'bajo riesgo/ATR/Safety/liquidación',
-                    symbol or '?', timeframe, minimum_required,
+                    'FUTURES %s %s sin leverage técnico viable bajo '
+                    'Safety/ATR/liquidación/contrato',
+                    symbol or '?', timeframe,
                 )
                 return None
 
             leverage = int(policy['leverage'])
-            security_factor = 0.25 + 0.75 * (safety / 100.0)
-            if safety >= FUTURES_RISK_CONFIG['high_safety_threshold']:
-                security_factor = min(1.0, security_factor + 0.05)
+            recommended_fraction = max(
+                0.01,
+                min(
+                    1.0,
+                    float(
+                        policy.get('recommended_risk_allocation_fraction')
+                        or initial_risk_fraction
+                    ),
+                ),
+            )
+            effective_margin = margin * recommended_fraction
 
             estimated_liquidation_distance_pct = max(
                 0.0,
@@ -3700,29 +3694,28 @@ class FuturesAnalysis(TradingExpertSystem):
                 'leverage': leverage,
                 'min_economic': round(min_leverage_economic, 2),
                 'min_by_roi': round(min_leverage_by_roi, 2),
-                'max_by_risk': round(max_leverage_by_risk, 2),
-                'max_by_atr_stress': round(max_leverage_by_atr_stress, 2),
+                'max_by_risk': round(technical_hard_cap, 2),
+                'max_by_atr_stress': round(technical_hard_cap, 2),
                 'max_by_liquidation_buffer': round(max_by_liquidation_buffer, 2),
                 'max_by_security': round(float(policy['max_by_security']), 2),
                 'max_safe': round(float(policy['max_safe']), 2),
-                'risk_based_max_without_timeframe_cap': round(
-                    risk_based_max_without_timeframe_cap, 2
-                ),
+                'risk_based_max_without_timeframe_cap': round(technical_hard_cap, 2),
                 'adaptive_profile_state': str(adaptive_profile.get('state', 'OBSERVE')),
                 'adaptive_profile_authority': adaptive_authority,
-                'adaptive_leverage_cap_factor': round(leverage_cap_factor, 3),
-                'adaptive_leverage_target_factor': round(
-                    float(adaptive_config.get('leverage_target_factor', 1.0) or 1.0), 3
-                ),
-                'adaptive_leverage_growth': bool(allow_leverage_growth),
+                'adaptive_leverage_cap_factor': 1.0,
+                'adaptive_leverage_target_factor': 1.0,
+                'adaptive_leverage_growth': bool(adaptive_authority),
                 'leverage_policy_version': policy.get('version'),
                 'leverage_policy_mode': policy.get('selection_policy'),
                 'target_loss_budget_pct_margin': policy.get('target_loss_budget_pct_margin'),
-                'risk_allocation_fraction': round(risk_fraction, 4),
+                'risk_allocation_fraction': round(recommended_fraction, 4),
+                'initial_risk_allocation_fraction': round(initial_risk_fraction, 4),
+                'recommended_risk_allocation_fraction': round(recommended_fraction, 4),
                 'reference_margin_usdt': round(margin, 4),
                 'effective_margin_usdt': round(effective_margin, 4),
                 'target_by_loss_budget': policy.get('target_by_loss_budget'),
                 'timeframe_cap_mode': policy.get('timeframe_cap_mode'),
+                'timeframe_reference_max': int(tf_reference_max),
                 'exchange_limit_verified': bool(policy.get('exchange_limit_verified')),
                 'exchange_limit_source': policy.get('exchange_limit_source'),
                 'exchange_cap': policy.get('exchange_cap'),
@@ -3745,26 +3738,34 @@ class FuturesAnalysis(TradingExpertSystem):
                 ),
                 'liquidation_distance_is_estimate': True,
                 'min_by_timeframe': int(min_leverage_tf),
-                'max_by_timeframe': int(tf_max),
+                'max_by_timeframe': int(tf_reference_max),
                 'atr_pct': round(normalized_atr_pct, 4),
                 'atr_stress_move_pct': round(atr_stress_move_pct, 4),
                 'estimated_atr_stress_loss_pct_margin': round(
-                    atr_stress_move_pct * leverage * risk_fraction, 2
+                    atr_stress_move_pct * leverage * recommended_fraction, 2
                 ),
                 'estimated_sl_loss_pct_margin': round(
-                    sl_pct * leverage * risk_fraction, 2
+                    sl_pct * leverage * recommended_fraction, 2
                 ),
                 'estimated_sl_loss_pct_position_margin': round(
                     sl_pct * leverage, 2
                 ),
-                'security_factor': round(security_factor, 3),
+                'security_factor': round(float(policy.get('quality_factor') or 0), 3),
+                'quality_score': round(quality_score, 2),
+                'quality_is_probability': False,
+                'calibrated_probability_authority': bool(
+                    policy.get('calibrated_probability_authority')
+                ),
+                'calibrated_tp_probability_lower': policy.get(
+                    'calibrated_tp_probability_lower'
+                ),
                 'selection_policy': policy.get(
-                    'selection_policy', 'POSITION_AWARE_TECHNICAL_MAX'
+                    'selection_policy', 'STANDARD_TECHNICAL_MAX_V6'
                 ),
                 'economically_viable': True,
             }
         except Exception as e:
-            logger.warning('Error calculando leverage económico: %s', e)
+            logger.warning('Error calculando leverage técnico V6: %s', e)
             return None
 
     def calculate_optimal_leverage(
@@ -3948,7 +3949,9 @@ class FuturesAnalysis(TradingExpertSystem):
     def _apply_futures_publication_gate(
         self,
         levels: Dict,
-        timeframe: str
+        timeframe: str,
+        symbol: str = '',
+        action: str = ''
     ) -> Dict:
         """
         Decide si un análisis merece aparecer como oportunidad de Futuros.
@@ -4159,6 +4162,28 @@ class FuturesAnalysis(TradingExpertSystem):
                 'del margen'
             )
         )
+
+        # RC9.7.14 — ReviewTrader execution continuity from de-identified,
+        # all-user saved outcomes.  It never changes LONG/SHORT or the levels.
+        # Only after N>=8 canonical system trades can repeated fast-SL/low-MFE
+        # evidence require a stronger CURRENT Entry before Premium publication.
+        global_execution_review = {}
+        try:
+            from user_execution_learning import get_execution_publication_review
+            if str(action or '').upper() in ('LONG', 'SHORT') and symbol:
+                global_execution_review = get_execution_publication_review(
+                    symbol, timeframe, action, result
+                )
+                if global_execution_review.get('block_publication'):
+                    require(
+                        False,
+                        'GLOBAL_EXECUTION_ENTRY',
+                        str(global_execution_review.get('reason') or 'Entry requiere revisión por continuidad real')
+                    )
+        except Exception:
+            global_execution_review = {}
+
+        result['global_execution_learning'] = global_execution_review
 
         gate = {
             'eligible': not rejection_reasons,
@@ -5544,6 +5569,98 @@ class FuturesAnalysis(TradingExpertSystem):
         return round(smc * 0.55 + reach * 0.15 + sl_quality * 0.30, 2)
 
     @staticmethod
+    def _futures_entry_timing_gate(action, trend, momentum, volatility, structure, levels):
+        """Reject *near-market* chase Entries when the trend is already extended.
+
+        This mirrors the Pullback specialist's ATR-aware extension logic but is
+        applied only to execution. A structurally good limit Entry that already
+        waits for a real pullback is allowed; a near-market Entry while price is
+        extended becomes ANALYSIS_ONLY until timing improves. Direction is never
+        flipped.
+        """
+        out = {
+            'version': 'RC9_7_14_FUTURES_TIMING_GATE_V1',
+            'passed': True,
+            'status': 'TIMING_OK',
+            'reason': 'NOT_EXTENDED_OR_ENTRY_ALREADY_WAITS_FOR_PULLBACK',
+            'support_distance_pct': None,
+            'resistance_distance_pct': None,
+            'entry_distance_atr': None,
+        }
+        try:
+            action_u = str(action or '').upper()
+            trend = trend if isinstance(trend, dict) else {}
+            momentum = momentum if isinstance(momentum, dict) else {}
+            volatility = volatility if isinstance(volatility, dict) else {}
+            structure = structure if isinstance(structure, dict) else {}
+            levels = levels if isinstance(levels, dict) else {}
+            current_price = float(structure.get('current_price') or 0)
+            if current_price <= 0 or action_u not in ('LONG', 'SHORT'):
+                return out
+            atr_pct = max(0.0, float(volatility.get('atr_pct') or 0))
+            atr = float(volatility.get('atr') or 0)
+            if atr <= 0 and atr_pct > 0:
+                atr = current_price * atr_pct / 100.0
+            bb_position = float(volatility.get('bb_position', 0.5) or 0.5)
+            trend_dir = str(trend.get('direction') or '').lower()
+            momentum_dir = str(momentum.get('direction') or '').lower()
+            adx = float(trend.get('adx') or 0)
+            nearest_support = structure.get('nearest_support')
+            nearest_resistance = structure.get('nearest_resistance')
+            entry = float(levels.get('entry') or 0)
+            entry_distance_atr = abs(current_price - entry) / atr if atr > 0 and entry > 0 else None
+            out['entry_distance_atr'] = round(entry_distance_atr, 4) if entry_distance_atr is not None else None
+            extended_threshold_pct = max(0.35, atr_pct * 1.10)
+            # A limit order already >=0.45 ATR away is itself waiting for the
+            # pullback, so extension at current price must not block it.
+            waits_for_pullback = entry_distance_atr is not None and entry_distance_atr >= 0.45
+
+            if nearest_support is not None:
+                ns = float(nearest_support)
+                if 0 < ns <= current_price:
+                    out['support_distance_pct'] = round((current_price - ns) / current_price * 100.0, 4)
+            if nearest_resistance is not None:
+                nr = float(nearest_resistance)
+                if nr >= current_price > 0:
+                    out['resistance_distance_pct'] = round((nr - current_price) / current_price * 100.0, 4)
+
+            if action_u == 'LONG' and trend_dir == 'bullish':
+                dist = out['support_distance_pct']
+                extended = dist is not None and bb_position > 0.70 and dist > extended_threshold_pct
+                if extended and not waits_for_pullback:
+                    out.update({
+                        'passed': False,
+                        'status': 'WAIT_PULLBACK_LONG_EXTENDED',
+                        'reason': (
+                            f'LONG extendido: {dist:.2f}% sobre soporte > umbral ATR '
+                            f'{extended_threshold_pct:.2f}%; Entry demasiado cerca del mercado'
+                        ),
+                    })
+            elif action_u == 'SHORT' and trend_dir == 'bearish':
+                dist = out['resistance_distance_pct']
+                extended = dist is not None and bb_position < 0.30 and dist > extended_threshold_pct
+                if extended and not waits_for_pullback:
+                    out.update({
+                        'passed': False,
+                        'status': 'WAIT_PULLBACK_SHORT_EXTENDED',
+                        'reason': (
+                            f'SHORT extendido: {dist:.2f}% bajo resistencia > umbral ATR '
+                            f'{extended_threshold_pct:.2f}%; Entry demasiado cerca del mercado'
+                        ),
+                    })
+            out['adx'] = round(adx, 2)
+            out['momentum_direction'] = momentum_dir
+            out['bb_position'] = round(bb_position, 4)
+            out['extended_threshold_pct'] = round(extended_threshold_pct, 4)
+            out['waits_for_pullback'] = bool(waits_for_pullback)
+            return out
+        except Exception as exc:
+            out['status'] = 'TIMING_DIAGNOSTIC_ERROR'
+            out['reason'] = type(exc).__name__
+            # Diagnostics fail open; Entry Reaction/Safety still fail closed.
+            return out
+
+    @staticmethod
     def _active_strategy_registry_diagnostic(decision, structure, timeframe=None, market_regime=None):
         """ACTIVE experimental strategies may veto a conflict, never create/boost a trade.
 
@@ -5779,6 +5896,27 @@ class FuturesAnalysis(TradingExpertSystem):
         levels['active_strategy_registry'] = strategy_registry_diag
 
         # ==============================================================
+        # RC9.7.14 — ENTRY TIMING / ANTI-CHASE GATE
+        # ==============================================================
+        timing_gate = self._futures_entry_timing_gate(
+            decision, trend, momentum, volatility, structure, levels
+        )
+        levels['entry_timing_gate'] = timing_gate
+        levels['entry_timing_status'] = timing_gate.get('status')
+        if not timing_gate.get('passed', True) and levels.get('is_executable', True):
+            reason = str(timing_gate.get('reason') or 'Futures Entry timing requires pullback')
+            levels = self._stamp_futures_filter_trace(
+                levels, stage='PRE_GATE',
+                reason_codes=['FUTURES_ENTRY_TIMING_WAIT'],
+                reason=reason, reached_publication_gate=False,
+                outcome='ANALYSIS_ONLY'
+            )
+            levels['is_executable'] = False
+            levels['is_rejected'] = True
+            levels['publication_status'] = 'ANALYSIS_ONLY'
+            levels['rejected_reason'] = reason
+
+        # ==============================================================
         # FINAL V1 RC4 — ENTRY REACTION ENGINE
         # ==============================================================
         # Q1 found the POI; Q2 refined SL/TP. RC4 now asks whether the
@@ -5806,7 +5944,7 @@ class FuturesAnalysis(TradingExpertSystem):
             entry_reaction.get('lower_tf_confirmation_required', False)
         )
         lower_tf_trigger = self._confirm_high_tf_entry_trigger(
-            symbol, timeframe, decision.get('action'), float(levels.get('entry') or 0)
+            symbol, timeframe, decision, float(levels.get('entry') or 0)
         ) if levels['entry_lower_tf_confirmation_required'] else {
             'required': False, 'passed': True, 'reason': 'NOT_REQUIRED'
         }
@@ -5826,7 +5964,7 @@ class FuturesAnalysis(TradingExpertSystem):
             levels['is_rejected'] = True
             levels['publication_status'] = 'ANALYSIS_ONLY'
             levels['rejected_reason'] = reason
-        if entry_reaction.get('hard_block') and levels.get('is_executable', True):
+        if (not entry_reaction.get('passed', False)) and levels.get('is_executable', True):
             reason = (
                 f"RC4 Entry reaction {entry_reaction.get('score', 0)}/"
                 f"{entry_reaction.get('threshold', 0)}: "
@@ -5834,7 +5972,7 @@ class FuturesAnalysis(TradingExpertSystem):
             )
             levels = self._stamp_futures_filter_trace(
                 levels, stage='PRE_GATE',
-                reason_codes=['RC4_ENTRY_REACTION_NOT_CONFIRMED'],
+                reason_codes=['RC9_7_14_ENTRY_REACTION_NOT_CONFIRMED'],
                 reason=reason, reached_publication_gate=False,
                 outcome='ANALYSIS_ONLY'
             )
@@ -6535,13 +6673,15 @@ class FuturesAnalysis(TradingExpertSystem):
             )
         
         # ==============================================================
-        # APALANCAMIENTO TÉCNICO + TAMAÑO PLANIFICADO (RC9.7.11)
+        # APALANCAMIENTO TÉCNICO ESTÁNDAR V6 + SIZING INDEPENDIENTE
         # ==============================================================
-        # El tamaño es parte del presupuesto monetario de riesgo. No cambia
-        # Entry/SL/TP y nunca relaja Safety, liquidación ni techos del TF.
+        # El leverage ya NO depende del margen USDT ni del tamaño elegido por
+        # el usuario. Primero se obtiene el máximo técnicamente admisible por
+        # SL/ATR/Safety/calidad/liquidación/contrato. Después se reduce el
+        # tamaño recomendado para mantener el presupuesto monetario estándar.
         try:
-            risk_allocation_fraction = max(
-                0.05,
+            initial_risk_allocation_fraction = max(
+                0.01,
                 min(
                     1.0,
                     float(
@@ -6554,11 +6694,15 @@ class FuturesAnalysis(TradingExpertSystem):
                 ),
             )
         except (TypeError, ValueError):
-            risk_allocation_fraction = 1.0
+            initial_risk_allocation_fraction = 1.0
 
-        levels['risk_allocation_fraction'] = round(
-            risk_allocation_fraction, 4
-        )
+        try:
+            _sl_q_raw = float(levels.get('sl_reliability') or 0)
+            sl_avoidance_quality = (
+                _sl_q_raw * 100.0 if _sl_q_raw <= 1.0 else _sl_q_raw
+            )
+        except Exception:
+            sl_avoidance_quality = 0.0
 
         leverage_evaluation = self._calculate_economic_leverage(
             margin_usdt=float(
@@ -6571,7 +6715,9 @@ class FuturesAnalysis(TradingExpertSystem):
             timeframe=timeframe,
             adaptive_profile=adaptive_profile,
             symbol=symbol,
-            risk_allocation_fraction=risk_allocation_fraction,
+            risk_allocation_fraction=initial_risk_allocation_fraction,
+            tp_quality_score=float(levels.get('tp_quality_score') or 0),
+            sl_avoidance_quality=sl_avoidance_quality,
         )
 
         optimal_leverage = int(
@@ -6580,31 +6726,64 @@ class FuturesAnalysis(TradingExpertSystem):
             else 0
         )
 
-        # RC8.2 — contingency is intentionally canary-sized. A cell without a
-        # validated action-specific Champion must not recover profitability by
-        # increasing leverage. The normal economic/Safety gates below still
-        # apply and may reject the trade after this cap.
+        # V6 elimina los techos arbitrarios por timeframe/contingency como hard
+        # caps. El playbook de contingencia sigue auditado y puede bloquear por
+        # Safety/publicación, pero no reduce 12x técnicamente admisible a 3x/10x
+        # sólo por pertenecer al banco default.
         contingency_playbook = (
             structure.get('_contingency_playbook', {})
             if isinstance(structure, dict) else {}
         ) or {}
         if contingency_playbook.get('active'):
+            levels['contingency_mode'] = True
             try:
-                contingency_leverage_cap = max(1, int(
-                    ((contingency_playbook.get('risk') or {}).get('leverage_cap')) or 10
-                ))
-                optimal_leverage = min(optimal_leverage, contingency_leverage_cap)
-                levels['contingency_leverage_cap'] = int(contingency_leverage_cap)
-                levels['contingency_mode'] = True
+                levels['contingency_leverage_reference_cap'] = max(
+                    1,
+                    int(((contingency_playbook.get('risk') or {}).get('leverage_cap')) or 10),
+                )
             except Exception:
-                pass
-        
-        # Si un cap posterior (por ejemplo contingency 10x) reduce el valor
-        # propuesto por V5, recalcular las métricas públicas con el apalancamiento
-        # FINAL. Así no quedan pérdidas/estrés estimados para 12x cuando la
-        # recomendación realmente terminó en 10x.
+                levels['contingency_leverage_reference_cap'] = 10
+            levels['contingency_leverage_cap_is_hard'] = False
+
+        # Tamaño estándar recomendado DESPUÉS de seleccionar leverage. Así el
+        # apalancamiento es comparable entre usuarios y el riesgo monetario se
+        # controla por sizing, no reduciendo artificialmente el leverage.
+        risk_allocation_fraction = initial_risk_allocation_fraction
         if leverage_evaluation and optimal_leverage > 0:
-            leverage_evaluation['leverage'] = int(optimal_leverage)
+            try:
+                risk_allocation_fraction = max(
+                    0.01,
+                    min(
+                        1.0,
+                        float(
+                            leverage_evaluation.get(
+                                'recommended_risk_allocation_fraction',
+                                leverage_evaluation.get(
+                                    'risk_allocation_fraction',
+                                    initial_risk_allocation_fraction,
+                                ),
+                            )
+                            or initial_risk_allocation_fraction
+                        ),
+                    ),
+                )
+            except Exception:
+                risk_allocation_fraction = initial_risk_allocation_fraction
+
+            levels['risk_allocation_fraction'] = round(
+                risk_allocation_fraction, 4
+            )
+            # suggested_size usa fracción 0..1 en el motor.
+            levels['suggested_size'] = round(risk_allocation_fraction, 4)
+
+            leverage_evaluation['risk_allocation_fraction'] = round(
+                risk_allocation_fraction, 4
+            )
+            leverage_evaluation['effective_margin_usdt'] = round(
+                float(FUTURES_RISK_CONFIG['default_margin_usdt'])
+                * risk_allocation_fraction,
+                4,
+            )
             leverage_evaluation['estimated_sl_loss_pct_margin'] = round(
                 float(sl_distance_pct or 0)
                 * optimal_leverage
@@ -6621,28 +6800,10 @@ class FuturesAnalysis(TradingExpertSystem):
                 * risk_allocation_fraction,
                 2,
             )
-            try:
-                _mmr_pct = float(
-                    leverage_evaluation.get('maintenance_margin_rate') or 0
-                ) * 100.0
-                _liq_fee_pct = float(
-                    leverage_evaluation.get('liquidation_fee_proxy_rate') or 0
-                ) * 100.0
-                _liq_distance = max(
-                    0.0,
-                    (100.0 / max(1.0, float(optimal_leverage)))
-                    - _mmr_pct
-                    - _liq_fee_pct,
-                )
-                leverage_evaluation['estimated_liquidation_distance_pct'] = round(
-                    _liq_distance, 4
-                )
-                leverage_evaluation['estimated_liquidation_buffer_beyond_sl_pct'] = round(
-                    _liq_distance - float(sl_distance_pct or 0),
-                    4,
-                )
-            except Exception:
-                pass
+
+        levels['risk_allocation_fraction'] = round(
+            risk_allocation_fraction, 4
+        )
 
         if optimal_leverage <= 0:
 
@@ -6694,6 +6855,17 @@ class FuturesAnalysis(TradingExpertSystem):
             )
             or FUTURES_RISK_CONFIG['default_margin_usdt']
         )
+        # RC9.7.14 V6: economía/publicación se compara contra un margen estándar
+        # de referencia, nunca contra el tamaño personal ni contra la fracción
+        # sugerida de riesgo. Así leverage y elegibilidad son universales entre
+        # usuarios; el sizing recomendado se aplica por separado al riesgo real.
+        economic_reference_margin_usdt = float(
+            leverage_evaluation.get(
+                'reference_margin_usdt',
+                FUTURES_RISK_CONFIG['default_margin_usdt'],
+            )
+            or FUTURES_RISK_CONFIG['default_margin_usdt']
+        )
 
         roi = self.calculate_roi_futures(
             levels['entry'],
@@ -6701,7 +6873,7 @@ class FuturesAnalysis(TradingExpertSystem):
             levels['stop_loss'],
             optimal_leverage,
             direction,
-            margin_usdt=effective_margin_usdt,
+            margin_usdt=economic_reference_margin_usdt,
         )
         
         levels.update(roi)
@@ -6795,13 +6967,11 @@ class FuturesAnalysis(TradingExpertSystem):
             )
         )
         
-        reference_margin_usdt = float(
-            FUTURES_RISK_CONFIG.get(
-                'default_margin_usdt',
-                10.0
-            )
-        )
-        margin_usdt = float(effective_margin_usdt)
+        reference_margin_usdt = float(economic_reference_margin_usdt)
+        # Costes/beneficio mínimo se auditan con el MISMO margen estándar de
+        # referencia usado por calculate_roi_futures. La fracción de sizing
+        # personal/estándar recomendada no puede volver a bajar el leverage.
+        margin_usdt = float(reference_margin_usdt)
         
         notional = (
             margin_usdt
@@ -6980,10 +7150,7 @@ class FuturesAnalysis(TradingExpertSystem):
                 PREFERRED_LEVERAGE_RANGES[timeframe][1]
             ),
             
-            'leverage_policy': (
-                'TECHNICAL_RISK_BUDGET '
-                f"(1x-{LEVERAGE_RANGES[timeframe][1]}x)"
-            ),
+            'leverage_policy': 'STANDARD_TECHNICAL_MAX (contract/liquidation/SL/ATR)',
             'leverage_policy_version': leverage_evaluation.get(
                 'leverage_policy_version'
             ),
@@ -7058,12 +7225,17 @@ class FuturesAnalysis(TradingExpertSystem):
                 'estimated_liquidation_buffer_beyond_sl_pct'
             ),
             'liquidation_distance_is_estimate': True,
+            'recommended_margin_usdt': round(
+                effective_margin_usdt, 4
+            ),
             'margin_usdt': round(
                 effective_margin_usdt, 4
             ),
             'reference_margin_usdt': round(
                 reference_margin_usdt, 4
             ),
+            'economic_gate_margin_is_standard': True,
+            'leverage_independent_of_user_margin': True,
             'estimated_loss_sl_usdt': round(
                 loss_sl_usdt,
                 4
@@ -7078,24 +7250,18 @@ class FuturesAnalysis(TradingExpertSystem):
             )
         }
         # ==============================================================
-        # VALIDACIÓN FINAL DEL LEVERAGE
+        # VALIDACIÓN FINAL DEL LEVERAGE — V6
         # ==============================================================
+        # No vuelve a aplicar un techo por timeframe. El hard cap técnico ya
+        # fue resuelto por contrato/liquidación/SL/ATR dentro de V6.
         if not _leverage_in_valid_range(
             int(optimal_leverage),
             timeframe
         ):
         
-            min_tf, max_tf = LEVERAGE_RANGES.get(
-                timeframe,
-                (1, 10)
-            )
-        
             rejection_reason = (
-                f"Apalancamiento recomendado "
-                f"{optimal_leverage}x "
-                f"fuera del rango operativo "
-                f"{min_tf}x-{max_tf}x "
-                f"para {timeframe}"
+                f"Apalancamiento recomendado {optimal_leverage}x fuera del "
+                "límite técnico/emergencia global"
             )
 
             traced_levels = (
@@ -7124,7 +7290,9 @@ class FuturesAnalysis(TradingExpertSystem):
         # Las demás conservan decisión y niveles como análisis consultable.
         return self._apply_futures_publication_gate(
             levels,
-            timeframe
+            timeframe,
+            symbol=symbol,
+            action=decision
         )
     # ========================================================================
     # ANÁLISIS COMPLETO DE FUTUROS

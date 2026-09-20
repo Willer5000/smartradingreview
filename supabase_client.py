@@ -741,12 +741,19 @@ class SupabaseClient:
             strategies = signal_data.get('strategies', [])
             if strategies and signal_id:
                 snapshot = signal_data.get('indicators_snapshot', {})
-                threading.Thread(
-                    target=self._insert_signal_indicators,
-                    args=(signal_id, strategies, snapshot),
-                    daemon=True,
-                    name='signal-indicators-write',
-                ).start()
+                low_memory = str(os.environ.get('LOW_MEMORY_MODE', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
+                if low_memory:
+                    # RC9.7.14: Render Free must not create one background
+                    # thread per analyzed signal. Persist in the current worker
+                    # instead; slower is preferable to a thread/RAM burst.
+                    self._insert_signal_indicators(signal_id, strategies, snapshot)
+                else:
+                    threading.Thread(
+                        target=self._insert_signal_indicators,
+                        args=(signal_id, strategies, snapshot),
+                        daemon=True,
+                        name='signal-indicators-write',
+                    ).start()
 
             self._schedule_rotation('signals')
             return signal_id

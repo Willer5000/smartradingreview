@@ -2184,19 +2184,18 @@ def _calculate_trade_r(
             or ''
         ).upper()
 
+        # R siempre se normaliza contra el riesgo ORIGINAL de la señal.
+        # Guardian puede mover SL/TP después de Entry; usar ese SL gestionado
+        # como denominador haría incomparable el aprendizaje y exageraría R.
         entry = float(
-            signal.get(
-                'entry',
-                0
-            )
+            signal.get('original_entry')
+            or signal.get('entry')
             or 0
         )
 
         sl = float(
-            signal.get(
-                'stop_loss',
-                0
-            )
+            signal.get('original_stop_loss')
+            or signal.get('stop_loss')
             or 0
         )
 
@@ -5355,7 +5354,14 @@ def close_saved_signal_manual(signal_id: str, current_price: float) -> Optional[
                     .eq('id', signal_id)
                     .execute())
         r = db._with_retry(_op)
-        return r.data[0] if r and r.data else None
+        result = r.data[0] if r and r.data else None
+        if result and entry_touched:
+            try:
+                from user_execution_learning import invalidate_global_execution_cache
+                invalidate_global_execution_cache()
+            except Exception:
+                pass
+        return result
     except Exception as e:
         logger.error(f"close_saved_signal_manual: {e}")
         return None
@@ -6252,6 +6258,12 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                 stats['errors'] += 1
                 logger.error(f"evaluate_saved_signals: error en {sig.get('id')}: {e}")
         
+        if int(stats.get('tp_hit') or 0) + int(stats.get('sl_hit') or 0) > 0:
+            try:
+                from user_execution_learning import invalidate_global_execution_cache
+                invalidate_global_execution_cache()
+            except Exception:
+                pass
         return stats
     except Exception as e:
         logger.error(f"evaluate_saved_signals: {e}")
