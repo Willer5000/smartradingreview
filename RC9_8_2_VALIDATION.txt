@@ -1,0 +1,35 @@
+RC9.8.2 VALIDATION
+===================
+
+Base auditada: RC9.8.1 MAIN Technical Signal Lifecycle.
+
+Validaciones ejecutadas:
+
+1) Sintaxis JavaScript
+   node --check static/futures.js
+   RESULTADO: OK
+
+2) Pruebas específicas RC9.8.2
+   pytest -q test_rc9_8_2_per_user_saved_visibility.py
+   RESULTADO: 6 passed
+
+3) Regresión dirigida de carriles + lifecycle + RC9.8.2
+   test_rc9_7_17_signal_lane_stability.py
+   test_rc9_8_1_technical_signal_lifecycle.py
+   test_rc9_8_2_per_user_saved_visibility.py
+   RESULTADO: 20 passed
+
+Contratos verificados:
+- Guardar NO altera la señal global ni el lifecycle compartido.
+- La ocultación es visual y por usuario autenticado.
+- source_signal_id es identidad primaria; fingerprint sirve de compatibilidad.
+- El cache visual se invalida al cambiar de usuario sin reload.
+- Guardar refresca Guardadas + Confirmadas/Vigentes del usuario.
+- Eliminar refresca y permite reaparecer en el carril global si sigue vivo.
+- Otro usuario no hereda la ocultación del primero.
+- Diagnósticos MEDIUM/HIGH guardados también se ocultan para su dueño.
+
+Research: NO requiere cambios.
+SQL: NO requiere cambios.
+Backend Python: NO requiere cambios.
+Telegram/Guardian/Entry/SL/TP: NO modificados.

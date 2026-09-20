@@ -1,0 +1,46 @@
+RC9.8.2 — Per-User Saved Signal Visibility
+============================================
+
+Objetivo
+--------
+Reducir ruido visual sin alterar la señal global, su vigencia, Entry/SL/TP,
+Guardian, ReviewTrader ni el lifecycle compartido.
+
+Contrato visual por usuario
+---------------------------
+1. Una señal Confirmada/Vigente sigue siendo GLOBAL.
+2. Si el usuario actual la guarda, para ESE usuario se oculta de:
+   - Señales confirmadas
+   - Señales vigentes
+   y queda visible únicamente en Señales guardadas.
+3. Otro usuario que no la guardó continúa viéndola en Confirmadas/Vigentes.
+4. Si el usuario elimina su guardado y la señal global todavía está viva:
+   - reaparece en Confirmadas si sigue siendo la confirmada actual;
+   - reaparece en Vigentes si ya pertenece al lifecycle vigente.
+5. El soft-delete personal NO elimina/modifica la señal global.
+
+Seguridad multiusuario
+----------------------
+- El índice personal usa /api/saved_signals, que ya se resuelve por la sesión
+  autenticada del servidor.
+- El cache visual incluye userKey y se vacía si cambia de usuario sin recargar
+  la pestaña, evitando que el estado de Willer se reutilice para Danilo.
+- source_signal_id es la identidad primaria.
+- Existe fingerprint de compatibilidad: symbol + timeframe + action + candle.
+
+Alcance
+-------
+Este commit modifica sólo static/futures.js porque el sistema de Señales
+Guardadas + Guardian actual pertenece al flujo Futures.
+
+NO modifica
+-----------
+- Comité de estrategias
+- Comité Entry/SL/TP RC9.8
+- Safety
+- Vigencia técnica RC9.8.1
+- Telegram
+- Guardian
+- ReviewTrader
+- Research
+- SQL/Supabase schema

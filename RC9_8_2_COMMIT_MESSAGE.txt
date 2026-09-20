@@ -1,0 +1,8 @@
+RC9.8.2 — Per-user saved signal visibility
+
+- hide a Confirmed/Vigent Futures signal only for the user who saved it
+- preserve global signal/lifecycle for every other user
+- restore the signal to Confirmed/Vigent after personal delete when still alive
+- scope frontend saved-reference cache by authenticated user
+- filter saved manual MEDIUM/HIGH hypotheses from diagnostic lanes too
+- no trading, Guardian, Telegram, Research or database changes

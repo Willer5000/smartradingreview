@@ -64,6 +64,135 @@ function futEscapeHtml(value) {
         .replace(/'/g, '&#039;');
 }
 
+
+// ============================================================================
+// RC9.8.2 — VISIBILIDAD PERSONAL DE SEÑALES GUARDADAS
+// ============================================================================
+//
+// La señal de mercado es global. El acto de guardarla es personal.
+// Por eso NO se modifica /previous, /active ni el lifecycle compartido.
+// Sólo se oculta, para el usuario autenticado actual, una Confirmada/Vigente
+// que ese mismo usuario ya guardó. Otro usuario sigue viendo la señal global.
+//
+// Al borrar (soft delete) la señal guardada, /api/saved_signals deja de
+// devolverla y la señal reaparece automáticamente en el carril global que aún
+// corresponda, siempre que siga confirmada/vigente.
+// ============================================================================
+window._userSavedSignalRefs = {
+    sourceIds: new Set(),
+    fingerprints: new Set(),
+    loadedAt: 0,
+    loadingPromise: null,
+    userKey: null
+};
+
+function _currentSavedSignalUserKey() {
+    const user = typeof window.getSmartTradingUser === 'function'
+        ? window.getSmartTradingUser()
+        : (
+            typeof window.getAuthenticatedUser === 'function'
+                ? window.getAuthenticatedUser()
+                : null
+        );
+    return String(user || '').trim();
+}
+
+function _savedSignalFingerprint(signal) {
+    if (!signal || typeof signal !== 'object') return '';
+    const symbol = String(signal.symbol || '').trim().toUpperCase();
+    const timeframe = String(signal.timeframe || '').trim();
+    const action = String(signal.action || signal.decision || '').trim().toUpperCase();
+    const candle = String(
+        signal.source_candle_timestamp
+        || signal.candle_timestamp
+        || signal.previous_candle_timestamp
+        || ''
+    ).trim();
+    if (!symbol || !timeframe || !action || !candle) return '';
+    return `${symbol}|${timeframe}|${action}|${candle}`;
+}
+
+function _replaceUserSavedSignalRefs(rows) {
+    const sourceIds = new Set();
+    const fingerprints = new Set();
+    (Array.isArray(rows) ? rows : []).forEach(row => {
+        const sourceId = String(row?.source_signal_id || '').trim();
+        if (sourceId) sourceIds.add(sourceId);
+        const fingerprint = _savedSignalFingerprint(row);
+        if (fingerprint) fingerprints.add(fingerprint);
+    });
+    window._userSavedSignalRefs.sourceIds = sourceIds;
+    window._userSavedSignalRefs.fingerprints = fingerprints;
+    window._userSavedSignalRefs.loadedAt = Date.now();
+}
+
+window.refreshUserSavedSignalRefs = async function(force = false) {
+    const state = window._userSavedSignalRefs;
+    const currentUserKey = _currentSavedSignalUserKey();
+
+    // RC9.8.2: nunca reutilizar el índice visual de Willer para Danilo (o viceversa)
+    // si la sesión cambia sin recargar la pestaña.
+    if (state.userKey !== currentUserKey) {
+        state.sourceIds = new Set();
+        state.fingerprints = new Set();
+        state.loadedAt = 0;
+        state.loadingPromise = null;
+        state.userKey = currentUserKey;
+    }
+
+    const fresh = state.loadedAt > 0 && (Date.now() - state.loadedAt) < 30000;
+    if (!force && fresh) return state;
+    if (state.loadingPromise) return state.loadingPromise;
+
+    state.loadingPromise = (async () => {
+        try {
+            const response = await fetch('/api/saved_signals?limit=500', {
+                method: 'GET',
+                credentials: 'same-origin',
+                cache: 'no-store'
+            });
+            if (response.status === 401) {
+                _replaceUserSavedSignalRefs([]);
+                return state;
+            }
+            const json = await response.json();
+            if (!response.ok || !json.success) {
+                throw new Error(json.error || `HTTP ${response.status}`);
+            }
+            // El endpoint ya filtra por _authenticated_user() y excluye deleted.
+            _replaceUserSavedSignalRefs(json.signals || []);
+            state.userKey = currentUserKey;
+        } catch (error) {
+            // Fallo de esta capa visual nunca debe ocultar señales globales.
+            console.warn('⚠️ RC9.8.2: no se pudo cargar índice personal guardado:', error);
+        } finally {
+            state.loadingPromise = null;
+        }
+        return state;
+    })();
+
+    return state.loadingPromise;
+};
+
+function _isSignalSavedByCurrentUser(signal) {
+    const state = window._userSavedSignalRefs;
+    const sourceId = String(signal?.signal_id || signal?.source_signal_id || '').trim();
+    if (sourceId && state.sourceIds.has(sourceId)) return true;
+    const fingerprint = _savedSignalFingerprint(signal);
+    return Boolean(fingerprint && state.fingerprints.has(fingerprint));
+}
+
+window.refreshSignalLanesAfterSavedChange = async function() {
+    await window.refreshUserSavedSignalRefs(true);
+    // Cada función conserva su propio lock; no tocamos caches/lifecycle globales.
+    if (typeof window.updateActiveSignals === 'function') {
+        window.updateActiveSignals();
+    }
+    if (typeof window.updatePreviousSignals === 'function') {
+        window.updatePreviousSignals();
+    }
+};
+
 function futPublicAnalysisRole(name, index) {
     const key = String(name || '').toLowerCase();
     if (key.includes('técnico') || key.includes('tecnico')) return 'Tendencia e indicadores';
@@ -460,6 +589,10 @@ function futRenderAnalysisDiagnostics(json, context) {
         }));
     }
 
+    // RC9.8.2: una hipótesis ya guardada por ESTE usuario vive sólo en
+    // Guardadas para él. No se oculta para otros usuarios.
+    candidates = candidates.filter(candidate => !_isSignalSavedByCurrentUser(candidate));
+
     const title = 'Por qué no aparecen otras señales';
 
     if (candidates.length === 0) {
@@ -781,9 +914,13 @@ window.updateActiveSignals = async function() {
             return;
         }
 
-        const signals = Array.isArray(json.signals)
+        const allSignals = Array.isArray(json.signals)
             ? json.signals
             : [];
+
+        // RC9.8.2: estado de guardado PERSONAL. No altera la señal global.
+        await window.refreshUserSavedSignalRefs(false);
+        const signals = allSignals.filter(sig => !_isSignalSavedByCurrentUser(sig));
 
         const progress = json.progress || {};
         const filterStats =
@@ -907,11 +1044,14 @@ window.updateActiveSignals = async function() {
         // ------------------------------------------------------------
         if (signals.length === 0) {
 
+            const hiddenInSaved = allSignals.length > 0;
             signalsList.innerHTML = `
                 <div class="list-group-item bg-dark text-warning text-center py-3">
                     <strong>✅ Análisis de Futuros completado</strong>
                     <br>
-                    <small>No hay señales vigentes de cierres anteriores en este momento.</small>
+                    <small>${hiddenInSaved
+                        ? 'Tus señales vigentes de este ciclo ya están en Señales guardadas.'
+                        : 'No hay señales vigentes de cierres anteriores en este momento.'}</small>
                 </div>
             `;
 
@@ -1421,10 +1561,14 @@ window.updatePreviousSignals = async function() {
             return;
         }
 
-        const signals =
+        const allSignals =
             Array.isArray(json.signals)
                 ? json.signals
                 : [];
+
+        // RC9.8.2: ocultar sólo para el usuario que ya la guardó.
+        await window.refreshUserSavedSignalRefs(false);
+        const signals = allSignals.filter(sig => !_isSignalSavedByCurrentUser(sig));
 
         const progress =
             json.progress || {};
@@ -1534,19 +1678,11 @@ window.updatePreviousSignals = async function() {
 
         if (signalsCount) {
         
-            const activeCount =
-                Number.isFinite(
-                    Number(
-                        json.active_count
-                    )
-                )
-                    ? Number(
-                        json.active_count
-                    )
-                    : signals.filter(
-                        signal =>
-                            signal.activa === 1
-                    ).length;
+            // El contador también es PERSONAL: no incluye señales que este
+            // usuario ya movió visualmente a Guardadas.
+            const activeCount = signals.filter(
+                signal => signal.activa === 1
+            ).length;
         
             signalsCount.textContent =
                 String(
@@ -1569,11 +1705,14 @@ window.updatePreviousSignals = async function() {
         // ------------------------------------------------------------
         if (signals.length === 0) {
 
+            const hiddenInSaved = allSignals.length > 0;
             signalsList.innerHTML = `
                 <div class="list-group-item bg-dark text-warning text-center py-3">
                     <strong>✅ Análisis completado</strong>
                     <br>
-                    <small>No hay nuevas señales confirmadas en el último cierre.</small>
+                    <small>${hiddenInSaved
+                        ? 'Tus señales confirmadas de este cierre ya están en Señales guardadas.'
+                        : 'No hay nuevas señales confirmadas en el último cierre.'}</small>
                 </div>
                 ${diagnosticsHtml}
             `;
@@ -3508,7 +3647,9 @@ window.confirmSaveSignal = async function() {
             );
             const modal = bootstrap.Modal.getInstance(document.getElementById('saveSignalModal'));
             if (modal) modal.hide();
-            window.updateSavedSignalsList();
+            await window.updateSavedSignalsList();
+            // RC9.8.2: desaparece de Confirmadas/Vigentes sólo para este usuario.
+            await window.refreshSignalLanesAfterSavedChange();
         } else {
             showToast('Error: ' + (json.error || 'no se pudo guardar'), 'danger');
         }
@@ -5446,7 +5587,10 @@ window.deleteSavedSignal = async function() {
             showToast('🗑️ Señal eliminada', 'success');
             const modal = bootstrap.Modal.getInstance(document.getElementById('savedSignalDetailModal'));
             if (modal) modal.hide();
-            window.updateSavedSignalsList();
+            await window.updateSavedSignalsList();
+            // RC9.8.2: al eliminar, si la señal global sigue confirmada o
+            // vigente vuelve a su carril únicamente para este usuario.
+            await window.refreshSignalLanesAfterSavedChange();
         } else {
             showToast('Error: ' + (json.error || ''), 'danger');
         }
