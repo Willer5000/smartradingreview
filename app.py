@@ -28376,7 +28376,34 @@ def _spot_previous_processing_age():
 # existiendo porque el frontend lo necesita, pero queda estrictamente acotado.
 # ============================================================================
 
-_SPOT_SIGNALS_CACHE_MAX_AGE = 24 * 60 * 60
+# RC9.8.1 — el snapshot no puede caducar antes que la propia señal técnica.
+# 90 días es sólo el techo de persistencia; cada guardado usa un TTL dinámico
+# derivado del valid_until más lejano de Confirmadas/Vigentes.
+_SPOT_SIGNALS_CACHE_MAX_AGE = 90 * 24 * 60 * 60
+_SPOT_SIGNALS_CACHE_MIN_TTL = 48 * 60 * 60
+
+
+def _spot_signals_snapshot_ttl_seconds(previous=None, vigent=None):
+    """TTL durable >= vigencia técnica restante + margen, sin rejuvenecer señales."""
+    now = pd.Timestamp.now(tz='UTC')
+    furthest = 0
+    for cache in (previous or {}, vigent or {}):
+        if not isinstance(cache, dict):
+            continue
+        for row in cache.values():
+            if not isinstance(row, dict):
+                continue
+            raw = row.get('valid_until') or row.get('source_valid_until')
+            if not raw:
+                continue
+            try:
+                ts = pd.Timestamp(raw)
+                ts = ts.tz_localize('UTC') if ts.tz is None else ts.tz_convert('UTC')
+                furthest = max(furthest, int((ts - now).total_seconds()))
+            except Exception:
+                continue
+    ttl = max(_SPOT_SIGNALS_CACHE_MIN_TTL, furthest + 12 * 60 * 60)
+    return max(_SPOT_SIGNALS_CACHE_MIN_TTL, min(_SPOT_SIGNALS_CACHE_MAX_AGE, int(ttl)))
 
 # HOTFIX 16.2 — FAST RESTORE SPOT
 # Después de un deploy el frontend no debe esperar minutos a que el bootstrap
@@ -28463,7 +28490,8 @@ def _save_spot_signals_cache_to_disk():
             'active_complete': False,
         }
         return save_runtime_snapshot(
-            'spot', 'signals_cache', payload, ttl_seconds=_SPOT_SIGNALS_CACHE_MAX_AGE
+            'spot', 'signals_cache', payload,
+            ttl_seconds=_spot_signals_snapshot_ttl_seconds(previous, vigent)
         )
     except Exception as cache_error:
         print(f"⚠️ [SPOT CACHE] No se pudo persistir snapshot: {cache_error}")
@@ -29370,72 +29398,85 @@ def _run_scheduled_spot_analysis(timeframe):
         _release_heavy_analysis(owner)
 
 
-_SPOT_VALIDITY_POLICY_VERSION = 'RC9_7_14_SPOT_TECHNICAL_VALIDITY_V3'
+_SPOT_VALIDITY_POLICY_VERSION = 'RC9_8_1_SPOT_TECHNICAL_VALIDITY_V4'
 
 
-def _spot_entry_wait_bars(signal, timeframe):
-    """Technical Spot order horizon in candles.
-
-    The horizon is deliberately patient because a Spot limit order represents
-    accumulation/rotation intent, not a one-candle prediction.  It estimates
-    persistence from Entry distance in ATR, reachability, trend persistence and
-    confidence.  The clock is anchored to the ORIGINAL source candle and never
-    restarts on refresh/deploy.  Original structural invalidation (SL) can end
-    the signal earlier.
-    """
+def _signal_geometry_context(signal):
+    """Read-only geometry metadata shared by Spot/Futures validity."""
     signal = signal or {}
     levels = signal.get('levels') if isinstance(signal.get('levels'), dict) else signal
     levels = levels or {}
-
-    # Structural-persistence guardrails by TF. These are MAXIMUM ages, not an
-    # automatic fixed TTL. Actual bars are calculated below from the setup.
-    base = {'4h': 8, '12h': 6, '1D': 5, '1W': 4}.get(str(timeframe), 6)
-    maximum = {'4h': 18, '12h': 14, '1D': 12, '1W': 8}.get(str(timeframe), 12)
-    bars = int(base)
-
+    timing = str(
+        levels.get('entry_timing_mode')
+        or signal.get('entry_timing_mode')
+        or 'STRUCTURAL_PULLBACK'
+    ).upper()
+    setup = str(
+        levels.get('setup_family')
+        or signal.get('setup_family')
+        or levels.get('strategy_family')
+        or signal.get('strategy_family')
+        or 'UNSPECIFIED'
+    ).upper()
     try:
-        distance_atr = abs(float(levels.get('entry_distance_atr') or 0))
+        distance_atr = abs(float(levels.get('entry_distance_atr') or signal.get('entry_distance_atr') or 0))
     except Exception:
         distance_atr = 0.0
-    if distance_atr > 0:
-        # Patient Spot orders: assume ~0.40 ATR of useful retracement/travel per
-        # candle, then add two candles for confirmation/noise.
-        travel_bars = int(math.ceil(distance_atr / 0.40)) + 2
-        bars = max(bars, travel_bars)
-
     try:
-        reach = float(levels.get('entry_reachability_score') or 0)
+        reach = float(levels.get('entry_reachability_score') or signal.get('entry_reachability_score') or 0)
     except Exception:
         reach = 0.0
-    if 0 < reach < 55:
-        bars += 2
-    elif reach >= 75:
-        bars += 1
-
     regime = signal.get('market_regime') or levels.get('market_regime') or {}
     regime_name = str(regime.get('regime') if isinstance(regime, dict) else regime).upper()
     try:
         regime_conf = float(regime.get('confidence') or 0) if isinstance(regime, dict) else 0.0
     except Exception:
         regime_conf = 0.0
-    if 'TREND' in regime_name and regime_conf >= 60:
+    return levels, timing, setup, distance_atr, reach, regime_name, regime_conf
+
+
+def _spot_entry_wait_bars(signal, timeframe):
+    """Technical Spot pre-Entry horizon in candles, not a timeframe table.
+
+    RC9.8.1: timeframe converts candles to clock time; it no longer decides how
+    many candles the setup lives.  A near-reaction setup may be valid for one
+    candle, while a defended deep pullback can remain order-worthy for many.
+    """
+    levels, timing, setup, distance_atr, reach, regime_name, regime_conf = _signal_geometry_context(signal)
+
+    if timing == 'NEAR_REACTION':
+        bars = 1
+        cap = 3
+    elif timing == 'DEEP_PULLBACK_LIMIT':
+        bars = 5
+        cap = 12
+    else:
+        bars = 3
+        cap = 8
+
+    # Distance is the main estimate of travel time to the planned Entry.
+    if distance_atr > 0:
+        travel = max(1, int(math.ceil(distance_atr / 0.45)))
+        bars = max(bars, travel)
+
+    # Hard-to-reach structural limits need time; immediately reachable zones do not.
+    if 0 < reach < 45:
         bars += 2
-
-    try:
-        confidence = float(
-            (signal.get('decision') or {}).get('confidence')
-            if isinstance(signal.get('decision'), dict)
-            else signal.get('confidence') or 0
-        )
-    except Exception:
-        confidence = 0.0
-    if confidence >= 70:
-        bars += 1
-    if confidence >= 82:
+    elif 45 <= reach < 65 and timing != 'NEAR_REACTION':
         bars += 1
 
-    return max(4, min(int(maximum), int(bars)))
+    # Trend persistence can keep a pullback thesis alive, but should not turn a
+    # near-market trigger into a stale multi-candle order.
+    if timing != 'NEAR_REACTION' and 'TREND' in regime_name and regime_conf >= 60:
+        bars += 1
 
+    # Fast trigger families stale quickly; structural accumulation may wait.
+    if setup in ('BREAKOUT_RETEST', 'STRUCTURE_RETEST') and timing == 'NEAR_REACTION':
+        cap = min(cap, 2)
+    elif any(token in setup for token in ('SWEEP', 'REVERS', 'RECLAIM')) and timing == 'NEAR_REACTION':
+        cap = min(cap, 2)
+
+    return max(1, min(int(cap), int(bars)))
 
 def _spot_valid_until_from_source(signal, timeframe):
     raw = (signal or {}).get('source_candle_close_timestamp') or (signal or {}).get('source_candle_timestamp')
@@ -29529,7 +29570,7 @@ def _build_spot_vigent_cache(old_confirmed, old_vigent, current_confirmed, obser
                         valid_until = max(valid_until, technical_until)
                         item['validity_bars'] = int(technical_bars or 0)
                         item['validity_policy_version'] = _SPOT_VALIDITY_POLICY_VERSION
-                        item['validity_basis'] = 'SOURCE_TF+ENTRY_DISTANCE_ATR+REACHABILITY+REGIME+STRUCTURAL_INVALIDATION'
+                        item['validity_basis'] = 'GEOMETRY_MODE+SETUP+ENTRY_DISTANCE_ATR+REACHABILITY+REGIME+STRUCTURAL_INVALIDATION'
                 except Exception:
                     pass
 
@@ -29590,6 +29631,40 @@ def _build_spot_vigent_cache(old_confirmed, old_vigent, current_confirmed, obser
     except Exception as exc:
         print(f"⚠️ [SPOT VIGENT] No se pudo construir lifecycle: {exc}")
         return {}
+
+
+def _spot_confirmed_alert_score(row):
+    """Rank only for Telegram choice; never changes trading authority."""
+    row = row or {}
+    def _n(name):
+        try: return float(row.get(name) or 0)
+        except Exception: return 0.0
+    return (
+        0.45 * _n('confidence')
+        + 0.25 * _n('entry_quality_score')
+        + 0.20 * _n('entry_reachability_score')
+        + 0.10 * _n('execution_safety')
+    )
+
+
+def _send_spot_confirmed_timeframe_alerts(resultados):
+    """At most one Spot CONFIRMADA per timeframe/close, plus later Entry alert."""
+    by_tf = {}
+    for row in (resultados or {}).values():
+        if not isinstance(row, dict):
+            continue
+        tf = str(row.get('timeframe') or '')
+        action = str(row.get('decision') or row.get('action') or '').upper()
+        if not tf or action not in ('COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT'):
+            continue
+        current = by_tf.get(tf)
+        if current is None or _spot_confirmed_alert_score(row) > _spot_confirmed_alert_score(current):
+            by_tf[tf] = row
+    for tf, row in by_tf.items():
+        try:
+            _send_confirmed_signal_telegram('spot', row)
+        except Exception as exc:
+            print(f"⚠️ [SPOT] Telegram CONFIRMADA {tf}: {exc}")
 
 
 def _compute_previous_signals():
@@ -29994,24 +30069,15 @@ def _compute_previous_signals():
                     'source_valid_until': (valid_until.isoformat() if valid_until is not None else analisis.get('source_valid_until')),
                     'validity_bars': int(validity_bars or 0),
                     'validity_policy_version': _SPOT_VALIDITY_POLICY_VERSION,
-                    'validity_basis': 'SOURCE_TF+ENTRY_DISTANCE_ATR+REACHABILITY+REGIME+STRUCTURAL_INVALIDATION',
+                    'validity_basis': 'GEOMETRY_MODE+SETUP+ENTRY_DISTANCE_ATR+REACHABILITY+REGIME+STRUCTURAL_INVALIDATION',
+                    'entry_timing_mode': levels.get('entry_timing_mode'),
+                    'setup_family': levels.get('setup_family'),
+                    'entry_reachability_score': levels.get('entry_reachability_score'),
+                    'entry_quality_score': levels.get('entry_quality_score') or levels.get('entry_score'),
+                    'execution_safety': levels.get('execution_safety'),
                     'ui_context': 'CONFIRMED',
                     'timestamp': str(tiempo_actual.isoformat())
                 }
-
-                # RC9.7.13 — Spot CONFIRMADA se avisa al cierre, no espera
-                # al toque de Entry. El monitor de Entry conserva su segundo
-                # evento Telegram independiente.
-                try:
-                    _send_confirmed_signal_telegram(
-                        'spot',
-                        resultados[clave],
-                    )
-                except Exception as confirmed_spot_telegram_error:
-                    print(
-                        "⚠️ [SPOT] Telegram CONFIRMADA "
-                        f"{symbol} {timeframe}: {confirmed_spot_telegram_error}"
-                    )
 
                 estado = "🟢 ACTIVA" if activa == 1 else "⚪ inactiva"
                 print(f"   ✅ {symbol} {timeframe}: {decision} ({confianza:.0f}%) - {estado}")
@@ -30027,6 +30093,10 @@ def _compute_previous_signals():
                 continue
             time.sleep(0.2)
     
+    # RC9.8.1 — Telegram Spot oportuno: una sola CONFIRMADA por temporalidad
+    # y cierre. El toque de Entry conserva su evento operativo independiente.
+    _send_spot_confirmed_timeframe_alerts(resultados)
+
     # ============ GUARDAR EN CACHÉ ============
     # Antes de reemplazar Confirmadas, conservar las que todavía mantienen la
     # vigencia ORIGINAL. Esto alimenta el carril rojo sin recalcular niveles.
@@ -32539,6 +32609,67 @@ def _futures_opportunity_quality(result):
         return 0.0
 
 
+def _futures_intrabar_watchlist_cells(selected_symbol=None, selected_tf=None, limit=3):
+    """Bounded watchlist from already-known technical candidates. No 63-cell scan."""
+    selected = (str(selected_symbol or ''), str(selected_tf or ''))
+    scored = {}
+    try:
+        with _futures_analysis_cache['lock']:
+            raw = dict(_futures_analysis_cache.get('data') or {})
+        for record in (raw.get('lifecycle') or {}).values():
+            if not isinstance(record, dict):
+                continue
+            if str(record.get('lifecycle_status') or '').lower() != 'waiting_entry':
+                continue
+            if str(record.get('publication_status') or '').upper() != 'EXECUTABLE_SIGNAL':
+                continue
+            cell = (str(record.get('symbol') or ''), str(record.get('timeframe') or ''))
+            if not all(cell) or cell == selected:
+                continue
+            score = 120.0 + float(record.get('confidence') or 0)
+            scored[cell] = max(scored.get(cell, -1e9), score)
+        for cell, result in (raw.get('analysis') or {}).items():
+            if not isinstance(cell, tuple) or len(cell) != 2 or not isinstance(result, dict):
+                continue
+            if cell == selected:
+                continue
+            decision = result.get('decision') or {}
+            levels = result.get('levels') or {}
+            action = str(decision.get('action') or '').upper()
+            if action not in ('LONG', 'SHORT'):
+                continue
+            publication = str(levels.get('publication_status') or result.get('publication_status') or '').upper()
+            manual = _futures_manual_risk_profile(result)
+            if publication == 'EXECUTABLE_SIGNAL':
+                score = 100.0 + float(decision.get('confidence') or 0)
+            elif manual.get('allowed') and str(manual.get('risk_class') or '').upper() in ('MEDIUM', 'HIGH'):
+                score = 60.0 + float(decision.get('confidence') or 0)
+            else:
+                continue
+            scored[(str(cell[0]), str(cell[1]))] = max(scored.get((str(cell[0]), str(cell[1])), -1e9), score)
+    except Exception:
+        return []
+    return [cell for cell, _ in sorted(scored.items(), key=lambda item: item[1], reverse=True)[:max(0, int(limit))]]
+
+
+def _schedule_one_futures_watchlist_preview(selected_symbol=None, selected_tf=None):
+    """Gradually warm one relevant intrabar cell only when the heavy slot is free."""
+    try:
+        with _HEAVY_ANALYSIS_STATE_LOCK:
+            if _HEAVY_ANALYSIS_OWNER is not None:
+                return 'DEFERRED_BUSY'
+        with _FUTURES_UI_CACHE['lock']:
+            if _FUTURES_UI_CACHE['running']:
+                return 'DEFERRED_RUNNING'
+        for symbol, timeframe in _futures_intrabar_watchlist_cells(selected_symbol, selected_tf, limit=3):
+            if _get_futures_intrabar_runtime(symbol, timeframe) is not None:
+                continue
+            return _start_futures_ui_analysis_async(symbol, timeframe)
+    except Exception:
+        return 'ERROR'
+    return 'NO_CANDIDATE'
+
+
 @app.route('/api/futures/opportunities', methods=['GET'])
 def api_futures_opportunities():
     """Señales ACTIVAS intrabar. Nunca reutiliza Confirmadas como actuales.
@@ -32560,6 +32691,9 @@ def api_futures_opportunities():
                 job_state = _start_futures_ui_analysis_async(selected_symbol, selected_tf)
             else:
                 job_state = 'CACHE_READY'
+                # RC9.8.1: selected cell remains priority; once ready, warm at
+                # most ONE technically relevant extra cell. No universe scan.
+                _schedule_one_futures_watchlist_preview(selected_symbol, selected_tf)
 
         rows = _list_futures_intrabar_active()
         try:
@@ -33785,6 +33919,33 @@ def _deserialize_futures_cache(payload):
     }
 
 
+_FUTURES_ANALYSIS_RESTORE_MAX_AGE = 24 * 60 * 60
+_FUTURES_SNAPSHOT_MAX_AGE = 45 * 24 * 60 * 60
+_FUTURES_SNAPSHOT_MIN_TTL = 3 * 24 * 60 * 60
+
+
+def _futures_snapshot_ttl_seconds(serial_data):
+    """Keep lifecycle at least through technical Entry validity; bounded."""
+    now = pd.Timestamp.now(tz='UTC')
+    ttl = _FUTURES_SNAPSHOT_MIN_TTL
+    lifecycle = (serial_data or {}).get('lifecycle') or {}
+    for row in lifecycle.values():
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get('lifecycle_status') or '').lower()
+        if status == 'entry_touched':
+            ttl = max(ttl, 30 * 24 * 60 * 60)
+        raw = row.get('valid_until')
+        if raw:
+            try:
+                ts = pd.Timestamp(raw)
+                ts = ts.tz_localize('UTC') if ts.tz is None else ts.tz_convert('UTC')
+                ttl = max(ttl, int((ts - now).total_seconds()) + 2 * 24 * 60 * 60)
+            except Exception:
+                pass
+    return max(_FUTURES_SNAPSHOT_MIN_TTL, min(_FUTURES_SNAPSHOT_MAX_AGE, int(ttl)))
+
+
 def _load_futures_cache_from_disk():
     """Compat name: restore Futures snapshot from Supabase, never /tmp."""
     global _futures_analysis_cache
@@ -33802,12 +33963,19 @@ def _load_futures_cache_from_disk():
             return False
         ts = float(payload.get('ts', 0) or 0)
         age = time.time() - ts if ts else 999999
-        if age > 24 * 3600:
+        if age > _FUTURES_SNAPSHOT_MAX_AGE:
             print(f'📂 [FUT] Snapshot Supabase muy viejo ({int(age/3600)}h); ignorado')
             return False
         data = _deserialize_futures_cache(payload.get('data'))
-        if not data or not (data.get('analysis') or {}):
+        if not data:
             print('📂 [FUT] Snapshot Supabase vacío; ignorado')
+            return False
+        # Un análisis CLOSED_CANDLE de más de 24h no vuelve a ser autoridad
+        # actual, pero su lifecycle técnico sí debe sobrevivir a cold-start.
+        if age > _FUTURES_ANALYSIS_RESTORE_MAX_AGE:
+            data['analysis'] = {}
+        if not (data.get('analysis') or data.get('lifecycle')):
+            print('📂 [FUT] Snapshot Supabase sin análisis/lifecycle útil; ignorado')
             return False
         with _futures_analysis_cache['lock']:
             _futures_analysis_cache['data'] = data
@@ -33912,7 +34080,8 @@ def _save_futures_cache_to_disk(force=False):
             'data': serial_data,
         }
         ok = save_runtime_snapshot(
-            'futures', 'analysis_cache', payload, ttl_seconds=24 * 3600
+            'futures', 'analysis_cache', payload,
+            ttl_seconds=_futures_snapshot_ttl_seconds(serial_data)
         )
         if ok:
             with _FUTURES_SNAPSHOT_SAVE_LOCK:
@@ -33931,86 +34100,79 @@ def _save_futures_cache_to_disk(force=False):
 # No tocar Supabase durante import app.
 
 
-_FUTURES_VALIDITY_POLICY_VERSION = 'RC9_7_14_TECHNICAL_VALIDITY_V3'
+_FUTURES_VALIDITY_POLICY_VERSION = 'RC9_8_1_TECHNICAL_VALIDITY_V4'
 
 
 def _futures_entry_wait_bars(result, timeframe):
     """Technical pre-Entry validity in candles.
 
-    A confirmed setup remains order-worthy while its ORIGINAL structural thesis
-    can still reach Entry.  Age is estimated from Entry distance in ATR, Entry
-    reachability, trend/ADX persistence, MTF alignment and R/R.  Time never
-    restarts on deploy.  SL/structural invalidation or a missed target may end
-    the setup earlier.
+    RC9.8.1: 1/2/4/10 candles are all possible.  The count follows geometry,
+    setup persistence, Entry travel, reachability and market context; timeframe
+    only converts that candle count into elapsed time.
     """
     result = result or {}
-    levels = result.get('levels') if isinstance(result.get('levels'), dict) else result
-    levels = levels or {}
+    levels, timing, setup, distance_atr, reach, regime_name, regime_conf = _signal_geometry_context(result)
 
-    # Guardrails prevent eternal orders; they are deliberately wider than one
-    # candle and are not the primary decision criterion.
-    base = {
-        '30m': 8, '1h': 8, '2h': 7, '4h': 6, '12h': 5, '1D': 4
-    }.get(str(timeframe), 6)
-    maximum = {
-        '30m': 16, '1h': 16, '2h': 14, '4h': 12, '12h': 10, '1D': 8
-    }.get(str(timeframe), 12)
-    bars = int(base)
+    if timing == 'NEAR_REACTION':
+        bars = 1
+        cap = 3
+    elif timing == 'DEEP_PULLBACK_LIMIT':
+        bars = 4
+        cap = 10
+    else:
+        bars = 2
+        cap = 7
 
-    try:
-        distance_atr = abs(float(levels.get('entry_distance_atr') or 0))
-    except Exception:
-        distance_atr = 0.0
     if distance_atr > 0:
-        # ~0.45 ATR of useful retracement/travel per bar + confirmation room.
-        bars = max(bars, int(math.ceil(distance_atr / 0.45)) + 2)
+        travel = max(1, int(math.ceil(distance_atr / 0.40)))
+        bars = max(bars, travel)
 
-    try:
-        reach = float(levels.get('entry_reachability_score') or 0)
-    except Exception:
-        reach = 0.0
-    if 0 < reach < 55:
+    if 0 < reach < 45:
         bars += 2
-    elif reach >= 80:
+    elif 45 <= reach < 65 and timing != 'NEAR_REACTION':
         bars += 1
 
-    regime = result.get('market_regime') or levels.get('market_regime') or {}
-    regime_name = str(regime.get('regime') if isinstance(regime, dict) else regime).upper()
-    try:
-        regime_conf = float(regime.get('confidence') or 0) if isinstance(regime, dict) else 0.0
-    except Exception:
-        regime_conf = 0.0
-    if 'TREND' in regime_name and regime_conf >= 65:
-        bars += 2
+    if timing != 'NEAR_REACTION' and 'TREND' in regime_name and regime_conf >= 65:
+        bars += 1
 
     indicators = result.get('indicators') or {}
     try:
         adx = float(indicators.get('adx') or levels.get('adx') or 0) if isinstance(indicators, dict) else 0.0
     except Exception:
         adx = 0.0
-    if adx >= 30:
-        bars += 1
-    if adx >= 40:
+    if timing != 'NEAR_REACTION' and adx >= 30:
         bars += 1
 
-    # MTF alignment may be represented in several generations of the payload.
     mtf_text = ' '.join(str(result.get(k) or '') for k in (
         'multi_timeframe_alignment', 'mtf_alignment', 'timeframe_alignment'
     )).lower()
-    if mtf_text and ('alcist' in mtf_text or 'bajist' in mtf_text or 'aligned' in mtf_text):
+    if timing != 'NEAR_REACTION' and mtf_text and (
+        'alcist' in mtf_text or 'bajist' in mtf_text or 'aligned' in mtf_text
+    ):
         bars += 1
 
+    # Faster universes intentionally keep shorter stale-order horizons.  This
+    # does not reject the signal; it only says when an untouched Entry must be
+    # re-evaluated instead of remaining indefinitely pending.
+    symbol = str(result.get('symbol') or levels.get('symbol') or '').upper().replace('/', '-')
     try:
-        rr = float(levels.get('risk_reward') or 0)
+        from futures_universe import risk_class_for
+        group = str(risk_class_for(symbol) or '').upper()
     except Exception:
-        rr = 0.0
-    if rr >= 1.8:
-        bars += 1
-    if rr >= 2.5:
-        bars += 1
+        group = ''
+    if group == 'HIGH':
+        cap = min(cap, 6)
+    elif group == 'MEDIUM':
+        cap = min(cap, 8)
+    else:
+        cap = min(cap, 10)
 
-    return max(4, min(int(maximum), int(bars)))
+    if setup in ('BREAKOUT_RETEST', 'STRUCTURE_RETEST') and timing == 'NEAR_REACTION':
+        cap = min(cap, 2)
+    elif any(token in setup for token in ('SWEEP', 'REVERS', 'RECLAIM')) and timing == 'NEAR_REACTION':
+        cap = min(cap, 2)
 
+    return max(1, min(int(cap), int(bars)))
 
 def _futures_valid_until_from_source(result, timeframe):
     import pandas as pd
@@ -34078,7 +34240,7 @@ def _futures_signal_validity(result,timeframe,record=None):
         'expired': remaining <= 0,
         'validity_bars': int(bars or 0),
         'validity_policy_version': _FUTURES_VALIDITY_POLICY_VERSION,
-        'validity_basis': 'SOURCE_TF+ENTRY_DISTANCE_ATR+REACHABILITY+REGIME+ADX+MTF+RR+STRUCTURAL_INVALIDATION',
+        'validity_basis': 'GEOMETRY_MODE+SETUP+ENTRY_DISTANCE_ATR+REACHABILITY+REGIME+ADX+MTF+STRUCTURAL_INVALIDATION',
     }
 
 
@@ -34201,7 +34363,7 @@ def _refresh_futures_signal_lifecycle(
                         ).isoformat() if old_until is not None else technical_until.isoformat()
                         record['validity_bars'] = int(technical_bars or 0)
                         record['validity_policy_version'] = _FUTURES_VALIDITY_POLICY_VERSION
-                        record['validity_basis'] = 'SOURCE_TF+ENTRY_DISTANCE_ATR+REACHABILITY+REGIME+ADX+MTF+RR+STRUCTURAL_INVALIDATION'
+                        record['validity_basis'] = 'GEOMETRY_MODE+SETUP+ENTRY_DISTANCE_ATR+REACHABILITY+REGIME+ADX+MTF+STRUCTURAL_INVALIDATION'
                 except Exception:
                     pass
 
@@ -34544,10 +34706,13 @@ def _refresh_futures_signal_lifecycle(
                 'valid_until': valid_until.isoformat(),
                 'validity_bars': int(validity_bars or 0),
                 'validity_policy_version': _FUTURES_VALIDITY_POLICY_VERSION,
-                'validity_basis': 'SOURCE_TF+ENTRY_DISTANCE_ATR+REACHABILITY+REGIME+ADX+MTF+RR+STRUCTURAL_INVALIDATION',
+                'validity_basis': 'GEOMETRY_MODE+SETUP+ENTRY_DISTANCE_ATR+REACHABILITY+REGIME+ADX+MTF+STRUCTURAL_INVALIDATION',
                 'entry_reachability_score': levels.get('entry_reachability_score'),
                 'entry_distance_atr': levels.get('entry_distance_atr'),
                 'entry_defensibility_score': levels.get('entry_defensibility_score'),
+                'entry_timing_mode': levels.get('entry_timing_mode'),
+                'setup_family': levels.get('setup_family'),
+                'strategy_family': levels.get('strategy_family'),
                 'market_regime': result.get('market_regime'),
                 'analysis_price': float(
                     result.get('analysis_price')
@@ -39145,13 +39310,15 @@ def _normalize_candle_start(timeframe, candle_ts):
 # RC9.7.13 — TELEGRAM DE SEÑAL CONFIRMADA (SPOT + FUTURES)
 # ============================================================================
 #
-# Contrato temporal:
+# Contrato temporal RC9.8.1:
 # - ACTIVA intrabar: jamás dispara Telegram.
-# - CONFIRMADA: una alerta inmediata al cierre, una sola vez.
-# - ENTRY: conserva su alerta operativa posterior cuando el precio toca Entry.
+# - SPOT CONFIRMADA: máximo una señal por temporalidad/cierre.
+# - SPOT ENTRY: segundo evento operativo cuando toca la zona de Entry.
+# - FUTURES: Telegram SÓLO al confirmar una EXECUTABLE_SIGNAL validada.
+#   Entry/TP/SL/expiración continúan en lifecycle/Guardian pero sin Telegram.
 #
-# La deduplicación es durable en Supabase y la barrera de arranque evita
-# "backfill" de confirmaciones viejas cuando Render recicla el worker.
+# La deduplicación es durable en Supabase. Cold-start permite cierres recientes
+# sin producir backfill histórico ni lluvia de mensajes.
 # ============================================================================
 
 _CONFIRMED_SIGNAL_ALERT_RETENTION = 14 * 24 * 3600
@@ -39265,17 +39432,32 @@ def _confirmed_signal_event_key(market, signal):
         normalized = candle_ts.isoformat()
     except Exception:
         normalized = str(candle or 'unknown')
+    if market == 'spot':
+        # RC9.8.1: máximo una CONFIRMADA por temporalidad/cierre. Entry remains
+        # a separate event, so useful execution alerts are not lost.
+        close_ts = _confirmed_signal_close_timestamp(signal, timeframe)
+        close_key = close_ts.isoformat() if close_ts is not None else normalized
+        return f"spot|{timeframe}|{close_key}"
     return f"{market}|{symbol}|{timeframe}|{action}|{normalized}"
 
 
 def _confirmed_signal_recent_enough(signal, timeframe):
-    """Anti-backfill: sólo anunciar cierres ocurridos con este proceso vivo."""
+    """RC9.8.1 anti-backfill resilient to Render cold-start.
+
+    Durable dedup is the primary anti-duplication authority.  A recent close may
+    be announced even if the worker started a few minutes AFTER the exchange
+    closed the candle; genuinely old history is still suppressed.
+    """
     close_ts = _confirmed_signal_close_timestamp(signal, timeframe)
     if close_ts is None:
         return False
-    # Dos minutos de gracia cubren pequeñas diferencias reloj/exchange sin
-    # convertir el primer arranque tras deploy en un backfill histórico.
-    return close_ts.timestamp() >= (_CONFIRMED_SIGNAL_PROCESS_STARTED_AT - 120.0)
+    now = pd.Timestamp.now(tz='UTC')
+    age = (now - close_ts).total_seconds()
+    if age < -5 * 60:
+        return False
+    tf_seconds = _confirmed_signal_tf_seconds(timeframe) or 3600
+    recent_window = max(15 * 60, min(2 * 60 * 60, int(tf_seconds * 0.35)))
+    return age <= recent_window
 
 
 def _confirmed_signal_rr(action, entry, stop_loss, take_profit):
@@ -40097,12 +40279,19 @@ def _build_saved_futures_lifecycle_message(
 
 def _send_saved_futures_lifecycle_notifications():
     """
+    RC9.8.1 Telegram policy: Futures notifies ONLY validated CONFIRMED signals.
+    Saved lifecycle continues in DB/UI but ENTRY/TP/SL/EXPIRED do not generate
+    Telegram messages, preventing duplicate/operational message rain.
+
     Envía únicamente eventos pendientes de Saved Futures ARMADAS.
 
     Históricos:
         telegram_lifecycle_armed_at = NULL
         -> jamás llegan aquí.
     """
+    # Política explícita del producto: en Futures Telegram sólo consume la
+    # confirmación validada de cierre. Lifecycle sigue funcionando sin Telegram.
+    return 0
 
     from saved_signals import (
         list_saved_signals,
@@ -47851,24 +48040,19 @@ def _mark_futures_official_entry_sent(user, record):
 
 
 def futures_standard_alert_loop():
-    """Official Futures Entry monitor for CONFIRMED + VIGENT signals.
+    """Shadow-live monitor for official Futures lifecycle.
 
-    RC9.7.13 contract:
-      - ACTIVE intrabar previews never notify Telegram.
-      - CONFIRMED notifies once at candle close (separate path).
-      - The same official signal remains eligible for a second ENTRY alert while
-        it is in the yellow Confirmed lane OR later in the red Vigent lane.
-      - Manual saving is NOT required for this official Entry alert.
-      - Once Entry has been recorded by the canonical lifecycle, the alert can
-        still be emitted even if price already moved away before this loop runs.
+    RC9.8.1: this loop still records Entry/TP/SL path telemetry for Guardian and
+    ReviewTrader, but Telegram is CONFIRMED-only and is sent by the closed-candle
+    confirmation path.  No second Futures Entry/TP/SL Telegram event is emitted.
     """
-    print('🎯 FUTURES Telegram: monitor CONFIRMADAS + VIGENTES hasta Entry')
+    print('🎯 FUTURES lifecycle: shadow monitor activo · Telegram CONFIRMADA-only')
     time.sleep(120)
     while True:
         try:
-            # Shadow-live runs for every official signal, independent of users.
-            # Telegram recipients are only needed later when an alert must be sent.
-            users = sorted(_telegram_market_users('futures'))
+            # Shadow-live runs for every official signal. RC9.8.1: Futures
+            # Telegram is CONFIRMED-only; Entry/TP/SL lifecycle stays silent.
+            users = []
 
             with _futures_analysis_cache['lock']:
                 raw = dict(_futures_analysis_cache.get('data') or {})

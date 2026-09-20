@@ -1,0 +1,52 @@
+RC9.8.1 — TECHNICAL SIGNAL LIFECYCLE
+Repository: MAIN only
+Base: RC9.8 already implemented
+
+PURPOSE
+- Keep RC9.8 Entry/SL/TP geometry unchanged.
+- Make pending-signal validity technical rather than a fixed timeframe table.
+- Preserve Vigent signals across Render cold-start/deploy for at least their technical valid_until.
+- Make Telegram event-driven and non-spammy.
+- Improve Futures Active intrabar continuity without scanning the 63-cell universe.
+
+TELEGRAM CONTRACT
+SPOT
+- Intrabar Active: never Telegram.
+- Confirmed: at most ONE best technical signal per timeframe / candle close.
+- Entry: one independent event when an official Confirmed/Vigent signal reaches Entry.
+- Durable Supabase dedup prevents duplicates after refresh/deploy.
+
+FUTURES
+- Intrabar Active: never Telegram.
+- Only validated CLOSED_CANDLE EXECUTABLE_SIGNAL confirmations send Telegram.
+- No Futures Entry / TP / SL / expiry Telegram events.
+- Shadow lifecycle still tracks Entry/TP/SL for Guardian/ReviewTrader learning.
+
+TECHNICAL VALIDITY
+- Timeframe no longer selects a fixed number of bars.
+- Geometry determines bars: NEAR_REACTION / STRUCTURAL_PULLBACK / DEEP_PULLBACK_LIMIT,
+  setup family, Entry distance in ATR, reachability, regime persistence, and in Futures ADX/MTF.
+- A setup can therefore live 1, 2, 4, 6, 10... candles within bounded technical caps.
+- Timeframe only converts the chosen candle count to elapsed clock time.
+- Structural invalidation/SL/missed target can terminate earlier.
+- Existing old-policy signals are migrated from their ORIGINAL source candle; clocks never restart.
+
+PERSISTENCE
+- Spot runtime snapshot TTL dynamically covers the furthest signal valid_until + margin (bounded).
+- Futures snapshot TTL dynamically covers lifecycle validity; entry_touched lifecycle receives a longer safety window.
+- Old Futures analysis (>24h) is not restored as current authority, but valid lifecycle can still restore.
+
+FUTURES ACTIVE
+- Browser polling: 300s -> 90s.
+- Selected cell keeps priority.
+- Once selected preview is ready and the heavy slot is free, Main warms at most ONE extra cell from a bounded technical watchlist built from official pending signals / strongest known directional candidates.
+- No 63-cell intrabar scan.
+
+FILES TO COMMIT
+- app.py
+- static/futures.js
+- test_rc9_8_1_technical_signal_lifecycle.py
+
+NO RESEARCH COMMIT.
+NO SQL.
+NO Entry/SL/TP policy relaxation.

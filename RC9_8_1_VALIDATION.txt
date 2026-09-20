@@ -1,0 +1,22 @@
+RC9.8.1 VALIDATION
+
+Syntax:
+- python -m py_compile app.py: PASS
+- node --check static/futures.js: PASS
+
+Regression staging (RC9.8 base + RC9.7.17 lane tests + RC9.8.1 tests):
+- 32 passed
+
+Focused RC9.8 + RC9.8.1 tests:
+- 27 passed
+
+Validated contracts:
+- Spot validity can be 1 candle for near reaction and many candles for deep pullback.
+- Futures validity can be 1 candle for near reaction and up to technical multi-candle horizons.
+- Timeframe does not directly set candle count in RC9.8.1.
+- Snapshot TTL exceeds technical valid_until.
+- Spot confirmed Telegram dedups across symbols by timeframe/close.
+- Futures confirmed sender still requires EXECUTABLE_SIGNAL.
+- Futures lifecycle Telegram is silent while shadow monitoring remains active.
+- Cold-start recent-window no longer depends on process_started_at.
+- Futures Active uses bounded watchlist; frontend polls every 90 seconds.

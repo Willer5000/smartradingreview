@@ -1,0 +1,8 @@
+RC9.8.1 Technical Signal Lifecycle
+
+- make Spot/Futures pending validity geometry-driven in candles
+- persist Vigent lifecycle through Render cold-start/deploy
+- Spot Telegram: one confirmed signal per timeframe + Entry touch alert
+- Futures Telegram: validated confirmed signals only
+- improve Futures Active continuity with bounded watchlist + 90s polling
+- preserve RC9.8 Entry/SL/TP/Safety/Guardian learning semantics

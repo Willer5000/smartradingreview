@@ -2968,9 +2968,11 @@ document.addEventListener('DOMContentLoaded', function() {
         _fut96ApplyTimeframes(event.target.value);
     }, true);
     setTimeout(() => window.loadFuturesUniverse96(), 150);
+    // RC9.8.1 — Activas intrabar: el polling debe ser menor que el TTL más
+    // corto del preview para evitar huecos falsos de 0 entre refrescos.
     setInterval(() => {
         if (!document.hidden) window.loadFuturesOpportunities96();
-    }, 300000);
+    }, 90000);
     // =========================================================================
     // RESTAURAR LAS FUNCIONES DE FUTUROS
     // =========================================================================
