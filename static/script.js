@@ -9974,7 +9974,11 @@ function _h3SpotPollSchedule(kind, callback, delayMs = 5000) {
     const now = Date.now();
     if (!state.startedAt) state.startedAt = now;
     const elapsed = now - state.startedAt;
-    if (elapsed >= 30000 || state.retries >= 6) {
+    // RC9.7.17: Activas pueden esperar a que el único slot pesado quede libre,
+    // pero el polling sigue siendo liviano. Confirmadas conserva el límite corto.
+    const maxElapsed = kind === 'active' ? 90000 : 30000;
+    const maxRetries = kind === 'active' ? 12 : 6;
+    if (elapsed >= maxElapsed || state.retries >= maxRetries) {
         clearTimeout(state.timer);
         state.timer = null;
         return false;
@@ -10026,7 +10030,23 @@ window.updateActiveSignals = function updateActiveSignals() {
         `;
     }
 
-    _h3FetchJson('/api/spot/signals/active', 10000, {cache: 'no-store'})
+    const activeSymbol = String(
+        window.currentSymbol
+        || document.getElementById('symbol-select')?.value
+        || 'BTC-USDT'
+    );
+    const activeTimeframe = String(
+        window.currentInterval
+        || document.getElementById('interval-select')?.value
+        || '1D'
+    );
+    const activeParams = new URLSearchParams({
+        symbol: activeSymbol,
+        timeframe: activeTimeframe,
+        _ts: String(Date.now())
+    });
+
+    _h3FetchJson(`/api/spot/signals/active?${activeParams.toString()}`, 10000, {cache: 'no-store'})
         .then(data => {
             if (!data.success) {
                 throw new Error(data.error || 'No se pudieron cargar las señales');
@@ -12111,35 +12131,32 @@ if (!window.__SMARTTRADING_AUTH_FLOW_INITIALIZED__) {
             // ============================================================
 
             setTimeout(() => {
-                if (
-                    typeof window.updateActiveSignals
-                    === 'function'
-                ) {
-                    console.log(
-                        '📊 Cargando señales activas Spot...'
-                    );
-
-                    window.updateActiveSignals();
-                }
-
-                if (
-                    typeof window.updatePreviousSignals
-                    === 'function'
-                ) {
-                    console.log(
-                        '📊 Cargando señales de la vela anterior...'
-                    );
-
-                    window.updatePreviousSignals();
-                }
-
+                // RC9.7.17: la información más accionable se pinta primero.
+                // Vigentes y Confirmadas son cachés cerrados/livianos; Activas
+                // pueden requerir un preview intrabar pesado y van al final.
                 if (
                     !window.IS_FUTURES_PAGE
                     && typeof window.updateSpotVigentSignals === 'function'
                 ) {
-                    console.log('📊 Cargando señales vigentes Spot...');
+                    console.log('📊 Cargando señales vigentes Spot (prioridad 1)...');
                     window.updateSpotVigentSignals();
                 }
+
+                setTimeout(() => {
+                    if (typeof window.updatePreviousSignals === 'function') {
+                        console.log('📊 Cargando señales confirmadas Spot (prioridad 2)...');
+                        window.updatePreviousSignals();
+                    }
+                }, 100);
+
+                setTimeout(() => {
+                    if (typeof window.updateActiveSignals === 'function') {
+                        console.log('📊 Cargando señales activas Spot (prioridad 3)...');
+                        window.updateActiveSignals();
+                    }
+                }, 800);
+
+                setTimeout(() => window.prioritizeSpotSignalLanes?.(), 1200);
             }, 500);
         })
         .catch(error => {
@@ -12152,6 +12169,28 @@ if (!window.__SMARTTRADING_AUTH_FLOW_INITIALIZED__) {
             updatePortfolioUI();
         });
 }
+
+
+// ============================================================================
+// RC9.7.17 — PRIORIDAD VISUAL/OPERATIVA DE CARRILES SPOT
+// Vigentes > Confirmadas > Activas. Sólo reordena si los tres bloques comparten
+// el mismo contenedor; no altera cálculos ni lifecycle.
+// ============================================================================
+window.prioritizeSpotSignalLanes = function prioritizeSpotSignalLanes() {
+    try {
+        const vigent = document.getElementById('active-signals-list')?.closest('.card');
+        const confirmed = document.getElementById('prev-signals-list')?.closest('.card');
+        const active = document.getElementById('current-active-signals-list')?.closest('.card');
+        if (!vigent || !confirmed || !active) return false;
+        const parent = vigent.parentElement;
+        if (!parent || confirmed.parentElement !== parent || active.parentElement !== parent) return false;
+        parent.insertBefore(vigent, confirmed);
+        parent.insertBefore(confirmed, active);
+        return true;
+    } catch (_) {
+        return false;
+    }
+};
 
 // ============ CIERRE DEL DOMContentLoaded ============
 });

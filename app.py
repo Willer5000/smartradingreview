@@ -28983,13 +28983,19 @@ def _run_spot_analysis_singleflight(symbol, timeframe, owner, wait_seconds=18.0)
 # para confirmar una señal.
 _SPOT_INTRABAR_PREVIEW_CACHE = {}
 _SPOT_INTRABAR_PREVIEW_CACHE_LOCK = threading.Lock()
-_SPOT_INTRABAR_PREVIEW_MAX_ITEMS = 1
+_SPOT_INTRABAR_PREVIEW_MAX_ITEMS = 4
 _SPOT_INTRABAR_PREVIEW_TTLS = {
     '4h': 90,
     '12h': 150,
     '1D': 240,
     '1W': 300,
 }
+
+# RC9.7.17 — la barra de Activas no debe depender de que el usuario pulse
+# Analizar ni de esperar al cierre de vela.  El endpoint sólo puede programar
+# UN preview seleccionado y nunca ejecuta trabajo pesado dentro del request.
+_SPOT_INTRABAR_ASYNC_LOCK = threading.Lock()
+_SPOT_INTRABAR_ASYNC_RUNNING = set()
 
 
 def _spot_intrabar_preview_cached(symbol, timeframe):
@@ -29073,6 +29079,72 @@ def _run_spot_intrabar_preview(symbol, timeframe, owner):
     finally:
         _release_heavy_analysis(str(owner))
         _mark_system_interactive_priority(seconds=8)
+
+
+
+def _schedule_spot_intrabar_preview_async(symbol, timeframe):
+    """Program selected Spot active-preview without blocking Gunicorn.
+
+    RC9.7.17 contract:
+    - Activas use the forming candle and may change before close.
+    - Confirmadas/Vigentes keep closed-candle authority.
+    - This helper never queues behind an already-running heavy job; it simply
+      defers and the lightweight endpoint/front-end retries later.  That keeps
+      Vigentes/Confirmadas and the page responsive on Render Free.
+    """
+    symbol = str(symbol or '').upper().strip()
+    timeframe = str(timeframe or '').strip()
+    if symbol not in ('BTC-USDT', 'PAXG-USDT', 'PAXG-BTC'):
+        return 'INVALID_SYMBOL'
+    if timeframe not in ('4h', '12h', '1D', '1W'):
+        return 'INVALID_TIMEFRAME'
+    if _spot_intrabar_preview_cached(symbol, timeframe) is not None:
+        return 'CACHE_READY'
+
+    key = (symbol, timeframe)
+    with _SPOT_INTRABAR_ASYNC_LOCK:
+        if key in _SPOT_INTRABAR_ASYNC_RUNNING:
+            return 'RUNNING'
+
+    # Active previews are third priority.  Never create a waiting queue while
+    # another heavy job is already using the single free-tier slot.
+    with _HEAVY_ANALYSIS_STATE_LOCK:
+        if _HEAVY_ANALYSIS_OWNER is not None:
+            return 'DEFERRED_BUSY'
+
+    with _SPOT_INTRABAR_ASYNC_LOCK:
+        if key in _SPOT_INTRABAR_ASYNC_RUNNING:
+            return 'RUNNING'
+        _SPOT_INTRABAR_ASYNC_RUNNING.add(key)
+
+    def _worker():
+        try:
+            _mark_system_interactive_priority(seconds=12)
+            result, source = _run_spot_intrabar_preview(
+                symbol,
+                timeframe,
+                f'spot-ui:active-preview:{symbol}:{timeframe}',
+            )
+            if result is None:
+                print(
+                    f'⏳ [SPOT ACTIVE] {symbol} {timeframe}: preview diferido ({source})',
+                    flush=True,
+                )
+        except Exception as exc:
+            print(
+                f'⚠️ [SPOT ACTIVE] {symbol} {timeframe}: {str(exc)[:180]}',
+                flush=True,
+            )
+        finally:
+            with _SPOT_INTRABAR_ASYNC_LOCK:
+                _SPOT_INTRABAR_ASYNC_RUNNING.discard(key)
+
+    threading.Thread(
+        target=_worker,
+        daemon=True,
+        name=f'spot-active-{symbol}-{timeframe}',
+    ).start()
+    return 'SCHEDULED'
 
 
 def _run_scheduled_spot_analysis(timeframe):
@@ -29845,17 +29917,34 @@ def _run_previous_signals_background():
 def api_spot_signals_active():
     """Señales provisionales de la vela actualmente en formación.
 
-    RC9.7.12: este carril es efímero. Nunca restaura señales de un deploy
-    anterior ni usa snapshots CLOSED_CANDLE. Una señal puede aparecer,
-    desaparecer o cambiar antes del cierre.
+    RC9.7.17: además de servir el caché intrabar, acepta ``symbol`` y
+    ``timeframe`` para programar de forma no bloqueante el preview de la celda
+    que el usuario está viendo.  No restaura previews de deploys anteriores y
+    jamás usa CLOSED_CANDLE como si fuese Activa.
     """
     try:
         now = time.time()
+        requested_symbol = str(request.args.get('symbol') or '').upper().strip()
+        requested_tf = str(request.args.get('timeframe') or '').strip()
+
+        preview_ready = False
+        job_state = 'NOT_REQUESTED'
+        if requested_symbol and requested_tf:
+            preview_ready = (
+                _spot_intrabar_preview_cached(requested_symbol, requested_tf)
+                is not None
+            )
+            if not preview_ready:
+                job_state = _schedule_spot_intrabar_preview_async(
+                    requested_symbol,
+                    requested_tf,
+                )
+            else:
+                job_state = 'CACHE_READY'
+
         cache_data = getattr(expert_system, 'spot_active_signals_cache', None)
         cache = dict(cache_data) if isinstance(cache_data, dict) else {}
 
-        # Expirar previews que ya no se han recalculado. El análisis principal
-        # visible se refresca cada 5 minutos; damos una pequeña tolerancia.
         cleaned = {}
         for key, signal in cache.items():
             if not isinstance(signal, dict):
@@ -29876,9 +29965,30 @@ def api_spot_signals_active():
         signals = list(cleaned.values())
         signals.sort(key=lambda signal: -float(signal.get('confidence') or 0))
 
+        # ``processing`` sólo significa que aún no existe ningún preview de la
+        # celda solicitada.  Una vez calculado, 0 señales es un resultado real,
+        # no una excusa para reutilizar Confirmadas.
+        processing = bool(
+            requested_symbol
+            and requested_tf
+            and not preview_ready
+            and job_state in ('SCHEDULED', 'RUNNING', 'DEFERRED_BUSY')
+        )
+        if requested_symbol and requested_tf and not preview_ready:
+            preview_ready = (
+                _spot_intrabar_preview_cached(requested_symbol, requested_tf)
+                is not None
+            )
+            if preview_ready:
+                processing = False
+
         return jsonify({
             'success': True,
-            'processing': False,
+            'processing': processing,
+            'job_state': job_state,
+            'requested_symbol': requested_symbol or None,
+            'requested_timeframe': requested_tf or None,
+            'preview_ready': bool(preview_ready),
             'intrabar': True,
             'source_candle_closed': False,
             'total': len(signals),
@@ -32223,9 +32333,26 @@ def _futures_opportunity_quality(result):
 
 @app.route('/api/futures/opportunities', methods=['GET'])
 def api_futures_opportunities():
-    """Señales ACTIVAS intrabar. Nunca reutiliza Confirmadas como actuales."""
+    """Señales ACTIVAS intrabar. Nunca reutiliza Confirmadas como actuales.
+
+    RC9.7.17: la celda seleccionada puede calentarse en background desde este
+    endpoint liviano. No se escanean 63 celdas intrabar en Render Free.
+    """
     try:
         limit = max(1, min(63, int(request.args.get('limit', 10) or 10)))
+        selected_symbol = str(request.args.get('symbol') or '').strip()
+        selected_tf = str(request.args.get('timeframe') or '').strip()
+        job_state = 'NOT_REQUESTED'
+        preview_ready = False
+        if selected_symbol and selected_tf:
+            preview_ready = _get_futures_intrabar_runtime(selected_symbol, selected_tf) is not None
+            if not preview_ready:
+                _mark_futures_interactive_priority(seconds=12)
+                _mark_system_interactive_priority(seconds=12)
+                job_state = _start_futures_ui_analysis_async(selected_symbol, selected_tf)
+            else:
+                job_state = 'CACHE_READY'
+
         rows = _list_futures_intrabar_active()
         try:
             from futures_universe import risk_class_for, exit_profile_for
@@ -32244,6 +32371,14 @@ def api_futures_opportunities():
             'only_executable': True,
             'intrabar': True,
             'source_candle_closed': False,
+            'selected_symbol': selected_symbol or None,
+            'selected_timeframe': selected_tf or None,
+            'selected_preview_ready': bool(preview_ready),
+            'job_state': job_state,
+            'processing_selected': bool(
+                selected_symbol and selected_tf and not preview_ready
+                and job_state in ('SCHEDULED', 'RUNNING')
+            ),
             'message': (
                 'Activas = previews de la vela en formación; pueden aparecer, '
                 'desaparecer o cambiar antes del cierre.'

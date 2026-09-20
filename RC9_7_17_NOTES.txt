@@ -1,0 +1,40 @@
+RC9.7.17 — SIGNAL LANE RECOVERY + RENDER FREE STABILITY + UI CLEANUP
+20/09/2026
+
+Scope:
+- No trading-policy relaxation.
+- No Entry/SL/TP/Safety/leverage/Guardian/ReviewTrader learning changes.
+- No SQL.
+- No Research repo changes.
+
+1) SPOT Active lane
+- Active signals remain forming-candle INTRABAR_PREVIEW only.
+- /api/spot/signals/active now accepts selected symbol/timeframe and can schedule one non-blocking preview if missing/stale.
+- The HTTP request itself never performs heavy work.
+- If the global heavy slot is occupied, Active is deferred and retried; Confirmed/Vigent remain readable.
+- Frontend polls the lightweight endpoint up to 90s and does not substitute Confirmed data as Active.
+
+2) FUTURES Active lane
+- /api/futures/opportunities accepts selected symbol/timeframe and warms only that intrabar cell asynchronously.
+- It does NOT scan all 63 cells intrabar on Render Free.
+- The Active panel can show a preparation state while Vigent/Confirmed stay available.
+
+3) Signal priority
+- Operational/UI priority: Vigent > Confirmed > Active, in Spot and Futures.
+- Startup requests load lightweight lifecycle lanes before the heavier intrabar preview.
+- Best-effort DOM reorder is applied only when the cards share a common parent.
+
+4) Removed frontend noise
+- Removes the visible ReviewTrader panel and Global Strategies panel.
+- Backend ReviewTrader and Strategy Bank remain unchanged and continue learning.
+- Removes their periodic frontend polling.
+
+5) Stability diagnosis addressed
+- Logs showed 202 responses caused by the single heavy slot being busy, not OOM/SIGKILL.
+- Active previews are now background/deferred and cannot block web requests.
+
+Validation:
+- Python py_compile: PASS
+- static/script.js node --check: PASS
+- static/futures.js node --check: PASS
+- 59 relevant RC9.7.13–RC9.7.17 tests: PASS
