@@ -1,0 +1,16 @@
+RC9.8.6 FINAL validation
+
+Python compile: PASS (app.py, research_bridge.py)
+JavaScript syntax: PASS (static/analytics.js)
+Pytest:
+.......                                                                  [100%]
+7 passed in 1.77s
+
+Runtime bug reproduced from Render log:
+NameError: name 'candidate' is not defined
+at _mapear_condiciones_activas
+
+Root cause: RC9.8 Entry-family confluence code existed in the message-condition mapper,
+outside its valid candidate/all_candidates/price scope.
+Fix: remove only the misplaced duplicate; retain the valid Entry confluence implementation
+inside _select_optimal_entry.

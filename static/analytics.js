@@ -1323,35 +1323,101 @@ function rf96CandidateInActiveContract(row) {
         && new Set(['4H','12H','1D','1W']).has(tf);
 }
 
-function rf96ActiveChampionStats(candidates) {
-    const rows = (Array.isArray(candidates) ? candidates : []).filter(rf96CandidateInActiveContract);
-    const champions = rows.filter(row => ['SHADOW_READY','SHADOW_READY_FAST'].includes(String(row.stage || '').toUpperCase()));
-    const unique = new Set(champions.map(row => [
+function rf96CellKey(row) {
+    row = row || {};
+    return String(row.coverage_cell_id || [
         String(row.market_family || row.scope?.market_family || ''),
         String(row.symbol || row.scope?.symbol || ''),
         rf96NormTf(row.timeframe || row.scope?.timeframe),
         String(row.action || row.scope?.action || row.direction || row.scope?.direction || row.candidate_key || '')
-    ].join('|')));
-    const oosPositive = champions.filter(row => {
+    ].join('|')).toUpperCase();
+}
+
+function rf96LearningStats(candidates, backendSummary) {
+    const rows = (Array.isArray(candidates) ? candidates : []).filter(rf96CandidateInActiveContract);
+    const byCell = new Map();
+    const stageRank = stage => ({
+        SHADOW_READY_FAST: 60, SHADOW_READY: 55,
+        VALIDATION_REQUIRED: 40, VALIDATED_SINGLE_ASSET: 38,
+        OBSERVE: 25, REJECTED_OOS: 10
+    }[String(stage || '').toUpperCase()] || 20);
+    rows.forEach(row => {
+        const key = rf96CellKey(row);
+        const old = byCell.get(key);
+        if (!old || stageRank(row.stage) > stageRank(old.stage)) byCell.set(key, row);
+    });
+    const cellRows = Array.from(byCell.values());
+    const champions = cellRows.filter(row => ['SHADOW_READY','SHADOW_READY_FAST'].includes(String(row.stage || '').toUpperCase()));
+    const selectionPositive = cellRows.filter(row => {
+        const status = String(row.coverage_status || '').toUpperCase();
+        return status === 'SELECTION_PROFITABLE'
+            || ['SHADOW_READY','SHADOW_READY_FAST'].includes(String(row.stage || '').toUpperCase());
+    }).length;
+    const oosPositive = cellRows.filter(row => {
         const exp = Number(row.oos_exp_r);
         const pf = Number(row.oos_pf);
         return Number.isFinite(exp) && exp > 0 && (!Number.isFinite(pf) || pf > 1);
     }).length;
-    return { rows, champions, championCount: unique.size, oosPositive };
+    const backend = backendSummary || {};
+    const haveRows = cellRows.length > 0;
+    return {
+        rows: cellRows,
+        champions,
+        investigatedCount: haveRows ? cellRows.length
+            : (Number.isFinite(Number(backend.investigated_cells)) ? Number(backend.investigated_cells) : 0),
+        selectionPositive: haveRows ? selectionPositive
+            : (Number.isFinite(Number(backend.selection_positive_cells)) ? Number(backend.selection_positive_cells) : 0),
+        oosPositive: haveRows ? oosPositive
+            : (Number.isFinite(Number(backend.oos_positive_cells)) ? Number(backend.oos_positive_cells) : 0),
+        championCount: haveRows ? champions.length
+            : (Number.isFinite(Number(backend.champion_cells)) ? Number(backend.champion_cells) : 0),
+        targetCells: Number.isFinite(Number(backend.target_cells))
+            ? Number(backend.target_cells) : RF96_RESEARCH_TARGET
+    };
+}
+
+function rf96EvidenceBucket(rows, marketKind) {
+    const filtered = (rows || []).filter(row => {
+        const family = String(row.market_family || row.scope?.market_family || '').toUpperCase();
+        return marketKind === 'FUTURES' ? family === 'CRYPTO_FUTURES' : family !== 'CRYPTO_FUTURES';
+    });
+    let oosN = 0, winsWeighted = 0, totalR = 0, expWeighted = 0, oosPositive = 0;
+    filtered.forEach(row => {
+        const n = Math.max(0, Number(row.oos_n || 0));
+        const wr = Number(row.oos_wr);
+        const exp = Number(row.oos_exp_r);
+        const pf = Number(row.oos_pf);
+        oosN += n;
+        if (n > 0 && Number.isFinite(wr)) winsWeighted += wr * n;
+        if (n > 0 && Number.isFinite(exp)) {
+            totalR += exp * n;
+            expWeighted += exp * n;
+        }
+        if (Number.isFinite(exp) && exp > 0 && (!Number.isFinite(pf) || pf > 1)) oosPositive += 1;
+    });
+    return {
+        cells: filtered.length,
+        oos_n: oosN,
+        oos_positive: oosPositive,
+        oos_wr_weighted: oosN > 0 ? winsWeighted / oosN : null,
+        oos_total_r: oosN > 0 ? totalR : null,
+        oos_exp_r_weighted: oosN > 0 ? expWeighted / oosN : null
+    };
 }
 
 function updateV1ReviewTraderNote() {
     const research = window.__v1LastResearchSummary || {};
-    const stats = rf96ActiveChampionStats(research.candidates || []);
+    const stats = rf96LearningStats(research.candidates || [], research.learning_summary);
     const scientist = (window.__v1LastAnalytics || {}).ai_learning_runtime || {};
     const scientistState = String(scientist.status || '').toUpperCase();
     const scientistText = scientistState && scientistState !== 'DONE'
         ? ` · IA ${scientistStatusLabel(scientistState)}`
         : '';
-    v1Set(
-        'v1-reviewtrader-note',
-        `Pruebas históricas activas ${stats.championCount}/${RF96_RESEARCH_TARGET} · con ventaja positiva ${stats.oosPositive} · prioridad: 30m/1h/2h y Spot 4h/12h · seguridad intacta · los resultados recientes comprueban si la ventaja sigue vigente${scientistText}`
-    );
+    const evidenceDegraded = Boolean(research?.coverage?.evidence_degraded);
+    const noteText = evidenceDegraded && stats.investigatedCount <= stats.championCount
+        ? `Research: la evidencia Selection/OOS está temporalmente sin conexión; Champions ${stats.championCount}/${stats.targetCells}. No se interpreta como aprendizaje cero${scientistText}`
+        : `Research: ${stats.investigatedCount}/${stats.targetCells} celdas investigadas · Selection+ ${stats.selectionPositive} · OOS+ ${stats.oosPositive} · Champions ${stats.championCount}/${stats.targetCells}. Los Champions siguen bloqueados hasta completar su validación; esto no significa aprendizaje cero${scientistText}`;
+    v1Set('v1-reviewtrader-note', noteText);
 }
 
 function renderV1EntryAudit(data) {
@@ -2893,20 +2959,24 @@ async function loadResearchFederationAnalytics(){
         updateV1ReviewTraderNote();
         body.dataset.hasResearchData='1';
         const coverage=data.coverage||{};
-        const analyzedRecent=Math.max(0, Math.min(RF96_RESEARCH_TARGET, Number(coverage.analyzed_last_cycle||0)));
         const profitability=data.profitability_evidence||{};
-        const rf96Stats=rf96ActiveChampionStats(candidates);
+        const rf96Stats=rf96LearningStats(candidates, data.learning_summary || coverage.learning_summary);
         const activeCandidates=rf96Stats.rows;
-        const activeChampionCount=rf96Stats.championCount;
-        const activePending=Math.max(0, RF96_RESEARCH_TARGET-activeChampionCount);
+        const researchTarget=rf96Stats.targetCells || RF96_RESEARCH_TARGET;
+        const investigatedCount=Math.max(0, Math.min(researchTarget, rf96Stats.investigatedCount));
+        const activeChampionCount=Math.max(0, Math.min(researchTarget, rf96Stats.championCount));
+        const pendingInvestigation=Math.max(0, researchTarget-investigatedCount);
+        const pendingChampion=Math.max(0, researchTarget-activeChampionCount);
         const strategic=coverage.strategic_timeframes||{};
+        const spotEvidence=rf96EvidenceBucket(activeCandidates,'SPOT');
+        const futuresEvidence=rf96EvidenceBucket(activeCandidates,'FUTURES');
         const covEl=document.getElementById('rf-analytics-coverage');
         if(covEl){
             const parts=['4H','12H','1D','1W'].map(tf=>`${tf}: ${Number(strategic[tf]||0)}`);
             const missing=(coverage.missing_strategic_timeframes||[]);
             covEl.className=`small mb-2 ${missing.length?'text-warning':'text-success'}`;
-            const causal=`Analizadas recientemente ${analyzedRecent}/${RF96_RESEARCH_TARGET} · validadas ${activeChampionCount}/${RF96_RESEARCH_TARGET} · pendientes ${activePending} · con ventaja histórica positiva ${rf96Stats.oosPositive}`;
-            covEl.textContent=`Cobertura por temporalidad · ${parts.join(' · ')} · ${causal}${missing.length?` · Aún sin validación final: ${missing.join(', ')}`:''}${data.degraded?' · mostrando el último estado disponible':''}`;
+            const causal=`Investigadas ${investigatedCount}/${researchTarget} · Selection+ ${rf96Stats.selectionPositive} · OOS+ ${rf96Stats.oosPositive} · Champions ${activeChampionCount}/${researchTarget}`;
+            covEl.textContent=`Cobertura por temporalidad · ${parts.join(' · ')} · ${causal}${pendingInvestigation?` · sin investigar ${pendingInvestigation}`:''}${missing.length?` · sin evidencia visible: ${missing.join(', ')}`:''}${data.degraded?' · mostrando el último estado disponible':''}`;
         }
         const sm=new Map(shadow.map(x=>[x.candidate_key,x]));
         const actionable=activeCandidates.filter(x=>['SHADOW_READY_FAST','SHADOW_READY','VALIDATED_SINGLE_ASSET','VALIDATION_REQUIRED','REJECTED_OOS','OBSERVE'].includes(String(x.stage||'')));
@@ -2957,59 +3027,96 @@ async function loadResearchFederationAnalytics(){
                     </div>
                 </details>`;
         };
-        const renderBt=(bucket, emptyLabel='Sin estrategia OOS validada todavía')=>{
-            if(!bucket || bucket.state==='NO_EVIDENCE') return `<span class="text-muted">${emptyLabel}</span>`;
+        const renderBt=(bucket, emptyLabel='Sin evidencia OOS visible todavía', evidenceFallback=null)=>{
+            const usable = bucket && bucket.state!=='NO_EVIDENCE' && Number(bucket.oos_n||0)>0;
+            if(!usable){
+                const ev=evidenceFallback||{};
+                if(Number(ev.cells||0)>0){
+                    const wr=ev.oos_wr_weighted==null?'--':`${fmt(ev.oos_wr_weighted,1)}%`;
+                    const totalR=ev.oos_total_r==null?'--':`${Number(ev.oos_total_r)>=0?'+':''}${fmt(ev.oos_total_r,2)}R`;
+                    return `🟡 EVIDENCIA OOS EN VALIDACIÓN · celdas ${Number(ev.cells||0)} · OOS+ ${Number(ev.oos_positive||0)} · N ${Number(ev.oos_n||0)} · WR ${wr} · resultado agregado ${totalR} · Exp. ${fmt(ev.oos_exp_r_weighted,3)}R/trade · aún sin Champion`;
+                }
+                return `<span class="text-muted">${emptyLabel}</span>`;
+            }
             const best=bucket.best||{};
             const state=bucket.state==='VALIDATED_OOS_POSITIVE'?'✅ RENTABILIDAD OOS VALIDADA':'🟡 EN BÚSQUEDA / VALIDACIÓN';
             const totalR = bucket.oos_total_r===null || bucket.oos_total_r===undefined ? '--' : `${Number(bucket.oos_total_r)>=0?'+':''}${fmt(bucket.oos_total_r,2)}R`;
             const wr = bucket.oos_wr_weighted===null || bucket.oos_wr_weighted===undefined ? '--' : `${fmt(bucket.oos_wr_weighted,1)}%`;
-            return `${state} · WR ${wr} · Resultado OOS / PnL ${totalR} · Trades ${Number(bucket.oos_n||0)} · Exp. ${fmt(bucket.oos_exp_r_weighted,3)}R/trade · Validadas ${Number(bucket.validated_strategies||0)}/${Number(bucket.cells||0)}`
+            return `${state} · WR ${wr} · Resultado OOS / PnL ${totalR} · Trades ${Number(bucket.oos_n||0)} · Exp. ${fmt(bucket.oos_exp_r_weighted,3)}R/trade · Champions ${Number(bucket.validated_strategies||0)}/${Number(bucket.cells||0)}`
                 + (best.oos_pf!=null?` · Mejor PF ${fmt(best.oos_pf,2)}`:'')
                 + (best.scope?.symbol?` · ${best.scope.symbol}`:'')
                 + (best.scope?.timeframe?` ${best.scope.timeframe}`:'')
                 + (Number(bucket.recycle_required||0)>0?` · ♻️ Reciclar ${Number(bucket.recycle_required||0)}`:'');
         };
         const spotBt=document.getElementById('q5-spot-backtest');
-        if(spotBt) spotBt.innerHTML=renderBt(profitability.spot);
+        if(spotBt) spotBt.innerHTML=renderBt(profitability.spot,'Sin evidencia Spot OOS visible todavía',spotEvidence);
         const futBt=document.getElementById('q5-futures-backtest');
-        if(futBt) futBt.innerHTML=renderBt(profitability.futures_official,'Aún no hay Futures SHADOW_READY causal; no se fuerza rentabilidad.');
+        if(futBt) futBt.innerHTML=renderBt(profitability.futures_official,'Aún no hay evidencia Futures OOS visible; no se fuerza rentabilidad.',futuresEvidence);
         const shadowBt=document.getElementById('q5-shadow-backtest');
         if(shadowBt) shadowBt.innerHTML=renderBt(profitability.futures_evaluation,'Sin challengers causales disponibles.');
         const simpleCoverage=document.getElementById('v1-coverage');
         const simpleCoverageNote=document.getElementById('v1-coverage-note');
-        if(simpleCoverage) simpleCoverage.textContent=`${analyzedRecent}/${RF96_RESEARCH_TARGET} analizadas · ${activeChampionCount}/${RF96_RESEARCH_TARGET} validadas`;
-        if(simpleCoverageNote) simpleCoverageNote.textContent=`Pendientes de validación: ${activePending} · con ventaja histórica positiva: ${rf96Stats.oosPositive}. Investigar no significa todavía autorizar una estrategia.`;
-        const simpleBucket=(id,noteId,bucket)=>{
+        const evidenceDegraded=Boolean(coverage.evidence_degraded);
+        if(simpleCoverage) simpleCoverage.textContent=(evidenceDegraded && investigatedCount<=activeChampionCount)
+            ? 'Evidencia temporalmente no disponible'
+            : `${investigatedCount}/${researchTarget} investigadas · OOS+ ${rf96Stats.oosPositive}`;
+        if(simpleCoverageNote) simpleCoverageNote.textContent=(evidenceDegraded && investigatedCount<=activeChampionCount)
+            ? `Champions ${activeChampionCount}/${researchTarget}. La falta temporal de lectura Selection/OOS no se interpreta como aprendizaje cero.`
+            : `Selection+ ${rf96Stats.selectionPositive} · Champions ${activeChampionCount}/${researchTarget} · sin investigar ${pendingInvestigation}. Tener evidencia no equivale todavía a autorizar una estrategia.`;
+        const simpleBucket=(id,noteId,bucket,evidenceFallback)=>{
             const el=document.getElementById(id), note=document.getElementById(noteId);
             if(!el) return;
-            if(!bucket || bucket.state==='NO_EVIDENCE'){ el.textContent='Sin evidencia'; if(note) note.textContent='La investigación continúa buscando una ventaja estadística.'; return; }
+            const usable=bucket && bucket.state!=='NO_EVIDENCE' && Number(bucket.oos_n||0)>0;
+            if(!usable){
+                const ev=evidenceFallback||{};
+                if(Number(ev.cells||0)>0){
+                    const wr=ev.oos_wr_weighted==null?'--':`${fmt(ev.oos_wr_weighted,1)}%`;
+                    el.textContent=`OOS+ ${Number(ev.oos_positive||0)}/${Number(ev.cells||0)} · WR ${wr}`;
+                    if(note) note.textContent=`N OOS ${Number(ev.oos_n||0)} · Exp media ${fmt(ev.oos_exp_r_weighted,3)}R · evidencia histórica en validación; Champions todavía no concedidos.`;
+                    return;
+                }
+                el.textContent='Sin evidencia';
+                if(note) note.textContent='La investigación continúa buscando una ventaja estadística.';
+                return;
+            }
             const wr=bucket.oos_wr_weighted==null?'--':`${fmt(bucket.oos_wr_weighted,1)}%`;
             const pnl=bucket.oos_total_r==null?'--':`${Number(bucket.oos_total_r)>=0?'+':''}${fmt(bucket.oos_total_r,2)}R`;
             el.textContent=`Acierto ${wr} · Resultado ${pnl}`;
-            if(note) note.textContent=`${Number(bucket.validated_strategies||0)}/${Number(bucket.cells||0)} validadas · pruebas ${Number(bucket.oos_n||0)} · resultado medio ${fmt(bucket.oos_exp_r_weighted,3)}R`;
+            if(note) note.textContent=`Champions ${Number(bucket.validated_strategies||0)}/${Number(bucket.cells||0)} · pruebas ${Number(bucket.oos_n||0)} · resultado medio ${fmt(bucket.oos_exp_r_weighted,3)}R`;
         };
-        simpleBucket('v1-spot-oos','v1-spot-oos-note',profitability.spot);
-        simpleBucket('v1-futures-oos','v1-futures-oos-note',profitability.futures_official);
+        simpleBucket('v1-spot-oos','v1-spot-oos-note',profitability.spot,spotEvidence);
+        simpleBucket('v1-futures-oos','v1-futures-oos-note',profitability.futures_official,futuresEvidence);
         const simpleShadow=document.getElementById('v1-shadow'), simpleShadowNote=document.getElementById('v1-shadow-note');
         if(simpleShadow) simpleShadow.textContent=`${Number(profitability.shadow_live_candidates||0)}/${Number(profitability.shadow_ready_cells||profitability.validated_cells||0)} en seguimiento`;
         if(simpleShadowNote) simpleShadowNote.textContent=`Casos ${Number(profitability.shadow_live_signals||0)} · resueltos ${Number(profitability.shadow_live_resolved||0)} · esperando mercado ${Number(profitability.shadow_waiting_market||0)} · seguimiento pendiente ${Number(profitability.shadow_tracking_errors||0)} · requieren nueva validación ${Number(profitability.recycle_required_cells||0)}`;
         // RC2: tabla comprensible de continuidad LIVE/OOS.
-        const setOosRow=(prefix,bucket)=>{
-            v1Set(`v1-op-${prefix}-oos-n`, Number(bucket?.oos_n||0).toLocaleString());
-            v1Set(`v1-op-${prefix}-oos-wr`, bucket?.oos_wr_weighted==null?'--':`${fmt(bucket.oos_wr_weighted,1)}%`);
-            v1Set(`v1-op-${prefix}-oos-pnl`, bucket?.oos_total_r==null?'--':`${Number(bucket.oos_total_r)>=0?'+':''}${fmt(bucket.oos_total_r,2)}R`);
+        const setOosRow=(prefix,bucket,evidenceFallback)=>{
+            const usable=bucket && Number(bucket?.oos_n||0)>0;
+            const source=usable?bucket:(evidenceFallback||{});
+            v1Set(`v1-op-${prefix}-oos-n`, Number(source?.oos_n||0).toLocaleString());
+            v1Set(`v1-op-${prefix}-oos-wr`, source?.oos_wr_weighted==null?'--':`${fmt(source.oos_wr_weighted,1)}%`);
+            v1Set(`v1-op-${prefix}-oos-pnl`, source?.oos_total_r==null?'--':`${Number(source.oos_total_r)>=0?'+':''}${fmt(source.oos_total_r,2)}R`);
             const validated=Number(bucket?.validated_strategies||0);
             const liveResolved=Number(bucket?.shadow_resolved||0);
             const recycle=Number(bucket?.recycle_required||0);
-            const state = recycle>0 ? '⚠️ REVALIDAR' : liveResolved>0 ? '🟢 RESULTADOS EN CURSO' : validated>0 ? '⏳ ESPERANDO RESULTADOS' : '🔎 BUSCANDO VENTAJA';
-            v1Set(`v1-op-${prefix}-state`, state, `small ${recycle>0?'text-warning':validated>0?'text-info':'text-muted'}`);
+            const evidenceCells=Number(evidenceFallback?.cells||0);
+            const evidencePositive=Number(evidenceFallback?.oos_positive||0);
+            const state = recycle>0 ? '⚠️ REVALIDAR'
+                : liveResolved>0 ? '🟢 RESULTADOS EN CURSO'
+                : validated>0 ? '⏳ ESPERANDO RESULTADOS'
+                : evidenceCells>0 ? `🟡 EVIDENCIA OOS ${evidencePositive}/${evidenceCells}`
+                : '🔎 BUSCANDO VENTAJA';
+            v1Set(`v1-op-${prefix}-state`, state, `small ${recycle>0?'text-warning':(validated>0||evidenceCells>0)?'text-info':'text-muted'}`);
         };
-        setOosRow('spot', profitability.spot||{});
-        setOosRow('fut', profitability.futures_official||{});
+        setOosRow('spot', profitability.spot||{},spotEvidence);
+        setOosRow('fut', profitability.futures_official||{},futuresEvidence);
 
         const matrixRaw=Array.isArray(profitability.coverage_matrix)?profitability.coverage_matrix:[];
-        const matrix=matrixRaw.filter(row=>rf96CandidateInActiveContract(row));
-        const validatedRows=matrix.filter(row=>['SHADOW_READY','SHADOW_READY_FAST'].includes(String(row.stage||'')) && !row.recycle_required);
+        const matrix=(matrixRaw.length?matrixRaw:activeCandidates).filter(row=>rf96CandidateInActiveContract(row));
+        const validatedRows=matrix.filter(row=>{
+            const exp=Number(row.oos_exp_r), pf=Number(row.oos_pf);
+            return Number.isFinite(exp) && exp>0 && (!Number.isFinite(pf) || pf>1);
+        }).sort((a,b)=>Number(b.oos_exp_r||-999)-Number(a.oos_exp_r||-999));
         const liveBody=document.getElementById('v1-validated-live-body');
         if(liveBody){
             liveBody.innerHTML=validatedRows.length?validatedRows.map(row=>{
@@ -3025,13 +3132,22 @@ async function loadResearchFederationAnalytics(){
                 const certState=String(cert.certification_state||'SIN CERTIFICAR');
                 const certText=certState.includes('POSITIVE')?'🧩 Backtest histórico positivo · confirmar ejecución real':certState.includes('INCOMPLETE')?'🟡 Ejecución incompleta':'🔎 Pendiente';
                 const shadowState=String(row.shadow_state||'WAITING');
-                const status=row.recycle_required?'⚠️ REVALIDAR':shadowState==='CONFIRMED'?'✅ CONFIRMANDO':shadowState==='DIVERGED'||shadowState==='EARLY_DIVERGENCE'?'⚠️ DIVERGIENDO':signals>0?'👀 OBSERVANDO':String(row.shadow_diagnostic||'')==='WAITING_MARKET_SETUP'?'⏳ ESPERANDO MERCADO':'⚠️ REVISAR TRACKING';
+                const isChampion=['SHADOW_READY','SHADOW_READY_FAST'].includes(String(row.stage||'').toUpperCase());
+                const status=row.recycle_required?'⚠️ REVALIDAR'
+                    : isChampion && shadowState==='CONFIRMED'?'✅ CONFIRMANDO'
+                    : isChampion && (shadowState==='DIVERGED'||shadowState==='EARLY_DIVERGENCE')?'⚠️ DIVERGIENDO'
+                    : isChampion && signals>0?'👀 OBSERVANDO'
+                    : isChampion && String(row.shadow_diagnostic||'')==='WAITING_MARKET_SETUP'?'⏳ ESPERANDO MERCADO'
+                    : isChampion?'⏳ CHAMPION · ESPERANDO SHADOW'
+                    : `🟡 ${uiHumanLabel(row.stage||'VALIDACIÓN REQUERIDA')} · aún sin Champion`;
                 const waitReason=safe(row.shadow_wait_reason_es||'');
                 return `<tr><td>${row.symbol||'--'}</td><td>${row.timeframe||'--'}</td><td>${strategyCardHtml(row)}</td><td>${row.oos_wr==null?'--':fmt(row.oos_wr,1)+'%'}</td><td>${oosPnl==null?'--':(oosPnl>=0?'+':'')+fmt(oosPnl,2)+'R'}</td><td>${row.oos_pf==null?'--':fmt(row.oos_pf,2)}</td><td class="${guardianDelta==null?'text-muted':Number(guardianDelta)>=0?'text-success':'text-warning'}">${guardianDeltaText}</td><td class="small">${certText}</td><td>${resolved}/${signals}</td><td>${status}${waitReason?`<div class="text-muted small mt-1">${waitReason}</div>`:''}</td></tr>`;
             }).join(''):'<tr><td colspan="10" class="text-muted text-center">Aún no hay estrategias que hayan superado todas las pruebas históricas requeridas.</td></tr>';
         }
         const covBody=document.getElementById('v1-coverage-matrix-body');
         if(covBody){
+            const headerCells=covBody.closest('table')?.querySelectorAll('thead th')||[];
+            if(headerCells[1]) headerCells[1].textContent='Investigadas · OOS+ · Champion';
             const groups=[
                 ['Futures 30m · grupos de riesgo','30M',8,'CRYPTO_FUTURES'],
                 ['Futures 1h · grupos de riesgo','1H',8,'CRYPTO_FUTURES'],
@@ -3045,12 +3161,15 @@ async function loadResearchFederationAnalytics(){
                 ['Spot 1W · COMPRA/VENTA','1W',6,'SPOT']
             ];
             covBody.innerHTML=groups.map(([label,tf,target,fam])=>{
-                const rows=matrix.filter(r=>String(r.timeframe||'').toUpperCase()===tf && (fam==='SPOT'?String(r.market_family||'')!=='CRYPTO_FUTURES':String(r.market_family||'')==='CRYPTO_FUTURES'));
-                const ok=rows.filter(r=>['SHADOW_READY','SHADOW_READY_FAST'].includes(String(r.stage||''))&&!r.recycle_required).length;
-                return `<tr><td>${label}</td><td>${ok}/${target}</td><td class="${ok===target?'text-success':ok>0?'text-info':'text-muted'}">${ok===target?'✅ Completa':ok>0?'🟡 Parcial':'🔎 Buscando'}</td></tr>`;
+                const rows=activeCandidates.filter(r=>rf96NormTf(r.timeframe||r.scope?.timeframe)===tf && (fam==='SPOT'?String(r.market_family||r.scope?.market_family||'')!=='CRYPTO_FUTURES':String(r.market_family||r.scope?.market_family||'')==='CRYPTO_FUTURES'));
+                const investigated=new Set(rows.map(rf96CellKey)).size;
+                const oosPlus=rows.filter(r=>{const exp=Number(r.oos_exp_r),pf=Number(r.oos_pf);return Number.isFinite(exp)&&exp>0&&(!Number.isFinite(pf)||pf>1);}).length;
+                const champions=rows.filter(r=>['SHADOW_READY','SHADOW_READY_FAST'].includes(String(r.stage||'').toUpperCase())).length;
+                const state=investigated>=target?'✅ Investigada':investigated>0?'🟡 Parcial':'🔎 Pendiente';
+                return `<tr><td>${label}</td><td>${investigated}/${target} · OOS+ ${oosPlus} · C ${champions}</td><td class="${investigated>=target?'text-success':investigated>0?'text-info':'text-muted'}">${state}</td></tr>`;
             }).join('');
         }
-        const coverageLabel = ` · Analizadas recientemente ${analyzedRecent}/${RF96_RESEARCH_TARGET} · validadas ${activeChampionCount}/${RF96_RESEARCH_TARGET}`;
+        const coverageLabel = ` · Investigadas ${investigatedCount}/${researchTarget} · Selection+ ${rf96Stats.selectionPositive} · OOS+ ${rf96Stats.oosPositive} · Champions ${activeChampionCount}/${researchTarget}`;
         body.innerHTML=actionable.slice(0,80).map(x=>{const l=sm.get(x.candidate_key)||{};return `<tr>
           <td><span class="badge bg-secondary">${x.stage||'--'}</span></td>
           <td><b>${x.source_engine||'--'}</b><br><span class="text-muted small">${x.experiment||'--'}</span></td>
@@ -3061,7 +3180,7 @@ async function loadResearchFederationAnalytics(){
           <td>${fmt(l.avg_safety,1)}</td></tr>`}).join('') || `<tr><td colspan="7" class="text-muted text-center">${data.connected===false?'Research Bridge sin conexión':'Bridge conectado, pero todavía no hay filas visibles para esta cuenta/clave.'}</td></tr>`;
         const stages={}; activeCandidates.forEach(x=>stages[x.stage]=(stages[x.stage]||0)+1);
         const kp=document.getElementById('rf-analytics-kpis');
-        if(kp) kp.innerHTML=[['Analizadas recientemente',`${analyzedRecent}/${RF96_RESEARCH_TARGET}`],['Estrategias validadas',activeChampionCount],['Con ventaja positiva',rf96Stats.oosPositive],['Pendientes de validación',activePending]].map(([k,v])=>`<div class="col-6 col-md-3"><div class="border rounded p-2 h-100"><div class="text-muted small">${k}</div><div class="h5 mb-0">${v}</div></div></div>`).join('');
+        if(kp) kp.innerHTML=[['Celdas investigadas',`${investigatedCount}/${researchTarget}`],['Selection positiva',rf96Stats.selectionPositive],['OOS final positivo',rf96Stats.oosPositive],['Champions',`${activeChampionCount}/${researchTarget}`]].map(([k,v])=>`<div class="col-6 col-md-3"><div class="border rounded p-2 h-100"><div class="text-muted small">${k}</div><div class="h5 mb-0">${v}</div></div></div>`).join('');
     }catch(err){body.innerHTML=`<tr><td colspan="7" class="text-warning">${err.message}</td></tr>`;}
 }
 window.loadResearchFederationAnalytics=loadResearchFederationAnalytics;

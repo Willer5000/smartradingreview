@@ -8838,28 +8838,6 @@ class TradingExpertSystem:
                 if total_short_bins > 100 and total_short_weight > 200_000_000:
                     condiciones.append('short_extreme')
                     print(f"   ⚠️ Condición: short_extreme ({total_short_bins} bins, {short_weight_m:.1f}M)")
-            # ==============================================================
-            # RC9.8 — CONFLUENCIA POR FAMILIAS INDEPENDIENTES
-            # ==============================================================
-            try:
-                from execution_geometry_committee import entry_family
-            except Exception:
-                entry_family = lambda value: str(value or 'structure')
-            nearby_families = {entry_family(candidate.get('type'))}
-            for other in all_candidates:
-                if other is candidate:
-                    continue
-                try:
-                    other_price = float(other.get('price', 0) or 0)
-                except (TypeError, ValueError):
-                    continue
-                if other_price <= 0:
-                    continue
-                if abs(other_price - price) / price * 100 <= 0.35:
-                    nearby_families.add(entry_family(other.get('type')))
-            independent_support = max(0, len(nearby_families) - 1)
-            confluence_score = min(100.0, independent_support * (100.0 / 3.0))
-
             # =====================================================================
            
             

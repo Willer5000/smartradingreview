@@ -1,0 +1,29 @@
+RC9.8.6 FINAL — RESEARCH LEARNING OBSERVABILITY + RUNTIME CONDITION-MAPPER HOTFIX
+
+Este paquete REEMPLAZA el RC9.8.6 preliminar que aún no fue implementado.
+
+1) ANALYTICS / APRENDIZAJE
+- Separa celdas investigadas, Selection positiva, OOS final positivo y Champions.
+- Evita interpretar 0 Champions como 0 aprendizaje.
+- Si Research está temporalmente inaccesible, no fabrica ceros.
+
+2) HOTFIX RUNTIME app.py
+- Corrige NameError: name 'candidate' is not defined en
+  _mapear_condiciones_activas().
+- La causa era un bloque de confluencia RC9.8 de Entry pegado accidentalmente
+  dentro del mapper de condiciones de redacción, donde no existen candidate,
+  all_candidates ni price.
+- El bloque correcto de confluencia permanece intacto dentro de
+  _select_optimal_entry().
+- El error estaba capturado, por eso el motor seguía analizando, pero el mapper
+  devolvía 0 condiciones y forzaba justificaciones genéricas. No era un fallo
+  completo del scheduler, pero degradaba la recomendación y la observabilidad.
+
+No cambia:
+- estrategia/dirección
+- Entry/SL/TP del comité RC9.8
+- Safety
+- Guardian
+- lifecycle
+- Research
+- SQL

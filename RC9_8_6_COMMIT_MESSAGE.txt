@@ -1,0 +1,6 @@
+RC9.8.6: fix Research learning observability and condition-mapper runtime NameError
+
+- distinguish investigated / Selection+ / OOS+ / Champions in Analytics
+- do not translate Research read failures into zero learning
+- remove misplaced RC9.8 entry-confluence block from _mapear_condiciones_activas
+- preserve the real independent-family Entry confluence inside _select_optimal_entry

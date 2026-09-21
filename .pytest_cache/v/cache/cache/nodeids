@@ -1,7 +1,9 @@
 [
-  "test_rc9_7_16_user_facing_signal_card.py::test_internal_review_language_is_translated_for_ui_only",
-  "test_rc9_7_16_user_facing_signal_card.py::test_real_indicators_are_explained_when_present",
-  "test_rc9_7_16_user_facing_signal_card.py::test_score_is_not_presented_as_tp_probability",
-  "test_rc9_7_16_user_facing_signal_card.py::test_user_card_hides_internal_strategy_id_and_source",
-  "test_rc9_7_16_user_facing_signal_card.py::test_user_card_uses_clear_labels"
+  "test_rc9_8_6_research_learning_observability.py::test_champion_remains_authoritative_for_same_cell",
+  "test_rc9_8_6_research_learning_observability.py::test_compact_promotion_preserves_selection_evidence",
+  "test_rc9_8_6_research_learning_observability.py::test_frontend_copy_and_labels_do_not_equate_zero_champions_with_zero_learning",
+  "test_rc9_8_6_research_learning_observability.py::test_learning_summary_distinguishes_learning_from_champions",
+  "test_rc9_8_6_research_learning_observability.py::test_snapshot_path_supplements_zero_champion_snapshot_with_learning",
+  "test_rc9_8_6_runtime_mapper_hotfix.py::test_condition_mapper_has_no_entry_candidate_scope_leak",
+  "test_rc9_8_6_runtime_mapper_hotfix.py::test_entry_committee_confluence_still_exists_in_entry_selector"
 ]

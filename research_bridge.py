@@ -228,6 +228,7 @@ def _compact_promotion(row):
     metrics = row.get('metrics') or {}
     allm = metrics.get('all') or {}
     val = metrics.get('validation') or {}
+    selection = metrics.get('selection') or metrics.get('holdout') or {}
     meta = row.get('meta') or {}
     scope = row.get('scope') or {}
     # RC8 P0: StrategySpec/Card are part of the immutable Champion contract.
@@ -252,6 +253,10 @@ def _compact_promotion(row):
         'backtest_wr': _num(allm.get('win_rate_pct')),
         'backtest_exp_r': _num(allm.get('expectancy_r')),
         'backtest_pf': _num(allm.get('profit_factor')),
+        'selection_n': int(selection.get('resolved') or 0),
+        'selection_wr': _num(selection.get('win_rate_pct')),
+        'selection_exp_r': _num(selection.get('expectancy_r')),
+        'selection_pf': _num(selection.get('profit_factor')),
         'oos_n': int(val.get('resolved') or 0),
         'oos_wr': _num(val.get('win_rate_pct')),
         'oos_exp_r': _num(val.get('expectancy_r')),
@@ -264,6 +269,7 @@ def _compact_promotion(row):
         'causal_strategy': bool(meta.get('causal_strategy') or meta.get('causal_candle_replay')),
         'coverage_cell': meta.get('coverage_cell') or {},
         'coverage_cell_id': meta.get('coverage_cell_id') or _causal_cell_id(row),
+        'coverage_status': meta.get('coverage_status'),
         'finalist_rank': meta.get('finalist_rank_selection_only'),
         'strategy_family': meta.get('causal_strategy_family') or meta.get('factory_family'),
         'walk_forward_positive_ratio': _num(meta.get('walk_forward_positive_ratio')),
@@ -304,6 +310,7 @@ def _snapshot_candidate(c):
         'shadow_target':int(c.get('shadow_target') or 0),'canary_target':int(c.get('canary_target') or 0),
         'research_version':c.get('research_version'),'updated_at':c.get('updated_at'),
         'causal_strategy':True,'coverage_cell':{},'coverage_cell_id':c.get('cell_key'),
+        'coverage_status':'SELECTION_PROFITABLE',
         'finalist_rank':1,'strategy_family':c.get('strategy_family'),
         'walk_forward_positive_ratio':_num(evidence.get('walk_forward_positive_ratio')),
         'scope':scope,'strategy_id':c.get('strategy_id'),'strategy_spec':c.get('strategy_spec') or {},
@@ -313,6 +320,118 @@ def _snapshot_candidate(c):
         'alpha_state':c.get('alpha_state') or 'HEALTHY','alpha_detail':c.get('alpha_detail') or {},
         'guardian_operational_replay':evidence.get('guardian_operational_replay') or {},
         'full_stack_profitability_certification':evidence.get('full_stack_profitability_certification') or {},
+    }
+
+
+def _current_causal_evidence_rows(limit=280):
+    """Return one current causal Research finalist per specialist cell.
+
+    RC9.8.6 observability rule:
+    the governance snapshot contains Champions, not the still-learning
+    Selection/OOS population. Analytics must supplement the snapshot with
+    bounded Research evidence instead of interpreting champion_count == 0 as
+    learning == 0.
+    """
+    fields='candidate_key,source_engine,experiment,stage,reason,scope,metrics,meta,research_version,updated_at'
+    rows=_get('research_promotions_v1',{
+        'select':fields,
+        'experiment':'in.(CAUSAL_COVERAGE_STRATEGY,CAUSAL_REGISTRY_RETEST,CAUSAL_SHADOW_RECYCLE)',
+        'stage':'neq.STALE',
+        'order':'updated_at.desc',
+        'limit':str(max(60, int(limit or 280))),
+    })
+    current=[
+        row for row in (rows or [])
+        if (row.get('meta') or {}).get('is_current') is not False
+        and str(row.get('stage') or '').upper() != 'STALE'
+    ]
+    # Match Validation's report semantics for a pending cell: newest current
+    # finalist first, then the deterministic quality score. Persistent Champions
+    # are merged separately from research_governance_snapshot_v1.
+    best={}
+    scores={}
+    for row in current:
+        cid=_causal_cell_id(row)
+        metrics=row.get('metrics') or {}
+        val=metrics.get('validation') or {}
+        score=(
+            str(row.get('updated_at') or ''),
+            _stage_priority(row.get('stage')),
+            _num(val.get('expectancy_r')) if _num(val.get('expectancy_r')) is not None else -999.0,
+            _num(val.get('profit_factor')) if _num(val.get('profit_factor')) is not None else -999.0,
+            int(val.get('resolved') or 0),
+            -int((row.get('meta') or {}).get('finalist_rank_selection_only') or 999),
+        )
+        if cid not in best or score > scores[cid]:
+            best[cid]=row
+            scores[cid]=score
+    return list(best.values())
+
+
+def _merge_champions_with_learning(champions, evidence_rows):
+    """Expose learning rows without weakening Champion authority.
+
+    A Champion remains the representative for its cell. Pending cells receive
+    their best current causal evidence row for Analytics only.
+    """
+    merged=[]
+    occupied=set()
+    for row in champions or []:
+        cid=str(row.get('coverage_cell_id') or '').upper()
+        if cid:
+            occupied.add(cid)
+        merged.append(row)
+    for raw in evidence_rows or []:
+        compact=_compact_promotion(raw)
+        cid=str(compact.get('coverage_cell_id') or '').upper()
+        if cid and cid in occupied:
+            continue
+        if cid:
+            occupied.add(cid)
+        merged.append(compact)
+    return merged
+
+
+def _research_learning_summary(candidates, target_cells=60):
+    """Compact truth-preserving Research learning counters for Analytics."""
+    target=max(1, int(target_cells or 60))
+    per_cell={}
+    for row in candidates or []:
+        cid=str(row.get('coverage_cell_id') or '').strip().upper()
+        if not cid:
+            cid='|'.join([
+                str(row.get('market_family') or (row.get('scope') or {}).get('market_family') or '').upper(),
+                str(row.get('symbol') or (row.get('scope') or {}).get('symbol') or '').upper(),
+                _tf(row.get('timeframe') or (row.get('scope') or {}).get('timeframe')),
+                str(row.get('action') or (row.get('scope') or {}).get('action') or row.get('direction') or '').upper(),
+            ])
+        old=per_cell.get(cid)
+        if old is None or _stage_priority(row.get('stage')) > _stage_priority(old.get('stage')):
+            per_cell[cid]=row
+
+    rows=list(per_cell.values())
+    selection_positive=sum(
+        1 for row in rows
+        if str(row.get('coverage_status') or '').upper() == 'SELECTION_PROFITABLE'
+        or str(row.get('stage') or '').upper() in {'SHADOW_READY','SHADOW_READY_FAST'}
+    )
+    oos_positive=sum(
+        1 for row in rows
+        if (_num(row.get('oos_exp_r')) is not None and float(_num(row.get('oos_exp_r')) or 0.0) > 0.0)
+        and (_num(row.get('oos_pf')) is None or float(_num(row.get('oos_pf')) or 0.0) > 1.0)
+    )
+    champions=sum(
+        1 for row in rows
+        if str(row.get('stage') or '').upper() in {'SHADOW_READY','SHADOW_READY_FAST'}
+    )
+    return {
+        'target_cells':target,
+        'investigated_cells':min(target, len(rows)),
+        'selection_positive_cells':min(target, selection_positive),
+        'oos_positive_cells':min(target, oos_positive),
+        'champion_cells':min(target, champions),
+        'pending_investigation_cells':max(0, target-len(rows)),
+        'pending_champion_cells':max(0, target-champions),
     }
 
 
@@ -389,8 +508,20 @@ def _compact(force=False):
         snapshots=_get('research_governance_snapshot_v1',{'select':'*','id':'eq.1','limit':'1'})
         if snapshots:
             snap=snapshots[0]
-            candidates=[_snapshot_candidate(x) for x in (snap.get('champions') or [])]
+            champions=[_snapshot_candidate(x) for x in (snap.get('champions') or [])]
             shadow=list(snap.get('shadow') or [])
+            # RC9.8.6: the canonical snapshot stores only Champions.  While
+            # Research is still learning it can legitimately contain zero
+            # Champions even though dozens of Selection/OOS cells already have
+            # evidence.  Load one bounded finalist per current causal cell for
+            # Analytics visibility; this does not grant production authority.
+            evidence_rows=[]
+            evidence_error=None
+            try:
+                evidence_rows=_current_causal_evidence_rows()
+            except Exception as evidence_exc:
+                evidence_error=f'{type(evidence_exc).__name__}: {str(evidence_exc)[:160]}'
+            candidates=_merge_champions_with_learning(champions,evidence_rows)
             try:
                 states=_get('research_engine_state_v1',{
                     'select':'engine,status,last_seen_at,rss_mb,research_version,meta','order':'engine.asc','limit':'10'
@@ -402,12 +533,17 @@ def _compact(force=False):
             coverage=_coverage([{'scope':x.get('scope') or {},'source_engine':x.get('source_engine')} for x in candidates])
             target_cells=int(snap.get('target_cells') or 60)
             progress=_engine_progress_from_states(states, target_cells)
+            learning_summary=_research_learning_summary(candidates,target_cells)
             coverage.update({
                 'target_cells':target_cells,
-                'champion_count':int(snap.get('champion_count') or len(candidates)),
-                'pending_count':int(snap.get('pending_count') or max(0,target_cells-len(candidates))),
+                'champion_count':int(snap.get('champion_count') or len(champions)),
+                'pending_count':int(snap.get('pending_count') or max(0,target_cells-len(champions))),
                 'analyzed_last_cycle':int(progress.get('analyzed_last_cycle') or 0),
                 'engine_progress':progress.get('by_engine') or {},
+                'learning_summary':learning_summary,
+                'evidence_rows_visible':int(learning_summary.get('investigated_cells') or 0),
+                'evidence_degraded':bool(evidence_error),
+                'evidence_error':evidence_error,
                 'knowledge_core':True,
                 'snapshot_updated_at':snap.get('updated_at'),
             })
@@ -453,6 +589,10 @@ def _compact(force=False):
         coverage=_coverage(raw_promotions)
         visible=_balanced_candidates(raw_promotions,120)
         candidates=[_compact_promotion(x) for x in visible]
+        target_cells=int(coverage.get('target_cells') or 60)
+        coverage['target_cells']=target_cells
+        coverage['learning_summary']=_research_learning_summary(candidates,target_cells)
+        coverage['evidence_rows_visible']=int((coverage.get('learning_summary') or {}).get('investigated_cells') or 0)
         states=_get('research_engine_state_v1',{
             'select':'engine,status,last_seen_at,rss_mb,research_version,meta',
             'order':'engine.asc',
@@ -530,6 +670,7 @@ def _degraded_empty_payload(exc):
         'candidates': [], 'engines': [], 'shadow_live': [],
         'authority': 'RESEARCH_SHADOW_BRIDGE_J_V2', 'visible_rows': 0,
         'coverage': {'by_timeframe':{},'by_engine':{},'by_market':{},'strategic_timeframes':{},'missing_strategic_timeframes':[],'total_current':0},
+        'learning_summary': {'target_cells':60,'investigated_cells':0,'selection_positive_cells':0,'oos_positive_cells':0,'champion_cells':0,'pending_investigation_cells':60,'pending_champion_cells':60},
         'profitability_evidence': _PROFIT_CACHE.get('payload') or {'state':'UNAVAILABLE','degraded':True},
         'error': f'{type(exc).__name__}: {str(exc)[:180]}',
         'retry_after_seconds': _BRIDGE_402_COOLDOWN if '402' in str(exc) else 60,
@@ -569,6 +710,10 @@ def register_research_bridge(app, auth_fn):
                 'authority':'RESEARCH_SHADOW_BRIDGE_J_V2',
                 'visible_rows':len(c),
                 'coverage':cov,
+                'learning_summary':(
+                    (cov or {}).get('learning_summary')
+                    or _research_learning_summary(c, int((cov or {}).get('target_cells') or 60))
+                ),
                 'profitability_evidence': profitability,
             })
         except Exception as exc:
