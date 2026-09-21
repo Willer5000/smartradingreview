@@ -1784,6 +1784,21 @@ function doChangePass() {
 // ============ INICIALIZACIÓN ============
 document.addEventListener('DOMContentLoaded', function() {
     console.log('DOM cargado, inicializando sistema...');
+
+    // RC9.8.3 — Damir usa el mismo nivel funcional que Danilo,
+    // pero mantiene sesión, portfolio, señales guardadas y Guardian propios.
+    const loginUserSelect = document.getElementById('login-user');
+    if (
+        loginUserSelect
+        && !Array.from(loginUserSelect.options || []).some(
+            option => option.value === 'Damir'
+        )
+    ) {
+        const damirOption = document.createElement('option');
+        damirOption.value = 'Damir';
+        damirOption.textContent = 'Damir';
+        loginUserSelect.appendChild(damirOption);
+    }
     
     const symbolSelect = document.getElementById('symbol-select');
     const intervalSelect = document.getElementById('interval-select');

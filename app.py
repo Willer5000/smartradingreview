@@ -152,6 +152,7 @@ def _auth_users():
     return {
         'Willer': os.getenv('SMARTRADING_PASSWORD_WILLER', ''),
         'Danilo': os.getenv('SMARTRADING_PASSWORD_DANILO', ''),
+        'Damir': os.getenv('SMARTRADING_PASSWORD_DAMIR', ''),
     }
 
 
@@ -30545,7 +30546,7 @@ def api_saved_signals_list():
     Query params:
       status: 'active,entry_touched' (coma) para filtrar. Default: todas menos deleted.
       limit: máximo a devolver (default 200)
-      user: filtrar por nombre de usuario (Willer/Danilo)
+      user: filtrar por nombre de usuario (Willer/Danilo/Damir)
     """
     try:
         from saved_signals import list_saved_signals
@@ -41846,7 +41847,7 @@ def _tgp_public_allocation_lines(tgp_result):
 #
 # Opcionalmente en Render se pueden crear:
 #
-# SMARTRADING_SPOT_USERS=Willer,Danilo
+# SMARTRADING_SPOT_USERS=Willer,Danilo,Damir
 # SMARTRADING_FUTURES_USERS=Willer
 #
 # No es obligatorio crear esas variables.
@@ -41886,6 +41887,15 @@ def _telegram_market_users(market):
         for item in raw.split(',')
         if item.strip()
     }
+
+    # RC9.8.3 — Damir replica los beneficios/permisos de mercado de Danilo.
+    # Esto sólo hereda acceso funcional; los datos personales, portfolio,
+    # señales guardadas y Guardian siguen aislados por usuario.
+    if (
+        'Danilo' in configured
+        and 'Damir' in system_users
+    ):
+        configured.add('Damir')
 
     return (
         configured

@@ -1,0 +1,34 @@
+RC9.8.3 VALIDATION
+==================
+
+Validation repo assembled as:
+RC9.8 -> RC9.8.1 -> RC9.8.2 -> revised RC9.8.3
+
+Commands passed:
+- python -m py_compile app.py saved_signals.py futures_system.py
+  execution_geometry_committee.py entry_reaction_engine.py
+  user_execution_learning.py review_trader.py
+- node --check static/script.js
+- node --check static/futures.js
+
+Pytest directed regression:
+- test_rc9_7_17_signal_lane_stability.py
+- test_rc9_8_execution_geometry.py
+- test_rc9_8_1_technical_signal_lifecycle.py
+- test_rc9_8_2_per_user_saved_visibility.py
+- test_rc9_8_3_causal_level_lifecycle.py
+- test_rc9_8_3_damir_user.py
+
+RESULT: 50 passed
+
+Specific RC9.8.3 checks:
+- modified LONG SL cannot hit from pre-activation candle history
+- real post-activation SL hit is still detected
+- modified Entry is not retroactively touched
+- modified TP is not retroactively hit
+- SHORT symmetry
+- per-level activation timestamp persistence
+- Damir uses SMARTRADING_PASSWORD_DAMIR, no plaintext password in code
+- default Damir market access matches Danilo
+- explicit Danilo market permission is inherited by Damir
+- login selector exposes Damir

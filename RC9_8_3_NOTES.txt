@@ -1,0 +1,77 @@
+RC9.8.3 — Causal Entry/SL/TP Lifecycle + Damir user
+====================================================
+
+BASE
+- Aplicar sobre MAIN que ya tiene RC9.8 + RC9.8.1 + RC9.8.2.
+- Este ZIP REEMPLAZA al RC9.8.3 preliminar anterior.
+- Research: sin cambios.
+
+A) BUG CAUSAL ENTRY / SL / TP
+-----------------------------
+Problema corregido:
+- Cuando el usuario modificaba Entry, SL o TP, el monitor podía volver a revisar
+  velas anteriores usando el NUEVO nivel y cerrar/activar retrospectivamente.
+- Ejemplo real: SL protegido por encima de break-even podía archivarse como
+  SL_HIT aunque el mercado nunca hubiera tocado ese nuevo SL después del cambio.
+
+Corrección:
+- Se persiste activación individual de niveles:
+    entry_updated_at
+    stop_loss_updated_at
+    take_profit_updated_at
+- Un nivel nuevo sólo puede activarse/resolverse por precio ocurrido después de
+  su propia fecha de activación.
+- En la vela que contiene el cambio no se usa retrospectivamente el high/low
+  completo anterior al cambio.
+- LONG y SHORT quedan cubiertos simétricamente.
+
+Migración requerida:
+1) Ejecutar schema_rc9_8_3_level_activation.sql en Supabase.
+2) Reemplazar saved_signals.py.
+
+B) NUEVO USUARIO DAMIR
+----------------------
+- Damir se agrega a la autenticación server-side.
+- Contraseña: NO se guarda en GitHub.
+- Configurar en Render la variable:
+    SMARTRADING_PASSWORD_DAMIR=<contraseña provisional acordada>
+- Damir recibe el mismo nivel funcional/beneficios de mercado que Danilo.
+- Si SMARTRADING_SPOT_USERS o SMARTRADING_FUTURES_USERS están configurados de
+  forma explícita e incluyen a Danilo, Damir hereda automáticamente ese acceso.
+- Si no hay listas explícitas, ambos reciben Spot + Futures como todos los
+  usuarios autenticados actuales.
+- El selector de login agrega Damir desde static/script.js sin reemplazar
+  templates/index.html, evitando regresiones visuales.
+
+AISLAMIENTO MULTIUSUARIO
+------------------------
+Damir comparte BENEFICIOS/PERMISOS con Danilo, pero NO datos personales:
+- sesión independiente;
+- portfolio independiente;
+- señales guardadas independientes;
+- Guardian independiente;
+- preferencias personales independientes;
+- resultados de ejecución identificados por usuario.
+
+NO CAMBIA
+---------
+- RC9.8 Entry / SL / TP committee.
+- RC9.8.1 vigencia técnica / Telegram / Active lane.
+- RC9.8.2 ocultamiento visual por usuario de señales guardadas.
+- Research / OOS / Champions.
+- Estrategias, Safety, leverage, Guardian logic.
+
+ORDEN DE IMPLEMENTACIÓN
+-----------------------
+1) Supabase SQL: schema_rc9_8_3_level_activation.sql
+2) GitHub MAIN: app.py
+3) GitHub MAIN: saved_signals.py
+4) GitHub MAIN: static/script.js
+5) Render env: crear SMARTRADING_PASSWORD_DAMIR con la contraseña provisional.
+6) Deploy y login como Damir.
+
+IMPORTANTE
+----------
+No introducir la contraseña de Damir directamente en app.py, script.js ni en
+ningún archivo versionado. El backend ya está diseñado para que las contraseñas
+vivan exclusivamente en variables de entorno de Render.

@@ -1,0 +1,7 @@
+RC9.8.3: causal saved-signal levels + Damir user
+
+- prevent retroactive Entry/SL/TP hits after manual level edits
+- persist per-level activation timestamps
+- add Damir as server-side authenticated user
+- mirror Danilo market access while keeping per-user state isolated
+- add Damir to login UI without hardcoding credentials

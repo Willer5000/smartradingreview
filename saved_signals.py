@@ -1770,6 +1770,203 @@ def _current_candle_live_entry_probe(
         )
         return None
 
+
+
+# ============================================================================
+# RC9.8.3 — CAUSAL ACTIVATION OF EDITABLE ENTRY / SL / TP LEVELS
+# ============================================================================
+#
+# Un nivel editado por el usuario NO existía antes de la hora de edición.
+# Por tanto, un high/low histórico previo no puede utilizarse para declarar:
+#   - Entry tocado,
+#   - SL tocado,
+#   - TP tocado.
+#
+# Esta regla evita el falso positivo más peligroso para un stop protegido:
+# subir el SL por encima de break-even y que una vela ANTERIOR a ese cambio
+# archive retroactivamente la operación como `sl_hit`.
+# ============================================================================
+
+
+def _saved_signal_utc_ts(value, fallback=None):
+    """Normaliza un timestamp de Saved Signals a UTC sin lanzar excepción."""
+    try:
+        import pandas as pd
+        raw = value if value not in (None, '') else fallback
+        if raw in (None, ''):
+            return None
+        ts = pd.Timestamp(raw)
+        if ts.tz is None:
+            ts = ts.tz_localize('UTC')
+        else:
+            ts = ts.tz_convert('UTC')
+        return ts
+    except Exception:
+        return None
+
+
+def _saved_signal_level_activation_ts(
+    signal: Dict,
+    *,
+    level_name: str,
+    current_value: float,
+    original_field: str,
+    fallback_ts,
+):
+    """Devuelve desde cuándo es causalmente válido el nivel actual.
+
+    RC9.8.3 persiste `<level>_updated_at` cuando el usuario modifica Entry,
+    SL o TP. Para filas históricas anteriores a la migración, si el valor
+    actual difiere del original usamos `updated_at` como fallback conservador:
+    es preferible ignorar recorrido antiguo a fabricar un toque retroactivo.
+    """
+    explicit = _saved_signal_utc_ts(
+        signal.get(f'{level_name}_updated_at')
+    )
+    if explicit is not None:
+        return explicit
+
+    fallback = _saved_signal_utc_ts(fallback_ts)
+
+    try:
+        original = float(signal.get(original_field) or 0)
+        current = float(current_value or 0)
+        changed = (
+            original > 0
+            and current > 0
+            and abs(current - original) > max(1e-12, abs(original) * 1e-10)
+        )
+    except Exception:
+        changed = False
+
+    if changed:
+        legacy_edit = _saved_signal_utc_ts(signal.get('updated_at'))
+        if legacy_edit is not None:
+            if fallback is None or legacy_edit > fallback:
+                return legacy_edit
+
+    return fallback
+
+
+def _saved_signal_level_hit(
+    *,
+    action: str,
+    level_kind: str,
+    level: float,
+    high: float,
+    low: float,
+) -> bool:
+    """Comprueba SL/TP sin tolerancia artificial."""
+    try:
+        level = float(level)
+        high = float(high)
+        low = float(low)
+    except Exception:
+        return False
+    if level <= 0 or high <= 0 or low <= 0:
+        return False
+
+    side = str(action or '').upper()
+    kind = str(level_kind or '').lower()
+    if side == 'LONG':
+        return low <= level if kind == 'stop_loss' else high >= level
+    if side == 'SHORT':
+        return high >= level if kind == 'stop_loss' else low <= level
+    return False
+
+
+def _current_candle_live_level_probe(
+    *,
+    level: float,
+    level_kind: str,
+    action: str,
+    df,
+    activation_ts,
+    timeframe: str,
+) -> Optional[Dict]:
+    """Comprueba sólo el precio vivo de una vela abierta antes del cambio.
+
+    Si Entry/SL/TP se modifica dentro de la vela actual, su high/low contiene
+    recorrido PREVIO a la modificación. No podemos atribuirlo causalmente al
+    nuevo nivel. En esa vela usamos exclusivamente el último close observable.
+    Las velas cuya apertura sea posterior al cambio sí pueden usar high/low.
+    """
+    try:
+        import pandas as pd
+        if df is None or len(df) == 0 or float(level or 0) <= 0:
+            return None
+
+        active_ts = _saved_signal_utc_ts(activation_ts)
+        if active_ts is None:
+            return None
+
+        latest = df.iloc[-1]
+        candle_ts = _saved_signal_utc_ts(latest['time'])
+        if candle_ts is None or candle_ts > active_ts:
+            return None
+
+        tf_seconds = _SAVED_SIGNAL_TF_SECONDS.get(str(timeframe or ''))
+        now_utc = pd.Timestamp.now(tz='UTC')
+        if tf_seconds:
+            max_age = tf_seconds + max(120, int(tf_seconds * 0.25))
+            if (now_utc - candle_ts).total_seconds() > max_age:
+                return None
+
+        live_price = float(latest['close'] or 0)
+        if live_price <= 0:
+            return None
+
+        if not _saved_signal_level_hit(
+            action=action,
+            level_kind=level_kind,
+            level=level,
+            high=live_price,
+            low=live_price,
+        ):
+            return None
+
+        return {
+            'time': now_utc,
+            'price': live_price,
+            'source': 'LIVE_CLOSE_AFTER_LEVEL_ACTIVATION',
+        }
+    except Exception as exc:
+        logger.debug('current-candle level probe omitido: %s', exc)
+        return None
+
+
+
+def _persist_saved_signal_level_hit(
+    *,
+    db,
+    signal: Dict,
+    level_kind: str,
+    level: float,
+    entry: float,
+    leverage: int,
+    investment: float,
+    action: str,
+) -> Optional[Dict]:
+    """Persiste un cierre SL/TP conservando la economía y shadow existentes."""
+    status = 'sl_hit' if level_kind == 'stop_loss' else 'tp_hit'
+    pnl = _calc_pnl(entry, level, leverage, investment, action)
+    now_iso = datetime.utcnow().isoformat()
+    payload = {
+        'status': status,
+        'closed_at': now_iso,
+        'closed_price': float(level),
+        'pnl_pct': pnl['pct'],
+        'pnl_usdt': pnl['usdt'],
+        **_build_estimated_economics(signal, level, pnl),
+        'close_reason': status,
+        **_build_early_exit_comparison(signal, level),
+        'updated_at': now_iso,
+    }
+    db.client.table('saved_signals').update(payload).eq(
+        'id', signal['id']
+    ).execute()
+    return {'status': status, 'pnl': pnl}
+
 def _calculate_open_excursions(
     signal: Dict,
     df_after,
@@ -2184,18 +2381,19 @@ def _calculate_trade_r(
             or ''
         ).upper()
 
-        # R siempre se normaliza contra el riesgo ORIGINAL de la señal.
-        # Guardian puede mover SL/TP después de Entry; usar ese SL gestionado
-        # como denominador haría incomparable el aprendizaje y exageraría R.
         entry = float(
-            signal.get('original_entry')
-            or signal.get('entry')
+            signal.get(
+                'entry',
+                0
+            )
             or 0
         )
 
         sl = float(
-            signal.get('original_stop_loss')
-            or signal.get('stop_loss')
+            signal.get(
+                'stop_loss',
+                0
+            )
             or 0
         )
 
@@ -4722,6 +4920,14 @@ def create_saved_signal(data: Dict) -> Optional[Dict]:
             'original_leverage': int(data.get('original_leverage', 0) or 0) or None,
             'candle_timestamp': candle_ts,
             'entry_at': entry_at,
+
+            # RC9.8.3 — activación causal de niveles editables.
+            # Los SL/TP iniciales sólo pueden cerrar después de Entry; el
+            # evaluador toma max(level_updated_at, entry_touched_at).
+            'entry_updated_at': lifecycle_armed_at,
+            'stop_loss_updated_at': lifecycle_armed_at,
+            'take_profit_updated_at': lifecycle_armed_at,
+
             'status':
                 initial_status,
 
@@ -5218,12 +5424,21 @@ def update_saved_signal(signal_id: str, updates: Dict) -> Optional[Dict]:
             return None
         
         allowed = {}
+        level_change_flags = {}
         for k in ('entry', 'stop_loss', 'take_profit'):
             if k in updates and updates[k] is not None:
                 try:
                     v = float(updates[k])
                     if v > 0:
-                        allowed[k] = v
+                        old_v = float(current.get(k) or 0)
+                        changed = (
+                            old_v <= 0
+                            or abs(v - old_v)
+                            > max(1e-12, abs(old_v) * 1e-10)
+                        )
+                        if changed:
+                            allowed[k] = v
+                            level_change_flags[k] = True
                 except (TypeError, ValueError):
                     pass
         if 'leverage' in updates and updates['leverage'] is not None:
@@ -5253,8 +5468,20 @@ def update_saved_signal(signal_id: str, updates: Dict) -> Optional[Dict]:
         
         if not allowed:
             return current
-        
-        allowed['updated_at'] = datetime.utcnow().isoformat()
+
+        now_iso = datetime.utcnow().isoformat()
+
+        # RC9.8.3 — un nivel editado empieza a existir AHORA.
+        # Sin este timestamp el evaluador podría aplicar el nuevo SL/TP a
+        # velas históricas anteriores a la modificación y fabricar un hit.
+        if level_change_flags.get('entry'):
+            allowed['entry_updated_at'] = now_iso
+        if level_change_flags.get('stop_loss'):
+            allowed['stop_loss_updated_at'] = now_iso
+        if level_change_flags.get('take_profit'):
+            allowed['take_profit_updated_at'] = now_iso
+
+        allowed['updated_at'] = now_iso
         
         def _op():
             return (db.client.table('saved_signals')
@@ -5479,7 +5706,28 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                     ]
                 )
 
-                # HOTFIX 14.1 — si la señal se guardó dentro de la vela
+                # RC9.8.3 — si el usuario cambió el Entry, el nuevo nivel no
+                # puede "haber sido tocado" por una vela anterior al cambio.
+                entry_activation_ts = _saved_signal_level_activation_ts(
+                    sig,
+                    level_name='entry',
+                    current_value=entry,
+                    original_field='original_entry',
+                    fallback_ts=start_ts,
+                ) or start_ts
+
+                if entry_activation_ts < start_ts:
+                    entry_activation_ts = start_ts
+
+                df_entry_after = (
+                    df[
+                        df_time > entry_activation_ts
+                    ]
+                )
+
+                # HOTFIX 14.1 + RC9.8.3 — si la señal/Entry se creó o editó
+                # dentro de la vela actualmente abierta, no reutilizar el
+                # high/low acumulado antes de esa activación.
                 # actualmente abierta, `df_time > start_ts` la excluye a
                 # propósito para no reutilizar high/low previos al guardado.
                 # Aun así debemos poder detectar el precio vivo tocando Entry.
@@ -5488,7 +5736,7 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                     live_entry_probe = _current_candle_live_entry_probe(
                         entry=entry,
                         df=df,
-                        start_ts=start_ts,
+                        start_ts=entry_activation_ts,
                         action=action,
                         timeframe=tf,
                     )
@@ -5530,8 +5778,8 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                     and exact_source_expiry is not None
                     and pd.Timestamp.now(tz='UTC') >= exact_source_expiry
                 ):
-                    expiry_window = df_after[
-                        pd.to_datetime(df_after['time'], utc=True) <= exact_source_expiry
+                    expiry_window = df_entry_after[
+                        pd.to_datetime(df_entry_after['time'], utc=True) <= exact_source_expiry
                     ]
                     entry_touched_before_expiry = False
                     for _, validity_row in expiry_window.iterrows():
@@ -5745,7 +5993,7 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                     # estrictamente posterior a entry_at; ahí todo el high/low
                     # pertenece al período válido de seguimiento.
                     if touch_ts is None:
-                        for _, row in df_after.iterrows():
+                        for _, row in df_entry_after.iterrows():
 
                             if not _check_entry_touched(
                                 entry,
@@ -5831,6 +6079,29 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
 
                 closed_this_cycle = False
 
+                # RC9.8.3 — SL/TP editados sólo existen desde su edición.
+                # Para niveles originales, la activación mínima es el momento
+                # real en que Entry fue tocado.
+                sl_activation_ts = _saved_signal_level_activation_ts(
+                    sig,
+                    level_name='stop_loss',
+                    current_value=sl,
+                    original_field='original_stop_loss',
+                    fallback_ts=excursion_start_ts,
+                ) or excursion_start_ts
+                tp_activation_ts = _saved_signal_level_activation_ts(
+                    sig,
+                    level_name='take_profit',
+                    current_value=tp,
+                    original_field='original_take_profit',
+                    fallback_ts=excursion_start_ts,
+                ) or excursion_start_ts
+
+                if sl_activation_ts < excursion_start_ts:
+                    sl_activation_ts = excursion_start_ts
+                if tp_activation_ts < excursion_start_ts:
+                    tp_activation_ts = excursion_start_ts
+
                 for _, row in df_after.iterrows():
 
                     high = float(
@@ -5841,10 +6112,20 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                         row['low']
                     )
 
+                    row_ts = _saved_signal_utc_ts(row.get('time'))
+                    sl_row_eligible = bool(
+                        row_ts is not None
+                        and row_ts >= sl_activation_ts
+                    )
+                    tp_row_eligible = bool(
+                        row_ts is not None
+                        and row_ts >= tp_activation_ts
+                    )
+
                     if action == 'LONG':
 
                         # LONG: SL abajo, TP arriba
-                        if low <= sl:
+                        if sl_row_eligible and low <= sl:
 
                             pnl = _calc_pnl(
                                 entry,
@@ -5919,7 +6200,7 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
 
                             break
 
-                        elif high >= tp:
+                        elif tp_row_eligible and high >= tp:
 
                             pnl = _calc_pnl(
                                 entry,
@@ -5991,7 +6272,7 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                     else:
 
                         # SHORT: SL arriba, TP abajo
-                        if high >= sl:
+                        if sl_row_eligible and high >= sl:
 
                             pnl = _calc_pnl(
                                 entry,
@@ -6060,7 +6341,7 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
 
                             break
 
-                        elif low <= tp:
+                        elif tp_row_eligible and low <= tp:
 
                             pnl = _calc_pnl(
                                 entry,
@@ -6140,6 +6421,76 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                             )
 
                             break
+
+                # ============================================================
+                # RC9.8.3 — VELA DE ACTIVACIÓN DEL NUEVO SL / TP
+                # ============================================================
+                # Si el usuario movió el nivel dentro de la vela actualmente
+                # abierta, no usamos el high/low completo porque parte de ese
+                # rango ocurrió antes de la modificación. Sólo el último close
+                # observable puede cerrar dentro de esa vela ambigua.
+                if not closed_this_cycle:
+                    sl_live = _current_candle_live_level_probe(
+                        level=sl,
+                        level_kind='stop_loss',
+                        action=action,
+                        df=df,
+                        activation_ts=sl_activation_ts,
+                        timeframe=tf,
+                    )
+                    tp_live = _current_candle_live_level_probe(
+                        level=tp,
+                        level_kind='take_profit',
+                        action=action,
+                        df=df,
+                        activation_ts=tp_activation_ts,
+                        timeframe=tf,
+                    )
+
+                    # Conservamos la prioridad histórica conservadora: SL antes
+                    # que TP si ambos estados fueran ambiguos en el mismo ciclo.
+                    live_hit = None
+                    live_kind = None
+                    live_level = None
+                    if sl_live is not None:
+                        live_hit = sl_live
+                        live_kind = 'stop_loss'
+                        live_level = sl
+                    elif tp_live is not None:
+                        live_hit = tp_live
+                        live_kind = 'take_profit'
+                        live_level = tp
+
+                    if live_hit is not None:
+                        persisted = _persist_saved_signal_level_hit(
+                            db=db,
+                            signal=sig,
+                            level_kind=live_kind,
+                            level=live_level,
+                            entry=entry,
+                            leverage=leverage,
+                            investment=investment,
+                            action=action,
+                        )
+                        status_hit = str((persisted or {}).get('status') or '')
+                        pnl_hit = (persisted or {}).get('pnl') or {}
+                        if status_hit == 'sl_hit':
+                            stats['sl_hit'] += 1
+                        elif status_hit == 'tp_hit':
+                            stats['tp_hit'] += 1
+                        closed_this_cycle = bool(status_hit)
+
+                        logger.info(
+                            "RC9.8.3 toque causal %s: %s %s %s @ %s "
+                            "source=%s pnl=%+.2f%%",
+                            status_hit,
+                            symbol,
+                            tf,
+                            action,
+                            live_level,
+                            live_hit.get('source'),
+                            float(pnl_hit.get('pct') or 0),
+                        )
 
                 # ============================================================
                 # 4. MFE / MAE SÓLO SI LA POSICIÓN SIGUE ABIERTA
