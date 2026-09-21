@@ -1,0 +1,9 @@
+RC9.8.4: persist per-user Spot alert timeframes and structure recommendations
+
+- keep Spot/Telegram timeframe preferences isolated per user
+- return the exact normalized preference just saved
+- prevent stale/default cache from rechecking all timeframes
+- structure public recommendations by technical layer
+- semantically dedupe repeated multitimeframe evidence
+- use concrete wait/caution causes instead of vague filler
+- preserve trading logic, Entry/SL/TP, Guardian and ReviewTrader behavior

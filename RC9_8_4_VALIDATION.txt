@@ -1,0 +1,22 @@
+RC9.8.4 VALIDATION
+==================
+
+Syntax:
+- python -m py_compile app.py supabase_client.py reason_presenter.py saved_signals.py: PASS
+- node --check static/script.js: PASS (no JS replacement required)
+
+Specific RC9.8.4 tests:
+- 2 passed
+  * user preference cache is isolated by Willer/Danilo/Damir
+  * recommendation is structured and MTF evidence is not duplicated
+
+Regression suite executed against RC9.8 -> RC9.8.4 chain:
+- 47 passed
+  * RC9.8 execution geometry
+  * RC9.8.1 technical signal lifecycle
+  * RC9.8.2 per-user saved-signal visibility
+  * RC9.8.3 causal Entry/SL/TP lifecycle + Damir
+  * RC9.8.4 preferences/recommendation clarity
+
+No Research commit required.
+No SQL migration required.

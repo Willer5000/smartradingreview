@@ -53469,11 +53469,14 @@ def api_user_telegram_preferences():
                     'No se pudieron guardar las preferencias.'
             }), 500
 
-        preferences = (
-            _get_spot_telegram_preferences(
-                user
-            )
-        )
+        # RC9.8.4 — responder con el valor NORMALIZADO que acaba de guardarse,
+        # no con una segunda lectura que podría devolver un cache anterior.
+        # La persistencia sigue siendo por user_name en Supabase; esta respuesta
+        # sólo garantiza consistencia visual inmediata para el usuario actual.
+        preferences = {
+            'spot_telegram_enabled': enabled,
+            'spot_telegram_timeframes': list(clean_timeframes),
+        }
 
         return jsonify({
             'success': True,

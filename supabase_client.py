@@ -2271,11 +2271,11 @@ class SupabaseClient:
 
             success = response.data is not None
             if success:
-                # RC9.7.11 — get_user_preferences() se llama durante el merge
-                # previo al upsert y deja cacheado el valor ANTIGUO hasta 6 h.
+                # RC9.8.4 — get_user_preferences() se usa durante el merge
+                # previo al upsert y puede dejar cacheado el valor ANTERIOR.
                 # Publicar inmediatamente el valor normalizado recién guardado
-                # evita que el frontend vuelva a marcar todos los TF después de
-                # guardar, por ejemplo, sólo ['4h'].
+                # evita que el frontend vuelva a marcar 4h/12h/1D/1W después
+                # de guardar sólo ['4h']. El cache queda aislado por user_name.
                 cached_value = {
                     'spot_telegram_enabled': bool(
                         payload['spot_telegram_enabled']

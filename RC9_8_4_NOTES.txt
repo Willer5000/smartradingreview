@@ -1,0 +1,58 @@
+RC9.8.4 — USER PREFERENCES + RECOMMENDATION CLARITY
+=====================================================
+
+Alcance: MAIN únicamente.
+Research: sin cambios.
+SQL: sin cambios.
+Trading policy / Entry / SL / TP / Guardian / ReviewTrader: sin cambios de decisión.
+
+1) Preferencias Spot/Telegram por usuario
+----------------------------------------
+Problema observado:
+- Willer guarda sólo 4h.
+- Tras guardar, la UI podía volver a mostrar 4h/12h/1D/1W marcados.
+
+Causa:
+- La lectura usada durante el merge de user_preferences podía dejar en memoria
+  el valor anterior/default y la respuesta posterior al guardado podía reutilizarlo.
+
+Corrección:
+- upsert_user_preferences publica inmediatamente en cache el valor NORMALIZADO
+  recién persistido.
+- El cache se indexa por user_name; Willer, Danilo y Damir quedan aislados.
+- POST /api/user/telegram-preferences responde con el valor normalizado recién
+  guardado, sin una segunda lectura susceptible a cache anterior.
+- No se asigna ninguna temporalidad "favorita" arbitraria a Danilo o Damir.
+  Cada usuario conserva su propia selección cuando la guarde.
+
+2) Recomendación del sistema
+----------------------------
+Se conserva evidencia técnica concreta, pero la salida queda estructurada en:
+- Contexto
+- Tendencia
+- Estructura
+- Volumen
+- Momentum
+- Volatilidad
+- Multitemporal
+- Ejecución
+- Decisión
+
+Correcciones de redacción:
+- deduplicación semántica entre capas equivalentes;
+- elimina repeticiones como:
+  "Alineación multitemporal... Lectura multitemporal: Alineación multitemporal...";
+- evita volver a anteponer "Lectura multitemporal" cuando el detalle ya trae
+  "Alineación multitemporal";
+- para ESPERAR/PRECAUCIÓN la conclusión reutiliza causas concretas detectadas,
+  por ejemplo barrido pendiente, volumen relativo bajo, cierre/retest pendiente,
+  baja fuerza direccional o riesgo de liquidaciones;
+- elimina la frase vaga heredada "Existe una tesis potencial...";
+- no muestra nombres del comité, votos, pesos ni códigos internos.
+
+Ejemplo esperado:
+⏳ ESPERAR · BTC/USDT en 1 Día. Tendencia: ADX 43.4 ... Estructura: ...
+Volumen: 0.68× ... Momentum: ... Multitemporal: contexto 1W alcista;
+estructura 1D alcista. Decisión: ESPERAR. La entrada no se habilita todavía
+por confirmación posterior al barrido de liquidez y volumen relativo bajo
+(0.68×); se reevalúa cuando esas condiciones queden resueltas.

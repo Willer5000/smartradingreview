@@ -207,6 +207,158 @@ def _append_unique(out: List[str], text: str) -> None:
         out.append(text)
 
 
+# RC9.8.4 — recomendación pública estructurada y sin repeticiones.
+# La recomendación conserva evidencia concreta, pero la agrupa por función
+# técnica para que el usuario pueda leerla como un análisis y no como una
+# concatenación de frases provenientes de distintas capas internas.
+_SECTION_PREFIX_RE = re.compile(
+    r"^\s*(?:contexto(?: de mercado)?|tendencia|estructura(?: y liquidez)?|"
+    r"volumen|participaci[oó]n|momentum|volatilidad|ejecuci[oó]n|"
+    r"lectura multitemporal|alineaci[oó]n multitemporal|multitemporal|"
+    r"perfil operativo)\s*:\s*",
+    re.I,
+)
+
+
+def _semantic_evidence_core(text: object) -> str:
+    value = " ".join(str(text or "").split()).strip().lower()
+    # Dos capas pueden describir exactamente la misma lectura MTF con
+    # encabezados distintos. Se eliminan encabezados repetidos antes de
+    # comparar el contenido real.
+    previous = None
+    while value and value != previous:
+        previous = value
+        value = _SECTION_PREFIX_RE.sub("", value).strip()
+    value = re.sub(r"[^a-z0-9áéíóúüñ%×+./-]+", " ", value, flags=re.I)
+    return " ".join(value.split())
+
+
+def _strip_public_section_prefix(text: object) -> str:
+    value = " ".join(str(text or "").split()).strip()
+    previous = None
+    while value and value != previous:
+        previous = value
+        value = _SECTION_PREFIX_RE.sub("", value).strip()
+    return value.rstrip(" .")
+
+
+def _evidence_section(sentence: str) -> str:
+    low = str(sentence or "").lower()
+    if any(token in low for token in (
+        "multitemporal", "temporalidad", "contexto 1w", "contexto 12h",
+        "contexto 4h", "estructura 2h", "estructura 1d",
+    )):
+        return "Multitemporal"
+    if any(token in low for token in (
+        "barrido", "stop hunt", "order block", "fvg", "soporte",
+        "resistencia", "poc", "hvn", "lvn", "estructura", "liquidez",
+    )):
+        return "Estructura"
+    if any(token in low for token in (
+        "volumen", "obv", "mfi", "force index", "vwap", "actividad de gran",
+        "absorción", "absorcion",
+    )):
+        return "Volumen"
+    if any(token in low for token in (
+        "rsi", "macd", "estocástico", "estocastico", "williams", "cci",
+        "momentum", "divergencia",
+    )):
+        return "Momentum"
+    if any(token in low for token in (
+        "adx", "dmi", "ema ", "sma", "supertrend", "ichimoku",
+        "parabolic", "tendencia",
+    )):
+        return "Tendencia"
+    if any(token in low for token in (
+        "atr", "bollinger", "squeeze", "volatilidad", "compresión", "compresion",
+    )):
+        return "Volatilidad"
+    if any(token in low for token in (
+        "confirm", "retest", "ruptura", "entrada", "stop loss", "take profit",
+    )):
+        return "Ejecución"
+    return "Contexto"
+
+
+def _format_structured_evidence(sentences: Iterable[str]) -> List[str]:
+    order = (
+        "Contexto", "Tendencia", "Estructura", "Volumen",
+        "Momentum", "Volatilidad", "Multitemporal", "Ejecución",
+    )
+    grouped: Dict[str, List[str]] = {key: [] for key in order}
+    seen: List[str] = []
+
+    for sentence in sentences or []:
+        core = _semantic_evidence_core(sentence)
+        if not core:
+            continue
+        # Dedupe semántico: evita, por ejemplo, mostrar a la vez
+        # "Alineación multitemporal: ..." y
+        # "Lectura multitemporal: Alineación multitemporal: ...".
+        duplicate = False
+        for previous in seen:
+            if core == previous or (
+                len(core) >= 28 and len(previous) >= 28
+                and (core in previous or previous in core)
+            ):
+                duplicate = True
+                break
+        if duplicate:
+            continue
+        seen.append(core)
+
+        section = _evidence_section(sentence)
+        body = _strip_public_section_prefix(sentence)
+        if body:
+            grouped.setdefault(section, []).append(body)
+
+    result: List[str] = []
+    for section in order:
+        rows = grouped.get(section) or []
+        if not rows:
+            continue
+        # Dos observaciones del mismo bloque pueden convivir, pero se mantienen
+        # dentro de una sola sección para no producir una lista fragmentada.
+        text = ". ".join(row.rstrip(" .") for row in rows)
+        result.append(f"{section}: {text}.")
+    return result
+
+
+def _concrete_wait_reasons(sentences: Iterable[str]) -> List[str]:
+    reasons: List[str] = []
+
+    def add(value: str) -> None:
+        if value and value not in reasons:
+            reasons.append(value)
+
+    for sentence in sentences or []:
+        low = str(sentence or "").lower()
+        if "barrido" in low or "stop hunt" in low:
+            add("confirmación posterior al barrido de liquidez")
+        if "participación es baja" in low or "participacion es baja" in low:
+            match = re.search(r"(\d+(?:[.,]\d+)?)\s*×", str(sentence))
+            add(
+                f"volumen relativo bajo ({match.group(1)}×)"
+                if match else "participación de volumen insuficiente"
+            )
+        if "confirmación todavía requiere" in low or "confirmacion todavia requiere" in low:
+            add("el cierre técnico requerido todavía pendiente")
+        if "ruptura/retest" in low or "retest" in low and "confirm" in low:
+            add("confirmación de ruptura/retest")
+        if "poca fuerza direccional" in low:
+            add("fuerza direccional insuficiente")
+        if "liquidez de la sesión es reducida" in low or "liquidez de la sesion es reducida" in low:
+            add("liquidez de sesión reducida")
+        if "mapa de liquidaciones" in low and "riesgo de barrido" in low:
+            add("riesgo de barrido por concentración de liquidaciones")
+        if "aún no está completamente alineado" in low or "aun no esta completamente alineado" in low:
+            add("momentum todavía no alineado")
+        if "compresión" in low and ("cierre" in low or "ruptura" in low):
+            add("ruptura de la compresión aún sin confirmar")
+
+    return reasons[:2]
+
+
 def contains_generic_public_phrase(text: object) -> bool:
     low = str(text or "").lower()
     return any(token in low for token in _GENERIC_PHRASES)
@@ -791,7 +943,17 @@ def compose_professional_recommendation(
             if score < 0.12 and action not in {'NO_OPERAR','ESPERAR','CAUTION'}:
                 continue
             label = family_labels.get(str(key).lower(), str(key).replace('_',' ').title())
-            _append_unique(evidence, f"{label}: {detail}")
+            # RC9.8.4: no duplicar encabezados MTF. Si el detalle ya viene como
+            # "Alineación multitemporal: ...", no producir
+            # "Lectura multitemporal: Alineación multitemporal: ...".
+            if str(key).lower() == 'multiframe' and re.match(
+                r"^\s*(?:alineaci[oó]n|lectura) multitemporal\s*:",
+                detail,
+                flags=re.I,
+            ):
+                _append_unique(evidence, detail)
+            else:
+                _append_unique(evidence, f"{label}: {detail}")
     # Prioridad según la decisión. En ESPERAR/NO OPERAR/PRECAUCIÓN la causa
     # concreta de espera/bloqueo debe sobrevivir al límite de longitud; nunca
     # puede ser desplazada por una lista de indicadores menos decisivos.
@@ -836,21 +998,46 @@ def compose_professional_recommendation(
     conclusion=''
     if action in {'LONG','SHORT'}:
         if lvl_entry>0 and sl>0 and tp>0:
-            conclusion=f"Plan propuesto: {action} con entrada {lvl_entry:.4f}, Stop Loss {sl:.4f} y Take Profit {tp:.4f}" + (f", relación riesgo/beneficio aproximada 1:{rr:.2f}" if rr>0 else '') + "."
+            conclusion=f"Plan: {action} con Entry {lvl_entry:.4f}, Stop Loss {sl:.4f} y Take Profit {tp:.4f}" + (f", relación riesgo/beneficio aproximada 1:{rr:.2f}" if rr>0 else '') + "."
         else:
-            conclusion=f"La decisión es {action}, pero sólo es ejecutable cuando Entry, Stop Loss y Take Profit queden definidos sobre la estructura observada."
+            conclusion=f"Decisión: {action}. La ejecución queda pendiente hasta que Entry, Stop Loss y Take Profit queden definidos sobre la estructura observada."
     elif action in {'COMPRA_SPOT','VENTA_SPOT'}:
         instruction=exact_spot_instruction(action,symbol)
-        conclusion=f"Acción propuesta: {instruction}. Esta es una operación Spot; no abre una posición Futures."
+        conclusion=f"Decisión: {instruction}. Operación Spot; no abre una posición Futures."
     elif action=='ESPERAR':
-        conclusion="Decisión: ESPERAR. Existe una tesis potencial, pero el momento de entrada aún no está confirmado; se reevalúa tras cierre válido, retest defendido o alineación clara de estructura, momentum y volumen."
+        pending=_concrete_wait_reasons(selected)
+        if pending:
+            if len(pending)==1:
+                cause=pending[0]
+            else:
+                cause=pending[0] + ' y ' + pending[1]
+            conclusion=(
+                "Decisión: ESPERAR. La entrada no se habilita todavía por "
+                + cause
+                + "; se reevalúa cuando esas condiciones queden resueltas."
+            )
+        else:
+            conclusion=(
+                "Decisión: ESPERAR. La entrada permanece pendiente hasta que la "
+                "confirmación de cierre/retest exigida por la estructura quede completada."
+            )
     elif action=='CAUTION':
-        conclusion="Decisión: PRECAUCIÓN. La tesis existe, pero el riesgo actual deteriora la ubicación de entrada; sólo mejora si baja la volatilidad/ruido o aparece una confirmación que permita invalidar la operación con un Stop Loss técnico."
+        pending=_concrete_wait_reasons(selected)
+        cause=(pending[0] if pending else 'riesgo de ejecución todavía elevado')
+        conclusion=(
+            "Decisión: PRECAUCIÓN. No se ejecuta mientras persista " + cause
+            + "; la operación se reevalúa con la siguiente confirmación estructural."
+        )
     else:
-        conclusion="Decisión: NO OPERAR. En este momento no existe una combinación suficientemente coherente de dirección, estructura, participación y ubicación para justificar una entrada; se reevalúa cuando cambien esas condiciones técnicas."
+        conclusion=(
+            "Decisión: NO OPERAR. Las lecturas anteriores no sostienen al mismo tiempo "
+            "una dirección ejecutable y una ubicación estructural válida; se reevalúa "
+            "cuando cambie alguno de esos datos técnicos."
+        )
 
-    body=' '.join(selected+[conclusion]).strip()
-    if not selected:
+    structured=_format_structured_evidence(selected)
+    body=' '.join(structured+[conclusion]).strip()
+    if not structured:
         body=conclusion
     ts=(f" {timestamp_text}" if timestamp_text else '')
     return " ".join((header+' '+body+ts).split())
