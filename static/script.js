@@ -70,13 +70,13 @@ const SPOT_TELEGRAM_TIMEFRAMES = [
 
 let spotTelegramPreferences = {
     spot_telegram_enabled: true,
-    spot_telegram_timeframes: [
-        '4h',
-        '12h',
-        '1D',
-        '1W'
-    ]
+    spot_telegram_timeframes: []
 };
+
+// RC9.8.5 — authority guards for per-user Telegram preferences.
+let spotTelegramPreferencesOwner = null;
+let spotTelegramPreferencesRevision = 0;
+let spotTelegramPreferencesDirty = false;
 
 // ============================================================================
 // ESTADO DE AUTENTICACIÓN
@@ -115,13 +115,11 @@ function clearPrivateUserState() {
     lastTGPResult = null;
     spotTelegramPreferences = {
         spot_telegram_enabled: true,
-        spot_telegram_timeframes: [
-            '4h',
-            '12h',
-            '1D',
-            '1W'
-        ]
+        spot_telegram_timeframes: []
     };
+    spotTelegramPreferencesOwner = null;
+    spotTelegramPreferencesRevision += 1;
+    spotTelegramPreferencesDirty = false;
 
     const telegramPrefsCard =
         document.getElementById(
@@ -641,9 +639,20 @@ function ensureSpotTelegramPreferencesUI() {
 
         enabled.addEventListener(
             'change',
-            syncSpotTelegramPreferenceControls
+            () => {
+                spotTelegramPreferencesDirty = true;
+                spotTelegramPreferencesRevision += 1;
+                syncSpotTelegramPreferenceControls();
+            }
         );
     }
+
+    document.querySelectorAll('.spot-telegram-tf').forEach(input => {
+        input.addEventListener('change', () => {
+            spotTelegramPreferencesDirty = true;
+            spotTelegramPreferencesRevision += 1;
+        });
+    });
 
     const saveButton =
         document.getElementById(
@@ -765,28 +774,29 @@ async function loadSpotTelegramPreferences() {
         || !isAuthenticated()
     ) {
 
-        setSpotTelegramPreferencesVisible(
-            false
-        );
-
+        setSpotTelegramPreferencesVisible(false);
         return false;
     }
 
     ensureSpotTelegramPreferencesUI();
 
-    try {
+    const requestedUser = String(currentUser || '');
+    const requestRevision = spotTelegramPreferencesRevision;
 
+    try {
         const response = await fetch(
             '/api/user/telegram-preferences',
             {
                 method: 'GET',
                 credentials: 'same-origin',
-                cache: 'no-store'
+                cache: 'no-store',
+                headers: {
+                    'Cache-Control': 'no-cache'
+                }
             }
         );
 
-        const data =
-            await response.json();
+        const data = await response.json();
 
         if (
             !response.ok
@@ -794,248 +804,183 @@ async function loadSpotTelegramPreferences() {
             || data.authenticated !== true
             || !data.preferences
         ) {
-
             throw new Error(
                 data.error
                 || 'No se pudieron cargar las preferencias.'
             );
         }
 
+        // Never allow a late GET from a previous user/request to repaint the UI.
+        if (String(currentUser || '') !== requestedUser) {
+            return false;
+        }
+
+        // If the user changed/saved controls while this GET was in flight,
+        // the local newer revision is authoritative and the stale GET is ignored.
+        if (
+            spotTelegramPreferencesDirty
+            || requestRevision !== spotTelegramPreferencesRevision
+        ) {
+            return true;
+        }
+
         spotTelegramPreferences = {
             spot_telegram_enabled:
-                data.preferences
-                    .spot_telegram_enabled
-                === true,
-
+                data.preferences.spot_telegram_enabled === true,
             spot_telegram_timeframes:
-                Array.isArray(
-                    data.preferences
-                        .spot_telegram_timeframes
-                )
-                    ? data.preferences
-                        .spot_telegram_timeframes
+                Array.isArray(data.preferences.spot_telegram_timeframes)
+                    ? data.preferences.spot_telegram_timeframes.filter(tf =>
+                        SPOT_TELEGRAM_TIMEFRAMES.includes(tf)
+                    )
                     : []
         };
-
+        spotTelegramPreferencesOwner = requestedUser;
         renderSpotTelegramPreferences();
 
-        const status =
-            document.getElementById(
-                'spot-telegram-prefs-status'
-            );
-
+        const status = document.getElementById('spot-telegram-prefs-status');
         if (status) {
-
-            status.textContent =
-                `Preferencias de ${currentUser} cargadas.`;
+            status.textContent = `Preferencias de ${currentUser} cargadas.`;
+            status.className = 'small text-muted mt-2';
         }
 
         return true;
 
     } catch (error) {
+        console.error('❌ Telegram Spot preferences:', error);
 
-        console.error(
-            '❌ Telegram Spot preferences:',
-            error
-        );
+        // Fail closed: do NOT reactivate every timeframe on a read failure.
+        // Keep the last known per-user selection in memory if it belongs to
+        // this user; otherwise render no timeframe until a successful load.
+        if (spotTelegramPreferencesOwner !== requestedUser) {
+            spotTelegramPreferences = {
+                spot_telegram_enabled: true,
+                spot_telegram_timeframes: []
+            };
+            spotTelegramPreferencesOwner = requestedUser;
+            renderSpotTelegramPreferences();
+        }
 
-        setSpotTelegramPreferencesVisible(
-            true
-        );
+        setSpotTelegramPreferencesVisible(true);
 
-        const status =
-            document.getElementById(
-                'spot-telegram-prefs-status'
-            );
-
+        const status = document.getElementById('spot-telegram-prefs-status');
         if (status) {
-
             status.textContent =
-                '⚠️ No se pudieron cargar las preferencias.';
-
-            status.className =
-                'small text-warning mt-2';
+                '⚠️ No se pudieron cargar las preferencias; no se activaron temporalidades por defecto.';
+            status.className = 'small text-warning mt-2';
         }
 
         return false;
     }
 }
 
-
 async function saveSpotTelegramPreferences() {
 
     if (!isAuthenticated()) {
-
-        showToast(
-            'Debes iniciar sesión.',
-            'warning'
-        );
-
+        showToast('Debes iniciar sesión.', 'warning');
         return false;
     }
 
-    const enabled =
-        document.getElementById(
-            'spot-telegram-enabled'
-        )?.checked === true;
+    const ownerAtSave = String(currentUser || '');
+    const enabled = document.getElementById('spot-telegram-enabled')?.checked === true;
 
-    const selectedTimeframes =
-        Array.from(
-            document.querySelectorAll(
-                '.spot-telegram-tf:checked'
-            )
-        )
-        .map(
-            input => input.value
-        )
-        .filter(
-            tf => (
-                SPOT_TELEGRAM_TIMEFRAMES
-                .includes(
-                    tf
-                )
-            )
-        );
+    const selectedTimeframes = Array.from(
+        document.querySelectorAll('.spot-telegram-tf:checked')
+    )
+    .map(input => input.value)
+    .filter(tf => SPOT_TELEGRAM_TIMEFRAMES.includes(tf));
 
-    const saveButton =
-        document.getElementById(
-            'btn-save-spot-telegram-prefs'
-        );
+    // Freeze exactly what the user selected at click time. A background GET
+    // must never be able to turn this back into 4h+12h+1D+1W.
+    const requestedPreferences = {
+        spot_telegram_enabled: enabled,
+        spot_telegram_timeframes: [...selectedTimeframes]
+    };
+    spotTelegramPreferencesRevision += 1;
+    const saveRevision = spotTelegramPreferencesRevision;
 
+    const saveButton = document.getElementById('btn-save-spot-telegram-prefs');
     if (saveButton) {
-
-        saveButton.disabled =
-            true;
-
-        saveButton.textContent =
-            'Guardando...';
+        saveButton.disabled = true;
+        saveButton.textContent = 'Guardando...';
     }
 
     try {
-
         const response = await fetch(
             '/api/user/telegram-preferences',
             {
                 method: 'POST',
-
                 headers: {
-                    'Content-Type':
-                        'application/json'
+                    'Content-Type': 'application/json'
                 },
-
-                credentials:
-                    'same-origin',
-
-                body: JSON.stringify({
-                    spot_telegram_enabled:
-                        enabled,
-
-                    spot_telegram_timeframes:
-                        selectedTimeframes
-                })
+                credentials: 'same-origin',
+                cache: 'no-store',
+                body: JSON.stringify(requestedPreferences)
             }
         );
 
-        const data =
-            await response.json();
+        const data = await response.json();
 
         if (
             !response.ok
             || data.success !== true
             || !data.preferences
         ) {
-
             throw new Error(
                 data.error
                 || 'No se pudieron guardar las preferencias.'
             );
         }
 
-        spotTelegramPreferences = {
-            spot_telegram_enabled:
-                data.preferences
-                    .spot_telegram_enabled
-                === true,
+        if (String(currentUser || '') !== ownerAtSave) {
+            return false;
+        }
 
-            spot_telegram_timeframes:
-                Array.isArray(
-                    data.preferences
-                        .spot_telegram_timeframes
-                )
-                    ? data.preferences
-                        .spot_telegram_timeframes
-                    : []
+        // The exact click snapshot is authoritative after a successful write.
+        // Do not repaint from a stale/default response payload.
+        spotTelegramPreferences = {
+            spot_telegram_enabled: requestedPreferences.spot_telegram_enabled,
+            spot_telegram_timeframes: [...requestedPreferences.spot_telegram_timeframes]
         };
+        spotTelegramPreferencesOwner = ownerAtSave;
+        spotTelegramPreferencesDirty = false;
+        spotTelegramPreferencesRevision = Math.max(
+            spotTelegramPreferencesRevision,
+            saveRevision
+        );
 
         renderSpotTelegramPreferences();
 
-        showToast(
-            'Preferencias Telegram guardadas.',
-            'success'
-        );
+        showToast('Preferencias Telegram guardadas.', 'success');
 
-        const status =
-            document.getElementById(
-                'spot-telegram-prefs-status'
-            );
-
+        const status = document.getElementById('spot-telegram-prefs-status');
         if (status) {
-
-            if (
-                !spotTelegramPreferences
-                    .spot_telegram_enabled
-            ) {
-
-                status.textContent =
-                    '🔕 Telegram Spot desactivado.';
-
-            } else if (
-                spotTelegramPreferences
-                    .spot_telegram_timeframes
-                    .length === 0
-            ) {
-
-                status.textContent =
-                    '🔕 Sin temporalidades seleccionadas.';
-
+            if (!spotTelegramPreferences.spot_telegram_enabled) {
+                status.textContent = '🔕 Telegram Spot desactivado.';
+            } else if (spotTelegramPreferences.spot_telegram_timeframes.length === 0) {
+                status.textContent = '🔕 Sin temporalidades seleccionadas.';
             } else {
-
                 status.textContent =
                     '🔔 Avisos en: '
-                    + spotTelegramPreferences
-                        .spot_telegram_timeframes
-                        .join(', ');
+                    + spotTelegramPreferences.spot_telegram_timeframes.join(', ');
             }
-
-            status.className =
-                'small text-info mt-2';
+            status.className = 'small text-info mt-2';
         }
 
         return true;
 
     } catch (error) {
-
-        console.error(
-            '❌ Guardando Telegram Spot:',
-            error
-        );
-
+        console.error('❌ Guardando Telegram Spot:', error);
+        spotTelegramPreferencesDirty = true;
         showToast(
             'No se pudieron guardar las preferencias Telegram.',
             'danger'
         );
-
         return false;
 
     } finally {
-
         if (saveButton) {
-
-            saveButton.disabled =
-                false;
-
-            saveButton.textContent =
-                '💾 Guardar preferencias';
+            saveButton.disabled = false;
+            saveButton.textContent = '💾 Guardar preferencias';
         }
     }
 }

@@ -29648,6 +29648,197 @@ def _spot_confirmed_alert_score(row):
     )
 
 
+
+def _signal_numeric_metric(row, *names):
+    """Read a public technical metric without depending on internal committee fields."""
+    row = row or {}
+    containers = [row]
+    for key in ('levels', 'entry_geometry', 'execution_geometry', 'decision_audit'):
+        value = row.get(key)
+        if isinstance(value, dict):
+            containers.append(value)
+    for name in names:
+        for container in containers:
+            try:
+                value = container.get(name)
+                if value is None or isinstance(value, dict):
+                    continue
+                return float(value)
+            except Exception:
+                continue
+    return 0.0
+
+
+def _representative_signal_score(row):
+    """Score used ONLY to reduce duplicate UI opportunities in one symbol×TF cell."""
+    def _pct(value):
+        value = max(0.0, float(value or 0))
+        return value * 100.0 if 0 < value <= 1.0 else min(100.0, value)
+
+    confidence = _pct(_signal_numeric_metric(row, 'confidence'))
+    entry_quality = _pct(_signal_numeric_metric(row, 'entry_quality_score', 'entry_quality'))
+    reachability = _pct(_signal_numeric_metric(row, 'entry_reachability_score', 'reachability_score'))
+    safety = _pct(_signal_numeric_metric(row, 'execution_safety', 'safety_score'))
+    rr = max(0.0, _signal_numeric_metric(row, 'risk_reward', 'rr'))
+    rr_score = min(100.0, (rr / 3.0) * 100.0)
+    return (
+        0.45 * confidence
+        + 0.25 * entry_quality
+        + 0.15 * reachability
+        + 0.10 * safety
+        + 0.05 * rr_score
+    )
+
+
+def _signal_source_epoch(row):
+    for key in ('source_candle_close_timestamp', 'source_candle_timestamp', 'candle_timestamp'):
+        raw = (row or {}).get(key)
+        if not raw:
+            continue
+        try:
+            ts = pd.Timestamp(raw)
+            ts = ts.tz_localize('UTC') if ts.tz is None else ts.tz_convert('UTC')
+            return float(ts.timestamp())
+        except Exception:
+            continue
+    return 0.0
+
+
+def _dedupe_representative_signals(rows):
+    """Keep one representative signal per symbol×timeframe for presentation/monitoring.
+
+    This does NOT delete lifecycle evidence. Hidden alternatives remain internal
+    and may become representative later if the current one expires or is filled.
+    """
+    best = {}
+    for row in (rows or []):
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get('symbol') or '').upper().replace('/', '-')
+        timeframe = str(row.get('timeframe') or '')
+        if not symbol or not timeframe:
+            continue
+        key = (symbol, timeframe)
+        rank = (
+            _representative_signal_score(row),
+            _signal_source_epoch(row),
+            int(row.get('tiempo_restante') or row.get('remaining_seconds') or 0),
+        )
+        previous = best.get(key)
+        if previous is None or rank > previous[0]:
+            best[key] = (rank, row)
+    return [item[1] for item in best.values()]
+
+
+def _spot_entry_touch_display_until(touched_at, timeframe):
+    """End of the Spot candle in which Entry was touched (UTC)."""
+    try:
+        ts = pd.Timestamp(touched_at)
+        ts = ts.tz_localize('UTC') if ts.tz is None else ts.tz_convert('UTC')
+        tf = str(timeframe or '')
+        if tf == '1W':
+            # Crypto weekly candle: Monday 00:00 UTC -> next Monday.
+            start = ts.normalize() - pd.Timedelta(days=int(ts.weekday()))
+            return start + pd.Timedelta(days=7)
+        seconds = _confirmed_signal_tf_seconds(tf)
+        if seconds <= 0:
+            return ts
+        epoch = int(ts.timestamp())
+        close_epoch = ((epoch // seconds) + 1) * seconds
+        return pd.Timestamp(close_epoch, unit='s', tz='UTC')
+    except Exception:
+        return None
+
+
+def _mark_spot_entry_touched_in_caches(signal, current_price, shadow=None):
+    """Persist Spot Entry touch so UI removal survives refresh/deploy.
+
+    Spot remains visible until the candle that contained the touch closes; after
+    that it leaves Vigentes. The Telegram Entry event is handled independently.
+    """
+    ident = _spot_signal_snapshot_identity(signal)
+    if not ident:
+        return False
+    shadow = shadow or {}
+    touched_at = shadow.get('entry_touched_at') or signal.get('entry_touched_at') or datetime.now(timezone.utc).isoformat()
+    display_until = _spot_entry_touch_display_until(touched_at, ident[1])
+    changed = False
+    for attr in ('prev_signals_cache', 'spot_vigent_signals_cache'):
+        cache = getattr(expert_system, attr, None)
+        if not isinstance(cache, dict):
+            continue
+        new_cache = dict(cache)
+        local_changed = False
+        for key, row in cache.items():
+            if not isinstance(row, dict) or _spot_signal_snapshot_identity(row) != ident:
+                continue
+            updated = dict(row)
+            if not updated.get('entry_touched_at'):
+                updated['entry_touched_at'] = str(touched_at)
+            updated['entry_touched_price'] = float(current_price)
+            updated['entry_touched'] = True
+            if display_until is not None:
+                updated['entry_display_until'] = display_until.isoformat()
+            new_cache[key] = updated
+            local_changed = True
+        if local_changed:
+            setattr(expert_system, attr, new_cache)
+            changed = True
+    if changed:
+        try:
+            _save_spot_signals_cache_to_disk()
+        except Exception:
+            pass
+    return changed
+
+
+def _spot_vigent_visible_cache(cache_data):
+    """UI contract: one Spot Vigent per cell; touched Entry leaves at candle close."""
+    now_utc = pd.Timestamp.now(tz='UTC')
+    rows = []
+    for row in (cache_data or {}).values():
+        if not isinstance(row, dict):
+            continue
+        item = dict(row)
+
+        # Expiry is evaluated at response time so a stale cache can never keep
+        # an already-dead opportunity visible until the next heavy refresh.
+        valid_until_raw = item.get('valid_until') or item.get('source_valid_until')
+        if valid_until_raw:
+            try:
+                valid_until = pd.Timestamp(valid_until_raw)
+                valid_until = valid_until.tz_localize('UTC') if valid_until.tz is None else valid_until.tz_convert('UTC')
+                if now_utc >= valid_until:
+                    continue
+            except Exception:
+                pass
+
+        touched_at = item.get('entry_touched_at') if item.get('entry_touched') or item.get('entry_touched_at') else None
+        if touched_at:
+            deadline = item.get('entry_display_until')
+            try:
+                deadline_ts = pd.Timestamp(deadline) if deadline else _spot_entry_touch_display_until(touched_at, item.get('timeframe'))
+                if deadline_ts is not None:
+                    deadline_ts = deadline_ts.tz_localize('UTC') if deadline_ts.tz is None else deadline_ts.tz_convert('UTC')
+                    item['entry_display_until'] = deadline_ts.isoformat()
+                    if now_utc >= deadline_ts:
+                        continue
+            except Exception:
+                pass
+        rows.append(item)
+    selected = _dedupe_representative_signals(rows)
+    selected.sort(
+        key=lambda row: (
+            str(row.get('timeframe') or ''),
+            str(row.get('symbol') or ''),
+        )
+    )
+    return {
+        f"{row.get('symbol')}_{row.get('timeframe')}_{idx}": row
+        for idx, row in enumerate(selected)
+    }
+
+
 def _send_spot_confirmed_timeframe_alerts(resultados):
     """At most one Spot CONFIRMADA per timeframe/close, plus later Entry alert."""
     by_tf = {}
@@ -30299,13 +30490,14 @@ def api_spot_signals_vigent():
         age = now - cache_time if cache_time else 999999
 
         if cache_data is not None:
+            visible_cache = _spot_vigent_visible_cache(cache_data)
             return jsonify({
                 'success': True,
                 'processing': False,
                 'cached': True,
                 'cache_age_seconds': int(age),
-                'total': len(cache_data),
-                'data': cache_data,
+                'total': len(visible_cache),
+                'data': visible_cache,
                 'timestamp': datetime.now(bolivia_tz).isoformat(),
             })
 
@@ -36915,8 +37107,8 @@ def _futures_vigent_manual_candidates(cache, fresh_signal_ids=None):
     Se excluye el signal_id que pertenece al último cierre para evitar que la
     misma hipótesis aparezca a la vez en "Señales confirmadas" y en
     "Señales vigentes". Una vez llega una vela nueva, el registro anterior
-    puede aparecer aquí mientras su valid_until no haya vencido o, si Entry
-    ya fue tocado, mientras continúe en seguimiento.
+    puede aparecer aquí mientras su valid_until no haya vencido y siga esperando Entry.
+    Tras tocar Entry sale de Vigentes; si el usuario la guardó, continúa sólo en Guardadas.
     """
     cache = cache or {}
     lifecycle = cache.get('lifecycle') or {}
@@ -36952,7 +37144,7 @@ def _futures_vigent_manual_candidates(cache, fresh_signal_ids=None):
             continue
 
         lifecycle_status = str(record.get('lifecycle_status') or '')
-        if lifecycle_status not in ('waiting_entry', 'entry_touched'):
+        if lifecycle_status != 'waiting_entry':
             continue
 
         symbol = str(record.get('symbol') or '')
@@ -36992,11 +37184,7 @@ def _futures_vigent_manual_candidates(cache, fresh_signal_ids=None):
                 or record.get('manual_risk_reason')
                 or 'No superó el filtro final de publicación.'
             ),
-            'active_reason': (
-                'Entry ya alcanzado; puede guardarse en operación.'
-                if lifecycle_status == 'entry_touched'
-                else 'Todavía conserva vigencia para esperar Entry.'
-            ),
+            'active_reason': 'Todavía conserva vigencia para esperar Entry.',
             'action': str(record.get('action') or '').upper(),
             'confidence': float(record.get('confidence') or 0),
             'directional': True,
@@ -37032,6 +37220,7 @@ def _futures_vigent_manual_candidates(cache, fresh_signal_ids=None):
             'decision_audit': _futures_decision_audit_for_api(record),
         })
 
+    visible = _dedupe_representative_signals(visible)
     visible.sort(
         key=lambda item: (
             0 if item.get('manual_risk_class') == 'MEDIUM' else 1,
@@ -37113,7 +37302,10 @@ def api_futures_signals_active():
             lifecycle_status = str(
                 record.get('lifecycle_status') or ''
             )
-            if lifecycle_status not in ('waiting_entry', 'entry_touched'):
+            if lifecycle_status != 'waiting_entry':
+                # RC9.8.5: Entry touched is no longer an available Vigent.
+                # If a user saved it, it remains in that user's Guardadas and
+                # Guardian lifecycle; the global opportunity lane stays clean.
                 filter_stats['not_active'] += 1
                 continue
 
@@ -37186,6 +37378,9 @@ def api_futures_signals_active():
                         0,
                         (valid_until - pd.Timestamp.now(tz='UTC')).total_seconds()
                     ))
+                    if tiempo_restante <= 0:
+                        filter_stats['not_active'] += 1
+                        continue
                 except Exception:
                     pass
 
@@ -37230,7 +37425,13 @@ def api_futures_signals_active():
                 'decision_audit': _futures_decision_audit_for_api(record)
             })
 
-        active_signals.sort(key=lambda x: -x['confidence'])
+        active_signals = _dedupe_representative_signals(active_signals)
+        active_signals.sort(
+            key=lambda x: (
+                -_representative_signal_score(x),
+                -_signal_source_epoch(x),
+            )
+        )
         
         # ==============================================================
         # PROGRESO REAL DEL ANALIZADOR
@@ -39887,13 +40088,18 @@ def _get_signals_for_entry_monitor():
                     'valid_until': sig.get('valid_until') or sig.get('source_valid_until'),
                     'message': sig.get('message', ''),
                     'tiempo_restante': sig.get('tiempo_restante'),
+                    'entry_quality_score': sig.get('entry_quality_score'),
+                    'entry_reachability_score': sig.get('entry_reachability_score'),
+                    'execution_safety': sig.get('execution_safety'),
+                    'risk_reward': sig.get('risk_reward'),
+                    'source_candle_close_timestamp': sig.get('source_candle_close_timestamp'),
                 })
     except Exception as e:
         print(f"⚠️ monitor_entries: error leyendo cachés Spot Confirmed/Vigent: {e}")
     
     # Futures usa su lifecycle oficial en futures_standard_alert_loop().
     # Este helper queda dedicado a Spot Confirmed + Vigent.
-    return signals
+    return _dedupe_representative_signals(signals)
 
 
 def _spot_live_market_price(symbol):
@@ -39980,6 +40186,11 @@ def monitor_entries_loop():
                 touched_for_alert = _price_touches_entry(current, entry, sig.get('action'), sig)
                 if shadow_status not in ('entry_touched', 'tp_hit', 'sl_hit') and not touched_for_alert:
                     continue
+
+                # RC9.8.5: el toque se persiste aunque Telegram esté desactivado.
+                # Spot permanece visible hasta el cierre de ESTA vela y luego
+                # sale de Vigentes; la alerta se intenta de forma independiente.
+                _mark_spot_entry_touched_in_caches(sig, current, shadow)
 
                 # Preferencias sólo controlan el AVISO, no el shadow-learning.
                 if not _spot_entry_alert_allowed(tf):
@@ -53186,9 +53397,7 @@ def _normalize_spot_telegram_preferences(
 
     default = {
         'spot_telegram_enabled': True,
-        'spot_telegram_timeframes': list(
-            _SPOT_TELEGRAM_ALLOWED_TIMEFRAMES
-        )
+        'spot_telegram_timeframes': []
     }
 
     if not isinstance(
@@ -53224,9 +53433,7 @@ def _normalize_spot_telegram_preferences(
 
     raw_timeframes = preferences.get(
         'spot_telegram_timeframes',
-        list(
-            _SPOT_TELEGRAM_ALLOWED_TIMEFRAMES
-        )
+        []
     )
 
     if isinstance(
@@ -53274,9 +53481,7 @@ def _get_spot_telegram_preferences(
 
     default = {
         'spot_telegram_enabled': True,
-        'spot_telegram_timeframes': list(
-            _SPOT_TELEGRAM_ALLOWED_TIMEFRAMES
-        )
+        'spot_telegram_timeframes': []
     }
 
     try:
@@ -53308,6 +53513,41 @@ def _get_spot_telegram_preferences(
         # Compatibilidad con comportamiento previo.
         return default
 
+
+
+_SPOT_TELEGRAM_SESSION_KEY = 'spot_telegram_preferences_v1'
+
+
+def _spot_telegram_session_preferences(user):
+    """Mirror browser-session preferences to prevent stale/default UI resets.
+
+    Supabase remains the durable authority.  The session mirror only protects
+    the currently authenticated browser from transient/stale reads immediately
+    after a successful save and is namespaced by authenticated user.
+    """
+    try:
+        payload = session.get(_SPOT_TELEGRAM_SESSION_KEY) or {}
+        if str(payload.get('user') or '') != str(user or ''):
+            return None
+        prefs = payload.get('preferences')
+        if not isinstance(prefs, dict):
+            return None
+        return _normalize_spot_telegram_preferences(prefs)
+    except Exception:
+        return None
+
+
+def _set_spot_telegram_session_preferences(user, preferences):
+    try:
+        session[_SPOT_TELEGRAM_SESSION_KEY] = {
+            'user': str(user or ''),
+            'preferences': _normalize_spot_telegram_preferences(preferences),
+            'saved_at': datetime.utcnow().isoformat(),
+        }
+        session.modified = True
+        return True
+    except Exception:
+        return False
 
 @app.route(
     '/api/user/telegram-preferences',
@@ -53347,11 +53587,10 @@ def api_user_telegram_preferences():
 
         if request.method == 'GET':
 
-            preferences = (
-                _get_spot_telegram_preferences(
-                    user
-                )
-            )
+            preferences = _spot_telegram_session_preferences(user)
+            if preferences is None:
+                preferences = _get_spot_telegram_preferences(user)
+                _set_spot_telegram_session_preferences(user, preferences)
 
             return jsonify({
                 'success': True,
@@ -53477,6 +53716,7 @@ def api_user_telegram_preferences():
             'spot_telegram_enabled': enabled,
             'spot_telegram_timeframes': list(clean_timeframes),
         }
+        _set_spot_telegram_session_preferences(user, preferences)
 
         return jsonify({
             'success': True,

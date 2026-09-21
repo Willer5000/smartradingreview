@@ -1959,7 +1959,7 @@ class SupabaseClient:
     ) -> Dict:
         defaults = {
             'spot_telegram_enabled': True,
-            'spot_telegram_timeframes': ['4h', '12h', '1D', '1W'],
+            'spot_telegram_timeframes': [],
             'futures_scalping_telegram_enabled': False,
             'futures_scalping_timeframes': [],
             'futures_scalping_start_time': None,

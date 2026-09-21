@@ -1,0 +1,10 @@
+RC9.8.5: dedupe vigent signals and harden per-user Spot Telegram preferences
+
+- keep one representative Vigent per symbol/timeframe without deleting lifecycle evidence
+- remove expired opportunities dynamically from Spot/Futures Vigentes
+- Futures: remove Entry-touched opportunities from Vigentes; saved user positions remain in Guardadas
+- Spot: persist Entry touch, send configured Entry Telegram, keep visible until current TF candle closes, then remove
+- dedupe Spot Entry monitor by symbol/timeframe to prevent duplicate operational alerts
+- make Spot Telegram preferences fail-closed instead of re-enabling all timeframes
+- protect per-user preference UI from stale GET/session races
+- preserve exact checkbox selection after successful save

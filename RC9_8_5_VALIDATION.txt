@@ -1,0 +1,31 @@
+RC9.8.5 VALIDATION
+==================
+
+Static validation
+-----------------
+python -m py_compile app.py supabase_client.py            PASS
+node --check static/script.js                             PASS
+
+Focused regression suite
+------------------------
+pytest -q \
+  test_rc9_8_1_technical_signal_lifecycle.py \
+  test_rc9_8_2_per_user_saved_visibility.py \
+  test_rc9_8_3_causal_level_lifecycle.py \
+  test_rc9_8_3_damir_user.py \
+  test_rc9_8_4_preferences_and_recommendation.py \
+  test_rc9_8_5_signal_noise_and_spot_prefs.py
+
+Result: 34 passed.
+
+RC9.8.5-specific tests
+----------------------
+5 passed:
+- one representative signal per symbol×TF, best technical score wins
+- Spot expiry/touched-entry visibility contract
+- Futures waiting_entry-only Vigentes + dedup contract
+- Spot Entry touch persisted before Telegram gate + monitor dedup
+- Spot Telegram preferences fail closed and preserve exact per-user selection
+
+No Research changes.
+No SQL migration.

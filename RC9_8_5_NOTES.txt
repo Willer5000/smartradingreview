@@ -1,0 +1,89 @@
+RC9.8.5 — SIGNAL NOISE + SPOT TELEGRAM PREFERENCES
+===================================================
+
+Objetivo
+--------
+Resolver dos problemas de presentación/runtime sin modificar la política de trading,
+Entry/SL/TP, Strategy Bank, ReviewTrader ni Research:
+
+1) Reducir ruido de Señales vigentes cuando varias señales comparten símbolo×TF.
+2) Corregir definitivamente el panel Guardian Spot · Telegram que volvía a marcar
+   4h/12h/1D/1W después de guardar una selección personal.
+
+A. Señales vigentes — una oportunidad representativa por celda
+---------------------------------------------------------------
+La evidencia/lifecycle NO se borra. El backend conserva las señales originales,
+pero la UI/monitor presenta como máximo UNA señal por:
+
+    símbolo × temporalidad
+
+La señal representativa se elige con un ranking técnico de presentación:
+
+    45% confianza
+    25% calidad de Entry
+    15% alcanzabilidad del Entry
+    10% Execution Safety
+     5% R/R normalizado
+
+En empate, tiene prioridad la fuente más reciente y luego la mayor vigencia restante.
+Este ranking NO cambia la autoridad de trading ni recalcula la señal.
+
+Spot
+----
+- Vigentes muestra como máximo una señal por símbolo×TF.
+- Una señal vencida desaparece aun si el cache pesado todavía no se refrescó.
+- Cuando Entry es tocado:
+    * se persiste el evento en el cache Spot;
+    * se intenta el Telegram de Entry según preferencias;
+    * la señal permanece visible hasta el cierre de la vela Spot en la que se tocó Entry;
+    * al cerrar esa vela desaparece de Vigentes.
+- La persistencia del toque evita que un refresh/deploy vuelva a mostrarla como si
+  siguiera esperando Entry.
+- El monitor de Entry también usa una sola señal representativa por símbolo×TF para
+  evitar múltiples avisos de Entries alternativos de una misma celda.
+
+Futures
+-------
+- Vigentes muestra sólo lifecycle_status=waiting_entry.
+- Cuando Entry es tocado, la señal sale inmediatamente del carril Vigentes.
+- Si el usuario la había guardado, NO se elimina de Guardadas: Saved Signals y
+  Guardian continúan su lifecycle personal normalmente.
+- Las hipótesis MEDIUM/HIGH vigentes usan la misma regla: sólo waiting_entry y una
+  representación por símbolo×TF.
+- El vencimiento se evalúa en la respuesta, por lo que una señal con valid_until
+  agotado no permanece visible por un cache stale.
+
+B. Guardian Spot · Telegram — preferencias por usuario
+-------------------------------------------------------
+El bug visual tenía dos riesgos:
+- una lectura tardía/stale podía repintar la UI después del guardado;
+- un fallo de lectura caía en el antiguo default 4h+12h+1D+1W.
+
+RC9.8.5 cambia el contrato:
+- La selección exacta al pulsar Guardar es la autoridad visual inmediata.
+- Se usa revision/dirty/owner para impedir que un GET tardío de otro estado/usuario
+  repinte las casillas.
+- El backend guarda además un mirror de sesión por usuario autenticado para evitar
+  que una lectura stale/default reemplace la selección recién guardada.
+- Supabase sigue siendo la persistencia durable.
+- Ante ausencia/error de lectura, el sistema falla cerrado: NO activa todas las
+  temporalidades por defecto.
+- La configuración permanece aislada por usuario (Willer/Danilo/Damir).
+
+No cambia
+---------
+- Entry/SL/TP RC9.8.
+- Vigencia técnica RC9.8.1 salvo limpieza visual dinámica de expiradas.
+- Corrección causal SL/TP/Entry RC9.8.3.
+- Redacción RC9.8.4.
+- Guardian de posiciones guardadas.
+- Saved Signals per-user RC9.8.2.
+- Research / OOS / Champions / Strategy Bank.
+- SQL: no requiere migración.
+
+Archivos
+--------
+app.py
+supabase_client.py
+static/script.js
+test_rc9_8_5_signal_noise_and_spot_prefs.py
