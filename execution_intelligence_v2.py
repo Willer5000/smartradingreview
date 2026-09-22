@@ -290,14 +290,16 @@ def attach_microstructure_entry_challenger(
         "affects_production": False,
     }
     candidates.append(candidate)
-    # Fixed maximum: Baseline + original three structural challengers + one
-    # genuinely new information source.  This cap limits multiple testing.
+    # Preserve the original fixed candidate contract: Commit 15 owns the fifth
+    # candidate slot. RC9.8.8 reachability lives in lab['reachability_candidate']
+    # and therefore does not evict this genuinely independent information source.
     lab = dict(lab)
     lab["candidates"] = candidates[:5]
     policy = dict(lab.get("policy") or {})
     policy["max_candidates_per_signal"] = 5
+    policy["reachability_candidate_out_of_band"] = True
     policy["microstructure_candidate_predeclared"] = True
     lab["policy"] = policy
-    lab["version"] = "C15_EXECUTION_CHALLENGER_LAB_V2"
+    lab["version"] = "RC9_8_8_EXECUTION_CHALLENGER_LAB_V3"
     analysis["execution_challenger_lab"] = lab
     return analysis

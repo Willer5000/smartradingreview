@@ -33,7 +33,7 @@ from execution_challenger_lab import (
 SELF_CALIBRATION_VERSION = "C14_GOVERNED_SELF_CALIBRATION_V1"
 QUALITY_SCORE_VERSION = "36W_V2_NORMALIZED"
 CANARY_FRACTION = 0.25
-MAX_RESOLVED_ROWS = 1200
+MAX_RESOLVED_ROWS = 800
 
 # Positive authority is deliberately harder than merely displaying a promising
 # row in Analytics.
@@ -154,50 +154,167 @@ def _build_execution_profile(
     challenger_summary: Dict[str, Any],
     governance: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Select at most one governed execution champion per Futures symbol×TF cell."""
+    """Select at most one governed execution champion per market×symbol×TF.
+
+    RC9.8.8 adds Entry reachability as evidence without redefining a missed
+    limit order as a losing trade.  Positive authority remains slow and
+    bounded; negative eight-trade evidence removes authority immediately.
+    """
     economics_ready = _governance_economics_ready(governance)
-    candidates: List[Dict[str, Any]] = []
-    for row in (challenger_summary or {}).get("rows") or []:
-        if not isinstance(row, dict):
+    governance_fresh = not bool((governance or {}).get("stale", False))
+
+    summary_rows = [
+        row for row in ((challenger_summary or {}).get("rows") or [])
+        if isinstance(row, dict)
+    ]
+    baseline_by_cell: Dict[tuple, Dict[str, Any]] = {}
+    for row in summary_rows:
+        if str(row.get("candidate") or "").upper() != "BASELINE":
             continue
+        key = (
+            str(row.get("market") or "").upper(),
+            str(row.get("symbol") or "").upper(),
+            str(row.get("timeframe") or "").upper(),
+            str(row.get("action") or "ALL").upper(),
+        )
+        baseline_by_cell[key] = row
+
+    candidates: List[Dict[str, Any]] = []
+    for row in summary_rows:
         market = str(row.get("market") or "").upper()
         name = str(row.get("candidate") or "").upper()
-        if market != "FUTURES" or name in {"", "BASELINE"}:
+        if market not in {"FUTURES", "SPOT"} or name in {"", "BASELINE"}:
             continue
+
+        key = (
+            market,
+            str(row.get("symbol") or "").upper(),
+            str(row.get("timeframe") or "").upper(),
+            str(row.get("action") or "ALL").upper(),
+        )
+        baseline = baseline_by_cell.get(key) or {}
         n = int(row.get("resolved") or 0)
         val_n = int(row.get("validation_resolved") or 0)
+        entry_gain = safe_float(row.get("entry_reach_improvement_pp"), 0.0) or 0.0
+        baseline_resolved = int(baseline.get("resolved") or 0)
+        reachability_candidate = name == "REACHABILITY_BALANCED"
+        alpha_decay = bool(row.get("alpha_decay"))
+        alpha_reason = str(row.get("alpha_decay_reason") or "")
+
+        gross_r = safe_float(row.get("expectancy_r"))
+        val_gross_r = safe_float(row.get("validation_expectancy_r"))
+        gross_pf = safe_float(row.get("profit_factor"))
+        val_gross_pf = safe_float(row.get("validation_profit_factor"))
+        baseline_val_gross = safe_float(baseline.get("validation_expectancy_r"))
+        gross_improvement = (
+            val_gross_r - baseline_val_gross
+            if val_gross_r is not None and baseline_val_gross is not None
+            else None
+        )
+
         net_r = safe_float(row.get("net_expectancy_r"))
         val_net_r = safe_float(row.get("validation_net_expectancy_r"))
-        pf = safe_float(row.get("net_profit_factor"))
-        improvement = safe_float(row.get("validation_net_improvement_vs_baseline_r"))
+        net_pf = safe_float(row.get("net_profit_factor"))
+        val_net_pf = safe_float(row.get("validation_net_profit_factor"))
+        net_improvement = safe_float(row.get("validation_net_improvement_vs_baseline_r"))
 
         state = "OBSERVE"
         reason = "EVIDENCE_NOT_READY"
-        if not economics_ready:
-            reason = "WAITING_ECONOMICS_COVERAGE"
-        elif (
-            n >= EXEC_ACTIVE_N and val_n >= EXEC_ACTIVE_VALIDATION_N
-            and net_r is not None and net_r >= EXEC_ACTIVE_NET_R
-            and val_net_r is not None and val_net_r >= EXEC_ACTIVE_NET_R
-            and pf is not None and pf >= 1.25
-            and improvement is not None and improvement >= 0.10
-        ):
-            state = "ACTIVE"
-            reason = "ROBUST_NET_OOS_CHAMPION"
-        elif (
-            n >= EXEC_CANARY_N and val_n >= EXEC_CANARY_VALIDATION_N
-            and net_r is not None and net_r >= EXEC_CANARY_NET_R
-            and val_net_r is not None and val_net_r >= EXEC_CANARY_NET_R
-            and pf is not None and pf >= 1.15
-            and improvement is not None and improvement >= 0.05
-        ):
-            state = "CANARY"
-            reason = "NET_OOS_CHALLENGER_CANARY"
-        candidates.append({**row, "state": state, "reason": reason})
+
+        # Alpha decay is asymmetric by design: slow promotion, fast rollback.
+        if alpha_decay:
+            reason = f"ALPHA_DECAY:{alpha_reason or 'RECENT_EDGE_DECAY'}"
+        elif not governance_fresh:
+            reason = "WAITING_FRESH_GOVERNANCE"
+        elif reachability_candidate and entry_gain < 8.0:
+            reason = "ENTRY_REACHABILITY_GAIN_TOO_SMALL"
+        elif market == "FUTURES":
+            # Futures keeps the conservative cost-complete gate.
+            improvement_canary = bool(
+                (net_improvement is not None and net_improvement >= 0.05)
+                or (reachability_candidate and baseline_resolved < 10)
+            )
+            improvement_active = bool(
+                (net_improvement is not None and net_improvement >= 0.10)
+                or (reachability_candidate and baseline_resolved < 10)
+            )
+            if not economics_ready:
+                reason = "WAITING_ECONOMICS_COVERAGE"
+            elif (
+                n >= EXEC_ACTIVE_N and val_n >= EXEC_ACTIVE_VALIDATION_N
+                and net_r is not None and net_r >= EXEC_ACTIVE_NET_R
+                and val_net_r is not None and val_net_r >= EXEC_ACTIVE_NET_R
+                and net_pf is not None and net_pf >= 1.25
+                and (val_net_pf is None or val_net_pf >= 1.15)
+                and improvement_active
+                and (not reachability_candidate or entry_gain >= 12.0)
+            ):
+                state = "ACTIVE"
+                reason = "ROBUST_NET_OOS_ENTRY_CHAMPION"
+            elif (
+                n >= EXEC_CANARY_N and val_n >= EXEC_CANARY_VALIDATION_N
+                and net_r is not None and net_r >= EXEC_CANARY_NET_R
+                and val_net_r is not None and val_net_r >= EXEC_CANARY_NET_R
+                and net_pf is not None and net_pf >= 1.15
+                and improvement_canary
+            ):
+                state = "CANARY"
+                reason = "NET_OOS_ENTRY_CHALLENGER_CANARY"
+        else:
+            # Spot has no leverage/funding risk-growth authority here. Entry
+            # geometry is allowed to learn from its own market×symbol×TF evidence
+            # even while the broader Research federation is still incomplete.
+            # Promotion remains slow through larger local samples + chronological
+            # validation + PF/expectancy + reachability gates.
+            improvement_canary = bool(
+                (gross_improvement is not None and gross_improvement >= 0.10)
+                or (reachability_candidate and baseline_resolved < 10)
+            )
+            improvement_active = bool(
+                (gross_improvement is not None and gross_improvement >= 0.15)
+                or (reachability_candidate and baseline_resolved < 10)
+            )
+            if (
+                n >= 60 and val_n >= 18
+                and gross_r is not None and gross_r >= 0.15
+                and val_gross_r is not None and val_gross_r >= 0.15
+                and gross_pf is not None and gross_pf >= 1.35
+                and (val_gross_pf is None or val_gross_pf >= 1.20)
+                and improvement_active
+                and (not reachability_candidate or entry_gain >= 12.0)
+            ):
+                state = "ACTIVE"
+                reason = "ROBUST_SPOT_OOS_ENTRY_CHAMPION"
+            elif (
+                n >= 30 and val_n >= 10
+                and gross_r is not None and gross_r >= 0.10
+                and val_gross_r is not None and val_gross_r >= 0.10
+                and gross_pf is not None and gross_pf >= 1.25
+                and improvement_canary
+            ):
+                state = "CANARY"
+                reason = "SPOT_OOS_ENTRY_CHALLENGER_CANARY"
+
+        candidates.append({
+            **row,
+            "state": state,
+            "reason": reason,
+            "entry_learning": True,
+            "no_entry_counts_in_win_rate": False,
+            "baseline_resolved": baseline_resolved,
+            "gross_validation_improvement_vs_baseline_r": (
+                round(gross_improvement, 4) if gross_improvement is not None else None
+            ),
+        })
 
     by_cell: Dict[tuple, List[Dict[str, Any]]] = {}
     for row in candidates:
-        key = (str(row.get("market") or ""), str(row.get("symbol") or ""), str(row.get("timeframe") or ""))
+        key = (
+            str(row.get("market") or ""),
+            str(row.get("symbol") or ""),
+            str(row.get("timeframe") or ""),
+            str(row.get("action") or "ALL"),
+        )
         by_cell.setdefault(key, []).append(row)
 
     selected_rows: List[Dict[str, Any]] = []
@@ -206,7 +323,9 @@ def _build_execution_profile(
         eligible = [r for r in cell_rows if r.get("state") in {"CANARY", "ACTIVE"}]
         eligible.sort(key=lambda r: (
             1 if r.get("state") == "ACTIVE" else 0,
-            safe_float(r.get("validation_net_expectancy_r"), -999.0) or -999.0,
+            safe_float(r.get("validation_net_expectancy_r"),
+                       safe_float(r.get("validation_expectancy_r"), -999.0)) or -999.0,
+            safe_float(r.get("entry_reach_improvement_pp"), 0.0) or 0.0,
             int(r.get("validation_resolved") or 0),
         ), reverse=True)
         winner = eligible[0] if eligible else None
@@ -224,14 +343,28 @@ def _build_execution_profile(
             rows.append(out)
 
     return {
-        "version": SELF_CALIBRATION_VERSION,
+        "version": "RC9_8_8_GOVERNED_ENTRY_LEARNING_V1",
         "authority": "GOVERNED_BOUNDED",
         "economics_ready": economics_ready,
         "rows": rows,
         "selected": selected_rows,
         "canary_fraction": CANARY_FRACTION,
-        "policy": {"selection_scope": "MARKET_SYMBOL_TIMEFRAME", "one_champion_per_cell": True},
+        "policy": {
+            "selection_scope": "MARKET_SYMBOL_TIMEFRAME_ACTION",
+            "one_champion_per_cell": True,
+            "spot_futures_separate": True,
+            "global_research_completion_required_for_entry_geometry": False,
+            "no_entry_counts_as_trade": False,
+            "no_entry_counts_in_win_rate": False,
+            "entry_reachability_can_adjust_geometry": True,
+            "direction_change_allowed": False,
+            "safety_threshold_can_be_lowered": False,
+            "stop_widening_allowed": False,
+            "alpha_decay_window_resolved_trades": 8,
+            "alpha_decay_rollback": "IMMEDIATE_TO_OBSERVE_BASELINE",
+        },
     }
+
 
 def build_self_calibration_state(
     trader_intelligence_v2: Dict[str, Any],
@@ -277,7 +410,8 @@ def build_self_calibration_state(
             "leverage_growth_allowed_here": False,
             "spot_futures_separate": True,
             "positive_requires_oos": True,
-            "positive_requires_cost_coverage_pct": MIN_ECONOMICS_COVERAGE_PCT,
+            "futures_positive_requires_cost_coverage_pct": MIN_ECONOMICS_COVERAGE_PCT,
+            "spot_entry_positive_requires_local_oos": True,
             "negative_evidence_can_protect_earlier": True,
             "canary_fraction": CANARY_FRACTION,
             "rollback": "AUTOMATIC_TO_BASELINE_WHEN_EVIDENCE_NO_LONGER_QUALIFIES",
@@ -308,14 +442,27 @@ def _result_list(row: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def refresh_self_calibration_from_db(db, governance: Dict[str, Any], *, days_back: int = 90) -> Dict[str, Any]:
-    """Bounded 4h refresh using only resolved V2 rows.
+    """Slow bounded refresh for execution + Entry-reachability learning.
 
-    No DataFrames are created and only resolved current-generation rows are
-    loaded, keeping the operation suitable for Render's small memory budget.
+    RC9.8.8 loads terminal current-generation rows (TP/SL/expired) in one
+    bounded query. `expired_no_entry` participates only in activation learning;
+    it never enters WR/expectancy. No DataFrames or new Supabase tables are
+    created. The caller throttles this to at most twice per day.
     """
     if db is None or not getattr(db, "enabled", False):
         return {"version": SELF_CALIBRATION_VERSION, "state": "OBSERVE", "reason": "SUPABASE_DISABLED"}
     try:
+        # Respect the existing Main Supabase free-plan budget.  When the guard
+        # is near its limit we keep the last installed profile and simply wait
+        # for a later cycle; learning is slower, not less safe.
+        if hasattr(db, "free_plan_allows") and not db.free_plan_allows("important"):
+            state = get_self_calibration_state()
+            state["refresh"] = {
+                "deferred": True,
+                "reason": "SUPABASE_FREE_PLAN_GUARD",
+                "max_rows": MAX_RESOLVED_ROWS,
+            }
+            return state
         from q6_integrity import read_pages
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=max(14, min(int(days_back), 180)))
@@ -334,12 +481,12 @@ def refresh_self_calibration_from_db(db, governance: Dict[str, Any], *, days_bac
                 .lt("created_at", now.isoformat())
                 .eq("context->execution->>quality_score_version", QUALITY_SCORE_VERSION)
                 .in_("action_normalized", ["LONG", "SHORT", "COMPRA_SPOT", "VENTA_SPOT"])
-                .in_("status", ["tp_hit", "sl_hit"])
-                .order("created_at", desc=False)
-                .order("id", desc=False)
+                .in_("status", ["tp_hit", "sl_hit", "expired"])
+                .order("created_at", desc=True)
+                .order("id", desc=True)
             )
 
-        rows = read_pages(query, page_size=200, max_rows=MAX_RESOLVED_ROWS, budget_seconds=20)
+        rows = read_pages(query, page_size=160, max_rows=MAX_RESOLVED_ROWS, budget_seconds=12)
         normalized: List[Dict[str, Any]] = []
         for row in rows or []:
             row = dict(row or {})
@@ -348,6 +495,10 @@ def refresh_self_calibration_from_db(db, governance: Dict[str, Any], *, days_bac
                 "execution": row.pop("q6_execution", {}) or {},
             }
             normalized.append(row)
+
+        # Query newest-first so a bounded window always contains the freshest
+        # evidence needed for alpha decay; restore chronological order locally.
+        normalized.sort(key=lambda item: (str(item.get("created_at") or ""), str(item.get("id") or "")))
 
         scopes: Dict[str, List[Dict[str, Any]]] = {
             "SPOT_CURRENT": [],
@@ -360,13 +511,32 @@ def refresh_self_calibration_from_db(db, governance: Dict[str, Any], *, days_bac
             elif market == "FUTURES":
                 scopes["FUTURES_CURRENT"].append(row)
 
-        intelligence = build_trader_intelligence_v2_summary(scopes)
+        # Existing trader-intelligence statistics remain trade-only.  Expired
+        # no-entry rows are passed only to the execution challenger summary.
+        resolved_scopes: Dict[str, List[Dict[str, Any]]] = {
+            "SPOT_CURRENT": [],
+            "FUTURES_CURRENT": [],
+        }
+        for scope_name, scope_rows in scopes.items():
+            resolved_scopes[scope_name] = [
+                row for row in scope_rows
+                if str(row.get("status") or "").lower() in {"tp_hit", "sl_hit"}
+            ]
+
+        intelligence = build_trader_intelligence_v2_summary(resolved_scopes)
         shadow = build_shadow_profile(intelligence, governance)
         install_shadow_profile(shadow)
         challenger = summarize_execution_challenger_evidence(scopes)
         state = build_self_calibration_state(intelligence, shadow, challenger, governance)
         state["refresh"] = {
-            "resolved_rows_loaded": len(normalized),
+            "terminal_rows_loaded": len(normalized),
+            "resolved_trade_rows_loaded": sum(len(v) for v in resolved_scopes.values()),
+            "expired_rows_loaded": sum(
+                1 for row in normalized if str(row.get("status") or "").lower() == "expired"
+            ),
+            "max_rows": MAX_RESOLVED_ROWS,
+            "query_budget_seconds": 12,
+            "no_entry_affects_win_rate": False,
             "coverage_complete": bool((getattr(rows, "coverage", {}) or {}).get("complete", False)),
         }
         install_self_calibration_state(state)

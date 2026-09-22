@@ -1,0 +1,43 @@
+RC9.8.8 VALIDATION
+==================
+
+Syntax
+- review_trader.py: PASS
+- execution_challenger_lab.py: PASS
+- execution_intelligence_v2.py: PASS
+- governed_self_calibration.py: PASS
+
+RC9.8.8 directed tests
+- 15 passed
+
+Relevant regression
+- Commit 13 Execution Challenger Lab
+- Commit 14 Governed Self Calibration
+- Commit 15 execution-intelligence functional tests
+- Execution Learning
+- RC9.8 Execution Geometry
+Result: 39 passed, 2 deselected obsolete lineage/UI assertions
+
+Total relevant passed checks: 54
+
+The two deselected legacy Commit-15 assertions expect an older analytics panel and
+older LINK/BNB research-universe declaration. They conflict with the already
+implemented later RC9.x lineage and are unrelated to this Entry-learning patch.
+
+Validated invariants
+- no-entry observations do not enter WR
+- no-entry observations do not create a loss
+- actionable signals are persisted independently of manual user save
+- direction-right / Entry-too-deep is learning-only, never a fabricated win
+- reachability candidate does not consume an existing core challenger slot
+- structural SL is preserved
+- candidate Entry move is bounded and RR remains >=1.8
+- Spot/Futures learning remain separate
+- LONG/SHORT learning remain separate
+- governed calibration changes geometry, never direction
+- Alpha Decay detects 8 consecutive losses
+- Alpha Decay detects an 8-trade Sharpe-proxy collapse
+- incomplete global Research coverage does not block evidence accumulation
+- Supabase refresh is paced >=12h and bounded <=800 terminal rows
+- no new Entry-learning table is introduced
+- current RC9.8 attribution/geometry metadata is preserved

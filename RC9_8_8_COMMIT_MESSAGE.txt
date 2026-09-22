@@ -1,0 +1,11 @@
+RC9.8.8: learn missed Entries without polluting WR; governed reachability + alpha decay
+
+- learn from all automatically persisted actionable Spot/Futures signals, independent of user save
+- classify expired-no-entry as Entry-geometry evidence only, never trade/loss/WR
+- add bounded REACHABILITY_BALANCED shadow challenger without replacing core candidates
+- scope governed learning by market x symbol x timeframe x action
+- preserve structural SL, RR and Safety constraints
+- promote only SHADOW -> CANARY -> ACTIVE with profitability + reachability evidence
+- rollback on 8-loss / 8-trade Sharpe / expectancy alpha decay
+- throttle Supabase learning reads to <=800 rows every >=12h with free-plan guard
+- no new tables, SQL, per-candle writes, market calls or Research jobs

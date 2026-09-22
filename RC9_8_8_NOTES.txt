@@ -1,0 +1,123 @@
+RC9.8.8 — ENTRY REACHABILITY + CONTINUOUS LEARNING
+===================================================
+
+Why RC9.8.8
+-----------
+The deployed lineage is RC9.8.7. The user wrote "9.7.8", but RC9.7.8 already
+existed earlier in the project. Reusing that identifier would create a release
+collision. This commit therefore continues the deployed sequence as RC9.8.8.
+
+Purpose
+-------
+Learn from every actionable Spot/Futures signal persisted automatically by
+ReviewTrader, even when no user manually saves it. A signal that never reaches
+Entry is execution-learning evidence only: it is NOT a trade, NOT a loss and
+never enters win rate.
+
+Core contract
+-------------
+1. NO ENTRY != LOSS
+   - expired_no_entry never enters WR, expectancy or loss streaks.
+   - it remains evidence for Entry reachability only.
+
+2. Direction and execution are separated
+   - If price advances >= 0.50R in the thesis direction without touching Entry,
+     the signal is classified as direction-right / Entry-too-deep or near-miss.
+   - This never fabricates a win.
+
+3. Entry Reachability Forensics
+   Persisted only inside the existing terminal signal_result.execution_forensics
+   JSON during the normal terminal result write:
+   - signal price and Entry price;
+   - initial Entry gap;
+   - closest remaining gap;
+   - percentage of required retracement achieved;
+   - favorable follow-through from signal price (R and %);
+   - adverse excursion from signal price (R);
+   - reachability classification.
+
+4. REACHABILITY_BALANCED challenger
+   - SHADOW first.
+   - Does not consume/replace the existing core challenger slots.
+   - Moves Entry toward signal price only within ALL limits:
+       * <= 35% of Entry gap;
+       * <= 0.35 ATR;
+       * <= 5% increase versus baseline price-risk.
+   - Preserves structural SL.
+   - Keeps RR >= 1.8.
+   - Never changes direction or lowers Safety.
+
+5. Governed continuous improvement
+   Scope = market x symbol x timeframe x action/direction.
+   Spot and Futures never share authority and LONG/SHORT never share authority.
+   Path: SHADOW -> CANARY (25%) -> ACTIVE.
+   A candidate needs better Entry activation AND robust post-Entry evidence.
+   Missed fills alone can NEVER promote a worse trading geometry.
+
+6. Win rate
+   - Win rate is based only on real post-Entry TP/SL resolved observations.
+   - no-entry rows are excluded.
+   - expired-after-entry remains unresolved for WR unless TP/SL was proven.
+
+7. Alpha Decay
+   Slow promotion, fast rollback. A promoted Entry geometry returns to
+   OBSERVE/baseline when terminal trade evidence shows:
+   - 8 consecutive SL losses; OR
+   - last 8 resolved trades show a robust Sharpe-proxy collapse; OR
+   - last 8 resolved trades show expectancy <= 0 with material deterioration.
+   No-entry observations are never treated as losses for Alpha Decay.
+
+Supabase / bandwidth policy
+---------------------------
+NO new table.
+NO SQL migration.
+NO per-candle Entry-learning writes.
+NO user-save dependency.
+NO extra OHLCV/API request for Entry forensics/challengers.
+
+The existing signal/result lifecycle is reused. Added learning metadata is compact
+JSON inside the terminal result that ReviewTrader already writes.
+
+Self-calibration database read:
+- at most once every 12 hours per running process;
+- maximum 800 newest terminal directional rows;
+- page size 160;
+- 12-second read budget;
+- respects existing Supabase free-plan guard;
+- if the guard blocks a read, production continues with the last/baseline profile;
+- newest rows are preferred so Alpha Decay observes recent evidence.
+
+Research repository
+-------------------
+No change. Research may continue slowly and independently. This Entry-learning
+loop does not wait for global Research completion before accumulating evidence.
+Positive production authority remains governed and bounded.
+
+Current-lineage preservation
+----------------------------
+The review_trader.py replacement was rebased on the current RC9.8 Execution
+Geometry lineage, not on the older RC9.7 snapshot. It preserves:
+- operational_source_v1;
+- market_regime attribution;
+- RC9.8 entry_timing_mode;
+- RC9.8 independent Entry confluence families;
+- RC9.7 Opportunity Capture V2.
+
+Files replaced
+--------------
+- review_trader.py
+- execution_challenger_lab.py
+- execution_intelligence_v2.py
+- governed_self_calibration.py
+
+No changes to
+-------------
+- Strategy Committee direction logic
+- RC9.8 base Execution Geometry logic
+- Safety thresholds
+- leverage policy
+- Guardian
+- per-user saved signals
+- Telegram
+- Supabase schema
+- Research repository

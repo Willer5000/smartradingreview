@@ -15,6 +15,7 @@
 import logging
 import math
 import json
+import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
@@ -239,6 +240,12 @@ class ReviewTrader:
         self._execution_safety_shadow_policy = None
 
         self._execution_safety_policy_updated_at = None
+
+        # RC9.8.8 — slow, bounded Entry-reachability learning. The normal
+        # adaptive worker may wake more often, but this heavier Supabase read
+        # is allowed at most once every 12 hours per running process.
+        self._entry_learning_last_refresh_monotonic = 0.0
+        self._entry_learning_refresh_seconds = 12 * 60 * 60
 
     # ========================================================================
     # CONTRATO DE APRENDIZAJE — SEPARACIÓN SPOT / FUTUROS
@@ -4154,6 +4161,53 @@ class ReviewTrader:
             else:
                 df_after = df
 
+            # RC9.8.8 — Entry Reachability Forensics.
+            # Uses the SAME already-loaded OHLCV. No extra market request and
+            # no write until the signal reaches its existing terminal outcome.
+            # A missed Entry is learning evidence, never a trade or a loss.
+            signal_price = float(signal.get('current_price', 0) or 0)
+            if signal_price <= 0:
+                signal_price = entry
+            reachability = {
+                'version': 'RC9_8_8_ENTRY_REACHABILITY_V1',
+                'learning_only': True,
+                'counts_as_trade': False,
+                'counts_in_win_rate': False,
+                'signal_price': round(signal_price, 10),
+                'entry_price': round(entry, 10),
+                'classification': 'UNAVAILABLE',
+            }
+            try:
+                if len(df_after) > 0:
+                    max_high = float(pd.to_numeric(df_after['high'], errors='coerce').max())
+                    min_low = float(pd.to_numeric(df_after['low'], errors='coerce').min())
+                    if action == 'LONG':
+                        initial_gap = max(0.0, signal_price - entry)
+                        closest_gap = max(0.0, min_low - entry)
+                        favorable_abs = max(0.0, max_high - signal_price)
+                        adverse_abs = max(0.0, signal_price - min_low)
+                    else:
+                        initial_gap = max(0.0, entry - signal_price)
+                        closest_gap = max(0.0, entry - max_high)
+                        favorable_abs = max(0.0, signal_price - min_low)
+                        adverse_abs = max(0.0, max_high - signal_price)
+                    retracement_pct = (
+                        max(0.0, min(100.0, (initial_gap - closest_gap) / initial_gap * 100.0))
+                        if initial_gap > 0 else 100.0
+                    )
+                    reachability.update({
+                        'initial_entry_gap_abs': round(initial_gap, 10),
+                        'closest_remaining_gap_abs': round(closest_gap, 10),
+                        'retracement_achieved_pct_of_gap': round(retracement_pct, 2),
+                        'favorable_follow_through_r_from_signal': round(favorable_abs / risk_abs, 4),
+                        'adverse_excursion_r_from_signal': round(adverse_abs / risk_abs, 4),
+                        'favorable_follow_through_pct_from_signal': round(
+                            favorable_abs / signal_price * 100.0, 4
+                        ) if signal_price > 0 else 0.0,
+                    })
+            except Exception as reachability_error:
+                reachability['error'] = str(reachability_error)[:120]
+
             entry_touched = False
             entry_timestamp = None
             candles_to_entry = 0
@@ -4241,7 +4295,7 @@ class ReviewTrader:
                     )
                 }
 
-            return build_execution_forensics(
+            forensic_payload = build_execution_forensics(
                 signal,
                 result,
                 entry_touched=entry_touched,
@@ -4249,6 +4303,34 @@ class ReviewTrader:
                 candles_to_entry=candles_to_entry,
                 post_stop_recovery=post_stop_recovery
             )
+            favorable_r = float(
+                reachability.get('favorable_follow_through_r_from_signal', 0) or 0
+            )
+            retracement_pct = float(
+                reachability.get('retracement_achieved_pct_of_gap', 0) or 0
+            )
+            if entry_touched:
+                reachability['classification'] = 'ENTRY_REACHED'
+            elif favorable_r >= 0.50:
+                reachability['classification'] = (
+                    'DIRECTION_RIGHT_ENTRY_NEAR_MISS'
+                    if retracement_pct >= 70.0
+                    else 'DIRECTION_RIGHT_ENTRY_TOO_DEEP'
+                )
+            elif retracement_pct >= 85.0:
+                reachability['classification'] = 'ENTRY_NEAR_MISS_NO_FOLLOW_THROUGH'
+            else:
+                reachability['classification'] = 'NO_ENTRY_INCONCLUSIVE'
+            reachability['entry_reached'] = bool(entry_touched)
+            reachability['eligible_for_entry_geometry_learning'] = bool(
+                not entry_touched and favorable_r >= 0.50
+            )
+            forensic_payload['entry_reachability'] = reachability
+            forensic_payload['win_rate_eligible'] = bool(
+                entry_touched
+                and str(result.get('status') or '').lower() in ('tp_hit', 'sl_hit')
+            )
+            return forensic_payload
 
         except Exception as forensic_error:
             logger.warning(
@@ -13583,6 +13665,66 @@ class ReviewTrader:
                     result.get('profiles_updated', 0),
                     len(result.get('strategy_transitions', []) or [])
                 )
+
+            # RC9.8.8 — slow continuous Entry learning. This is intentionally
+            # much slower than market analysis: at most two bounded reads/day,
+            # reusing existing signals/signal_results. No new table, no
+            # per-candle persistence and no separate Research job.
+            now_m = time.monotonic()
+            due = (
+                self._entry_learning_last_refresh_monotonic <= 0
+                or now_m - self._entry_learning_last_refresh_monotonic
+                    >= self._entry_learning_refresh_seconds
+            )
+            # A governance/bootstrap path may already have refreshed this
+            # process. Respect the installed timestamp to avoid duplicate reads.
+            if due:
+                try:
+                    from governed_self_calibration import get_self_calibration_state
+                    installed_state = get_self_calibration_state() or {}
+                    updated_text = str(installed_state.get('updated_at') or '').strip()
+                    if updated_text:
+                        updated_dt = datetime.fromisoformat(updated_text.replace('Z', '+00:00'))
+                        if updated_dt.tzinfo is not None:
+                            updated_dt = updated_dt.replace(tzinfo=None)
+                        if (datetime.utcnow() - updated_dt).total_seconds() < self._entry_learning_refresh_seconds:
+                            due = False
+                except Exception:
+                    pass
+            if due:
+                allow_read = True
+                try:
+                    if hasattr(self.db, 'free_plan_allows'):
+                        allow_read = bool(self.db.free_plan_allows('important'))
+                except Exception:
+                    allow_read = True
+                if allow_read:
+                    try:
+                        from promotion_governance import get_promotion_governance_status
+                        from governed_self_calibration import refresh_self_calibration_from_db
+                        governance = get_promotion_governance_status(self.db)
+                        entry_state = refresh_self_calibration_from_db(
+                            self.db, governance, days_back=90
+                        )
+                        self._entry_learning_last_refresh_monotonic = now_m
+                        result['entry_reachability_learning'] = {
+                            'state': entry_state.get('state', 'OBSERVE'),
+                            'updated_at': entry_state.get('updated_at'),
+                            'refresh': entry_state.get('refresh', {}),
+                            'alpha_decay_guard': True,
+                            'no_entry_affects_win_rate': False,
+                        }
+                    except Exception as entry_learning_error:
+                        logger.warning(
+                            'RC9.8.8 Entry learning refresh diferido: %s',
+                            entry_learning_error
+                        )
+                else:
+                    result['entry_reachability_learning'] = {
+                        'state': 'DEFERRED_FREE_PLAN_GUARD',
+                        'alpha_decay_guard': True,
+                        'no_entry_affects_win_rate': False,
+                    }
             return result
         except Exception as exc:
             logger.error('C4 Autopilot fallback: %s', exc)

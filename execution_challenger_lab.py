@@ -18,7 +18,7 @@ import pandas as pd
 
 from learning_integrity import learning_context, latest_result, normalize_action, normalize_market, safe_float
 
-CHALLENGER_LAB_VERSION = "C15_EXECUTION_CHALLENGER_LAB_V2"
+CHALLENGER_LAB_VERSION = "RC9_8_8_EXECUTION_CHALLENGER_LAB_V3"
 
 
 def _positive(value: Any) -> Optional[float]:
@@ -205,9 +205,57 @@ def build_execution_challenger_lab(analysis: Dict[str, Any], df: Optional[pd.Dat
             d_tp = min(baseline_tp, d_entry - abs(d_entry - d_sl) * 1.8)
         candidates.append(_candidate('SPECIALIST_COMMITTEE', d_entry, d_sl, d_tp, action, 'C12_SHADOW_AGREEMENT'))
 
-    # Commit 15 reserves one additional slot for a predeclared microstructure
-    # confirmation challenger appended later by futures_system.py.  Baseline +
-    # three structural candidates are still produced here.
+    # RC9.8.8 — reachability challenger.
+    #
+    # The baseline Entry can be technically defensible yet so deep that price
+    # repeatedly runs in the correct direction without ever filling.  This
+    # challenger moves Entry only a bounded fraction toward the signal price,
+    # keeps absolute risk no wider than baseline and preserves >=1.8R.  It is
+    # SHADOW until enough chronological evidence proves both better activation
+    # and acceptable post-entry expectancy.  It never changes direction.
+    candidates = candidates[:4]
+    baseline_risk = abs(baseline_entry - baseline_sl)
+    initial_gap = (current - baseline_entry) if action == 'LONG' else (baseline_entry - current)
+    if baseline_risk > 0 and initial_gap > max(0.10 * atr, 0.0):
+        # Production safety remains stricter than the learning objective. We
+        # never move the structural SL just to manufacture fills. Entry may
+        # approach the signal price by at most 5% of baseline price-risk, while
+        # SHADOW forensics still record the full missed-gap/retracement data.
+        shift = min(initial_gap * 0.35, atr * 0.35, baseline_risk * 0.05)
+        if action == 'LONG':
+            e_entry = min(current - 0.10 * atr, baseline_entry + shift)
+            e_entry = max(baseline_entry, e_entry)
+            e_sl = baseline_sl
+            new_risk = abs(e_entry - e_sl)
+            e_tp = max(baseline_tp, e_entry + new_risk * 1.8)
+        else:
+            e_entry = max(current + 0.10 * atr, baseline_entry - shift)
+            e_entry = min(baseline_entry, e_entry)
+            e_sl = baseline_sl
+            new_risk = abs(e_entry - e_sl)
+            e_tp = min(baseline_tp, e_entry - new_risk * 1.8)
+        reachability = _candidate(
+            'REACHABILITY_BALANCED',
+            e_entry, e_sl, e_tp, action,
+            'BOUNDED_ENTRY_REACHABILITY',
+            reason=(
+                'Shadow alternative for missed fills: bounded by 35% of Entry gap, '
+                '0.35 ATR and 5% of baseline risk; structural SL is preserved'
+            ),
+        )
+        reachability['entry_shift_from_baseline_pct'] = round(
+            abs((e_entry or baseline_entry) - baseline_entry) / baseline_entry * 100.0, 6
+        ) if baseline_entry else 0.0
+        reachability['baseline_gap_to_signal_price_pct'] = round(
+            initial_gap / current * 100.0, 6
+        ) if current else 0.0
+    else:
+        reachability = None
+
+    # Preserve the original Commit 13 contract: the base lab still exposes at
+    # most four core candidates. RC9.8.8 keeps its reachability experiment in
+    # a dedicated SHADOW field, so no earlier specialist candidate is displaced
+    # and Commit 15 can still use its fifth microstructure slot.
     candidates = candidates[:4]
     return {
         'version': CHALLENGER_LAB_VERSION,
@@ -217,9 +265,11 @@ def build_execution_challenger_lab(analysis: Dict[str, Any], df: Optional[pd.Dat
         'action': action,
         'atr_reference': round(float(atr), 10),
         'candidates': candidates,
+        'reachability_candidate': reachability,
         'status': 'OBSERVING',
         'policy': {
             'max_candidates_per_signal': 5,
+            'reachability_candidate_out_of_band': True,
             'no_stop_widening_in_production': True,
             'no_direction_change': True,
             'compare_activation_mfe_mae_tp_sl_expectancy': True,
@@ -233,7 +283,16 @@ def evaluate_execution_challengers(signal: Dict[str, Any], df: pd.DataFrame, eva
     learning = learning_context(signal)
     lab = learning.get('execution_challenger_lab') or {}
     candidates = lab.get('candidates') if isinstance(lab, dict) else []
-    if not isinstance(candidates, list) or not candidates:
+    if not isinstance(candidates, list):
+        candidates = []
+    reachability = lab.get('reachability_candidate') if isinstance(lab, dict) else None
+    evaluation_candidates = list(candidates[:5])
+    if isinstance(reachability, dict) and not any(
+        isinstance(item, dict) and str(item.get('name') or '').upper() == 'REACHABILITY_BALANCED'
+        for item in evaluation_candidates
+    ):
+        evaluation_candidates.append(reachability)
+    if not evaluation_candidates:
         return {}
 
     frame = df
@@ -249,7 +308,7 @@ def evaluate_execution_challengers(signal: Dict[str, Any], df: pd.DataFrame, eva
         frame = df
 
     results = []
-    for candidate in candidates[:5]:
+    for candidate in evaluation_candidates[:6]:
         if not isinstance(candidate, dict) or not candidate.get('geometry_valid'):
             continue
         # Commit 15: conditional challengers form a subset cohort.  If the
@@ -366,9 +425,21 @@ def _signal_cost_r(result: Dict[str, Any]) -> Optional[float]:
 
 
 def _evidence_metrics(observations: List[Dict[str, Any]]) -> Dict[str, Any]:
-    resolved = [o for o in observations if o.get('status') in {'tp_hit', 'sl_hit'} and o.get('realized_r') is not None]
+    """Chronological profitability evidence plus an eight-trade decay watch.
+
+    `expired_no_entry` observations remain in the activation sample but never
+    enter WR/expectancy.  This preserves the contract: no fill == no trade.
+    """
+    resolved = [
+        o for o in observations
+        if o.get('status') in {'tp_hit', 'sl_hit'}
+        and o.get('realized_r') is not None
+    ]
     resolved.sort(key=lambda o: str(o.get('created_at') or ''))
-    cut = max(1, min(len(resolved) - 1, int(math.floor(len(resolved) * 0.70)))) if len(resolved) >= 2 else len(resolved)
+    cut = (
+        max(1, min(len(resolved) - 1, int(math.floor(len(resolved) * 0.70))))
+        if len(resolved) >= 2 else len(resolved)
+    )
     discovery = resolved[:cut]
     validation = resolved[cut:]
 
@@ -380,20 +451,88 @@ def _evidence_metrics(observations: List[Dict[str, Any]]) -> Dict[str, Any]:
                 out.append(value)
         return out
 
+    def effective_r(row):
+        value = safe_float(row.get('net_r'))
+        if value is None:
+            value = safe_float(row.get('realized_r'))
+        return value
+
     gross = vals(resolved, 'realized_r')
     net = vals(resolved, 'net_r')
     disc_net = vals(discovery, 'net_r')
     val_net = vals(validation, 'net_r')
     val_gross = vals(validation, 'realized_r')
+    gross_pf = _profit_factor(gross)
+    val_gross_pf = _profit_factor(val_gross)
     pf = _profit_factor(net)
     val_pf = _profit_factor(val_net)
     coverage = len(net) / len(resolved) * 100.0 if resolved else 0.0
+
+    # RC9.8.8 Alpha Decay: a promoted execution geometry must be able to lose
+    # authority faster than it gained it. Eight consecutive losses revoke it;
+    # an eight-trade expectancy collapse versus its previous history also
+    # forces revalidation. No no-entry observation is treated as a loss.
+    recent8 = resolved[-8:]
+    prior = resolved[:-8]
+    recent_values = [v for v in (effective_r(row) for row in recent8) if v is not None]
+    prior_values = [v for v in (effective_r(row) for row in prior) if v is not None]
+    recent8_expectancy = (
+        sum(recent_values) / len(recent_values)
+        if len(recent_values) == 8 else None
+    )
+    prior_expectancy = (
+        sum(prior_values) / len(prior_values)
+        if prior_values else None
+    )
+
+    def sharpe_proxy(values):
+        if len(values) < 2:
+            return None
+        mean = sum(values) / len(values)
+        variance = sum((v - mean) ** 2 for v in values) / len(values)
+        std = math.sqrt(max(0.0, variance))
+        if std <= 1e-12:
+            return 99.0 if mean > 0 else (-99.0 if mean < 0 else 0.0)
+        return mean / std
+
+    recent8_sharpe = sharpe_proxy(recent_values) if len(recent_values) == 8 else None
+    prior_sharpe = sharpe_proxy(prior_values)
+    consecutive_losses = 0
+    for row in reversed(resolved):
+        if str(row.get('status') or '').lower() == 'sl_hit':
+            consecutive_losses += 1
+        else:
+            break
+
+    alpha_decay_reason = None
+    if consecutive_losses >= 8:
+        alpha_decay_reason = 'EIGHT_CONSECUTIVE_LOSSES'
+    elif (
+        len(recent_values) == 8
+        and prior_sharpe is not None
+        and recent8_sharpe is not None
+        and prior_sharpe >= 0.50
+        and recent8_sharpe <= 0.0
+        and (prior_sharpe - recent8_sharpe) >= 0.75
+    ):
+        alpha_decay_reason = 'EIGHT_TRADE_SHARPE_DECAY'
+    elif (
+        len(recent_values) == 8
+        and prior_expectancy is not None
+        and recent8_expectancy is not None
+        and recent8_expectancy <= 0.0
+        and (prior_expectancy - recent8_expectancy) >= 0.15
+    ):
+        alpha_decay_reason = 'EIGHT_TRADE_EXPECTANCY_DECAY'
+
     return {
         'resolved': len(resolved),
         'discovery_resolved': len(discovery),
         'validation_resolved': len(validation),
         'expectancy_r': round(sum(gross) / len(gross), 4) if gross else None,
         'validation_expectancy_r': round(sum(val_gross) / len(val_gross), 4) if val_gross else None,
+        'profit_factor': round(gross_pf, 3) if gross_pf is not None else None,
+        'validation_profit_factor': round(val_gross_pf, 3) if val_gross_pf is not None else None,
         'net_rows': len(net),
         'net_coverage_pct': round(coverage, 2),
         'net_expectancy_r': round(sum(net) / len(net), 4) if net else None,
@@ -401,6 +540,14 @@ def _evidence_metrics(observations: List[Dict[str, Any]]) -> Dict[str, Any]:
         'validation_net_expectancy_r': round(sum(val_net) / len(val_net), 4) if val_net else None,
         'net_profit_factor': round(pf, 3) if pf is not None else None,
         'validation_net_profit_factor': round(val_pf, 3) if val_pf is not None else None,
+        'recent8_resolved': len(recent8),
+        'recent8_expectancy_r': round(recent8_expectancy, 4) if recent8_expectancy is not None else None,
+        'prior_expectancy_r': round(prior_expectancy, 4) if prior_expectancy is not None else None,
+        'recent8_sharpe_proxy': round(recent8_sharpe, 4) if recent8_sharpe is not None else None,
+        'prior_sharpe_proxy': round(prior_sharpe, 4) if prior_sharpe is not None else None,
+        'consecutive_losses': int(consecutive_losses),
+        'alpha_decay': bool(alpha_decay_reason),
+        'alpha_decay_reason': alpha_decay_reason,
     }
 
 
@@ -413,13 +560,15 @@ def summarize_execution_challenger_evidence(scoped_rows: Dict[str, Iterable[Dict
     exchange-realized result.
     """
     groups = defaultdict(list)
-    counters = defaultdict(lambda: {'n': 0, 'entry': 0, 'tp': 0, 'sl': 0, 'ambiguous': 0, 'mfe_sum': 0.0, 'mfe_n': 0, 'mae_sum': 0.0, 'mae_n': 0})
+    counters = defaultdict(lambda: {'n': 0, 'entry': 0, 'tp': 0, 'sl': 0, 'ambiguous': 0, 'expired_no_entry': 0, 'expired_after_entry': 0, 'mfe_sum': 0.0, 'mfe_n': 0, 'mae_sum': 0.0, 'mae_n': 0})
 
     for rows in (scoped_rows or {}).values():
         for row in rows or []:
             market = normalize_market(row).upper() or 'UNKNOWN'
             symbol = str(row.get('symbol') or 'ALL').upper().replace('/', '-')
             timeframe = str(row.get('timeframe') or 'ALL').upper()
+            action = normalize_action(row.get('action_normalized'))
+            action = action if action in {'LONG', 'SHORT'} else 'ALL'
             result = latest_result(row)
             evaluation = _candidate_evaluation_from_result(result)
             items = evaluation.get('results') if isinstance(evaluation, dict) else []
@@ -429,7 +578,7 @@ def summarize_execution_challenger_evidence(scoped_rows: Dict[str, Iterable[Dict
                 if not isinstance(item, dict):
                     continue
                 name = str(item.get('name') or 'UNKNOWN').upper()
-                key = (market, symbol, timeframe, name)
+                key = (market, symbol, timeframe, action, name)
                 c = counters[key]
                 c['n'] += 1
                 c['entry'] += int(bool(item.get('entry_reached')))
@@ -437,6 +586,8 @@ def summarize_execution_challenger_evidence(scoped_rows: Dict[str, Iterable[Dict
                 if status == 'tp_hit': c['tp'] += 1
                 elif status == 'sl_hit': c['sl'] += 1
                 elif status == 'ambiguous': c['ambiguous'] += 1
+                elif status == 'expired_no_entry': c['expired_no_entry'] += 1
+                elif status == 'expired_after_entry': c['expired_after_entry'] += 1
                 realized = safe_float(item.get('realized_r'))
                 net_r = None
                 if realized is not None and cost_r is not None:
@@ -455,18 +606,30 @@ def summarize_execution_challenger_evidence(scoped_rows: Dict[str, Iterable[Dict
                 })
 
     metrics_by_key = {key: _evidence_metrics(obs) for key, obs in groups.items()}
-    baseline_by_market = {
-        (market, symbol, timeframe): metrics
-        for (market, symbol, timeframe, candidate), metrics in metrics_by_key.items()
+    baseline_by_cell = {
+        (market, symbol, timeframe, action): metrics
+        for (market, symbol, timeframe, action, candidate), metrics in metrics_by_key.items()
         if candidate == 'BASELINE'
     }
 
     rows_out = []
     for key, observations in groups.items():
-        market, symbol, timeframe, name = key
+        market, symbol, timeframe, action, name = key
         c = counters[key]
         m = metrics_by_key[key]
-        baseline = baseline_by_market.get((market, symbol, timeframe)) or {}
+        baseline = baseline_by_cell.get((market, symbol, timeframe, action)) or {}
+        baseline_counter = counters.get((market, symbol, timeframe, action, 'BASELINE')) or {}
+        baseline_n = int(baseline_counter.get('n') or 0)
+        baseline_entry_pct = (
+            float(baseline_counter.get('entry') or 0) / baseline_n * 100.0
+            if baseline_n else None
+        )
+        candidate_entry_pct = (float(c.get('entry') or 0) / c['n'] * 100.0) if c['n'] else None
+        entry_reach_improvement_pp = (
+            candidate_entry_pct - baseline_entry_pct
+            if candidate_entry_pct is not None and baseline_entry_pct is not None
+            else None
+        )
         val_net = safe_float(m.get('validation_net_expectancy_r'))
         base_val_net = safe_float(baseline.get('validation_net_expectancy_r'))
         improvement = None
@@ -499,9 +662,14 @@ def summarize_execution_challenger_evidence(scoped_rows: Dict[str, Iterable[Dict
             'market': market,
             'symbol': symbol,
             'timeframe': timeframe,
+            'action': action,
             'candidate': name,
             'n_evaluated': c['n'],
-            'entry_reached_pct': round(c['entry'] / c['n'] * 100.0, 2) if c['n'] else None,
+            'entry_reached_pct': round(candidate_entry_pct, 2) if candidate_entry_pct is not None else None,
+            'baseline_entry_reached_pct': round(baseline_entry_pct, 2) if baseline_entry_pct is not None else None,
+            'entry_reach_improvement_pp': round(entry_reach_improvement_pp, 2) if entry_reach_improvement_pp is not None else None,
+            'no_entry_count': int(c.get('expired_no_entry') or 0),
+            'expired_after_entry_count': int(c.get('expired_after_entry') or 0),
             'tp': c['tp'], 'sl': c['sl'], 'ambiguous': c['ambiguous'],
             'win_rate_pct': round(c['tp'] / resolved * 100.0, 2) if resolved else None,
             'avg_mfe_r': round(c['mfe_sum'] / c['mfe_n'], 4) if c['mfe_n'] else None,
@@ -512,18 +680,22 @@ def summarize_execution_challenger_evidence(scoped_rows: Dict[str, Iterable[Dict
             'economics_basis': 'MODELED_SIGNAL_COST_R_PROXY',
         })
 
-    rows_out.sort(key=lambda r: (r['market'], r.get('symbol') or '', r.get('timeframe') or '', -(r['resolved'] or 0), -(safe_float(r.get('validation_net_expectancy_r'), -999) or -999), r['candidate']))
+    rows_out.sort(key=lambda r: (r['market'], r.get('symbol') or '', r.get('timeframe') or '', r.get('action') or 'ALL', -(r['resolved'] or 0), -(safe_float(r.get('validation_net_expectancy_r'), -999) or -999), r['candidate']))
     return {
         'version': CHALLENGER_LAB_VERSION,
         'authority': 'SHADOW_ONLY', 'production_change': False,
         'rows': rows_out,
         'policy': {
             'spot_futures_separate': True,
-            'symbol_timeframe_specific': True,
+            'symbol_timeframe_action_specific': True,
             'min_resolved_before_review': 25,
             'oos_required_before_promotion': True,
             'costs_required_before_promotion': True,
             'cost_basis': 'CONSERVATIVE_MODELED_COST_R_FROM_SOURCE_SIGNAL',
+            'no_entry_counts_as_trade': False,
+            'no_entry_counts_in_win_rate': False,
+            'entry_reachability_is_learning_evidence': True,
+            'alpha_decay_window_resolved_trades': 8,
         },
     }
 
@@ -561,14 +733,15 @@ def _canary_selected(analysis: Dict[str, Any], fraction: float) -> bool:
 
 
 def apply_governed_execution_calibration(analysis: Dict[str, Any], lab: Dict[str, Any]) -> Dict[str, Any]:
-    """Apply one already-governed execution champion without changing direction.
+    """Apply one already-governed Entry geometry champion without changing direction.
 
-    CANARY affects a deterministic 25% of eligible source candles. ACTIVE affects
-    all eligible signals.  A candidate is rejected if it widens baseline risk by
-    more than 5%, preserving the no-hide-bad-entry policy.
+    RC9.8.8 supports Spot and Futures separately. CANARY affects a deterministic
+    25% of eligible source candles; ACTIVE affects all eligible signals. A
+    candidate is rejected if it widens baseline risk by more than 5%. Safety is
+    never lowered and a missed Entry is never converted into a trade result.
     """
     audit = {
-        'version': 'C14_GOVERNED_SELF_CALIBRATION_V1',
+        'version': 'RC9_8_8_GOVERNED_ENTRY_CALIBRATION_V1',
         'applied': False,
         'state': 'OBSERVE',
         'candidate': None,
@@ -577,8 +750,8 @@ def apply_governed_execution_calibration(analysis: Dict[str, Any], lab: Dict[str
     if not isinstance(analysis, dict) or not isinstance(lab, dict):
         return audit
     market = str(analysis.get('system_type') or '').upper()
-    if market != 'FUTURES':
-        audit['reason'] = 'FUTURES_ONLY_V1'
+    if market not in {'FUTURES', 'SPOT'}:
+        audit['reason'] = 'UNSUPPORTED_MARKET'
         return audit
 
     profile = get_governed_execution_profile()
@@ -587,10 +760,12 @@ def apply_governed_execution_calibration(analysis: Dict[str, Any], lab: Dict[str
         selected_rows = [selected_rows]
     symbol = str(analysis.get('symbol') or '').upper().replace('/', '-')
     timeframe = str(analysis.get('timeframe') or '').upper()
+    current_action = normalize_action((analysis.get('decision') or {}).get('action'))
     selected = next((r for r in selected_rows if isinstance(r, dict)
-                     and str(r.get('market') or '').upper() == 'FUTURES'
+                     and str(r.get('market') or '').upper() == market
                      and str(r.get('symbol') or 'ALL').upper().replace('/', '-') in {'ALL', symbol}
-                     and str(r.get('timeframe') or 'ALL').upper() in {'ALL', timeframe}), None)
+                     and str(r.get('timeframe') or 'ALL').upper() in {'ALL', timeframe}
+                     and str(r.get('action') or 'ALL').upper() in {'ALL', current_action}), None)
     if not selected:
         audit['reason'] = 'NO_GOVERNED_CHAMPION_FOR_CELL'
         return audit
@@ -603,13 +778,16 @@ def apply_governed_execution_calibration(analysis: Dict[str, Any], lab: Dict[str
         return audit
 
     name = str(selected.get('candidate') or '').upper()
-    candidates = lab.get('candidates') or []
+    candidates = list(lab.get('candidates') or [])
+    reachability = lab.get('reachability_candidate')
+    if isinstance(reachability, dict):
+        candidates.append(reachability)
     candidate = next((c for c in candidates if isinstance(c, dict) and str(c.get('name') or '').upper() == name), None)
     if not candidate or not candidate.get('geometry_valid'):
         audit.update({'state': state, 'candidate': name, 'reason': 'CANDIDATE_NOT_AVAILABLE_THIS_SIGNAL'})
         return audit
 
-    action = normalize_action((analysis.get('decision') or {}).get('action'))
+    action = current_action
     if normalize_action(candidate.get('action')) != action or action not in {'LONG', 'SHORT'}:
         audit.update({'state': state, 'candidate': name, 'reason': 'DIRECTION_GUARD'})
         return audit
