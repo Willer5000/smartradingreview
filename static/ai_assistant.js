@@ -424,7 +424,7 @@ console.log(
                     class="text-muted"
                     style="font-size: 0.68rem;"
                 >
-                    Preparando evaluación horaria
+                    Preparando Consejo IA
                     del sistema...
                 </div>
 
@@ -435,8 +435,11 @@ console.log(
                 >
 
                     <span class="text-muted">
-                        El consejo se genera
-                        automáticamente cada 30 minutos.
+                        ${
+                            market() === 'FUTURES'
+                                ? 'Futures: consejo cada 30 min cuando hay oportunidad activa; en espera reduce frecuencia para ahorrar cuota.'
+                                : 'Spot: el consejo usa una cadencia conservadora para ahorrar cuota.'
+                        }
                     </span>
 
                 </div>
@@ -578,7 +581,11 @@ console.log(
                     class="text-muted mt-1"
                     style="font-size: 0.66rem;"
                 >
-                    Máx. 3 preguntas por hora.
+                    ${
+                        market() === 'FUTURES'
+                            ? 'Futures: 1 pregunta cada 20 min (máx. 3 por hora).'
+                            : 'Máx. 3 preguntas por hora.'
+                    }
                     Enter envía · Shift+Enter agrega una línea.
                 </div>
 
@@ -897,19 +904,57 @@ console.log(
             || {};
 
 
-        el.textContent =
-            (
-                `${hourly.remaining ?? '--'}`
-                + '/'
-                + `${hourly.limit ?? 10}`
+        const futuresCooldown =
+            quota.manual_futures_cooldown
+            || {};
+
+
+        const cooldownSeconds =
+            Number(
+                futuresCooldown.remaining_seconds
+                || 0
             );
 
 
-        el.title =
-            (
-                'Preguntas disponibles '
-                + 'esta hora'
-            );
+        if (
+            market() === 'FUTURES'
+            && cooldownSeconds > 0
+        ) {
+
+            const minutes =
+                Math.max(
+                    1,
+                    Math.ceil(
+                        cooldownSeconds / 60
+                    )
+                );
+
+            el.textContent =
+                `⏳${minutes}m`;
+
+            el.title =
+                (
+                    'Futures: próxima pregunta en '
+                    + `${minutes} min. `
+                    + 'Máximo 3 por hora.'
+                );
+
+        } else {
+
+            el.textContent =
+                (
+                    `${hourly.remaining ?? '--'}`
+                    + '/'
+                    + `${hourly.limit ?? 3}`
+                );
+
+            el.title =
+                (
+                    market() === 'FUTURES'
+                        ? 'Futures: 1 pregunta cada 20 min; máximo 3 por hora.'
+                        : 'Preguntas disponibles esta hora'
+                );
+        }
     }
 
 
@@ -1032,7 +1077,7 @@ console.log(
             if (state) {
 
                 state.textContent =
-                    'Consejo horario no disponible';
+                    'Consejo IA no disponible';
             }
 
 
@@ -1526,7 +1571,7 @@ console.log(
         } catch (error) {
 
             console.error(
-                '❌ Consejo IA horario:',
+                '❌ Consejo IA:',
                 error
             );
 
@@ -1541,7 +1586,7 @@ console.log(
                         error?.message
                         || (
                             'No se pudo generar '
-                            + 'el consejo horario.'
+                            + 'el Consejo IA.'
                         )
                     )
             });

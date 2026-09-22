@@ -1,0 +1,79 @@
+COMMIT 10.1 — ORDEN DE IMPLEMENTACIÓN (DELTA SOBRE COMMIT 10)
+=============================================================
+
+IMPORTANTE
+----------
+Commit 10 ya está aplicado. NO repetir el SQL de Commit 10 por causa de esta
+entrega y NO sustituir archivos no incluidos aquí.
+
+1) GitHub/Main — reemplazar exactamente estos archivos
+-------------------------------------------------------
+- app.py
+- ai_advisor.py
+- render.yaml
+- static/ai_assistant.js
+
+El archivo test_commit10_1_guardian_privacy_ai_cadence.py es de validación y
+puede subirse o conservarse fuera del runtime.
+
+2) Un solo commit
+-----------------
+Mensaje sugerido:
+Commit 10.1 - Compacta Guardian Telegram y distribuye el consumo IA por usuario
+
+3) Render — deploy
+------------------
+Esperar deploy SUCCESS y comprobar /api/health.
+
+4) QA mínimo
+------------
+- Login de los 3 usuarios.
+- Spot y Futures cargan sin carga infinita.
+- Guardian Spot/Futures sigue funcionando.
+- Consejo IA y Asistente IA cargan.
+
+5) QA privacidad Spot Telegram
+------------------------------
+Debe verse, por ejemplo:
+  💵 Usar: 10.0% de USDT
+  💵 Venta sugerida: 10.0% del portafolio BTC
+
+NO debe mostrarse:
+- saldo nominal;
+- cantidad exacta BTC/PAXG;
+- monto USDT/USD equivalente.
+
+6) QA Futures Guardian compacto
+-------------------------------
+Verificar que conserva los datos accionables correspondientes:
+- par / TF / dirección / riesgo / leverage;
+- precio / R / deterioro / estado;
+- SL / TP / aumento / reducción según acción;
+- RR incremental cuando exista;
+- condición para añadir y aviso de no ejecución automática.
+
+7) QA Consejo IA Futures
+------------------------
+- Con oportunidad activa: máximo una generación nueva cada 30 min.
+- Sin oportunidad activa: hasta 60 min para proteger cuota.
+- No debe volver al bucket de 15 min.
+
+8) QA Asistente IA Futures
+--------------------------
+- Primera pregunta: permitida si hay cuota.
+- Segunda antes de 20 min: bloqueada con mensaje explícito.
+- Badge/UI muestra tiempo aproximado restante.
+- A los 20 min: siguiente pregunta permitida.
+- Sigue existiendo máximo 3 preguntas/h por usuario.
+
+9) Fusible Groq
+---------------
+Si se alcanza el presupuesto protector, Consejo/Chat deben poder mostrar el
+modo local de respaldo sin nueva llamada LLM. Ese modo es informativo y no
+modifica ninguna decisión del motor.
+
+10) Supabase
+------------
+Commit 10.1 NO requiere ejecutar un SQL nuevo.
+Si el SQL de Commit 10 todavía no fue ejecutado, seguir exclusivamente el orden
+y las precondiciones de Commit 10 para ese paso.

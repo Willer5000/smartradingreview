@@ -1,0 +1,15 @@
+COMMIT 10.1 — VALIDACIÓN DELTA
+==============================
+
+Base:
+- app.py: RC9.8.7/estado previo que Commit 10 no modificó.
+- ai_advisor.py y render.yaml: Commit 10.
+- static/ai_assistant.js: versión estable previa a 10.1.
+
+Validaciones requeridas:
+- Python compile de app.py y ai_advisor.py.
+- JavaScript syntax check de static/ai_assistant.js.
+- test_commit10_1_guardian_privacy_ai_cadence.py.
+- Contratos de Commit 10 deben permanecer válidos en ai_advisor.py/render.yaml.
+
+Este delta NO contiene ni requiere un nuevo SQL Supabase.

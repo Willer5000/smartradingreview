@@ -42106,34 +42106,66 @@ def _tgp_public_subject(tgp_result, state='', veto=False):
 
 
 def _tgp_public_allocation_lines(tgp_result):
-    """Telegram compartido: sólo porcentajes; montos quedan en la web privada."""
+    """Telegram compartido: sólo porcentajes; montos quedan en la web privada.
+
+    RC10.1:
+    - nunca expone amount_usd / amount_crypto;
+    - comunica el tamaño como porcentaje del activo fuente;
+    - conserva la asignación objetivo para que la recomendación siga siendo útil.
+    """
     result = tgp_result or {}
+    action = str(result.get('action') or '').upper()
+    source = str(result.get('source_asset') or '').upper()
+    target = str(result.get('target_asset') or '').upper()
     before = result.get('portfolio_before') or {}
     after = result.get('portfolio_after') or {}
-    target = str(result.get('target_asset') or '').upper()
 
-    key = {
+    try:
+        trade_pct = max(
+            0.0,
+            float(result.get('trade_size_pct') or 0) * 100.0
+        )
+    except Exception:
+        trade_pct = 0.0
+
+    lines = []
+
+    # El porcentaje viene del propio TGP. Telegram nunca necesita conocer
+    # saldos ni montos nominales del usuario.
+    if trade_pct > 0 and source:
+        if action in ('BUY_BTC', 'BUY_PAXG') and source == 'USDT':
+            lines.append(
+                f"💵 Usar: <b>{trade_pct:.1f}% de USDT</b>"
+            )
+        elif action in ('SELL_BTC', 'SELL_PAXG'):
+            lines.append(
+                f"💵 Venta sugerida: <b>{trade_pct:.1f}% del portafolio {source}</b>"
+            )
+        elif action in ('SWAP_PAXG_TO_BTC', 'SWAP_BTC_TO_PAXG') and target:
+            lines.append(
+                f"🔄 Rotación sugerida: <b>{trade_pct:.1f}% del portafolio {source} → {target}</b>"
+            )
+        else:
+            lines.append(
+                f"💵 Ajuste sugerido: <b>{trade_pct:.1f}% de {source}</b>"
+            )
+
+    target_key = {
         'BTC': 'pct_btc',
         'PAXG': 'pct_paxg',
         'USDT': 'pct_usdt',
     }.get(target)
 
-    lines = []
-    if key:
+    if target_key:
         try:
-            before_pct = float(before.get(key) or 0) * 100.0
-            after_pct = float(after.get(key) or 0) * 100.0
+            before_pct = float(before.get(target_key) or 0) * 100.0
+            after_pct = float(after.get(target_key) or 0) * 100.0
             delta = after_pct - before_pct
             sign = '+' if delta >= 0 else ''
             lines.append(
-                f"{target}: <b>{before_pct:.1f}% → {after_pct:.1f}%</b> "
+                f"🎯 {target}: <b>{before_pct:.1f}% → {after_pct:.1f}%</b> "
                 f"({sign}{delta:.1f} pp)"
             )
-            if delta > 0:
-                lines.append(
-                    'Tomar el ajuste desde PAXG y/o USDT según corresponda, '
-                    'sin bajar las reservas mínimas definidas por el Guardián.'
-                )
         except Exception:
             pass
 
@@ -42699,192 +42731,112 @@ def _build_futures_guardian_telegram_message(
     current_price,
     management_action
 ):
+    """RC10.1 — Telegram compacto sin perder información operativa."""
 
-    symbol = str(
-        signal.get(
-            'symbol',
-            '?'
-        )
-    )
+    symbol = str(signal.get('symbol', '?'))
+    timeframe = str(signal.get('timeframe', '?'))
+    direction = str(signal.get('action', '?')).upper()
+    leverage = signal.get('leverage')
 
-    timeframe = str(
-        signal.get(
-            'timeframe',
-            '?'
-        )
-    )
-
-    direction = str(
-        signal.get(
-            'action',
-            '?'
-        )
-    ).upper()
-
-    leverage = signal.get(
-        'leverage'
-    )
-
-    original_sl = signal.get(
-        'stop_loss'
-    )
-
-    original_tp = signal.get(
-        'take_profit'
-    )
-
-    suggested_sl = advice.get(
-        'suggested_stop_loss'
-    )
-
-    suggested_tp = advice.get(
-        'suggested_take_profit'
-    )
-
+    original_sl = signal.get('stop_loss')
+    original_tp = signal.get('take_profit')
+    suggested_sl = advice.get('suggested_stop_loss')
+    suggested_tp = advice.get('suggested_take_profit')
     suggested_add_entry = advice.get('suggested_add_entry')
     suggested_add_pct = advice.get('suggested_add_position_pct')
     suggested_add_usdt = advice.get('suggested_add_position_usdt')
     suggested_reduce_pct = advice.get('suggested_reduce_pct')
     scale_in_rr = advice.get('scale_in_rr')
     trade_state = str(advice.get('trade_state') or 'HEALTHY').upper()
-
-    progress_r = advice.get(
-        'progress_r'
-    )
-
-    deterioration = advice.get(
-        'deterioration_score',
-        0
-    )
-
+    progress_r = advice.get('progress_r')
+    deterioration = advice.get('deterioration_score', 0)
     reason = (
-        advice.get(
-            'management_reason'
-        )
-        or advice.get(
-            'reason'
-        )
+        advice.get('management_reason')
+        or advice.get('reason')
         or ''
     )
 
     labels = {
-
-        'PROTECT':
-            '🛡️ <b>PROTEGER POSICIÓN</b>',
-
-        'EXTEND':
-            '🎯 <b>EXTENDER OBJETIVO</b>',
-
-        'PROTECT_AND_EXTEND':
-            '🛡️🎯 <b>PROTEGER + EXTENDER</b>',
-
-        'ADD_POSITION':
-            '➕ <b>AUMENTAR POSICIÓN</b>',
-
-        'PROTECT_AND_ADD':
-            '🛡️➕ <b>PROTEGER + AUMENTAR</b>',
-
-        'ADD_AND_EXTEND':
-            '➕🎯 <b>AUMENTAR + EXTENDER</b>',
-
-        'PROTECT_ADD_AND_EXTEND':
-            '🛡️➕🎯 <b>PROTEGER + AUMENTAR + EXTENDER</b>',
-
-        'REDUCE':
-            '🟡 <b>REDUCIR / PROTEGER</b>',
-
-        'EXIT':
-            '🔴 <b>SALIR DE LA OPERACIÓN</b>'
+        'PROTECT': '🛡️ <b>PROTEGER</b>',
+        'EXTEND': '🎯 <b>EXTENDER OBJETIVO</b>',
+        'PROTECT_AND_EXTEND': '🛡️🎯 <b>PROTEGER + EXTENDER</b>',
+        'ADD_POSITION': '➕ <b>AUMENTAR POSICIÓN</b>',
+        'PROTECT_AND_ADD': '🛡️➕ <b>PROTEGER + AUMENTAR</b>',
+        'ADD_AND_EXTEND': '➕🎯 <b>AUMENTAR + EXTENDER</b>',
+        'PROTECT_ADD_AND_EXTEND': '🛡️➕🎯 <b>PROTEGER + AUMENTAR + EXTENDER</b>',
+        'REDUCE': '🟡 <b>REDUCIR / PROTEGER</b>',
+        'EXIT': '🔴 <b>SALIR DE LA OPERACIÓN</b>',
     }
+    headline = labels.get(management_action, _telegram_escape(management_action))
 
-    headline = labels.get(
-        management_action,
-        management_action
-    )
-
-    lines = [
-
-        f"👤 <b>{_telegram_escape(user)}</b>",
-        "🛡️ <b>FUTURES GUARDIAN</b>",
-        '',
-        headline,
-        '',
-        (
-            f"<b>{_telegram_escape(symbol)}</b> "
-            f"· {timeframe} · {direction}"
-        )
-    ]
-
+    risk_bits = []
     try:
         from futures_universe import exit_profile_for
-        _risk_profile = exit_profile_for(symbol)
-        _risk_class = str(_risk_profile.get('risk_class') or 'UNKNOWN')
-        if _risk_class != 'UNKNOWN':
-            lines.append(
-                f"🧩 Riesgo: <b>{_telegram_escape(_risk_class)}</b> · "
-                f"salida {_telegram_escape(str(_risk_profile.get('name') or 'NORMAL'))}"
-            )
+        risk_profile = exit_profile_for(symbol)
+        risk_class = str(risk_profile.get('risk_class') or 'UNKNOWN')
+        exit_name = str(risk_profile.get('name') or 'NORMAL')
+        if risk_class != 'UNKNOWN':
+            risk_bits.append(_telegram_escape(risk_class))
+            risk_bits.append('salida ' + _telegram_escape(exit_name))
     except Exception:
         pass
 
     if leverage:
-
         try:
-
-            lines[-1] += (
-                f" · x{int(float(leverage))}"
-            )
-
+            risk_bits.append(f"x{int(float(leverage))}")
         except Exception:
             pass
 
-    lines.extend([
+    instrument_line = (
+        f"<b>{_telegram_escape(symbol)}</b> · "
+        f"{_telegram_escape(timeframe)} · {_telegram_escape(direction)}"
+    )
+    if risk_bits:
+        instrument_line += ' · ' + ' · '.join(risk_bits)
+
+    metric_bits = [
+        f"💹 <b>{_telegram_price(current_price)}</b>"
+    ]
+    try:
+        if progress_r is not None:
+            metric_bits.append(f"📈 <b>{float(progress_r):+.2f}R</b>")
+    except Exception:
+        pass
+    try:
+        metric_bits.append(f"⚠️ Deterioro <b>{float(deterioration):.0f}/100</b>")
+    except Exception:
+        pass
+
+    lines = [
+        f"👤 <b>{_telegram_escape(user)} · 🛡️ FUTURES GUARDIAN</b>",
+        instrument_line,
         '',
-        (
-            "💹 Precio actual: "
-            f"<b>{_telegram_price(current_price)}</b>"
-        )
-    ])
+        headline,
+        ' · '.join(metric_bits),
+        f"🧭 Estado: <b>{_telegram_escape(trade_state)}</b>",
+    ]
 
     if management_action in (
         'PROTECT',
         'PROTECT_AND_EXTEND',
         'PROTECT_AND_ADD',
-        'PROTECT_ADD_AND_EXTEND'
+        'PROTECT_ADD_AND_EXTEND',
     ):
-
-        lines.extend([
-            '',
-            '🛡️ <b>Protección de riesgo</b>',
-            (
-                "SL original: "
-                f"{_telegram_price(original_sl)}"
-            ),
-            (
-                "SL sugerido: "
-                f"<b>{_telegram_price(suggested_sl)}</b>"
-            )
-        ])
+        lines.append(
+            f"🛡️ SL: {_telegram_price(original_sl)} → "
+            f"<b>{_telegram_price(suggested_sl)}</b>"
+        )
 
     if management_action in (
         'EXTEND',
         'PROTECT_AND_EXTEND',
         'ADD_AND_EXTEND',
-        'PROTECT_ADD_AND_EXTEND'
+        'PROTECT_ADD_AND_EXTEND',
     ):
-
-        lines.extend([
-            '',
-            '🎯 <b>Objetivo</b>',
-            (
-                "TP original: "
-                f"{_telegram_price(original_tp)}"
-            ),
-            (
-                "TP sugerido: "
-                f"<b>{_telegram_price(suggested_tp)}</b>"
-            )
-        ])
+        lines.append(
+            f"🎯 TP: {_telegram_price(original_tp)} → "
+            f"<b>{_telegram_price(suggested_tp)}</b>"
+        )
 
     if management_action in (
         'ADD_POSITION',
@@ -42892,100 +42844,50 @@ def _build_futures_guardian_telegram_message(
         'ADD_AND_EXTEND',
         'PROTECT_ADD_AND_EXTEND',
     ):
-        lines.extend([
-            '',
-            '➕ <b>Aumento de posición · sólo confirmación</b>',
-            (
-                'Entrada adicional sugerida: '
-                f'<b>{_telegram_price(suggested_add_entry)}</b>'
-            ),
-            (
-                'Tamaño adicional máximo: '
-                f'<b>{float(suggested_add_pct or 0):.0f}%</b> de la posición original'
-            ),
-        ])
+        add_bits = [
+            f"➕ Entrada: <b>{_telegram_price(suggested_add_entry)}</b>",
+            f"máx. <b>{float(suggested_add_pct or 0):.0f}%</b>",
+        ]
         if suggested_add_usdt is not None:
             try:
-                lines.append(
-                    f'Margen orientativo: <b>{float(suggested_add_usdt):.2f} USDT</b>'
-                )
+                add_bits.append(f"~<b>{float(suggested_add_usdt):.2f} USDT</b>")
             except Exception:
                 pass
+        lines.append(' · '.join(add_bits))
+
         if scale_in_rr is not None:
             try:
                 lines.append(
-                    f'RR incremental estimado: <b>{float(scale_in_rr):.2f}</b>'
+                    f"📈 RR incremental: <b>{float(scale_in_rr):.2f}</b>"
                 )
             except Exception:
                 pass
-        lines.append('No promediar pérdida: añadir sólo si el retest/confirmación se mantiene.')
+        lines.append(
+            'Sólo añadir con retest/confirmación; <b>no promediar pérdida</b>.'
+        )
 
     if management_action == 'REDUCE' and suggested_reduce_pct is not None:
         try:
-            lines.extend([
-                '',
-                f'📉 Reducción sugerida: <b>{float(suggested_reduce_pct):.0f}%</b> de la exposición.'
-            ])
-        except Exception:
-            pass
-
-    lines.extend([
-        '',
-        f'🧭 Estado técnico: <b>{_telegram_escape(trade_state)}</b>'
-    ])
-
-    if progress_r is not None:
-
-        try:
-
-            progress_r = float(
-                progress_r
+            lines.append(
+                f"📉 Reducir: <b>{float(suggested_reduce_pct):.0f}%</b> de la exposición."
             )
-
-            lines.extend([
-                '',
-                (
-                    "📈 Progreso: "
-                    f"<b>{progress_r:+.2f}R</b>"
-                )
-            ])
-
         except Exception:
             pass
 
-    try:
-
+    if management_action == 'EXIT':
         lines.append(
-            "⚠️ Deterioro: "
-            f"{float(deterioration):.0f}/100"
+            f"🔴 Salida sugerida: <b>{_telegram_price(current_price)}</b>"
         )
-
-    except Exception:
-        pass
 
     if reason:
+        lines.append('💡 ' + _telegram_escape(reason))
 
-        lines.extend([
-            '',
-            (
-                "💡 "
-                + _telegram_escape(
-                    reason
-                )
-            )
-        ])
-
-    lines.extend([
-        '',
-        (
-            "⚠️ <i>Recomendación del Guardian. "
-            "No modifica automáticamente la orden.</i>"
-        )
-    ])
-
-    return '\n'.join(
-        lines
+    lines.append(
+        '⚠️ <i>Recomendación del Guardian; no ejecuta órdenes automáticamente.</i>'
     )
+
+    return '\n'.join(lines)
+
 
 # ============================================================================
 # COMMIT 36R — CONTEXTO IA
@@ -46931,22 +46833,6 @@ def _build_proactive_spot_guardian_message(
             ''
         )
         or ''
-    )
-
-    amount_crypto = float(
-        tgp_result.get(
-            'amount_crypto',
-            0
-        )
-        or 0
-    )
-
-    amount_usd = float(
-        tgp_result.get(
-            'amount_usd',
-            0
-        )
-        or 0
     )
 
     before = (
@@ -53978,8 +53864,6 @@ def send_tgp_telegram_alert(tgp_result, user, symbol, timeframe, prices):
         action = tgp_result.get('action', 'HOLD')
         reason = _tgp_public_reason(tgp_result.get('reason', ''))
         confidence = tgp_result.get('confidence', 0)
-        amount_crypto = tgp_result.get('amount_crypto', 0)
-        amount_usd = tgp_result.get('amount_usd', 0)
         source = tgp_result.get('source_asset', '')
         target = tgp_result.get('target_asset', '')
         state = tgp_result.get('state', '')

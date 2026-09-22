@@ -1,0 +1,62 @@
+COMMIT 10.1 — DELTA SOBRE COMMIT 10 YA IMPLEMENTADO
+===================================================
+
+PRECONDICIÓN
+------------
+Commit 10 ya está aplicado. Esta entrega NO vuelve a incluir el SQL de lockdown,
+ni el hardening base de Commit 10 como archivos separados.
+
+ARCHIVOS RUNTIME MODIFICADOS
+----------------------------
+1. app.py
+2. ai_advisor.py
+3. render.yaml
+4. static/ai_assistant.js
+
+ALCANCE
+-------
+1) Guardian Spot / Telegram — privacidad
+   - Telegram NO muestra amount_usd ni amount_crypto.
+   - Compra con USDT: "Usar: X% de USDT".
+   - Venta: "Venta sugerida: X% del portafolio BTC/PAXG".
+   - Rotación: "X% del portafolio ORIGEN → DESTINO".
+   - Mantiene porcentajes antes/después y objetivo táctico.
+   - Los montos nominales siguen disponibles dentro de la interfaz autenticada.
+
+2) Guardian Futures / Telegram — compactación
+   - Compacta PROTECT / EXTEND / ADD / combinaciones / REDUCE / EXIT.
+   - Conserva símbolo, TF, dirección, riesgo/salida, leverage, precio, progreso R,
+     deterioro, estado, SL/TP, entrada adicional, porcentaje adicional, RR
+     incremental, reducción, motivo y aviso de no ejecución automática.
+   - Elimina encabezados y frases redundantes.
+
+3) Consejo IA Futures — ahorro de tokens
+   - Con oportunidad activa: máximo una generación externa nueva cada 30 min.
+   - Sin oportunidad activa: conserva 60 min para ahorrar cuota.
+   - No cambia Spot ni la lógica de trading.
+
+4) Asistente IA Futures — 3/h distribuidas
+   - Máximo 1 pregunta cada 20 minutos por usuario.
+   - Se mantiene máximo 3 preguntas por ventana móvil de 1 hora.
+   - Backend impide saltarse el intervalo, incluso mediante respuesta cacheada.
+   - UI lo informa explícitamente y muestra cuenta regresiva aproximada.
+
+5) Fusible Groq — modo local sin tokens
+   - Si el presupuesto protector diario se alcanza, Consejo/Chat pueden usar un
+     resumen local determinista con datos ya calculados por SmartTradingReview.
+   - No realiza otra llamada a Groq.
+   - No cambia LONG/SHORT, Entry, SL, TP, leverage, Guardian ni publicación.
+
+NO MODIFICA
+-----------
+- Dirección de trading.
+- Entry / SL / TP del motor.
+- Safety ni publication gates.
+- R:R mínimo.
+- Apalancamiento calculado.
+- ReviewTrader / Alpha Decay / Shadow-Canary-Active.
+- Aprendizaje gobernado por mercado × símbolo × TF × acción.
+
+POLÍTICA PRESERVADA
+-------------------
+Asertivo pero cauto. Precavido pero no tímido. Orientado a rentabilidad.
