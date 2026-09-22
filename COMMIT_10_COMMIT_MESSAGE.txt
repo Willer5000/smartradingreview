@@ -1,0 +1,12 @@
+Commit 10 — Final Phase 1 release hardening
+
+- freeze trading/safety contracts without changing signal intelligence
+- restore RC9.8.7 Futures cache capacity (8) + bounded microstructure cache
+- keep Supabase free-plan application guards explicit
+- consolidate AI quota checks into one bounded Supabase read
+- add protective Groq daily token budget and reserve
+- normalize deprecated Groq model IDs
+- add server-only Supabase RLS/revoke lockdown migration
+- add final release contract tests and audit report
+
+No Research commit. No strategy/Safety/Entry/SL/TP logic change.

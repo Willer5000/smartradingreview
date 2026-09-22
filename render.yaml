@@ -35,11 +35,22 @@ services:
       - key: MEMORY_ANALYSIS_CACHE_KEEP
         value: "2"
       - key: FUTURES_DATA_CACHE_MAX_ENTRIES
-        value: "2"
+        value: "8"
+      - key: FUTURES_MICROSTRUCTURE_CACHE_MAX_ENTRIES
+        value: "20"
       - key: MEMORY_JOB_START_LIMIT_MB
         value: "240"
       - key: LOW_MEMORY_MODE
         value: "1"
+      # RC10 — resource circuit breakers: preserve free Supabase/Groq quotas.
+      - key: FREE_PLAN_LOCKDOWN
+        value: "1"
+      - key: MAIN_SUPABASE_DAILY_BUDGET_MB
+        value: "12"
+      - key: AI_GROQ_DAILY_TOKEN_BUDGET
+        value: "160000"
+      - key: AI_GROQ_DAILY_TOKEN_RESERVE
+        value: "8000"
       - key: FUTURES_INCREMENTAL_INTERVAL_SECONDS
         value: "30"
       - key: SYSTEM_INTERACTIVE_PRIORITY_SECONDS

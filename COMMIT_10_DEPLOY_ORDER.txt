@@ -1,0 +1,32 @@
+COMMIT 10 — ORDEN DE IMPLEMENTACIÓN
+
+1) GitHub/Main: reemplazar
+   - ai_advisor.py
+   - render.yaml
+
+2) Deploy de Render y comprobar:
+   - /api/health responde
+   - login funciona
+   - Spot y Futures cargan
+   - Asistente IA no devuelve error de modelo
+   - recomendaciones y señales siguen apareciendo
+
+3) ANTES del SQL: confirmar en Render que Supabase usa una key service_role:
+   CENTRAL_SUPABASE_SERVICE_KEY o SUPABASE_SERVICE_ROLE_KEY.
+   Si sólo existe SUPABASE_KEY, confirmar que esa key es service_role.
+   NO ejecutar el SQL con una anon/publishable key como backend principal.
+
+4) Supabase SQL Editor: ejecutar
+   schema_commit10_final_security_lockdown.sql
+
+5) Volver a comprobar inmediatamente:
+   - login
+   - guardar/leer preferencias
+   - señales Spot/Futures
+   - señales guardadas/Guardian
+   - Analytics/Research
+   - Asistente IA
+
+6) Supabase Advisors: volver a ejecutar Security Advisor.
+
+7) Congelar Fase 1. Los siguientes cambios son Fase 2 salvo bug crítico.

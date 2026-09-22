@@ -53,12 +53,42 @@ AI_PROVIDER = (
 )
 
 
-AI_MODEL = (
+_GROQ_DEPRECATED_MODEL_MAP = {
+    # RC10: Groq retiró estos IDs en 2026. Si un Environment viejo
+    # sigue apuntando a ellos, normalizamos sin romper el Asistente.
+    "llama-3.1-8b-instant": "openai/gpt-oss-20b",
+    "llama-3.3-70b-versatile": "openai/gpt-oss-20b",
+    "groq/compound": "openai/gpt-oss-20b",
+    "groq/compound-mini": "openai/gpt-oss-20b",
+    "qwen/qwen3.6-27b": "qwen/qwen3.8-27b",
+}
+
+def _effective_groq_model(model):
+    value = str(model or "openai/gpt-oss-20b").strip()
+    return _GROQ_DEPRECATED_MODEL_MAP.get(value, value)
+
+AI_MODEL = _effective_groq_model(
     os.getenv(
         "AI_ADVISOR_MODEL",
         "openai/gpt-oss-20b"
     )
-    .strip()
+)
+
+# RC10: presupuesto protector, por debajo del TPD publicado para gpt-oss.
+# No pretende reemplazar el 429/rate-limit real de Groq: es un fusible local.
+GROQ_DAILY_TOKEN_BUDGET = max(
+    20_000,
+    min(
+        190_000,
+        int(os.getenv("AI_GROQ_DAILY_TOKEN_BUDGET", "160000"))
+    )
+)
+GROQ_DAILY_TOKEN_RESERVE = max(
+    2_000,
+    min(
+        20_000,
+        int(os.getenv("AI_GROQ_DAILY_TOKEN_RESERVE", "8000"))
+    )
 )
 
 
@@ -625,18 +655,7 @@ TRADING_TERMS = (
     "sol",
     "xrp",
     "ada",
-    "bnb",
-    "link",
-    "avax",
-    "near",
-    "dot",
-    "sui",
-    "hype",
-    "apt",
-    "inj",
-    "sei",
     "paxg",
-    "usdt",
     "señal",
     "senal",
     "long",
@@ -964,242 +983,123 @@ def _count_usage(
 
         return -1
 
+def _read_usage_window_once(day_iso):
+    """RC10: una sola lectura acotada para todas las cuotas IA de 24h."""
+    db = _db()
+    if db is None or not getattr(db, "enabled", False):
+        return None
+    if hasattr(db, "read_circuit_open") and db.read_circuit_open():
+        return None
+    try:
+        def _op():
+            return (
+                db.client.table("ai_usage_events")
+                .select(
+                    "user_name,usage_type,context_type,provider,status,total_tokens,created_at"
+                )
+                .gte("created_at", day_iso)
+                .order("created_at", desc=True)
+                .limit(720)
+                .execute()
+            )
+        result = db._with_retry(_op)
+        rows = getattr(result, "data", None)
+        return list(rows or [])
+    except Exception as e:
+        logger.warning("AI quota snapshot: %s", e)
+        return None
+
+
 def get_ai_quota_status(
     user_name
 ):
-
     now = _now()
+    hour_dt = now - timedelta(hours=1)
+    day_dt = now - timedelta(hours=24)
+    rows = _read_usage_window_once(day_dt.isoformat())
 
-
-    hour = (
-        now
-        - timedelta(
-            hours=1
-        )
-    ).isoformat()
-
-
-    day = (
-        now
-        - timedelta(
-            hours=24
-        )
-    ).isoformat()
-
-
-    # ================================================================
-    # CUOTAS SEPARADAS
-    # ================================================================
-    #
-    # MANUAL:
-    #     por usuario.
-    #
-    # HOURLY_MARKET_ADVICE:
-    #     por usuario.
-    #
-    # DECISION_CONTROL + GUARDIAN:
-    #     presupuesto automático del sistema.
-    #
-    # LEARNING:
-    #     presupuesto independiente.
-    #
-    # Esto evita que Guardian / Decision Control consuman
-    # el presupuesto del consejo horario del usuario.
-    # ================================================================
-
-    values = {
-
-        "mh":
-            _count_usage(
-                hour,
-                user_name,
-                "MANUAL"
-            ),
-
-        "md":
-            _count_usage(
-                day,
-                user_name,
-                "MANUAL"
-            ),
-
-        # AUTO total.
-        # Sólo para observabilidad / compatibilidad.
-        "ad":
-            _count_usage(
-                day,
-                None,
-                "AUTO"
-            ),
-
-        # Consejo horario PERSONAL.
-        "had":
-            _count_usage(
-                day,
-                user_name,
-                "AUTO",
-                "HOURLY_MARKET_ADVICE"
-            ),
-
-        # Controles automáticos Futures.
-        "dc":
-            _count_usage(
-                day,
-                None,
-                "AUTO",
-                "DECISION_CONTROL"
-            ),
-
-        # Guardian IA.
-        "gu":
-            _count_usage(
-                day,
-                None,
-                "AUTO",
-                "GUARDIAN"
-            ),
-
-        "ld":
-            _count_usage(
-                day,
-                None,
-                "LEARNING"
-            ),
-
-        # Total general.
-        # Se conserva como información de diagnóstico.
-        "gd":
-            _count_usage(
-                day
-            )
-    }
-
-
-    if (
-        values["dc"] < 0
-        or values["gu"] < 0
-    ):
-
-        auto_control_used = -1
-
-    else:
-
-        auto_control_used = (
-            values["dc"]
-            + values["gu"]
-        )
-
-
-    def item(
-        used,
-        limit
-    ):
-
-        used = max(
-            0,
-            used
-        )
-
+    def item(used, limit):
+        used = max(0, int(used or 0))
         return {
-            "used":
-                used,
-
-            "limit":
-                limit,
-
-            "remaining":
-                max(
-                    0,
-                    limit - used
-                )
+            "used": used,
+            "limit": int(limit),
+            "remaining": max(0, int(limit) - used),
         }
 
+    # Fail closed: si no podemos comprobar cuotas, no hacemos nuevas llamadas IA.
+    if rows is None:
+        return {
+            "enabled": AI_ENABLED,
+            "provider": AI_PROVIDER,
+            "model": AI_MODEL,
+            "window": "ROLLING",
+            "manual_hourly": item(0, LIMIT_MANUAL_HOUR),
+            "manual_daily": item(0, LIMIT_MANUAL_DAY),
+            "hourly_advice_daily": item(0, LIMIT_HOURLY_ADVICE_DAY),
+            "auto_control_daily": item(0, LIMIT_AUTO_CONTROL_DAY),
+            "automatic_daily": item(0, LIMIT_AUTO_DAY),
+            "learning_daily": item(0, LIMIT_LEARNING_DAY),
+            "global_daily": item(0, LIMIT_GLOBAL_DAY),
+            "groq_tokens_daily": item(0, GROQ_DAILY_TOKEN_BUDGET),
+            "quota_storage_ok": False,
+        }
 
-    storage_values = [
-        values["mh"],
-        values["md"],
-        values["ad"],
-        values["had"],
-        values["dc"],
-        values["gu"],
-        values["ld"],
-        values["gd"],
-    ]
+    uname = str(user_name or "")
+    counters = dict(mh=0, md=0, ad=0, had=0, dc=0, gu=0, ld=0, gd=0)
+    groq_tokens = 0
 
+    for row in rows:
+        if str(row.get("status") or "").upper() != "SUCCESS":
+            continue
+        created_raw = str(row.get("created_at") or "")
+        try:
+            created = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+        except Exception:
+            created = day_dt
 
+        usage = str(row.get("usage_type") or "").upper()
+        context = str(row.get("context_type") or "").upper()
+        row_user = str(row.get("user_name") or "")
+        provider = str(row.get("provider") or "").upper()
+
+        counters["gd"] += 1
+        if "GROQ" in provider:
+            try:
+                groq_tokens += max(0, int(row.get("total_tokens") or 0))
+            except Exception:
+                pass
+        if usage == "MANUAL" and row_user == uname:
+            counters["md"] += 1
+            if created >= hour_dt:
+                counters["mh"] += 1
+        if usage == "AUTO":
+            counters["ad"] += 1
+            if context == "HOURLY_MARKET_ADVICE" and row_user == uname:
+                counters["had"] += 1
+            elif context == "DECISION_CONTROL":
+                counters["dc"] += 1
+            elif context == "GUARDIAN":
+                counters["gu"] += 1
+        elif usage == "LEARNING":
+            counters["ld"] += 1
+
+    auto_control_used = counters["dc"] + counters["gu"]
     return {
-
-        "enabled":
-            AI_ENABLED,
-
-        "provider":
-            AI_PROVIDER,
-
-        "model":
-            AI_MODEL,
-
-        # Ventanas móviles:
-        # última hora / últimas 24 horas.
-        "window":
-            "ROLLING",
-
-        "manual_hourly":
-            item(
-                values["mh"],
-                LIMIT_MANUAL_HOUR
-            ),
-
-        "manual_daily":
-            item(
-                values["md"],
-                LIMIT_MANUAL_DAY
-            ),
-
-        # ============================================================
-        # CONSEJO HORARIO PERSONAL
-        # ============================================================
-        "hourly_advice_daily":
-            item(
-                values["had"],
-                LIMIT_HOURLY_ADVICE_DAY
-            ),
-
-        # ============================================================
-        # CONTROL AUTOMÁTICO DEL SISTEMA
-        # ============================================================
-        "auto_control_daily":
-            item(
-                auto_control_used,
-                LIMIT_AUTO_CONTROL_DAY
-            ),
-
-        # AUTO agregado.
-        # Informativo, no mezcla los gates.
-        "automatic_daily":
-            item(
-                values["ad"],
-                LIMIT_AUTO_DAY
-            ),
-
-        "learning_daily":
-            item(
-                values["ld"],
-                LIMIT_LEARNING_DAY
-            ),
-
-        # Total agregado para diagnóstico.
-        "global_daily":
-            item(
-                values["gd"],
-                LIMIT_GLOBAL_DAY
-            ),
-
-        "quota_storage_ok":
-            all(
-                value >= 0
-                for value
-                in storage_values
-            )
+        "enabled": AI_ENABLED,
+        "provider": AI_PROVIDER,
+        "model": AI_MODEL,
+        "window": "ROLLING",
+        "manual_hourly": item(counters["mh"], LIMIT_MANUAL_HOUR),
+        "manual_daily": item(counters["md"], LIMIT_MANUAL_DAY),
+        "hourly_advice_daily": item(counters["had"], LIMIT_HOURLY_ADVICE_DAY),
+        "auto_control_daily": item(auto_control_used, LIMIT_AUTO_CONTROL_DAY),
+        "automatic_daily": item(counters["ad"], LIMIT_AUTO_DAY),
+        "learning_daily": item(counters["ld"], LIMIT_LEARNING_DAY),
+        "global_daily": item(counters["gd"], LIMIT_GLOBAL_DAY),
+        "groq_tokens_daily": item(groq_tokens, GROQ_DAILY_TOKEN_BUDGET),
+        "quota_storage_ok": True,
     }
 
 def _quota_allowed(
@@ -1239,6 +1139,16 @@ def _quota_allowed(
         context_type
         or ""
     ).upper()
+
+    # RC10: fusible por tokens Groq. Deja reserva para no pegar el límite real.
+    if "GROQ" in str(AI_PROVIDER).upper():
+        token_quota = quota.get("groq_tokens_daily") or {}
+        if int(token_quota.get("remaining") or 0) <= GROQ_DAILY_TOKEN_RESERVE:
+            return (
+                False,
+                "Presupuesto diario protector de tokens Groq alcanzado; se conserva reserva.",
+                quota,
+            )
 
 
     # ================================================================
@@ -1452,8 +1362,9 @@ def _record_usage(
 
         "model":
             str(
-                model
-                or AI_MODEL
+                _effective_groq_model(model or AI_MODEL)
+                if "GROQ" in str(provider or AI_PROVIDER).upper()
+                else (model or AI_MODEL)
             )[:120],
 
         "status":
@@ -2685,10 +2596,6 @@ no definen dirección; considera crowding, desapalancamiento, absorción y
 si el contexto favorece continuación o reversión. Una pared puede desaparecer.
 No inventes Entry/SL/TP, no aumentes leverage y no conviertas
 NO_OPERAR en LONG/SHORT. Si contradices una señal, explica la evidencia.
-Si manual_comparison existe, compara únicamente los activos solicitados con
-la evidencia disponible para cada uno. No elijas por confidence aislada: prioriza
-calidad de Entry/SL/TP, RR, Safety, estructura, volatilidad, costes y contexto.
-Si ninguno tiene ventaja suficiente, responde que no conviene entrar en ninguno.
 
 SPOT/TGP:
 Spot no es Futures. Considera BTC, PAXG y USDT, reservas,
@@ -3158,27 +3065,16 @@ Una estrategia propuesta:
 Una estrategia propuesta debe indicar:
 
 1. mercado: SPOT o FUTURES;
-2. scope_key: par Spot exacto o grupo Futures CORE/MEDIUM/HIGH;
-3. temporalidad exacta permitida por contrato;
-4. acción/dirección: COMPRA_SPOT, VENTA_SPOT, LONG o SHORT;
-5. tesis y régimen donde debería funcionar;
-6. setup técnico;
-7. familias de indicadores independientes (evita contar indicadores correlacionados como votos distintos);
-8. condiciones de entrada observables;
-9. invalidación;
-10. lógica de target;
-11. métrica principal de éxito y cantidad mínima de muestras;
-12. regla de falsificación;
-13. por qué merece ser probada;
-14. research_filters: filtros ESTRUCTURADOS que Research Federation pueda medir.
-
-Nunca presentes una hipótesis RESEARCH_ONLY como una oportunidad operativa.
-En LEARNING están prohibidas frases como "considerar una posición", "entrar LONG",
-"abrir SHORT", "comprar ahora" o "vender ahora". Debes decir "validar en Research",
-"hipótesis a comprobar" o equivalente. Separa SIEMPRE Discovery de Validation/OOS.
-Si Validation tiene menos de 10 resultados, dilo explícitamente y no la llames edge validado.
-Una hipótesis agregada de Futures debe validarse después por grupo y símbolo local antes
-de adquirir autoridad; un prior CORE/MEDIUM/HIGH nunca se convierte en Champion local.
+2. tesis;
+3. régimen donde debería funcionar;
+4. setup técnico;
+5. condiciones de entrada observables;
+6. invalidación;
+7. lógica de target;
+8. métrica principal de éxito;
+9. cantidad mínima de muestras;
+10. por qué merece ser probada;
+11. research_filters: filtros ESTRUCTURADOS que Research Federation pueda medir.
 
 research_filters sólo puede usar estas claves cuando exista evidencia para ellas:
 market_family, symbol, timeframe, direction, regime, micro_alignment, orderbook_imbalance_band, recent_buy_share_band,
@@ -3603,21 +3499,6 @@ def _normalize_strategy_proposals(
             "market":
                 market,
 
-            "scope_key":
-                _ai_clean_text(item.get("scope_key") or item.get("risk_group_or_spot_pair"), "", 120).upper(),
-
-            "timeframe":
-                _ai_clean_text(item.get("timeframe"), "", 24).upper(),
-
-            "direction":
-                _ai_clean_text(item.get("direction") or item.get("action"), "", 32).upper(),
-
-            "indicator_families":
-                _ai_clean_list(item.get("indicator_families"), 8),
-
-            "falsification_rule":
-                _ai_clean_text(item.get("falsification_rule"), "", 800),
-
             "thesis":
                 _ai_clean_text(
                     item.get(
@@ -3946,57 +3827,6 @@ def _normalize_ai_advice(
 
     return normalized
 
-def _apply_scientist_learning_guard(advice, context):
-    """Deterministic semantic guard for the Scientist AI.
-
-    The model may *describe* Research evidence but may never convert it into an
-    operational recommendation. This also prevents a strong Discovery split from
-    being quoted without its much smaller Validation split.
-    """
-    out=dict(advice or {})
-    ctx=dict(context or {})
-    edge=dict(ctx.get('edge_discovery_v1') or {})
-    priority=list(edge.get('priority') or [])
-    top=priority[0] if priority and isinstance(priority[0],dict) else {}
-    if top:
-        label=str(top.get('label') or 'hipótesis prioritaria')[:220]
-        disc=dict(top.get('discovery') or {})
-        val=dict(top.get('validation') or {})
-        out['headline']=f"Investigación · {label}"[:300]
-        d_n=int(disc.get('resolved') or 0); v_n=int(val.get('resolved') or 0)
-        d_exp=disc.get('expectancy_r'); v_exp=val.get('expectancy_r')
-        out['advice']=(
-            f"Validar en Research la hipótesis «{label}». "
-            f"Discovery: N={d_n}, Exp.R={d_exp if d_exp is not None else '--'}; "
-            f"Validation: N={v_n}, Exp.R={v_exp if v_exp is not None else '--'}. "
-            "No es una señal operativa ni modifica Safety, Entry, SL, TP o leverage. "
-            "Antes de cualquier autoridad debe separarse por grupo/par, temporalidad, acción y símbolo local, "
-            "y superar Holdout/OOS, costes y Shadow."
-        )[:3000]
-        risks=list(out.get('risks') or [])
-        if v_n < 10:
-            risks.insert(0, f"Validation insuficiente: {v_n}/10 resultados mínimos para una lectura preliminar robusta.")
-        out['risks']=risks[:5]
-        watch=list(out.get('what_to_watch') or [])
-        scope_note="Separar la evidencia por CORE/MEDIUM/HIGH y luego por símbolo local antes de promover."
-        if scope_note not in watch:
-            watch.insert(0,scope_note)
-        out['what_to_watch']=watch[:5]
-    else:
-        headline=str(out.get('headline') or 'Investigación')
-        for old in ('Oportunidad de compra','Oportunidad de venta','Comprar','Vender'):
-            headline=headline.replace(old,'Hipótesis Research')
-        out['headline']=('Investigación · '+headline)[:300] if not headline.startswith('Investigación') else headline[:300]
-        out['advice']=(
-            "Formular y validar la hipótesis en Research/Holdout/OOS. "
-            "Este resultado científico no constituye una señal operativa."
-        )
-    out['verdict']='INFO'
-    out['authority']='ADVISORY_ONLY'
-    out['affect_decision']=False; out['affect_safety']=False; out['affect_levels']=False
-    out['affect_leverage']=False; out['affect_weights']=False
-    return out
-
 def _call_groq(
     context,
     question=None,
@@ -4099,8 +3929,7 @@ why, risks, what_to_watch y learning_hypotheses
 deben ser listas de textos.
 
 strategy_proposals debe ser [] salvo que el contexto
-corresponda específicamente a LEARNING. En LEARNING ninguna salida puede
-recomendar abrir/cerrar una posición; sólo hipótesis Research.
+corresponda específicamente a LEARNING.
 
 Cuando incluyas strategy_proposals, cada propuesta debe contener además
 research_filters con únicamente dimensiones medibles del contexto:
@@ -4149,7 +3978,7 @@ en el contexto recibido.
         json={
 
             "model":
-                (model_override or AI_MODEL),
+                _effective_groq_model(model_override or AI_MODEL),
 
             "messages": [
 
@@ -4298,8 +4127,6 @@ en el contexto recibido.
             generated
         )
     )
-    if str(context_type or '').upper() == 'LEARNING':
-        advice = _apply_scientist_learning_guard(advice, context)
 
 
     return (
@@ -4528,11 +4355,6 @@ Usa exactamente esta estructura:
     {
       "name": "",
       "market": "FUTURES",
-      "scope_key": "CORE",
-      "timeframe": "30M",
-      "direction": "SHORT",
-      "indicator_families": [],
-      "falsification_rule": "",
       "thesis": "",
       "setup": "",
       "entry_conditions": [],
@@ -4721,7 +4543,6 @@ y preservación de capital, no Win Rate aislado.
             generated
         )
     )
-    advice = _apply_scientist_learning_guard(advice, context)
 
     usage_raw = (
         raw.get(

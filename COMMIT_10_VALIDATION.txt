@@ -1,0 +1,41 @@
+COMMIT 10 · VALIDATION
+Date: 2026-09-22
+
+Static/runtime checks
+- Python compile (ai_advisor/app/futures/review/learning/supabase): PASS
+- node --check static/script.js: PASS
+- node --check static/futures.js: PASS
+- node --check static/analytics.js: PASS
+- Groq deprecated-model normalization runtime smoke: PASS
+- Groq protective token budget default: 160000 PASS
+
+Regression gate
+- Commit 10 + RC9.8 → RC9.8.8 focused suite: 78 passed, 0 failed
+- Warnings: 7 datetime.utcnow deprecation warnings (non-blocking on Python 3.11)
+
+Historical test-suite note
+- A full historical pytest collection was started but contains legacy contract tests from
+  superseded 46/92-cell/UI/research versions and exceeded the audit execution window.
+  These tests are not used as the final-release gate because satisfying them would mean
+  reverting newer 60-cell/current contracts. They should be version-tagged/archived in Phase 2.
+
+Live Supabase audit at audit time
+- project status: ACTIVE_HEALTHY
+- organization plan: Free
+- database size: 155 MB
+- approximate live rows: 71,250
+- DB connections observed: 6
+- Security Advisor: 26 public tables without RLS; migration included in Commit 10
+- Additional advisor findings: server-only cleanup RPC grants + security-definer view;
+  migration included in Commit 10
+
+Trading freeze assertions
+- min execution Safety 65
+- publication Safety 75
+- min TP quality 55
+- min SL avoidance quality 60
+- min publication R:R 1.8
+- reachability challenger remains bounded and governed
+- Canary fraction remains 25%
+
+No automatic SQL was executed by this audit.
