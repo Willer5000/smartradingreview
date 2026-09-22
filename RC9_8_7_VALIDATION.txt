@@ -1,0 +1,30 @@
+RC9.8.7 VALIDATION
+==================
+
+Syntax
+- python -m py_compile app.py futures_system.py kucoin_cache.py : PASS
+- node --check static/script.js                            : PASS
+
+Dedicated RC9.8.7 + RC9.8.6 runtime hotfix
+- 6 passed
+
+RC9.8 Execution Geometry regression
+- 18 passed
+
+RC9.8.5 signal-noise / Spot-preferences regression
+- 5 passed
+
+RC9.8.6 observability / runtime regression
+- 7 passed
+
+Audited invariants
+- Futures OHLCV 30m TTL remains 60s.
+- Spot OHLCV history is NOT truncated.
+- Q3 remains SHADOW_OBSERVATION.
+- Q3 affects_entry=False.
+- Q3 affects_safety=False.
+- Q3 affects_publication=False.
+- Q3 affects_leverage=False.
+- No modifications to Execution Geometry / Safety thresholds.
+- No SQL migration.
+- No Research repository change.

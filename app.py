@@ -39048,6 +39048,56 @@ def _rc9_system_info_widget_html():
 </script>
 """
 
+def _rc987_compress_text_response(response):
+    """Gzip para respuestas de texto grandes, sin alterar su contenido.
+
+    Render contabiliza bytes HTTP; JSON/HTML/JS comprimen muy bien. La lógica se
+    aplica sólo cuando el cliente anunció gzip, nunca a streams/rangos/archivos
+    ya comprimidos y nunca a cuerpos pequeños.
+    """
+    try:
+        if request.method == 'HEAD' or response.status_code < 200 or response.status_code in (204, 304):
+            return response
+        if response.direct_passthrough or response.is_streamed:
+            return response
+        if response.headers.get('Content-Encoding') or response.headers.get('Content-Range'):
+            return response
+        # Respuestas que crean/cambian sesión suelen ser pequeñas; no se
+        # comprimen para mantener el boundary de autenticación simple.
+        if response.headers.get('Set-Cookie'):
+            return response
+        if 'gzip' not in str(request.headers.get('Accept-Encoding') or '').lower():
+            return response
+        ctype = str(response.headers.get('Content-Type') or '').lower()
+        compressible = (
+            'application/json' in ctype
+            or 'text/' in ctype
+            or 'javascript' in ctype
+            or 'application/xml' in ctype
+            or 'image/svg+xml' in ctype
+        )
+        if not compressible:
+            return response
+        raw = response.get_data()
+        if not raw or len(raw) < 2048:
+            return response
+        import gzip
+        packed = gzip.compress(raw, compresslevel=4)
+        # No gastar CPU/headers si el cuerpo casi no comprime.
+        if len(packed) >= len(raw) * 0.95:
+            return response
+        response.set_data(packed)
+        response.headers['Content-Encoding'] = 'gzip'
+        response.headers['Content-Length'] = str(len(packed))
+        vary = str(response.headers.get('Vary') or '')
+        if 'accept-encoding' not in vary.lower():
+            response.headers['Vary'] = (vary + ', Accept-Encoding').strip(', ')
+        response.headers['X-RC987-Compression'] = 'gzip'
+    except Exception:
+        pass
+    return response
+
+
 @app.after_request
 def _memory_cleanup_after_analytics(response):
     """Release transient objects and inject the lightweight RC9 user guide."""
@@ -39073,7 +39123,47 @@ def _memory_cleanup_after_analytics(response):
                     response.headers.pop('Content-Length', None)
     except Exception as _rc9_info_error:
         print(f"⚠️ RC9 info widget omitido: {_rc9_info_error}")
-    return response
+
+    # RC9.8.7: comprimir al final, después de cualquier inyección HTML.
+    return _rc987_compress_text_response(response)
+
+
+@app.route('/api/system/bandwidth-stats', methods=['GET'])
+def api_system_bandwidth_stats():
+    """Telemetría local desde el último restart; cero requests externos."""
+    user = _authenticated_user()
+    if not user:
+        return jsonify({'success': False, 'error': 'Debes iniciar sesión.'}), 401
+    spot = {}
+    futures = {}
+    try:
+        from kucoin_cache import get_cache_stats
+        spot = get_cache_stats() or {}
+    except Exception as exc:
+        spot = {'error': str(exc)[:120]}
+    try:
+        _configured_futures_module()
+        from futures_system import get_futures_network_stats
+        futures = get_futures_network_stats() or {}
+    except Exception as exc:
+        futures = {'error': str(exc)[:120]}
+    total_bytes = int(spot.get('bytes_received') or 0) + int(futures.get('bytes_received') or 0)
+    return jsonify({
+        'success': True,
+        'scope': 'PROCESS_SINCE_LAST_RESTART',
+        'spot_kucoin': spot,
+        'futures_kucoin': futures,
+        'observed_kucoin_response_bytes': total_bytes,
+        'observed_kucoin_response_megabytes': round(total_bytes / (1024.0 * 1024.0), 3),
+        # Alias conservados para no romper ninguna lectura manual previa.
+        'observed_bytes': total_bytes,
+        'observed_megabytes': round(total_bytes / (1024.0 * 1024.0), 3),
+        'note': (
+            'Telemetría diagnóstica de respuestas KuCoin vistas por este proceso; '
+            'NO equivale al outbound facturado por Render. No incluye Supabase, '
+            'Telegram, Groq ni tráfico previo al último restart.'
+        ),
+    }), 200
 
 
 @app.route('/api/analytics/summary')
@@ -40080,6 +40170,14 @@ def _get_signals_for_entry_monitor():
     return _dedupe_representative_signals(signals)
 
 
+# RC9.8.7 — un mismo símbolo puede tener señales Spot en varios TF. El precio
+# level1 es idéntico para todas ellas; compartirlo unos segundos evita repetir
+# tráfico sin cambiar la detección de Entry ni recalcular indicadores.
+_SPOT_LEVEL1_CACHE_LOCK = threading.Lock()
+_SPOT_LEVEL1_CACHE = {}
+_SPOT_LEVEL1_CACHE_TTL_SECONDS = 20
+
+
 def _spot_live_market_price(symbol):
     """Precio Spot ligero para detectar Entry sin recalcular indicadores.
 
@@ -40087,10 +40185,21 @@ def _spot_live_market_price(symbol):
     puede conservar el precio cacheado de la señal y reintentar en el próximo
     ciclo.
     """
+    normalized = str(symbol or '').replace('/', '-')
+    now_mono = time.monotonic()
+    with _SPOT_LEVEL1_CACHE_LOCK:
+        cached = _SPOT_LEVEL1_CACHE.get(normalized) or {}
+        if cached and (now_mono - float(cached.get('ts') or 0.0)) < _SPOT_LEVEL1_CACHE_TTL_SECONDS:
+            try:
+                price = float(cached.get('price') or 0)
+                if price > 0:
+                    return price
+            except Exception:
+                pass
     try:
         response = requests.get(
             'https://api.kucoin.com/api/v1/market/orderbook/level1',
-            params={'symbol': str(symbol or '').replace('/', '-')},
+            params={'symbol': normalized},
             timeout=4,
         )
         response.raise_for_status()
@@ -40099,7 +40208,18 @@ def _spot_live_market_price(symbol):
             return None
         data = payload.get('data') or {}
         price = float(data.get('price') or 0)
-        return price if price > 0 else None
+        if price > 0:
+            with _SPOT_LEVEL1_CACHE_LOCK:
+                _SPOT_LEVEL1_CACHE[normalized] = {'price': price, 'ts': now_mono}
+                if len(_SPOT_LEVEL1_CACHE) > 12:
+                    oldest = sorted(
+                        _SPOT_LEVEL1_CACHE.items(),
+                        key=lambda item: float((item[1] or {}).get('ts') or 0.0),
+                    )
+                    for old_key, _ in oldest[:-8]:
+                        _SPOT_LEVEL1_CACHE.pop(old_key, None)
+            return price
+        return None
     except Exception as exc:
         print(f"⚠️ monitor_entries: precio Spot {symbol}: {str(exc)[:120]}")
         return None

@@ -155,9 +155,12 @@ _futures_contract_spec_lock = threading.Lock()
 # inside one refresh but it must never grow without a bound.  Twelve entries
 # cover the hottest short timeframes while keeping the 30-symbol/TF sweep from
 # retaining every DataFrame at once.
-FUTURES_DATA_CACHE_MAX_ENTRIES = max(1, int(os.environ.get('FUTURES_DATA_CACHE_MAX_ENTRIES', '2') or 2))
+# RC9.8.7: 2 entradas provocaban thrashing entre scheduler, lifecycle y
+# Guardian. Ocho DataFrames de ~200 velas siguen siendo una huella pequeña
+# frente a 512 MB, pero permiten reutilizar OHLCV entre consumidores.
+FUTURES_DATA_CACHE_MAX_ENTRIES = max(1, int(os.environ.get('FUTURES_DATA_CACHE_MAX_ENTRIES', '8') or 8))
 if str(os.environ.get('LOW_MEMORY_MODE', '1')).strip().lower() not in ('0', 'false', 'no', 'off'):
-    FUTURES_DATA_CACHE_MAX_ENTRIES = min(FUTURES_DATA_CACHE_MAX_ENTRIES, 2)
+    FUTURES_DATA_CACHE_MAX_ENTRIES = min(FUTURES_DATA_CACHE_MAX_ENTRIES, 8)
 
 # ============================================================================
 # QUALITY ENGINE Q3A — FUTURES MICROSTRUCTURE SHADOW
@@ -191,7 +194,12 @@ FUTURES_MICROSTRUCTURE_VERSION = (
     'H_MARKET_INTELLIGENCE_V1'
 )
 
-FUTURES_MICROSTRUCTURE_TTL_SECONDS = max(20, int(os.environ.get('FUTURES_MICROSTRUCTURE_TTL_SECONDS', '30') or 30))
+# RC9.8.7: la microestructura es por SÍMBOLO, no por timeframe, y sigue en
+# SHADOW_OBSERVATION (no cambia Entry/Safety/publicación/leverage). Un snapshot
+# de 10 minutos se comparte entre los TF que cierran juntos, evitando descargar
+# order book + trades + funding + basis + OI varias veces para el mismo mercado.
+# 10 min sigue siendo claramente menor que el TF operativo mínimo de 30m.
+FUTURES_MICROSTRUCTURE_TTL_SECONDS = max(120, int(os.environ.get('FUTURES_MICROSTRUCTURE_TTL_SECONDS', '600') or 600))
 
 KUCOIN_FUTURES_ORDERBOOK_URL = (
     'https://api-futures.kucoin.com/'
@@ -222,8 +230,11 @@ _futures_microstructure_cache = {}
 _futures_microstructure_cache_lock = (
     threading.Lock()
 )
-FUTURES_MICROSTRUCTURE_CACHE_MAX_ENTRIES = max(4, min(12, int(
-    os.environ.get('FUTURES_MICROSTRUCTURE_CACHE_MAX_ENTRIES', '8') or 8
+# El snapshot Q3 es un dict compacto, no un DataFrame. Mantener una entrada
+# por símbolo operativo permite reutilizar la misma microestructura entre TFs
+# sin expulsar BTC/ETH antes de que llegue el siguiente timeframe.
+FUTURES_MICROSTRUCTURE_CACHE_MAX_ENTRIES = max(8, min(24, int(
+    os.environ.get('FUTURES_MICROSTRUCTURE_CACHE_MAX_ENTRIES', '20') or 20
 )))
 
 def _get_futures_http_session() -> requests.Session:
@@ -250,6 +261,64 @@ def _get_futures_http_session() -> requests.Session:
             _futures_http_session = session
 
     return _futures_http_session
+
+
+# ============================================================================
+# RC9.8.7 — TELEMETRÍA LOCAL DE EGRESS
+# ============================================================================
+# No hace requests ni persiste nada: sólo cuenta los bytes de respuestas que
+# YA llegaron desde KuCoin. Sirve para verificar el ahorro en Render.
+_FUTURES_NET_STATS_LOCK = threading.Lock()
+_FUTURES_NET_STATS = {
+    'requests': 0,
+    'bytes_received': 0,
+    'by_category': {},
+}
+
+
+def _track_futures_network_response(response, category: str) -> None:
+    try:
+        byte_count = len(response.content or b'')
+    except Exception:
+        byte_count = 0
+    key = str(category or 'other')
+    with _FUTURES_NET_STATS_LOCK:
+        _FUTURES_NET_STATS['requests'] += 1
+        _FUTURES_NET_STATS['bytes_received'] += int(byte_count)
+        bucket = _FUTURES_NET_STATS['by_category'].setdefault(
+            key, {'requests': 0, 'bytes_received': 0}
+        )
+        bucket['requests'] += 1
+        bucket['bytes_received'] += int(byte_count)
+
+
+def get_futures_network_stats() -> Dict:
+    with _FUTURES_NET_STATS_LOCK:
+        by_category = {
+            key: {
+                **value,
+                'megabytes_received': round(
+                    float(value.get('bytes_received') or 0) / (1024.0 * 1024.0), 3
+                ),
+            }
+            for key, value in _FUTURES_NET_STATS['by_category'].items()
+        }
+        payload = {
+            'requests': int(_FUTURES_NET_STATS['requests']),
+            'bytes_received': int(_FUTURES_NET_STATS['bytes_received']),
+            'megabytes_received': round(
+                float(_FUTURES_NET_STATS['bytes_received']) / (1024.0 * 1024.0), 3
+            ),
+            'by_category': by_category,
+        }
+    with _futures_data_cache_lock:
+        payload['ohlcv_cache_entries'] = len(_futures_data_cache)
+    with _futures_microstructure_cache_lock:
+        payload['microstructure_cache_entries'] = len(_futures_microstructure_cache)
+    payload['ohlcv_cache_max_entries'] = FUTURES_DATA_CACHE_MAX_ENTRIES
+    payload['microstructure_cache_max_entries'] = FUTURES_MICROSTRUCTURE_CACHE_MAX_ENTRIES
+    payload['microstructure_ttl_seconds'] = FUTURES_MICROSTRUCTURE_TTL_SECONDS
+    return payload
 
 
 def _get_futures_contract_risk_spec(symbol: str) -> Dict:
@@ -287,6 +356,7 @@ def _get_futures_contract_risk_spec(symbol: str) -> Dict:
             KUCOIN_FUTURES_CONTRACT_URL.format(symbol=contract_symbol),
             timeout=4,
         )
+        _track_futures_network_response(response, 'contract_spec')
         response.raise_for_status()
         payload = response.json()
         if str(payload.get('code')) != '200000':
@@ -452,8 +522,8 @@ def _store_futures_microstructure(
 
     now = time.monotonic()
     with _futures_microstructure_cache_lock:
-        # H.2 — cache acotado. Con BTC/ETH/SOL/XRP/ADA/LINK/BNB cabemos
-        # normalmente en 7 snapshots compactos; el límite evita crecimiento
+        # H.2 / RC9.8.7 — cache acotado. La capacidad cubre el universo
+        # operativo actual con snapshots compactos y evita crecimiento
         # accidental si mañana se amplía el universo.
         for key, cached in list(_futures_microstructure_cache.items()):
             if now - float((cached or {}).get('stored_at') or 0) >= FUTURES_MICROSTRUCTURE_TTL_SECONDS:
@@ -600,6 +670,7 @@ def _fetch_public_futures_microstructure(
             },
             timeout=4
         )
+        _track_futures_network_response(response, 'micro_orderbook')
 
         response.raise_for_status()
 
@@ -912,6 +983,7 @@ def _fetch_public_futures_microstructure(
             },
             timeout=4
         )
+        _track_futures_network_response(response, 'micro_trades')
 
         response.raise_for_status()
 
@@ -1084,6 +1156,7 @@ def _fetch_public_futures_microstructure(
             funding_url,
             timeout=4
         )
+        _track_futures_network_response(response, 'micro_funding')
 
         response.raise_for_status()
 
@@ -1175,6 +1248,7 @@ def _fetch_public_futures_microstructure(
             KUCOIN_FUTURES_MARK_PRICE_URL.format(symbol=contract_symbol),
             timeout=4
         )
+        _track_futures_network_response(response, 'micro_mark_index')
         response.raise_for_status()
         payload = response.json()
         if str(payload.get('code')) != '200000':
@@ -1219,6 +1293,7 @@ def _fetch_public_futures_microstructure(
             },
             timeout=4
         )
+        _track_futures_network_response(response, 'micro_open_interest')
 
         response.raise_for_status()
 
@@ -1460,8 +1535,8 @@ def _fetch_public_futures_microstructure(
 def get_futures_microstructure_snapshot(symbol: str) -> Dict:
     """Public lightweight snapshot for the UI indicator.
 
-    This helper never creates OHLCV DataFrames and reuses the same 30-second
-    cache as the learning layer.  It is safe to call independently from a full
+    This helper never creates OHLCV DataFrames and reuses the same bounded
+    per-symbol shadow cache as the learning layer. It is safe to call independently from a full
     Futures analysis, including when the committee says NO_OPERAR.
     """
     symbol = str(symbol or '').strip().upper()
@@ -1832,6 +1907,7 @@ class FuturesAnalysis(TradingExpertSystem):
                 },
                 timeout=15,
             )
+            _track_futures_network_response(response, 'ohlcv')
 
             if response.status_code != 200:
                 raise RuntimeError(

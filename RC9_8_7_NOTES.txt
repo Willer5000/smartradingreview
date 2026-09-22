@@ -1,0 +1,68 @@
+RC9.8.7 MAIN — BANDWIDTH EFFICIENCY / RENDER HOBBY
+===================================================
+
+OBJETIVO
+Reducir tráfico redundante y tamaño de respuestas sin modificar la inteligencia
+operativa del sistema. Este commit NO cambia Strategy Committee, dirección,
+Entry, SL, TP, Safety, leverage, RR, Guardian, ReviewTrader authority ni
+Research governance.
+
+CAMBIOS
+1. Futures Q3 microstructure shadow
+   - Sigue siendo SHADOW_OBSERVATION.
+   - Sigue con affects_entry=False, affects_safety=False,
+     affects_publication=False, affects_leverage=False.
+   - El snapshot es por símbolo, no por timeframe. Se reutiliza hasta 10 min
+     entre análisis cercanos del mismo mercado para evitar repetir order book,
+     trades, funding, mark/index y open interest varias veces.
+   - Cache bounded: 20 por defecto, máximo 24.
+
+2. Futures OHLCV
+   - NO se alargan TTL operativos: 30m sigue 60s, 1h 120s, 2h 240s,
+     4h 300s, 12h 600s, 1D 900s.
+   - Sólo aumenta el cache bounded de 2 a 8 DataFrames para evitar thrashing
+     entre scheduler/lifecycle/Guardian.
+
+3. Spot OHLCV
+   - NO se recorta historial y NO se limita número de velas.
+   - Esto es deliberado: Research/ReviewTrader comparten este proveedor y se
+     preserva íntegramente su historial/inteligencia.
+   - Se añade únicamente telemetría de red sin requests adicionales.
+
+4. Spot Entry monitor
+   - Precio KuCoin level1 compartido durante 20s por símbolo.
+   - Si BTC tiene varias señales/TF en el mismo ciclo no descarga el mismo
+     precio repetidamente.
+   - No cambia criterio de Entry ni detección técnica.
+
+5. Frontend
+   - Una pestaña Spot oculta no sigue descargando carriles visuales cada 5 min.
+   - En /futures el poll genérico de script.js se desactiva porque futures.js ya
+     tiene su scheduler propio. Se elimina duplicación de HTTP, no funcionalidad.
+
+6. Compresión HTTP
+   - JSON/HTML/JS/texto >=2 KB se comprimen con gzip cuando el cliente lo acepta.
+   - Streams, ranges, respuestas ya comprimidas y respuestas con Set-Cookie no
+     se modifican.
+   - Reduce la categoría HTTP Responses de Render sin cambiar el contenido.
+
+7. Diagnóstico
+   - GET /api/system/bandwidth-stats para usuario autenticado.
+   - No genera requests externos.
+   - Muestra actividad KuCoin observada desde el último restart.
+   - Es telemetría diagnóstica y NO equivale al outbound facturado por Render;
+     no incluye Supabase, Telegram, Groq ni tráfico previo al restart.
+
+ARCHIVOS A REEMPLAZAR
+- app.py
+- futures_system.py
+- kucoin_cache.py
+- static/script.js
+
+SQL: NO
+RESEARCH: NO
+VARIABLES DE ENTORNO NUEVAS OBLIGATORIAS: NO
+
+NOTA RENDER
+Este commit reduce tráfico futuro. No borra el ancho de banda que Render ya
+contabilizó durante el mes actual.

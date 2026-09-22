@@ -10173,7 +10173,11 @@ window.changeToSignal = function(symbol, timeframe) {
 // Antes había dos (uno a 60s aquí + otro a 120s en la inicialización),
 // que causaban peticiones duplicadas al backend.
 setInterval(() => {
-    if (!isAuthenticated()) {
+    // RC9.8.7 bandwidth guard:
+    // - una pestaña oculta no necesita descargar carriles visuales;
+    // - Futures ya posee su propio scheduler específico en futures.js, por lo
+    //   que este poll genérico no debe duplicarlo.
+    if (document.hidden || window.IS_FUTURES_PAGE || !isAuthenticated()) {
         return;
     }
 
@@ -10192,12 +10196,11 @@ setInterval(() => {
     }
 
     if (
-        !window.IS_FUTURES_PAGE
-        && typeof window.updateSpotVigentSignals === 'function'
+        typeof window.updateSpotVigentSignals === 'function'
     ) {
         window.updateSpotVigentSignals();
     }
-}, 300000); // RC9.7.10: tres carriles Spot cada 5 minutos
+}, 300000); // RC9.8.7: sólo Spot visible; Futures no duplica polling
 
 
 function updateMarketAlerts(data) {

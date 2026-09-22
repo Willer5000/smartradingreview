@@ -1,0 +1,10 @@
+RC9.8.7: reduce Render bandwidth without changing trading intelligence
+
+- reuse bounded Futures OHLCV/cache resources without extending operational TTLs
+- reuse per-symbol Q3 shadow microstructure snapshots; authority remains shadow-only
+- cache Spot level1 briefly across same-symbol Entry checks
+- stop hidden/duplicate frontend lane polling
+- gzip large text/JSON HTTP responses when supported
+- add local diagnostic bandwidth/network counters
+- preserve full Spot history for Research/ReviewTrader
+- no Safety, Entry, SL, TP, leverage, strategy or governance changes

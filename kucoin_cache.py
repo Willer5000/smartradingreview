@@ -65,6 +65,12 @@ TTL_BY_INTERVAL = {
 }
 DEFAULT_TTL = 60  # fallback si el intervalo no está en la tabla
 
+# RC9.8.7 — preservación de inteligencia:
+# No se recorta globalmente el historial Spot. Este módulo también abastece
+# rutas de Research/ReviewTrader y esas rutas pueden necesitar más historia
+# que la ventana de producción. La optimización aquí es conexión compartida,
+# caché/single-flight y telemetría; el payload funcional se conserva.
+
 # ============================================================================
 # Intervalos KuCoin (mapping)
 # ============================================================================
@@ -168,6 +174,8 @@ _stats = {
     'misses': 0,
     'errors': 0,
     'fetches': 0,
+    'bytes_received': 0,
+    'candles_received': 0,
 
     # Número de requests que NO hicieron una descarga duplicada
     # porque esperaron al fetch que ya estaba en curso.
@@ -409,9 +417,15 @@ def fetch_kucoin_candles(
         url = (
             "https://api.kucoin.com/"
             "api/v1/market/candles"
-            f"?symbol={symbol}"
-            f"&type={kucoin_interval}"
         )
+
+        # RC9.8.7: conservar la semántica histórica original. No añadimos
+        # startAt/endAt ni recortamos velas globalmente porque este mismo
+        # proveedor es reutilizado por Research y ReviewTrader.
+        params = {
+            'symbol': symbol,
+            'type': kucoin_interval,
+        }
 
         session = _get_session()
 
@@ -429,8 +443,18 @@ def fetch_kucoin_candles(
 
             response = session.get(
                 url,
+                params=params,
                 timeout=timeout
             )
+
+            # Contabilización local para comprobar el ahorro real sin llamadas
+            # adicionales. response.content ya es reutilizado por response.json().
+            try:
+                payload_bytes = len(response.content or b'')
+            except Exception:
+                payload_bytes = 0
+            with _cache_lock:
+                _stats['bytes_received'] += int(payload_bytes)
 
             if response.status_code != 200:
 
@@ -477,6 +501,10 @@ def fetch_kucoin_candles(
             candles = data[
                 'data'
             ]
+
+            # Telemetría solamente: no recorta ni transforma el historial.
+            with _cache_lock:
+                _stats['candles_received'] += len(candles) if isinstance(candles, list) else 0
 
             if (
                 not candles
@@ -753,6 +781,15 @@ def get_cache_stats() -> dict:
                 _stats[
                     'fetches'
                 ],
+
+            'bytes_received':
+                _stats['bytes_received'],
+
+            'megabytes_received':
+                round(_stats['bytes_received'] / (1024.0 * 1024.0), 3),
+
+            'candles_received':
+                _stats['candles_received'],
 
             'errors':
                 _stats[
