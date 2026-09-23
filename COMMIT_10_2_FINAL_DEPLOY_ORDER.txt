@@ -1,0 +1,14 @@
+COMMIT 10.2 FINAL — ORDEN
+
+1) Reemplazar en GitHub, dentro de UN MISMO commit, los 7 archivos de producción incluidos en este ZIP.
+2) NO modificar ni volver a ejecutar el SQL de Commit 10.
+3) NO reemplazar futures_system.py, review_trader.py, execution_challenger_lab.py, governed_self_calibration.py ni pdf_learning_report.py.
+4) Commit sugerido:
+   Commit 10.2 FINAL - Reduce outbound bandwidth y deja Telegram text-only con deep-links
+5) Esperar únicamente el deploy normal de Render asociado a ese commit.
+6) Verificación funcional tras deploy:
+   - abrir Spot y Futures;
+   - confirmar que ya no aparece una acción operativa para PDF de análisis;
+   - confirmar que "Aprendizaje" sigue descargando el PDF de aprendizaje;
+   - ante una nueva alerta, Telegram debe recibir texto y enlace /signal/<id>, nunca imagen/PDF;
+   - revisar Render > Metrics > Outbound Bandwidth > Service-Initiated en las horas siguientes para medir la nueva pendiente.

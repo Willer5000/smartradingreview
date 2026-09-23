@@ -1,0 +1,1 @@
+Commit 10.2 FINAL - Reduce outbound bandwidth y deja Telegram text-only con deep-links

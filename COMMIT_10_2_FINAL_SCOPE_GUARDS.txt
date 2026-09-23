@@ -1,0 +1,10 @@
+GUARDAS NO NEGOCIABLES VALIDADAS
+
+- Primary learning evidence dedupe: OFF.
+- Derived cache/stat dedupe: ON únicamente cuando el payload técnico es idéntico.
+- Failed Supabase write: NO queda marcada como persistida; se puede reintentar.
+- Telegram media transport: OFF.
+- Analysis PDF endpoint: OFF.
+- Learning PDF endpoint: ON.
+- Direction / Entry / SL / TP / Safety / RR / leverage: SIN CAMBIOS.
+- Shadow / Canary / Active / Alpha Decay: SIN CAMBIOS.

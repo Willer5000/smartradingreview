@@ -10488,7 +10488,8 @@ window.updatePreviousSignals = function updatePreviousSignals() {
                 }
                 
                 html += `
-                    <div class="list-group-item bg-dark text-white border-secondary signal-item ${senal.activa !== 1 ? 'opacity-50' : ''}" 
+                    <div class="list-group-item bg-dark text-white border-secondary signal-item ${senal.activa !== 1 ? 'opacity-50' : ''}"
+                         data-signal-id="${String(senal.signal_id || '').replace(/"/g, '&quot;')}"
                          style="cursor: pointer; transition: all 0.2s;"
                          onclick='window.showPreviousSignalJustification(${JSON.stringify(senal).replace(/'/g, "\\'")})'
                          onmouseover="this.style.backgroundColor='#1a1e24'"
@@ -10521,6 +10522,7 @@ window.updatePreviousSignals = function updatePreviousSignals() {
             
             signalsList.innerHTML = html;
             window.prevSignalsLoaded = true;
+            window.applySignalDeepLink?.();
             
             if (data.cached) {
                 console.log('📦 Datos de caché (10 min)');
@@ -11076,11 +11078,6 @@ function actualizarTextosPorDefecto() {
 }
 // FUNCIÓN sendTelegramTest ELIMINADA en v22 — no se usaba (código muerto).
 
-function downloadAnalysisReport(delivery = 'download') {
-    if (typeof window.downloadAnalysisReport === 'function' && window.downloadAnalysisReport !== downloadAnalysisReport) {
-        return window.downloadAnalysisReport(delivery);
-    }
-}
 
 // ============ TOAST ============
 function showToast(message, type = 'info') {
@@ -12023,6 +12020,48 @@ const TIMEFRAMES = {
 };
 
 
+
+// ============================================================================
+// RC10.2 FINAL — PDF DE ANÁLISIS RETIRADO + DEEP LINK DE SEÑAL
+// ============================================================================
+window.removeAnalysisPdfControls = function removeAnalysisPdfControls() {
+    document.querySelectorAll('[onclick*="downloadAnalysisReport"]').forEach(btn => {
+        const dropdown = btn.closest('.dropdown');
+        if (dropdown) dropdown.remove();
+        else btn.remove();
+    });
+    // El inline histórico puede existir en HTML, pero queda desactivado al cargar.
+    try { delete window.downloadAnalysisReport; } catch (_) { window.downloadAnalysisReport = undefined; }
+};
+
+window.applySignalDeepLink = function applySignalDeepLink() {
+    try {
+        const params = new URLSearchParams(window.location.search || '');
+        const signalId = String(params.get('signal_id') || '').trim();
+        if (!signalId) return false;
+        const safe = (window.CSS && CSS.escape) ? CSS.escape(signalId) : signalId.replace(/['"\\]/g, '');
+        const node = document.querySelector(`[data-signal-id="${safe}"]`);
+        if (!node) return false;
+        node.scrollIntoView({behavior: 'smooth', block: 'center'});
+        node.classList.add('border-info');
+        setTimeout(() => node.classList.remove('border-info'), 6000);
+        if (typeof node.click === 'function') node.click();
+        return true;
+    } catch (err) {
+        console.debug('Deep link Spot no aplicado:', err);
+        return false;
+    }
+};
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+        window.removeAnalysisPdfControls();
+        setTimeout(() => window.applySignalDeepLink?.(), 1200);
+    }, {once: true});
+} else {
+    window.removeAnalysisPdfControls();
+    setTimeout(() => window.applySignalDeepLink?.(), 1200);
+}
 
 // ============================================================
 // EJECUTAR CARGA INICIAL DESPUÉS DE DEFINIR TODAS LAS FUNCIONES

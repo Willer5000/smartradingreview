@@ -86,6 +86,33 @@ window._userSavedSignalRefs = {
     userKey: null
 };
 
+// ============================================================================
+// RC10.2 FINAL — enlace profundo a señal Futures / señal guardada
+// ============================================================================
+window.applyFuturesSignalDeepLink = function applyFuturesSignalDeepLink() {
+    try {
+        const params = new URLSearchParams(window.location.search || '');
+        const savedId = String(params.get('saved_signal_id') || '').trim();
+        if (savedId && typeof window.openSavedSignalDetail === 'function') {
+            setTimeout(() => window.openSavedSignalDetail(savedId), 50);
+            return true;
+        }
+        const signalId = String(params.get('signal_id') || '').trim();
+        if (!signalId) return false;
+        const safe = (window.CSS && CSS.escape) ? CSS.escape(signalId) : signalId.replace(/['"\\]/g, '');
+        const node = document.querySelector(`[data-signal-id="${safe}"]`);
+        if (!node) return false;
+        node.scrollIntoView({behavior: 'smooth', block: 'center'});
+        node.classList.add('border-info');
+        setTimeout(() => node.classList.remove('border-info'), 6000);
+        if (typeof node.click === 'function') node.click();
+        return true;
+    } catch (err) {
+        console.debug('Deep link Futures no aplicado:', err);
+        return false;
+    }
+};
+
 function _currentSavedSignalUserKey() {
     const user = typeof window.getSmartTradingUser === 'function'
         ? window.getSmartTradingUser()
@@ -1824,6 +1851,7 @@ window.updatePreviousSignals = async function() {
                 <div
                     class="list-group-item bg-dark text-white border-secondary ${opacity}"
                     style="cursor:pointer;"
+                    data-signal-id="${String(sig.signal_id || '').replace(/"/g, '&quot;')}"
                     data-signal="${signalData}"
                     onclick="window.showFuturesPrevJustif(_decodeFuturesSignal(this.getAttribute('data-signal')))"
                 >
@@ -1908,6 +1936,7 @@ window.updatePreviousSignals = async function() {
         });
 
         signalsList.innerHTML = html + diagnosticsHtml;
+        window.applyFuturesSignalDeepLink?.();
 
     } catch (err) {
 

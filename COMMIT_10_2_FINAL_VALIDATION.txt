@@ -1,0 +1,26 @@
+COMMIT 10.2 FINAL — VALIDACIÓN
+
+Sintaxis:
+- python -m py_compile app.py supabase_client.py ai_advisor.py: PASS
+- node --check static/script.js: PASS
+- node --check static/futures.js: PASS
+- node --check static/ai_assistant.js: PASS
+
+Regresión compuesta:
+- Commit 10 hardening
+- Commit 10.1 Guardian/IA
+- RC9.8.7 bandwidth contract
+- Commit 10.2 final bandwidth/media/deep-links
+Resultado: 23 passed.
+
+Checks explícitos:
+- sendPhoto: AUSENTE del backend operativo
+- sendDocument: AUSENTE del backend operativo
+- /api/generate_report: AUSENTE
+- import pdf_report: AUSENTE
+- /api/review/learning_pdf: PRESENTE
+- generate_learning_pdf: PRESENTE
+- dedupe en insert_signal: AUSENTE
+- dedupe en update_signal_result: AUSENTE
+- dedupe derivada de recomendaciones/stats: PRESENTE
+- /signal/<signal_id>: PRESENTE

@@ -22,6 +22,7 @@ import logging
 import time
 import threading
 import uuid
+import hashlib
 import requests
 from datetime import datetime, timedelta
 
@@ -194,6 +195,11 @@ class SupabaseClient:
         self._rest_session = requests.Session()
         self._rotation_lock = threading.Lock()
         self._rotation_last_check = {}
+        # RC10.2 FINAL — dedupe sólo de material DERIVADO (nunca evidencia primaria).
+        self._derived_write_lock = threading.Lock()
+        self._derived_write_fingerprints = {}
+        self._outbound_meter_lock = threading.Lock()
+        self._outbound_payload_bytes = {}
         # FREE-PLAN: las estadísticas de 90 días se hidratan una vez por proceso
         # y después sólo incorporan nuevas señales cerradas. Evita descargar
         # repetidamente decenas de MB de JSON histórico cada cuatro horas.
@@ -517,6 +523,64 @@ class SupabaseClient:
                 logger.warning(f"Error de conexión Supabase persistió tras retry: {e2}")
                 raise
 
+    @staticmethod
+    def _stable_payload_digest(payload: Any) -> str:
+        """Hash estable para dedupe de cachés/estadísticas derivadas."""
+        volatile = {'created_at', 'updated_at', 'last_updated', 'timestamp'}
+        def clean(value):
+            if isinstance(value, dict):
+                return {str(k): clean(v) for k, v in sorted(value.items()) if str(k) not in volatile}
+            if isinstance(value, (list, tuple)):
+                return [clean(v) for v in value]
+            return value
+        raw = json.dumps(clean(payload), sort_keys=True, separators=(',', ':'), default=str)
+        return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+    def _derived_write_changed(self, key: str, payload: Any, ttl_seconds: int = 21600) -> bool:
+        """True si cambió un material DERIVADO; no marca éxito antes de persistir."""
+        now = time.monotonic()
+        digest = self._stable_payload_digest(payload)
+        with self._derived_write_lock:
+            previous = self._derived_write_fingerprints.get(str(key))
+            if previous and previous[0] == digest and now - previous[1] < max(60, int(ttl_seconds)):
+                return False
+        return True
+
+    def _mark_derived_write_persisted(self, key: str, payload: Any, ttl_seconds: int = 21600) -> None:
+        """Marca dedupe sólo DESPUÉS de que Supabase confirmó la escritura."""
+        now = time.monotonic()
+        digest = self._stable_payload_digest(payload)
+        with self._derived_write_lock:
+            self._derived_write_fingerprints[str(key)] = (digest, now)
+            if len(self._derived_write_fingerprints) > 12000:
+                cutoff = now - max(3600, int(ttl_seconds))
+                self._derived_write_fingerprints = {
+                    k: v for k, v in self._derived_write_fingerprints.items() if v[1] >= cutoff
+                }
+
+    def _meter_outbound_payload(self, table: str, method: str, payload: Any) -> int:
+        """Telemetría local: bytes JSON enviados Render→Supabase."""
+        if payload is None:
+            size = 0
+        else:
+            try:
+                size = len(json.dumps(payload, separators=(',', ':'), default=str).encode('utf-8'))
+            except Exception:
+                size = len(str(payload).encode('utf-8', errors='ignore'))
+        key = f"{str(method).upper()}:{table}"
+        with self._outbound_meter_lock:
+            self._outbound_payload_bytes[key] = int(self._outbound_payload_bytes.get(key, 0)) + int(size)
+        return size
+
+    def outbound_payload_status(self) -> Dict[str, Any]:
+        with self._outbound_meter_lock:
+            rows = dict(self._outbound_payload_bytes)
+        return {
+            'total_bytes': sum(rows.values()),
+            'by_operation': dict(sorted(rows.items(), key=lambda item: item[1], reverse=True)),
+            'scope': 'JSON payload bytes sent from this process to Supabase',
+        }
+
     def _rest_headers(self, prefer: str = "return=minimal") -> Dict[str, str]:
         headers = {
             "apikey": self.key,
@@ -548,6 +612,7 @@ class SupabaseClient:
                 return _LocalQueuedResponse()
             raise RuntimeError("SUPABASE_CIRCUIT_OPEN")
         url=f"{self.url.rstrip('/')}/rest/v1/{table}"
+        self._meter_outbound_payload(table, method, payload)
         try:
             r=self._rest_session.request(
                 method.upper(), url, params=params or {}, json=payload,
@@ -1305,6 +1370,12 @@ class SupabaseClient:
                 'created_at': datetime.utcnow().isoformat()
             }
             
+            # RC10.2 FINAL: recomendación es caché derivable. Si el contenido
+            # técnico no cambió, no repetir DELETE+POST hacia Supabase.
+            rec_key = f"recommendation|{payload['symbol']}|{payload['timeframe']}|{payload['action']}"
+            if not self._derived_write_changed(rec_key, payload, ttl_seconds=6 * 3600):
+                return True
+
             # FREE-PLAN: estas recomendaciones son caché derivable. No descargar
             # la fila eliminada ni la recién insertada.
             filters = {
@@ -1326,6 +1397,7 @@ class SupabaseClient:
                 timeout=(1.25, 2.25),
                 prefer='return=minimal',
             )
+            self._mark_derived_write_persisted(rec_key, payload, ttl_seconds=6 * 3600)
             self._schedule_rotation('review_recommendations')
             return True
         except Exception as e:
@@ -1343,14 +1415,24 @@ class SupabaseClient:
         try:
             table = 'strategy_stats_general' if general else 'strategy_stats_specific'
             
-            # Upsert fila por fila (más lento pero seguro)
+            # Conserva el contrato DB actual, pero evita SELECT+UPDATE/INSERT
+            # cuando una estadística DERIVADA es byte-a-byte equivalente.
             for stat in stats_list:
+                stat = dict(stat)
+                if general:
+                    stat['action'] = str(stat.get('action') or 'ALL')
+                    stat_key = f"stats|general|{stat.get('strategy')}|{stat.get('action')}"
+                else:
+                    stat_key = (
+                        f"stats|specific|{stat.get('symbol')}|{stat.get('timeframe')}|"
+                        f"{stat.get('action')}|{stat.get('strategy')}"
+                    )
+                if not self._derived_write_changed(stat_key, stat, ttl_seconds=4 * 3600):
+                    continue
                 # Construir filtro de unicidad
                 if general:
                     # General is intentionally non-directional in the current
                     # engine. Keep the legacy DB uniqueness contract explicit.
-                    stat = dict(stat)
-                    stat['action'] = str(stat.get('action') or 'ALL')
                     query = (self.client.table(table)
                              .select('id')
                              .eq('strategy', stat['strategy'])
@@ -1373,6 +1455,7 @@ class SupabaseClient:
                 else:
                     # Insert
                     self.client.table(table).insert(stat).execute()
+                self._mark_derived_write_persisted(stat_key, stat, ttl_seconds=4 * 3600)
             
             self._check_rotation(table)
             return True

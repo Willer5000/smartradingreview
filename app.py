@@ -14,7 +14,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from io import BytesIO, StringIO
 import pytz
-from flask import Flask, render_template, jsonify, request, send_file, session
+from flask import Flask, render_template, jsonify, request, send_file, session, redirect
 import warnings
 
 # ============================================================================
@@ -22210,7 +22210,7 @@ class TradingExpertSystem:
     # Ubicación: Reemplazar entre línea 1780 y línea 1805 aproximadamente
     
     def send_telegram_alert(self, message, image_bytes=None, category=None):
-        """Envía Telegram y registra salud de transporte sin lluvia de polling."""
+        """RC10.2 FINAL — Telegram sólo texto/enlaces; nunca sube imágenes/PDF."""
         category = category or (
             'FUTURES_GUARDIAN' if 'GUARDIAN' in str(message).upper() else
             'ENTRY' if 'ENTRY' in str(message).upper() else
@@ -22221,11 +22221,21 @@ class TradingExpertSystem:
                 _telegram_health_update(False, category, 'NOT_CONFIGURED')
                 print("❌ Error: Credenciales de Telegram no configuradas")
                 return False
-            print(f"      📤 Telegram: Enviando mensaje ({len(message)} chars)")
+            if image_bytes:
+                # Compatibilidad: callers legacy pueden seguir pasando bytes,
+                # pero RC10.2 FINAL jamás los transmite fuera de Render.
+                print("      ℹ️ Telegram media omitida por RC10.2 FINAL (text-only)")
+            print(f"      📤 Telegram: Enviando mensaje ({len(str(message))} chars)")
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            message = str(message or '')
             if len(message) > 4000:
                 message = message[:4000] + "...\n\n[Mensaje truncado]"
-            payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'HTML', 'disable_web_page_preview': True}
+            payload = {
+                'chat_id': TELEGRAM_CHAT_ID,
+                'text': message,
+                'parse_mode': 'HTML',
+                'disable_web_page_preview': True,
+            }
             response = requests.post(url, json=payload, timeout=15)
             try:
                 body = response.json()
@@ -22236,17 +22246,6 @@ class TradingExpertSystem:
                 _telegram_health_update(False, category, error)
                 print(f"      ❌ Telegram no confirmó envío: {error}")
                 return False
-            if image_bytes:
-                url_photo = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-                files = {'photo': ('chart.png', image_bytes, 'image/png')}
-                data = {'chat_id': TELEGRAM_CHAT_ID}
-                response_photo = requests.post(url_photo, files=files, data=data, timeout=30)
-                try:
-                    photo_body = response_photo.json()
-                except Exception:
-                    photo_body = {}
-                if response_photo.status_code != 200 or photo_body.get('ok') is not True:
-                    print(f"      ⚠️ Imagen Telegram no confirmada: {photo_body.get('description') or response_photo.status_code}")
             _telegram_health_update(True, category)
             return True
         except Exception as e:
@@ -22267,7 +22266,7 @@ class TradingExpertSystem:
             message = "🔍 <b>📊 PANORAMA COMPLETO DE MERCADO</b>\n"
             message += f"🕐 {datetime.now(self.bolivia_tz).strftime('%Y-%m-%d %H:%M:%S')} Hora Bolivia\n\n"
             
-            all_images = []
+            all_images = []  # RC10.2 FINAL: Telegram text-only
             btc_1d_analysis = None
             paxg_btc_analysis = None
             
@@ -22302,12 +22301,6 @@ class TradingExpertSystem:
                         else:
                             reason = analysis['decision'].get('reason', 'condiciones desfavorables')
                             message += f"Razón: {reason}\n"
-                        
-                        # Generar gráfico para BTC (máximo 2 gráficos de BTC)
-                        if len(all_images) < 2:
-                            img = self.generate_chart_image('BTC-USDT', tf, analysis)
-                            if img:
-                                all_images.append(img)
                                 
                 except Exception as e:
                     print(f"Error analizando BTC {tf}: {e}")
@@ -22335,12 +22328,6 @@ class TradingExpertSystem:
                             message += f"Entrada: ${levels.get('entry', 0):.2f}\n"
                         else:
                             message += f"\n"
-                        
-                        # Gráfico para PAXG (1 máximo)
-                        if len(all_images) < 3:
-                            img = self.generate_chart_image('PAXG-USDT', tf, analysis)
-                            if img:
-                                all_images.append(img)
                                 
                 except Exception as e:
                     print(f"Error analizando PAXG {tf}: {e}")
@@ -22367,12 +22354,6 @@ class TradingExpertSystem:
                         message += f"Entrada: {levels.get('entry', 0):.6f} BTC\n"
                     else:
                         message += f"\n"
-                    
-                    # Gráfico del ratio
-                    if len(all_images) < 4:
-                        img = self.generate_chart_image('PAXG-BTC', '1D', analysis)
-                        if img:
-                            all_images.append(img)
                             
             except Exception as e:
                 print(f"Error analizando PAXG/BTC: {e}")
@@ -22471,10 +22452,8 @@ class TradingExpertSystem:
             
             message += f"\n━━━━━━━━━━━━━━━━━━━━━\n"
             message += f"✅ <b>Análisis generado por Crypto Trader Analyst Pro</b>\n"
-            message += f"📊 {len(all_images)} gráficos adjuntos con indicadores clave\n"
-            
-            # Limitar a 5 imágenes máximo (Telegram permite hasta 10 pero por estabilidad)
-            return message, all_images[:5]
+            message += "🔗 Telegram opera en modo texto + enlaces de señal.\n"
+            return message, []
             
         except Exception as e:
             print(f"Error generando panorama: {e}")
@@ -27824,6 +27803,25 @@ def futures_page():
     """Página de Futuros - reutiliza index.html con flag is_futures=True"""
     return render_template('index.html', is_futures=True)
 
+
+@app.route('/signal/<signal_id>')
+def signal_deep_link(signal_id):
+    """RC10.2 FINAL — enlace estable a UNA señal, no a la página genérica."""
+    from urllib.parse import urlencode
+    market = str(request.args.get('market') or '').strip().lower()
+    symbol = str(request.args.get('symbol') or '').strip().upper().replace('/', '-')
+    timeframe = str(request.args.get('timeframe') or '').strip()
+    saved_signal_id = str(request.args.get('saved_signal_id') or '').strip()
+    params = {'signal_id': str(signal_id)}
+    if symbol:
+        params['symbol'] = symbol
+    if timeframe:
+        params['timeframe'] = timeframe
+    if saved_signal_id:
+        params['saved_signal_id'] = saved_signal_id
+    target = '/futures' if market == 'futures' else '/'
+    return redirect(f"{target}?{urlencode(params)}")
+
 @app.route('/analytics')
 def analytics_page():
     """Página de Análisis Estadístico (Fase C)"""
@@ -32411,196 +32409,14 @@ def api_telegram_test():
         }), 500
 
 
-@app.route('/api/generate_report')
-def api_generate_report():
-    """
-    Genera reporte PDF completo con gráficos del análisis técnico.
-    
-    Estructura del PDF:
-      1. Cabecera + tabla resumen niveles
-      2. 3 párrafos (acción, indicadores, conclusión) con banco justificaciones
-      3. ANEXO A: gráfico principal (velas + EMAs + estructura)
-      4. ANEXO B: gráficos individuales de indicadores que respaldan la señal
-    
-    OPTIMIZACIONES DE MEMORIA (Render Free 512MB):
-    - Se libera temporalmente el caché de análisis (~40MB) antes de kaleido
-    - gc.collect() agresivo entre cada gráfico
-    - Máximo 4 imágenes de indicadores (era 10, reducido a 4)
-    - Si aún falla por memoria: usar ?with_charts=0 para PDF ligero sin gráficos
-    """
-    import gc
-    symbol = request.args.get('symbol', 'BTC-USDT')
-    interval = request.args.get('interval', '1D')
-    delivery = str(request.args.get('delivery', 'download') or 'download').strip().lower()
-    if delivery not in {'download', 'telegram'}:
-        return jsonify({'success': False, 'error': 'Método de entrega no válido'}), 400
-    telegram_token = str(TELEGRAM_BOT_TOKEN or '').strip()
-    telegram_chat_id = str(TELEGRAM_CHAT_ID or '').strip()
-    if delivery == 'telegram':
-        if not session.get('authenticated_user'):
-            return jsonify({'success': False, 'error': 'Debes iniciar sesión para enviar informes a Telegram'}), 401
-        if not telegram_token or not telegram_chat_id:
-            return jsonify({'success': False, 'error': 'Telegram no está configurado en Render'}), 503
-
-    # Render Free (512 MB): enviar a Telegram usa por defecto el PDF ligero.
-    # La descarga local conserva gráficos por defecto. Esto separa el transporte
-    # Telegram de los picos de RAM de Kaleido y evita interpretar un OOM como
-    # una falla del bot. Se puede solicitar explícitamente with_charts=1.
-    default_with_charts = '0' if delivery == 'telegram' else '1'
-    with_charts = request.args.get('with_charts', default_with_charts) in ('1', 'true', 'yes')
-
-    # Ejecutar análisis (usa caché si está caliente → 0ms).
-    try:
-        result = expert_system.analyze_full_market(symbol, interval)
-    except Exception as exc:
-        import traceback
-        traceback.print_exc()
-        return jsonify({
-            'success': False,
-            'error': f'Error preparando el análisis: {type(exc).__name__}',
-            'stage': 'analysis',
-        }), 500
-
-    if not result or not result.get('success'):
-        return jsonify({'success': False, 'error': 'No se pudo generar el análisis', 'stage': 'analysis'}), 400
-    
-    chart_bytes = None
-    supporting_charts = []
-    
-    if with_charts:
-        # ============ LIBERAR MEMORIA ANTES DE KALEIDO ============
-        # Kaleido (Chrome headless) consume ~150-200MB al generar imágenes.
-        # Para no reventar los 512MB de Render Free, liberamos temporalmente
-        # el caché de análisis (~40MB) y forzamos gc antes de invocarlo.
-        try:
-            with _ANALYSIS_CACHE_LOCK:
-                _cache_backup = dict(_ANALYSIS_CACHE)
-                _ANALYSIS_CACHE.clear()
-        except Exception:
-            _cache_backup = None
-        gc.collect()
-        
-        # 1. Gráfico principal (velas + EMAs + estructura + top indicadores)
-        try:
-            top_indicators = expert_system.get_top_indicators_for_chart(result)
-            chart_bytes = expert_system.generate_chart_image(symbol, interval, result, top_indicators)
-            gc.collect()
-            print(f"✅ Gráfico principal PDF: {len(chart_bytes) if chart_bytes else 0} bytes")
-        except Exception as e:
-            print(f"⚠️ generate_report: gráfico principal falló: {e}")
-        
-        # 2. Gráficos individuales de indicadores (máx 4 para no exceder RAM)
-        try:
-            supporting_charts = expert_system.generate_supporting_indicators_images(
-                symbol, interval, result, max_indicators=4
-            )
-            gc.collect()
-            print(f"✅ Gráficos individuales PDF: {len(supporting_charts)}")
-        except Exception as e:
-            print(f"⚠️ generate_report: gráficos indicadores fallaron: {e}")
-        
-        # ============ RESTAURAR CACHÉ DE ANÁLISIS ============
-        try:
-            if _cache_backup:
-                with _ANALYSIS_CACHE_LOCK:
-                    _ANALYSIS_CACHE.update(_cache_backup)
-        except Exception:
-            pass
-    
-    # Generar PDF
-    try:
-        from pdf_report import generate_analysis_pdf
-        pdf_bytes = generate_analysis_pdf(
-            result,
-            chart_image_bytes=chart_bytes,
-            indicators_image_bytes=None,
-            supporting_indicator_charts=supporting_charts,
-        )
-    except ImportError:
-        return jsonify({
-            'success': False,
-            'error': 'reportlab no está instalado'
-        }), 500
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({'success': False, 'error': f'Error generando PDF: {e}'}), 500
-    
-    filename = f'analisis_{symbol}_{interval}_{datetime.now().strftime("%Y%m%d_%H%M")}.pdf'
-
-    # Liberar estructuras pesadas antes de transmitir el PDF.
-    del chart_bytes, supporting_charts, result
-    gc.collect()
-
-    if delivery == 'telegram':
-        try:
-            telegram_url = f"https://api.telegram.org/bot{telegram_token}/sendDocument"
-            caption = f"Informe de análisis · {symbol} · {interval}"
-            response = requests.post(
-                telegram_url,
-                data={
-                    'chat_id': telegram_chat_id,
-                    'caption': caption,
-                },
-                files={
-                    'document': (filename, pdf_bytes, 'application/pdf'),
-                },
-                timeout=30,
-            )
-            try:
-                telegram_payload = response.json()
-            except Exception:
-                telegram_payload = {}
-            if not response.ok or telegram_payload.get('ok') is not True:
-                description = str(
-                    telegram_payload.get('description')
-                    or f'HTTP {response.status_code}'
-                )[:240]
-                print(f"❌ Telegram sendDocument falló: {description}")
-                del pdf_bytes
-                gc.collect()
-                return jsonify({
-                    'success': False,
-                    'error': f'Telegram no confirmó el envío: {description}',
-                }), 502
-            del pdf_bytes
-            gc.collect()
-            return jsonify({
-                'success': True,
-                'delivery': 'telegram',
-                'message': 'Informe enviado a Telegram',
-                'telegram_ok': True,
-                'report_mode': 'completo' if with_charts else 'ligero',
-            })
-        except requests.RequestException as exc:
-            print(f"❌ Telegram sendDocument error de red: {exc}")
-            del pdf_bytes
-            gc.collect()
-            return jsonify({
-                'success': False,
-                'error': 'No se pudo conectar con Telegram para enviar el informe',
-                'stage': 'telegram_transport',
-            }), 502
-        except Exception as exc:
-            print(f"❌ Telegram sendDocument error inesperado: {type(exc).__name__}: {exc}")
-            del pdf_bytes
-            gc.collect()
-            return jsonify({
-                'success': False,
-                'error': f'Error interno enviando el informe: {type(exc).__name__}',
-                'stage': 'telegram_transport',
-            }), 500
-
-    return pdf_bytes, 200, {
-        'Content-Type': 'application/pdf',
-        'Content-Disposition': f'attachment; filename={filename}',
-        'Content-Length': str(len(pdf_bytes)),
-    }
-
-
 # ============================================================================
-# ENDPOINT: PDF de Aprendizaje del Sistema (ReviewTrader)
+# RC10.2 FINAL — INFORME PDF DE ANÁLISIS RETIRADO
 # ============================================================================
+# El PDF de análisis (y su envío a Telegram) se elimina para reducir RAM/CPU/
+# outbound bandwidth. El PDF DE APRENDIZAJE permanece intacto en
+# /api/review/learning_pdf y pdf_learning_report.py.
+# ============================================================================
+
 @app.route('/api/review/learning_pdf')
 def api_review_learning_pdf():
     """
@@ -32670,17 +32486,12 @@ def api_run_scheduled():
                 if pattern_message:
                     full_message += f"\n\n{pattern_message}"
                 
-                # Generar gráfico con TOP indicadores que generaron la señal
-                img = expert_system.generate_chart_image(symbol, timeframe, result)
-                
-                # Enviar mensaje con gráfico
-                if expert_system.send_telegram_alert(full_message, img):
+                # RC10.2 FINAL: Telegram sólo texto/enlace. No renderizar PNG.
+                if expert_system.send_telegram_alert(full_message, None):
                     messages_sent += 1
-                    print(f"      ✅ Enviado con gráfico y patrón")
+                    print("      ✅ Enviado texto-only")
                 else:
-                    # Reintentar solo texto
-                    expert_system.send_telegram_alert(full_message, None)
-                    print(f"      ⚠️ Enviado solo texto")
+                    print("      ⚠️ Telegram no confirmó el envío")
         
         return jsonify({
             'success': True,
@@ -34415,11 +34226,12 @@ def _futures_signal_validity(result,timeframe,record=None):
     }
 
 
-def _futures_signal_public_url(symbol,timeframe,result):
-    from urllib.parse import urlencode
-    base=(os.getenv('PUBLIC_APP_URL') or os.getenv('RENDER_EXTERNAL_URL') or 'https://smartradingreview.onrender.com').rstrip('/')
-    q=urlencode({'symbol':symbol,'timeframe':timeframe,'signal_id':str((result or {}).get('signal_id') or '')})
-    return f"{base}/futures?{q}"
+def _futures_signal_public_url(symbol, timeframe, result):
+    result = dict(result or {})
+    result.setdefault('symbol', symbol)
+    result.setdefault('timeframe', timeframe)
+    return _telegram_signal_deep_link('futures', result)
+
 
 
 def _refresh_futures_signal_lifecycle(
@@ -39748,6 +39560,36 @@ def _confirmed_signal_rr(action, entry, stop_loss, take_profit):
         return None
 
 
+def _telegram_signal_deep_link(market, signal, saved_signal_id=None):
+    """URL específica e identificable de señal para Telegram."""
+    from urllib.parse import urlencode, quote
+    signal = signal or {}
+    levels = signal.get('levels') or {}
+    signal_id = str(
+        signal.get('signal_id')
+        or signal.get('source_signal_id')
+        or levels.get('signal_id')
+        or ''
+    ).strip()
+    if not signal_id:
+        return ''
+    symbol = str(signal.get('symbol') or '').upper().replace('/', '-')
+    timeframe = str(signal.get('timeframe') or '')
+    base = (
+        os.getenv('PUBLIC_APP_URL')
+        or os.getenv('RENDER_EXTERNAL_URL')
+        or 'https://smartradingreview.onrender.com'
+    ).rstrip('/')
+    params = {
+        'market': str(market or '').lower(),
+        'symbol': symbol,
+        'timeframe': timeframe,
+    }
+    if saved_signal_id:
+        params['saved_signal_id'] = str(saved_signal_id)
+    return f"{base}/signal/{quote(signal_id, safe='')}?{urlencode(params)}"
+
+
 def _build_confirmed_signal_telegram_message(market, signal):
     """Mensaje compacto de una señal que acaba de confirmarse al cierre."""
     signal = signal or {}
@@ -39818,11 +39660,14 @@ def _build_confirmed_signal_telegram_message(market, signal):
         except Exception:
             pass
 
+    link = _telegram_signal_deep_link(market, signal)
     lines.extend([
         '',
         'Esta señal quedó confirmada al cierre de vela.',
         'La alerta de Entry se enviará aparte si el precio alcanza la zona de entrada.',
     ])
+    if link:
+        lines.append(f'🔗 <a href="{_telegram_escape(link)}">Abrir esta señal</a>')
     return '\n'.join(lines)
 
 
@@ -40087,7 +39932,10 @@ def _build_entry_alert_message(signal, current_price):
     if source:
         lines.append(f'🧭 Entrada: {str(source)[:120]}')
     lines.append(f'🎯 Calidad/convicción: {confidence:.0f}/100')
-    
+    market = str(signal.get('system') or signal.get('system_type') or 'spot').lower()
+    link = _telegram_signal_deep_link(market, signal)
+    if link:
+        lines.append(f'🔗 <a href="{_telegram_escape(link)}">Abrir esta señal</a>')
     return '\n'.join(lines)
 
 
@@ -40153,6 +40001,10 @@ def _get_signals_for_entry_monitor():
                     'current_price': sig.get('precio_actual'),
                     'candle_timestamp': candle_ts,
                     'source_candle_timestamp': candle_ts,
+                    'signal_id': (
+                        sig.get('signal_id')
+                        or (sig.get('levels') or {}).get('signal_id')
+                    ),
                     'valid_until': sig.get('valid_until') or sig.get('source_valid_until'),
                     'message': sig.get('message', ''),
                     'tiempo_restante': sig.get('tiempo_restante'),
@@ -40300,62 +40152,14 @@ def monitor_entries_loop():
                 
                 # DISPARAR ALERTA
                 try:
-                    # ============ GENERAR IMAGEN COMBINADA (principal + indicadores) ============
-                    # v20: usamos render_telegram_signal_chart que combina en UNA
-                    # sola imagen: velas + niveles + hasta 4 indicadores que
-                    # respaldan la señal. Es más eficiente que enviar múltiples
-                    # (Telegram sendPhoto solo acepta 1 imagen).
-                    # El renderer usa fallback a KuCoin si no hay df en el caché.
-                    import gc
-                    image_bytes = None
-                    analysis = None
-                    top_indicators = []
-                    
-                    # Intentar leer del caché primero (rápido, 0 memoria extra)
-                    try:
-                        analysis = _analysis_cache_get((symbol, tf))
-                    except Exception:
-                        analysis = None
-                    
-                    # RC9.7.14 FINAL: un monitor Telegram jamás inicia análisis
-                    # pesado. Si no existe snapshot en caché, el aviso sale texto-only.
-                    # En LOW_MEMORY_MODE los avisos automáticos también evitan render
-                    # de PNG para proteger el web worker de 512 MB.
-                    if analysis is None or not analysis.get('success'):
-                        analysis = None
-
-                    render_background_chart = bool(
-                        analysis
-                        and analysis.get('success')
-                        and not _LOW_MEMORY_MODE
-                        and (_process_rss_mb() is None or _process_rss_mb() < 200.0)
-                    )
-
-                    # Generar imagen sólo desde un snapshot YA calculado y sólo
-                    # cuando hay headroom. Nunca fetch OHLCV/indicadores aquí.
-                    if render_background_chart:
-                        try:
-                            top_indicators = expert_system.get_top_signal_indicators_for_telegram(
-                                analysis,
-                                max_indicators=4
-                            )
-                            from chart_renderer import render_telegram_signal_chart
-                            image_bytes = render_telegram_signal_chart(
-                                symbol, tf, analysis, indicators=top_indicators
-                            )
-                        except Exception as chart_err:
-                            print(f"   ⚠️ imagen Telegram omitida: {chart_err}")
-                            image_bytes = None
-                    
-                    # Liberar análisis (grande) antes de enviar Telegram
-                    del analysis
-                    gc.collect()
-                    
+                    # RC10.2 FINAL — Telegram text-only. El monitor no carga
+                    # snapshots grandes ni renderiza PNG; el análisis permanece
+                    # disponible mediante el enlace profundo a la señal.
                     # Construir mensaje compacto (sin precio actual, sin justificación)
                     message = _build_entry_alert_message(sig, current)
                     
                     # Enviar
-                    ok = expert_system.send_telegram_alert(message, image_bytes)
+                    ok = expert_system.send_telegram_alert(message, None)
                     if ok:
                         _entry_alert_mark_sent(symbol, tf, candle_ts)
                         alerts_sent += 1
@@ -40364,8 +40168,7 @@ def monitor_entries_loop():
                         print(f"   ⚠️ Telegram rechazó la alerta para {symbol} {tf}")
                     
                     # Liberar memoria
-                    del image_bytes, message
-                    gc.collect()
+                    del message
                 except Exception as send_err:
                     print(f"   ⚠️ monitor_entries: fallo enviando alerta: {send_err}")
                     import traceback; traceback.print_exc()
@@ -41837,34 +41640,17 @@ def ejecutar_analisis_completo(timeframe):
                     if mensajes_enviados_hoy[contador_clave] >= max_por_par:
                         print(f"   ⏸️ {par} ya alcanzó límite diario ({max_por_par})")
                         continue
-                    
-                    # ============ OBTENER TOP 4 INDICADORES ============
+                    # RC10.2 FINAL — no generar imagen para Telegram.
                     top_indicadores = expert_system.get_top_indicators_for_chart(resultado)
-                    
-                    # ============ CONSTRUIR MENSAJE ============
                     symbol_name = SYMBOLS.get(par, {'name': par})['name']
                     emoji = '🟢' if 'COMPRA' in decision or 'LONG' in decision else '🔴'
-                    
                     mensaje = f"{emoji} {decision} DE {symbol_name} en {timeframe}\n"
                     mensaje += f"Confianza: {confianza:.0f}%\n"
                     mensaje += f"📊 Indicadores clave: {', '.join(top_indicadores[:4])}\n\n"
                     mensaje += resultado.get('message', '')
-                    
-                    # ============ GENERAR IMAGEN CON TODOS LOS INDICADORES ============
-                    print(f"   🖼️ Generando imagen con todos los indicadores...")
-                    imagen = None
-                    try:
-                        # Pasar los top_indicadores para que se dibujen en los subplots 2-5
-                        imagen = expert_system.generate_chart_image(par, timeframe, resultado, top_indicadores)
-                        if imagen:
-                            print(f"      ✅ Imagen generada ({len(imagen)} bytes)")
-                    except Exception as e:
-                        print(f"      ⚠️ Error imagen: {e}")
-                        import traceback
-                        traceback.print_exc()
-                    
-                    # ============ ENVIAR ============
-                    if expert_system.send_telegram_alert(mensaje, imagen):
+
+                    # ============ ENVIAR TEXTO ============
+                    if expert_system.send_telegram_alert(mensaje, None):
                         print(f"   ✅ {par} ENVIADO a Telegram")
                         expert_system.señales_ventana[señal_clave] = ahora
                         mensajes_enviados_hoy[contador_clave] += 1
@@ -42881,6 +42667,14 @@ def _build_futures_guardian_telegram_message(
 
     if reason:
         lines.append('💡 ' + _telegram_escape(reason))
+
+    guardian_link = _telegram_signal_deep_link(
+        'futures',
+        signal,
+        saved_signal_id=signal.get('id'),
+    )
+    if guardian_link:
+        lines.append(f'🔗 <a href="{_telegram_escape(guardian_link)}">Abrir esta señal</a>')
 
     lines.append(
         '⚠️ <i>Recomendación del Guardian; no ejecuta órdenes automáticamente.</i>'
@@ -48440,7 +48234,6 @@ def futures_standard_alert_loop():
                     'signal_id': record.get('signal_id'),
                 }
                 base_message = _build_entry_alert_message(signal_for_zone, current)
-                link = _futures_signal_public_url(symbol, timeframe, result)
                 message = '\n'.join([
                     base_message,
                     (
@@ -48449,7 +48242,6 @@ def futures_standard_alert_loop():
                         else '📌 Origen: <b>VIGENTE</b>'
                     ),
                     f"⏳ Vigencia Entry: <b>{escape(str(validity.get('duration_text') or ''))}</b>",
-                    f"🔗 <a href=\"{escape(link)}\">Abrir análisis completo</a>",
                 ])
 
                 for user in users:
