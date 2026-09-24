@@ -29816,23 +29816,30 @@ def _spot_vigent_visible_cache(cache_data):
 
 
 def _send_spot_confirmed_timeframe_alerts(resultados):
-    """At most one Spot CONFIRMADA per timeframe/close, plus later Entry alert."""
-    by_tf = {}
+    """Envía una CONFIRMADA por símbolo×timeframe×cierre.
+
+    RC10.2.1: antes se elegía una sola señal por timeframe entre BTC/PAXG/ratio,
+    por lo que una confirmación BTC 1D podía quedar silenciada por otra celda 1D.
+    El dedup durable sigue evitando repeticiones del mismo cierre.
+    """
+    by_cell = {}
     for row in (resultados or {}).values():
         if not isinstance(row, dict):
             continue
+        symbol = str(row.get('symbol') or '').upper().replace('/', '-')
         tf = str(row.get('timeframe') or '')
         action = str(row.get('decision') or row.get('action') or '').upper()
-        if not tf or action not in ('COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT'):
+        if not symbol or not tf or action not in ('COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT'):
             continue
-        current = by_tf.get(tf)
+        key = (symbol, tf)
+        current = by_cell.get(key)
         if current is None or _spot_confirmed_alert_score(row) > _spot_confirmed_alert_score(current):
-            by_tf[tf] = row
-    for tf, row in by_tf.items():
+            by_cell[key] = row
+    for (symbol, tf), row in by_cell.items():
         try:
             _send_confirmed_signal_telegram('spot', row)
         except Exception as exc:
-            print(f"⚠️ [SPOT] Telegram CONFIRMADA {tf}: {exc}")
+            print(f"⚠️ [SPOT] Telegram CONFIRMADA {symbol} {tf}: {exc}")
 
 
 def _compute_previous_signals():
@@ -30220,6 +30227,11 @@ def _compute_previous_signals():
                 resultados[clave] = {
                     'symbol': str(symbol),
                     'timeframe': str(timeframe),
+                    # RC10.2.1 — conservar identidad para el deep-link Telegram.
+                    'signal_id': (
+                        analisis.get('signal_id')
+                        or levels.get('signal_id')
+                    ),
                     'decision': str(decision),
                     'confidence': float(confianza),
                     'entry': entry,
@@ -30247,6 +30259,21 @@ def _compute_previous_signals():
                     'timestamp': str(tiempo_actual.isoformat())
                 }
 
+                # HOTFIX 10.2.2 — canal de SEÑALES técnicas independiente
+                # del Guardian. Apenas esta celda cerrada confirma una compra/
+                # venta Spot, intentar Telegram; el dedup durable evita repetir
+                # exactamente símbolo×TF×dirección×cierre.
+                try:
+                    _send_confirmed_signal_telegram(
+                        'spot',
+                        resultados[clave],
+                    )
+                except Exception as _telegram_confirmed_error:
+                    print(
+                        "⚠️ [SPOT] Telegram CONFIRMADA "
+                        f"{symbol} {timeframe}: {_telegram_confirmed_error}"
+                    )
+
                 estado = "🟢 ACTIVA" if activa == 1 else "⚪ inactiva"
                 print(f"   ✅ {symbol} {timeframe}: {decision} ({confianza:.0f}%) - {estado}")
                 
@@ -30261,9 +30288,8 @@ def _compute_previous_signals():
                 continue
             time.sleep(0.2)
     
-    # RC9.8.1 — Telegram Spot oportuno: una sola CONFIRMADA por temporalidad
-    # y cierre. El toque de Entry conserva su evento operativo independiente.
-    _send_spot_confirmed_timeframe_alerts(resultados)
+    # HOTFIX 10.2.2 — las confirmadas Spot ya se intentaron enviar celda por
+    # celda, inmediatamente al confirmarse. No esperar al final del barrido.
 
     # ============ GUARDAR EN CACHÉ ============
     # Antes de reemplazar Confirmadas, conservar las que todavía mantienen la
@@ -39515,11 +39541,12 @@ def _confirmed_signal_event_key(market, signal):
     except Exception:
         normalized = str(candle or 'unknown')
     if market == 'spot':
-        # RC9.8.1: máximo una CONFIRMADA por temporalidad/cierre. Entry remains
-        # a separate event, so useful execution alerts are not lost.
+        # RC10.2.1: dedup por CELDA real. BTC 1D y PAXG 1D son señales distintas
+        # y ambas deben poder avisarse; sólo se bloquea repetir la misma señal
+        # del mismo símbolo×TF×dirección×cierre.
         close_ts = _confirmed_signal_close_timestamp(signal, timeframe)
         close_key = close_ts.isoformat() if close_ts is not None else normalized
-        return f"spot|{timeframe}|{close_key}"
+        return f"spot|{symbol}|{timeframe}|{action}|{close_key}"
     return f"{market}|{symbol}|{timeframe}|{action}|{normalized}"
 
 
@@ -39538,7 +39565,22 @@ def _confirmed_signal_recent_enough(signal, timeframe):
     if age < -5 * 60:
         return False
     tf_seconds = _confirmed_signal_tf_seconds(timeframe) or 3600
-    recent_window = max(15 * 60, min(2 * 60 * 60, int(tf_seconds * 0.35)))
+    # RC10.2.1: Render Free/LOW_MEMORY puede diferir el worker pesado. Una vela
+    # recién cerrada 1D/1W no debe convertirse en "histórica" sólo porque el
+    # análisis terminó >2h después. Ventanas acotadas por TF + dedup durable.
+    explicit_windows = {
+        '30m': 30 * 60,
+        '1h': 45 * 60,
+        '2h': 60 * 60,
+        '4h': 2 * 60 * 60,
+        '12h': 4 * 60 * 60,
+        '1D': 6 * 60 * 60,
+        '1W': 12 * 60 * 60,
+    }
+    recent_window = explicit_windows.get(
+        str(timeframe or ''),
+        max(15 * 60, min(2 * 60 * 60, int(tf_seconds * 0.35)))
+    )
     return age <= recent_window
 
 
@@ -39672,27 +39714,22 @@ def _build_confirmed_signal_telegram_message(market, signal):
 
 
 def _confirmed_signal_preferences_allow(market, timeframe):
-    """Respeta permisos de mercado y, en Spot, TF elegidos por usuarios."""
-    market = str(market or '').strip().lower()
-    users = sorted(_telegram_market_users(market))
-    if not users:
-        return False
-    if market != 'spot':
-        return True
+    """Canal de señales técnicas confirmadas, separado del Guardian.
 
-    # Un solo chat Telegram compartido: basta con que al menos un usuario
-    # autorizado tenga habilitada esa temporalidad Spot.
-    for user in users:
-        try:
-            prefs = _get_spot_telegram_preferences(user)
-            if (
-                prefs.get('spot_telegram_enabled', True)
-                and str(timeframe) in (prefs.get('spot_telegram_timeframes') or [])
-            ):
-                return True
-        except Exception:
-            continue
-    return False
+    HOTFIX 10.2.2:
+    - Spot COMPRA/VENTA confirmada se anuncia SIEMPRE en 4h/12h/1D/1W.
+    - ``spot_telegram_enabled`` y ``spot_telegram_timeframes`` pertenecen
+      exclusivamente a las alertas del Guardian/TGP del portafolio.
+    - Futures conserva su control de usuarios/mercado existente.
+    """
+    market = str(market or '').strip().lower()
+    timeframe = str(timeframe or '').strip()
+
+    if market == 'spot':
+        return timeframe in ('4h', '12h', '1D', '1W')
+
+    users = sorted(_telegram_market_users(market))
+    return bool(users)
 
 
 def _send_confirmed_signal_telegram(market, signal):
@@ -39728,15 +39765,19 @@ def _send_confirmed_signal_telegram(market, signal):
             return False
 
     if confidence < 60:
+        print(f"🔕 CONFIRMADA {market.upper()} {symbol} {timeframe}: confianza {confidence:.1f}% < 60")
         return False
     if not _confirmed_signal_preferences_allow(market, timeframe):
+        print(f"🔕 CONFIRMADA {market.upper()} {symbol} {timeframe}: bloqueada por permisos/preferencias Telegram")
         return False
     if not _confirmed_signal_recent_enough(signal, timeframe):
+        print(f"🔕 CONFIRMADA {market.upper()} {symbol} {timeframe}: cierre fuera de ventana anti-backfill")
         return False
 
     key = _confirmed_signal_event_key(market, signal)
     with _confirmed_signal_alerts_lock:
         if key in _confirmed_signal_alerts_sent:
+            print(f"🔕 CONFIRMADA {market.upper()} {symbol} {timeframe}: ya informada ({key})")
             return False
 
     message = _build_confirmed_signal_telegram_message(market, signal)
@@ -53162,13 +53203,10 @@ def _normalize_spot_telegram_preferences(
     preferences
 ):
     """
-    Normaliza únicamente preferencias de COMUNICACIÓN.
+    Normaliza preferencias de ALERTAS DEL GUARDIAN/TGP SPOT.
 
-    No modifica:
-    - TGP
-    - Guardian
-    - análisis multitemporal
-    - decisiones
+    Estas preferencias NO controlan el canal de señales técnicas confirmadas.
+    Tampoco modifican análisis multitemporal ni decisiones.
     """
 
     default = {
@@ -53249,10 +53287,10 @@ def _get_spot_telegram_preferences(
     user
 ):
     """
-    Preferencias personales del usuario.
+    Preferencias personales de alertas del Guardian/TGP Spot.
 
-    El usuario proviene de sesión/auth del servidor,
-    nunca del navegador.
+    No afectan COMPRA_SPOT/VENTA_SPOT confirmadas. El usuario proviene
+    de sesión/auth del servidor, nunca del navegador.
     """
 
     default = {
@@ -53334,8 +53372,8 @@ def _set_spot_telegram_session_preferences(user, preferences):
 )
 def api_user_telegram_preferences():
     """
-    Preferencias Telegram asociadas exclusivamente
-    al usuario autenticado.
+    Preferencias Telegram del Guardian/TGP Spot asociadas exclusivamente
+    al usuario autenticado. No gobiernan señales técnicas confirmadas.
 
     El navegador NO puede seleccionar otro usuario.
     """

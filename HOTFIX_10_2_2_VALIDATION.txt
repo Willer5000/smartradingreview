@@ -1,0 +1,14 @@
+HOTFIX 10.2.2 VALIDATION
+========================
+Python compile: PASS
+Regression + hotfix tests: 26/26 PASS
+
+Verified contracts:
+- Spot confirmed signal channel does NOT read Guardian Spot preferences.
+- Guardian/TGP Spot still reads spot_telegram_enabled and spot_telegram_timeframes.
+- Spot confirmed signal scan includes 4h, 12h, 1D, 1W.
+- Alert attempt occurs immediately after each confirmed cell is assembled.
+- Durable dedup remains symbol + timeframe + action + candle close.
+- 1D/1W delayed-worker grace remains.
+- signal_id/deep-link remains.
+- Learning PDF and learning/trading core remain present.

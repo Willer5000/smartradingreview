@@ -1,0 +1,1 @@
+Hotfix 10.2.2 - Separa señales Spot Telegram de preferencias Guardian
