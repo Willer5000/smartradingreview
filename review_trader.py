@@ -265,6 +265,21 @@ class ReviewTrader:
         value = str(system_type or '').strip().lower()
         return 'futures' if value == 'futures' else 'spot'
 
+    @staticmethod
+    def _is_multiasset_signal(signal: Dict) -> bool:
+        context = (signal or {}).get('context') or {}
+        if isinstance(context, str):
+            try:
+                import json as _json
+                context = _json.loads(context)
+            except Exception:
+                context = {}
+        segment = str((context or {}).get('market_segment') or (signal or {}).get('market_segment') or '').upper()
+        symbol = str((signal or {}).get('symbol') or '').upper().replace('/', '-')
+        return segment == 'MULTIASSET' or symbol in {
+            'SPY-USDT','QQQ-USDT','CL-USDT','NATGAS-USDT','COPPER-USDT','XAG-USDT','KSTR-USDT'
+        }
+
     def _build_learning_provenance(
         self,
         analysis: Dict,
@@ -1531,12 +1546,16 @@ class ReviewTrader:
         # RC8.3 FINAL: la cohorte ReviewTrader debe ser idéntica a Analytics.
         # 5m/15m y cualquier celda fuera del contrato actual se conservan como
         # historia/Research, pero no calibran WR/PF/Expectancy ni autoridad.
-        from cohort_integrity import futures_cell_active
-        if not futures_cell_active(
-            signal.get('symbol'),
-            signal.get('timeframe') or signal.get('interval')
-        ):
-            return False
+        if self._is_multiasset_signal(signal):
+            if str(signal.get('timeframe') or signal.get('interval') or '') not in ('1h','4h','1D'):
+                return False
+        else:
+            from cohort_integrity import futures_cell_active
+            if not futures_cell_active(
+                signal.get('symbol'),
+                signal.get('timeframe') or signal.get('interval')
+            ):
+                return False
 
         learning = self._get_signal_learning(signal)
         return bool(
@@ -1591,15 +1610,21 @@ class ReviewTrader:
             except Exception:
                 return None, 'SPOT_SOURCE_REJECTED'
 
-        if not _active_futures_runtime_cell(symbol, timeframe):
+        is_multiasset = self._is_multiasset_signal(signal)
+        if not is_multiasset and not _active_futures_runtime_cell(symbol, timeframe):
             return None, 'FUTURES_RETIRED_OR_OUT_OF_CONTRACT_TF'
+        if is_multiasset and str(timeframe or '') not in ('1h','4h','1D'):
+            return None, 'MULTIASSET_OUT_OF_CONTRACT_TF'
 
         if not self._is_clean_futures_signal(signal):
             return None, 'FUTURES_LEGACY_QUARANTINED'
 
         try:
             # Importación diferida para no crear un ciclo durante el arranque.
-            from futures_system import futures_system as futures_engine
+            if is_multiasset:
+                from multiasset_system import multiasset_system as futures_engine
+            else:
+                from futures_system import futures_system as futures_engine
 
             df = futures_engine.get_kucoin_data(symbol, timeframe)
             if df is None or len(df) == 0:
@@ -1663,6 +1688,13 @@ class ReviewTrader:
             
             # Extraer estrategias detectadas por los traders
             strategies = self._extract_strategies(analysis_result)
+            if str(analysis_result.get('market_segment') or '').upper() == 'MULTIASSET':
+                asset_class = str(analysis_result.get('asset_class') or 'GENERIC').upper()
+                strategies = [f"MULTI::{asset_class}::{name}" for name in strategies]
+                routed = (analysis_result.get('multiasset_strategy_route') or {}).get('selected_family')
+                if routed:
+                    strategies.append(f"MULTI::{asset_class}::ROUTED::{str(routed).upper()}")
+                strategies = sorted(set(strategies))
             
             # Extraer snapshot de indicadores
             indicators = self._extract_indicators_snapshot(analysis_result)

@@ -205,6 +205,14 @@ _SAVED_FUTURES_CONTRACT_SYMBOLS = {
     'SOL-USDT': 'SOLUSDTM',
     'XRP-USDT': 'XRPUSDTM',
     'ADA-USDT': 'ADAUSDTM',
+    # Commit 12 · Multi-Activo USDT-M (mismo lifecycle/fees/funding post-cierre).
+    'SPY-USDT': 'SPYUSDTM',
+    'QQQ-USDT': 'QQQUSDTM',
+    'CL-USDT': 'CLUSDTM',
+    'NATGAS-USDT': 'NATGASUSDTM',
+    'COPPER-USDT': 'COPPERUSDTM',
+    'XAG-USDT': 'XAGUSDTM',
+    'KSTR-USDT': 'KSTRUSDTM',
 }
 
 

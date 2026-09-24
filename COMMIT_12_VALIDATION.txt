@@ -1,0 +1,42 @@
+COMMIT 12 · VALIDACIÓN LOCAL
+Fecha: 2026-09-24
+
+Base GitHub verificada justo antes del empaquetado:
+app.py             9d9bcb8c126851f885906963a04ea66d7d899d75
+futures_system.py  000edbf9513efc8dbd547bf3521fde0c12a32c00
+review_trader.py   552638870bbfeaf730bf0ef56eb0f87e0184455e
+saved_signals.py   bcec1e2a6803def3799291d5efa642353ad0caa3
+ai_advisor.py      69584d246231178b97db571243e204e01dec8f29
+index.html         5e0b3b6d1c03c32f270be01800fb47acd6726330
+futures.js         606d1cc4122c3c5871fc24e0bd5afc67b976bdf7
+script.js          62533378101801feabb296ffc2e128ee1d99c206
+ai_assistant.js    27afc97748ef4151cee6f185641da68255597915
+render.yaml        54b34f241b3eeabee8a22d8757e101c74d414d9a
+
+Pruebas:
+- pytest conjunto: 30/30 PASS
+  * Commit 12 Multi-Activo: 9
+  * Commit 10.2 + Hotfix 10.2.2: 12
+  * Commit 10.1 privacidad/cadencia IA: 9
+- Python py_compile: PASS
+  app.py, futures_system.py, multiasset_system.py, review_trader.py,
+  saved_signals.py, ai_advisor.py, supabase_client.py, macro_context.py
+- Node --check: PASS
+  static/script.js, static/futures.js, static/ai_assistant.js
+- Jinja2 parse templates/index.html: PASS
+
+Supabase pre-deploy, consulta directa:
+- database total: 156 MB
+- signals: ~107 MB / ~19,388 filas
+- signal_indicators: ~12 MB / ~39,590 filas
+- signal_results: ~2.8 MB / ~2,655 filas
+
+Commit 12 no incluye SQL/migración.
+
+Limitación de validación:
+El contenedor de artefactos no tiene toda la pila Flask instalada para iniciar
+el servidor productivo completo. Se validó sintaxis, contratos de código y
+regresiones automatizadas. El smoke test final debe hacerse tras el único deploy.
+
+ZIP incluido: test_commit12_multiasset.py (9/9 PASS autocontenido).
+Las 21 pruebas heredadas se ejecutaron contra el árbol completo de auditoría y no se incluyen para evitar empaquetar archivos de producción sin cambios sólo como fixtures.

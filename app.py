@@ -27801,7 +27801,12 @@ def index():
 @app.route('/futures')
 def futures_page():
     """Página de Futuros - reutiliza index.html con flag is_futures=True"""
-    return render_template('index.html', is_futures=True)
+    return render_template('index.html', is_futures=True, is_multiasset=False)
+
+@app.route('/multiasset')
+def multiasset_page():
+    """Commit 12: derivados Multi-Activo con motor Futures compartido."""
+    return render_template('index.html', is_futures=True, is_multiasset=True)
 
 
 @app.route('/signal/<signal_id>')
@@ -27819,7 +27824,7 @@ def signal_deep_link(signal_id):
         params['timeframe'] = timeframe
     if saved_signal_id:
         params['saved_signal_id'] = saved_signal_id
-    target = '/futures' if market == 'futures' else '/'
+    target = '/multiasset' if market == 'multiasset' else ('/futures' if market == 'futures' else '/')
     return redirect(f"{target}?{urlencode(params)}")
 
 @app.route('/analytics')
@@ -28992,7 +28997,7 @@ def _acquire_heavy_analysis(owner, timeout=None):
     global _HEAVY_ANALYSIS_OWNER
 
     owner = str(owner or 'heavy-analysis')
-    interactive_owner = owner.startswith(('futures-ui:', 'spot-ui:'))
+    interactive_owner = owner.startswith(('futures-ui:', 'spot-ui:', 'multi-ui:'))
 
     # RC9.7.14 FREE-runtime: never let background jobs pile up waiting for the
     # only heavy slot. On a 512 MB worker a queue of waiting threads can make
@@ -31686,6 +31691,17 @@ def api_futures_position_guardian():
             user_name=user
         )
 
+        # Commit 12: el Guardian Crypto Futures no debe consumir posiciones
+        # Multi-Activo. Cada mercado comparte el motor pero no el contexto.
+        try:
+            from multiasset_system import MULTIASSET_SYMBOLS
+            signals = [
+                sig for sig in (signals or [])
+                if str(sig.get('symbol') or '').upper().replace('/', '-') not in MULTIASSET_SYMBOLS
+            ]
+        except Exception:
+            pass
+
         if not signals:
 
             return jsonify({
@@ -32564,6 +32580,140 @@ def _get_futures_system():
         return None
 
 
+# ============================================================================
+# COMMIT 12 — MULTI-ACTIVO RESOURCE-GOVERNED RUNTIME
+# ============================================================================
+_MULTI_ASSET_CACHE = {
+    'lock': threading.RLock(),
+    'analysis': {},
+    'updated_at': 0.0,
+}
+_MULTI_AUTO_DONE = set()
+_MULTI_AUTO_LOCK = threading.Lock()
+_MULTI_AUTO_DAILY = {'day': None, 'count': 0}
+
+def _get_multiasset_system():
+    try:
+        from multiasset_system import multiasset_system
+        return multiasset_system
+    except Exception as exc:
+        print(f"⚠️ MultiAssetSystem no disponible: {exc}")
+        return None
+
+def _multiasset_cache_result(symbol, timeframe, result):
+    with _MULTI_ASSET_CACHE['lock']:
+        _MULTI_ASSET_CACHE['analysis'][(str(symbol), str(timeframe))] = dict(result or {})
+        _MULTI_ASSET_CACHE['updated_at'] = time.time()
+        # Límite duro: sólo 2 análisis profundos por TF caliente + contexto reciente.
+        if len(_MULTI_ASSET_CACHE['analysis']) > 8:
+            keys = list(_MULTI_ASSET_CACHE['analysis'].keys())
+            for old in keys[:-8]:
+                _MULTI_ASSET_CACHE['analysis'].pop(old, None)
+
+def _multiasset_signal_row(result, source_context='PREVIOUS_CONFIRMED'):
+    result = result or {}
+    decision = result.get('decision') or {}
+    levels = result.get('levels') or {}
+    action = str(decision.get('action') or '').upper()
+    return {
+        'signal_id': str(result.get('signal_id') or ''),
+        'symbol': result.get('symbol'), 'timeframe': result.get('timeframe'),
+        'display_name': result.get('display_name'), 'asset_class': result.get('asset_class'),
+        'action': action, 'confidence': float(decision.get('confidence') or 0),
+        'entry': levels.get('entry'), 'stop_loss': levels.get('stop_loss'),
+        'take_profit': levels.get('take_profit'), 'leverage': levels.get('leverage'),
+        'risk_reward': levels.get('risk_reward'), 'roi_tp': levels.get('roi_tp'), 'roi_sl': levels.get('roi_sl'),
+        'execution_safety': levels.get('execution_safety'),
+        'publication_status': levels.get('publication_status') or result.get('publication_status'),
+        'source_candle_timestamp': result.get('source_candle_timestamp'),
+        'source_candle_close_timestamp': result.get('source_candle_close_timestamp'),
+        'candle_timestamp': result.get('source_candle_timestamp'),
+        'current_price': result.get('live_price') or result.get('current_price'),
+        'valid_until': result.get('valid_until') or levels.get('valid_until'),
+        'message': str(result.get('message') or '')[:900],
+        'source_context': source_context,
+        'multiasset_macro': result.get('multiasset_macro'),
+        'multiasset_specialist': result.get('multiasset_specialist'),
+        'multiasset_strategy_bank': result.get('multiasset_strategy_bank'),
+    }
+
+def _multiasset_is_executable(result):
+    decision=(result or {}).get('decision') or {}; levels=(result or {}).get('levels') or {}
+    return (str(decision.get('action') or '').upper() in ('LONG','SHORT') and
+            str(levels.get('publication_status') or result.get('publication_status') or '').upper() == 'EXECUTABLE_SIGNAL' and
+            result.get('is_executable', levels.get('is_executable', True)) is not False)
+
+def _multiasset_run_analysis(symbol, timeframe, owner='multi-background'):
+    engine=_get_multiasset_system()
+    if engine is None:
+        return {'success':False,'error':'MultiAssetSystem no disponible'}
+    acquired=_acquire_heavy_analysis(owner, timeout=1.0 if owner.startswith('multi-ui:') else 0.0)
+    if not acquired:
+        return {'success':False,'busy':True,'deferred':True,'error':'Motor pesado ocupado; se conserva el último snapshot.'}
+    try:
+        result=engine.analyze_multiasset_market(symbol,timeframe,closed_candle_only=True)
+        if isinstance(result,dict):
+            result.setdefault('symbol',symbol); result.setdefault('timeframe',timeframe)
+            _multiasset_cache_result(symbol,timeframe,result)
+        return result
+    finally:
+        _release_heavy_analysis(owner)
+
+def _multiasset_compact_telegram(result):
+    # Reutiliza el canal CONFIRMED durable de 10.2: texto + deep-link, sin imagen/PDF.
+    return _send_confirmed_signal_telegram('multiasset', result)
+
+def _multiasset_background_tick():
+    """Piggyback barato sobre el loop Futures existente: cero thread extra.
+
+    Scanner: 7 requests secuenciales cada 15 min, sin DB/IA. Deep analysis sólo
+    para shortlist y sólo en ventana de cierre 4h/1D o Fast Lane 1h de alta calidad.
+    """
+    try:
+        if str(os.getenv('MULTIASSET_ENABLED','1')).lower() in ('0','false','no','off'):
+            return
+        from multiasset_system import scan_opportunities, MULTIASSET_DEEP_LIMIT, MULTIASSET_AUTO_DEEP_DAILY_MAX
+        now=datetime.now(timezone.utc)
+        with _MULTI_AUTO_LOCK:
+            today=now.strftime('%Y-%m-%d')
+            if _MULTI_AUTO_DAILY.get('day') != today:
+                _MULTI_AUTO_DAILY.update({'day':today,'count':0})
+            if int(_MULTI_AUTO_DAILY.get('count') or 0) >= MULTIASSET_AUTO_DEEP_DAILY_MAX:
+                return
+        rows=scan_opportunities('4h', force=False)
+        if not rows:
+            return
+        candidates=[r for r in rows if r.get('deep_candidate')][:MULTIASSET_DEEP_LIMIT]
+        due=[]
+        # 4h is the main executable lane. Daily gives independent swing coverage.
+        if now.hour % 4 == 0 and now.minute <= 15:
+            due.extend((r['symbol'],'4h') for r in candidates)
+        if now.hour == 0 and now.minute <= 20:
+            due.extend((r['symbol'],'1D') for r in candidates)
+        # Dynamic 1h Fast Lane only for exceptionally active top candidate.
+        if now.minute <= 10 and candidates and float(candidates[0].get('router_score') or 0) >= 82:
+            due.insert(0,(candidates[0]['symbol'],'1h'))
+        for symbol,tf in due:
+            bucket=f"{symbol}|{tf}|{now.strftime('%Y-%m-%d')}|{now.hour // (1 if tf=='1h' else (4 if tf=='4h' else 24))}"
+            with _MULTI_AUTO_LOCK:
+                if bucket in _MULTI_AUTO_DONE:
+                    continue
+            result=_multiasset_run_analysis(symbol,tf,owner=f'multi-background:{symbol}:{tf}')
+            if result.get('busy'):
+                return
+            with _MULTI_AUTO_LOCK:
+                _MULTI_AUTO_DONE.add(bucket)
+                _MULTI_AUTO_DAILY['count'] = int(_MULTI_AUTO_DAILY.get('count') or 0) + 1
+                if len(_MULTI_AUTO_DONE)>80:
+                    for old in list(_MULTI_AUTO_DONE)[:30]: _MULTI_AUTO_DONE.discard(old)
+            if _multiasset_is_executable(result):
+                _multiasset_compact_telegram(result)
+            # One deep cell per 20s loop max: protects RAM/CPU and UI priority.
+            return
+    except Exception as exc:
+        print(f"⚠️ Multi-Activo background tick: {str(exc)[:160]}")
+
+
 def _get_review_trader():
     """Obtiene la instancia de ReviewTrader o None si no está disponible"""
     try:
@@ -32573,6 +32723,124 @@ def _get_review_trader():
         print(f"⚠️ ReviewTrader no disponible: {e}")
         return None
 
+
+# ============================================================================
+# COMMIT 12 — MULTI-ACTIVO API
+# ============================================================================
+@app.route('/api/multiasset/universe', methods=['GET'])
+def api_multiasset_universe():
+    try:
+        from multiasset_system import universe_payload
+        return jsonify(universe_payload())
+    except Exception as exc:
+        return jsonify({'success':False,'error':str(exc)[:180]}),500
+
+@app.route('/api/multiasset/opportunities', methods=['GET'])
+def api_multiasset_opportunities():
+    try:
+        from multiasset_system import scan_opportunities, MULTIASSET_DEEP_LIMIT
+        tf=str(request.args.get('timeframe') or '4h')
+        rows=scan_opportunities(tf, force=False)
+        with _MULTI_ASSET_CACHE['lock']:
+            analyses=dict(_MULTI_ASSET_CACHE['analysis'])
+        signals=[]
+        for (symbol,timeframe),result in analyses.items():
+            if isinstance(result,dict) and _multiasset_is_executable(result):
+                signals.append(_multiasset_signal_row(result,'ACTIVE_CONFIRMED'))
+        return jsonify({
+            'success':True,'total':len(signals),'signals':signals,
+            'count':len(signals),'opportunities':signals,'processing_selected':False,
+            'router':rows,'shortlist':[r for r in rows if r.get('deep_candidate')][:MULTIASSET_DEEP_LIMIT],
+            'resource_policy':{'scanner_db_writes':0,'scanner_ai_calls':0,'deep_limit':MULTIASSET_DEEP_LIMIT},
+            'timestamp':datetime.now(bolivia_tz).isoformat(),
+        })
+    except Exception as exc:
+        return jsonify({'success':False,'error':str(exc)[:180]}),500
+
+@app.route('/api/multiasset/analyze', methods=['POST'])
+def api_multiasset_analyze():
+    try:
+        payload=request.get_json(silent=True) or {}
+        symbol=str(payload.get('symbol') or 'CL-USDT').upper().replace('/','-')
+        timeframe=str(payload.get('timeframe') or '4h')
+        from multiasset_system import MULTIASSET_SYMBOLS, MULTIASSET_TIMEFRAMES
+        if symbol not in MULTIASSET_SYMBOLS or timeframe not in MULTIASSET_TIMEFRAMES:
+            return jsonify({'success':False,'error':'Símbolo/temporalidad fuera del universo Multi-Activo'}),400
+        result=_multiasset_run_analysis(symbol,timeframe,owner=f'multi-ui:{symbol}:{timeframe}')
+        status=202 if result.get('busy') else 200
+        return jsonify(result),status
+    except Exception as exc:
+        return jsonify({'success':False,'error':str(exc)[:180]}),500
+
+@app.route('/api/multiasset/signals/previous', methods=['GET'])
+def api_multiasset_signals_previous():
+    try:
+        min_conf=float(request.args.get('min_confidence',55) or 55)
+        with _MULTI_ASSET_CACHE['lock']:
+            analyses=dict(_MULTI_ASSET_CACHE['analysis'])
+        signals=[]
+        for result in analyses.values():
+            if not isinstance(result,dict) or not _multiasset_is_executable(result): continue
+            row=_multiasset_signal_row(result,'PREVIOUS_CONFIRMED')
+            if row['confidence']>=min_conf: signals.append(row)
+        signals.sort(key=lambda x:-x['confidence'])
+        return jsonify({'success':True,'warming_up':False,'running':False,'cache_ready':bool(analyses),'total':len(signals),'active_count':len(signals),'signals':signals,'other_directional_signals':[],'analysis_candidates':[],'progress':{'total':7,'completed':len(analyses),'errors':0},'timestamp':datetime.now(bolivia_tz).isoformat()})
+    except Exception as exc:
+        return jsonify({'success':False,'error':str(exc)[:180]}),500
+
+@app.route('/api/multiasset/signals/active', methods=['GET'])
+def api_multiasset_signals_active():
+    # Commit 12 V1 does not duplicate a second lifecycle store. Fresh executable
+    # analyses are exposed in /previous; saved/entered positions live in Guardian.
+    return jsonify({'success':True,'warming_up':False,'running':False,'cache_ready':True,'total':0,'signals':[],'other_directional_signals':[],'vigent_other_directional_signals':[],'analysis_candidates':[],'progress':{'total':7,'completed':0,'errors':0},'timestamp':datetime.now(bolivia_tz).isoformat()})
+
+@app.route('/api/multiasset/correlation', methods=['GET'])
+def api_multiasset_correlation():
+    try:
+        from multiasset_system import scan_opportunities
+        rows=scan_opportunities(str(request.args.get('timeframe') or '4h'),force=False)
+        selected=str(request.args.get('symbol') or '')
+        best=rows[0] if rows else None
+        return jsonify({'success':True,'selected_symbol':selected,'market_context':'MULTI_ASSET_OPPORTUNITY_ROUTER','best_opportunity':best,'rankings':rows[:7],'description':'Router determinístico por actividad/tendencia/volatilidad; Macro Gate confirma o veta, nunca crea dirección.'})
+    except Exception as exc:
+        return jsonify({'success':False,'error':str(exc)[:180]}),500
+
+@app.route('/api/multiasset/microstructure', methods=['GET'])
+def api_multiasset_microstructure():
+    symbol=str(request.args.get('symbol') or ''); tf=str(request.args.get('timeframe') or '4h')
+    with _MULTI_ASSET_CACHE['lock']:
+        result=(_MULTI_ASSET_CACHE['analysis'].get((symbol,tf)) or {})
+    return jsonify({'success':True,'data':result.get('futures_microstructure') or result.get('microstructure') or {'available':False,'mode':'RESOURCE_GUARDED_PROXY','reason':'Sin descarga automática adicional de order book.'}})
+
+@app.route('/api/multiasset/position-guardian', methods=['GET'])
+def api_multiasset_position_guardian():
+    try:
+        from saved_signals import list_saved_signals
+        from multiasset_system import MULTIASSET_SYMBOLS
+        user=_authenticated_user()
+        if not user:
+            return jsonify({'success':False,'authenticated':False,'error':'Debes iniciar sesión.','positions':[]}),401
+        signals=list_saved_signals(status_filter=['active','entry_touched'],limit=50,user_name=user) or []
+        signals=[s for s in signals if str(s.get('symbol') or '').upper().replace('/','-') in MULTIASSET_SYMBOLS]
+        if not signals:
+            return jsonify({'success':True,'user':user,'positions':[],'count':0})
+        engine=_get_multiasset_system(); positions=[]
+        try:
+            from macro_context import get_macro_context_snapshot
+            macro=get_macro_context_snapshot(fetch_if_stale=False) or {}
+        except Exception: macro={}
+        for sig in signals:
+            symbol=str(sig.get('symbol') or ''); tf=str(sig.get('timeframe') or '')
+            snapshot=_guardian_prepare_futures_market_data(engine,symbol,tf) if engine else None
+            if not snapshot: continue
+            if sig.get('status')=='entry_touched':
+                advice=portfolio_guardian.evaluate_futures_position(signal=sig,current_price=snapshot['current_price'],candles=snapshot['candles'],macro_context=macro)
+            else:
+                advice={'action':'WAIT_ENTRY','severity':'NONE','reason':'Guardian se activa cuando Entry queda realmente tocado.'}
+            positions.append({'signal_id':sig.get('id'),'symbol':symbol,'timeframe':tf,'action':sig.get('action'),'entry':sig.get('entry'),'stop_loss':sig.get('stop_loss'),'take_profit':sig.get('take_profit'),'current_price':snapshot['current_price'],'guardian':advice,'market':'multiasset'})
+        return jsonify({'success':True,'user':user,'positions':positions,'count':len(positions)})
+    except Exception as exc:
+        return jsonify({'success':False,'positions':[],'error':str(exc)[:180]}),500
 
 # ============================================================================
 # COMMIT 9.6 — FUTURES UNIVERSE + OPPORTUNITY ROUTER
@@ -39667,7 +39935,7 @@ def _build_confirmed_signal_telegram_message(market, signal):
 
     lines = [
         '✅ <b>NUEVA SEÑAL CONFIRMADA</b>',
-        f"📊 Mercado: <b>{'FUTURES' if market == 'futures' else 'SPOT'}</b>",
+        f"📊 Mercado: <b>{'MULTI-ACTIVO' if market == 'multiasset' else ('FUTURES' if market == 'futures' else 'SPOT')}</b>",
         f"💱 <b>{_telegram_escape(symbol)}</b> · {_telegram_escape(timeframe)}",
         f"Dirección: <b>{_telegram_escape(action)}</b>",
         f"Confianza: <b>{confidence:.0f}%</b>",
@@ -39686,7 +39954,7 @@ def _build_confirmed_signal_telegram_message(market, signal):
     if rr is not None:
         lines.append(f"⚖️ R/R: <b>1:{rr:.2f}</b>")
 
-    if market == 'futures' and leverage is not None:
+    if market in ('futures', 'multiasset') and leverage is not None:
         try:
             lines.append(f"⚡ Apalancamiento: <b>{int(float(leverage))}x</b>")
         except Exception:
@@ -39750,7 +40018,7 @@ def _send_confirmed_signal_telegram(market, signal):
 
     if not symbol or not timeframe:
         return False
-    if market == 'futures':
+    if market in ('futures', 'multiasset'):
         if action not in ('LONG', 'SHORT'):
             return False
         publication_status = str(
@@ -40815,16 +41083,12 @@ def saved_futures_lifecycle_loop():
                 )
 
                 if key not in price_cache:
-
-                    price_cache[
-                        key
-                    ] = (
-                        futures_market
-                        .get_kucoin_data(
-                            symbol,
-                            timeframe
-                        )
-                    )
+                    try:
+                        from multiasset_system import MULTIASSET_SYMBOLS, multiasset_system
+                        market_engine = multiasset_system if symbol in MULTIASSET_SYMBOLS else futures_market
+                    except Exception:
+                        market_engine = futures_market
+                    price_cache[key] = market_engine.get_kucoin_data(symbol, timeframe)
 
                 return price_cache[
                     key
@@ -42029,7 +42293,7 @@ def _telegram_market_users(market):
 
     env_name = (
         'SMARTRADING_FUTURES_USERS'
-        if market == 'futures'
+        if market in ('futures', 'multiasset')
         else 'SMARTRADING_SPOT_USERS'
     )
 
@@ -44118,7 +44382,8 @@ def _resolve_ai_question_target(
 
     if market not in (
         'SPOT',
-        'FUTURES'
+        'FUTURES',
+        'MULTIASSET'
     ):
 
         market = 'SPOT'
@@ -44152,6 +44417,13 @@ def _resolve_ai_question_target(
     asset_rules = (
         (r'\bpaxg\s*[/\-]?\s*btc\b', 'PAXG-BTC', 'SPOT'),
         (r'\bpaxg\b(?!\s*[/\-]?\s*btc\b)', 'PAXG-USDT', 'SPOT'),
+        (r'\bspy\b|s&p\s*500|sp500', 'SPY-USDT', 'MULTIASSET'),
+        (r'\bqqq\b|nasdaq\s*100', 'QQQ-USDT', 'MULTIASSET'),
+        (r'\bcl\b|petroleo|petróleo|wti', 'CL-USDT', 'MULTIASSET'),
+        (r'\bnatgas\b|gas\s+natural', 'NATGAS-USDT', 'MULTIASSET'),
+        (r'\bcopper\b|cobre', 'COPPER-USDT', 'MULTIASSET'),
+        (r'\bxag\b|plata', 'XAG-USDT', 'MULTIASSET'),
+        (r'\bkstr\b|star\s*50', 'KSTR-USDT', 'MULTIASSET'),
         (r'\bbtc\b', 'BTC-USDT', None),
         (r'\beth\b', 'ETH-USDT', 'FUTURES'),
         (r'\bsol\b', 'SOL-USDT', 'FUTURES'),
@@ -44304,7 +44576,21 @@ def _resolve_ai_question_target(
     # NORMALIZAR SEGÚN LOS MERCADOS REALES DEL SISTEMA
     # ========================================================================
 
-    if market == 'FUTURES':
+    if market == 'MULTIASSET':
+        multi_symbols = (
+            'SPY-USDT','QQQ-USDT','CL-USDT','NATGAS-USDT',
+            'COPPER-USDT','XAG-USDT','KSTR-USDT'
+        )
+        if symbol not in multi_symbols:
+            symbol = str(page_symbol or 'CL-USDT').upper()
+            if symbol not in multi_symbols:
+                symbol = 'CL-USDT'
+        allowed_timeframes = ('1h','4h','1D')
+        if timeframe not in allowed_timeframes:
+            page_tf = str(page_timeframe or '')
+            timeframe = page_tf if page_tf in allowed_timeframes else '4h'
+
+    elif market == 'FUTURES':
 
         futures_tf_by_symbol = {
             'BTC-USDT': ('30m', '1h', '2h', '4h', '12h', '1D'),
@@ -44802,6 +45088,62 @@ def _build_ai_advisor_context(
                 'SIGNAL_REVIEW'
             )
 
+
+    # ========================================================================
+    # MULTI-ACTIVO — Commit 12 compact context, same GLOBAL token budget
+    # ========================================================================
+
+    elif market == 'MULTIASSET':
+        try:
+            from supabase_client import supabase_client
+            context['personal_risk_profile'] = supabase_client.get_user_futures_risk_profile(user) or {}
+        except Exception:
+            context['personal_risk_profile'] = {}
+
+        with _MULTI_ASSET_CACHE['lock']:
+            analysis_map = dict(_MULTI_ASSET_CACHE.get('analysis') or {})
+
+        for key, result in analysis_map.items():
+            if not isinstance(result, dict):
+                continue
+            key_symbol = key[0] if isinstance(key, tuple) and len(key) >= 2 else None
+            key_tf = key[1] if isinstance(key, tuple) and len(key) >= 2 else None
+            compact = _ai_compact_analysis(result, key_symbol, key_tf)
+            compact['display_name'] = result.get('display_name')
+            compact['asset_class'] = result.get('asset_class')
+            compact['macro_gate'] = (result.get('multiasset_macro') or {}).get('gate')
+            compact['strategy_cell'] = (result.get('multiasset_strategy_bank') or {}).get('learning_cell')
+            if symbol and timeframe and str(compact.get('symbol')) == str(symbol) and str(compact.get('timeframe')) == str(timeframe):
+                selected = compact
+            if compact.get('action') in ('LONG','SHORT'):
+                candidates.append(compact)
+
+        candidates.sort(key=lambda x: float(x.get('confidence') or 0), reverse=True)
+        # Hard token guard: never send the seven-market universe to Groq.
+        context['signals'] = candidates[:4]
+        context['selected_signal'] = selected or {}
+        if selected:
+            context['system_action'] = selected.get('action')
+        try:
+            from multiasset_system import scan_opportunities
+            router = scan_opportunities('4h', force=False)
+            context['opportunity_router'] = [
+                {k: row.get(k) for k in ('symbol','display_name','asset_class','router_score','bias','macro_gate','session')}
+                for row in router[:4]
+            ]
+        except Exception:
+            context['opportunity_router'] = []
+        context['macro_context'] = _ai_macro_context() if '_ai_macro_context' in globals() else {}
+        context['reviewtrader'] = _ai_review_snapshot(
+            symbol, timeframe, (selected.get('action') if selected else None), 'futures'
+        )
+        context['ai_resource_contract'] = {
+            'automatic_multiasset_llm_calls': 0,
+            'shares_global_budget': True,
+            'max_signals_in_prompt': 4,
+            'router_is_deterministic': True,
+        }
+        event_type = 'SIGNAL_REVIEW' if candidates else 'PASSIVE_MARKET'
 
     # ========================================================================
     # SPOT
@@ -48090,6 +48432,9 @@ def futures_standard_alert_loop():
     time.sleep(120)
     while True:
         try:
+            # Commit 12: piggyback Multi-Activo on this existing daemon. No
+            # additional worker/thread is created; scanner is TTL-cached.
+            _multiasset_background_tick()
             # Shadow-live runs for every official signal. RC9.8.1: Futures
             # Telegram is CONFIRMED-only; Entry/TP/SL lifecycle stays silent.
             users = []
@@ -50876,7 +51221,8 @@ def api_ai_advice():
 
     if market not in (
         'SPOT',
-        'FUTURES'
+        'FUTURES',
+        'MULTIASSET'
     ):
 
         market = 'SPOT'
@@ -51088,7 +51434,7 @@ def api_ai_advice():
             )
 
 
-        elif market == 'FUTURES':
+        elif market in ('FUTURES', 'MULTIASSET'):
 
             context[
                 'hourly_market_snapshot'
@@ -51528,7 +51874,8 @@ def api_ai_ask():
 
     if page_market not in (
         'SPOT',
-        'FUTURES'
+        'FUTURES',
+        'MULTIASSET'
     ):
 
         page_market = 'SPOT'

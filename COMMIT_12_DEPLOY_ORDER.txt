@@ -1,0 +1,43 @@
+COMMIT 12 · ORDEN DE DEPLOY
+
+Base obligatoria: main actual posterior a Hotfix 10.2.2.
+No requiere SQL ni migración Supabase.
+
+1. Reemplazar/agregar en GitHub, conservando exactamente las rutas del ZIP:
+   - futures_system.py
+   - multiasset_system.py  (NUEVO)
+   - review_trader.py
+   - saved_signals.py
+   - ai_advisor.py
+   - app.py
+   - static/script.js
+   - static/futures.js
+   - static/ai_assistant.js
+   - templates/index.html
+   - render.yaml
+
+2. Hacer UN SOLO commit con el mensaje:
+   Commit 12 - Incorpora Multi-Activo gobernado con Router macro y límites gratuitos
+
+3. Dejar que Render haga un único deploy.
+
+4. Smoke test después del deploy:
+   a) Abrir / y comprobar SPOT.
+   b) Abrir /futures y comprobar FUTURES.
+   c) Abrir /multiasset.
+   d) Verificar que el selector muestre nombres humanos, por ejemplo:
+      CL (Petróleo WTI), SPY (S&P 500), QQQ (Nasdaq 100).
+   e) Abrir /api/multiasset/universe: debe devolver success=true.
+   f) Abrir /api/multiasset/opportunities: debe devolver router/shortlist sin ejecutar IA.
+   g) Ejecutar manualmente CL-USDT 4h desde Multi-Activo.
+   h) Confirmar que Spot/Futures siguen cargando normalmente.
+
+5. No modificar cuotas de Supabase/Groq/Render después del deploy.
+
+6. Monitoreo operativo recomendado durante el primer día:
+   - Render: RAM y Service-Initiated outbound.
+   - Supabase: tamaño de DB/egress.
+   - Groq: consumo total, no crear una cuota nueva para Multi-Activo.
+
+Rollback simple:
+- Revertir este único commit. Como no hay SQL, no queda migración de base pendiente.

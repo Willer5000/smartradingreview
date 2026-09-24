@@ -1206,7 +1206,7 @@ def _quota_allowed(
 
         normalized_market = str(market or "").upper()
 
-        if normalized_market == "FUTURES":
+        if normalized_market in {"FUTURES", "MULTIASSET"}:
             cooldown = quota.get("manual_futures_cooldown") or {}
             cooldown_remaining = int(cooldown.get("remaining_seconds") or 0)
             if cooldown_remaining > 0:
@@ -2401,7 +2401,7 @@ def _fingerprint(
 
             interval_minutes = 120
 
-        elif normalized_market == "FUTURES":
+        elif normalized_market in {"FUTURES", "MULTIASSET"}:
 
             interval_minutes = (
                 30
@@ -2939,7 +2939,7 @@ Spot debe mencionar al menos uno de ellos cuando sea relevante.
 
 NO necesitas conocer las cantidades exactas.
 
-Si market == FUTURES y existe personal_risk_profile:
+Si market == FUTURES o MULTIASSET y existe personal_risk_profile:
 
 - respeta futures_risk_mode;
 - respeta futures_margin_policy;
@@ -3131,7 +3131,7 @@ Una estrategia propuesta:
 
 Una estrategia propuesta debe indicar:
 
-1. mercado: SPOT o FUTURES;
+1. mercado: SPOT, FUTURES o MULTIASSET;
 2. tesis;
 3. régimen donde debería funcionar;
 4. setup técnico;
@@ -4974,7 +4974,7 @@ def _local_operational_fallback(context, market, question=None, reason=''):
         if open_count:
             why.append(f'Posiciones/señales guardadas activas: {open_count}')
 
-    if market == 'FUTURES':
+    if market in ('FUTURES', 'MULTIASSET'):
         risks.append('Mantener el riesgo definido por Entry–SL y respetar Guardian/Publication Gate.')
         advice_parts.append('No se altera LONG/SHORT, Entry, SL, TP ni leverage en este modo de respaldo.')
     else:

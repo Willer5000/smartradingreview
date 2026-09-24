@@ -1,0 +1,56 @@
+COMMIT 12 · GUARDAS DE RECURSOS Y ALCANCE
+
+NO CAMBIA:
+- política central de trading;
+- Entry/SL/TP base de Futures;
+- Safety ni Publication Gate como mecanismo central;
+- Reachability;
+- ReviewTrader/Alpha Decay como gobernanza;
+- presupuesto MAIN_SUPABASE_DAILY_BUDGET_MB=12;
+- presupuesto AI_GROQ_DAILY_TOKEN_BUDGET=160000;
+- Gunicorn: 1 worker / 2 threads;
+- Telegram text-only;
+- PDF de aprendizaje.
+
+MULTI-ACTIVO AÑADE:
+- scanner secuencial barato de 7 instrumentos;
+- TTL router 900 s;
+- 72 velas por consulta del scanner;
+- shortlist máximo 2;
+- máximo automático de 12 análisis profundos/día;
+- máximo 1 análisis profundo por iteración del loop existente;
+- 0 threads nuevos;
+- 0 escrituras Supabase desde el scanner;
+- 0 llamadas LLM automáticas desde el scanner;
+- macro reutilizada desde cache existente con fetch_if_stale=False;
+- cache de análisis Multi-Activo acotada a 8 elementos;
+- microestructura extra de OrderBook/trades desactivada en automático para Multi-Activo.
+
+UNIVERSO V1:
+SPY-USDT     -> SPY (S&P 500)
+QQQ-USDT     -> QQQ (Nasdaq 100)
+CL-USDT      -> CL (Petróleo WTI)
+NATGAS-USDT  -> NATGAS (Gas Natural)
+COPPER-USDT  -> COPPER (Cobre)
+XAG-USDT     -> XAG (Plata)
+KSTR-USDT    -> KSTR (China STAR 50)
+
+TEMPORALIDADES V1:
+1h  = Fast Lane dinámica, sólo para candidato excepcional.
+4h  = principal ejecutable.
+1D  = swing/contexto.
+
+APRENDIZAJE:
+- no hay tablas nuevas;
+- símbolos Multi-Activo son exclusivos;
+- context.market_segment=MULTIASSET;
+- strategy family se prefija MULTI::<ASSET_CLASS>::...;
+- celdas incluyen clase, activo, TF, régimen y volatilidad;
+- ReviewTrader obtiene OHLCV del motor Multi-Activo para TP/SL/MFE/MAE;
+- transporte DB conserva system_type=futures por compatibilidad del esquema derivativo, pero la segmentación operativa se hace por market_segment/símbolo/contexto/estrategia.
+
+IA:
+- no hay Científico/Consejo/Asistente adicionales;
+- Multi-Activo comparte la cuota global;
+- contexto IA Multi-Activo usa máximo 4 señales compactas + top 4 del Router;
+- scanner nunca llama IA.

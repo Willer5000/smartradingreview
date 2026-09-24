@@ -135,10 +135,35 @@
     
     <!-- ============ FLAG DE FUTUROS (inyectado por Jinja) ============ -->
     <script>
+        window.IS_MULTI_ASSET_PAGE = {{ 'true' if is_multiasset|default(false) else 'false' }};
         window.IS_FUTURES_PAGE = {{ 'true' if is_futures else 'false' }};
-        
-        // Configuración específica según sea Spot o Futuros
-        window.PAGE_CONFIG = window.IS_FUTURES_PAGE ? {
+        window.DERIV_API_BASE = window.IS_MULTI_ASSET_PAGE ? '/api/multiasset' : '/api/futures';
+
+        // Commit 12: Multi-Activo reutiliza la UI derivada de Futures, pero
+        // mantiene universo, endpoints y aprendizaje separados por símbolo/contexto.
+        window.PAGE_CONFIG = window.IS_MULTI_ASSET_PAGE ? {
+            title: 'MULTI-ACTIVO',
+            symbols: {
+                'SPY-USDT': 'SPY (S&P 500)',
+                'QQQ-USDT': 'QQQ (Nasdaq 100)',
+                'CL-USDT': 'CL (Petróleo WTI)',
+                'NATGAS-USDT': 'NATGAS (Gas Natural)',
+                'COPPER-USDT': 'COPPER (Cobre)',
+                'XAG-USDT': 'XAG (Plata)',
+                'KSTR-USDT': 'KSTR (China STAR 50)'
+            },
+            allowedTimeframesBySymbol: {
+                'SPY-USDT': ['1h','4h','1D'], 'QQQ-USDT': ['1h','4h','1D'],
+                'CL-USDT': ['1h','4h','1D'], 'NATGAS-USDT': ['1h','4h','1D'],
+                'COPPER-USDT': ['1h','4h','1D'], 'XAG-USDT': ['1h','4h','1D'],
+                'KSTR-USDT': ['1h','4h','1D']
+            },
+            timeframes: {'1h':'1 Hora · Fast Lane','4h':'4 Horas · Principal','1D':'1 Día · Swing'},
+            defaultSymbol: 'CL-USDT',
+            defaultTimeframe: '4h',
+            apiEndpoint: '/api/multiasset/analyze',
+            systemType: 'multiasset'
+        } : window.IS_FUTURES_PAGE ? {
             title: 'FUTUROS',
             symbols: {
                 'BTC-USDT': 'BTC/USDT · CORE 1',
@@ -174,41 +199,20 @@
                 'INJ-USDT': ['30m', '1h', '2h'],
                 'SEI-USDT': ['30m', '1h', '2h']
             },
-            timeframes: {
-                '30m': '30 Minutos',
-                '1h':  '1 Hora',
-                '2h':  '2 Horas',
-                '4h':  '4 Horas',
-                '12h': '12 Horas',
-                '1D':  '1 Día'
-            },
-            defaultSymbol: 'BTC-USDT',
-            defaultTimeframe: '1h',
-            apiEndpoint: '/api/futures/analyze',
-            systemType: 'futures'
+            timeframes: {'30m':'30 Minutos','1h':'1 Hora','2h':'2 Horas','4h':'4 Horas','12h':'12 Horas','1D':'1 Día'},
+            defaultSymbol: 'BTC-USDT', defaultTimeframe: '1h',
+            apiEndpoint: '/api/futures/analyze', systemType: 'futures'
         } : {
             title: 'SPOT',
-            symbols: {
-                'BTC-USDT': 'BTC/USDT',
-                'PAXG-USDT': 'PAXG/USDT (Oro)',
-                'PAXG-BTC': 'PAXG/BTC (Ratio)'
-            },
-            timeframes: {
-                '4h':  '4 Horas (Operativa)',
-                '12h': '12 Horas (Swing)',
-                '1D':  '1 Día (Inversión)',
-                '1W':  '1 Semana (Estratégica)'
-            },
-            defaultSymbol: 'BTC-USDT',
-            defaultTimeframe: '1D',
-            apiEndpoint: '/api/analyze',
-            systemType: 'spot'
+            symbols: {'BTC-USDT':'BTC/USDT','PAXG-USDT':'PAXG/USDT (Oro)','PAXG-BTC':'PAXG/BTC (Ratio)'},
+            timeframes: {'4h':'4 Horas (Operativa)','12h':'12 Horas (Swing)','1D':'1 Día (Inversión)','1W':'1 Semana (Estratégica)'},
+            defaultSymbol:'BTC-USDT', defaultTimeframe:'1D', apiEndpoint:'/api/analyze', systemType:'spot'
         };
-        
+
         console.log('📌 Página cargada:', window.PAGE_CONFIG.title);
     </script>
 </head>
-<body class="trading-app {{ 'mode-futures' if is_futures else 'mode-spot' }}">
+<body class="trading-app {{ 'mode-multiasset' if is_multiasset|default(false) else ('mode-futures' if is_futures else 'mode-spot') }}">
     <!-- Reloj Digital Bolivia + KPIs del Sistema (Rendimiento del ReviewTrader) -->
     <div class="container-fluid bg-dark border-bottom border-secondary py-2">
         <div class="row align-items-center">
@@ -282,15 +286,9 @@
                 <span class="brand-mobile">TRADER ANALYST PRO</span>
             </a>
             <div class="navbar-nav ms-auto">
-                {% if is_futures %}
-                <a class="nav-link" href="/">
-                    <i class="fas fa-chart-line me-1"></i>📊 Volver a Spot
-                </a>
-                {% else %}
-                <a class="nav-link fw-semibold" href="/futures" id="btn-open-futures">
-                    <i class="fas fa-chart-line me-1" aria-hidden="true"></i>FUTUROS
-                </a>
-                {% endif %}
+                <a class="nav-link fw-semibold" href="/">SPOT</a>
+                <a class="nav-link fw-semibold" href="/futures" id="btn-open-futures">FUTUROS</a>
+                <a class="nav-link fw-semibold" href="/multiasset" id="btn-open-multiasset">MULTI-ACTIVO</a>
                 <a class="nav-link fw-semibold" href="/analytics">
                     <i class="fas fa-chart-column me-1" aria-hidden="true"></i>ANÁLISIS
                 </a>
@@ -2552,7 +2550,7 @@
 <!-- V1.0 UX — CORRELACIÓN / ROTACIÓN COMPACTA -->
 <div class="card bg-dark border-secondary mt-3 correlation-compact">
     <div class="card-header correlation-compact-header">
-        <h6 class="mb-0" id="correlation-panel-title">{% if is_futures %}<i class="fas fa-network-wired me-2" aria-hidden="true"></i>Contexto de mercado Futures{% else %}<i class="fas fa-arrows-rotate me-2" aria-hidden="true"></i>Correlación y rotación Spot{% endif %}</h6>
+        <h6 class="mb-0" id="correlation-panel-title">{% if is_multiasset|default(false) %}<i class="fas fa-globe me-2" aria-hidden="true"></i>Contexto Macro / Multi-Activo{% elif is_futures %}<i class="fas fa-network-wired me-2" aria-hidden="true"></i>Contexto de mercado Futures{% else %}<i class="fas fa-arrows-rotate me-2" aria-hidden="true"></i>Correlación y rotación Spot{% endif %}</h6>
         <span class="badge bg-info" id="correlation-timeframe">1D</span>
     </div>
     <div class="card-body correlation-compact-body">
@@ -2626,7 +2624,7 @@
 
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI-2"></script>
     <script
-        src="{{ url_for('static', filename='script.js') }}?v=20260919-RC9-7-10-FINALIZATION"
+        src="{{ url_for('static', filename='script.js') }}?v=20260924-COMMIT12-MULTIASSET"
     ></script>
 
 
@@ -2637,7 +2635,7 @@
     {% if is_futures %}
 
     <script
-        src="{{ url_for('static', filename='futures.js') }}?v=20260919-RC9-7-10-FINALIZATION"
+        src="{{ url_for('static', filename='futures.js') }}?v=20260924-COMMIT12-MULTIASSET"
     ></script>
 
     {% endif %}
@@ -2661,7 +2659,7 @@
         Debe permanecer aislado y estable.
     -->
     <script
-        src="{{ url_for('static', filename='ai_assistant.js') }}?v=20260908-Q6-INTEGRITY"
+        src="{{ url_for('static', filename='ai_assistant.js') }}?v=20260924-COMMIT12-MULTIASSET"
     ></script>
     
     
@@ -3245,7 +3243,7 @@
                 if (document.hidden) return;
                 const symbol = window.currentSymbol || (window.PAGE_CONFIG?.defaultSymbol || 'BTC-USDT');
                 const interval = window.currentInterval || (window.PAGE_CONFIG?.defaultTimeframe || '1D');
-                const market = window.IS_FUTURES_PAGE ? 'futures' : 'spot';
+                const market = window.IS_MULTI_ASSET_PAGE ? 'multiasset' : (window.IS_FUTURES_PAGE ? 'futures' : 'spot');
                 const normalizeSymbol = value => String(value || '').trim().toUpperCase().replace('/', '-');
                 const normalizeTf = value => {
                     const raw = String(value || '').trim();
@@ -3813,7 +3811,7 @@
                         if (navBrand) {
                             navBrand.innerHTML = '<span class="brand-desktop">CRYPTO TRADER ANALYST PRO · FUTUROS</span><span class="brand-mobile">TRADER ANALYST · FUTUROS</span>';
                         }
-                        document.title = 'Futuros - Crypto Trader Analyst Pro';
+                        document.title = window.IS_MULTI_ASSET_PAGE ? 'Multi-Activo - Trader Analyst Pro' : 'Futuros - Crypto Trader Analyst Pro';
                     }
                     
                     console.log('✅ Selectores reconfigurados para:', window.PAGE_CONFIG.title);

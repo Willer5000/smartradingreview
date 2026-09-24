@@ -2662,7 +2662,7 @@ window.buildAnalyzeURL = function(symbol, timeframe) {
     if (window.IS_FUTURES_PAGE === true) {
 
         return {
-            url: '/api/futures/analyze',
+            url: (window.IS_MULTI_ASSET_PAGE === true ? '/api/multiasset/analyze' : '/api/futures/analyze'),
             method: 'POST',
 
             body: {

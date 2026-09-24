@@ -5,6 +5,13 @@
 
 console.log('🚀 futures.js cargado - modo Futuros activo');
 
+const DERIV_API_BASE = window.DERIV_API_BASE || (window.IS_MULTI_ASSET_PAGE ? '/api/multiasset' : '/api/futures');
+function _derivPageSymbols(rows) {
+    const allowed = new Set(Object.keys(window.PAGE_CONFIG?.symbols || {}));
+    return (Array.isArray(rows) ? rows : []).filter(row => allowed.size === 0 || allowed.has(String(row?.symbol || '').toUpperCase().replace('/', '-')));
+}
+
+
 // ============================================================================
 // CONTROL DE CARGA DE SEÑALES FUTUROS
 // Evita peticiones simultáneas al mismo caché pesado.
@@ -187,7 +194,7 @@ window.refreshUserSavedSignalRefs = async function(force = false) {
                 throw new Error(json.error || `HTTP ${response.status}`);
             }
             // El endpoint ya filtra por _authenticated_user() y excluye deleted.
-            _replaceUserSavedSignalRefs(json.signals || []);
+            _replaceUserSavedSignalRefs(_derivPageSymbols(json.signals || []));
             state.userKey = currentUserKey;
         } catch (error) {
             // Fallo de esta capa visual nunca debe ocultar señales globales.
@@ -883,7 +890,7 @@ window.updateActiveSignals = async function() {
     try {
 
         const response = await fetch(
-            '/api/futures/signals/active?min_confidence=55&_ts=' + Date.now(),
+            DERIV_API_BASE + '/signals/active?min_confidence=55&_ts=' + Date.now(),
             {
                 method: 'GET',
                 cache: 'no-store',
@@ -1519,7 +1526,7 @@ window.updatePreviousSignals = async function() {
     try {
 
         const response = await fetch(
-            '/api/futures/signals/previous?min_confidence=55&_ts='
+            DERIV_API_BASE + '/signals/previous?min_confidence=55&_ts='
             + Date.now(),
             {
                 method: 'GET',
@@ -2151,17 +2158,17 @@ window.updateCorrelationInfo = function(data) {
     if (!window.IS_FUTURES_PAGE) return;
 
     const tf = document.getElementById('interval-select')?.value || window.currentInterval || '1h';
-    const symbol = document.getElementById('symbol-select')?.value || window.currentSymbol || 'BTC-USDT';
+    const symbol = document.getElementById('symbol-select')?.value || window.currentSymbol || window.PAGE_CONFIG?.defaultSymbol || 'BTC-USDT';
     const requestKey = `${symbol}|${tf}`;
     window.__FUTURES_CONTEXT_REQUEST_KEY__ = requestKey;
 
-    fetch(`/api/futures/correlation?timeframe=${encodeURIComponent(tf)}&symbol=${encodeURIComponent(symbol)}`, {
+    fetch(`${DERIV_API_BASE}/correlation?timeframe=${encodeURIComponent(tf)}&symbol=${encodeURIComponent(symbol)}`, {
         cache: 'no-store'
     })
         .then(r => r.json())
         .then(json => {
             if (!json.success) return;
-            const currentSymbol = document.getElementById('symbol-select')?.value || window.currentSymbol || 'BTC-USDT';
+            const currentSymbol = document.getElementById('symbol-select')?.value || window.currentSymbol || window.PAGE_CONFIG?.defaultSymbol || 'BTC-USDT';
             const currentTf = document.getElementById('interval-select')?.value || window.currentInterval || '1h';
             if (`${currentSymbol}|${currentTf}` !== requestKey) return;
             renderFuturesCorrelation(json);
@@ -2174,9 +2181,28 @@ function renderFuturesCorrelation(payload) {
     const container = document.getElementById('correlation-info');
     if (!container) return;
 
+    if (window.IS_MULTI_ASSET_PAGE) {
+        const rows = Array.isArray(payload?.rankings) ? payload.rankings : [];
+        const best = payload?.best_opportunity || {};
+        const title = document.getElementById('correlation-panel-title');
+        if (title) title.innerHTML = '<i class="fas fa-globe me-2"></i>Router de oportunidades · Multi-Activo';
+        const tfBadge = document.getElementById('correlation-timeframe');
+        if (tfBadge) tfBadge.textContent = window.currentInterval || '4h';
+        container.innerHTML = `
+            <div class="small text-muted mb-2">Scanner determinístico sin IA ni escrituras DB. Sólo los mejores pasan al análisis completo.</div>
+            ${rows.slice(0,7).map((r,i) => `
+                <div class="d-flex justify-content-between align-items-center border-bottom border-secondary py-2">
+                    <span><strong>${futEscapeHtml(r.display_name || r.symbol || '--')}</strong><br><small>${futEscapeHtml(r.asset_class || '')} · ${futEscapeHtml(r.session || '')}</small></span>
+                    <span class="text-end"><span class="badge bg-${i < 2 ? 'success' : 'secondary'}">${Number(r.router_score || 0).toFixed(0)}</span><br><small>${futEscapeHtml(r.bias || '')} · Macro ${futEscapeHtml(r.macro_gate || 'NORMAL')}</small></span>
+                </div>`).join('') || '<div class="text-muted">Sin datos suficientes del Router.</div>'}
+            ${best?.display_name ? `<div class="mt-2 text-info">Mejor contexto ahora: <strong>${futEscapeHtml(best.display_name)}</strong>. Esto no obliga a operar; sólo prioriza análisis.</div>` : ''}
+        `;
+        return;
+    }
+
     const ctx = payload.intermarket_context || {};
     const pairs = payload.pairs || {};
-    const selectedSymbol = String(ctx.selected_symbol || window.currentSymbol || 'BTC-USDT').toUpperCase().replace('/', '-');
+    const selectedSymbol = String(ctx.selected_symbol || window.currentSymbol || window.PAGE_CONFIG?.defaultSymbol || 'BTC-USDT').toUpperCase().replace('/', '-');
     const selected = pairs[selectedSymbol] || {};
     const tf = payload.timeframe || window.currentInterval || '1h';
     const symbolLabel = selectedSymbol.replace('-', '/');
@@ -2914,7 +2940,8 @@ function _futDetectBrowserTimezone() {
 window._fut96Universe = null;
 
 function _fut96GroupLabel(group) {
-    return ({CORE1:'CORE 1 · BTC/ETH/SOL', CORE2:'CORE 2 · XRP/ADA', MEDIUM:'MEDIUM · salida rápida', HIGH:'HIGH · salida muy rápida'})[group] || group;
+    const remote = window._derivUniverse?.group_labels || {};
+    return remote[group] || ({CORE1:'CORE 1 · BTC/ETH/SOL', CORE2:'CORE 2 · XRP/ADA', MEDIUM:'MEDIUM · salida rápida', HIGH:'HIGH · salida muy rápida'})[group] || group;
 }
 
 function _fut96ApplyTimeframes(symbol) {
@@ -2930,21 +2957,23 @@ function _fut96ApplyTimeframes(symbol) {
     const labels = {'30m':'30 Minutos','1h':'1 Hora','2h':'2 Horas','4h':'4 Horas','12h':'12 Horas','1D':'1 Día'};
     const previous = select.value;
     select.innerHTML = allowed.map(tf => `<option value="${tf}">${labels[tf] || tf}</option>`).join('');
-    select.value = allowed.includes(previous) ? previous : (allowed.includes('1h') ? '1h' : allowed[0]);
+    select.value = allowed.includes(previous) ? previous : (allowed.includes(window.PAGE_CONFIG?.defaultTimeframe) ? window.PAGE_CONFIG.defaultTimeframe : (allowed.includes('1h') ? '1h' : allowed[0]));
     select.dataset.riskClass = groupName;
 }
 
 window.loadFuturesUniverse96 = async function() {
     try {
-        const response = await fetch('/api/futures/universe', {cache:'no-store'});
+        const response = await fetch(DERIV_API_BASE + '/universe', {cache:'no-store'});
         const data = await response.json();
         if (!data?.success) return false;
         window._fut96Universe = data;
         const select = document.getElementById('symbol-select');
         if (!select) return true;
-        const previous = select.value || 'BTC-USDT';
+        const previous = select.value || window.PAGE_CONFIG?.defaultSymbol || 'BTC-USDT';
         let html = '';
-        for (const group of ['CORE1','CORE2','MEDIUM','HIGH']) {
+        window._derivUniverse = data || {};
+        const groupOrder = Array.isArray(data.group_order) && data.group_order.length ? data.group_order : ['CORE1','CORE2','MEDIUM','HIGH'];
+        for (const group of groupOrder) {
             const cfg = data.groups[group];
             if (!cfg) continue;
             html += `<optgroup label="${_fut96GroupLabel(group)}">`;
@@ -2956,7 +2985,7 @@ window.loadFuturesUniverse96 = async function() {
         }
         select.innerHTML = html;
         const all = Object.keys(data.symbols || {});
-        select.value = all.includes(previous) ? previous : 'BTC-USDT';
+        select.value = all.includes(previous) ? previous : (window.PAGE_CONFIG?.defaultSymbol || all[0] || 'BTC-USDT');
         _fut96ApplyTimeframes(select.value);
         return true;
     } catch (error) {
@@ -3000,7 +3029,7 @@ window.loadFuturesOpportunities96 = async function() {
             timeframe: selectedTimeframe,
             _ts: String(Date.now())
         });
-        const response = await fetch(`/api/futures/opportunities?${params.toString()}`, {cache:'no-store'});
+        const response = await fetch(`${DERIV_API_BASE}/opportunities?${params.toString()}`, {cache:'no-store'});
         const data = await response.json();
         const rows = Array.isArray(data?.opportunities) ? data.opportunities : [];
         const total = Number.isFinite(Number(data?.count)) ? Number(data.count) : rows.length;
@@ -4074,7 +4103,7 @@ window.updateSavedSignalsList = async function() {
             return;
         }
         
-        const signals = lJson.signals || [];
+        const signals = _derivPageSymbols(lJson.signals || []);
         if (signals.length === 0) {
 
             list.innerHTML = `
@@ -4115,7 +4144,7 @@ window.updateSavedSignalsList = async function() {
         
         try {
             const gRes = await fetch(
-                '/api/futures/position-guardian?user='
+                DERIV_API_BASE + '/position-guardian?user='
                 + encodeURIComponent(user)
                 + '&_ts='
                 + Date.now(),

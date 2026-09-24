@@ -58,6 +58,20 @@ services:
         value: "20"
       - key: AI_MANUAL_DAILY_LIMIT
         value: "12"
+      # Commit 12 — Multi-Activo comparte RAM/slot pesado y presupuesto IA global.
+      # Scanner: 7 OHLCV secuenciales/15min, 0 DB writes, 0 LLM calls.
+      - key: MULTIASSET_ENABLED
+        value: "1"
+      - key: MULTIASSET_ROUTER_TTL_SECONDS
+        value: "900"
+      - key: MULTIASSET_ROUTER_CANDLES
+        value: "72"
+      - key: MULTIASSET_DEEP_LIMIT
+        value: "2"
+      - key: MULTIASSET_AUTO_DEEP_DAILY_MAX
+        value: "12"
+      - key: MULTIASSET_AI_AUTOMATIC_ENABLED
+        value: "0"
       - key: FUTURES_INCREMENTAL_INTERVAL_SECONDS
         value: "30"
       - key: SYSTEM_INTERACTIVE_PRIORITY_SECONDS

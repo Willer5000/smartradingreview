@@ -50,9 +50,9 @@ console.log(
 
     function market() {
 
-        return window.IS_FUTURES_PAGE
-            ? 'FUTURES'
-            : 'SPOT';
+        return window.IS_MULTI_ASSET_PAGE
+            ? 'MULTIASSET'
+            : (window.IS_FUTURES_PAGE ? 'FUTURES' : 'SPOT');
     }
 
 

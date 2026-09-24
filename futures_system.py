@@ -1540,7 +1540,7 @@ def get_futures_microstructure_snapshot(symbol: str) -> Dict:
     Futures analysis, including when the committee says NO_OPERAR.
     """
     symbol = str(symbol or '').strip().upper()
-    if symbol not in FUTURES_ALL_SYMBOLS:
+    if symbol not in self._market_all_symbols():
         return {
             'available': False,
             'status': 'SYMBOL_NOT_ALLOWED',
@@ -1827,14 +1827,60 @@ class FuturesAnalysis(TradingExpertSystem):
         super().__init__()
         self._futures_data_errors = {}
         print("=" * 60)
-        print("🚀 FUTURES ANALYSIS - INICIALIZANDO")
+        print(f"🚀 {self._market_label()} ANALYSIS - INICIALIZANDO")
         print("=" * 60)
-        print(f"✅ Símbolos: {list(FUTURES_SYMBOLS.keys())}")
-        print(f"✅ Temporalidades: {list(FUTURES_TIMEFRAMES.keys())}")
+        print(f"✅ Símbolos: {list(self._market_symbols().keys())}")
+        print(f"✅ Temporalidades: {list(self._market_timeframes().keys())}")
         print(f"✅ Apalancamiento por TF:")
         for tf, (lo, hi) in LEVERAGE_RANGES.items():
             print(f"   {tf}: x{lo} - x{hi}")
         print("=" * 60)
+
+    # ========================================================================
+    # COMMIT 12 — HOOKS DE MERCADO DERIVADO
+    # ========================================================================
+    # Permiten reutilizar el motor Futures (Entry/Safety/Publication Gate) con
+    # otro universo de contratos sin mezclar símbolos ni tocar el comportamiento
+    # Crypto. FuturesAnalysis conserva exactamente estos defaults.
+    def _market_label(self):
+        return 'FUTUROS'
+
+    def _market_symbols(self):
+        return FUTURES_SYMBOLS
+
+    def _market_all_symbols(self):
+        return FUTURES_ALL_SYMBOLS
+
+    def _market_timeframes(self):
+        return FUTURES_TIMEFRAMES
+
+    def _market_timeframe_allowed(self, symbol, timeframe):
+        return futures_timeframe_allowed(symbol, timeframe)
+
+    def _market_contract_symbols(self):
+        return FUTURES_CONTRACT_SYMBOLS
+
+    def _market_granularity_minutes(self):
+        return FUTURES_GRANULARITY_MINUTES
+
+    def _market_timeframe_seconds(self):
+        return FUTURES_TIMEFRAME_SECONDS
+
+    def _market_system_type(self):
+        # Se mantiene 'futures' para preservar el contrato estadístico vigente
+        # de ReviewTrader; Multi-Activo añade market_segment/asset_class en
+        # contexto para que sus celdas no se mezclen con Crypto.
+        return 'futures'
+
+    def _market_data_source(self):
+        return KUCOIN_FUTURES_DATA_SOURCE
+
+    def _get_contract_risk_spec(self, symbol):
+        return _get_futures_contract_risk_spec(symbol)
+
+    def _post_market_analysis_hook(self, result, symbol, timeframe):
+        """Market-specific context hook. Futures default is a strict no-op."""
+        return result
     
     # ========================================================================
     # OVERRIDE: OBTENER DATOS DE KUCOIN (mapea TF cortas)
@@ -1851,17 +1897,17 @@ class FuturesAnalysis(TradingExpertSystem):
         - devuelve None ante cualquier duda para que NO se publique una señal.
         """
         error_key = (symbol, interval)
-        contract_symbol = FUTURES_CONTRACT_SYMBOLS.get(symbol)
-        granularity = FUTURES_GRANULARITY_MINUTES.get(interval)
+        contract_symbol = self._market_contract_symbols().get(symbol)
+        granularity = self._market_granularity_minutes().get(interval)
 
         if not contract_symbol:
-            error = f'Símbolo Futures no soportado: {symbol}'
+            error = f'Símbolo {self._market_label()} no soportado: {symbol}'
             self._futures_data_errors[error_key] = error
             logger.warning(error)
             return None
 
         if not granularity:
-            error = f'Temporalidad Futures no soportada: {interval}'
+            error = f'Temporalidad {self._market_label()} no soportada: {interval}'
             self._futures_data_errors[error_key] = error
             logger.warning(error)
             return None
@@ -1990,7 +2036,7 @@ class FuturesAnalysis(TradingExpertSystem):
 
             fetched_at = datetime.utcnow().isoformat() + 'Z'
             df.attrs.update({
-                'market_data_source': KUCOIN_FUTURES_DATA_SOURCE,
+                'market_data_source': self._market_data_source(),
                 'market_data_is_synthetic': False,
                 'contract_symbol': contract_symbol,
                 'fetched_at': fetched_at,
@@ -3580,7 +3626,7 @@ class FuturesAnalysis(TradingExpertSystem):
 
             # Public contract metadata + conservative risk-tier floor.
             contract_spec = (
-                _get_futures_contract_risk_spec(symbol)
+                self._get_contract_risk_spec(symbol)
                 if symbol
                 else {
                     'verified': False,
@@ -7376,7 +7422,7 @@ class FuturesAnalysis(TradingExpertSystem):
                         'Futuros detenido por seguridad: '
                         f'{data_error}'
                     ),
-                    'market_data_source': KUCOIN_FUTURES_DATA_SOURCE,
+                    'market_data_source': self._market_data_source(),
                     'market_data_is_synthetic': False,
                 }
 
@@ -7451,12 +7497,12 @@ class FuturesAnalysis(TradingExpertSystem):
                 'open_candle_present': bool(open_candle_present),
                 'market_data_source': full_df.attrs.get(
                     'market_data_source',
-                    KUCOIN_FUTURES_DATA_SOURCE,
+                    self._market_data_source(),
                 ),
                 'market_data_is_synthetic': False,
                 'contract_symbol': full_df.attrs.get(
                     'contract_symbol',
-                    FUTURES_CONTRACT_SYMBOLS.get(symbol),
+                    self._market_contract_symbols().get(symbol),
                 ),
                 'market_data_fetched_at': full_df.attrs.get('fetched_at'),
                 'market_data_candles': int(len(full_df)),
@@ -7492,16 +7538,16 @@ class FuturesAnalysis(TradingExpertSystem):
         """
         # Validar. Commit 15A acepta LINK/BNB sólo como universo de
         # investigación; nunca se convierten en señal ejecutable en V1.0.
-        if symbol not in FUTURES_ALL_SYMBOLS:
+        if symbol not in self._market_all_symbols():
             return {
                 'success': False,
-                'error': f'Símbolo {symbol} no permitido en futuros. Válidos: {list(FUTURES_ALL_SYMBOLS.keys())}',
+                'error': f'Símbolo {symbol} no permitido en {self._market_label()}. Válidos: {list(self._market_all_symbols().keys())}',
                 'symbol': symbol,
                 'timeframe': timeframe
             }
         research_only_symbol = False
-        if not futures_timeframe_allowed(symbol, timeframe):
-            allowed = [tf for tf in FUTURES_TIMEFRAMES if futures_timeframe_allowed(symbol, tf)]
+        if not self._market_timeframe_allowed(symbol, timeframe):
+            allowed = [tf for tf in self._market_timeframes() if self._market_timeframe_allowed(symbol, tf)]
             return {
                 'success': False,
                 'error': f'{symbol} no usa {timeframe} en RC4. Temporalidades permitidas: {allowed}',
@@ -7511,7 +7557,7 @@ class FuturesAnalysis(TradingExpertSystem):
             }
         
         print(f"\n{'='*60}")
-        print(f"🚀 FUTUROS: Analizando {symbol} {timeframe}")
+        print(f"🚀 {self._market_label()}: Analizando {symbol} {timeframe}")
         print(f"{'='*60}")
 
         # Preparación opcional y retrocompatible. app.py activará este modo
@@ -7534,7 +7580,7 @@ class FuturesAnalysis(TradingExpertSystem):
                 _preview_open = pd.to_datetime(
                     full_df['time'].iloc[-1], utc=True, errors='coerce'
                 )
-                _preview_seconds = int(FUTURES_TIMEFRAME_SECONDS.get(timeframe) or 0)
+                _preview_seconds = int(self._market_timeframe_seconds().get(timeframe) or 0)
                 preview_context = {
                     'source_candle_timestamp': (
                         _preview_open.isoformat() if not pd.isna(_preview_open) else None
@@ -7627,7 +7673,7 @@ class FuturesAnalysis(TradingExpertSystem):
         )
         result['market_data_source'] = KUCOIN_FUTURES_DATA_SOURCE
         result['market_data_is_synthetic'] = False
-        result['contract_symbol'] = FUTURES_CONTRACT_SYMBOLS.get(symbol)
+        result['contract_symbol'] = self._market_contract_symbols().get(symbol)
 
         # ============ IDENTIDAD DE LA VELA FUENTE ============
         # Solo se publica cuando el caller pidió explícitamente analizar
@@ -8087,6 +8133,17 @@ class FuturesAnalysis(TradingExpertSystem):
             })
             result['futures_publication_gate'] = gate
 
+        # COMMIT 12: market-specific post-processing occurs before persistence.
+        # Futures keeps a no-op default; Multi-Activo uses this hook for its
+        # macro/event gate, specialist rationale and strategy-bank metadata.
+        try:
+            result = self._post_market_analysis_hook(result, symbol, timeframe) or result
+        except Exception as _market_hook_err:
+            logger.warning(
+                '%s post-analysis hook failed open for %s %s: %s',
+                self._market_label(), symbol, timeframe, _market_hook_err
+            )
+
         # ============ REGISTRAR EN REVIEWTRADER (si está disponible) ============
         # IMPORTANTE: solo registrar si el análisis fue FRESCO (no vino del caché).
         # Antes se registraba SIEMPRE, causando 5-10 duplicados idénticos por
@@ -8102,7 +8159,7 @@ class FuturesAnalysis(TradingExpertSystem):
                 from review_trader import review_trader
                 if review_trader.db.enabled:
                     _review_signal_id = review_trader.register_signal(
-                        result, system_type='futures'
+                        result, system_type=self._market_system_type()
                     )
                     if _review_signal_id:
                         print(f"   📝 Señal registrada en ReviewTrader (futures)")
