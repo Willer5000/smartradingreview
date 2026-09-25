@@ -5650,7 +5650,9 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
             'mfe_mae_updated': 0,
             'early_exit_observed': 0,
             'expired':0,
+            'expired_events': [],
             'errors': 0
+
         }
 
     stats = {
@@ -5661,6 +5663,7 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
         'mfe_mae_updated': 0,
         'early_exit_observed': 0,
         'expired':0,
+        'expired_events': [],
         'errors': 0
     }
     
@@ -5816,6 +5819,19 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                             'updated_at': now_iso,
                         }).eq('id', sig['id']).execute()
                         stats['expired'] += 1
+                        expired_event = dict(sig)
+                        expired_event.update({
+                            'status': 'expired',
+                            'closed_at': now_iso,
+                            'closed_price': expiry_price if expiry_price > 0 else None,
+                            'pnl_pct': 0.0,
+                            'pnl_usdt': 0.0,
+                            'close_reason': 'expired_source_validity_no_entry',
+                            'updated_at': now_iso,
+                        })
+                        stats['expired_events'].append(expired_event)
+       
+        
                         logger.info(
                             f"⌛ Señal expirada por vigencia original: {symbol} {tf} {action}"
                         )
@@ -5925,6 +5941,21 @@ def evaluate_saved_signals(price_fetcher) -> Dict:
                             stats[
                                 'expired'
                             ] += 1
+                            expired_event = dict(sig)
+                            expired_event.update({
+                                'status': 'expired',
+                                'closed_at': now_iso,
+                                'closed_price': (
+                                    expiry_price
+                                    if expiry_price > 0
+                                    else None
+                                ),
+                                'pnl_pct': 0.0,
+                                'pnl_usdt': 0.0,
+                                'close_reason': 'expired_no_entry',
+                                'updated_at': now_iso,
+                            })
+                            stats['expired_events'].append(expired_event)
 
                             logger.info(
                                 "⌛ Señal expirada sin Entry: "

@@ -41042,18 +41042,15 @@ def _saved_expiry_short_message(user, signal):
     )
 
 
-def _send_saved_futures_lifecycle_notifications():
-    """Notify only saved signals that expire before Entry.
+def _send_saved_futures_lifecycle_notifications(expired_events=None):
+    """Envía sólo expiraciones creadas en el ciclo ACTUAL del evaluator.
 
-    Entry/TP/SL remain silent for Saved signals. Commit 12.3 restores only the
-    operationally useful expiration notice so a user can cancel a pending order
-    in their personal exchange. The notification is one-line, personal and
-    deduplicated through ``telegram_expired_notified_at``.
+    Hotfix 12.3.1:
+    - jamás recorre el archivo histórico buscando status='expired';
+    - sólo consume eventos emitidos al cambiar una saved ACTIVA -> expired;
+    - el aviso sigue siendo personal y persistente/deduplicado.
     """
-    from saved_signals import (
-        list_saved_signals,
-        update_saved_signal_telegram_state,
-    )
+    from saved_signals import update_saved_signal_telegram_state
 
     expiry_reasons = {
         'expired_no_entry',
@@ -41062,45 +41059,58 @@ def _send_saved_futures_lifecycle_notifications():
         'missed_target_before_entry',
     }
     sent_count = 0
+    seen_signal_ids = set()
+    valid_users = set(_auth_users().keys())
 
-    for user in sorted(_auth_users().keys()):
-        signals = list_saved_signals(
-            status_filter=['expired'],
-            limit=200,
-            user_name=user,
-        ) or []
+    for sig in list(expired_events or []):
+        if not isinstance(sig, dict):
+            continue
 
-        for sig in signals:
-            if not sig.get('telegram_lifecycle_armed_at'):
-                continue
-            if sig.get('telegram_expired_notified_at'):
-                continue
-            if bool(sig.get('entry_touched')):
-                continue
-            if str(sig.get('close_reason') or '').lower() not in expiry_reasons:
-                continue
+        signal_id = str(sig.get('id') or '').strip()
+        if not signal_id or signal_id in seen_signal_ids:
+            continue
+        seen_signal_ids.add(signal_id)
 
-            market, message = _saved_expiry_short_message(user, sig)
-            if not _telegram_user_has_market_permission(user, market):
-                continue
+        # Sólo eventos que ACABAN de quedar expirados en este ciclo.
+        if str(sig.get('status') or '').lower() != 'expired':
+            continue
+        if not sig.get('telegram_lifecycle_armed_at'):
+            continue
+        if sig.get('telegram_expired_notified_at'):
+            continue
+        if bool(sig.get('entry_touched')):
+            continue
 
-            if expert_system.send_telegram_alert(
-                message,
-                None,
-                category='SAVED_SIGNAL_EXPIRED',
-            ):
-                now_iso = datetime.utcnow().isoformat()
-                update_saved_signal_telegram_state(
-                    sig.get('id'),
-                    {'telegram_expired_notified_at': now_iso},
-                )
-                sent_count += 1
-                print(
-                    "⌛📱 Saved signal expired: "
-                    f"{user} {market} {sig.get('symbol')} {sig.get('timeframe')}"
-                )
+        close_reason = str(sig.get('close_reason') or '').lower()
+        if close_reason not in expiry_reasons:
+            continue
+
+        user = str(sig.get('user_name') or '').strip()
+        if not user or user not in valid_users:
+            continue
+
+        market, message = _saved_expiry_short_message(user, sig)
+        if not _telegram_user_has_market_permission(user, market):
+            continue
+
+        if expert_system.send_telegram_alert(
+            message,
+            None,
+            category='SAVED_SIGNAL_EXPIRED',
+        ):
+            now_iso = datetime.utcnow().isoformat()
+            update_saved_signal_telegram_state(
+                signal_id,
+                {'telegram_expired_notified_at': now_iso},
+            )
+            sent_count += 1
+            print(
+                "⌛📱 Saved signal expired NOW: "
+                f"{user} {market} {sig.get('symbol')} {sig.get('timeframe')}"
+            )
 
     return sent_count
+
 
 def saved_futures_lifecycle_loop():
     """
@@ -41212,8 +41222,10 @@ def saved_futures_lifecycle_loop():
             # una notificación operacional.
             # ========================================================
 
-            _send_saved_futures_lifecycle_notifications()
 
+            _send_saved_futures_lifecycle_notifications(
+                stats.get('expired_events') or []
+            )
 
             # ========================================================
             # DESPUÉS: COMMIT 36O.2
