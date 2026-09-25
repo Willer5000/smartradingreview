@@ -15,7 +15,10 @@ def _block(source: str, start: str, end: str) -> str:
 
 def test_confirmed_telegram_is_after_frontend_cache_publication():
     cycle = _block(APP, 'def _analyze_futures_all_parallel', 'def _futures_combo_due_for_closed_candle')
-    assert cycle.index("cache['data'] = partial_data") < cycle.index("_send_confirmed_signal_telegram(\n                    'futures'")
+    published = cycle.index("cache['data'] = partial_data")
+    visible_gate = cycle.index('_futures_confirmed_visible_in_frontend(', published)
+    telegram_send = cycle.index('_send_confirmed_signal_telegram(', visible_gate)
+    assert published < visible_gate < telegram_send
 
 
 def test_futures_vigentes_keep_entry_touched_until_terminal_or_validity():
