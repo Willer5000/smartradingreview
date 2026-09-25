@@ -113,50 +113,30 @@ console.log(
     }
 
 
-    function currentHourKey() {
-
-        const now =
-            new Date();
-
-        const halfHour =
-            now.getMinutes() < 30
-                ? '00'
-                : '30';
-
-        return [
-
-            market(),
-
-            now.getFullYear(),
-
-            String(
-                now.getMonth() + 1
-            ).padStart(
-                2,
-                '0'
-            ),
-
-            String(
-                now.getDate()
-            ).padStart(
-                2,
-                '0'
-            ),
-
-            String(
-                now.getHours()
-            ).padStart(
-                2,
-                '0'
-            ),
-
-            halfHour
-
-        ].join(
-            '|'
-        );
+    function adviceIntervalMinutes() {
+        const mk = market();
+        if (mk === 'SPOT') return 240;
+        if (mk === 'FUTURES') return 30;
+        if (mk === 'MULTIASSET') return 60;
+        return 60;
     }
 
+    function currentHourKey() {
+        const now = new Date();
+        const interval = adviceIntervalMinutes();
+        const minutesToday = now.getHours() * 60 + now.getMinutes();
+        const bucket = Math.floor(minutesToday / interval) * interval;
+        const bucketHour = Math.floor(bucket / 60);
+        const bucketMinute = bucket % 60;
+        return [
+            market(),
+            now.getFullYear(),
+            String(now.getMonth() + 1).padStart(2, '0'),
+            String(now.getDate()).padStart(2, '0'),
+            String(bucketHour).padStart(2, '0'),
+            String(bucketMinute).padStart(2, '0')
+        ].join('|');
+    }
 
     function verdictMeta(
         verdictRaw
@@ -436,9 +416,11 @@ console.log(
 
                     <span class="text-muted">
                         ${
-                            market() === 'FUTURES'
-                                ? 'Futures: consejo cada 30 min cuando hay oportunidad activa; en espera reduce frecuencia para ahorrar cuota.'
-                                : 'Spot: el consejo usa una cadencia conservadora para ahorrar cuota.'
+                            market() === 'SPOT'
+                                ? 'Spot: consejo cacheado cada 4 h.'
+                                : (market() === 'FUTURES'
+                                    ? 'Futures: consejo cacheado cada 30 min.'
+                                    : 'Multi-Activo: consejo cacheado cada 1 h.')
                         }
                     </span>
 
@@ -506,7 +488,7 @@ console.log(
                         class="badge bg-secondary"
                         style="font-size: 0.62rem;"
                     >
-                        3/h
+                        ${market() === 'SPOT' ? '3/4h' : (market() === 'FUTURES' ? '1/30m' : '1/1h')}
                     </span>
 
                 </div>
@@ -545,7 +527,7 @@ console.log(
                         id="ai-assistant-question"
                         class="form-control bg-dark text-light border-secondary"
                         rows="1"
-                        maxlength="800"
+                        maxlength="1200"
                         placeholder="Pregunta sobre señales, riesgo, Guardian, portafolio u oportunidades..."
                         style="
                             resize: none;
@@ -582,11 +564,16 @@ console.log(
                     style="font-size: 0.66rem;"
                 >
                     ${
-                        market() === 'FUTURES'
-                            ? 'Futures: 1 pregunta cada 20 min (máx. 3 por hora).'
-                            : 'Máx. 3 preguntas por hora.'
+                        market() === 'SPOT'
+                            ? 'Spot: 3 preguntas cada 4 h.'
+                            : (market() === 'FUTURES'
+                                ? 'Futures: 1 pregunta cada 30 min.'
+                                : 'Multi-Activo: 1 pregunta cada 1 h.')
                     }
                     Enter envía · Shift+Enter agrega una línea.
+                    <div class="mt-1" style="font-size:0.60rem; opacity:0.82;">
+                        Podés incluir varios activos en una sola pregunta. Las cuotas son independientes por pestaña; si una se agotó, otra pestaña conserva su propia cuota siempre que indiques claramente el activo o mercado que querés consultar. Los prompts simples también son válidos.
+                    </div>
                 </div>
 
             </div>
@@ -880,81 +867,26 @@ console.log(
     }
 
 
-    function updateQuota(
-        quota
-    ) {
-
-        const el =
-            document.getElementById(
-                'ai-assistant-quota'
-            );
-
-
-        if (
-            !el
-            || !quota
-        ) {
-
-            return;
-        }
-
-
-        const hourly =
-            quota.manual_hourly
-            || {};
-
-
-        const futuresCooldown =
-            quota.manual_futures_cooldown
-            || {};
-
-
-        const cooldownSeconds =
-            Number(
-                futuresCooldown.remaining_seconds
-                || 0
-            );
-
-
-        if (
-            market() === 'FUTURES'
-            && cooldownSeconds > 0
-        ) {
-
-            const minutes =
-                Math.max(
-                    1,
-                    Math.ceil(
-                        cooldownSeconds / 60
-                    )
-                );
-
-            el.textContent =
-                `⏳${minutes}m`;
-
-            el.title =
-                (
-                    'Futures: próxima pregunta en '
-                    + `${minutes} min. `
-                    + 'Máximo 3 por hora.'
-                );
-
+    function updateQuota(quota) {
+        const el = document.getElementById('ai-assistant-quota');
+        if (!el || !quota) return;
+        const mk = market();
+        const perMarket = (quota.manual_market || {})[mk] || {};
+        const remaining = Number(perMarket.remaining ?? 0);
+        const limit = Number(perMarket.limit ?? 0);
+        const cooldownSeconds = Number(perMarket.remaining_seconds || 0);
+        if (remaining <= 0 && cooldownSeconds > 0) {
+            const minutes = Math.max(1, Math.ceil(cooldownSeconds / 60));
+            el.textContent = `⏳${minutes}m`;
         } else {
-
-            el.textContent =
-                (
-                    `${hourly.remaining ?? '--'}`
-                    + '/'
-                    + `${hourly.limit ?? 3}`
-                );
-
-            el.title =
-                (
-                    market() === 'FUTURES'
-                        ? 'Futures: 1 pregunta cada 20 min; máximo 3 por hora.'
-                        : 'Preguntas disponibles esta hora'
-                );
+            el.textContent = `${remaining}/${limit || '--'}`;
         }
+        const rules = {
+            SPOT: 'Spot: 3 preguntas cada 4 horas.',
+            FUTURES: 'Futures: 1 pregunta cada 30 minutos.',
+            MULTIASSET: 'Multi-Activo: 1 pregunta cada hora.'
+        };
+        el.title = rules[mk] || 'Cuota IA de esta pestaña';
     }
 
 
@@ -1794,8 +1726,8 @@ console.log(
             );
 
 
-            // Revisa una vez por minuto si cambió el bloque de 30 min.
-            // NO llama a la IA otra vez dentro del mismo bloque.
+            // Revisa una vez por minuto si cambió el bloque propio de cada mercado.
+            // NO llama a la IA otra vez dentro del mismo bloque cacheado.
 
             setInterval(
                 () => {

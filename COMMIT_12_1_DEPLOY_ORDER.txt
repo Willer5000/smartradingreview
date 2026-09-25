@@ -1,0 +1,19 @@
+BASE: Commit 12 ya desplegado.
+
+REPO MAIN (Willer5000/smartradingreview)
+1) Reemplazar/agregar los archivos del MAIN ready-tree respetando carpetas.
+2) NO ejecutar SQL.
+3) Un solo commit:
+   Commit 12.1 - QA Multi-Activo, IA gobernada y separación por mercado
+4) Deploy Render Main.
+5) Smoke: /multiasset, /analytics, Consejo/Asistente en las 3 pestañas.
+
+REPO RESEARCH (Willerman5000/smartradingresearch)
+1) Reemplazar app.py y historical_market.py.
+2) Agregar multiasset_research.py.
+3) NO ejecutar SQL y NO crear servicio Render nuevo.
+4) Un solo commit:
+   Commit 12.1 Research - Backtest OOS Multi-Activo acotado
+5) Deploy de los servicios Research existentes según tu flujo normal.
+
+ORDEN RECOMENDADO: Main primero, Research después. Son compatibles incluso si Research tarda en desplegar.

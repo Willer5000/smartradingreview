@@ -1,0 +1,19 @@
+MAIN
+- test_commit12_1_qa.py: PASS
+- test_commit12_1_ai_contract.py: 16/16 PASS
+- python compile app.py, ai_advisor.py, multiasset_system.py, analytics_service.py: PASS
+- node --check script.js, futures.js, ai_assistant.js: PASS
+- AI advice cadence: SPOT 240m / FUTURES 30m / MULTIASSET 60m
+- Manual quota: SPOT 3/240m / FUTURES 1/30m / MULTIASSET 1/60m
+- Global Groq daily budget remains 160000; reserve remains 8000
+- Advice max completion = 450 tokens
+- Multi Guardian still filters user_name=user
+
+RESEARCH
+- multiasset_research.audit(): PASS
+- bounded cells/run = 10
+- new LLM calls = 0
+- new services = 0
+- new tables = 0
+- synthetic causal batch = 10/10 PASS
+- python compile app.py, historical_market.py, multiasset_research.py: PASS

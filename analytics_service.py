@@ -56,6 +56,31 @@ def _cap_confidence(v):
         return 0.0
 
 
+# Commit 12.1 — Multi-Activo shares the persisted derivatives schema for
+# compatibility, but it is a distinct statistical market. Symbols are stable
+# logical IDs; no new Supabase table/column is required.
+MULTIASSET_ANALYTICS_SYMBOLS = frozenset({
+    'CL-USDT', 'SPY-USDT', 'QQQ-USDT', 'NATGAS-USDT',
+    'COPPER-USDT', 'XAG-USDT', 'KSTR-USDT',
+})
+
+
+def _analytics_is_multiasset_signal(signal):
+    return str((signal or {}).get('symbol') or '').upper().replace('/','-') in MULTIASSET_ANALYTICS_SYMBOLS
+
+
+def _analytics_filter_market_rows(rows, requested_system):
+    requested=str(requested_system or '').strip().lower()
+    source=list(rows or [])
+    if requested == 'multiasset':
+        return [r for r in source if str(r.get('system_type') or '').lower() == 'futures' and _analytics_is_multiasset_signal(r)]
+    if requested == 'futures':
+        return [r for r in source if str(r.get('system_type') or '').lower() == 'futures' and not _analytics_is_multiasset_signal(r)]
+    if requested == 'spot':
+        return [r for r in source if str(r.get('system_type') or '').lower() == 'spot']
+    return source
+
+
 class AnalyticsService:
     """
     Servicio que agrega estadísticas para el frontend de análisis.
@@ -97,13 +122,17 @@ class AnalyticsService:
                 query = query.eq('symbol', symbol)
             if timeframe:
                 query = query.eq('timeframe', timeframe)
-            if system_type and system_type != 'both':
-                query = query.eq('system_type', system_type)
+            requested_system=str(system_type or '').strip().lower()
+            if requested_system in ('futures','multiasset'):
+                query = query.eq('system_type', 'futures')
+            elif requested_system == 'spot':
+                query = query.eq('system_type', 'spot')
             if action and action != 'ALL':
                 query = query.eq('action_normalized', action)
-            
+
             response = query.order('created_at', desc=True).limit(2000).execute()
-            return response.data or []
+            rows=response.data or []
+            return _analytics_filter_market_rows(rows, requested_system)
         except Exception as e:
             logger.error(f"Error fetching signals: {e}")
             return []
@@ -1737,8 +1766,11 @@ class AnalyticsService:
             if timeframe:
                 q = q.eq('timeframe', timeframe)
 
-            if system_type and system_type != 'both':
-                q = q.eq('system_type', system_type)
+            requested_system=str(system_type or '').strip().lower()
+            if requested_system in ('futures','multiasset'):
+                q = q.eq('system_type', 'futures')
+            elif requested_system == 'spot':
+                q = q.eq('system_type', 'spot')
 
             if action and action != 'ALL':
                 q = q.eq('action_normalized', action)
@@ -1752,8 +1784,17 @@ class AnalyticsService:
             budget_seconds=30,
         )
 
+        requested_system=str(system_type or '').strip().lower()
+        if requested_system in ('spot','futures','multiasset'):
+            filtered=_analytics_filter_market_rows(rows, requested_system)
+            try:
+                rows[:] = filtered
+            except Exception:
+                rows = filtered
+
         coverage = dict(getattr(rows, 'coverage', {}) or {})
         coverage['source'] = 'analytics_quality_v2_compact_v1'
+        coverage['market_filter'] = requested_system or 'all'
 
         # Make a missing/not-yet-created SQL view explicit instead of silently
         # presenting a fake 0-signal learning state.  The caller will mark the
@@ -2166,6 +2207,12 @@ class AnalyticsService:
 
         futures_other = []
 
+        multiasset_official = []
+
+        multiasset_shadow = []
+
+        multiasset_other = []
+
         for signal in signals:
 
             market = str(
@@ -2185,6 +2232,16 @@ class AnalyticsService:
             else:
                 info = classify_quality_signal(signal, spot_verified=False)
             cohort = str(info.get('cohort') or '')
+            is_multiasset = _analytics_is_multiasset_signal(signal)
+            if is_multiasset:
+                if cohort == 'OFFICIAL_CURRENT_FUTURES':
+                    multiasset_official.append(signal)
+                elif cohort == 'SHADOW_CURRENT_FUTURES':
+                    multiasset_shadow.append(signal)
+                else:
+                    multiasset_other.append(signal)
+                continue
+
             if cohort == 'OFFICIAL_CURRENT_SPOT':
                 spot.append(signal)
             elif cohort == 'OFFICIAL_CURRENT_FUTURES':
@@ -2236,7 +2293,15 @@ class AnalyticsService:
         # where the card could say "official 0" while the live cohort below
         # was already populated. Raw history is preserved separately.
         try:
-            raw_legacy_or_other = max(0, len(signals) - len(spot) - len(futures_official) - len(futures_shadow))
+            raw_legacy_or_other = max(
+                0,
+                len(signals)
+                - len(spot)
+                - len(futures_official)
+                - len(futures_shadow)
+                - len(multiasset_official)
+                - len(multiasset_shadow)
+            )
             cohort_integrity = {
                 'version': 'CURRENT_COHORT_INTEGRITY_V3',
                 'state': 'STANDARDIZED',
@@ -2246,6 +2311,8 @@ class AnalyticsService:
                     'OFFICIAL_CURRENT_SPOT': len(spot),
                     'OFFICIAL_CURRENT_FUTURES': len(futures_official),
                     'SHADOW_CURRENT_FUTURES': len(futures_shadow),
+                    'OFFICIAL_CURRENT_MULTI_ASSET': len(multiasset_official),
+                    'SHADOW_CURRENT_MULTI_ASSET': len(multiasset_shadow),
                     'LEGACY_RESEARCH_OR_UNVERIFIED': raw_legacy_or_other,
                 },
                 'directional_counts': {
@@ -2382,6 +2449,16 @@ class AnalyticsService:
                     futures_shadow
                 ),
 
+            'multiasset':
+                self._q5_aggregate(
+                    multiasset_official
+                ),
+
+            'multiasset_shadow':
+                self._q5_aggregate(
+                    multiasset_shadow
+                ),
+
             # ==========================================================
             # COMMIT 2 — EXECUTION LEARNING / ATTRIBUTION
             # ==========================================================
@@ -2510,6 +2587,21 @@ class AnalyticsService:
                 'futures_other_v2':
                     len(
                         futures_other
+                    ),
+
+                'multiasset_official_v2':
+                    len(
+                        multiasset_official
+                    ),
+
+                'multiasset_shadow_v2':
+                    len(
+                        multiasset_shadow
+                    ),
+
+                'multiasset_other_v2':
+                    len(
+                        multiasset_other
                     ),
 
                 'max_rows_guard':

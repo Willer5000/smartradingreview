@@ -27869,7 +27869,10 @@ def api_price():
         # Spot market. This endpoint remains display-only; trading decisions are
         # still produced by the corresponding closed-candle analysis pipeline.
         try:
-            if market == 'futures':
+            if market == 'multiasset':
+                multi_market = _get_multiasset_system()
+                df = multi_market.get_kucoin_data(symbol, interval) if multi_market is not None else None
+            elif market == 'futures':
                 futures_market = _get_futures_system()
                 df = futures_market.get_kucoin_data(symbol, interval) if futures_market is not None else None
             else:
@@ -32245,8 +32248,45 @@ def api_kpis_frontend_signals():
     """
     try:
         market_filter = str(request.args.get('system_type', 'spot')).lower()
-        if market_filter not in ('spot', 'futures'):
+        if market_filter not in ('spot', 'futures', 'multiasset'):
             return jsonify({'success': False, 'error': 'Mercado inválido'}), 400
+
+        # Commit 12.1 — Multi-Activo header is cache-only. It must NEVER turn
+        # the lightweight page header into another Supabase reader. Historical
+        # performance remains in Analytics; the header only reports the local
+        # resource-governed analysis cache.
+        if market_filter == 'multiasset':
+            with _MULTI_ASSET_CACHE['lock']:
+                analyses = [
+                    dict(v or {})
+                    for v in (_MULTI_ASSET_CACHE.get('analysis') or {}).values()
+                    if isinstance(v, dict)
+                ]
+            total = len(analyses)
+            active = sum(1 for row in analyses if _multiasset_is_executable(row))
+            return jsonify({
+                'success': True,
+                'data': {
+                    'total': total,
+                    'total_spot': 0,
+                    'total_futures': 0,
+                    'total_multiasset': total,
+                    'resolved': 0,
+                    'tp_hit': 0,
+                    'sl_hit': 0,
+                    'pending': total,
+                    'active': active,
+                    'win_rate': 0.0,
+                    'pnl_total_pct': 0.0,
+                    'source': 'multiasset_local_cache_no_db',
+                    'system_type': 'multiasset',
+                    'note': (
+                        'Cabecera local: no consulta Supabase. '
+                        'El rendimiento histórico Multi-Activo se consulta en Análisis.'
+                    )
+                }
+            })
+
         signals = [s for s in _collect_frontend_signals()
                    if s.get('system') == market_filter]
         total = len(signals)
@@ -32647,9 +32687,34 @@ def _multiasset_run_analysis(symbol, timeframe, owner='multi-background'):
     engine=_get_multiasset_system()
     if engine is None:
         return {'success':False,'error':'MultiAssetSystem no disponible'}
-    acquired=_acquire_heavy_analysis(owner, timeout=1.0 if owner.startswith('multi-ui:') else 0.0)
+
+    is_ui = str(owner or '').startswith('multi-ui:')
+    if is_ui:
+        # QA 12.1: a human opening Multi-Activo has the same priority as Spot
+        # and Futures. No extra worker is created; background simply yields.
+        _mark_system_interactive_priority(seconds=120)
+
+    acquired=_acquire_heavy_analysis(owner, timeout=6.0 if is_ui else 0.0)
     if not acquired:
-        return {'success':False,'busy':True,'deferred':True,'error':'Motor pesado ocupado; se conserva el último snapshot.'}
+        with _MULTI_ASSET_CACHE['lock']:
+            cached=dict((_MULTI_ASSET_CACHE.get('analysis') or {}).get((str(symbol),str(timeframe))) or {})
+        if cached:
+            return {
+                'success':True,
+                'busy':True,
+                'deferred':True,
+                'partial':True,
+                'data':cached,
+                'retry_after_ms':7000,
+                'error':'Motor compartido ocupado; se muestra el último análisis válido.'
+            }
+        return {
+            'success':False,
+            'busy':True,
+            'deferred':True,
+            'retry_after_ms':7000,
+            'error':'Motor compartido ocupado; el Router y el precio siguen disponibles.'
+        }
     try:
         result=engine.analyze_multiasset_market(symbol,timeframe,closed_candle_only=True)
         if isinstance(result,dict):
@@ -32807,10 +32872,33 @@ def api_multiasset_correlation():
 
 @app.route('/api/multiasset/microstructure', methods=['GET'])
 def api_multiasset_microstructure():
-    symbol=str(request.args.get('symbol') or ''); tf=str(request.args.get('timeframe') or '4h')
+    """Cache-only microstructure for Multi-Activo.
+
+    Commit 12.1 deliberately does not call another exchange endpoint here:
+    Order Book/OI/funding are not fetched just to paint the UI. If the deep
+    analysis already produced a proxy, expose it; otherwise return an explicit
+    protected-mode state.
+    """
+    symbol=str(request.args.get('symbol') or '').upper().replace('/','-')
+    tf=str(request.args.get('timeframe') or '4h')
     with _MULTI_ASSET_CACHE['lock']:
-        result=(_MULTI_ASSET_CACHE['analysis'].get((symbol,tf)) or {})
-    return jsonify({'success':True,'data':result.get('futures_microstructure') or result.get('microstructure') or {'available':False,'mode':'RESOURCE_GUARDED_PROXY','reason':'Sin descarga automática adicional de order book.'}})
+        result=dict((_MULTI_ASSET_CACHE['analysis'].get((symbol,tf)) or {}))
+    snapshot=(result.get('futures_microstructure') or result.get('microstructure') or {})
+    if not isinstance(snapshot,dict):
+        snapshot={}
+    payload={
+        'success':True,
+        'symbol':symbol,
+        'timeframe':tf,
+        'available':bool(snapshot.get('available')),
+        'mode':snapshot.get('mode') or 'RESOURCE_GUARDED_PROXY',
+        'reason':snapshot.get('reason') or 'Modo protegido: sin descarga automática adicional de Order Book/OI/funding.',
+    }
+    payload.update(snapshot)
+    payload['success']=True
+    payload['symbol']=symbol
+    payload['timeframe']=tf
+    return jsonify(payload)
 
 @app.route('/api/multiasset/position-guardian', methods=['GET'])
 def api_multiasset_position_guardian():
@@ -33881,6 +33969,7 @@ _BACKGROUND_HEAVY_NOT_BEFORE = 0.0
 _BACKGROUND_HEAVY_COOLDOWN_LOCK = threading.Lock()
 _BACKGROUND_HEAVY_PREFIXES = (
     'futures-incremental:',
+    'multi-background:',
     'reviewtrader-learning:',
     'historical-research:',
     'analytics-quality-v2',
@@ -33958,6 +34047,7 @@ def _futures_interactive_priority_active():
 _INTERACTIVE_PAGE_PATHS = {
     '/',
     '/futures',
+    '/multiasset',
     '/analytics',
     '/research-federation',
 }
@@ -39092,8 +39182,11 @@ def _rc9_system_info_widget_html():
           <div class="rc9-info-card"><h4>Qué no hace</h4><p>No obliga una operación. Cuando el mercado no ofrece una entrada clara puede indicar <b>Esperar</b>, <b>Precaución</b> o <b>No operar</b>.</p></div>
           <div class="rc9-info-card"><h4>Spot</h4><p>Busca acumular y rotar entre BTC, PAXG y USDT preservando reservas y evitando ventas o compras sin ventaja técnica.</p></div>
           <div class="rc9-info-card"><h4>Futuros</h4><p>Busca entradas precisas con invalidación clara, Stop Loss defendible y Take Profit alcanzable. La prioridad es la calidad de la operación, no la cantidad de señales.</p></div>
+          <div class="rc9-info-card"><h4>Multi-Activo</h4><p>Opera derivados USDT de índices, energía y metales con tratamiento por activo, sesión, contexto macro, volatilidad y estrategia. El Router sólo prioriza dónde analizar: nunca inventa LONG/SHORT.</p></div>
+          <div class="rc9-info-card"><h4>Análisis</h4><p>Separa Spot, Futures y Multi-Activo. Multi-Activo usa símbolos y celdas propias para no contaminar las métricas de Futures; las capas Crypto Research siguen mostrándose aparte.</p></div>
         </div>
         <div class="rc9-info-note mt-3">Una señal es una lectura técnica, no una garantía. Antes de operar revisa la justificación, Entry, Stop Loss, Take Profit y el riesgo que estás dispuesto a asumir.</div>
+        <div class="rc9-info-note mt-2"><b>Multi-Activo · modo protegido:</b> el scanner no escribe en Supabase ni llama IA. Order Book/OI/funding extra no se descargan automáticamente sólo para dibujar la pantalla; se priorizan RAM, ancho de banda y aprendizaje útil.</div>
       </section>
       <section class="rc9-info-section" data-section="uso">
         <div class="rc9-info-grid">
@@ -39204,6 +39297,79 @@ def _rc987_compress_text_response(response):
     return response
 
 
+
+def _rc12_1_analytics_ui_patch_html():
+    """Tiny DOM patch so Analytics can navigate/filter Multi-Activo without
+    replacing the large analytics template. No polling and no network calls.
+    """
+    return r"""
+<script id="rc12-1-analytics-ui-patch">
+(function(){
+  if (window.location.pathname !== '/analytics') return;
+  const nav=document.querySelector('.navbar-nav.ms-auto');
+  if (nav && !nav.querySelector('a[href="/multiasset"]')) {
+    const a=document.createElement('a');
+    a.className='nav-link';
+    a.href='/multiasset';
+    a.innerHTML='<i class="fas fa-globe me-1"></i>Multi-Activo';
+    nav.appendChild(a);
+  }
+  const sys=document.getElementById('f-system');
+  if (sys) {
+    const first=sys.querySelector('option[value=""]');
+    if (first) first.textContent='Todos';
+    if (!sys.querySelector('option[value="multiasset"]')) {
+      const opt=document.createElement('option');
+      opt.value='multiasset'; opt.textContent='Multi-Activo';
+      sys.appendChild(opt);
+    }
+  }
+  const symbols=document.getElementById('f-symbol');
+  const multiSymbols={
+    'CL-USDT':'CL (Petróleo WTI)',
+    'SPY-USDT':'SPY (S&P 500)',
+    'QQQ-USDT':'QQQ (Nasdaq 100)',
+    'NATGAS-USDT':'NATGAS (Gas Natural)',
+    'COPPER-USDT':'COPPER (Cobre)',
+    'XAG-USDT':'XAG (Plata)',
+    'KSTR-USDT':'KSTR (China STAR 50)'
+  };
+  if (symbols) {
+    Object.entries(multiSymbols).forEach(([value,label])=>{
+      if (symbols.querySelector('option[value="'+value+'"]')) return;
+      const opt=document.createElement('option');
+      opt.value=value; opt.textContent=label; symbols.appendChild(opt);
+    });
+  }
+  const action=document.getElementById('f-action');
+  if (action) {
+    action.querySelectorAll('option').forEach(opt=>{
+      if (opt.value==='LONG') opt.textContent='LONG (Derivados)';
+      if (opt.value==='SHORT') opt.textContent='SHORT (Derivados)';
+    });
+  }
+
+  const q5=document.getElementById('q5-v2-section');
+  let note=document.getElementById('rc12-1-multi-analytics-note');
+  if (!note) {
+    note=document.createElement('div');
+    note.id='rc12-1-multi-analytics-note';
+    note.className='alert alert-info py-2 px-3 small d-none';
+    note.innerHTML='<b>Multi-Activo:</b> los gráficos históricos inferiores se filtran por sus símbolos propios. El Quality Engine/Research Crypto queda oculto con este filtro para no mezclarlo con Futures; ReviewTrader sigue registrando resultados por celda.';
+    const filters=document.querySelector('.card.bg-dark.border-secondary.mb-3');
+    if (filters && filters.parentNode) filters.parentNode.insertBefore(note, filters.nextSibling);
+  }
+  function sync(){
+    const isMulti=String(sys?.value||'').toLowerCase()==='multiasset';
+    if (q5) q5.style.display=isMulti?'none':'';
+    if (note) note.classList.toggle('d-none',!isMulti);
+  }
+  sys?.addEventListener('change',sync);
+  sync();
+})();
+</script>
+"""
+
 @app.after_request
 def _memory_cleanup_after_analytics(response):
     """Release transient objects and inject the lightweight RC9 user guide."""
@@ -39215,16 +39381,21 @@ def _memory_cleanup_after_analytics(response):
     except Exception:
         pass
 
-    # RC9 frontend: one lightweight help button shared by Spot and Futures.
-    # It is injected server-side so no existing template/JS file has to be
-    # replaced, reducing regression risk and the number of physical commits.
+    # RC12.1 frontend: one lightweight help button shared by Spot, Futures,
+    # Multi-Activo and Analytics. Analytics also gets a zero-network DOM patch
+    # for navigation/filtering without cloning its large template.
     try:
-        if request.path in {'/', '/futures'} and response.status_code == 200:
+        if request.path in {'/', '/futures', '/multiasset', '/analytics'} and response.status_code == 200:
             ctype = str(response.headers.get('Content-Type') or '').lower()
             if 'text/html' in ctype:
                 html = response.get_data(as_text=True)
-                if 'id="rc9-info-button"' not in html and '</body>' in html:
-                    html = html.replace('</body>', _rc9_system_info_widget_html() + '</body>', 1)
+                extras = ''
+                if 'id="rc9-info-button"' not in html:
+                    extras += _rc9_system_info_widget_html()
+                if request.path == '/analytics' and 'id="rc12-1-analytics-ui-patch"' not in html:
+                    extras += _rc12_1_analytics_ui_patch_html()
+                if extras and '</body>' in html:
+                    html = html.replace('</body>', extras + '</body>', 1)
                     response.set_data(html)
                     response.headers.pop('Content-Length', None)
     except Exception as _rc9_info_error:
@@ -44672,128 +44843,150 @@ def _resolve_ai_question_target(
             timeframe_explicit,
     }
 def _build_ai_manual_comparison(target):
-    """Construye contexto compacto para comparar varios Futures solicitados."""
-
+    """Compact comparison for several requested Futures or Multi-Assets."""
     if not isinstance(target, dict):
         return {}
-
-    if str(target.get('market') or '').upper() != 'FUTURES':
+    target_market = str(target.get('market') or '').upper()
+    if target_market not in {'FUTURES', 'MULTIASSET'}:
         return {}
 
-    requested_symbols = []
+    requested_symbols=[]
     for item in (target.get('mentioned_symbols') or []):
-        symbol = str(item or '').upper().strip()
+        symbol=str(item or '').upper().strip()
         if symbol and symbol not in requested_symbols:
             requested_symbols.append(symbol)
-
-    if len(requested_symbols) < 2:
+    if len(requested_symbols)<2:
         return {}
 
-    explicit_tf = bool(target.get('timeframe_explicit'))
-    requested_tf = (
-        str(target.get('timeframe') or '')
-        if explicit_tf
-        else None
-    )
+    explicit_tf=bool(target.get('timeframe_explicit'))
+    requested_tf=str(target.get('timeframe') or '') if explicit_tf else None
 
-    cache = (
-        _get_or_refresh_futures_analysis(
-            force_wait=False
-        )
-        or {}
-    )
+    if target_market == 'FUTURES':
+        cache=(_get_or_refresh_futures_analysis(force_wait=False) or {})
+        analysis_map=cache.get('analysis',{}) or {}
+    else:
+        with _MULTI_ASSET_CACHE['lock']:
+            analysis_map=dict(_MULTI_ASSET_CACHE.get('analysis') or {})
 
-    analysis_map = (
-        cache.get('analysis', {})
-        or {}
-    )
-
-    rows_by_symbol = {
-        symbol: []
-        for symbol in requested_symbols[:5]
-    }
-
-    for key, result in analysis_map.items():
-        if not isinstance(result, dict):
+    rows_by_symbol={symbol:[] for symbol in requested_symbols[:7]}
+    for key,result in analysis_map.items():
+        if not isinstance(result,dict):
             continue
-
-        key_symbol = (
-            key[0]
-            if isinstance(key, tuple) and len(key) >= 2
-            else result.get('symbol')
-        )
-        key_tf = (
-            key[1]
-            if isinstance(key, tuple) and len(key) >= 2
-            else result.get('timeframe')
-        )
-
-        compact = _ai_compact_analysis(
-            result,
-            key_symbol,
-            key_tf
-        )
-
-        compact_symbol = str(
-            compact.get('symbol') or ''
-        ).upper()
-        compact_tf = str(
-            compact.get('timeframe') or ''
-        )
-
+        key_symbol=key[0] if isinstance(key,tuple) and len(key)>=2 else result.get('symbol')
+        key_tf=key[1] if isinstance(key,tuple) and len(key)>=2 else result.get('timeframe')
+        compact=_ai_compact_analysis(result,key_symbol,key_tf)
+        compact_symbol=str(compact.get('symbol') or '').upper()
+        compact_tf=str(compact.get('timeframe') or '')
         if compact_symbol not in rows_by_symbol:
             continue
-
         if requested_tf and compact_tf != requested_tf:
             continue
-
         rows_by_symbol[compact_symbol].append(compact)
 
-    comparison_candidates = []
-
-    for symbol in requested_symbols[:5]:
-        rows = rows_by_symbol.get(symbol, [])
-
-        rows.sort(
-            key=lambda item: (
-                1 if str(item.get('action') or '').upper() in ('LONG', 'SHORT') else 0,
-                1 if bool(item.get('publication_eligible')) else 0,
-                float(item.get('execution_safety') or 0),
-                float(item.get('confidence') or 0),
-                float(item.get('risk_reward') or 0),
-            ),
-            reverse=True
-        )
-
-        best = rows[0] if rows else {}
-
+    comparison_candidates=[]
+    for symbol in requested_symbols[:7]:
+        rows=rows_by_symbol.get(symbol,[])
+        rows.sort(key=lambda item:(
+            1 if str(item.get('action') or '').upper() in ('LONG','SHORT') else 0,
+            1 if bool(item.get('publication_eligible')) else 0,
+            float(item.get('execution_safety') or 0),
+            float(item.get('confidence') or 0),
+            float(item.get('risk_reward') or 0),
+        ),reverse=True)
+        best=rows[0] if rows else {}
         comparison_candidates.append({
-            'symbol': symbol,
-            'requested_timeframe': requested_tf,
-            'best_current': best,
-            'alternatives': rows[1:3],
-            'reviewtrader': (
-                _ai_review_snapshot(
-                    symbol,
-                    best.get('timeframe'),
-                    best.get('action'),
-                    'futures'
-                )
-                if best
-                else {}
-            )
+            'symbol':symbol,
+            'requested_timeframe':requested_tf,
+            'best_current':best,
+            # Token guard: una sola ficha compacta por activo. El usuario puede
+            # incluir hasta 7 activos en una pregunta sin duplicar alternativas
+            # ni recomendaciones generales de ReviewTrader por cada símbolo.
+            'comparison_compact':True,
         })
 
     return {
-        'requested_symbols': requested_symbols[:5],
-        'timeframe_explicit': explicit_tf,
-        'requested_timeframe': requested_tf,
-        'selection_rule': (
-            'comparar setup ejecutable, publication eligibility, '
-            'Safety, confianza, RR y evidencia técnica; no elegir '
-            'por confidence aislada'
-        ),
-        'candidates': comparison_candidates
+        'market':target_market,
+        'requested_symbols':requested_symbols[:7],
+        'timeframe_explicit':explicit_tf,
+        'requested_timeframe':requested_tf,
+        'selection_rule':'comparar setup ejecutable, publication eligibility, Safety, confianza, RR y evidencia técnica; no elegir por confidence aislada',
+        'candidates':comparison_candidates,
+    }
+
+def _ai_cross_market_cached_snapshot():
+    """One best cached opportunity per market, with ZERO new I/O.
+
+    The Advice IA can compare Spot/Futures/Multi-Asset without refreshing any
+    engine, querying Supabase or calling another provider. Missing cache simply
+    means that market is reported as NO_CACHED_SETUP.
+    """
+    def _rank(row):
+        return (
+            1 if str((row or {}).get('action') or '').upper() in ('LONG','SHORT','COMPRA_SPOT','VENTA_SPOT') else 0,
+            float((row or {}).get('execution_safety') or 0),
+            float((row or {}).get('confidence') or 0),
+            float((row or {}).get('risk_reward') or 0),
+        )
+
+    out={}
+    # Spot: use the already-built active-signal cache only.
+    spot_rows=[]
+    try:
+        for item in (getattr(expert_system,'spot_active_signals_cache',{}) or {}).values():
+            if not isinstance(item,dict):
+                continue
+            action=str(item.get('action') or '').upper()
+            if action not in ('COMPRA_SPOT','VENTA_SPOT','LONG','SHORT'):
+                continue
+            spot_rows.append({
+                'symbol':item.get('symbol'),'timeframe':item.get('timeframe'),'action':action,
+                'confidence':_ai_number(item.get('confidence'),0.0),
+                'risk_reward':_ai_number(item.get('risk_reward'),None),
+            })
+    except Exception:
+        spot_rows=[]
+    spot_rows.sort(key=_rank,reverse=True)
+    out['SPOT']=spot_rows[0] if spot_rows else {'status':'NO_CACHED_SETUP'}
+
+    # Futures: intrabar/active cache is process-local and causes no refresh.
+    fut_rows=[]
+    try:
+        for item in _list_futures_intrabar_active():
+            if not isinstance(item,dict):
+                continue
+            fut_rows.append({
+                'symbol':item.get('symbol'),'timeframe':item.get('timeframe'),'action':item.get('action'),
+                'confidence':_ai_number(item.get('confidence'),0.0),
+                'execution_safety':_ai_number(item.get('execution_safety'),None),
+                'risk_reward':_ai_number(item.get('risk_reward'),None),
+            })
+    except Exception:
+        fut_rows=[]
+    fut_rows.sort(key=_rank,reverse=True)
+    out['FUTURES']=fut_rows[0] if fut_rows else {'status':'NO_CACHED_SETUP'}
+
+    # Multi-Asset: use only the bounded analysis cache built by user/router work.
+    multi_rows=[]
+    try:
+        with _MULTI_ASSET_CACHE['lock']:
+            analyses=dict(_MULTI_ASSET_CACHE.get('analysis') or {})
+        for key,result in analyses.items():
+            if not isinstance(result,dict):
+                continue
+            ks=key[0] if isinstance(key,tuple) and len(key)>=2 else result.get('symbol')
+            kt=key[1] if isinstance(key,tuple) and len(key)>=2 else result.get('timeframe')
+            compact=_ai_compact_analysis(result,ks,kt)
+            if str(compact.get('action') or '').upper() not in ('LONG','SHORT'):
+                continue
+            multi_rows.append({k:compact.get(k) for k in ('symbol','timeframe','action','confidence','execution_safety','risk_reward')})
+    except Exception:
+        multi_rows=[]
+    multi_rows.sort(key=_rank,reverse=True)
+    out['MULTIASSET']=multi_rows[0] if multi_rows else {'status':'NO_CACHED_SETUP'}
+    return {
+        'mode':'CACHE_ONLY_ZERO_EXTRA_IO',
+        'markets':out,
+        'purpose':'permitir que un único Consejo compare los tres mercados sin disparar análisis ni llamadas adicionales',
     }
 
 
@@ -51261,6 +51454,11 @@ def api_ai_advice():
             )
         )
 
+        # Commit 12.1: el Consejo de cada pestaña puede comparar los TRES
+        # mercados usando solamente caché local. No refresca motores, no consulta
+        # Supabase y no realiza una llamada IA adicional.
+        context['cross_market_snapshot'] = _ai_cross_market_cached_snapshot()
+
 
         signals = (
 
@@ -51287,35 +51485,23 @@ def api_ai_advice():
 
 
         # ================================================================
-        # UNA EVALUACIÓN NUEVA CADA 30 MINUTOS
+        # COMMIT 12.1 — CADENCIA DIFERENCIADA SIN AUMENTAR TOKENS
         # ================================================================
-        #
-        # Conservamos el nombre interno `hour_bucket`
-        # por compatibilidad con ai_advisor.py y Supabase,
-        # pero ahora existen dos buckets por hora:
-        #
-        #     10:00
-        #     10:30
-        #
-        # Una recarga dentro del mismo bloque reutiliza caché.
+        # Spot: 4h | Futures: 30m | Multi-Activo: 1h.
+        # La recarga dentro del mismo bucket reutiliza caché y no llama de nuevo
+        # al proveedor IA. Todos comparten el mismo presupuesto global Groq.
         # ================================================================
-        now_utc = datetime.now(
-            pytz.UTC
-        )
-
-        minute_bucket = (
-            '00'
-            if now_utc.minute < 30
-            else '30'
-        )
-
-        hour_bucket = (
-            now_utc.strftime(
-                '%Y-%m-%dT%H'
-            )
-            + ':'
-            + minute_bucket
-        )
+        now_utc = datetime.now(pytz.UTC)
+        advice_interval_minutes = {
+            'SPOT': 240,
+            'FUTURES': 30,
+            'MULTIASSET': 60,
+        }.get(market, 60)
+        day_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        minutes_today = now_utc.hour * 60 + now_utc.minute
+        bucket_minutes = (minutes_today // advice_interval_minutes) * advice_interval_minutes
+        bucket_time = day_start + timedelta(minutes=bucket_minutes)
+        hour_bucket = bucket_time.strftime('%Y-%m-%dT%H:%M')
 
         context[
             'hour_bucket'
@@ -51335,7 +51521,7 @@ def api_ai_advice():
                 3,
 
             'interval_minutes':
-                30,
+                advice_interval_minutes,
 
             'must_use_independent_trader_judgment':
                 True,
@@ -51845,7 +52031,7 @@ def api_ai_ask():
             ''
         )
         or ''
-    ).strip()[:800]
+    ).strip()[:1200]
 
 
     if not question:
@@ -51996,6 +52182,10 @@ def api_ai_ask():
                 page_timeframe,
         }
 
+        context['quota_market'] = page_market
+        context['requested_market'] = target_market
+        context['cross_tab_question'] = bool(page_market != target_market)
+
 
         manual_comparison = (
             _build_ai_manual_comparison(
@@ -52032,6 +52222,10 @@ def api_ai_ask():
 
                 market=(
                     target_market
+                ),
+
+                quota_market=(
+                    page_market
                 ),
 
                 context=context,

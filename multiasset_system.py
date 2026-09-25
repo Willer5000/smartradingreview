@@ -9,8 +9,10 @@ Design goals:
 """
 from __future__ import annotations
 
+import ast
 import math
 import os
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -26,7 +28,7 @@ from futures_system import (
     _track_futures_network_response,
 )
 
-MULTIASSET_VERSION = 'COMMIT12_MULTI_V1_RESOURCE_GOVERNED'
+MULTIASSET_VERSION = 'COMMIT12_1_MULTI_V1_QA_RESOURCE_GOVERNED'
 MULTIASSET_ENABLED = str(os.getenv('MULTIASSET_ENABLED', '1')).lower() not in ('0','false','no','off')
 MULTIASSET_DEEP_LIMIT = max(1, min(2, int(os.getenv('MULTIASSET_DEEP_LIMIT', '2') or 2)))
 MULTIASSET_ROUTER_TTL_SECONDS = max(300, int(os.getenv('MULTIASSET_ROUTER_TTL_SECONDS', '900') or 900))
@@ -366,6 +368,94 @@ def _specialist_evaluation(meta: Dict, strategy: Dict, macro: Dict, result: Dict
     }
 
 
+_MULTI_PUBLIC_CODE_LABELS = {
+    'rechazo_intrabarra': 'rechazo intrabarra',
+    'falso_breakdown_bajista': 'falso quiebre bajista',
+    'falso_breakout_alcista': 'falso quiebre alcista',
+    'volumen_confirmacion': 'volumen de confirmación',
+    'vela_fuerte': 'vela de impulso',
+    'volumen_alto': 'volumen alto',
+    'volumen_bajo': 'volumen bajo',
+    'absorcion': 'absorción',
+    'distribucion': 'distribución',
+}
+
+
+def _multi_public_phrase(value):
+    text=str(value or '').strip().strip("'\"")
+    return _MULTI_PUBLIC_CODE_LABELS.get(text, text.replace('_',' ').strip())
+
+
+def _humanize_multiasset_message(message, symbol, meta, macro, strategy):
+    """Public wording only; never expose Python lists or internal bank codes."""
+    text=str(message or '').strip()
+    if not text:
+        return text
+
+    display=str(meta.get('name') or symbol)
+    text=text.replace(str(symbol), display)
+
+    # The legacy recommendation presenter may stringify an evidence list,
+    # e.g. "Volumen: ['a','b'].". Convert those implementation details to
+    # natural Spanish only on Multi-Activo; Crypto wording remains untouched.
+    def repl_list(match):
+        label=match.group(1)
+        raw=match.group(2)
+        try:
+            values=ast.literal_eval(raw)
+        except Exception:
+            values=[]
+        if not isinstance(values,(list,tuple)) or not values:
+            return f"{label}: evidencia disponible"
+        phrases=[_multi_public_phrase(v) for v in values[:5] if str(v or '').strip()]
+        if not phrases:
+            return f"{label}: evidencia disponible"
+        if len(phrases)==1:
+            joined=phrases[0]
+        else:
+            joined=', '.join(phrases[:-1])+' y '+phrases[-1]
+        return f"{label}: {joined}"
+
+    text=re.sub(
+        r'([A-Za-zÁÉÍÓÚÜÑáéíóúüñ ]{3,28}):\s*(\[(?:[^\[\]]|\[[^\]]*\])*\])',
+        repl_list,
+        text
+    )
+    text=re.sub(r'MULTI::[A-Z0-9_:.-]+', 'estrategia adaptativa del activo', text)
+
+    asset_class=str(meta.get('asset_class') or '')
+    context_sentence={
+        'ENERGY': 'Contexto del activo: se ponderan volatilidad energética, sesión y riesgo macro propio de energía.',
+        'US_INDEX': 'Contexto del activo: se ponderan sesión bursátil, tasas, entorno macro y amplitud del índice.',
+        'INDUSTRIAL_METAL': 'Contexto del activo: se ponderan ciclo industrial, dólar, China y volatilidad propia del metal.',
+        'PRECIOUS_METAL': 'Contexto del activo: se ponderan dólar, tasas reales, demanda defensiva e impulso del metal.',
+        'CHINA_INDEX': 'Contexto del activo: se ponderan sesión asiática, China, yuan y riesgo macro/regulatorio.',
+    }.get(asset_class,'Contexto del activo: se aplican parámetros propios de su mercado y volatilidad.')
+
+    gate=str((macro or {}).get('gate') or 'NORMAL').upper()
+    if gate=='WAIT_EVENT':
+        context_sentence += ' Existe riesgo de evento próximo; la tesis técnica se conserva, pero una entrada nueva debe esperar confirmación posterior.'
+    elif gate=='CAUTION':
+        context_sentence += ' El contexto macro exige confirmación adicional y evita perseguir el precio.'
+
+    if context_sentence not in text:
+        marker='Decisión:'
+        if marker in text:
+            text=text.replace(marker, context_sentence+' '+marker,1)
+        else:
+            # Preserve the existing timestamp at the tail if present.
+            ts=re.search(r'\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+Hora Bolivia\.?$',text)
+            if ts:
+                text=text[:ts.start()].rstrip()+'. '+context_sentence+text[ts.start():]
+            else:
+                text=text.rstrip()+'. '+context_sentence
+
+    # Normalize accidental duplicate punctuation/spaces from legacy fragments.
+    text=re.sub(r'\s{2,}',' ',text)
+    text=re.sub(r'\.\s*\.', '.', text)
+    return text.strip()
+
+
 class MultiAssetAnalysis(FuturesAnalysis):
     """Futures execution engine with Multi-Asset market semantics."""
     def _market_label(self): return 'MULTI-ACTIVO'
@@ -426,6 +516,14 @@ class MultiAssetAnalysis(FuturesAnalysis):
                 if 'MULTI_MACRO_EVENT_RISK' not in reasons: reasons.append('MULTI_MACRO_EVENT_RISK')
                 gate.update({'eligible':False,'status':'WAIT_EVENT','reasons':reasons,'market_gate':'MACRO_EVENT'})
                 result['futures_publication_gate']=gate
+
+        result['message']=_humanize_multiasset_message(
+            result.get('message'),
+            symbol,
+            meta,
+            macro,
+            strategy,
+        )
         return result
 
     def analyze_multiasset_market(self,symbol,timeframe,**kwargs):

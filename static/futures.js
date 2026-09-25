@@ -3,9 +3,14 @@
 // solo los endpoints /api/futures/* con los símbolos y timeframes de futuros.
 // También añade el panel del ReviewTrader y adapta la correlación.
 
-console.log('🚀 futures.js cargado - modo Futuros activo');
+console.log(`🚀 futures.js cargado - modo ${window.IS_MULTI_ASSET_PAGE ? 'Multi-Activo' : 'Futuros'} activo`);
 
 const DERIV_API_BASE = window.DERIV_API_BASE || (window.IS_MULTI_ASSET_PAGE ? '/api/multiasset' : '/api/futures');
+const DERIV_MARKET_LABEL = window.IS_MULTI_ASSET_PAGE ? 'derivados Multi-Activo' : 'Futures';
+function futDisplaySymbol(symbol, explicitName = '') {
+    const key = String(symbol || '').toUpperCase();
+    return explicitName || window.PAGE_CONFIG?.symbols?.[key] || key.replace('-', '/');
+}
 function _derivPageSymbols(rows) {
     const allowed = new Set(Object.keys(window.PAGE_CONFIG?.symbols || {}));
     return (Array.isArray(rows) ? rows : []).filter(row => allowed.size === 0 || allowed.has(String(row?.symbol || '').toUpperCase().replace('/', '-')));
@@ -1018,7 +1023,7 @@ window.updateActiveSignals = async function() {
                     <div class="spinner-border spinner-border-sm me-2"></div>
 
                     <strong>
-                        Analizando Futuros: ${completed}/${total}
+                        Analizando ${window.IS_MULTI_ASSET_PAGE ? 'Multi-Activo' : 'Futuros'}: ${completed}/${total}
                     </strong>
 
                     <br>
@@ -1081,7 +1086,7 @@ window.updateActiveSignals = async function() {
             const hiddenInSaved = allSignals.length > 0;
             signalsList.innerHTML = `
                 <div class="list-group-item bg-dark text-warning text-center py-3">
-                    <strong>✅ Análisis de Futuros completado</strong>
+                    <strong>✅ Análisis de ${window.IS_MULTI_ASSET_PAGE ? 'Multi-Activo' : 'Futuros'} completado</strong>
                     <br>
                     <small>${hiddenInSaved
                         ? 'Tus señales vigentes de este ciclo ya están en Señales guardadas.'
@@ -1113,8 +1118,7 @@ window.updateActiveSignals = async function() {
                     : '📉';
 
             const symbolName =
-                String(sig.symbol || '')
-                    .replace('-', '/');
+                futDisplaySymbol(sig.symbol, sig.display_name);
 
             const confidence =
                 Number(sig.confidence || 0);
@@ -1310,7 +1314,7 @@ window.updateActiveSignals = async function() {
             <div class="list-group-item bg-dark text-danger text-center py-3">
 
                 <strong>
-                    ❌ No se pudo consultar Futuros
+                    ❌ No se pudo consultar ${window.IS_MULTI_ASSET_PAGE ? 'Multi-Activo' : 'Futuros'}
                 </strong>
 
                 <br>
@@ -1775,8 +1779,7 @@ window.updatePreviousSignals = async function() {
                     : '📉';
 
             const symbolName =
-                String(sig.symbol || '')
-                    .replace('-', '/');
+                futDisplaySymbol(sig.symbol, sig.display_name);
 
             const confidence =
                 Number(sig.confidence || 0);
@@ -2013,7 +2016,7 @@ window.showFuturesPrevJustif = function(sig) {
     
     // Renderizar de inmediato
     setTimeout(() => {
-        const symbolName = sig.symbol.replace('-', '/');
+        const symbolName = futDisplaySymbol(sig.symbol, sig.display_name);
         const isLong = sig.action === 'LONG';
         const emoji = isLong ? '📈' : '📉';
         const bgColor = isLong ? 'success' : 'danger';
@@ -2173,7 +2176,7 @@ window.updateCorrelationInfo = function(data) {
             if (`${currentSymbol}|${currentTf}` !== requestKey) return;
             renderFuturesCorrelation(json);
         })
-        .catch(err => console.error('Error contexto Futures:', err));
+        .catch(err => console.error(`Error contexto ${window.IS_MULTI_ASSET_PAGE ? 'Multi-Activo' : 'Futures'}:`, err));
 };
 
 
@@ -3279,17 +3282,17 @@ document.addEventListener('DOMContentLoaded', function() {
     // loadFuturesOpportunities96 es la Activa intrabar de vela abierta.
     setTimeout(() => {
         if (typeof window.updateActiveSignals === 'function') {
-            console.log('🚀 Futures: cargando Vigentes (prioridad 1)');
+            console.log(`🚀 ${window.IS_MULTI_ASSET_PAGE ? 'Multi-Activo' : 'Futures'}: cargando Vigentes (prioridad 1)`);
             window.updateActiveSignals();
         }
         setTimeout(() => {
             if (typeof window.updatePreviousSignals === 'function') {
-                console.log('📜 Futures: cargando Confirmadas (prioridad 2)');
+                console.log(`📜 ${window.IS_MULTI_ASSET_PAGE ? 'Multi-Activo' : 'Futures'}: cargando Confirmadas (prioridad 2)`);
                 window.updatePreviousSignals();
             }
         }, 500);
         setTimeout(() => {
-            console.log('🟢 Futures: cargando Activas intrabar (prioridad 3)');
+            console.log(`🟢 ${window.IS_MULTI_ASSET_PAGE ? 'Multi-Activo' : 'Futures'}: cargando Activas (prioridad 3)`);
             window.loadFuturesOpportunities96?.();
         }, 1600);
         setTimeout(() => window.prioritizeFuturesSignalLanes?.(), 2200);
@@ -3444,7 +3447,7 @@ window.openSaveSignalModal = function(sig, alreadyInPosition = false) {
         info.innerHTML = `
             <div class="d-flex align-items-center mb-2">
                 <span class="badge bg-${badgeClass} p-2 me-3">${emoji} ${sig.action}</span>
-                <strong>${(sig.symbol || '???').replace('-', '/')}</strong>
+                <strong>${futEscapeHtml(futDisplaySymbol(sig.symbol, sig.display_name))}</strong>
                 <span class="badge bg-dark ms-2">${sig.timeframe}</span>
                 <span class="badge bg-secondary ms-2">Confianza ${Math.round(sig.confidence || 0)}%</span>
             </div>
@@ -5361,7 +5364,7 @@ window.openSavedSignalDetail = async function(signalId) {
         body.innerHTML = `
             <div class="mb-3 d-flex flex-wrap align-items-center gap-2">
                 <span class="badge bg-${badgeClass} p-2">${emoji} ${sig.action}</span>
-                <strong>${sig.symbol.replace('-', '/')}</strong>
+                <strong>${futEscapeHtml(futDisplaySymbol(sig.symbol, sig.display_name))}</strong>
                 <span class="badge bg-dark">${sig.timeframe}</span>
                 <span class="badge bg-secondary">${sig.leverage}x</span>
                 <span class="text-muted">$${sig.investment_usdt} USDT</span>
@@ -5732,7 +5735,7 @@ if (window.IS_FUTURES_PAGE) {
             badge.textContent = 'LOGIN';
             badge.className = 'badge bg-warning text-dark';
         }
-        renderMessage('Inicia sesión para cargar o guardar tu perfil Futures.', 'warning');
+        renderMessage(`Inicia sesión para cargar o guardar tu perfil ${DERIV_MARKET_LABEL}.`, 'warning');
     };
 
     window.loadFuturesRiskProfile = async function({silent = false} = {}) {
@@ -5755,12 +5758,12 @@ if (window.IS_FUTURES_PAGE) {
 
             renderProfile(data.profile || {}, data.user || null);
             if (!silent && typeof window.showToast === 'function') {
-                window.showToast('Perfil Futures actualizado', 'success');
+                window.showToast(`Perfil ${DERIV_MARKET_LABEL} actualizado`, 'success');
             }
             return true;
         } catch (error) {
             console.error('❌ loadFuturesRiskProfile:', error);
-            renderMessage(`No se pudo cargar el perfil Futures: ${error.message}`, 'danger');
+            renderMessage(`No se pudo cargar el perfil ${DERIV_MARKET_LABEL}: ${error.message}`, 'danger');
             return false;
         }
     };
@@ -5791,7 +5794,7 @@ if (window.IS_FUTURES_PAGE) {
 
             if (response.status === 401 || data.authenticated === false) {
                 window.clearFuturesRiskProfileUI();
-                throw new Error('Debes iniciar sesión antes de guardar el perfil Futures.');
+                throw new Error(`Debes iniciar sesión antes de guardar el perfil ${DERIV_MARKET_LABEL}.`);
             }
             if (!response.ok || data.success !== true) {
                 throw new Error(data.error || `HTTP ${response.status}`);
@@ -5799,14 +5802,14 @@ if (window.IS_FUTURES_PAGE) {
 
             renderProfile(data.profile || payload, data.user || null);
             if (typeof window.showToast === 'function') {
-                window.showToast('✅ Perfil de riesgo Futures guardado', 'success');
+                window.showToast(`✅ Perfil de riesgo ${DERIV_MARKET_LABEL} guardado`, 'success');
             }
             return true;
         } catch (error) {
             console.error('❌ saveFuturesRiskProfile:', error);
-            renderMessage(error.message || 'No se pudo guardar el perfil Futures.', 'danger');
+            renderMessage(error.message || `No se pudo guardar el perfil ${DERIV_MARKET_LABEL}.`, 'danger');
             if (typeof window.showToast === 'function') {
-                window.showToast(error.message || 'No se pudo guardar el perfil Futures', 'danger');
+                window.showToast(error.message || `No se pudo guardar el perfil ${DERIV_MARKET_LABEL}`, 'danger');
             }
             return false;
         } finally {

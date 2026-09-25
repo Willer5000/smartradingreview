@@ -419,36 +419,6 @@
                                 <i class="fas fa-play me-1" aria-hidden="true"></i>Analizar
                             </button>
 
-                            <div class="dropdown">
-                                <button
-                                    class="btn btn-outline-info btn-sm dropdown-toggle"
-                                    type="button"
-                                    data-bs-toggle="dropdown"
-                                    aria-expanded="false"
-                                    title="Informe de análisis"
-                                >
-                                    <i class="fas fa-file-lines me-1" aria-hidden="true"></i>Informe
-                                </button>
-                                <ul class="dropdown-menu dropdown-menu-dark">
-                                    <li>
-                                        <button class="dropdown-item" type="button" onclick="window.downloadAnalysisReport('download')">
-                                            <i class="fas fa-download me-2" aria-hidden="true"></i>Descargar aquí
-                                        </button>
-                                    </li>
-                                    <li>
-                                        <button class="dropdown-item" type="button" onclick="window.downloadAnalysisReport('telegram')">
-                                            <i class="fas fa-paper-plane me-2" aria-hidden="true"></i>Enviar a Telegram
-                                        </button>
-                                    </li>
-                                    <li><hr class="dropdown-divider"></li>
-                                    <li>
-                                        <button class="dropdown-item" type="button" onclick="window.testTelegramConnection()">
-                                            <i class="fas fa-circle-check me-2" aria-hidden="true"></i>Probar conexión Telegram
-                                        </button>
-                                    </li>
-                                </ul>
-                            </div>
-
                             <button
                                 class="btn btn-outline-primary btn-sm"
                                 onclick="window.downloadLearningReport()"
@@ -1250,7 +1220,7 @@
                         <div class="card-header d-flex justify-content-between align-items-center bg-danger bg-opacity-25">
                             <h5 class="mb-0">
                                 <i class="fas fa-fire me-2" style="color: #FF5B5B;"></i>
-                                Mapa de Calor de Liquidaciones
+                                {% if is_multiasset|default(false) %}Mapa de Liquidez / Barridos (proxy){% else %}Mapa de Calor de Liquidaciones{% endif %}
                             </h5>
                             <div class="btn-group btn-group-sm">
                                 <button class="btn btn-outline-secondary btn-move" data-direction="up">
@@ -1299,7 +1269,7 @@
                                 <small class="text-muted">
                                     <i class="fas fa-info-circle me-1" style="color: #FF5B5B;"></i>
                                     <strong>Interpretación:</strong> 
-                                    <span id="liquidation-interpretation">Analizando pools de liquidez...</span>
+                                    <span id="liquidation-interpretation">{% if is_multiasset|default(false) %}Analizando pools técnicos de liquidez; no representa liquidaciones reales del exchange.{% else %}Analizando pools de liquidez...{% endif %}</span>
                                 </small>
                                 <div class="mt-1">
                                     <small class="text-muted">
@@ -1318,8 +1288,8 @@
                 <div class="card bg-dark border-primary mb-4 indicator-card" data-indicator="order-flow">
                     <div class="card-header d-flex justify-content-between align-items-center bg-primary bg-opacity-10">
                         <div>
-                            <h5 class="mb-0"><i class="fas fa-layer-group me-2"></i>Order Book / Order Flow</h5>
-                            <small class="text-muted">Profundidad y presión compradora/vendedora alrededor del precio</small>
+                            <h5 class="mb-0"><i class="fas fa-layer-group me-2"></i>{% if is_multiasset|default(false) %}Microestructura Multi-Activo{% else %}Order Book / Order Flow{% endif %}</h5>
+                            <small class="text-muted">{% if is_multiasset|default(false) %}Modo protegido: usa la evidencia ya disponible; no descarga Order Book/OI/funding extra sólo para dibujar la tarjeta.{% else %}Profundidad y presión compradora/vendedora alrededor del precio{% endif %}</small>
                         </div>
                         <span id="fast-futures-memory-badge" class="badge bg-info bg-opacity-10 text-info border border-info border-opacity-25 d-none">
                             ⚡ FAST · UI ligera
@@ -1346,6 +1316,13 @@
                             </div>
                         </div>
 
+                        {% if is_multiasset|default(false) %}
+                        <div class="alert alert-info py-2 px-3 small mt-3 mb-2">
+                            <i class="fas fa-shield-halved me-1"></i>
+                            <b>Protección de recursos:</b> esta vista no dispara consultas adicionales de Open Interest, funding ni profundidad.
+                            La microestructura disponible procede del análisis ya calculado o de proxies de precio/volumen.
+                        </div>
+                        {% else %}
                         <!-- Commit H: evidencia visual ligera. Sin nuevos DataFrames ni históricos grandes. -->
                         <div class="row g-2 mt-3">
                             <div class="col-lg-3 col-6">
@@ -1377,6 +1354,7 @@
                                 </div>
                             </div>
                         </div>
+                        {% endif %}
                         <div class="mt-3 p-2 rounded border border-secondary border-opacity-50">
                             <small class="text-muted">
                                 BID representa órdenes de compra y ASK órdenes de venta. La línea punteada marca el precio medio entre ambos lados.
@@ -2555,7 +2533,15 @@
     </div>
     <div class="card-body correlation-compact-body">
         <div id="correlation-info">
-            {% if is_futures %}
+            {% if is_multiasset|default(false) %}
+            <div class="small text-muted mb-2">
+                Router de oportunidades + contexto macro del universo Multi-Activo. Prioriza qué activo merece análisis profundo; no crea LONG/SHORT por sí solo.
+            </div>
+            <div class="correlation-chip-row">
+                <div class="correlation-chip"><strong>Activo seleccionado</strong><span class="badge bg-secondary">Esperando contexto…</span></div>
+                <div class="correlation-chip"><strong>Mejor oportunidad</strong><span class="badge bg-secondary">Escaneando…</span></div>
+            </div>
+            {% elif is_futures %}
             <div class="small text-muted mb-2">
                 Contexto del símbolo seleccionado frente a BTC de temporalidad superior, amplitud del universo Futures, derivados y liquidez. Es contexto; no crea una señal por sí solo.
             </div>
@@ -2624,7 +2610,7 @@
 
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI-2"></script>
     <script
-        src="{{ url_for('static', filename='script.js') }}?v=20260924-COMMIT12-MULTIASSET"
+        src="{{ url_for('static', filename='script.js') }}?v=20260924-COMMIT12-1-QA"
     ></script>
 
 
@@ -2635,7 +2621,7 @@
     {% if is_futures %}
 
     <script
-        src="{{ url_for('static', filename='futures.js') }}?v=20260924-COMMIT12-MULTIASSET"
+        src="{{ url_for('static', filename='futures.js') }}?v=20260924-COMMIT12-1-QA"
     ></script>
 
     {% endif %}
@@ -3329,48 +3315,6 @@
                 .catch(error => console.error('Error:', error));
         };
 
-        window.downloadAnalysisReport = async function(delivery = 'download') {
-            const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
-            const interval = document.getElementById('interval-select')?.value || '1D';
-            const toTelegram = delivery === 'telegram';
-            window.showToast(
-                toTelegram ? 'Generando informe para Telegram…' : 'Generando informe PDF…',
-                'info'
-            );
-            try {
-                const url = `/api/generate_report?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}${toTelegram ? '&delivery=telegram&with_charts=0' : ''}`;
-                const response = await fetch(url, {cache: 'no-store'});
-                if (!response.ok) {
-                    let detail = `HTTP ${response.status}`;
-                    try {
-                        const payload = await response.json();
-                        if (payload?.error) detail = payload.error;
-                    } catch (_) {}
-                    throw new Error(detail);
-                }
-                if (toTelegram) {
-                    const payload = await response.json();
-                    if (!payload?.success) throw new Error(payload?.error || 'Telegram no confirmó el envío');
-                    const mode = payload?.report_mode === 'ligero' ? ' (modo ligero para proteger la memoria del servidor)' : '';
-                    window.showToast(`Informe enviado a Telegram correctamente${mode}`, 'success');
-                    return;
-                }
-                const blob = await response.blob();
-                const objectUrl = window.URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = objectUrl;
-                a.download = `analisis_${symbol}_${interval}_${new Date().toISOString().slice(0,10)}.pdf`;
-                document.body.appendChild(a);
-                a.click();
-                a.remove();
-                window.URL.revokeObjectURL(objectUrl);
-                window.showToast('Informe PDF descargado', 'success');
-            } catch (error) {
-                console.error('Error generando informe:', error);
-                window.showToast(`No se pudo ${toTelegram ? 'enviar el informe a Telegram' : 'descargar el informe'}: ${error.message}`, 'danger');
-            }
-        };
-
         window.testTelegramConnection = async function() {
             window.showToast('Probando conexión con Telegram…', 'info');
             try {
@@ -3586,7 +3530,7 @@
         //   AMARILLO → borderline o pocas resueltas
         //   ROJO   → perdedoras
         window.updateSystemKPIs = function() {
-            fetch('/api/kpis/frontend_signals?system_type={{ "futures" if is_futures else "spot" }}')
+            fetch('/api/kpis/frontend_signals?system_type={{ "multiasset" if is_multiasset|default(false) else ("futures" if is_futures else "spot") }}')
                 .then(r => {
                     if (!r.ok) throw new Error('HTTP ' + r.status);
                     return r.json();
@@ -3600,7 +3544,9 @@
                     const active = Number(d.active) || 0;
                     const totalSpot = Number(d.total_spot) || 0;
                     const totalFut = Number(d.total_futures) || 0;
+                    const totalMulti = Number(d.total_multiasset) || 0;
                     const total = Number(d.total) || 0;
+                    const isMultiKpi = String(d.system_type || '') === 'multiasset';
                     
                     // ============ Win Rate ============
                     // v22.1: solo colorear si hay muestras suficientes (>=5).
@@ -3616,7 +3562,7 @@
                         wrEl.className = 'badge ' + cls;
                         wrEl.title = resolved < 5
                             ? `${resolved} señales resueltas — muestra insuficiente para conclusiones.`
-                            : `Win rate real: ${resolved} señales resueltas del frontend (spot + futuros).`;
+                            : `Win rate real: ${resolved} señales resueltas del mercado visible.`;
                     }
                     
                     // ============ PnL total ============
@@ -3639,14 +3585,18 @@
                     if (resEl) {
                         resEl.innerHTML = `<b>${resolved}/${total}</b> ops`;
                         resEl.className = resolved < 5 ? 'badge bg-secondary' : 'badge bg-dark text-muted';
-                        resEl.title = `${resolved} resueltas de ${total} señales visibles (${totalSpot} spot + ${totalFut} futuros) + ${active} activas. Para el histórico completo ver Análisis del Sistema.`;
+                        resEl.title = isMultiKpi
+                            ? `${totalMulti} análisis Multi-Activo en caché local · ${active} ejecutables. La cabecera no consulta Supabase; el histórico está en Análisis.`
+                            : `${resolved} resueltas de ${total} señales visibles (${totalSpot} spot + ${totalFut} futuros) + ${active} activas. Para el histórico completo ver Análisis del Sistema.`;
                     }
                     
                     // Log de debug
                     if (resolved >= 5) {
-                        console.log(`📊 KPIs frontend: WR ${winRate.toFixed(1)}% · PnL ${pnlPct.toFixed(2)}% · ${resolved}/${total} (${totalSpot}spot+${totalFut}fut) · ${active} activas`);
+                        console.log(`📊 KPIs frontend: WR ${winRate.toFixed(1)}% · PnL ${pnlPct.toFixed(2)}% · ${resolved}/${total} (${totalSpot}spot+${totalFut}fut+${totalMulti}multi) · ${active} activas`);
                     } else {
-                        console.log(`⏳ KPIs frontend: ${resolved}/${total} resueltas (${totalSpot}spot+${totalFut}fut). Muestra insuficiente aún.`);
+                        console.log(isMultiKpi
+                            ? `🌐 KPIs Multi-Activo: ${totalMulti} análisis locales · ${active} ejecutables · histórico en Análisis.`
+                            : `⏳ KPIs frontend: ${resolved}/${total} resueltas (${totalSpot}spot+${totalFut}fut). Muestra insuficiente aún.`);
                     }
                 })
                 .catch(err => {

@@ -6,6 +6,12 @@ console.log(
 
 let currentAnalysis = null;
 let currentSymbol = 'BTC-USDT';
+
+function _displaySymbolName(symbol) {
+    const key = String(symbol || '').toUpperCase();
+    return window.PAGE_CONFIG?.symbols?.[key] || key.replace('-', '/') || 'Mercado';
+}
+window.getDisplaySymbolName = _displaySymbolName;
 let currentInterval = '1D';
 
 // RC8.3 FINAL — PUBLIC REASONS
@@ -2962,19 +2968,21 @@ window.runCompleteAnalysis = function() {
                     window.__FUTURES_ANALYSIS_RETRY_STARTED_AT__ = startedAt;
                 }
 
+                const isMulti = window.IS_MULTI_ASSET_PAGE === true;
                 const retryCount = Number(window.__FUTURES_ANALYSIS_BUSY_RETRIES__ || 0);
                 const elapsedMs = now - startedAt;
-                const retryAfterMs = Math.min(
-                    12000,
-                    Math.max(4000, Number(data.retry_after_ms || 6000))
-                );
+                const retryAfterMs = isMulti
+                    ? Math.min(10000, Math.max(6000, Number(data.retry_after_ms || 7000)))
+                    : Math.min(12000, Math.max(4000, Number(data.retry_after_ms || 6000)));
+                const maxBusyMs = isMulti ? 30000 : 90000;
+                const maxBusyRetries = isMulti ? 3 : 8;
 
                 if (data.partial && data.data?.decision) {
                     window.currentAnalysis = data.data;
                     try {
                         updateInstantRecommendation(data.data);
                     } catch (partialErr) {
-                        console.debug('Futures parcial: recomendación compacta no renderizada', partialErr);
+                        console.debug(`${isMulti ? 'Multi-Activo' : 'Futures'} parcial: recomendación compacta no renderizada`, partialErr);
                     }
                 }
 
@@ -2982,15 +2990,17 @@ window.runCompleteAnalysis = function() {
                 if (recommendationEl && !(data.partial && data.data?.decision)) {
                     recommendationEl.innerHTML = `
                         <div class="alert alert-info mb-0">
-                            <strong>⏳ Preparando gráficos Futures.</strong>
+                            <strong>⏳ ${isMulti ? 'Preparando análisis Multi-Activo' : 'Preparando gráficos Futures'}.</strong>
                             <div class="small mt-2">
-                                El último estado del mercado seguirá visible mientras termina el payload gráfico.
+                                ${isMulti
+                                    ? 'El Router, el precio y el último análisis válido siguen disponibles mientras el motor compartido termina el turno anterior.'
+                                    : 'El último estado del mercado seguirá visible mientras termina el payload gráfico.'}
                             </div>
                         </div>
                     `;
                 }
 
-                if (elapsedMs < 90000 && retryCount < 8) {
+                if (elapsedMs < maxBusyMs && retryCount < maxBusyRetries) {
                     window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = retryCount + 1;
                     clearTimeout(window.__FUTURES_ANALYSIS_RETRY_TIMER__);
                     window.__FUTURES_ANALYSIS_RETRY_TIMER__ = window.setTimeout(() => {
@@ -3005,13 +3015,15 @@ window.runCompleteAnalysis = function() {
                     if (recommendationEl) {
                         recommendationEl.innerHTML = `
                             <div class="alert alert-warning mb-0">
-                                <strong>⚠️ Los gráficos tardaron más de lo esperado.</strong>
+                                <strong>⚠️ ${isMulti ? 'El motor compartido sigue ocupado' : 'Los gráficos tardaron más de lo esperado'}.</strong>
                                 <div class="small mt-2">
-                                    La página sigue disponible. Puedes reintentar sin recargarla.
+                                    ${isMulti
+                                        ? 'No se seguirá haciendo polling. La página, el Router y el precio continúan disponibles; reintenta cuando quieras.'
+                                        : 'La página sigue disponible. Puedes reintentar sin recargarla.'}
                                 </div>
                                 <button type="button" class="btn btn-sm btn-outline-warning mt-2"
                                     onclick="window.runCompleteAnalysis?.()">
-                                    Reintentar gráficos
+                                    ${isMulti ? 'Reintentar análisis' : 'Reintentar gráficos'}
                                 </button>
                             </div>
                         `;
@@ -3597,12 +3609,17 @@ window.runCompleteAnalysis = function() {
                 const serverRetry = Number(
                     error?.serverData?.retry_after_ms || 1800
                 );
-                const retryAfterMs = Math.min(12000, Math.max(4000, serverRetry));
+                const isMulti = window.IS_MULTI_ASSET_PAGE === true;
+                const retryAfterMs = isMulti
+                    ? Math.min(10000, Math.max(6000, serverRetry || 7000))
+                    : Math.min(12000, Math.max(4000, serverRetry));
+                const maxBusyMs = isMulti ? 30000 : 90000;
+                const maxBusyRetries = isMulti ? 3 : 8;
 
                 // RC8: backoff amplio ante 520/522; evitar tormenta de polls. If the backend cannot
                 // prepare the rich chart payload in that window, surface a
                 // normal retry button instead of keeping the page spinning.
-                if (elapsedMs < 90000 && retryCount < 8) {
+                if (elapsedMs < maxBusyMs && retryCount < maxBusyRetries) {
                     window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = retryCount + 1;
 
                     const recommendationEl = document.getElementById(
@@ -3611,10 +3628,11 @@ window.runCompleteAnalysis = function() {
                     if (recommendationEl) {
                         recommendationEl.innerHTML = `
                             <div class="alert alert-info mb-0">
-                                <strong>⏳ Preparando gráficos Futures.</strong>
+                                <strong>⏳ ${isMulti ? 'Esperando turno Multi-Activo' : 'Preparando gráficos Futures'}.</strong>
                                 <div class="small mt-2">
-                                    El análisis se ejecuta en segundo plano para mantener la página disponible.
-                                    Intento ${retryCount + 1}.
+                                    ${isMulti
+                                        ? `El motor compartido está terminando otro trabajo. Intento acotado ${retryCount + 1}/${maxBusyRetries}.`
+                                        : `El análisis se ejecuta en segundo plano para mantener la página disponible. Intento ${retryCount + 1}.`}
                                 </div>
                             </div>
                         `;
@@ -3650,9 +3668,10 @@ window.runCompleteAnalysis = function() {
             if (recommendationEl) {
                 recommendationEl.innerHTML = `
                     <div class="alert alert-warning mb-0">
-                        <strong>⚠️ El análisis Futures tardó más de lo esperado.</strong>
+                        <strong>⚠️ ${window.IS_MULTI_ASSET_PAGE ? 'El análisis Multi-Activo no pudo tomar el turno compartido' : 'El análisis Futures tardó más de lo esperado'}.</strong>
                         <div class="small mt-2">
                             ${error?.message || 'El servidor está ocupado temporalmente.'}
+                            ${window.IS_MULTI_ASSET_PAGE ? '<br>El Router y el precio siguen disponibles; no se continuará haciendo polling automático.' : ''}
                         </div>
                         <button
                             type="button"
@@ -4102,7 +4121,7 @@ window.updateCandleChart = function(data) {
     
     if (dates.length === 0) return;
     
-    const symbolName = data.symbol?.replace('-', '/') || 'BTC/USDT';
+    const symbolName = _displaySymbolName(data.symbol || window.currentSymbol || 'BTC-USDT');
     const intervalName = getIntervalName(data.timeframe || '1D');
     
     const closePrices = close.map(Number);
@@ -8143,6 +8162,23 @@ function _orderFlowSnapshotFromAnalysis(data) {
 }
 
 function _renderOrderFlowSnapshot(snapshot, symbol) {
+
+    if (window.IS_MULTI_ASSET_PAGE && snapshot && snapshot.available === false) {
+        const chartDiv = document.getElementById('order-flow-chart');
+        const interpretationEl = document.getElementById('order-flow-interpretation');
+        if (chartDiv) {
+            chartDiv.innerHTML = '<div class="h-100 d-flex align-items-center justify-content-center text-muted text-center px-3"><div><i class="fas fa-shield-halved me-1"></i>Microestructura en modo protegido<br><small>No se realizan descargas extra de Order Book/OI/funding sólo para dibujar esta tarjeta.</small></div></div>';
+        }
+        if (interpretationEl) {
+            interpretationEl.textContent = snapshot.reason || 'Modo protegido de recursos.';
+        }
+        ['order-flow-imbalance','order-flow-buy-share','order-flow-spread'].forEach(id=>{
+            const el=document.getElementById(id); if (el) el.textContent='--';
+        });
+        const align=document.getElementById('order-flow-alignment');
+        if (align) { align.textContent='PROXY'; align.className='text-info'; }
+        return;
+    }
     const chartDiv = document.getElementById('order-flow-chart');
     if (!chartDiv || typeof Plotly === 'undefined') return;
 
@@ -8212,7 +8248,7 @@ function _renderOrderFlowSnapshot(snapshot, symbol) {
         }] : []
     };
     const layout = window.TradingTheme?.baseLayout
-        ? window.TradingTheme.baseLayout(`Order Book · ${String(symbol || '').replace('-', '/')}`, layoutBase)
+        ? window.TradingTheme.baseLayout(`${window.IS_MULTI_ASSET_PAGE ? 'Microestructura' : 'Order Book'} · ${_displaySymbolName(symbol)}`, layoutBase)
         : {template: 'plotly_dark', ...layoutBase};
 
     try {
@@ -8346,23 +8382,30 @@ function _renderOrderFlowSnapshot(snapshot, symbol) {
 async function _fetchOrderFlowUi(symbol) {
     if (!symbol || !window.IS_FUTURES_PAGE) return null;
     const now = Date.now();
-    const cached = __orderFlowUiCache.get(symbol);
+    const cacheKey = `${symbol}|${window.currentInterval || ''}`;
+    const cached = __orderFlowUiCache.get(cacheKey);
     if (cached && (now - cached.ts) < 20000) return cached.data;
-    if (__orderFlowUiInflight.has(symbol)) return cached?.data || null;
-    __orderFlowUiInflight.add(symbol);
+    if (__orderFlowUiInflight.has(cacheKey)) return cached?.data || null;
+    __orderFlowUiInflight.add(cacheKey);
     try {
-        const response = await fetch(`/api/futures/microstructure?symbol=${encodeURIComponent(symbol)}`, {credentials: 'same-origin'});
+        const base = window.DERIV_API_BASE || '/api/futures';
+        const tf = String(window.currentInterval || window.PAGE_CONFIG?.defaultTimeframe || '4h');
+        const url = `${base}/microstructure?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(tf)}`;
+        const response = await fetch(url, {credentials: 'same-origin'});
         const json = await response.json().catch(() => ({}));
         if (response.ok && json?.success) {
-            __orderFlowUiCache.set(symbol, {ts: now, data: json});
-            return json;
+            const snapshot = (window.IS_MULTI_ASSET_PAGE && json?.data && typeof json.data === 'object')
+                ? {...json.data, success: true, symbol: json.symbol || symbol, timeframe: json.timeframe || tf}
+                : json;
+            __orderFlowUiCache.set(cacheKey, {ts: now, data: snapshot});
+            return snapshot;
         }
         return cached?.data || null;
     } catch (error) {
         console.warn('Microestructura UI no disponible:', error);
         return cached?.data || null;
     } finally {
-        __orderFlowUiInflight.delete(symbol);
+        __orderFlowUiInflight.delete(cacheKey);
     }
 }
 

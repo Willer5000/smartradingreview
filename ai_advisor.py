@@ -153,18 +153,14 @@ LIMIT_MANUAL_HOUR = max(
     )
 )
 
-# RC10.1 — repartir las 3 preguntas/h de Futures en el tiempo.
-# Evita consumir el cupo en pocos minutos y conserva tokens para operar
-# distintas temporalidades durante toda la hora.
-MANUAL_FUTURES_MIN_INTERVAL_MINUTES = max(
-    1,
-    int(
-        os.getenv(
-            "AI_MANUAL_MIN_INTERVAL_MINUTES",
-            "20"
-        )
-    )
-)
+# Commit 12.1 — cuotas manuales diferenciadas por mercado.
+# Son independientes entre pestañas, pero comparten el presupuesto diario global
+# y el fusible de tokens Groq. Esto permite usar otra pestaña si una cuota local
+# se agotó, sin aumentar el presupuesto total.
+MANUAL_SPOT_WINDOW_MINUTES = max(60, int(os.getenv("AI_MANUAL_SPOT_WINDOW_MINUTES", "240")))
+MANUAL_SPOT_WINDOW_LIMIT = max(1, int(os.getenv("AI_MANUAL_SPOT_WINDOW_LIMIT", "3")))
+MANUAL_FUTURES_MIN_INTERVAL_MINUTES = max(1, int(os.getenv("AI_MANUAL_FUTURES_MIN_INTERVAL_MINUTES", "30")))
+MANUAL_MULTI_MIN_INTERVAL_MINUTES = max(1, int(os.getenv("AI_MANUAL_MULTI_MIN_INTERVAL_MINUTES", "60")))
 
 # Límite diario por usuario.
 #
@@ -1023,9 +1019,14 @@ def _read_usage_window_once(day_iso):
         return None
 
 
-def get_ai_quota_status(
-    user_name
-):
+def get_ai_quota_status(user_name):
+    """Commit 12.1: quota snapshot with independent market windows.
+
+    SPOT: 3 questions / rolling 4h.
+    FUTURES: 1 question / rolling 30m.
+    MULTIASSET: 1 question / rolling 60m.
+    All markets still share the daily/manual/global token fuses.
+    """
     now = _now()
     hour_dt = now - timedelta(hours=1)
     day_dt = now - timedelta(hours=24)
@@ -1033,39 +1034,39 @@ def get_ai_quota_status(
 
     def item(used, limit):
         used = max(0, int(used or 0))
+        return {"used": used, "limit": int(limit), "remaining": max(0, int(limit)-used)}
+
+    def market_item(used, limit, window_minutes, oldest=None):
+        remaining_seconds = 0
+        if used >= limit and oldest is not None:
+            remaining_seconds = max(0, int((oldest + timedelta(minutes=window_minutes) - now).total_seconds()))
         return {
-            "used": used,
-            "limit": int(limit),
-            "remaining": max(0, int(limit) - used),
+            "used": int(used), "limit": int(limit), "remaining": max(0, int(limit)-int(used)),
+            "window_minutes": int(window_minutes), "remaining_seconds": remaining_seconds,
+            "ready": int(used) < int(limit),
         }
 
-    # Fail closed: si no podemos comprobar cuotas, no hacemos nuevas llamadas IA.
+    empty_markets = {
+        "SPOT": market_item(0, MANUAL_SPOT_WINDOW_LIMIT, MANUAL_SPOT_WINDOW_MINUTES),
+        "FUTURES": market_item(0, 1, MANUAL_FUTURES_MIN_INTERVAL_MINUTES),
+        "MULTIASSET": market_item(0, 1, MANUAL_MULTI_MIN_INTERVAL_MINUTES),
+    }
     if rows is None:
         return {
-            "enabled": AI_ENABLED,
-            "provider": AI_PROVIDER,
-            "model": AI_MODEL,
-            "window": "ROLLING",
-            "manual_hourly": item(0, LIMIT_MANUAL_HOUR),
-            "manual_daily": item(0, LIMIT_MANUAL_DAY),
-            "manual_futures_cooldown": {
-                "interval_minutes": MANUAL_FUTURES_MIN_INTERVAL_MINUTES,
-                "remaining_seconds": 0,
-                "ready": True,
-            },
-            "hourly_advice_daily": item(0, LIMIT_HOURLY_ADVICE_DAY),
-            "auto_control_daily": item(0, LIMIT_AUTO_CONTROL_DAY),
-            "automatic_daily": item(0, LIMIT_AUTO_DAY),
-            "learning_daily": item(0, LIMIT_LEARNING_DAY),
-            "global_daily": item(0, LIMIT_GLOBAL_DAY),
-            "groq_tokens_daily": item(0, GROQ_DAILY_TOKEN_BUDGET),
+            "enabled": AI_ENABLED, "provider": AI_PROVIDER, "model": AI_MODEL, "window": "ROLLING",
+            "manual_hourly": item(0, LIMIT_MANUAL_HOUR), "manual_daily": item(0, LIMIT_MANUAL_DAY),
+            "manual_market": empty_markets,
+            "manual_futures_cooldown": {"interval_minutes": MANUAL_FUTURES_MIN_INTERVAL_MINUTES, "remaining_seconds":0, "ready":True},
+            "hourly_advice_daily": item(0, LIMIT_HOURLY_ADVICE_DAY), "auto_control_daily": item(0, LIMIT_AUTO_CONTROL_DAY),
+            "automatic_daily": item(0, LIMIT_AUTO_DAY), "learning_daily": item(0, LIMIT_LEARNING_DAY),
+            "global_daily": item(0, LIMIT_GLOBAL_DAY), "groq_tokens_daily": item(0, GROQ_DAILY_TOKEN_BUDGET),
             "quota_storage_ok": False,
         }
 
     uname = str(user_name or "")
     counters = dict(mh=0, md=0, ad=0, had=0, dc=0, gu=0, ld=0, gd=0)
     groq_tokens = 0
-    last_manual_futures_at = None
+    manual_times = {"SPOT": [], "FUTURES": [], "MULTIASSET": []}
 
     for row in rows:
         if str(row.get("status") or "").upper() != "SUCCESS":
@@ -1073,79 +1074,51 @@ def get_ai_quota_status(
         created_raw = str(row.get("created_at") or "")
         try:
             created = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
-            if created.tzinfo is None:
-                created = created.replace(tzinfo=timezone.utc)
+            if created.tzinfo is None: created = created.replace(tzinfo=timezone.utc)
         except Exception:
             created = day_dt
-
         usage = str(row.get("usage_type") or "").upper()
         context = str(row.get("context_type") or "").upper()
         row_market = str(row.get("market") or "").upper()
         row_user = str(row.get("user_name") or "")
         provider = str(row.get("provider") or "").upper()
-
         counters["gd"] += 1
         if "GROQ" in provider:
-            try:
-                groq_tokens += max(0, int(row.get("total_tokens") or 0))
-            except Exception:
-                pass
+            try: groq_tokens += max(0, int(row.get("total_tokens") or 0))
+            except Exception: pass
         if usage == "MANUAL" and row_user == uname:
             counters["md"] += 1
-            if created >= hour_dt:
-                counters["mh"] += 1
-            if row_market == "FUTURES":
-                if (
-                    last_manual_futures_at is None
-                    or created > last_manual_futures_at
-                ):
-                    last_manual_futures_at = created
+            if created >= hour_dt: counters["mh"] += 1
+            if row_market in manual_times: manual_times[row_market].append(created)
         if usage == "AUTO":
             counters["ad"] += 1
-            if context == "HOURLY_MARKET_ADVICE" and row_user == uname:
-                counters["had"] += 1
-            elif context == "DECISION_CONTROL":
-                counters["dc"] += 1
-            elif context == "GUARDIAN":
-                counters["gu"] += 1
-        elif usage == "LEARNING":
-            counters["ld"] += 1
+            if context == "HOURLY_MARKET_ADVICE" and row_user == uname: counters["had"] += 1
+            elif context == "DECISION_CONTROL": counters["dc"] += 1
+            elif context == "GUARDIAN": counters["gu"] += 1
+        elif usage == "LEARNING": counters["ld"] += 1
+
+    windows = {
+        "SPOT": (MANUAL_SPOT_WINDOW_MINUTES, MANUAL_SPOT_WINDOW_LIMIT),
+        "FUTURES": (MANUAL_FUTURES_MIN_INTERVAL_MINUTES, 1),
+        "MULTIASSET": (MANUAL_MULTI_MIN_INTERVAL_MINUTES, 1),
+    }
+    market_status = {}
+    for mk, (mins, limit) in windows.items():
+        cutoff = now - timedelta(minutes=mins)
+        active = sorted([dt for dt in manual_times[mk] if dt >= cutoff])
+        market_status[mk] = market_item(len(active), limit, mins, active[0] if active else None)
 
     auto_control_used = counters["dc"] + counters["gu"]
-
-    manual_futures_remaining_seconds = 0
-    if last_manual_futures_at is not None:
-        try:
-            elapsed = max(
-                0,
-                int((now - last_manual_futures_at).total_seconds())
-            )
-            manual_futures_remaining_seconds = max(
-                0,
-                MANUAL_FUTURES_MIN_INTERVAL_MINUTES * 60 - elapsed
-            )
-        except Exception:
-            manual_futures_remaining_seconds = 0
-
+    fut = market_status["FUTURES"]
     return {
-        "enabled": AI_ENABLED,
-        "provider": AI_PROVIDER,
-        "model": AI_MODEL,
-        "window": "ROLLING",
-        "manual_hourly": item(counters["mh"], LIMIT_MANUAL_HOUR),
-        "manual_daily": item(counters["md"], LIMIT_MANUAL_DAY),
-        "manual_futures_cooldown": {
-            "interval_minutes": MANUAL_FUTURES_MIN_INTERVAL_MINUTES,
-            "remaining_seconds": manual_futures_remaining_seconds,
-            "ready": manual_futures_remaining_seconds <= 0,
-        },
-        "hourly_advice_daily": item(counters["had"], LIMIT_HOURLY_ADVICE_DAY),
-        "auto_control_daily": item(auto_control_used, LIMIT_AUTO_CONTROL_DAY),
-        "automatic_daily": item(counters["ad"], LIMIT_AUTO_DAY),
-        "learning_daily": item(counters["ld"], LIMIT_LEARNING_DAY),
-        "global_daily": item(counters["gd"], LIMIT_GLOBAL_DAY),
-        "groq_tokens_daily": item(groq_tokens, GROQ_DAILY_TOKEN_BUDGET),
-        "quota_storage_ok": True,
+        "enabled":AI_ENABLED, "provider":AI_PROVIDER, "model":AI_MODEL, "window":"ROLLING",
+        "manual_hourly":item(counters["mh"], LIMIT_MANUAL_HOUR), "manual_daily":item(counters["md"], LIMIT_MANUAL_DAY),
+        "manual_market":market_status,
+        "manual_futures_cooldown":{"interval_minutes":MANUAL_FUTURES_MIN_INTERVAL_MINUTES, "remaining_seconds":fut["remaining_seconds"], "ready":fut["ready"]},
+        "hourly_advice_daily":item(counters["had"], LIMIT_HOURLY_ADVICE_DAY),
+        "auto_control_daily":item(auto_control_used, LIMIT_AUTO_CONTROL_DAY), "automatic_daily":item(counters["ad"], LIMIT_AUTO_DAY),
+        "learning_daily":item(counters["ld"], LIMIT_LEARNING_DAY), "global_daily":item(counters["gd"], LIMIT_GLOBAL_DAY),
+        "groq_tokens_daily":item(groq_tokens, GROQ_DAILY_TOKEN_BUDGET), "quota_storage_ok":True,
     }
 
 def _quota_allowed(
@@ -1203,64 +1176,22 @@ def _quota_allowed(
     # ================================================================
 
     if usage_type == "MANUAL":
-
-        normalized_market = str(market or "").upper()
-
-        if normalized_market in {"FUTURES", "MULTIASSET"}:
-            cooldown = quota.get("manual_futures_cooldown") or {}
-            cooldown_remaining = int(cooldown.get("remaining_seconds") or 0)
-            if cooldown_remaining > 0:
-                wait_minutes = max(1, (cooldown_remaining + 59) // 60)
-                return (
-                    False,
-                    (
-                        "En Futures el Asistente permite 1 pregunta cada "
-                        f"{MANUAL_FUTURES_MIN_INTERVAL_MINUTES} minutos "
-                        f"(máx. {LIMIT_MANUAL_HOUR} por hora). "
-                        f"Próxima consulta en aproximadamente {wait_minutes} min."
-                    ),
-                    quota
-                )
-
-        if (
-            quota[
-                "manual_hourly"
-            ][
-                "remaining"
-            ]
-            <= 0
-        ):
-
-            return (
-                False,
-                (
-                    "Ya usaste tus "
-                    f"{LIMIT_MANUAL_HOUR} "
-                    "preguntas disponibles "
-                    "en la última hora."
-                ),
-                quota
-            )
-
-
-        if (
-            quota[
-                "manual_daily"
-            ][
-                "remaining"
-            ]
-            <= 0
-        ):
-
-            return (
-                False,
-                (
-                    "Se alcanzó tu límite "
-                    "diario de preguntas IA."
-                ),
-                quota
-            )
-
+        normalized_market = str(market or "SPOT").upper()
+        if normalized_market not in {"SPOT", "FUTURES", "MULTIASSET"}:
+            normalized_market = "SPOT"
+        market_quota = (quota.get("manual_market") or {}).get(normalized_market) or {}
+        if int(market_quota.get("remaining") or 0) <= 0:
+            wait_seconds = max(0, int(market_quota.get("remaining_seconds") or 0))
+            wait_minutes = max(1, (wait_seconds + 59)//60) if wait_seconds else int(market_quota.get("window_minutes") or 60)
+            labels = {"SPOT":"Spot", "FUTURES":"Futures", "MULTIASSET":"Multi-Activo"}
+            rules = {
+                "SPOT": f"{MANUAL_SPOT_WINDOW_LIMIT} preguntas cada {MANUAL_SPOT_WINDOW_MINUTES//60} horas",
+                "FUTURES": f"1 pregunta cada {MANUAL_FUTURES_MIN_INTERVAL_MINUTES} minutos",
+                "MULTIASSET": f"1 pregunta cada {MANUAL_MULTI_MIN_INTERVAL_MINUTES} minutos",
+            }
+            return (False, f"Cuota de {labels[normalized_market]} agotada ({rules[normalized_market]}). Próxima consulta en aproximadamente {wait_minutes} min. Las otras pestañas conservan su propia cuota.", quota)
+        if quota["manual_daily"]["remaining"] <= 0:
+            return (False, "Se alcanzó tu límite diario global de preguntas IA.", quota)
 
     # ================================================================
     # AUTOMÁTICO
@@ -2398,19 +2329,12 @@ def _fingerprint(
         )
 
         if normalized_market == "SPOT":
-
-            interval_minutes = 120
-
-        elif normalized_market in {"FUTURES", "MULTIASSET"}:
-
-            interval_minutes = (
-                30
-                if futures_actionable
-                else 60
-            )
-
+            interval_minutes = 240
+        elif normalized_market == "FUTURES":
+            interval_minutes = 30
+        elif normalized_market == "MULTIASSET":
+            interval_minutes = 60
         else:
-
             interval_minutes = 60
 
         now = _now()
@@ -4077,8 +4001,15 @@ en el contexto recibido.
             "temperature":
                 0.2,
 
+            # Commit 12.1 token governor: the recurring Advice is deliberately
+            # shorter than manual chat/learning. This lets the three market
+            # cadences coexist under the SAME 160k daily Groq fuse.
             "max_completion_tokens":
-                900,
+                (
+                    450
+                    if str(context_type or "").strip().upper() == "HOURLY_MARKET_ADVICE"
+                    else (700 if str(context_type or "").strip().upper() == "MANUAL_CHAT" else 900)
+                ),
 
             "reasoning_effort":
                 "low",
@@ -5017,7 +4948,8 @@ def run_ai_advisor(
     timeframe=None,
     related_saved_signal_id=None,
     source_signal_id=None,
-    question=None
+    question=None,
+    quota_market=None
 ):
 
     if not AI_ENABLED:
@@ -5052,6 +4984,9 @@ def run_ai_advisor(
     market = str(
         market
     ).upper()
+    quota_market = str(quota_market or market or "SPOT").upper()
+    if quota_market not in {"SPOT", "FUTURES", "MULTIASSET"}:
+        quota_market = market
     # ================================================================
     # ROUTER MULTI-PROVIDER 36S.2C
     # ================================================================
@@ -5161,15 +5096,11 @@ def run_ai_advisor(
     )
 
 
-    # RC10.1 — Futures manual respeta SIEMPRE el intervalo de 20 min.
-    # Incluso una pregunta idéntica no puede saltarse el cooldown mediante
-    # caché; esto hace que la regla visible 1/20 min sea también contractual.
-    manual_futures_request = (
-        usage_type == "MANUAL"
-        and market == "FUTURES"
-    )
+    # Commit 12.1 — toda consulta manual respeta la cuota de la pestaña desde
+    # la que se envía, incluso si la misma pregunta ya existe en caché.
+    manual_market_request = (usage_type == "MANUAL")
 
-    if cached and not manual_futures_request:
+    if cached and not manual_market_request:
 
         return {
 
@@ -5194,7 +5125,7 @@ def run_ai_advisor(
             user_name,
             usage_type,
             context_type,
-            market
+            quota_market
         )
     )
 
@@ -5301,7 +5232,7 @@ def run_ai_advisor(
                     learning_groq_error
                 )
                 _record_usage(
-                    user_name, usage_type, context_type, market, "ERROR", {},
+                    user_name, usage_type, context_type, quota_market, "ERROR", {},
                     provider="GROQ_LEARNING", model=selected_model
                 )
                 selected_provider = "GROQ"
@@ -5354,7 +5285,7 @@ def run_ai_advisor(
                     user_name,
                     usage_type,
                     context_type,
-                    market,
+                    quota_market,
                     "ERROR",
                     {},
                     provider=
@@ -5390,7 +5321,7 @@ def run_ai_advisor(
             user_name,
             usage_type,
             context_type,
-            market,
+            quota_market,
             "SUCCESS",
             usage,
             provider=
@@ -5454,7 +5385,7 @@ def run_ai_advisor(
             user_name,
             usage_type,
             context_type,
-            market,
+            quota_market,
             "ERROR",
             {},
             provider=
