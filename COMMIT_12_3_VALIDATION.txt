@@ -1,0 +1,30 @@
+COMMIT 12.3 — VALIDACIÓN PREVIA
+
+Base MAIN: edf0a3f44945ecbd655dcb0e8020713c986d8702 (Commit 12.2)
+Base RESEARCH: 5adfd072a05d1af1829198823d9ee160494b0fb3 (Commit 12.1)
+
+VALIDACIONES EJECUTADAS
+- app.py compila con py_compile: PASS
+- static/futures.js pasa node --check: PASS
+- static/script.js pasa node --check: PASS
+- pytest coordinado:
+  test_commit12_1_qa.py
+  test_commit12_1_ai_contract.py
+  test_commit12_3_signal_lifecycle.py
+  Resultado en árbol completo 12.1 + cambios 12.3: 20 passed
+- Smoke test del paquete incremental: 17 passed, 3 skipped (los skips son archivos de soporte 12.1 no duplicados dentro del ZIP incremental)
+
+CONTRATOS 12.3 VERIFICADOS
+- Cache Futures se actualiza ANTES de enviar Telegram confirmado.
+- Vigentes Futures acepta waiting_entry + entry_touched.
+- TP-before-Entry tiene estado terminal.
+- Entry tocado no guardado finaliza por TP / SL / vigencia técnica.
+- Confirmadas y Vigentes usan selector compartido por símbolo×TF.
+- Spot Confirmadas/Vigentes se proyectan a una sola señal por símbolo×TF.
+- Notificación Saved de expiración es simple, personal y deduplicada.
+- Texto visible no expone frases internas solicitadas.
+
+NOTA SOBRE saved_signals.py
+Se entrega como parche/copia-pega quirúrgico porque el archivo actual es grande y no se incluyó una copia completa potencialmente desfasada. Tras aplicar el bloque, el test 12.3 comprueba la presencia de `expired_tp_before_entry_no_entry`.
+
+No se realizó QA live autenticado post-deploy desde este entorno. El QA final debe confirmar en Render que el estado visible y Telegram coinciden con el lifecycle real.

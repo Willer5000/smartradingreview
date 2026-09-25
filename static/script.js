@@ -8167,10 +8167,10 @@ function _renderOrderFlowSnapshot(snapshot, symbol) {
         const chartDiv = document.getElementById('order-flow-chart');
         const interpretationEl = document.getElementById('order-flow-interpretation');
         if (chartDiv) {
-            chartDiv.innerHTML = '<div class="h-100 d-flex align-items-center justify-content-center text-muted text-center px-3"><div><i class="fas fa-shield-halved me-1"></i>Microestructura en modo protegido<br><small>No se realizan descargas extra de Order Book/OI/funding sólo para dibujar esta tarjeta.</small></div></div>';
+            chartDiv.innerHTML = '<div class="h-100 d-flex align-items-center justify-content-center text-muted text-center px-3"><div><i class="fas fa-chart-area me-1"></i>Datos de profundidad no disponibles<br><small>Vuelve a consultar más tarde o cambia de activo.</small></div></div>';
         }
         if (interpretationEl) {
-            interpretationEl.textContent = snapshot.reason || 'Modo protegido de recursos.';
+            interpretationEl.textContent = 'Datos de profundidad no disponibles en este momento.';
         }
         ['order-flow-imbalance','order-flow-buy-share','order-flow-spread'].forEach(id=>{
             const el=document.getElementById(id); if (el) el.textContent='--';

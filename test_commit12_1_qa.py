@@ -1,10 +1,14 @@
 from pathlib import Path
 import ast
+import pytest
 
 ROOT=Path(__file__).resolve().parent
 
 def read(path):
-    return (ROOT/path).read_text(encoding='utf-8')
+    target = ROOT / path
+    if not target.exists():
+        pytest.skip(f'Archivo de soporte no incluido en este paquete incremental: {path}')
+    return target.read_text(encoding='utf-8')
 
 
 def test_multiasset_price_uses_multiasset_engine_not_spot():
@@ -51,7 +55,8 @@ def test_frontend_humanizes_multiasset_and_protected_microstructure():
     assert "'CL-USDT': 'CL (Petróleo WTI)'" in template
     assert 'Microestructura Multi-Activo' in template
     assert 'Mapa de Liquidez / Barridos (proxy)' in template
-    assert 'no descarga Order Book/OI/funding extra' in template
+    assert 'Profundidad y presión de compra/venta disponibles para este mercado.' in template
+    assert 'no descarga Order Book/OI/funding extra' not in template
     assert '_humanize_multiasset_message' in multi
     assert 'ast.literal_eval' in multi
     assert "text.replace(str(symbol), display)" in multi

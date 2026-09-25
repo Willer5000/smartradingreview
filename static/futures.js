@@ -361,7 +361,7 @@ function futRenderDecisionAudit(audit) {
                 <div class="mt-2">
                     <strong>Resultado del análisis:</strong>
                     resultado ${futEscapeHtml(trace.final_action || 'NO_OPERAR')}
-                    (${numberText(trace.final_confidence, 1)}%) · control interno aplicado
+                    (${numberText(trace.final_confidence, 1)}%) · evaluación completada
                 </div>
                 ${finalReasons.length > 0 ? `
                     <div class="text-light mt-1">
@@ -2188,16 +2188,16 @@ function renderFuturesCorrelation(payload) {
         const rows = Array.isArray(payload?.rankings) ? payload.rankings : [];
         const best = payload?.best_opportunity || {};
         const title = document.getElementById('correlation-panel-title');
-        if (title) title.innerHTML = '<i class="fas fa-globe me-2"></i>Router de oportunidades · Multi-Activo';
+        if (title) title.innerHTML = '<i class="fas fa-globe me-2"></i>Oportunidades · Multi-Activo';
         const tfBadge = document.getElementById('correlation-timeframe');
         if (tfBadge) tfBadge.textContent = window.currentInterval || '4h';
         container.innerHTML = `
-            <div class="small text-muted mb-2">Scanner determinístico sin IA ni escrituras DB. Sólo los mejores pasan al análisis completo.</div>
+            <div class="small text-muted mb-2">Prioriza los activos con mejor contexto de mercado para el análisis.</div>
             ${rows.slice(0,7).map((r,i) => `
                 <div class="d-flex justify-content-between align-items-center border-bottom border-secondary py-2">
                     <span><strong>${futEscapeHtml(r.display_name || r.symbol || '--')}</strong><br><small>${futEscapeHtml(r.asset_class || '')} · ${futEscapeHtml(r.session || '')}</small></span>
                     <span class="text-end"><span class="badge bg-${i < 2 ? 'success' : 'secondary'}">${Number(r.router_score || 0).toFixed(0)}</span><br><small>${futEscapeHtml(r.bias || '')} · Macro ${futEscapeHtml(r.macro_gate || 'NORMAL')}</small></span>
-                </div>`).join('') || '<div class="text-muted">Sin datos suficientes del Router.</div>'}
+                </div>`).join('') || '<div class="text-muted">Sin datos suficientes de mercado.</div>'}
             ${best?.display_name ? `<div class="mt-2 text-info">Mejor contexto ahora: <strong>${futEscapeHtml(best.display_name)}</strong>. Esto no obliga a operar; sólo prioriza análisis.</div>` : ''}
         `;
         return;

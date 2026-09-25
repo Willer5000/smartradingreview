@@ -1,0 +1,32 @@
+COMMIT 12.3 — ORDEN DE APLICACIÓN
+
+1) RAÍZ / saved_signals.py
+   - NO reemplazar archivo completo.
+   - Seguir ../MANUAL_EDIT/CAMBIO_SAVED_SIGNALS_COPIAR_Y_PEGAR.txt
+
+2) RAÍZ / app.py
+   - Reemplazar por MAIN_READY_TREE/app.py
+
+3) /static/futures.js
+   - Reemplazar por MAIN_READY_TREE/static/futures.js
+
+4) /static/script.js
+   - Reemplazar por MAIN_READY_TREE/static/script.js
+
+5) /templates/index.html
+   - Reemplazar por MAIN_READY_TREE/templates/index.html
+
+6) RAÍZ / test_commit12_1_qa.py
+   - Reemplazar: su contrato de frontend se actualiza para 12.3.
+
+7) RAÍZ / test_commit12_3_signal_lifecycle.py
+   - Agregar.
+
+8) Commit sugerido:
+   Commit 12.3 - Lifecycle visible, deduplicación y expiración simple
+
+9) Render despliega MAIN automáticamente según tu configuración habitual.
+
+RESEARCH: NO CAMBIAR / NO DEPLOY.
+SQL: NO.
+Variables Render nuevas: NO.

@@ -29689,10 +29689,10 @@ def _signal_source_epoch(row):
 
 
 def _dedupe_representative_signals(rows):
-    """Keep one representative signal per symbol×timeframe for presentation/monitoring.
+    """Keep one best currently-valid signal per symbol×timeframe for UI/monitoring.
 
-    This does NOT delete lifecycle evidence. Hidden alternatives remain internal
-    and may become representative later if the current one expires or is filled.
+    Quality is the primary criterion and recency breaks ties. This helper never
+    deletes lifecycle evidence; it only chooses which opportunity is presented.
     """
     best = {}
     for row in (rows or []):
@@ -29712,6 +29712,60 @@ def _dedupe_representative_signals(rows):
         if previous is None or rank > previous[0]:
             best[key] = (rank, row)
     return [item[1] for item in best.values()]
+
+
+def _futures_frontend_representative_ids(cache):
+    """Return the single visible official Futures signal for each symbol×TF.
+
+    Confirmadas and Vigentes share this selector, so one cell can never be
+    rendered in both lanes. The best-quality valid setup wins; a newer setup
+    replaces it only when its presentation score is at least as competitive.
+    Terminal lifecycle rows remain available internally for learning/audit.
+    """
+    lifecycle = (cache or {}).get('lifecycle') or {}
+    now_utc = pd.Timestamp.now(tz='UTC')
+    candidates = []
+
+    for signal_id, raw in lifecycle.items():
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        status = str(row.get('lifecycle_status') or '').lower()
+        if status not in ('waiting_entry', 'entry_touched'):
+            continue
+        publication = str(
+            row.get('publication_status')
+            or row.get('engine_publication_status')
+            or ''
+        ).upper()
+        if publication != 'EXECUTABLE_SIGNAL' or row.get('system_executable') is False:
+            continue
+
+        valid_until_raw = row.get('valid_until')
+        remaining = 0
+        if valid_until_raw:
+            try:
+                valid_until = pd.Timestamp(valid_until_raw)
+                valid_until = (
+                    valid_until.tz_localize('UTC')
+                    if valid_until.tz is None
+                    else valid_until.tz_convert('UTC')
+                )
+                remaining = int(max(0, (valid_until - now_utc).total_seconds()))
+                if remaining <= 0:
+                    continue
+            except Exception:
+                pass
+
+        row['signal_id'] = str(row.get('signal_id') or signal_id or '')
+        row['tiempo_restante'] = remaining
+        candidates.append(row)
+
+    return {
+        str(row.get('signal_id') or '')
+        for row in _dedupe_representative_signals(candidates)
+        if str(row.get('signal_id') or '')
+    }
 
 
 def _spot_entry_touch_display_until(touched_at, timeframe):
@@ -29820,6 +29874,33 @@ def _spot_vigent_visible_cache(cache_data):
     return {
         f"{row.get('symbol')}_{row.get('timeframe')}_{idx}": row
         for idx, row in enumerate(selected)
+    }
+
+
+def _spot_frontend_representative_identities(current_confirmed, visible_vigent):
+    """Choose one Spot signal per symbol×TF across Confirmadas and Vigentes.
+
+    The stronger presentation score wins; recency breaks ties. This is a UI
+    projection only and does not delete the underlying cached evidence.
+    """
+    rows = []
+    for source in (current_confirmed or {}, visible_vigent or {}):
+        values = source.values() if isinstance(source, dict) else source
+        for raw in (values or []):
+            if not isinstance(raw, dict):
+                continue
+            row = dict(raw)
+            if int(row.get('activa', 1) or 0) != 1:
+                continue
+            if not row.get('symbol') or not row.get('timeframe'):
+                continue
+            row.setdefault('source_candle_timestamp', row.get('candle_timestamp'))
+            rows.append(row)
+
+    return {
+        _spot_signal_snapshot_identity(row)
+        for row in _dedupe_representative_signals(rows)
+        if _spot_signal_snapshot_identity(row)
     }
 
 
@@ -30501,6 +30582,16 @@ def api_spot_signals_vigent():
 
         if cache_data is not None:
             visible_cache = _spot_vigent_visible_cache(cache_data)
+            current_confirmed = getattr(expert_system, 'prev_signals_cache', None) or {}
+            representative_ids = _spot_frontend_representative_identities(
+                current_confirmed,
+                visible_cache,
+            )
+            visible_cache = {
+                key: row
+                for key, row in visible_cache.items()
+                if _spot_signal_snapshot_identity(row) in representative_ids
+            }
             return jsonify({
                 'success': True,
                 'processing': False,
@@ -30566,9 +30657,24 @@ def api_previous_signals():
                 print(f"📦 Sirviendo caché stale ({int(age)}s), refresh en bg disparado")
             else:
                 print(f"📦 Sirviendo caché ({int(age)}s)")
+            visible_vigent = _spot_vigent_visible_cache(
+                getattr(expert_system, 'spot_vigent_signals_cache', None) or {}
+            )
+            representative_ids = _spot_frontend_representative_identities(
+                cache_data,
+                visible_vigent,
+            )
+            frontend_cache = {
+                key: row
+                for key, row in cache_data.items()
+                if (
+                    int((row or {}).get('activa', 0) or 0) == 1
+                    and _spot_signal_snapshot_identity(row) in representative_ids
+                )
+            }
             return jsonify({
                 'success': True,
-                'data': cache_data,
+                'data': frontend_cache,
                 'cached': True,
                 'cache_age_seconds': int(age),
                 'stale': bool(_spot_previous_refresh_due(cache_time, now)),
@@ -34706,33 +34812,32 @@ def _refresh_futures_signal_lifecycle(
             if status not in ('waiting_entry', 'entry_touched'):
                 return
 
-            # RC9.7.14 FINAL — migrate old pre-entry TTLs from the original
-            # candle close, never from now. Entry-touched positions no longer
-            # expire by the waiting clock, but preserving metadata is harmless.
-            if status == 'waiting_entry':
-                try:
-                    validity_probe = dict(record)
-                    validity_probe['levels'] = dict(record)
-                    technical_until, technical_bars = _futures_valid_until_from_source(
-                        validity_probe, timeframe
-                    )
-                    old_until = None
-                    if record.get('valid_until'):
-                        old_until = pd.Timestamp(record.get('valid_until'))
-                        old_until = old_until.tz_localize('UTC') if old_until.tz is None else old_until.tz_convert('UTC')
-                    if technical_until is not None and (
-                        old_until is None
-                        or record.get('validity_policy_version') != _FUTURES_VALIDITY_POLICY_VERSION
-                        or technical_until > old_until
-                    ):
-                        record['valid_until'] = max(
-                            technical_until, old_until
-                        ).isoformat() if old_until is not None else technical_until.isoformat()
-                        record['validity_bars'] = int(technical_bars or 0)
-                        record['validity_policy_version'] = _FUTURES_VALIDITY_POLICY_VERSION
-                        record['validity_basis'] = 'GEOMETRY_MODE+SETUP+ENTRY_DISTANCE_ATR+REACHABILITY+REGIME+ADX+MTF+STRUCTURAL_INVALIDATION'
-                except Exception:
-                    pass
+            # Commit 12.3 — the technical validity belongs to the public setup,
+            # not only to the pre-Entry wait. An unsaved Entry-touched signal
+            # remains visible only until TP, SL or its original technical limit.
+            try:
+                validity_probe = dict(record)
+                validity_probe['levels'] = dict(record)
+                technical_until, technical_bars = _futures_valid_until_from_source(
+                    validity_probe, timeframe
+                )
+                old_until = None
+                if record.get('valid_until'):
+                    old_until = pd.Timestamp(record.get('valid_until'))
+                    old_until = old_until.tz_localize('UTC') if old_until.tz is None else old_until.tz_convert('UTC')
+                if technical_until is not None and (
+                    old_until is None
+                    or record.get('validity_policy_version') != _FUTURES_VALIDITY_POLICY_VERSION
+                    or technical_until > old_until
+                ):
+                    record['valid_until'] = max(
+                        technical_until, old_until
+                    ).isoformat() if old_until is not None else technical_until.isoformat()
+                    record['validity_bars'] = int(technical_bars or 0)
+                    record['validity_policy_version'] = _FUTURES_VALIDITY_POLICY_VERSION
+                    record['validity_basis'] = 'GEOMETRY_MODE+SETUP+ENTRY_DISTANCE_ATR+REACHABILITY+REGIME+ADX+MTF+STRUCTURAL_INVALIDATION'
+            except Exception:
+                pass
 
             action = str(record.get('action') or '').upper()
             entry = float(record.get('entry') or 0)
@@ -34773,6 +34878,17 @@ def _refresh_futures_signal_lifecycle(
                 ) or (
                     action == 'SHORT' and live_price >= entry
                 )
+                target_before_entry = (
+                    action == 'LONG' and tp_price > 0 and live_price >= tp_price
+                ) or (
+                    action == 'SHORT' and tp_price > 0 and live_price <= tp_price
+                )
+
+                if target_before_entry and not entry_touched:
+                    record['lifecycle_status'] = 'missed_target_before_entry'
+                    record['close_reason'] = 'missed_target_before_entry'
+                    record['closed_at'] = now_iso
+                    return
 
                 if not entry_touched:
                     return
@@ -34788,19 +34904,29 @@ def _refresh_futures_signal_lifecycle(
                         record['lifecycle_status'] = 'sl_hit'
                         record['close_reason'] = 'sl_hit'
                         record['closed_at'] = now_iso
-                    elif tp_price > 0 and live_price >= tp_price:
+                        return
+                    if tp_price > 0 and live_price >= tp_price:
                         record['lifecycle_status'] = 'tp_hit'
                         record['close_reason'] = 'tp_hit'
                         record['closed_at'] = now_iso
+                        return
                 elif action == 'SHORT':
                     if sl_price > 0 and live_price >= sl_price:
                         record['lifecycle_status'] = 'sl_hit'
                         record['close_reason'] = 'sl_hit'
                         record['closed_at'] = now_iso
-                    elif tp_price > 0 and live_price <= tp_price:
+                        return
+                    if tp_price > 0 and live_price <= tp_price:
                         record['lifecycle_status'] = 'tp_hit'
                         record['close_reason'] = 'tp_hit'
                         record['closed_at'] = now_iso
+                        return
+
+                if valid_until is not None and now_utc >= valid_until:
+                    record['lifecycle_status'] = 'expired'
+                    record['close_reason'] = 'expired_after_entry_unsaved'
+                    record['closed_at'] = now_iso
+                    return
 
         # Primero avanzar señales antiguas del mismo par/TF.
         for record in lifecycle.values():
@@ -35901,22 +36027,12 @@ def _analyze_futures_all_parallel(combos_override=None):
                 )
             )
 
-            # RC9.7.13 — Telegram sólo para la confirmación CLOSED_CANDLE
-            # oficial. El dedup durable impide repetirla por refresh/deploy.
-            try:
-                _send_confirmed_signal_telegram(
-                    'futures',
-                    r,
-                )
-            except Exception as confirmed_telegram_error:
-                print(
-                    "⚠️ [FUT] Telegram CONFIRMADA "
-                    f"{combo_name}: {confirmed_telegram_error}"
-                )
-
             # ---------------------------------------------------------
-            # PUBLICAR EL RESULTADO INMEDIATAMENTE
+            # PUBLICAR EL RESULTADO ANTES DE TELEGRAM
             # ---------------------------------------------------------
+            # Commit 12.3: la alerta nunca debe adelantarse al estado que la
+            # web consulta. Así, al tocar el deep-link, la misma confirmación
+            # ya existe en el snapshot visible del frontend.
             partial_data = {
                 'analysis': results,
                 'errors': errors,
@@ -35931,6 +36047,19 @@ def _analyze_futures_all_parallel(combos_override=None):
                 cache['progress']['errors'] = len(errors)
 
             completed_count = index
+
+            # RC9.7.13 + Commit 12.3 — Telegram consume un estado que ya fue
+            # publicado. El dedup durable impide repetir refresh/deploy.
+            try:
+                _send_confirmed_signal_telegram(
+                    'futures',
+                    r,
+                )
+            except Exception as confirmed_telegram_error:
+                print(
+                    "⚠️ [FUT] Telegram CONFIRMADA "
+                    f"{combo_name}: {confirmed_telegram_error}"
+                )
 
             print(
                 f"✅ [FUT {index}/{total}] "
@@ -37455,6 +37584,8 @@ def api_futures_signals_active():
             ):
                 fresh_manual_ids.add(_signal_id)
 
+        representative_ids = _futures_frontend_representative_ids(cache)
+
         active_signals = []
         filter_stats = {
             'total_processed': 0,
@@ -37476,10 +37607,13 @@ def api_futures_signals_active():
             lifecycle_status = str(
                 record.get('lifecycle_status') or ''
             )
-            if lifecycle_status != 'waiting_entry':
-                # RC9.8.5: Entry touched is no longer an available Vigent.
-                # If a user saved it, it remains in that user's Guardadas and
-                # Guardian lifecycle; the global opportunity lane stays clean.
+            if lifecycle_status not in ('waiting_entry', 'entry_touched'):
+                filter_stats['not_active'] += 1
+                continue
+
+            if str(signal_id) not in representative_ids:
+                # Another still-valid signal of the same symbol×TF has the
+                # stronger presentation score. Evidence is retained internally.
                 filter_stats['not_active'] += 1
                 continue
 
@@ -37536,27 +37670,25 @@ def api_futures_signals_active():
             except Exception:
                 pass
 
-            # ``valid_until`` limits only how long we wait for Entry. Once
-            # Entry is touched the trade lifecycle continues until TP/SL/manual
-            # close and must not display a misleading entry-expiry countdown.
-            tiempo_restante = None
-            if lifecycle_status == 'waiting_entry':
-                tiempo_restante = 0
-                try:
-                    valid_until = pd.Timestamp(record.get('valid_until'))
-                    if valid_until.tz is None:
-                        valid_until = valid_until.tz_localize('UTC')
-                    else:
-                        valid_until = valid_until.tz_convert('UTC')
-                    tiempo_restante = int(max(
-                        0,
-                        (valid_until - pd.Timestamp.now(tz='UTC')).total_seconds()
-                    ))
-                    if tiempo_restante <= 0:
-                        filter_stats['not_active'] += 1
-                        continue
-                except Exception:
-                    pass
+            # Commit 12.3: the public unsaved setup keeps its original
+            # technical horizon even after Entry is touched. Saved personal
+            # operations use their independent Saved/Guardian lifecycle.
+            tiempo_restante = 0
+            try:
+                valid_until = pd.Timestamp(record.get('valid_until'))
+                if valid_until.tz is None:
+                    valid_until = valid_until.tz_localize('UTC')
+                else:
+                    valid_until = valid_until.tz_convert('UTC')
+                tiempo_restante = int(max(
+                    0,
+                    (valid_until - pd.Timestamp.now(tz='UTC')).total_seconds()
+                ))
+                if tiempo_restante <= 0:
+                    filter_stats['not_active'] += 1
+                    continue
+            except Exception:
+                pass
 
             filter_stats['accepted'] += 1
             active_signals.append({
@@ -37860,6 +37992,7 @@ def api_futures_signals_previous():
             cache,
             min_confidence=min_conf
         )
+        representative_ids = _futures_frontend_representative_ids(cache)
         
         previous_signals = []
         filter_stats = {
@@ -37987,9 +38120,14 @@ def api_futures_signals_previous():
                 record.get('lifecycle_status') or ''
             )
 
-            activa = int(
-                lifecycle_status in ('waiting_entry', 'entry_touched')
-            )
+            if (
+                lifecycle_status not in ('waiting_entry', 'entry_touched')
+                or signal_id not in representative_ids
+            ):
+                filter_stats['non_executable'] += 1
+                continue
+
+            activa = 1
             resultado = (
                 'pending'
                 if lifecycle_status == 'waiting_entry'
@@ -40870,321 +41008,99 @@ def _build_saved_futures_lifecycle_message(
     )
 
 
-def _send_saved_futures_lifecycle_notifications():
-    """
-    RC9.8.1 Telegram policy: Futures notifies ONLY validated CONFIRMED signals.
-    Saved lifecycle continues in DB/UI but ENTRY/TP/SL/EXPIRED do not generate
-    Telegram messages, preventing duplicate/operational message rain.
-
-    Envía únicamente eventos pendientes de Saved Futures ARMADAS.
-
-    Históricos:
-        telegram_lifecycle_armed_at = NULL
-        -> jamás llegan aquí.
-    """
-    # Política explícita del producto: en Futures Telegram sólo consume la
-    # confirmación validada de cierre. Lifecycle sigue funcionando sin Telegram.
-    return 0
-
-    from saved_signals import (
-        list_saved_signals,
-        update_saved_signal_telegram_state
+def _saved_expiry_market_and_label(signal):
+    symbol = str((signal or {}).get('symbol') or '').upper().replace('/', '-')
+    try:
+        from multiasset_system import MULTIASSET_SYMBOLS
+        is_multiasset = symbol in set(MULTIASSET_SYMBOLS)
+    except Exception:
+        is_multiasset = False
+    return (
+        ('multiasset', 'Multiactivo')
+        if is_multiasset
+        else ('futures', 'Futuros')
     )
 
-    for user in sorted(
-        _telegram_market_users(
-            'futures'
-        )
-    ):
 
-        signals = (
-            list_saved_signals(
-                status_filter=[
-                    'entry_touched',
-                    'tp_hit',
-                    'sl_hit',
-                    'expired'
-                ],
-                limit=200,
-                user_name=user
-            )
-            or []
-        )
+def _saved_expiry_short_message(user, signal):
+    market, market_label = _saved_expiry_market_and_label(signal)
+    symbol = str((signal or {}).get('symbol') or '').upper().replace('/', '-')
+    base = symbol[:-5] if symbol.endswith('-USDT') else symbol
+    raw_tf = str((signal or {}).get('timeframe') or '')
+    tf_labels = {
+        '30m': '30 min', '30M': '30 min',
+        '1h': '1H', '1H': '1H', '2h': '2H', '2H': '2H',
+        '4h': '4H', '4H': '4H', '12h': '12H', '12H': '12H',
+        '1d': '1D', '1D': '1D', '1w': '1W', '1W': '1W',
+    }
+    tf_label = tf_labels.get(raw_tf, raw_tf)
+    return (
+        market,
+        f"⌛ <b>SEÑAL EXPIRADA</b>\n"
+        f"{_telegram_escape(user)}: {_telegram_escape(market_label)}: "
+        f"{_telegram_escape(base)}-{_telegram_escape(tf_label)}"
+    )
+
+
+def _send_saved_futures_lifecycle_notifications():
+    """Notify only saved signals that expire before Entry.
+
+    Entry/TP/SL remain silent for Saved signals. Commit 12.3 restores only the
+    operationally useful expiration notice so a user can cancel a pending order
+    in their personal exchange. The notification is one-line, personal and
+    deduplicated through ``telegram_expired_notified_at``.
+    """
+    from saved_signals import (
+        list_saved_signals,
+        update_saved_signal_telegram_state,
+    )
+
+    expiry_reasons = {
+        'expired_no_entry',
+        'expired_source_validity_no_entry',
+        'expired_tp_before_entry_no_entry',
+        'missed_target_before_entry',
+    }
+    sent_count = 0
+
+    for user in sorted(_auth_users().keys()):
+        signals = list_saved_signals(
+            status_filter=['expired'],
+            limit=200,
+            user_name=user,
+        ) or []
 
         for sig in signals:
-
-            # ========================================================
-            # ANTI-BACKFILL PRINCIPAL
-            # ========================================================
-
-            if not sig.get(
-                'telegram_lifecycle_armed_at'
-            ):
+            if not sig.get('telegram_lifecycle_armed_at'):
+                continue
+            if sig.get('telegram_expired_notified_at'):
+                continue
+            if bool(sig.get('entry_touched')):
+                continue
+            if str(sig.get('close_reason') or '').lower() not in expiry_reasons:
                 continue
 
-            signal_id = sig.get(
-                'id'
-            )
-
-            if not signal_id:
+            market, message = _saved_expiry_short_message(user, sig)
+            if not _telegram_user_has_market_permission(user, market):
                 continue
 
-            status = str(
-                sig.get(
-                    'status',
-                    ''
-                )
-                or ''
-            ).lower()
-
-            # --------------------------------------------------------
-            # ENTRY
-            # --------------------------------------------------------
-            #
-            # También se comprueba entry_touched para que si dentro del
-            # mismo ciclo ya llegó a TP/SL, pueda conservarse el evento
-            # Entry antes de informar el cierre.
-            # --------------------------------------------------------
-
-            if (
-                bool(
-                    sig.get(
-                        'entry_touched'
-                    )
-                )
-                and not sig.get(
-                    'telegram_entry_notified_at'
-                )
+            if expert_system.send_telegram_alert(
+                message,
+                None,
+                category='SAVED_SIGNAL_EXPIRED',
             ):
-
-                # RC9.7.13: si esta señal guardada proviene de una señal oficial
-                # del sistema y el Telegram oficial de Entry ya fue enviado,
-                # no duplicar el mismo evento en el mismo chat. El lifecycle
-                # personal queda marcado como notificado y continúa con TP/SL.
-                source_signal_id = str(sig.get('source_signal_id') or '').strip()
-                official_entry_sent = False
-                if source_signal_id:
-                    official_record = {
-                        'signal_id': source_signal_id,
-                        'symbol': sig.get('symbol'),
-                        'timeframe': sig.get('timeframe'),
-                        'action': sig.get('action'),
-                        'source_candle_timestamp': sig.get('candle_timestamp'),
-                        'entry': sig.get('entry'),
-                    }
-                    official_entry_sent = _futures_official_entry_already_sent(
-                        user,
-                        official_record,
-                    )
-
-                if official_entry_sent:
-                    now_iso = datetime.utcnow().isoformat()
-                    update_saved_signal_telegram_state(
-                        signal_id,
-                        {'telegram_entry_notified_at': now_iso}
-                    )
-                    sig['telegram_entry_notified_at'] = now_iso
-                    print(
-                        "📍📱 Saved Futures ENTRY deduplicado contra señal oficial: "
-                        f"{user} {sig.get('symbol')} {sig.get('timeframe')}"
-                    )
-                else:
-                    message = (
-                        _build_saved_futures_lifecycle_message(
-                            user=user,
-                            signal=sig,
-                            event='ENTRY'
-                        )
-                    )
-
-                    sent = (
-                        expert_system
-                        .send_telegram_alert(
-                            message,
-                            None
-                        )
-                    )
-
-                    if sent:
-
-                        now_iso = (
-                            datetime.utcnow()
-                            .isoformat()
-                        )
-
-                        update_saved_signal_telegram_state(
-                            signal_id,
-                            {
-                                'telegram_entry_notified_at':
-                                    now_iso
-                            }
-                        )
-
-                        sig[
-                            'telegram_entry_notified_at'
-                        ] = now_iso
-
-                        print(
-                            "📍📱 Saved Futures ENTRY: "
-                            f"{user} "
-                            f"{sig.get('symbol')} "
-                            f"{sig.get('timeframe')}"
-                        )
-
-            # --------------------------------------------------------
-            # TAKE PROFIT
-            # --------------------------------------------------------
-
-            if (
-                status == 'tp_hit'
-                and not sig.get(
-                    'telegram_tp_notified_at'
+                now_iso = datetime.utcnow().isoformat()
+                update_saved_signal_telegram_state(
+                    sig.get('id'),
+                    {'telegram_expired_notified_at': now_iso},
                 )
-            ):
-
-                message = (
-                    _build_saved_futures_lifecycle_message(
-                        user=user,
-                        signal=sig,
-                        event='TP'
-                    )
+                sent_count += 1
+                print(
+                    "⌛📱 Saved signal expired: "
+                    f"{user} {market} {sig.get('symbol')} {sig.get('timeframe')}"
                 )
 
-                sent = (
-                    expert_system
-                    .send_telegram_alert(
-                        message,
-                        None
-                    )
-                )
-
-                if sent:
-
-                    update_saved_signal_telegram_state(
-                        signal_id,
-                        {
-                            'telegram_tp_notified_at':
-                                (
-                                    datetime.utcnow()
-                                    .isoformat()
-                                )
-                        }
-                    )
-
-                    print(
-                        "✅📱 Saved Futures TP: "
-                        f"{user} "
-                        f"{sig.get('symbol')} "
-                        f"{sig.get('timeframe')}"
-                    )
-
-            # --------------------------------------------------------
-            # STOP LOSS
-            # --------------------------------------------------------
-
-            if (
-                status == 'sl_hit'
-                and not sig.get(
-                    'telegram_sl_notified_at'
-                )
-            ):
-
-                message = (
-                    _build_saved_futures_lifecycle_message(
-                        user=user,
-                        signal=sig,
-                        event='SL'
-                    )
-                )
-
-                sent = (
-                    expert_system
-                    .send_telegram_alert(
-                        message,
-                        None
-                    )
-                )
-
-                if sent:
-
-                    update_saved_signal_telegram_state(
-                        signal_id,
-                        {
-                            'telegram_sl_notified_at':
-                                (
-                                    datetime.utcnow()
-                                    .isoformat()
-                                )
-                        }
-                    )
-
-                    print(
-                        "🛑📱 Saved Futures SL: "
-                        f"{user} "
-                        f"{sig.get('symbol')} "
-                        f"{sig.get('timeframe')}"
-                    )
-
-            # --------------------------------------------------------
-            # EXPIRED SIN ENTRY
-            # --------------------------------------------------------
-            # Una señal que vence sin Entry requiere una acción operativa:
-            # retirar la orden pendiente del exchange. Se notifica una sola
-            # vez mediante estado persistente en Supabase.
-            # --------------------------------------------------------
-
-            if (
-                status == 'expired'
-                and str(sig.get('close_reason', '') or '').lower()
-                == 'expired_no_entry'
-                and not sig.get(
-                    'telegram_expired_notified_at'
-                )
-            ):
-
-                message = (
-                    _build_saved_futures_lifecycle_message(
-                        user=user,
-                        signal=sig,
-                        event='EXPIRED'
-                    )
-                )
-
-                sent = (
-                    expert_system
-                    .send_telegram_alert(
-                        message,
-                        None
-                    )
-                )
-
-                if sent:
-
-                    now_iso = (
-                        datetime.utcnow()
-                        .isoformat()
-                    )
-
-                    update_saved_signal_telegram_state(
-                        signal_id,
-                        {
-                            'telegram_expired_notified_at':
-                                now_iso
-                        }
-                    )
-
-                    sig[
-                        'telegram_expired_notified_at'
-                    ] = now_iso
-
-                    print(
-                        "⌛📱 Saved Futures EXPIRED: "
-                        f"{user} "
-                        f"{sig.get('symbol')} "
-                        f"{sig.get('timeframe')} "
-                        "— retirar orden pendiente"
-                    )
-
+    return sent_count
 
 def saved_futures_lifecycle_loop():
     """
@@ -48684,8 +48600,6 @@ def futures_standard_alert_loop():
 
                 result = analysis_by_signal_id.get(str(signal_id)) or record
                 validity = _futures_signal_validity(result, timeframe, record)
-                if status == 'waiting_entry' and validity.get('expired'):
-                    continue
 
                 canonical = dict(record)
                 canonical['signal_id'] = str(record.get('signal_id') or signal_id or '')
@@ -48758,6 +48672,10 @@ def futures_standard_alert_loop():
                             shadow_status = 'sl_hit'
                         elif current <= tp:
                             shadow_status = 'tp_hit'
+
+                    if shadow_status == 'entry_touched' and validity.get('expired'):
+                        shadow_status = 'expired'
+                        record['close_reason'] = 'expired_after_entry_unsaved'
 
                 record['current_price'] = float(current)
                 record['last_shadow_live_at'] = now_iso

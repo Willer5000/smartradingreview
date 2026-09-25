@@ -1,0 +1,1 @@
+Commit 12.3 - Lifecycle visible, deduplicación y expiración simple
