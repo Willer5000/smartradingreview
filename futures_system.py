@@ -1540,7 +1540,7 @@ def get_futures_microstructure_snapshot(symbol: str) -> Dict:
     Futures analysis, including when the committee says NO_OPERAR.
     """
     symbol = str(symbol or '').strip().upper()
-    if symbol not in self._market_all_symbols():
+    if symbol not in FUTURES_ALL_SYMBOLS:
         return {
             'available': False,
             'status': 'SYMBOL_NOT_ALLOWED',
