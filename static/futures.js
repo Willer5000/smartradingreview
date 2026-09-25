@@ -597,14 +597,19 @@ function futRenderAnalysisDiagnostics(json, context) {
         ? 'vigent_other_directional_signals'
         : 'other_directional_signals';
 
-    let candidates = Array.isArray(json && json[candidateKey])
+    // Commit 12.4: an explicit empty server list means EMPTY. Do not fall
+    // back to analysis_candidates, because that legacy fallback could revive a
+    // second signal for the same symbol×timeframe in another UI lane.
+    const hasServerCandidateList = Array.isArray(json && json[candidateKey]);
+    let candidates = hasServerCandidateList
         ? json[candidateKey]
         : [];
 
-    // Fallback compatible con un backend anterior durante un deploy mixto.
+    // Backward compatibility only when the backend truly does not expose the
+    // dedicated candidate list (mixed deploy), never when it explicitly sent [].
     if (
         context !== 'vigent'
-        && candidates.length === 0
+        && !hasServerCandidateList
         && Array.isArray(json && json.analysis_candidates)
     ) {
         candidates = json.analysis_candidates.filter(candidate => {

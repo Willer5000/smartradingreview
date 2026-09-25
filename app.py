@@ -29715,30 +29715,52 @@ def _dedupe_representative_signals(rows):
 
 
 def _futures_frontend_representative_ids(cache):
-    """Return the single visible official Futures signal for each symbol×TF.
+    """Return ONE visible Futures opportunity per symbol×timeframe.
 
-    Confirmadas and Vigentes share this selector, so one cell can never be
-    rendered in both lanes. The best-quality valid setup wins; a newer setup
-    replaces it only when its presentation score is at least as competitive.
-    Terminal lifecycle rows remain available internally for learning/audit.
+    Commit 12.4 unifies all public lanes under the same representative:
+    Confirmadas, Vigentes and the MEDIUM/HIGH hypotheses shown inside
+    ``Por qué no aparecen otras señales``.
+
+    Selection contract:
+    1. an official EXECUTABLE_SIGNAL always outranks ANALYSIS_ONLY;
+    2. inside the same class, technical presentation quality wins;
+    3. recency breaks a quality tie;
+    4. remaining validity is only the final tie-break.
+
+    This is presentation/lifecycle arbitration only. It does not delete research
+    evidence and does not promote an ANALYSIS_ONLY setup to an official signal.
     """
     lifecycle = (cache or {}).get('lifecycle') or {}
     now_utc = pd.Timestamp.now(tz='UTC')
-    candidates = []
+    best_by_cell = {}
 
     for signal_id, raw in lifecycle.items():
         if not isinstance(raw, dict):
             continue
+
         row = dict(raw)
         status = str(row.get('lifecycle_status') or '').lower()
         if status not in ('waiting_entry', 'entry_touched'):
             continue
+
         publication = str(
             row.get('publication_status')
             or row.get('engine_publication_status')
             or ''
         ).upper()
-        if publication != 'EXECUTABLE_SIGNAL' or row.get('system_executable') is False:
+        official = bool(
+            publication == 'EXECUTABLE_SIGNAL'
+            and row.get('system_executable') is not False
+        )
+        manual = bool(
+            not official
+            and status == 'waiting_entry'
+            and row.get('manual_save_allowed') is True
+            and str(row.get('manual_risk_class') or '').upper()
+                in ('MEDIUM', 'HIGH')
+        )
+
+        if not official and not manual:
             continue
 
         valid_until_raw = row.get('valid_until')
@@ -29751,21 +29773,229 @@ def _futures_frontend_representative_ids(cache):
                     if valid_until.tz is None
                     else valid_until.tz_convert('UTC')
                 )
-                remaining = int(max(0, (valid_until - now_utc).total_seconds()))
+                remaining = int(max(
+                    0,
+                    (valid_until - now_utc).total_seconds()
+                ))
                 if remaining <= 0:
                     continue
             except Exception:
-                pass
+                # Existing lifecycle compatibility: absence of a parseable TTL
+                # never manufactures a fresher candidate.
+                remaining = 0
 
         row['signal_id'] = str(row.get('signal_id') or signal_id or '')
+        if not row['signal_id']:
+            continue
         row['tiempo_restante'] = remaining
-        candidates.append(row)
+
+        symbol = str(row.get('symbol') or '').upper().replace('/', '-')
+        timeframe = str(row.get('timeframe') or '')
+        if not symbol or not timeframe:
+            continue
+
+        # The user's explicit rule is stronger than raw score: if one candidate
+        # is official and another lives in "Por qué...", the official one is
+        # the sole visible opportunity for that symbol×TF.
+        class_priority = 2 if official else 1
+        rank = (
+            class_priority,
+            _representative_signal_score(row),
+            _signal_source_epoch(row),
+            remaining,
+        )
+        key = (symbol, timeframe)
+        previous = best_by_cell.get(key)
+        if previous is None or rank > previous[0]:
+            best_by_cell[key] = (rank, row)
 
     return {
-        str(row.get('signal_id') or '')
-        for row in _dedupe_representative_signals(candidates)
-        if str(row.get('signal_id') or '')
+        str(item[1].get('signal_id') or '')
+        for item in best_by_cell.values()
+        if str(item[1].get('signal_id') or '')
     }
+
+
+def _expire_saved_futures_waiting_on_replacement(
+    symbol,
+    timeframe,
+    replacement
+):
+    """Expire pending Saved orders superseded by a newer representative.
+
+    Commit 12.4 rule:
+    - same symbol×timeframe only;
+    - only Saved rows that have NOT touched Entry;
+    - the replacement must be a newer closed-candle source;
+    - the Saved row's own source_signal_id is never expired by itself;
+    - PnL remains zero because no position opened;
+    - returns only transitions created NOW, for Telegram without backfill.
+
+    Fail-open by design: a database problem must never break market analysis.
+    """
+    replacement = dict(replacement or {})
+    replacement_signal_id = str(
+        replacement.get('signal_id') or ''
+    ).strip()
+    if not replacement_signal_id:
+        return []
+
+    # Compare source candles on the SAME temporal basis. Saved stores the
+    # original source candle in candle_timestamp, so prefer the replacement's
+    # source_candle_timestamp instead of mixing it with a later close timestamp.
+    replacement_epoch = _signal_source_epoch({
+        'source_candle_timestamp': (
+            replacement.get('source_candle_timestamp')
+            or replacement.get('candle_timestamp')
+            or replacement.get('source_candle_close_timestamp')
+        )
+    })
+    if replacement_epoch <= 0:
+        return []
+
+    normalized_symbol = str(symbol or '').upper().replace('/', '-')
+    normalized_timeframe = str(timeframe or '')
+    if not normalized_symbol or not normalized_timeframe:
+        return []
+
+    try:
+        import saved_signals as saved_module
+        from supabase_client import supabase_db as db
+
+        if db is None or not getattr(db, 'enabled', False):
+            return []
+
+        # Query only this cell. This keeps Commit 12.4 cheap in Supabase and
+        # avoids transferring the complete Saved inventory on every new setup.
+        def _read_pending_cell():
+            return (
+                db.client
+                .table('saved_signals')
+                .select(
+                    'id,user_name,symbol,timeframe,status,entry_touched,'
+                    'source_signal_id,candle_timestamp,'
+                    'telegram_lifecycle_armed_at,'
+                    'telegram_expired_notified_at'
+                )
+                .eq('symbol', normalized_symbol)
+                .eq('timeframe', normalized_timeframe)
+                .eq('status', 'active')
+                .eq('entry_touched', False)
+                .limit(100)
+                .execute()
+            )
+
+        pending_response = db._with_retry(_read_pending_cell)
+        pending_rows = (
+            pending_response.data
+            if pending_response and getattr(pending_response, 'data', None)
+            else []
+        )
+        expired_events = []
+        now_iso = datetime.utcnow().isoformat()
+
+        for raw in pending_rows:
+            if not isinstance(raw, dict):
+                continue
+
+            saved_symbol = str(
+                raw.get('symbol') or ''
+            ).upper().replace('/', '-')
+            saved_timeframe = str(raw.get('timeframe') or '')
+            if (
+                saved_symbol != normalized_symbol
+                or saved_timeframe != normalized_timeframe
+            ):
+                continue
+
+            # Race-safe policy: an already-open trade is never invalidated by a
+            # newer public setup. Guardian keeps managing it to its own exit.
+            if bool(raw.get('entry_touched')):
+                continue
+            if str(raw.get('status') or '').lower() != 'active':
+                continue
+
+            saved_source_id = str(
+                raw.get('source_signal_id') or ''
+            ).strip()
+            if saved_source_id == replacement_signal_id:
+                continue
+
+            # Fail closed on missing provenance. A saved order is replaced only
+            # when we can prove the incoming setup belongs to a later candle.
+            saved_epoch = _signal_source_epoch({
+                'source_candle_timestamp': raw.get('candle_timestamp'),
+            })
+            if saved_epoch <= 0 or replacement_epoch <= saved_epoch:
+                continue
+
+            signal_id = str(raw.get('id') or '').strip()
+            if not signal_id:
+                continue
+
+            updates = {
+                'status': 'expired',
+                'closed_at': now_iso,
+                'closed_price': None,
+                'pnl_pct': 0.0,
+                'pnl_usdt': 0.0,
+                'close_reason': 'expired_signal_update_no_entry',
+                'updated_at': now_iso,
+            }
+
+            def _op():
+                return (
+                    db.client
+                    .table('saved_signals')
+                    .update(updates)
+                    .eq('id', signal_id)
+                    .eq('status', 'active')
+                    .eq('entry_touched', False)
+                    .execute()
+                )
+
+            response = db._with_retry(_op)
+            if not response or not getattr(response, 'data', None):
+                continue
+
+            event = dict(raw)
+            event.update(updates)
+            event['replacement_signal_id'] = replacement_signal_id
+            event['replacement_candle_timestamp'] = (
+                replacement.get('source_candle_timestamp')
+                or replacement.get('source_candle_close_timestamp')
+            )
+            expired_events.append(event)
+
+        # Browser lists are user-scoped and may be cached for a few seconds.
+        # Clear them only after a real transition so the expiration is visible
+        # immediately without changing the normal read-cache policy.
+        if expired_events:
+            try:
+                cache_lock = getattr(
+                    saved_module,
+                    '_SAVED_LIST_CACHE_LOCK',
+                    None,
+                )
+                saved_cache = getattr(
+                    saved_module,
+                    '_SAVED_LIST_CACHE',
+                    None,
+                )
+                if cache_lock is not None and isinstance(saved_cache, dict):
+                    with cache_lock:
+                        saved_cache.clear()
+            except Exception:
+                pass
+
+        return expired_events
+
+    except Exception as exc:
+        print(
+            '⚠️ [12.4 SAVED UPDATE EXPIRY] '
+            f'{normalized_symbol} {normalized_timeframe}: {str(exc)[:180]}'
+        )
+        return []
 
 
 def _spot_entry_touch_display_until(touched_at, timeframe):
@@ -36018,6 +36248,17 @@ def _analyze_futures_all_parallel(combos_override=None):
             runtime_r = _compact_futures_runtime_result(r)
             results[(symbol, timeframe)] = runtime_r
 
+            # Commit 12.4: replacement-expiry is an EVENT, never a backfill.
+            # Remember whether this signal identity existed before refreshing the
+            # lifecycle. A deploy/reload that restores the same identity must not
+            # expire a user's pending Saved order again.
+            replacement_signal_id = str(r.get('signal_id') or '').strip()
+            replacement_is_new_lifecycle = bool(
+                replacement_signal_id
+                and replacement_signal_id not in lifecycle
+                and not r.get('_reused_closed_candle')
+            )
+
             lifecycle = (
                 _refresh_futures_signal_lifecycle(
                     lifecycle,
@@ -36047,6 +36288,46 @@ def _analyze_futures_all_parallel(combos_override=None):
                 cache['progress']['errors'] = len(errors)
 
             completed_count = index
+
+            # =========================================================
+            # COMMIT 12.4 — SAVED EXPIRA POR ACTUALIZACIÓN
+            # =========================================================
+            # A Saved pendiente no debe seguir esperando un Entry obsoleto si
+            # nació una NUEVA señal representativa para el mismo símbolo×TF.
+            # No hay backfill: una vela reutilizada tras deploy/refresh no crea
+            # un evento. Una operación cuyo Entry ya fue tocado tampoco cambia.
+            try:
+                if replacement_is_new_lifecycle:
+                    representative_ids_now = (
+                        _futures_frontend_representative_ids(
+                            partial_data
+                        )
+                    )
+                    if (
+                        replacement_signal_id
+                        and replacement_signal_id in representative_ids_now
+                        and _confirmed_signal_recent_enough(r, timeframe)
+                    ):
+                        expired_by_update = (
+                            _expire_saved_futures_waiting_on_replacement(
+                                symbol,
+                                timeframe,
+                                r,
+                            )
+                        )
+                        if expired_by_update:
+                            _send_saved_futures_lifecycle_notifications(
+                                expired_by_update
+                            )
+                            print(
+                                '🔄 [12.4] Saved expiradas por actualización: '
+                                f'{len(expired_by_update)} · {combo_name}'
+                            )
+            except Exception as replacement_error:
+                print(
+                    '⚠️ [12.4] Expiración por actualización no disponible '
+                    f'{combo_name}: {str(replacement_error)[:180]}'
+                )
 
             # RC9.7.13 + Commit 12.3 — Telegram consume un estado que ya fue
             # publicado. El dedup durable impide repetir refresh/deploy.
@@ -37346,7 +37627,11 @@ def _build_futures_analysis_visibility(cache, min_confidence):
     }
 
 
-def _futures_directional_hidden_candidates(visibility, source_context):
+def _futures_directional_hidden_candidates(
+    visibility,
+    source_context,
+    representative_ids=None
+):
     """
     RC9.7.6 — subconjunto visible para las listas de señales Futures.
 
@@ -37382,6 +37667,13 @@ def _futures_directional_hidden_candidates(visibility, source_context):
         if raw.get('manual_save_allowed') is not True:
             continue
 
+        signal_id = str(raw.get('signal_id') or '')
+        if (
+            representative_ids is not None
+            and signal_id not in representative_ids
+        ):
+            continue
+
         item = dict(raw)
         item['source_context'] = str(source_context).upper()
         # Este helper sólo entrega CURRENT/PREVIOUS. La lista actual es
@@ -37400,7 +37692,11 @@ def _futures_directional_hidden_candidates(visibility, source_context):
     return visible
 
 
-def _futures_vigent_manual_candidates(cache, fresh_signal_ids=None):
+def _futures_vigent_manual_candidates(
+    cache,
+    fresh_signal_ids=None,
+    representative_ids=None
+):
     """
     RC9.7.9 FINAL — MEDIUM/HIGH de cierres anteriores aún vigentes.
 
@@ -37428,6 +37724,11 @@ def _futures_vigent_manual_candidates(cache, fresh_signal_ids=None):
 
         signal_id = str(signal_id or record.get('signal_id') or '')
         if not signal_id or signal_id in fresh_signal_ids:
+            continue
+        if (
+            representative_ids is not None
+            and signal_id not in representative_ids
+        ):
             continue
 
         publication_status = str(
@@ -37779,7 +38080,8 @@ def api_futures_signals_active():
             'other_directional_signals':
                 _futures_directional_hidden_candidates(
                     visibility,
-                    'CURRENT_ANALYSIS_ONLY'
+                    'CURRENT_ANALYSIS_ONLY',
+                    representative_ids=representative_ids,
                 ),
 
             # RC9.7.9 FINAL — MEDIUM/HIGH de cierres ANTERIORES que todavía
@@ -37792,7 +38094,8 @@ def api_futures_signals_active():
                     fresh_signal_ids=(
                         fresh_confirmed_ids
                         | fresh_manual_ids
-                    )
+                    ),
+                    representative_ids=representative_ids,
                 ),
             'cache_age':
                 cache.get(
@@ -38245,7 +38548,8 @@ def api_futures_signals_previous():
             'other_directional_signals':
                 _futures_directional_hidden_candidates(
                     visibility,
-                    'PREVIOUS_ANALYSIS_ONLY'
+                    'PREVIOUS_ANALYSIS_ONLY',
+                    representative_ids=representative_ids,
                 ),
             'cache_age':
                 cache.get(
@@ -41034,9 +41338,17 @@ def _saved_expiry_short_message(user, signal):
         '1d': '1D', '1D': '1D', '1w': '1W', '1W': '1W',
     }
     tf_label = tf_labels.get(raw_tf, raw_tf)
+    close_reason = str(
+        (signal or {}).get('close_reason') or ''
+    ).lower()
+    title = (
+        '🔄 <b>SEÑAL EXPIRADA POR ACTUALIZACIÓN</b>'
+        if close_reason == 'expired_signal_update_no_entry'
+        else '⌛ <b>SEÑAL EXPIRADA</b>'
+    )
     return (
         market,
-        f"⌛ <b>SEÑAL EXPIRADA</b>\n"
+        f"{title}\n"
         f"{_telegram_escape(user)}: {_telegram_escape(market_label)}: "
         f"{_telegram_escape(base)}-{_telegram_escape(tf_label)}"
     )
@@ -41057,6 +41369,7 @@ def _send_saved_futures_lifecycle_notifications(expired_events=None):
         'expired_source_validity_no_entry',
         'expired_tp_before_entry_no_entry',
         'missed_target_before_entry',
+        'expired_signal_update_no_entry',
     }
     sent_count = 0
     seen_signal_ids = set()
@@ -41222,10 +41535,10 @@ def saved_futures_lifecycle_loop():
             # una notificación operacional.
             # ========================================================
 
-
             _send_saved_futures_lifecycle_notifications(
                 stats.get('expired_events') or []
             )
+
 
             # ========================================================
             # DESPUÉS: COMMIT 36O.2
