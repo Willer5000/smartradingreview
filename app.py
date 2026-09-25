@@ -29715,103 +29715,20 @@ def _dedupe_representative_signals(rows):
 
 
 def _futures_frontend_representative_ids(cache):
-    """Return ONE visible OFFICIAL Futures signal per symbol×timeframe.
+    """Return ONE visible Futures opportunity per symbol×timeframe.
 
-    Hotfix 12.4.1 scope is intentionally narrow:
-    - this selector arbitrates only the two official public lanes,
-      Confirmadas + Vigentes;
-    - ANALYSIS_ONLY hypotheses under "Por qué no aparecen otras señales" are
-      not deduplicated by this selector;
-    - Saved signals are personal records and are never collapsed by this
-      selector.
+    Commit 12.4 unifies all public lanes under the same representative:
+    Confirmadas, Vigentes and the MEDIUM/HIGH hypotheses shown inside
+    ``Por qué no aparecen otras señales``.
 
-    Within one official symbol×timeframe cell, technical presentation quality
-    wins; recency breaks a quality tie and remaining validity is the final
-    tie-break. Lifecycle/research evidence is retained internally.
-    """
-    lifecycle = (cache or {}).get('lifecycle') or {}
-    now_utc = pd.Timestamp.now(tz='UTC')
-    best_by_cell = {}
+    Selection contract:
+    1. an official EXECUTABLE_SIGNAL always outranks ANALYSIS_ONLY;
+    2. inside the same class, technical presentation quality wins;
+    3. recency breaks a quality tie;
+    4. remaining validity is only the final tie-break.
 
-    for signal_id, raw in lifecycle.items():
-        if not isinstance(raw, dict):
-            continue
-
-        row = dict(raw)
-        status = str(row.get('lifecycle_status') or '').lower()
-        if status not in ('waiting_entry', 'entry_touched'):
-            continue
-
-        publication = str(
-            row.get('publication_status')
-            or row.get('engine_publication_status')
-            or ''
-        ).upper()
-        official = bool(
-            publication == 'EXECUTABLE_SIGNAL'
-            and row.get('system_executable') is not False
-        )
-        if not official:
-            continue
-
-        valid_until_raw = row.get('valid_until')
-        remaining = 0
-        if valid_until_raw:
-            try:
-                valid_until = pd.Timestamp(valid_until_raw)
-                valid_until = (
-                    valid_until.tz_localize('UTC')
-                    if valid_until.tz is None
-                    else valid_until.tz_convert('UTC')
-                )
-                remaining = int(max(
-                    0,
-                    (valid_until - now_utc).total_seconds()
-                ))
-                if remaining <= 0:
-                    continue
-            except Exception:
-                # Existing lifecycle compatibility: absence of a parseable TTL
-                # never manufactures a fresher candidate.
-                remaining = 0
-
-        row['signal_id'] = str(row.get('signal_id') or signal_id or '')
-        if not row['signal_id']:
-            continue
-        row['tiempo_restante'] = remaining
-
-        symbol = str(row.get('symbol') or '').upper().replace('/', '-')
-        timeframe = str(row.get('timeframe') or '')
-        if not symbol or not timeframe:
-            continue
-
-        key = (symbol, timeframe)
-        rank = (
-            _representative_signal_score(row),
-            _signal_source_epoch(row),
-            remaining,
-        )
-        previous = best_by_cell.get(key)
-        if previous is None or rank > previous[0]:
-            best_by_cell[key] = (rank, row)
-
-    return {
-        str(item[1].get('signal_id') or '')
-        for item in best_by_cell.values()
-        if str(item[1].get('signal_id') or '')
-    }
-
-
-def _futures_saved_replacement_representative_ids(cache):
-    """Preserve Commit 12.4 Saved-update replacement arbitration.
-
-    This helper is NOT a UI dedupe rule. It exists only so the pre-existing
-    Commit 12.4 rule can still expire a pending Saved order (never an opened
-    operation) when a newer representative setup supersedes it.
-
-    It intentionally preserves the original 12.4 official-vs-manual ranking so
-    Hotfix 12.4.1 does not alter Saved/Guardian lifecycle behaviour while the
-    public frontend selector is narrowed to Confirmadas + Vigentes.
+    This is presentation/lifecycle arbitration only. It does not delete research
+    evidence and does not promote an ANALYSIS_ONLY setup to an official signal.
     """
     lifecycle = (cache or {}).get('lifecycle') or {}
     now_utc = pd.Timestamp.now(tz='UTC')
@@ -29863,6 +29780,8 @@ def _futures_saved_replacement_representative_ids(cache):
                 if remaining <= 0:
                     continue
             except Exception:
+                # Existing lifecycle compatibility: absence of a parseable TTL
+                # never manufactures a fresher candidate.
                 remaining = 0
 
         row['signal_id'] = str(row.get('signal_id') or signal_id or '')
@@ -29875,6 +29794,9 @@ def _futures_saved_replacement_representative_ids(cache):
         if not symbol or not timeframe:
             continue
 
+        # The user's explicit rule is stronger than raw score: if one candidate
+        # is official and another lives in "Por qué...", the official one is
+        # the sole visible opportunity for that symbol×TF.
         class_priority = 2 if official else 1
         rank = (
             class_priority,
@@ -29892,82 +29814,6 @@ def _futures_saved_replacement_representative_ids(cache):
         for item in best_by_cell.values()
         if str(item[1].get('signal_id') or '')
     }
-
-
-def _futures_confirmed_visible_in_frontend(cache, result, min_confidence=60):
-    """Return True only if this exact Futures confirmation is publicly visible.
-
-    Telegram CONFIRMED_SIGNAL must be a subset of the official frontend
-    projection. If a new setup loses the one-per-symbol×timeframe arbitration
-    to another still-valid official setup, it remains internal evidence but is
-    not announced as a new signal the user cannot find or save.
-    """
-    if not isinstance(result, dict) or not result.get('success'):
-        return False
-
-    symbol = str(result.get('symbol') or '').upper().replace('/', '-')
-    timeframe = str(result.get('timeframe') or '')
-    signal_id = str(result.get('signal_id') or '').strip()
-    if not symbol or not timeframe or not signal_id:
-        return False
-
-    try:
-        _configured_futures_module()
-        from futures_system import futures_timeframe_allowed, _leverage_in_valid_range
-        if not futures_timeframe_allowed(symbol, timeframe):
-            return False
-    except Exception:
-        return False
-
-    decision = result.get('decision') or {}
-    levels = result.get('levels') or {}
-    action = str(decision.get('action') or '').upper()
-    try:
-        confidence = float(decision.get('confidence') or 0)
-    except Exception:
-        confidence = 0.0
-
-    publication = str(
-        levels.get('publication_status')
-        or result.get('publication_status')
-        or ('ANALYSIS_ONLY' if levels.get('is_rejected') else 'EXECUTABLE_SIGNAL')
-    ).upper()
-
-    if action not in ('LONG', 'SHORT'):
-        return False
-    if publication != 'EXECUTABLE_SIGNAL':
-        return False
-    if confidence < float(min_confidence or 0):
-        return False
-
-    try:
-        entry = float(levels.get('entry') or 0)
-        stop_loss = float(levels.get('stop_loss') or 0)
-        take_profit = float(levels.get('take_profit') or 0)
-        leverage = int(levels.get('leverage') or 1)
-    except Exception:
-        return False
-
-    if entry <= 0 or stop_loss <= 0 or take_profit <= 0:
-        return False
-
-    try:
-        if not _leverage_in_valid_range(leverage, timeframe):
-            return False
-    except Exception:
-        return False
-
-    lifecycle = (cache or {}).get('lifecycle') or {}
-    record = lifecycle.get(signal_id) or {}
-    if not isinstance(record, dict):
-        return False
-    if str(record.get('lifecycle_status') or '').lower() not in (
-        'waiting_entry',
-        'entry_touched',
-    ):
-        return False
-
-    return signal_id in _futures_frontend_representative_ids(cache)
 
 
 def _expire_saved_futures_waiting_on_replacement(
@@ -36453,7 +36299,7 @@ def _analyze_futures_all_parallel(combos_override=None):
             try:
                 if replacement_is_new_lifecycle:
                     representative_ids_now = (
-                        _futures_saved_replacement_representative_ids(
+                        _futures_frontend_representative_ids(
                             partial_data
                         )
                     )
@@ -36483,14 +36329,19 @@ def _analyze_futures_all_parallel(combos_override=None):
                     f'{combo_name}: {str(replacement_error)[:180]}'
                 )
 
-            # Hotfix 12.4.1 — Telegram y frontend comparten el MISMO contrato
-            # oficial. Sólo se anuncia una nueva confirmación si ese exacto
-            # signal_id es el representante visible de Confirmadas/Vigentes.
+            # Commit 12.4.1 FINAL — Telegram sólo anuncia el mismo
+            # signal_id que el frontend mantiene como representante visible
+            # para ese símbolo×timeframe. No cambia el selector de 12.4 ni
+            # ninguna regla de Entry/SL/TP/Safety/leverage/learning.
             try:
-                if _futures_confirmed_visible_in_frontend(
-                    partial_data,
-                    r,
-                    min_confidence=60,
+                telegram_representative_ids = (
+                    _futures_frontend_representative_ids(partial_data)
+                )
+                telegram_signal_id = str(r.get('signal_id') or '')
+
+                if (
+                    telegram_signal_id
+                    and telegram_signal_id in telegram_representative_ids
                 ):
                     _send_confirmed_signal_telegram(
                         'futures',
@@ -36498,8 +36349,8 @@ def _analyze_futures_all_parallel(combos_override=None):
                     )
                 else:
                     print(
-                        "🔕 [FUT] CONFIRMADA no publicada en Telegram: "
-                        f"{combo_name} no es el representante oficial visible"
+                        '🔕 [FUT] Confirmada no enviada a Telegram: '
+                        f'{combo_name} no es la señal visible de su celda'
                     )
             except Exception as confirmed_telegram_error:
                 print(
@@ -37794,7 +37645,8 @@ def _build_futures_analysis_visibility(cache, min_confidence):
 
 def _futures_directional_hidden_candidates(
     visibility,
-    source_context
+    source_context,
+    representative_ids=None
 ):
     """
     RC9.7.6 — subconjunto visible para las listas de señales Futures.
@@ -37831,6 +37683,13 @@ def _futures_directional_hidden_candidates(
         if raw.get('manual_save_allowed') is not True:
             continue
 
+        signal_id = str(raw.get('signal_id') or '')
+        if (
+            representative_ids is not None
+            and signal_id not in representative_ids
+        ):
+            continue
+
         item = dict(raw)
         item['source_context'] = str(source_context).upper()
         # Este helper sólo entrega CURRENT/PREVIOUS. La lista actual es
@@ -37851,7 +37710,8 @@ def _futures_directional_hidden_candidates(
 
 def _futures_vigent_manual_candidates(
     cache,
-    fresh_signal_ids=None
+    fresh_signal_ids=None,
+    representative_ids=None
 ):
     """
     RC9.7.9 FINAL — MEDIUM/HIGH de cierres anteriores aún vigentes.
@@ -37880,6 +37740,11 @@ def _futures_vigent_manual_candidates(
 
         signal_id = str(signal_id or record.get('signal_id') or '')
         if not signal_id or signal_id in fresh_signal_ids:
+            continue
+        if (
+            representative_ids is not None
+            and signal_id not in representative_ids
+        ):
             continue
 
         publication_status = str(
@@ -37975,6 +37840,7 @@ def _futures_vigent_manual_candidates(
             'decision_audit': _futures_decision_audit_for_api(record),
         })
 
+    visible = _dedupe_representative_signals(visible)
     visible.sort(
         key=lambda item: (
             0 if item.get('manual_risk_class') == 'MEDIUM' else 1,
@@ -38231,6 +38097,7 @@ def api_futures_signals_active():
                 _futures_directional_hidden_candidates(
                     visibility,
                     'CURRENT_ANALYSIS_ONLY',
+                    representative_ids=representative_ids,
                 ),
 
             # RC9.7.9 FINAL — MEDIUM/HIGH de cierres ANTERIORES que todavía
@@ -38244,6 +38111,7 @@ def api_futures_signals_active():
                         fresh_confirmed_ids
                         | fresh_manual_ids
                     ),
+                    representative_ids=representative_ids,
                 ),
             'cache_age':
                 cache.get(
@@ -38697,6 +38565,7 @@ def api_futures_signals_previous():
                 _futures_directional_hidden_candidates(
                     visibility,
                     'PREVIOUS_ANALYSIS_ONLY',
+                    representative_ids=representative_ids,
                 ),
             'cache_age':
                 cache.get(
