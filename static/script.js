@@ -8508,13 +8508,14 @@ function updateLiquidationHeatmap(data) {
     const timeframe = data.timeframe || data?.data?.timeframe || window.currentInterval || '4h';
     const calibration = liquidation.calibration || {};
 
-    // COMMIT 14.1.3 — VISUAL-ONLY
-    // Proyección de densidad continua tipo heatmap a partir de los MISMOS bins
-    // del backend. No crea niveles técnicos, no recalcula pesos y no altera señales.
+    // COMMIT 14.1.4 — VISUAL-ONLY
+    // Objetivo: conservar las zonas técnicas del backend, diferenciarlas mejor y
+    // abrir un corredor más amplio alrededor del precio. No recalcula bins,
+    // pesos, liquidaciones, señales ni calibración pública.
     let maxBars;
     switch (timeframe) {
-        case '5m': maxBars = 240; break;
-        case '15m': maxBars = 225; break;
+        case '5m': maxBars = 230; break;
+        case '15m': maxBars = 220; break;
         case '30m': maxBars = 205; break;
         case '1h': maxBars = 190; break;
         case '2h': maxBars = 180; break;
@@ -8538,12 +8539,15 @@ function updateLiquidationHeatmap(data) {
     const validPrices = [...high, ...low].filter(Number.isFinite);
     if (!validPrices.length || !Number.isFinite(currentPrice) || currentPrice <= 0) return;
 
-    // Rango de visualización solamente. El backend conserva todos los bins.
     const inVisualRange = bin => {
-        const center = (Number(bin.price_top) + Number(bin.price_bottom)) / 2;
-        return Number.isFinite(center) && center > 0
+        const bottom = Number(bin.price_bottom);
+        const top = Number(bin.price_top);
+        const center = (bottom + top) / 2;
+        return [bottom, top, center].every(Number.isFinite)
+            && center > 0
             && Math.abs(center - currentPrice) / currentPrice <= 0.35;
     };
+
     const relevantActive = activeBins.filter(inVisualRange);
     const relevantFrozen = frozenBins.slice(-300).filter(inVisualRange);
     const relevant = [...relevantActive, ...relevantFrozen];
@@ -8558,13 +8562,13 @@ function updateLiquidationHeatmap(data) {
     });
 
     const rawRange = Math.max(maxPrice - minPrice, currentPrice * 0.01);
-    minPrice -= rawRange * 0.025;
-    maxPrice += rawRange * 0.025;
+    minPrice -= rawRange * 0.03;
+    maxPrice += rawRange * 0.03;
 
-    // Matriz suficientemente densa para que el mapa se lea como CAMPO y no
-    // como un conjunto de rectángulos independientes.
-    const xCount = Math.max(2, Math.min(150, dates.length));
-    const yCount = 168;
+    // Resolución suficientemente fina para bloques suaves, sin convertir las
+    // zonas en líneas de uno o dos píxeles.
+    const xCount = Math.max(2, Math.min(140, dates.length));
+    const yCount = 144;
     const xIdx = [];
     for (let i = 0; i < xCount; i++) {
         xIdx.push(Math.round(i * (dates.length - 1) / Math.max(1, xCount - 1)));
@@ -8574,7 +8578,8 @@ function updateLiquidationHeatmap(data) {
     const yVals = Array.from({length: yCount}, (_, i) =>
         minPrice + (maxPrice - minPrice) * i / Math.max(1, yCount - 1)
     );
-    const z = Array.from({length: yCount}, () => Array(xCount).fill(0));
+    let z = Array.from({length: yCount}, () => Array(xCount).fill(0));
+    const priceCorridor = Array.from({length: yCount}, () => Array(xCount).fill(false));
 
     const firstMs = xVals[0].getTime();
     const lastMs = xVals[xVals.length - 1].getTime();
@@ -8587,24 +8592,28 @@ function updateLiquidationHeatmap(data) {
         return Math.max(0, Math.min(xCount - 1, Math.round(ratio * (xCount - 1))));
     };
 
+    const indexForPrice = price => {
+        const ratio = Math.max(0, Math.min(1, (price - minPrice) / ySpan));
+        return Math.max(0, Math.min(yCount - 1, Math.round(ratio * (yCount - 1))));
+    };
+
     const percentile = (arr, p) => {
-        if (!arr.length) return 1;
+        if (!arr.length) return 0;
         const sorted = [...arr].sort((a, b) => a - b);
         const idx = Math.max(0, Math.min(sorted.length - 1, Math.round((sorted.length - 1) * p)));
         return sorted[idx];
     };
 
-    // Actividad observable del propio OHLCV: sólo modula la textura visual.
+    // Actividad del propio OHLCV. Sólo introduce una textura temporal leve.
     const trueRanges = high.map((h, i) => {
         const l = low[i];
         const prev = i > 0 ? close[i - 1] : close[i];
         if (![h, l, prev].every(Number.isFinite)) return 0;
         return Math.max(h - l, Math.abs(h - prev), Math.abs(l - prev));
     });
-    const rangeScale = Math.max(
-        percentile(trueRanges.filter(v => Number.isFinite(v) && v > 0), 0.82),
-        currentPrice * 1e-9
-    );
+    const validRanges = trueRanges.filter(v => Number.isFinite(v) && v > 0);
+    const medianRange = Math.max(percentile(validRanges, 0.50), currentPrice * 1e-9);
+    const rangeScale = Math.max(percentile(validRanges, 0.82), medianRange);
     const volumeScale = Math.max(
         percentile(volume.filter(v => Number.isFinite(v) && v > 0), 0.82),
         1e-12
@@ -8614,168 +8623,182 @@ function updateLiquidationHeatmap(data) {
         const r = Math.max(0, Math.min(1, Number(trueRanges[idx] || 0) / rangeScale));
         if (!volume.length) return r;
         const v = Math.max(0, Math.min(1, Number(volume[idx] || 0) / volumeScale));
-        return 0.58 * r + 0.42 * v;
+        return 0.60 * r + 0.40 * v;
     });
-
-    // Suavizado temporal pequeño: evita columnas bruscas sin inventar información.
     activity = activity.map((value, i, arr) => {
         const a = i > 0 ? arr[i - 1] : value;
         const b = value;
         const c = i + 1 < arr.length ? arr[i + 1] : value;
-        return a * 0.22 + b * 0.56 + c * 0.22;
+        return 0.20 * a + 0.60 * b + 0.20 * c;
     });
 
     const weights = relevant
         .map(bin => Number(bin.max_weight ?? bin.weight ?? 0))
         .filter(v => Number.isFinite(v) && v > 0);
     const visualWeightCap = Math.max(
-        percentile(weights, 0.90),
-        weights.length ? Math.max(...weights) * 0.62 : 1,
+        percentile(weights, 0.92),
+        weights.length ? Math.max(...weights) * 0.72 : 1,
         1e-12
     );
 
-    // Modelos visuales de cada bin. El centro y la intensidad nacen del bin real;
-    // el sigma sólo define cómo se interpola SU densidad en la matriz de pantalla.
-    const models = relevant.map(bin => {
+    const addCell = (yi, xi, value) => {
+        if (yi < 0 || yi >= yCount || xi < 0 || xi >= xCount || value <= 0) return;
+        z[yi][xi] += value;
+    };
+
+    const paintBand = (bin, mode) => {
         const bottom = Number(bin.price_bottom);
         const top = Number(bin.price_top);
         const rawWeight = Number(bin.max_weight ?? bin.weight ?? 0);
-        if (![bottom, top, rawWeight].every(Number.isFinite) || rawWeight <= 0) return null;
-        return {
-            bin,
-            bottom: Math.min(bottom, top),
-            top: Math.max(bottom, top),
-            center: (bottom + top) / 2,
-            halfHeight: Math.max(Math.abs(top - bottom) / 2, yStep),
-            rawWeight,
-            active: !bin.frozen
-        };
-    }).filter(Boolean).sort((a, b) => a.center - b.center);
+        if (![bottom, top, rawWeight].every(Number.isFinite) || rawWeight <= 0) return;
 
-    const centerDiffs = [];
-    for (let i = 1; i < models.length; i++) {
-        const diff = models[i].center - models[i - 1].center;
-        if (diff > 0) centerDiffs.push(diff);
-    }
-    const medianGap = Math.max(percentile(centerDiffs, 0.50), yStep * 5.0);
+        let y0 = indexForPrice(Math.min(bottom, top));
+        let y1 = indexForPrice(Math.max(bottom, top));
+        if (y1 < y0) [y0, y1] = [y1, y0];
 
-    models.forEach((model, i) => {
-        const prevGap = i > 0 ? model.center - models[i - 1].center : medianGap;
-        const nextGap = i + 1 < models.length ? models[i + 1].center - model.center : medianGap;
-        const localGap = Math.max(
-            yStep * 5.0,
-            Math.min(Math.max(prevGap, nextGap), medianGap * 2.4)
-        );
-        model.sigma = Math.max(
-            model.halfHeight * 2.0,
-            localGap * 0.36,
-            yStep * 2.8
-        );
+        // Mínimo visual de 4 filas: zona visible, pero no una barra gruesa artificial.
+        if (y1 - y0 < 3) {
+            const mid = Math.round((y0 + y1) / 2);
+            y0 = Math.max(0, mid - 2);
+            y1 = Math.min(yCount - 1, mid + 1);
+        }
 
-        const leverage = Number(model.bin.leverage || 0);
+        const leverage = Number(bin.leverage || 0);
         const leverageEmphasis = leverage >= 50 ? 1.05 : leverage >= 25 ? 1.025 : 1.0;
-        const weightRatio = Math.max(0, Math.min(1, model.rawWeight / visualWeightCap));
-        model.baseIntensity = (
-            model.active
-                ? 0.30 + 0.70 * Math.pow(weightRatio, 0.94)
-                : 0.13 + 0.38 * Math.pow(weightRatio, 1.00)
+        const weightRatio = Math.max(0, Math.min(1, rawWeight / visualWeightCap));
+
+        // Mayor separación cromática entre zonas débiles, medias y fuertes.
+        const baseIntensity = (mode === 'active'
+            ? 0.10 + 0.90 * Math.pow(weightRatio, 1.38)
+            : 0.055 + 0.52 * Math.pow(weightRatio, 1.30)
         ) * leverageEmphasis;
 
-        model.x0 = 0;
-        model.x1 = xCount - 1;
-        if (!model.active) {
-            const createdMs = Date.parse(model.bin.created_at || '');
-            const frozenMs = Date.parse(model.bin.frozen_at || '');
-            model.x0 = Number.isFinite(createdMs) ? indexForTime(createdMs) : 0;
-            model.x1 = Number.isFinite(frozenMs) ? indexForTime(frozenMs) : xCount - 1;
-            if (model.x1 < model.x0) [model.x0, model.x1] = [model.x1, model.x0];
+        let x0 = 0;
+        let x1 = xCount - 1;
+        if (mode === 'frozen') {
+            const createdMs = Date.parse(bin.created_at || '');
+            const frozenMs = Date.parse(bin.frozen_at || '');
+            x0 = Number.isFinite(createdMs) ? indexForTime(createdMs) : 0;
+            x1 = Number.isFinite(frozenMs) ? indexForTime(frozenMs) : xCount - 1;
+            if (x1 < x0) [x0, x1] = [x1, x0];
         }
-    });
 
-    // Campo continuo: superposición de kernels de los mismos bins. Esto rellena
-    // visualmente los huecos con azul/cian de baja densidad, como un heatmap real,
-    // en lugar de dibujar líneas horizontales aisladas.
-    for (let xi = 0; xi < xCount; xi++) {
-        const temporalActivity = activity[xi] || 0;
-        const progress = xi / Math.max(1, xCount - 1);
+        const center = Math.round((y0 + y1) / 2);
+        const half = Math.max(1, (y1 - y0 + 1) / 2);
 
-        for (let yi = 0; yi < yCount; yi++) {
-            const price = yVals[yi];
-            let field = 0;
+        for (let xi = x0; xi <= x1; xi++) {
+            const progress = mode === 'active'
+                ? xi / Math.max(1, xCount - 1)
+                : (xi - x0) / Math.max(1, x1 - x0);
+            const temporal = mode === 'active'
+                ? 0.86 + 0.10 * (activity[xi] || 0) + 0.04 * progress
+                : 0.63 + 0.08 * (activity[xi] || 0);
+            const core = baseIntensity * temporal;
 
-            for (const model of models) {
-                if (xi < model.x0 || xi > model.x1) continue;
-
-                // El grosor cambia levemente con la actividad del mercado para
-                // evitar bordes perfectamente rectos y artificiales.
-                const sigma = model.sigma * (0.88 + temporalActivity * 0.28);
-                const distance = Math.abs(price - model.center);
-                const coreKernel = Math.exp(-0.5 * Math.pow(distance / Math.max(sigma * 0.44, 1e-12), 2));
-                const haloKernel = Math.exp(-0.5 * Math.pow(distance / Math.max(sigma, 1e-12), 2));
-
-                const timeTexture = model.active
-                    ? (0.80 + 0.15 * temporalActivity + 0.05 * progress)
-                    : (0.72 + 0.12 * temporalActivity);
-
-                field += model.baseIntensity * timeTexture * (
-                    0.64 * coreKernel + 0.36 * haloKernel
-                );
+            // Perfil con centro fuerte y bordes suaves. Esto conserva la zona
+            // claramente distinguible sin convertirla en una línea plana.
+            for (let yi = y0; yi <= y1; yi++) {
+                const d = Math.abs(yi - center) / half;
+                const profile = 1.00 - 0.16 * Math.min(1, d);
+                addCell(yi, xi, core * profile);
             }
 
-            // Piso visual mínimo: el fondo conserva densidad azul muy baja entre
-            // zonas para que no existan franjas negras artificiales.
-            const ambient = models.length
-                ? 0.020 + 0.018 * temporalActivity
-                : 0;
-            z[yi][xi] = Math.max(field, ambient);
+            addCell(y0 - 1, xi, core * 0.50);
+            addCell(y1 + 1, xi, core * 0.50);
+            addCell(y0 - 2, xi, core * 0.24);
+            addCell(y1 + 2, xi, core * 0.24);
+            addCell(y0 - 3, xi, core * 0.10);
+            addCell(y1 + 3, xi, core * 0.10);
         }
-    }
+    };
 
-    // Corredor del precio: el único hueco claro del campo sigue el rango de las
-    // velas. Además de acercarse visualmente a TradingDifferent, deja las velas
-    // japonesas más limpias y legibles sobre el mapa.
-    for (let xi = 0; xi < xCount; xi++) {
-        const idx = xIdx[xi];
-        const candleLow = Number(low[idx]);
-        const candleHigh = Number(high[idx]);
-        const tr = Number(trueRanges[idx] || 0);
-        if (![candleLow, candleHigh].every(Number.isFinite)) continue;
+    relevantFrozen.forEach(bin => paintBand(bin, 'frozen'));
+    relevantActive.forEach(bin => paintBand(bin, 'active'));
 
-        const corridor = Math.max(tr * 0.24, yStep * 1.8);
-        const feather = Math.max(tr * 0.42, yStep * 3.2);
-
+    // Dos pases de difusión MUY contenidos: une zonas próximas en forma de campo,
+    // pero mantiene centros e intensidades diferenciados.
+    for (let pass = 0; pass < 2; pass++) {
+        const softened = Array.from({length: yCount}, () => Array(xCount).fill(0));
         for (let yi = 0; yi < yCount; yi++) {
-            const price = yVals[yi];
-            let distance = 0;
-            if (price < candleLow) distance = candleLow - price;
-            else if (price > candleHigh) distance = price - candleHigh;
-
-            if (distance <= corridor) {
-                z[yi][xi] *= 0.035;
-            } else if (distance < feather) {
-                const t = (distance - corridor) / Math.max(feather - corridor, 1e-12);
-                const mask = 0.035 + 0.965 * Math.pow(t, 1.45);
-                z[yi][xi] *= mask;
+            for (let xi = 0; xi < xCount; xi++) {
+                const center = z[yi][xi];
+                const up = yi > 0 ? z[yi - 1][xi] : 0;
+                const down = yi + 1 < yCount ? z[yi + 1][xi] : 0;
+                softened[yi][xi] = center * 0.82 + (up + down) * 0.09;
             }
         }
+        z = softened;
     }
 
-    // Normalización robusta. Menos gamma expansiva que 14.1.2: predominan
-    // azul/cian/verde y el amarillo-rojo queda reservado a concentraciones reales.
+    // Normalización EXCLUYENDO el futuro fondo azul. Así el fondo nunca se
+    // convierte por error en verde/amarillo como ocurrió en 14.1.3.
     const cellValues = [];
     for (let yi = 0; yi < yCount; yi++) {
         for (let xi = 0; xi < xCount; xi++) {
             const value = z[yi][xi];
-            if (Number.isFinite(value) && value > 0.045) cellValues.push(value);
+            if (Number.isFinite(value) && value > 0.025) cellValues.push(value);
         }
     }
-    const cellCap = Math.max(percentile(cellValues, 0.992), 1e-12);
+    const cellCap = Math.max(percentile(cellValues, 0.985), 1e-12);
 
     for (let yi = 0; yi < yCount; yi++) {
         for (let xi = 0; xi < xCount; xi++) {
             const raw = Math.max(0, Number(z[yi][xi] || 0));
+            if (raw <= 0) {
+                z[yi][xi] = 0;
+                continue;
+            }
             const normalized = Math.max(0, Math.min(1, raw / cellCap));
-            z[yi][xi] = Math.pow(normalized, 1.06);
+            z[yi][xi] = Math.pow(normalized, 1.28);
+        }
+    }
+
+    // Corredor del precio MÁS AMPLIO. Este sí es el hueco principal del mapa.
+    // Se usa low/high + padding basado en ATR local/mediano para que las velas
+    // queden claramente separadas del calor y no tapadas por el fondo.
+    for (let xi = 0; xi < xCount; xi++) {
+        const idx = xIdx[xi];
+        const candleLow = Number(low[idx]);
+        const candleHigh = Number(high[idx]);
+        const tr = Math.max(Number(trueRanges[idx] || 0), medianRange);
+        if (![candleLow, candleHigh].every(Number.isFinite)) continue;
+
+        const pad = Math.max(
+            tr * 0.78,
+            medianRange * 0.70,
+            currentPrice * 0.0016,
+            yStep * 4.5
+        );
+        const feather = Math.max(pad * 1.65, yStep * 7.0);
+        const coreLow = candleLow - pad;
+        const coreHigh = candleHigh + pad;
+        const featherLow = candleLow - feather;
+        const featherHigh = candleHigh + feather;
+
+        for (let yi = 0; yi < yCount; yi++) {
+            const price = yVals[yi];
+            if (price >= coreLow && price <= coreHigh) {
+                z[yi][xi] = 0;
+                priceCorridor[yi][xi] = true;
+                continue;
+            }
+
+            if (price >= featherLow && price < coreLow) {
+                const t = (coreLow - price) / Math.max(coreLow - featherLow, 1e-12);
+                z[yi][xi] *= 0.12 + 0.88 * Math.min(1, t);
+            } else if (price > coreHigh && price <= featherHigh) {
+                const t = (price - coreHigh) / Math.max(featherHigh - coreHigh, 1e-12);
+                z[yi][xi] *= 0.12 + 0.88 * Math.min(1, t);
+            }
+        }
+    }
+
+    // Fondo visual azul MUY bajo fuera del corredor: evita huecos negros puros,
+    // pero permanece claramente por debajo de cualquier zona de interés.
+    for (let yi = 0; yi < yCount; yi++) {
+        for (let xi = 0; xi < xCount; xi++) {
+            if (priceCorridor[yi][xi]) continue;
+            if (z[yi][xi] <= 0) z[yi][xi] = 0.018;
         }
     }
 
@@ -8792,24 +8815,23 @@ function updateLiquidationHeatmap(data) {
         ygap: 0,
         showscale: false,
         hoverongaps: false,
-        // Transparencia global deliberada: las velas quedan por encima y el mapa
-        // funciona como contexto, no como una capa que tape al precio.
-        opacity: 0.74,
+        // Más transparencia que 14.1.2/14.1.3: el precio manda visualmente.
+        opacity: 0.60,
         colorscale: [
-            [0.000, '#030611'],
-            [0.035, '#111a47'],
-            [0.090, '#183276'],
-            [0.170, '#15569a'],
-            [0.270, '#087fa8'],
-            [0.390, '#00a9a0'],
-            [0.515, '#00c97a'],
-            [0.630, '#55d43e'],
-            [0.745, '#b8df25'],
-            [0.835, '#f2e92b'],
-            [0.905, '#ffd12b'],
-            [0.955, '#ff9528'],
-            [0.985, '#ff5b2c'],
-            [1.000, '#ff2e3f']
+            [0.000, '#02040b'],
+            [0.018, '#07122d'],
+            [0.080, '#0b2453'],
+            [0.170, '#0c4678'],
+            [0.285, '#087c9a'],
+            [0.410, '#00a8a1'],
+            [0.535, '#19c77e'],
+            [0.645, '#68cf4b'],
+            [0.740, '#b9d73a'],
+            [0.815, '#ece13a'],
+            [0.875, '#ffd33a'],
+            [0.925, '#ff9b31'],
+            [0.965, '#ff672f'],
+            [1.000, '#ff3346']
         ],
         hovertemplate:
             '<b>Densidad estimada</b><br>' +
@@ -8826,9 +8848,9 @@ function updateLiquidationHeatmap(data) {
         close,
         type: 'candlestick',
         name: 'Precio',
-        increasing: {line: {color: '#20e0ad', width: 1.35}, fillcolor: '#20e0ad'},
-        decreasing: {line: {color: '#ff6070', width: 1.35}, fillcolor: '#ff6070'},
-        whiskerwidth: 0.28,
+        increasing: {line: {color: '#19e6ad', width: 1.55}, fillcolor: '#19e6ad'},
+        decreasing: {line: {color: '#ff5366', width: 1.55}, fillcolor: '#ff5366'},
+        whiskerwidth: 0.30,
         opacity: 1.0,
         hoverlabel: {bgcolor: '#0b1018', font: {color: '#f1f5f9'}}
     };
@@ -8850,11 +8872,11 @@ function updateLiquidationHeatmap(data) {
 
     let interpretation;
     if (longPct >= 65) {
-        interpretation = 'Mayor concentración estimada de exposición LONG. Vigilar reacción y barridos en las zonas inferiores.';
+        interpretation = 'Mayor concentración estimada de exposición LONG. Priorizar áreas inferiores de mayor intensidad y su reacción.';
     } else if (shortPct >= 65) {
-        interpretation = 'Mayor concentración estimada de exposición SHORT. Vigilar reacción y barridos en las zonas superiores.';
+        interpretation = 'Mayor concentración estimada de exposición SHORT. Priorizar áreas superiores de mayor intensidad y su reacción.';
     } else {
-        interpretation = 'Distribución relativamente equilibrada. Priorizar las áreas de mayor intensidad y la reacción del precio.';
+        interpretation = 'Distribución relativamente equilibrada. Las zonas amarillo/naranja/rojo concentran mayor interés; el corredor oscuro sigue al precio.';
     }
 
     if (calibration.status === 'PUBLIC_MARKET_CALIBRATED') {
@@ -8900,8 +8922,8 @@ function updateLiquidationHeatmap(data) {
         },
         height: 470,
         margin: {l: 10, r: 72, t: 46, b: 34},
-        paper_bgcolor: '#05070d',
-        plot_bgcolor: '#05070d',
+        paper_bgcolor: '#03050a',
+        plot_bgcolor: '#03050a',
         showlegend: false,
         shapes: [{
             type: 'line',
@@ -8911,11 +8933,11 @@ function updateLiquidationHeatmap(data) {
             x1: 1,
             y0: currentPrice,
             y1: currentPrice,
-            line: {color: 'rgba(232,238,245,0.52)', width: 1, dash: 'dot'}
+            line: {color: 'rgba(235,241,247,0.58)', width: 1, dash: 'dot'}
         }],
         hovermode: 'closest',
         dragmode: 'pan',
-        uirevision: 'liq-heatmap-14-1-3-' + timeframe,
+        uirevision: 'liq-heatmap-14-1-4-' + timeframe,
         font: {color: '#dfe7ef'}
     };
 
@@ -8934,7 +8956,6 @@ function updateLiquidationHeatmap(data) {
         chartDiv.innerHTML = '<div class="alert alert-danger">No se pudo dibujar el mapa de calor.</div>';
     });
 }
-
 
 // ============ ZONAS DINÁMICAS DE TRADING ============
 function updateTradingZones(data) {
