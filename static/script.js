@@ -8905,7 +8905,7 @@ function updateLiquidationHeatmap(data) {
 
     const layout = {
         title: {
-            text: 'Calor de liquidaciones estimadas (' + timeframe + ') · ' + activeBins.length + ' zonas activas',
+            text: 'Calor de liquidaciones (' + timeframe + ') · ' + activeBins.length + ' zonas activas',
             font: {color: '#eef4fb', size: 14},
             x: 0.015,
             xanchor: 'left',
