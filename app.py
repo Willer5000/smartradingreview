@@ -140,7 +140,28 @@ if not app.secret_key:
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SECURE'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-app.config['SESSION_PERMANENT'] = False
+app.config['SESSION_COOKIE_NAME'] = 'smartrading_session'
+app.config['SESSION_COOKIE_PATH'] = '/'
+# Commit 15: sesión privada con expiración deslizante. Mientras exista actividad
+# legítima, Flask renueva el vencimiento; una sesión abandonada expira.
+app.config['SESSION_PERMANENT'] = True
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=12)
+app.config['SESSION_REFRESH_EACH_REQUEST'] = True
+
+
+# --------------------------------------------------------------------------
+# COMMIT 15 — SECURITY LOCKDOWN
+# --------------------------------------------------------------------------
+# Objetivo: la aplicación es PRIVADA POR DEFECTO. Sin una sesión válida sólo
+# se exponen /login, /api/auth/login, /api/auth/me y un /health mínimo para
+# Render. Los jobs machine-to-machine conservan X-Auth-Key y fallan cerrados si
+# SCHEDULED_AUTH_KEY no existe.
+# --------------------------------------------------------------------------
+_AUTH_FAILURE_LOCK = threading.Lock()
+_AUTH_FAILURES = {}
+_AUTH_FAILURE_WINDOW_SECONDS = 15 * 60
+_AUTH_FAILURE_LIMIT = 7
+_AUTH_BLOCK_SECONDS = 15 * 60
 
 
 def _auth_users():
@@ -189,6 +210,160 @@ def _require_auth():
         }), 401
 
     return user
+
+
+
+def _safe_next_path(value):
+    """Acepta sólo rutas locales para evitar redirecciones externas."""
+    value = str(value or '').strip()
+    if not value.startswith('/') or value.startswith('//'):
+        return '/'
+    return value
+
+
+def _auth_rate_key(user):
+    """Clave de rate-limit por origen + usuario sin confiar en headers."""
+    remote = str(request.remote_addr or 'unknown')[:96]
+    normalized_user = str(user or '').strip().lower()[:64]
+    return f'{remote}|{normalized_user}'
+
+
+def _auth_rate_block_remaining(user):
+    """Segundos restantes de bloqueo por demasiados intentos fallidos."""
+    now = time.time()
+    key = _auth_rate_key(user)
+    with _AUTH_FAILURE_LOCK:
+        state = _AUTH_FAILURES.get(key)
+        if not state:
+            return 0
+        blocked_until = float(state.get('blocked_until') or 0.0)
+        if blocked_until > now:
+            return max(1, int(blocked_until - now))
+        failures = [
+            float(ts) for ts in (state.get('failures') or [])
+            if now - float(ts) <= _AUTH_FAILURE_WINDOW_SECONDS
+        ]
+        if failures:
+            state['failures'] = failures
+            state['blocked_until'] = 0.0
+        else:
+            _AUTH_FAILURES.pop(key, None)
+        return 0
+
+
+def _auth_record_failure(user):
+    now = time.time()
+    key = _auth_rate_key(user)
+    with _AUTH_FAILURE_LOCK:
+        state = _AUTH_FAILURES.setdefault(key, {
+            'failures': [],
+            'blocked_until': 0.0,
+        })
+        failures = [
+            float(ts) for ts in (state.get('failures') or [])
+            if now - float(ts) <= _AUTH_FAILURE_WINDOW_SECONDS
+        ]
+        failures.append(now)
+        state['failures'] = failures
+        if len(failures) >= _AUTH_FAILURE_LIMIT:
+            state['blocked_until'] = now + _AUTH_BLOCK_SECONDS
+
+
+def _auth_clear_failures(user):
+    key = _auth_rate_key(user)
+    with _AUTH_FAILURE_LOCK:
+        _AUTH_FAILURES.pop(key, None)
+
+
+def _valid_machine_auth():
+    """Autenticación exclusiva para jobs internos programados."""
+    import hmac
+    expected = str(os.getenv('SCHEDULED_AUTH_KEY', '') or '')
+    provided = str(request.headers.get('X-Auth-Key', '') or '')
+    return bool(
+        expected
+        and provided
+        and hmac.compare_digest(provided, expected)
+    )
+
+
+_PUBLIC_UNAUTHENTICATED_PATHS = {
+    '/login',
+    '/api/auth/login',
+    '/api/auth/me',
+    '/health',
+}
+
+_MACHINE_AUTH_PATHS = {
+    '/api/run_scheduled',
+    '/api/review/run_now',
+    '/api/review/fix_confidence_overflow',
+    '/api/admin/dedup_signals',
+}
+
+
+@app.before_request
+def _commit15_private_by_default():
+    """Bloquea TODO el sistema salvo las excepciones explícitas."""
+    path = str(request.path or '/')
+
+    if path in _PUBLIC_UNAUTHENTICATED_PATHS:
+        return None
+
+    if _authenticated_user():
+        return None
+
+    if path in _MACHINE_AUTH_PATHS and _valid_machine_auth():
+        return None
+
+    if path.startswith('/api/'):
+        return jsonify({
+            'success': False,
+            'authenticated': False,
+            'error': 'Autenticación requerida'
+        }), 401
+
+    # Páginas, assets y deep-links: nunca entregar contenido del sistema antes
+    # del login. Se conserva el destino para volver exactamente allí después.
+    from urllib.parse import urlencode
+    target = request.full_path if request.query_string else request.path
+    target = _safe_next_path(target.rstrip('?'))
+    return redirect('/login?' + urlencode({'next': target}))
+
+
+@app.after_request
+def _commit15_security_headers(response):
+    """Headers que endurecen la aplicación sin alterar Plotly/JS actual."""
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    response.headers['Permissions-Policy'] = (
+        'camera=(), microphone=(), geolocation=(), payment=()'
+    )
+    response.headers['Strict-Transport-Security'] = (
+        'max-age=31536000; includeSubDomains'
+    )
+    response.headers['X-Robots-Tag'] = 'noindex, nofollow, noarchive'
+
+    # Evita que, después de cerrar sesión, el botón Atrás muestre una copia
+    # cacheada del HTML privado. JS/CSS estáticos conservan su caché normal.
+    if response.mimetype == 'text/html' or request.path.startswith('/api/auth/'):
+        response.headers['Cache-Control'] = 'no-store, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
+
+    # El login no depende de CDNs: puede usar una CSP estricta sin afectar el
+    # dashboard, Plotly ni los recursos existentes de la aplicación.
+    if request.path == '/login':
+        response.headers['Content-Security-Policy'] = (
+            "default-src 'none'; "
+            "style-src 'unsafe-inline'; "
+            "script-src 'unsafe-inline'; "
+            "connect-src 'self'; "
+            "form-action 'self'; "
+            "base-uri 'none'; "
+            "frame-ancestors 'none'"
+        )
+    return response
 # ============================================================================
 # COMMIT 16 — RESEARCH FEDERATION V1.2 / SHADOW BRIDGE
 # Sólo lectura para UI; el tracker live es fail-open y no modifica señales.
@@ -28112,21 +28287,24 @@ def api_auth_me():
 
 @app.route('/api/auth/login', methods=['POST'])
 def api_auth_login():
-    """
-    Autenticación server-side.
-
-    Body:
-        {
-            "user": "Willer",
-            "password": "..."
-        }
-    """
+    """Autenticación privada para Willer, Danilo y Damir."""
     import hmac
 
     data = request.get_json(silent=True) or {}
-
     user = str(data.get('user', '')).strip()
     password = str(data.get('password', ''))
+
+    blocked_for = _auth_rate_block_remaining(user)
+    if blocked_for > 0:
+        session.clear()
+        response = jsonify({
+            'success': False,
+            'authenticated': False,
+            'error': 'Demasiados intentos. Espera unos minutos.'
+        })
+        response.status_code = 429
+        response.headers['Retry-After'] = str(blocked_for)
+        return response
 
     users = _auth_users()
     expected_password = users.get(user, '')
@@ -28134,22 +28312,22 @@ def api_auth_login():
     if (
         not user
         or not expected_password
-        or not hmac.compare_digest(
-            password,
-            expected_password
-        )
+        or not hmac.compare_digest(password, expected_password)
     ):
+        _auth_record_failure(user)
         session.clear()
-
         return jsonify({
             'success': False,
             'authenticated': False,
             'error': 'Usuario o contraseña incorrectos'
         }), 401
 
+    _auth_clear_failures(user)
+    # session.clear() evita conservar datos de una sesión previa (session
+    # fixation). Flask vuelve a firmar la cookie con el secreto del servidor.
     session.clear()
     session['authenticated_user'] = user
-    session.permanent = False
+    session.permanent = True
 
     return jsonify({
         'success': True,
@@ -28170,6 +28348,15 @@ def api_auth_logout():
         'authenticated': False,
         'user': None
     })
+@app.route('/login')
+def login_page():
+    """Única pantalla visible antes de autenticarse."""
+    next_url = _safe_next_path(request.args.get('next'))
+    if _authenticated_user():
+        return redirect(next_url)
+    return render_template('login.html', next_url=next_url)
+
+
 @app.route('/')
 def index():
     return render_template('index.html', is_futures=False)
@@ -28210,14 +28397,8 @@ def analytics_page():
 
 @app.route('/health')
 def health():
-    """Health check para Render + telemetría de memoria no sensible."""
-    return jsonify({
-        'status': 'ok',
-        'timestamp': datetime.now(bolivia_tz).isoformat(),
-        'system': 'Crypto Trader Analyst Pro',
-        'version': '2.0',
-        'memory': _memory_runtime_state()
-    })
+    """Health check público mínimo para Render, sin telemetría interna."""
+    return jsonify({'status': 'ok'})
 
 # === CORRECCIÓN: app.py - Manejo de errores en rutas API ===
 # Ubicación: Reemplazar rutas  y /api/telegram/test
@@ -33250,8 +33431,7 @@ def api_run_scheduled():
     """Ejecutar análisis programado para temporalidades específicas - CON GRÁFICOS Y PATRONES"""
     try:
         # Verificar autenticación simple (evitar ejecución no autorizada)
-        auth_key = request.headers.get('X-Auth-Key')
-        if auth_key != os.environ.get('SCHEDULED_AUTH_KEY', 'crypto_trader_analyst_2025'):
+        if not _valid_machine_auth():
             return jsonify({'success': False, 'error': 'No autorizado'}), 401
         
         data = request.get_json()
@@ -39497,9 +39677,7 @@ def api_review_run_now():
     """
     try:
         # Autenticación
-        auth_key = request.headers.get('X-Auth-Key')
-        expected_key = os.environ.get('SCHEDULED_AUTH_KEY', 'crypto_trader_analyst_2025')
-        if auth_key != expected_key:
+        if not _valid_machine_auth():
             return jsonify({'success': False, 'error': 'No autorizado'}), 401
         
         review = _get_review_trader()
@@ -39579,9 +39757,7 @@ def api_fix_confidence_overflow():
     Protegida con X-Auth-Key. Idempotente.
     """
     try:
-        auth_key = request.headers.get('X-Auth-Key', '')
-        expected = os.environ.get('SCHEDULED_AUTH_KEY', 'crypto_trader_analyst_2025')
-        if auth_key != expected:
+        if not _valid_machine_auth():
             return jsonify({'success': False, 'error': 'Unauthorized'}), 401
         
         from review_trader import review_trader
@@ -39636,9 +39812,7 @@ def api_admin_dedup_signals():
     Devuelve: cuántos grupos había, cuántos duplicados se borraron.
     """
     try:
-        auth_key = request.headers.get('X-Auth-Key', '')
-        expected = os.environ.get('SCHEDULED_AUTH_KEY', 'crypto_trader_analyst_2025')
-        if auth_key != expected:
+        if not _valid_machine_auth():
             return jsonify({'success': False, 'error': 'Unauthorized'}), 401
         
         from review_trader import review_trader
