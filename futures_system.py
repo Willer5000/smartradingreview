@@ -3308,30 +3308,40 @@ class FuturesAnalysis(TradingExpertSystem):
             )
     
             # ==============================================================
-            # 4. RR
+            # 4. RR — Commit 13 contextual
             # ==============================================================
-            if rr < 1.8:
+            # Entry/SL/TP are chosen first.  R/R then judges the resulting
+            # economics. A structurally reachable TP below the legacy 1.8R may
+            # survive, but it receives less Safety contribution and must pass
+            # the leverage/economic viability check later.
+            try:
+                minimum_viable_rr = max(
+                    1.0,
+                    float(levels.get('minimum_viable_rr') or 1.8)
+                )
+                maximum_technical_rr = max(
+                    minimum_viable_rr,
+                    float(levels.get('maximum_technical_rr') or 4.5)
+                )
+            except (TypeError, ValueError):
+                minimum_viable_rr, maximum_technical_rr = 1.8, 4.5
+
+            if rr < minimum_viable_rr:
                 rr_component = 0
-    
+            elif rr < 1.8:
+                rr_component = 55
             elif rr < 2.0:
-                rr_component = 45
-    
+                rr_component = 70
             elif rr < 2.5:
-                rr_component = 65
-    
+                rr_component = 82
             elif rr < 3.0:
-                rr_component = 80
-    
-            elif rr < 3.5:
-                rr_component = 90
-    
-            elif rr <= 4.5:
+                rr_component = 92
+            elif rr <= min(3.5, maximum_technical_rr):
                 rr_component = 100
-    
+            elif rr <= maximum_technical_rr:
+                rr_component = 88
             else:
-                # Un RR demasiado grande suele implicar
-                # un TP excesivamente lejano.
-                rr_component = 65
+                rr_component = 55
     
             # ==============================================================
             # 5. CONDICIONES ESTRUCTURALES
@@ -3578,7 +3588,7 @@ class FuturesAnalysis(TradingExpertSystem):
         tp_quality_score=0.0,
         sl_avoidance_quality=0.0,
     ):
-        """RC9.7.14 FINAL V6 — standard technical leverage, size-decoupled.
+        """Commit 13 / V6 core — target-aware technical leverage, size-decoupled.
 
         Leverage is selected from structural SL distance, ATR stress, execution
         quality, public contract limits and an estimated liquidation buffer.
@@ -3620,6 +3630,16 @@ class FuturesAnalysis(TradingExpertSystem):
             min_leverage_economic = target_profit / max(1e-9, margin * edge_after_cost)
             minimum_roi_tp = float(FUTURES_RISK_CONFIG['minimum_roi_tp_pct'])
             min_leverage_by_roi = minimum_roi_tp / tp_pct
+            target_rr = tp_pct / sl_pct if sl_pct > 0 else 0.0
+            # Commit 13 preserves V6 behavior for the traditional >=1.8R lane.
+            # Only a newly-allowed compact target must prove that the same
+            # technical leverage envelope can still deliver useful economics.
+            compact_target = 0 < target_rr < 1.8
+            minimum_required_leverage = (
+                max(1.0, min_leverage_economic, min_leverage_by_roi)
+                if compact_target
+                else 1.0
+            )
 
             min_leverage_tf, tf_reference_max = LEVERAGE_RANGES.get(timeframe, (1, 10))
             absolute_max = max(1.0, float(FUTURES_RISK_CONFIG['absolute_max_leverage']))
@@ -3768,7 +3788,7 @@ class FuturesAnalysis(TradingExpertSystem):
             )
 
             policy = select_risk_budget_leverage(
-                minimum_required=1.0,
+                minimum_required=minimum_required_leverage,
                 sl_distance_pct=sl_pct,
                 # V6: these are technical headroom caps, not wallet-loss caps.
                 max_by_risk=technical_hard_cap,
@@ -3817,6 +3837,9 @@ class FuturesAnalysis(TradingExpertSystem):
                 'leverage': leverage,
                 'min_economic': round(min_leverage_economic, 2),
                 'min_by_roi': round(min_leverage_by_roi, 2),
+                'target_rr': round(target_rr, 3),
+                'compact_target_economic_check': bool(compact_target),
+                'minimum_required_leverage': round(minimum_required_leverage, 2),
                 'max_by_risk': round(technical_hard_cap, 2),
                 'max_by_atr_stress': round(technical_hard_cap, 2),
                 'max_by_liquidation_buffer': round(max_by_liquidation_buffer, 2),
@@ -4136,11 +4159,22 @@ class FuturesAnalysis(TradingExpertSystem):
                     'minimum_publication_sl_avoidance_quality'
                 ]
             ),
-            'risk_reward_min': float(
-                FUTURES_RISK_CONFIG['minimum_publication_rr']
+            'risk_reward_min': max(
+                1.0,
+                safe_float(
+                    result.get('minimum_viable_rr'),
+                    FUTURES_RISK_CONFIG['minimum_publication_rr']
+                )
             ),
-            'risk_reward_max': float(
-                FUTURES_RISK_CONFIG['maximum_publication_rr']
+            'risk_reward_max': max(
+                safe_float(
+                    result.get('minimum_viable_rr'),
+                    FUTURES_RISK_CONFIG['minimum_publication_rr']
+                ),
+                safe_float(
+                    result.get('maximum_technical_rr'),
+                    FUTURES_RISK_CONFIG['maximum_publication_rr']
+                )
             ),
             'roi_tp_min': float(
                 FUTURES_RISK_CONFIG['minimum_roi_tp_pct']
@@ -4227,7 +4261,7 @@ class FuturesAnalysis(TradingExpertSystem):
             ],
             'RR',
             (
-                'R/R fuera de banda premium '
+                'R/R fuera de banda técnica '
                 f"{thresholds['risk_reward_min']:.1f}-"
                 f"{thresholds['risk_reward_max']:.1f}"
             )
@@ -4591,36 +4625,37 @@ class FuturesAnalysis(TradingExpertSystem):
             )
         }
     @staticmethod
-    def _q2_rr_quality(rr):
-        """
-        Calidad geométrica del RR SIN cambiar los umbrales operativos.
+    def _q2_rr_quality(rr, rr_policy=None):
+        """Commit 13 — contextual economic quality of an already-real TP.
 
-        Premium actual:
-            1.8 <= RR <= 3.5
+        R/R no longer manufactures the target.  It scores the economics of a
+        structural target after Entry and SL exist.  The profile supplies a
+        bounded technical floor by instrument family/timeframe.
         """
-
         try:
-            rr = float(
-                rr
-                or 0
-            )
-
-        except (
-            TypeError,
-            ValueError
-        ):
+            rr = float(rr or 0)
+        except (TypeError, ValueError):
             return 0.0
 
-        if 1.8 <= rr < 2.0:
-            return 80.0
+        policy = rr_policy if isinstance(rr_policy, dict) else {}
+        try:
+            floor = max(1.0, float(policy.get('technical_rr_floor') or 1.8))
+            pref_lo = max(floor, float(policy.get('preferred_rr_min') or 2.0))
+            pref_hi = max(pref_lo, float(policy.get('preferred_rr_max') or 3.0))
+            ceiling = max(pref_hi, float(policy.get('technical_rr_ceiling') or 4.5))
+        except (TypeError, ValueError):
+            floor, pref_lo, pref_hi, ceiling = 1.8, 2.0, 3.0, 4.5
 
-        if 2.0 <= rr <= 3.0:
+        if rr < floor or rr > ceiling:
+            return 0.0
+        if pref_lo <= rr <= pref_hi:
             return 100.0
-
-        if 3.0 < rr <= 3.5:
-            return 90.0
-
-        return 0.0
+        if floor <= rr < pref_lo:
+            span = max(0.05, pref_lo - floor)
+            return 70.0 + 25.0 * ((rr - floor) / span)
+        # Above preferred band but still inside the technical ceiling.
+        span = max(0.05, ceiling - pref_hi)
+        return max(72.0, 95.0 - 23.0 * ((rr - pref_hi) / span))
 
 
     def _q2_execution_pair_score(
@@ -4628,29 +4663,23 @@ class FuturesAnalysis(TradingExpertSystem):
         sl_score,
         tp_score,
         rr,
-        weights=None
+        weights=None,
+        rr_policy=None,
     ):
-        """
-        Compara PARES SL + TP.
-
-        Commit 4 permite que ReviewTrader cambie *sólo* la ponderación entre
-        candidatos estructurales ya válidos. Nunca crea SL/TP artificiales.
-        Sin evidencia robusta, conserva exactamente 40/30/30.
-        """
-
-        rr_quality = self._q2_rr_quality(rr)
+        """Compare an independent SL decision with an independent TP decision."""
+        rr_quality = self._q2_rr_quality(rr, rr_policy=rr_policy)
 
         safe_weights = {
             'sl': 0.40,
-            'tp': 0.30,
-            'rr': 0.30,
+            'tp': 0.35,
+            'rr': 0.25,
         }
         if isinstance(weights, dict):
             try:
                 candidate = {
                     'sl': max(0.0, float(weights.get('sl', 0.40) or 0.40)),
-                    'tp': max(0.0, float(weights.get('tp', 0.30) or 0.30)),
-                    'rr': max(0.0, float(weights.get('rr', 0.30) or 0.30)),
+                    'tp': max(0.0, float(weights.get('tp', 0.35) or 0.35)),
+                    'rr': max(0.0, float(weights.get('rr', 0.25) or 0.25)),
                 }
                 total = sum(candidate.values())
                 if total > 0:
@@ -4912,6 +4941,24 @@ class FuturesAnalysis(TradingExpertSystem):
         except Exception:
             geometry_profile = {'_atr_abs': atr}
 
+        try:
+            technical_rr_floor = max(
+                1.0,
+                float((geometry_profile or {}).get('technical_rr_floor') or 1.8)
+            )
+            technical_rr_ceiling = max(
+                technical_rr_floor,
+                float((geometry_profile or {}).get('technical_rr_ceiling') or 4.5)
+            )
+        except (TypeError, ValueError):
+            technical_rr_floor = 1.8
+            technical_rr_ceiling = 4.5
+
+        # User-facing code receives only a plain technical threshold. Internal
+        # specialist/committee names stay backend-only.
+        result['minimum_viable_rr'] = round(technical_rr_floor, 2)
+        result['maximum_technical_rr'] = round(technical_rr_ceiling, 2)
+
         diagnostics[
             'evaluated'
         ] = True
@@ -5132,170 +5179,89 @@ class FuturesAnalysis(TradingExpertSystem):
         pair_candidates = []
 
         # ============================================================
-        # EVALUAR SL + TP COMO PAREJA
+        # COMMIT 13 — SL INDEPENDIENTE -> TP INDEPENDIENTE -> ARBITRAJE
         # ============================================================
+        # El mejor SL se fija primero por invalidación/protección.  TP no puede
+        # elegir un SL distinto sólo para mejorar el R/R. Después, los objetivos
+        # estructurales compiten contra ese riesgo real y el árbitro económico
+        # valida la pareja final. Esto además reduce el coste de O(6×20) a O(20).
+        selected_sl_pair = next(
+            (item for item in scored_sl if float(item[1]) >= minimum_sl_quality),
+            None,
+        )
 
-        for (
-            sl_candidate,
-            sl_score
-        ) in scored_sl:
+        if selected_sl_pair is not None:
+            sl_candidate, sl_score = selected_sl_pair
+            sl_price = float(sl_candidate['price'])
+            risk = abs(entry - sl_price)
 
-            # Q2 NO baja el filtro SL actual.
-            if (
-                sl_score
-                < minimum_sl_quality
-            ):
-                continue
+            if risk > 0:
+                sl_distance_pct = risk / entry * 100
+                minimum_tp_distance = max(
+                    technical_rr_floor * sl_distance_pct,
+                    0.4,
+                )
 
-            sl_price = float(
-                sl_candidate[
-                    'price'
-                ]
-            )
+                for tp_candidate in tp_candidates:
+                    try:
+                        tp_price = float(tp_candidate.get('price', 0) or 0)
+                    except (TypeError, ValueError):
+                        continue
 
-            risk = abs(
-                entry
-                - sl_price
-            )
+                    if not math.isfinite(tp_price):
+                        continue
 
-            if risk <= 0:
-                continue
+                    valid_geometry = (
+                        (direction == 'long' and tp_price > entry)
+                        or (direction == 'short' and 0 < tp_price < entry)
+                    )
+                    if not valid_geometry:
+                        continue
 
-            sl_distance_pct = (
-                risk
-                / entry
-                * 100
-            )
+                    reward = abs(tp_price - entry)
+                    rr = reward / risk if risk > 0 else 0
+                    if not (technical_rr_floor <= rr <= technical_rr_ceiling):
+                        continue
 
-            minimum_tp_distance = max(
-                1.8
-                * sl_distance_pct,
-                0.4
-            )
-
-            for tp_candidate in tp_candidates:
-
-                try:
-                    tp_price = float(
-                        tp_candidate.get(
-                            'price',
-                            0
+                    try:
+                        tp_score = float(
+                            self._score_tp_candidate(
+                                tp_candidate,
+                                entry,
+                                direction,
+                                tp_candidates,
+                                minimum_tp_distance,
+                                sl_distance_pct=sl_distance_pct,
+                                geometry_profile=geometry_profile,
+                            )
+                            or 0
                         )
-                        or 0
-                    )
+                    except Exception:
+                        continue
 
-                except (
-                    TypeError,
-                    ValueError
-                ):
-                    continue
+                    tp_score = max(0.0, min(100.0, tp_score))
+                    if tp_score < minimum_tp_quality:
+                        continue
 
-                if not math.isfinite(
-                    tp_price
-                ):
-                    continue
-
-                valid_geometry = (
-                    (
-                        direction == 'long'
-                        and tp_price > entry
-                    )
-                    or (
-                        direction == 'short'
-                        and 0 < tp_price < entry
-                    )
-                )
-
-                if not valid_geometry:
-                    continue
-
-                reward = abs(
-                    tp_price
-                    - entry
-                )
-
-                rr = (
-                    reward
-                    / risk
-                    if risk > 0
-                    else 0
-                )
-
-                # ====================================================
-                # MISMA BANDA PREMIUM ACTUAL
-                # ====================================================
-
-                if not (
-                    1.8
-                    <= rr
-                    <= 3.5
-                ):
-                    continue
-
-                try:
-                    tp_score = float(
-                        self
-                        ._score_tp_candidate(
-                            tp_candidate,
-                            entry,
-                            direction,
-                            tp_candidates,
-                            minimum_tp_distance,
-                            sl_distance_pct=(
-                                sl_distance_pct
-                            ),
-                            geometry_profile=geometry_profile
-                        )
-                        or 0
-                    )
-
-                except Exception:
-                    continue
-
-                tp_score = max(
-                    0.0,
-                    min(
-                        100.0,
-                        tp_score
-                    )
-                )
-
-                # Q2 tampoco baja TP Quality.
-                if (
-                    tp_score
-                    < minimum_tp_quality
-                ):
-                    continue
-
-                pair_score = (
-                    self
-                    ._q2_execution_pair_score(
+                    pair_score = self._q2_execution_pair_score(
                         sl_score,
                         tp_score,
                         rr,
-                        weights=q2_weights
+                        weights=q2_weights,
+                        rr_policy=geometry_profile,
                     )
-                )
+                    pair_candidates.append({
+                        'sl_candidate': sl_candidate,
+                        'tp_candidate': tp_candidate,
+                        'sl_score': sl_score,
+                        'tp_score': tp_score,
+                        'rr': rr,
+                        'pair_score': pair_score,
+                    })
 
-                pair_candidates.append({
-                    'sl_candidate':
-                        sl_candidate,
-
-                    'tp_candidate':
-                        tp_candidate,
-
-                    'sl_score':
-                        sl_score,
-
-                    'tp_score':
-                        tp_score,
-
-                    'rr':
-                        rr,
-
-                    'pair_score':
-                        pair_score
-                })
+        diagnostics['sl_candidates_considered'] = len(scored_sl)
+        diagnostics['tp_candidates_considered'] = len(tp_candidates)
+        diagnostics['independent_sl_selected'] = bool(selected_sl_pair is not None)
 
         diagnostics[
             'pairs_evaluated'
@@ -5397,16 +5363,17 @@ class FuturesAnalysis(TradingExpertSystem):
                 base_sl_score,
                 base_tp_score,
                 base_rr,
-                weights=q2_weights
+                weights=q2_weights,
+                rr_policy=geometry_profile,
             )
             if (
                 base_sl_score
                 >= minimum_sl_quality
                 and base_tp_score
                 >= minimum_tp_quality
-                and 1.8
+                and technical_rr_floor
                 <= base_rr
-                <= 3.5
+                <= technical_rr_ceiling
             )
             else 0.0
         )
@@ -5532,7 +5499,7 @@ class FuturesAnalysis(TradingExpertSystem):
                     'SL estructural'
                 )
             )
-            + ' [Q2 pair]'
+            + ' [nivel estructural refinado]'
         )
 
         result[
@@ -5544,7 +5511,7 @@ class FuturesAnalysis(TradingExpertSystem):
                     'TP estructural'
                 )
             )
-            + ' [Q2 pair]'
+            + ' [nivel estructural refinado]'
         )
 
         result[

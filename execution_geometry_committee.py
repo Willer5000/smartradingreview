@@ -21,13 +21,24 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, Mapping
 
-VERSION = "RC9_8_EXECUTION_GEOMETRY_AUDITED_V1"
+VERSION = "COMMIT13_EXECUTION_GEOMETRY_V2"
 
 FUTURES_GROUPS = {
     "CORE1": {"BTC-USDT", "ETH-USDT", "SOL-USDT"},
     "CORE2": {"XRP-USDT", "ADA-USDT"},
     "MEDIUM": {"BNB-USDT", "LINK-USDT", "AVAX-USDT", "NEAR-USDT", "DOT-USDT"},
     "HIGH": {"SUI-USDT", "HYPE-USDT", "APT-USDT", "INJ-USDT", "SEI-USDT"},
+}
+
+# Commit 13 — Multi-Activo shares the deterministic execution engine but keeps
+# its own instrument families.  These sets are intentionally local constants:
+# importing multiasset_system here would create a circular dependency.
+MULTIASSET_BUCKETS = {
+    "MULTI_US_INDEX": {"SPY-USDT", "QQQ-USDT"},
+    "MULTI_ENERGY": {"CL-USDT", "NATGAS-USDT"},
+    "MULTI_INDUSTRIAL_METAL": {"COPPER-USDT"},
+    "MULTI_PRECIOUS_METAL": {"XAG-USDT"},
+    "MULTI_CHINA_INDEX": {"KSTR-USDT"},
 }
 
 SPOT_CLASSES = {
@@ -78,6 +89,13 @@ def instrument_bucket(market_type: Any, symbol: Any) -> str:
     sym = canonical_symbol(symbol)
     if market == "spot":
         return SPOT_CLASSES.get(sym, "SPOT_OTHER")
+    # Multi-Activo subclasses FuturesAnalysis, therefore market_type remains
+    # "futures" inside the common geometry engine.  Symbol membership is the
+    # deterministic discriminator and prevents crypto priors leaking into
+    # energy/index/metals/China contracts.
+    for bucket, members in MULTIASSET_BUCKETS.items():
+        if sym in members:
+            return bucket
     for bucket, members in FUTURES_GROUPS.items():
         if sym in members:
             return bucket
@@ -218,6 +236,12 @@ def build_profile(
         mission = "ACCUMULATION_ROTATION"
         speed = "POSITIONAL"
         preferred_rr = (1.8, 4.5)
+        # R/R remains an economic filter, not a target generator.  Commit 13
+        # allows a nearer structural objective to compete when it is genuinely
+        # reachable; the final economics/publication layers still decide if the
+        # trade is worth taking.
+        technical_rr_floor = 1.40
+        technical_rr_ceiling = 4.50
         near_max_atr = 0.55
         deep_min_atr = 0.90
         hard_max_reach_atr = {"4h": 3.4, "12h": 3.8, "1D": 4.2, "1W": 4.8}.get(tf, 3.2)
@@ -225,22 +249,84 @@ def build_profile(
         weights["structure_liquidity"] += 0.08
         weights["volume_profile"] += 0.08
         if bucket == "SPOT_BTC_USDT":
+            technical_rr_floor = 1.50
             weights["pullback_retest"] += 0.10
             weights["trend_ema"] += 0.08
         elif bucket == "SPOT_PAXG_USDT":
+            technical_rr_floor = 1.40
             weights["structure_liquidity"] += 0.10
             weights["fibonacci"] += 0.05
             hard_max_reach_atr += 0.25
         elif bucket == "SPOT_PAXG_BTC_ROTATION":
+            technical_rr_floor = 1.30
             weights["volume_profile"] += 0.12
             weights["structure_liquidity"] += 0.12
             weights["fibonacci"] += 0.08
             deep_min_atr = 0.75
     else:
         mission = "FAST_TACTICAL_EXECUTION"
-        if bucket == "CORE1":
+        # Commit 13 — market-specific execution horizons.  The floor is only
+        # the minimum R/R at which an already-detected structural target may
+        # compete; it never fabricates a target and it never lowers Safety.
+        technical_rr_ceiling = 4.50
+        if bucket == "MULTI_US_INDEX":
+            speed = "FAST"
+            preferred_rr = (1.7, 2.8)
+            technical_rr_floor = 1.45
+            near_max_atr = 0.55
+            deep_min_atr = 0.82
+            hard_max_reach_atr = {"1h": 2.4, "4h": 2.9, "1D": 3.3}.get(tf, 2.7)
+            target_atr_soft_max = 4.1
+            weights["volume_profile"] += 0.12
+            weights["trend_ema"] += 0.10
+            weights["pullback_retest"] += 0.10
+        elif bucket == "MULTI_ENERGY":
+            speed = "FASTER"
+            preferred_rr = (1.6, 2.7)
+            technical_rr_floor = 1.40
+            near_max_atr = 0.58
+            deep_min_atr = 0.86
+            hard_max_reach_atr = {"1h": 2.6, "4h": 3.1, "1D": 3.5}.get(tf, 2.9)
+            target_atr_soft_max = 4.2
+            weights["structure_liquidity"] += 0.12
+            weights["volatility_risk"] += 0.12
+            weights["pullback_retest"] += 0.08
+        elif bucket == "MULTI_INDUSTRIAL_METAL":
+            speed = "FAST"
+            preferred_rr = (1.7, 2.9)
+            technical_rr_floor = 1.45
+            near_max_atr = 0.56
+            deep_min_atr = 0.85
+            hard_max_reach_atr = {"1h": 2.5, "4h": 3.0, "1D": 3.5}.get(tf, 2.9)
+            target_atr_soft_max = 4.4
+            weights["structure_liquidity"] += 0.10
+            weights["volume_profile"] += 0.10
+        elif bucket == "MULTI_PRECIOUS_METAL":
+            speed = "FAST"
+            preferred_rr = (1.7, 3.0)
+            technical_rr_floor = 1.45
+            near_max_atr = 0.58
+            deep_min_atr = 0.86
+            hard_max_reach_atr = {"1h": 2.6, "4h": 3.1, "1D": 3.6}.get(tf, 3.0)
+            target_atr_soft_max = 4.6
+            weights["structure_liquidity"] += 0.10
+            weights["volume_profile"] += 0.10
+            weights["fibonacci"] += 0.05
+        elif bucket == "MULTI_CHINA_INDEX":
+            speed = "FASTER"
+            preferred_rr = (1.6, 2.7)
+            technical_rr_floor = 1.40
+            near_max_atr = 0.54
+            deep_min_atr = 0.82
+            hard_max_reach_atr = {"1h": 2.3, "4h": 2.8, "1D": 3.2}.get(tf, 2.6)
+            target_atr_soft_max = 3.9
+            weights["structure_liquidity"] += 0.12
+            weights["pullback_retest"] += 0.10
+            weights["volatility_risk"] += 0.08
+        elif bucket == "CORE1":
             speed = "FAST"
             preferred_rr = (2.0, 3.4)
+            technical_rr_floor = 1.55
             near_max_atr = 0.60
             deep_min_atr = 0.90
             hard_max_reach_atr = {"30m": 2.4, "1h": 2.7, "2h": 2.9, "4h": 3.2, "12h": 3.4, "1D": 3.6}.get(tf, 3.0)
@@ -254,6 +340,7 @@ def build_profile(
             # stereotypes per coin.
             speed = "FAST"
             preferred_rr = (1.9, 3.2)
+            technical_rr_floor = 1.50
             near_max_atr = 0.58
             deep_min_atr = 0.88
             hard_max_reach_atr = {"30m": 2.3, "1h": 2.6, "2h": 2.8, "4h": 3.0, "12h": 3.2, "1D": 3.4}.get(tf, 2.8)
@@ -263,6 +350,7 @@ def build_profile(
         elif bucket == "MEDIUM":
             speed = "FASTER"
             preferred_rr = (1.9, 3.0)
+            technical_rr_floor = 1.45
             near_max_atr = 0.58
             deep_min_atr = 0.85
             hard_max_reach_atr = {"30m": 2.3, "1h": 2.6, "2h": 2.8, "4h": 3.0, "12h": 3.2, "1D": 3.4}.get(tf, 2.8)
@@ -272,6 +360,7 @@ def build_profile(
         elif bucket == "HIGH":
             speed = "VERY_FAST"
             preferred_rr = (1.8, 2.6)
+            technical_rr_floor = 1.35
             near_max_atr = 0.55
             deep_min_atr = 0.80
             hard_max_reach_atr = {"30m": 2.2, "1h": 2.4, "2h": 2.6, "4h": 2.8, "12h": 3.0, "1D": 3.2}.get(tf, 2.6)
@@ -282,6 +371,7 @@ def build_profile(
         else:
             speed = "FAST"
             preferred_rr = (1.9, 3.2)
+            technical_rr_floor = 1.50
             near_max_atr = 0.58
             deep_min_atr = 0.88
             hard_max_reach_atr = 2.8
@@ -376,6 +466,8 @@ def build_profile(
         "specialist_weights": weights,
         "preferred_rr_min": round(preferred_rr[0], 3),
         "preferred_rr_max": round(preferred_rr[1], 3),
+        "technical_rr_floor": round(max(1.0, technical_rr_floor), 3),
+        "technical_rr_ceiling": round(max(technical_rr_floor, technical_rr_ceiling), 3),
         "near_max_atr": round(near_max_atr, 4),
         "deep_min_atr": round(deep_min_atr, 4),
         "hard_max_reach_atr": round(max(1.5, hard_max_reach_atr), 4),
@@ -499,19 +591,38 @@ def tp_candidate_adjustment(
     rr: float,
     distance_atr: float | None,
 ) -> float:
+    """Commit 13 target ranking: structure first, reachability second, R/R third.
+
+    The function only re-ranks structural targets already detected by the base
+    engine. ReviewTrader is deliberately weak at first: N<8 has zero influence;
+    after that its MFE/tp_speed hint is bounded and can never create a TP.
+    """
     profile = profile or {}
     weights = profile.get("specialist_weights") or {}
+    learning = profile.get("learning") or {}
     family = entry_family(candidate_type)
     family_weight = _f(weights.get(family), 1.0)
     rr = max(0.0, _f(rr, 0.0))
-    rr_lo = _f(profile.get("preferred_rr_min"), 1.8)
-    rr_hi = _f(profile.get("preferred_rr_max"), 3.5)
+    rr_floor = max(1.0, _f(profile.get("technical_rr_floor"), 1.8))
+    rr_lo = max(rr_floor, _f(profile.get("preferred_rr_min"), 1.8))
+    rr_hi = max(rr_lo, _f(profile.get("preferred_rr_max"), 3.5))
+    rr_ceiling = max(rr_hi, _f(profile.get("technical_rr_ceiling"), 4.5))
     adj = (family_weight - 1.0) * 12.0
 
+    # A target near the preferred band gets the best economic score.  Targets
+    # between the technical floor and preferred band remain valid rather than
+    # being discarded merely to manufacture 1.8R+.
     if rr_lo <= rr <= rr_hi:
         adj += 8.0
+    elif rr_floor <= rr < rr_lo:
+        span = max(0.05, rr_lo - rr_floor)
+        adj += 2.0 + 4.0 * ((rr - rr_floor) / span)
+    elif rr < rr_floor:
+        adj -= min(16.0, 8.0 + (rr_floor - rr) * 10.0)
+    elif rr > rr_ceiling:
+        adj -= min(16.0, 8.0 + (rr - rr_ceiling) * 6.0)
     elif rr > rr_hi:
-        adj -= min(12.0, (rr - rr_hi) * 6.0)
+        adj -= min(10.0, (rr - rr_hi) * 5.0)
 
     if distance_atr is not None:
         d = max(0.0, _f(distance_atr, 0.0))
@@ -519,10 +630,32 @@ def tp_candidate_adjustment(
         if d <= soft_max:
             adj += 5.0
         else:
-            # Faster groups progressively dislike targets that demand an
-            # unnecessarily long excursion, but this remains a soft ranking.
             speed = str(profile.get("speed") or "")
             scale = 3.0 if speed == "VERY_FAST" else 2.2 if speed == "FASTER" else 1.5
             adj -= min(14.0, (d - soft_max) * scale)
 
-    return round(max(-16.0, min(16.0, adj)), 3)
+    # ReviewTrader continuity — intentionally bounded.  The profile already
+    # guarantees zero weight for N<8. avg_mfe_r is observed excursion, not a
+    # promise; it can only bias ranking among technically valid targets.
+    n = int(_f(learning.get("sample_size"), 0))
+    weight = max(0.0, min(0.16, _f(learning.get("weight"), 0.0)))
+    if n >= 8 and weight > 0:
+        avg_mfe = _f(learning.get("avg_mfe_r"), 0.0)
+        speed_bias = max(0.0, min(1.0, _f(learning.get("tp_speed_bias"), 0.0)))
+        if avg_mfe > 0:
+            # Reward targets that sit inside observed favorable excursion and
+            # progressively penalize targets far beyond it.
+            ratio = rr / max(0.25, avg_mfe)
+            if 0.70 <= ratio <= 1.15:
+                adj += 5.0 * (weight / 0.16)
+            elif ratio > 1.35:
+                adj -= min(8.0, (ratio - 1.35) * 5.0) * (weight / 0.16)
+        if speed_bias > 0:
+            # Faster-target bias is strongest close to the technical floor but
+            # capped so learning never overrules structure or Safety.
+            band = max(0.10, rr_hi - rr_floor)
+            closeness = max(0.0, min(1.0, (rr_hi - rr) / band))
+            adj += min(6.0, speed_bias * 6.0 * closeness * (weight / 0.16))
+
+    return round(max(-18.0, min(18.0, adj)), 3)
+

@@ -13870,6 +13870,40 @@ class TradingExpertSystem:
                 or entry <= 0
             ):
                 return -1
+
+            # ==========================================================
+            # COMMIT 13 — TARGET ECONOMICS / REACHABILITY
+            # ==========================================================
+            # R/R is evaluated after a real structural target exists.  The
+            # contextual floor only decides whether that target may compete;
+            # it never fabricates a farther TP to make the ratio look better.
+            technical_rr_floor = 1.8
+            preferred_rr_min = 2.0
+            preferred_rr_max = 3.0
+            technical_rr_ceiling = 4.5
+            if isinstance(geometry_profile, dict):
+                try:
+                    technical_rr_floor = max(
+                        1.0,
+                        float(geometry_profile.get('technical_rr_floor') or 1.8)
+                    )
+                    preferred_rr_min = max(
+                        technical_rr_floor,
+                        float(geometry_profile.get('preferred_rr_min') or 2.0)
+                    )
+                    preferred_rr_max = max(
+                        preferred_rr_min,
+                        float(geometry_profile.get('preferred_rr_max') or 3.0)
+                    )
+                    technical_rr_ceiling = max(
+                        preferred_rr_max,
+                        float(geometry_profile.get('technical_rr_ceiling') or 4.5)
+                    )
+                except (TypeError, ValueError):
+                    technical_rr_floor = 1.8
+                    preferred_rr_min = 2.0
+                    preferred_rr_max = 3.0
+                    technical_rr_ceiling = 4.5
     
             # ==========================================================
             # DIRECCIÓN
@@ -13921,7 +13955,7 @@ class TradingExpertSystem:
                     / sl_distance_pct
                 )
 
-                if rr < 1.8:
+                if rr < technical_rr_floor:
                     rr_penalty = 35
 
             if below_min_distance:
@@ -13939,12 +13973,12 @@ class TradingExpertSystem:
             ):
     
                 optimal_distance = (
-                    2.5
+                    ((preferred_rr_min + preferred_rr_max) / 2.0)
                     * sl_distance_pct
                 )
     
                 max_reasonable = (
-                    4.5
+                    technical_rr_ceiling
                     * sl_distance_pct
                 )
     
@@ -14184,21 +14218,21 @@ class TradingExpertSystem:
                 and sl_distance_pct > 0
             ):
     
-                if rr < 2.0:
+                if rr < technical_rr_floor:
                     proximity_penalty = 15
-                elif rr < 2.25:
-                    proximity_penalty = 8
+                elif rr < preferred_rr_min:
+                    proximity_penalty = 6
     
             # ==========================================================
             # TP DEMASIADO LEJOS
             # ==========================================================
             far_penalty = 0
     
-            if rr > 4.5:
+            if rr > technical_rr_ceiling:
                 far_penalty = min(
                     20,
                     int(
-                        (rr - 4.5)
+                        (rr - technical_rr_ceiling)
                         * 5
                     )
                 )
@@ -14412,9 +14446,9 @@ class TradingExpertSystem:
         """
         Selecciona el TP óptimo: rentable + probable.
         
-        v23 (Parte A2): si se pasa sl_price, el TP mínimo se calcula como
-        1.8×distancia_SL (asegura RR mínimo 1.8 = breakeven WR 36%).
-        Antes: TP mínimo era un valor absoluto por TF, permitiendo RR < 1.
+        Commit 13: si se pasa sl_price, el TP mínimo usa el piso económico
+        contextual del perfil de ejecución. El R/R valida una zona estructural
+        real; nunca obliga a inventar o alejar el TP sólo para alcanzar 1.8R.
         
         Retorna: (tp_price, tp_source, tp_score) o (None, msg, 0)
         """
@@ -14429,6 +14463,28 @@ class TradingExpertSystem:
         )
         if not candidates:
             return None, "Sin candidatos de TP", 0
+
+        technical_rr_floor = 1.8
+        preferred_rr_min = 2.0
+        technical_rr_ceiling = 4.5
+        if isinstance(geometry_profile, dict):
+            try:
+                technical_rr_floor = max(
+                    1.0,
+                    float(geometry_profile.get('technical_rr_floor') or 1.8)
+                )
+                preferred_rr_min = max(
+                    technical_rr_floor,
+                    float(geometry_profile.get('preferred_rr_min') or 2.0)
+                )
+                technical_rr_ceiling = max(
+                    preferred_rr_min,
+                    float(geometry_profile.get('technical_rr_ceiling') or 4.5)
+                )
+            except (TypeError, ValueError):
+                technical_rr_floor = 1.8
+                preferred_rr_min = 2.0
+                technical_rr_ceiling = 4.5
         
         # ============ Calcular MIN distance como múltiplo del SL ============
         sl_distance_pct = None
@@ -14448,8 +14504,8 @@ class TradingExpertSystem:
                 / entry
                 * 100
             )
-            # v23: TP mínimo = 1.8×SL (garantiza RR ≥ 1.8, breakeven WR ~36%)
-            min_distance_from_sl = 1.8 * sl_distance_pct
+            # Commit 13: piso contextual; no fuerza un TP más lejano.
+            min_distance_from_sl = technical_rr_floor * sl_distance_pct
             # Piso absoluto para cubrir comisiones + slippage (0.4%)
             min_distance = max(min_distance_from_sl, 0.4)
         else:
@@ -14589,11 +14645,11 @@ class TradingExpertSystem:
             # ==============================================================
             # CALIDAD DEL RR
             # ==============================================================
-            if rr < 1.8:
+            if rr < technical_rr_floor:
                 best_source = (
                     f"{best_source} "
                     f"[ANALYSIS_ONLY: "
-                    f"RR {rr:.2f} < 1.8]"
+                    f"RR {rr:.2f} < piso técnico {technical_rr_floor:.2f}]"
                 )
 
                 best_score = min(
@@ -14601,12 +14657,12 @@ class TradingExpertSystem:
                     45
                 )
             
-            if rr > 4.5:
+            if rr > technical_rr_ceiling:
                 print(
                     f"   ⚠️ TP demasiado lejano: RR {rr:.2f}"
                 )           
-            if rr > 4.5:
-                # Buscar candidato intermedio con RR entre 2.5 y 4.5
+            if rr > technical_rr_ceiling:
+                # Buscar candidato intermedio dentro del horizonte técnico.
                 intermediate = None
                 for c, s in scored:
                     c_tp_dist = (
@@ -14618,7 +14674,7 @@ class TradingExpertSystem:
                         * 100
                     )
                     c_rr = c_tp_dist / sl_dist if sl_dist > 0 else 0
-                    if 2.5 <= c_rr <= 4.5:
+                    if preferred_rr_min <= c_rr <= technical_rr_ceiling:
                         intermediate = (c, s)
                         break
                 
@@ -14654,7 +14710,7 @@ class TradingExpertSystem:
                     best_source = (
                         f"{best_source} "
                         f"[ANALYSIS_ONLY: "
-                        f"RR {rr:.2f} > 4.5]"
+                        f"RR {rr:.2f} > techo técnico {technical_rr_ceiling:.2f}]"
                     )
 
                     best_score = min(
@@ -16653,10 +16709,10 @@ class TradingExpertSystem:
             else:
                 leverage = 1
             
-            # ============ v23: SL PRIMERO, TP DESPUÉS (Parte A) ============
-            # Motivo: el TP mínimo debe calcularse como múltiplo del SL real
-            # (RR ≥ 1.8), no como valor absoluto por TF. Antes se calculaba
-            # TP primero con un mínimo fijo — permitía trades con RR < 1.
+            # ============ COMMIT 13: ENTRY -> SL -> TP INDEPENDIENTES ============
+            # SL se elige por invalidación/ruido. TP se elige después entre
+            # objetivos estructurales alcanzables. El R/R evalúa la economía
+            # resultante; nunca obliga a alejar artificialmente el target.
             
             # 1. SELECCIONAR SL ÓPTIMO (sweet spot 2.0-3.5×ATR)
             sl_price, sl_source, sl_score = self._select_optimal_sl(
@@ -16672,7 +16728,7 @@ class TradingExpertSystem:
                 print(f"   ⚠️ RECHAZADO: sin SL válido")
                 return self._build_rejected_levels(current_price, symbol, "Sin SL válido")
             
-            # 2. SELECCIONAR TP ÓPTIMO con SL como referencia (RR mín 1.8)
+            # 2. SELECCIONAR TP ÓPTIMO con SL como referencia económica
             tp_price, tp_source, tp_score = self._select_optimal_tp(
                 direction,
                 structure,
@@ -16846,45 +16902,47 @@ class TradingExpertSystem:
             risk = abs(entry - sl_price)
             rr = reward / risk if risk > 0 else 0
             
-            # v23: umbral R/R subido de 1.5 a 1.8 (coherente con A2)
             # ==========================================================
-            # RR / ESTADO DE EJECUCIÓN
+            # COMMIT 13 — RR / ESTADO DE EJECUCIÓN CONTEXTUAL
             # ==========================================================
-            #
-            # El RR mínimo operativo sigue siendo 1.8.
-            #
-            # PERO:
-            # RR < 1.8 NO destruye Entry / SL / TP.
-            #
-            # La configuración queda disponible como ANALYSIS_ONLY.
-            # ==========================================================
+            # Entry, SL y TP ya existen por razones técnicas. Ahora R/R
+            # determina si esa geometría real merece ejecutarse. El piso se
+            # diferencia por mercado/instrumento/TF y nunca fabrica niveles.
+            try:
+                minimum_viable_rr = max(
+                    1.0,
+                    float((execution_geometry_profile or {}).get('technical_rr_floor') or 1.8)
+                )
+                maximum_technical_rr = max(
+                    minimum_viable_rr,
+                    float((execution_geometry_profile or {}).get('technical_rr_ceiling') or 4.5)
+                )
+            except (TypeError, ValueError):
+                minimum_viable_rr, maximum_technical_rr = 1.8, 4.5
 
             non_executable_reason = None
 
-            if rr < 1.8:
+            if rr < minimum_viable_rr:
                 non_executable_reason = (
                     f"R/R desfavorable "
-                    f"{rr:.2f} < 1.8"
+                    f"{rr:.2f} < {minimum_viable_rr:.2f}"
                 )
-
                 print(
                     f"   ⚠️ ANALYSIS_ONLY: "
-                    f"R/R {rr:.2f} < 1.8"
+                    f"R/R {rr:.2f} < piso técnico {minimum_viable_rr:.2f}"
                 )
 
-            elif rr > 4.5:
+            elif rr > maximum_technical_rr:
                 non_executable_reason = (
-                    f"R/R demasiado alto para ejecución "
-                    f"{rr:.2f} > 4.5"
+                    f"R/R fuera del horizonte técnico "
+                    f"{rr:.2f} > {maximum_technical_rr:.2f}"
                 )
-
                 print(
                     f"   ⚠️ ANALYSIS_ONLY: "
-                    f"R/R {rr:.2f} > 4.5"
+                    f"R/R {rr:.2f} > techo técnico {maximum_technical_rr:.2f}"
                 )
 
 
-            
             # ============ AJUSTAR APALANCAMIENTO POR VOLATILIDAD ============
             if atr_pct > 0.05:  # > 5%
                 leverage = max(1, int(leverage * 0.6))
@@ -17021,6 +17079,12 @@ class TradingExpertSystem:
 
                 'risk_reward':
                     round(rr, 2),
+
+                'minimum_viable_rr':
+                    round(minimum_viable_rr, 2),
+
+                'maximum_technical_rr':
+                    round(maximum_technical_rr, 2),
 
                 'suggested_size':
                     round(
