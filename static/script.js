@@ -8508,18 +8508,21 @@ function updateLiquidationHeatmap(data) {
     const timeframe = data.timeframe || data?.data?.timeframe || window.currentInterval || '4h';
     const calibration = liquidation.calibration || {};
 
+    // COMMIT 14.1 — VISUAL-ONLY
+    // El backend, los bins, sus pesos y la calibración pública NO se modifican.
+    // Esta función sólo cambia cómo se proyecta esa misma información en Plotly.
     let maxBars;
     switch (timeframe) {
-        case '5m': maxBars = 180; break;
-        case '15m': maxBars = 180; break;
-        case '30m': maxBars = 170; break;
-        case '1h': maxBars = 160; break;
-        case '2h': maxBars = 150; break;
-        case '4h': maxBars = 140; break;
-        case '12h': maxBars = 120; break;
-        case '1D': maxBars = 100; break;
-        case '1W': maxBars = 80; break;
-        default: maxBars = 140;
+        case '5m': maxBars = 220; break;
+        case '15m': maxBars = 210; break;
+        case '30m': maxBars = 190; break;
+        case '1h': maxBars = 180; break;
+        case '2h': maxBars = 170; break;
+        case '4h': maxBars = 160; break;
+        case '12h': maxBars = 140; break;
+        case '1D': maxBars = 120; break;
+        case '1W': maxBars = 90; break;
+        default: maxBars = 160;
     }
 
     maxBars = Math.max(2, Math.min(maxBars, df.time.length));
@@ -8533,13 +8536,21 @@ function updateLiquidationHeatmap(data) {
     const validPrices = [...high, ...low].filter(Number.isFinite);
     if (!validPrices.length || !Number.isFinite(currentPrice) || currentPrice <= 0) return;
 
-    // El frontend visualiza sólo el entorno operativo; el backend conserva
-    // todos los bins para análisis, aprendizaje y demás consumidores.
-    const relevant = [...activeBins, ...frozenBins.slice(-240)].filter(bin => {
+    // Sólo se muestran zonas útiles alrededor del precio actual. Esto es
+    // exclusivamente una decisión de render; no elimina bins del motor.
+    const relevantActive = activeBins.filter(bin => {
         const center = (Number(bin.price_top) + Number(bin.price_bottom)) / 2;
-        if (!Number.isFinite(center) || center <= 0) return false;
-        return Math.abs(center - currentPrice) / currentPrice <= 0.35;
+        return Number.isFinite(center) && center > 0
+            && Math.abs(center - currentPrice) / currentPrice <= 0.35;
     });
+
+    const relevantFrozen = frozenBins.slice(-260).filter(bin => {
+        const center = (Number(bin.price_top) + Number(bin.price_bottom)) / 2;
+        return Number.isFinite(center) && center > 0
+            && Math.abs(center - currentPrice) / currentPrice <= 0.35;
+    });
+
+    const relevant = [...relevantActive, ...relevantFrozen];
 
     let minPrice = Math.min(...validPrices);
     let maxPrice = Math.max(...validPrices);
@@ -8549,18 +8560,21 @@ function updateLiquidationHeatmap(data) {
         if (Number.isFinite(b0)) minPrice = Math.min(minPrice, b0);
         if (Number.isFinite(b1)) maxPrice = Math.max(maxPrice, b1);
     });
-    const rawRange = Math.max(maxPrice - minPrice, currentPrice * 0.01);
-    minPrice -= rawRange * 0.04;
-    maxPrice += rawRange * 0.04;
 
-    // Heatmap ligero: máximo ~10k celdas, sensiblemente más eficiente que
-    // cientos de shapes Plotly de ancho completo.
-    const xCount = Math.max(2, Math.min(110, dates.length));
-    const yCount = 92;
+    const rawRange = Math.max(maxPrice - minPrice, currentPrice * 0.01);
+    minPrice -= rawRange * 0.035;
+    maxPrice += rawRange * 0.035;
+
+    // Malla deliberadamente contenida para Render/navegadores móviles.
+    // Da una lectura mucho más parecida a un heatmap de liquidez profesional
+    // sin añadir endpoints, consultas ni cálculos al backend.
+    const xCount = Math.max(2, Math.min(120, dates.length));
+    const yCount = 118;
     const xIdx = [];
     for (let i = 0; i < xCount; i++) {
         xIdx.push(Math.round(i * (dates.length - 1) / Math.max(1, xCount - 1)));
     }
+
     const xVals = xIdx.map(i => dates[i]);
     const yVals = Array.from({length: yCount}, (_, i) =>
         minPrice + (maxPrice - minPrice) * i / Math.max(1, yCount - 1)
@@ -8576,49 +8590,118 @@ function updateLiquidationHeatmap(data) {
         const ratio = Math.max(0, Math.min(1, (ms - firstMs) / (lastMs - firstMs)));
         return Math.max(0, Math.min(xCount - 1, Math.round(ratio * (xCount - 1))));
     };
+
     const indexForPrice = price => {
         const ratio = Math.max(0, Math.min(1, (price - minPrice) / ySpan));
         return Math.max(0, Math.min(yCount - 1, Math.round(ratio * (yCount - 1))));
     };
 
-    let absoluteMax = 0;
-    relevant.forEach(bin => {
+    // Normalización robusta: una única zona muy pesada no debe apagar
+    // visualmente el resto del mapa.
+    const weights = relevant
+        .map(bin => Number(bin.max_weight ?? bin.weight ?? 0))
+        .filter(v => Number.isFinite(v) && v > 0)
+        .sort((a, b) => a - b);
+
+    const percentile = (arr, p) => {
+        if (!arr.length) return 1;
+        const idx = Math.max(0, Math.min(arr.length - 1, Math.round((arr.length - 1) * p)));
+        return arr[idx];
+    };
+
+    const visualWeightCap = Math.max(
+        percentile(weights, 0.90),
+        weights.length ? weights[weights.length - 1] * 0.55 : 1,
+        1e-12
+    );
+
+    const addCell = (yi, xi, value) => {
+        if (yi < 0 || yi >= yCount || xi < 0 || xi >= xCount || value <= 0) return;
+        z[yi][xi] += value;
+    };
+
+    const paintBand = (bin, mode) => {
         const bottom = Number(bin.price_bottom);
         const top = Number(bin.price_top);
-        const weight = Number(bin.max_weight ?? bin.weight ?? 0);
-        if (![bottom, top, weight].every(Number.isFinite) || weight <= 0) return;
-
-        const createdMs = Date.parse(bin.created_at || xVals[0]);
-        const frozenMs = bin.frozen_at ? Date.parse(bin.frozen_at) : lastMs;
-        let x0 = indexForTime(Number.isFinite(createdMs) ? createdMs : firstMs);
-        let x1 = indexForTime(Number.isFinite(frozenMs) ? frozenMs : lastMs);
-        if (x1 < x0) [x0, x1] = [x1, x0];
+        const rawWeight = Number(bin.max_weight ?? bin.weight ?? 0);
+        if (![bottom, top, rawWeight].every(Number.isFinite) || rawWeight <= 0) return;
 
         let y0 = indexForPrice(Math.min(bottom, top));
         let y1 = indexForPrice(Math.max(bottom, top));
         if (y1 < y0) [y0, y1] = [y1, y0];
-        if (y1 === y0) {
+
+        // Mantener legibles bins muy finos en pantallas grandes y móviles.
+        if (y1 - y0 < 1) {
             y0 = Math.max(0, y0 - 1);
             y1 = Math.min(yCount - 1, y1 + 1);
         }
 
-        const historyFade = bin.frozen ? 0.58 : 1.0;
         const leverage = Number(bin.leverage || 0);
-        const leverageEmphasis = leverage >= 50 ? 1.06 : leverage >= 25 ? 1.03 : 1.0;
-        const contribution = weight * historyFade * leverageEmphasis;
+        const leverageEmphasis = leverage >= 50 ? 1.07 : leverage >= 25 ? 1.04 : 1.0;
+        const baseIntensity = Math.max(
+            0.06,
+            Math.min(1.0, rawWeight / visualWeightCap)
+        ) * leverageEmphasis;
 
-        for (let yi = y0; yi <= y1; yi++) {
-            for (let xi = x0; xi <= x1; xi++) {
-                z[yi][xi] += contribution;
-                if (z[yi][xi] > absoluteMax) absoluteMax = z[yi][xi];
-            }
+        let x0 = 0;
+        let x1 = xCount - 1;
+
+        if (mode === 'frozen') {
+            // Para zonas ya tocadas sí existe intervalo histórico real:
+            // respetar creación -> toque cuando está dentro de la ventana.
+            const createdMs = Date.parse(bin.created_at || '');
+            const frozenMs = Date.parse(bin.frozen_at || '');
+            x0 = Number.isFinite(createdMs) ? indexForTime(createdMs) : 0;
+            x1 = Number.isFinite(frozenMs) ? indexForTime(frozenMs) : xCount - 1;
+            if (x1 < x0) [x0, x1] = [x1, x0];
         }
-    });
+
+        for (let xi = x0; xi <= x1; xi++) {
+            let timeFactor;
+            if (mode === 'active') {
+                // Las zonas activas son un PERFIL VIGENTE, no un supuesto
+                // historial de liquidaciones. Se proyectan sobre la ventana
+                // visible con más énfasis hacia el presente para que el mapa
+                // sea legible como heatmap, sin alterar su valor ni su geometría.
+                const progress = xi / Math.max(1, xCount - 1);
+                timeFactor = 0.52 + 0.48 * Math.pow(progress, 0.75);
+            } else {
+                const progress = (xi - x0) / Math.max(1, x1 - x0);
+                timeFactor = (0.26 + 0.18 * progress);
+            }
+
+            const core = baseIntensity * timeFactor;
+
+            for (let yi = y0; yi <= y1; yi++) {
+                addCell(yi, xi, core);
+            }
+
+            // Halo vertical corto: da continuidad de densidad como Trading
+            // Different sin inventar zonas nuevas; sólo difumina el mismo bin.
+            addCell(y0 - 1, xi, core * 0.42);
+            addCell(y1 + 1, xi, core * 0.42);
+            addCell(y0 - 2, xi, core * 0.16);
+            addCell(y1 + 2, xi, core * 0.16);
+        }
+    };
+
+    relevantFrozen.forEach(bin => paintBand(bin, 'frozen'));
+    relevantActive.forEach(bin => paintBand(bin, 'active'));
+
+    let absoluteMax = 0;
+    for (let yi = 0; yi < yCount; yi++) {
+        for (let xi = 0; xi < xCount; xi++) {
+            if (z[yi][xi] > absoluteMax) absoluteMax = z[yi][xi];
+        }
+    }
 
     if (absoluteMax > 0) {
+        // Gamma > 1 reduce el "ruido" de baja densidad y deja destacar las
+        // concentraciones fuertes con amarillo/naranja/rojo.
         for (let yi = 0; yi < yCount; yi++) {
             for (let xi = 0; xi < xCount; xi++) {
-                z[yi][xi] = Math.pow(z[yi][xi] / absoluteMax, 0.72);
+                const normalized = Math.max(0, Math.min(1, z[yi][xi] / absoluteMax));
+                z[yi][xi] = Math.pow(normalized, 1.18);
             }
         }
     }
@@ -8631,19 +8714,26 @@ function updateLiquidationHeatmap(data) {
         name: 'Densidad estimada',
         zmin: 0,
         zmax: 1,
+        zsmooth: false,
         showscale: false,
         hoverongaps: false,
         colorscale: [
-            [0.00, '#080b0f'],
-            [0.08, '#0d2b2b'],
-            [0.22, '#13634e'],
-            [0.42, '#2ca75e'],
-            [0.62, '#d3c83d'],
-            [0.80, '#f29a32'],
-            [1.00, '#ff3f46']
+            [0.00, '#040713'],
+            [0.035, '#07142b'],
+            [0.10, '#0b2853'],
+            [0.22, '#0a5670'],
+            [0.38, '#128271'],
+            [0.54, '#62a94d'],
+            [0.68, '#c8c63c'],
+            [0.80, '#f0a12f'],
+            [0.91, '#f66a2f'],
+            [1.00, '#ff343f']
         ],
-        hovertemplate: '<b>Zona de calor</b><br>%{x}<br>Precio: %{y:,.6f}<br>Intensidad relativa: %{z:.0%}<extra></extra>',
-        opacity: 0.92
+        hovertemplate:
+            '<b>Densidad estimada</b><br>' +
+            '%{x|%Y-%m-%d %H:%M}<br>' +
+            'Precio: %{y:,.6f}<br>' +
+            'Intensidad relativa: %{z:.0%}<extra></extra>'
     };
 
     const candleTrace = {
@@ -8654,9 +8744,11 @@ function updateLiquidationHeatmap(data) {
         close,
         type: 'candlestick',
         name: 'Precio',
-        increasing: {line: {color: '#28d9a7', width: 1.15}, fillcolor: '#28d9a7'},
-        decreasing: {line: {color: '#ff626d', width: 1.15}, fillcolor: '#ff626d'},
-        whiskerwidth: 0.25
+        increasing: {line: {color: '#20d6a6', width: 1.15}, fillcolor: '#20d6a6'},
+        decreasing: {line: {color: '#ff5e6c', width: 1.15}, fillcolor: '#ff5e6c'},
+        whiskerwidth: 0.22,
+        opacity: 0.96,
+        hoverlabel: {bgcolor: '#0b1018', font: {color: '#f1f5f9'}}
     };
 
     const longWeight = Math.max(0, Number(liquidation.total_long_weight || 0));
@@ -8676,11 +8768,11 @@ function updateLiquidationHeatmap(data) {
 
     let interpretation;
     if (longPct >= 65) {
-        interpretation = 'Mayor concentración estimada de exposición LONG. Vigilar barridos y reacción en zonas inferiores.';
+        interpretation = 'Mayor concentración estimada de exposición LONG. Vigilar reacción y barridos en las zonas inferiores.';
     } else if (shortPct >= 65) {
-        interpretation = 'Mayor concentración estimada de exposición SHORT. Vigilar barridos y reacción en zonas superiores.';
+        interpretation = 'Mayor concentración estimada de exposición SHORT. Vigilar reacción y barridos en las zonas superiores.';
     } else {
-        interpretation = 'Distribución relativamente equilibrada. Priorizar las zonas de mayor intensidad y su reacción con el precio.';
+        interpretation = 'Distribución relativamente equilibrada. Priorizar las franjas de mayor intensidad y la reacción del precio.';
     }
 
     if (calibration.status === 'PUBLIC_MARKET_CALIBRATED') {
@@ -8689,35 +8781,45 @@ function updateLiquidationHeatmap(data) {
     } else {
         interpretation += ' Sin calibración pública disponible: se conserva el modelo base.';
     }
+    interpretation += ' El color representa intensidad relativa estimada; no montos exactos de liquidación.';
+
     const interpretationEl = document.getElementById('liquidation-interpretation');
     if (interpretationEl) interpretationEl.textContent = interpretation;
 
     const layout = {
         title: {
             text: 'Calor de liquidaciones estimadas (' + timeframe + ') · ' + activeBins.length + ' zonas activas',
-            font: {color: '#e8edf4', size: 14},
-            x: 0.02,
-            xanchor: 'left'
+            font: {color: '#eef4fb', size: 14},
+            x: 0.015,
+            xanchor: 'left',
+            y: 0.985,
+            yanchor: 'top'
         },
         xaxis: {
             type: 'date',
             range: [dates[0], dates[dates.length - 1]],
             showgrid: false,
+            zeroline: false,
             rangeslider: {visible: false},
-            fixedrange: false
+            fixedrange: false,
+            tickfont: {color: '#a9b5c3', size: 10},
+            linecolor: 'rgba(160,175,190,0.16)',
+            mirror: false
         },
         yaxis: {
             range: [minPrice, maxPrice],
-            showgrid: true,
-            gridcolor: 'rgba(130,145,160,0.10)',
+            showgrid: false,
+            zeroline: false,
             tickformat: currentPrice >= 1000 ? ',.0f' : currentPrice >= 1 ? '.3f' : '.6f',
             side: 'right',
-            fixedrange: false
+            fixedrange: false,
+            tickfont: {color: '#dfe7ef', size: 10},
+            linecolor: 'rgba(160,175,190,0.16)'
         },
-        height: 450,
-        margin: {l: 16, r: 70, t: 42, b: 28},
-        paper_bgcolor: '#080b0f',
-        plot_bgcolor: '#080b0f',
+        height: 470,
+        margin: {l: 10, r: 72, t: 46, b: 34},
+        paper_bgcolor: '#05070d',
+        plot_bgcolor: '#05070d',
         showlegend: false,
         shapes: [{
             type: 'line',
@@ -8727,10 +8829,12 @@ function updateLiquidationHeatmap(data) {
             x1: 1,
             y0: currentPrice,
             y1: currentPrice,
-            line: {color: 'rgba(255,255,255,0.50)', width: 1, dash: 'dot'}
+            line: {color: 'rgba(232,238,245,0.62)', width: 1, dash: 'dot'}
         }],
         hovermode: 'closest',
-        dragmode: 'pan'
+        dragmode: 'pan',
+        uirevision: 'liq-heatmap-' + timeframe,
+        font: {color: '#dfe7ef'}
     };
 
     Plotly.react(
@@ -8741,7 +8845,7 @@ function updateLiquidationHeatmap(data) {
             responsive: true,
             displaylogo: false,
             scrollZoom: true,
-            modeBarButtonsToRemove: ['lasso2d', 'select2d']
+            modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d']
         }
     ).catch(error => {
         console.error('Error al renderizar mapa de calor:', error);
