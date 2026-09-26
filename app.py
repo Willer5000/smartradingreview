@@ -19377,7 +19377,7 @@ class TradingExpertSystem:
             
             # Crear heatmap si no existe
             if symbol not in self.liquidation_heatmaps[timeframe]:
-                self.liquidation_heatmaps[timeframe][symbol] = LiquidationHeatmap(timeframe=timeframe)
+                self.liquidation_heatmaps[timeframe][symbol] = LiquidationHeatmap(timeframe=timeframe, symbol=symbol)
                 print(f"   ✅ Nuevo heatmap {timeframe} creado para {symbol}")
                 
                 # ============ CARGAR HISTORIAL COMPLETO ============
@@ -24123,14 +24123,296 @@ class DynamicZones:
         }
 
 
+class LiquidationPublicCalibration:
+    """
+    Commit 14 — ajuste ligero del heatmap con datos públicos gratuitos.
+
+    No intenta reconstruir posiciones privadas ni afirmar liquidaciones futuras
+    exactas. Sólo recalibra la intensidad RELATIVA del modelo OHLCV existente
+    con contexto observable de derivados (OI, long/short y flujo taker).
+
+    Diseño:
+    - fail-open: cualquier error conserva exactamente el peso legacy (factor 1);
+    - caché RAM: evita consultas repetidas y no usa Supabase/Groq;
+    - sin credenciales ni APIs pagas;
+    - Binance USD-M como fuente principal y Bybit como fallback público.
+    """
+
+    SUCCESS_TTL_SECONDS = 900
+    FAILURE_TTL_SECONDS = 180
+    _cache = {}
+    _lock = threading.RLock()
+    _network_gate = threading.BoundedSemaphore(2)
+
+    @staticmethod
+    def _clip(value, low, high):
+        try:
+            return max(low, min(high, float(value)))
+        except Exception:
+            return low
+
+    @classmethod
+    def _normalize_symbol(cls, symbol):
+        raw = str(symbol or '').upper().replace('-', '').replace('/', '').replace('_', '')
+        if not raw or not raw.endswith('USDT') or raw == 'PAXGUSDT':
+            return None
+        return raw
+
+    @classmethod
+    def _periods(cls, timeframe):
+        tf = str(timeframe or '4h')
+        binance = {
+            '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1h',
+            '2h': '2h', '4h': '4h', '12h': '12h', '1D': '1d', '1W': '1d'
+        }.get(tf, '4h')
+        bybit = {
+            '5m': '5min', '15m': '15min', '30m': '30min', '1h': '1h',
+            '2h': '1h', '4h': '4h', '12h': '4h', '1D': '1d', '1W': '1d'
+        }.get(tf, '4h')
+        return binance, bybit
+
+    @staticmethod
+    def _safe_json(url, params):
+        try:
+            response = requests.get(
+                url,
+                params=params,
+                timeout=(0.55, 0.85),
+                headers={'User-Agent': 'SmarTradingReview/Commit14'}
+            )
+            if response.status_code != 200:
+                return None
+            return response.json()
+        except Exception:
+            return None
+
+    @classmethod
+    def _latest_row(cls, rows, ts_key='timestamp'):
+        if not isinstance(rows, list) or not rows:
+            return None
+        try:
+            return max(rows, key=lambda r: float((r or {}).get(ts_key, 0) or 0))
+        except Exception:
+            return rows[-1] if rows else None
+
+    @classmethod
+    def _build_result(cls, source, long_share, taker_buy_share, oi_change, quality):
+        long_share = cls._clip(long_share, 0.05, 0.95)
+        taker_buy_share = cls._clip(taker_buy_share, 0.05, 0.95)
+        oi_change = cls._clip(oi_change, -0.15, 0.15)
+        quality = cls._clip(quality, 0.0, 100.0)
+
+        # Recalibración deliberadamente moderada: el dato público corrige el
+        # peso del modelo, pero no sustituye la geometría ni crea dirección.
+        bias = (
+            0.65 * ((long_share - 0.50) * 2.0)
+            + 0.35 * ((taker_buy_share - 0.50) * 2.0)
+        )
+        participation_factor = cls._clip(1.0 + oi_change * 1.5, 0.88, 1.12)
+        long_factor = cls._clip(participation_factor * (1.0 + 0.28 * bias), 0.72, 1.30)
+        short_factor = cls._clip(participation_factor * (1.0 - 0.28 * bias), 0.72, 1.30)
+
+        return {
+            'status': 'PUBLIC_MARKET_CALIBRATED',
+            'source': source,
+            'quality': round(quality, 1),
+            'global_long_share': round(long_share, 4),
+            'global_short_share': round(1.0 - long_share, 4),
+            'taker_buy_share': round(taker_buy_share, 4),
+            'taker_sell_share': round(1.0 - taker_buy_share, 4),
+            'open_interest_change_pct': round(oi_change * 100.0, 4),
+            'long_factor': round(long_factor, 4),
+            'short_factor': round(short_factor, 4),
+            'observed_market_inputs': True,
+            'observed_liquidations': False,
+        }
+
+    @classmethod
+    def _fetch_binance(cls, symbol, period):
+        base = 'https://fapi.binance.com'
+        jobs = [
+            ('ratio', base + '/futures/data/globalLongShortAccountRatio',
+             {'symbol': symbol, 'period': period, 'limit': 2}),
+            ('oi', base + '/futures/data/openInterestHist',
+             {'symbol': symbol, 'period': period, 'limit': 3}),
+            ('taker', base + '/futures/data/takerlongshortRatio',
+             {'symbol': symbol, 'period': period, 'limit': 2}),
+        ]
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            out = {}
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                futures = {
+                    name: pool.submit(cls._safe_json, url, params)
+                    for name, url, params in jobs
+                }
+                for name, future in futures.items():
+                    try:
+                        out[name] = future.result(timeout=1.05)
+                    except Exception:
+                        out[name] = None
+        except Exception:
+            out = {name: cls._safe_json(url, params) for name, url, params in jobs}
+
+        ratio_row = cls._latest_row(out.get('ratio'))
+        oi_rows = out.get('oi') if isinstance(out.get('oi'), list) else []
+        taker_row = cls._latest_row(out.get('taker'))
+
+        long_share = None
+        if isinstance(ratio_row, dict):
+            try:
+                long_share = float(ratio_row.get('longAccount'))
+            except Exception:
+                long_share = None
+
+        taker_buy_share = None
+        if isinstance(taker_row, dict):
+            try:
+                buy = float(taker_row.get('buyVol', 0) or 0)
+                sell = float(taker_row.get('sellVol', 0) or 0)
+                if buy + sell > 0:
+                    taker_buy_share = buy / (buy + sell)
+            except Exception:
+                taker_buy_share = None
+
+        oi_change = 0.0
+        if len(oi_rows) >= 2:
+            try:
+                rows = sorted(oi_rows, key=lambda r: float((r or {}).get('timestamp', 0) or 0))
+                first = float(rows[0].get('sumOpenInterestValue') or rows[0].get('sumOpenInterest') or 0)
+                last = float(rows[-1].get('sumOpenInterestValue') or rows[-1].get('sumOpenInterest') or 0)
+                if first > 0:
+                    oi_change = (last - first) / first
+            except Exception:
+                oi_change = 0.0
+
+        available = sum([
+            1 if long_share is not None else 0,
+            1 if taker_buy_share is not None else 0,
+            1 if len(oi_rows) >= 2 else 0,
+        ])
+        if available < 2:
+            return None
+
+        return cls._build_result(
+            source='BINANCE_PUBLIC_USDM',
+            long_share=long_share if long_share is not None else 0.50,
+            taker_buy_share=taker_buy_share if taker_buy_share is not None else 0.50,
+            oi_change=oi_change,
+            quality=(available / 3.0) * 100.0,
+        )
+
+    @classmethod
+    def _fetch_bybit(cls, symbol, period):
+        base = 'https://api.bybit.com'
+        ratio = cls._safe_json(
+            base + '/v5/market/account-ratio',
+            {'category': 'linear', 'symbol': symbol, 'period': period, 'limit': 2},
+        )
+        oi = cls._safe_json(
+            base + '/v5/market/open-interest',
+            {'category': 'linear', 'symbol': symbol, 'intervalTime': period, 'limit': 3},
+        )
+
+        ratio_rows = (((ratio or {}).get('result') or {}).get('list') or [])
+        oi_rows = (((oi or {}).get('result') or {}).get('list') or [])
+        ratio_row = cls._latest_row(ratio_rows)
+
+        long_share = None
+        if isinstance(ratio_row, dict):
+            try:
+                long_share = float(ratio_row.get('buyRatio'))
+            except Exception:
+                long_share = None
+
+        oi_change = 0.0
+        if len(oi_rows) >= 2:
+            try:
+                rows = sorted(oi_rows, key=lambda r: float((r or {}).get('timestamp', 0) or 0))
+                first = float(rows[0].get('openInterest', 0) or 0)
+                last = float(rows[-1].get('openInterest', 0) or 0)
+                if first > 0:
+                    oi_change = (last - first) / first
+            except Exception:
+                oi_change = 0.0
+
+        if long_share is None or len(oi_rows) < 2:
+            return None
+
+        return cls._build_result(
+            source='BYBIT_PUBLIC_LINEAR',
+            long_share=long_share,
+            taker_buy_share=0.50,
+            oi_change=oi_change,
+            quality=66.0,
+        )
+
+    @classmethod
+    def get(cls, symbol, timeframe):
+        normalized = cls._normalize_symbol(symbol)
+        if not normalized:
+            return {
+                'status': 'LEGACY_FALLBACK',
+                'source': 'OHLCV_ONLY',
+                'quality': 0.0,
+                'long_factor': 1.0,
+                'short_factor': 1.0,
+                'observed_market_inputs': False,
+                'observed_liquidations': False,
+            }
+
+        key = (normalized, str(timeframe or '4h'))
+        now = time.monotonic()
+        with cls._lock:
+            cached = cls._cache.get(key)
+            if cached and now < cached.get('_expires_at', 0):
+                return {k: v for k, v in cached.items() if k != '_expires_at'}
+
+        binance_period, bybit_period = cls._periods(timeframe)
+        with cls._network_gate:
+            result = cls._fetch_binance(normalized, binance_period)
+            if result is None:
+                result = cls._fetch_bybit(normalized, bybit_period)
+
+        if result is None:
+            result = {
+                'status': 'LEGACY_FALLBACK',
+                'source': 'OHLCV_ONLY',
+                'quality': 0.0,
+                'long_factor': 1.0,
+                'short_factor': 1.0,
+                'observed_market_inputs': False,
+                'observed_liquidations': False,
+            }
+            ttl = cls.FAILURE_TTL_SECONDS
+        else:
+            ttl = cls.SUCCESS_TTL_SECONDS
+
+        stored = dict(result)
+        stored['_expires_at'] = now + ttl
+        with cls._lock:
+            cls._cache[key] = stored
+        return dict(result)
+
+
 class LiquidationHeatmap:
     """
     Mapa estimado de exposición apalancada a partir de OHLCV público.
     Sus bins no representan posiciones ni liquidaciones observadas.
     """
     
-    def __init__(self, timeframe='4h', max_bins_per_side=500):
+    def __init__(self, timeframe='4h', max_bins_per_side=500, symbol=None):
         self.timeframe = timeframe
+        self.symbol = symbol
+        self.last_public_calibration = {
+            'status': 'LEGACY_FALLBACK',
+            'source': 'OHLCV_ONLY',
+            'quality': 0.0,
+            'long_factor': 1.0,
+            'short_factor': 1.0,
+            'observed_market_inputs': False,
+            'observed_liquidations': False,
+        }
         self.max_bins_per_side = max_bins_per_side
         
         # ============ APALANCAMIENTOS POR TEMPORALIDAD ============
@@ -24313,6 +24595,19 @@ class LiquidationHeatmap:
         lev_count = len(self.leverages)
         per_lev_long = long_flow / lev_count
         per_lev_short = short_flow / lev_count
+
+        # Commit 14: conserva la geometría existente y recalibra únicamente
+        # la intensidad relativa con mercado público observable.
+        self.last_public_calibration = LiquidationPublicCalibration.get(
+            self.symbol,
+            self.timeframe
+        )
+        per_lev_long *= float(
+            self.last_public_calibration.get('long_factor', 1.0) or 1.0
+        )
+        per_lev_short *= float(
+            self.last_public_calibration.get('short_factor', 1.0) or 1.0
+        )
         
         # Asegurar peso mínimo
         if per_lev_long < 0.01:
@@ -24619,6 +24914,7 @@ class LiquidationHeatmap:
         for bin_obj in self.all_bins:
             bin_dict = bin_obj.to_dict()
             bin_dict['color'] = self.get_color_from_weight(bin_obj.max_weight, max_weight)
+            bin_dict['intensity'] = round((bin_obj.max_weight / max(max_weight, 1e-12)) * 100.0, 2)
             bin_dict['border_style'] = 'solid'
             active_bins.append(bin_dict)
         
@@ -24627,6 +24923,7 @@ class LiquidationHeatmap:
             bin_dict = bin_obj.to_dict()
             base_color = self.get_color_from_weight(bin_obj.max_weight, max_weight)
             bin_dict['color'] = base_color.replace('0.7', '0.2').replace('0.6', '0.15').replace('0.5', '0.1').replace('0.4', '0.08').replace('0.3', '0.05')
+            bin_dict['intensity'] = round((bin_obj.max_weight / max(max_weight, 1e-12)) * 100.0, 2)
             bin_dict['border_style'] = 'dotted'
             frozen_bins.append(bin_dict)
         
@@ -24653,11 +24950,16 @@ class LiquidationHeatmap:
             'total_spikes': self.total_events,
             'total_bins_historical': total_bins,
             'data_type': 'MODEL_ESTIMATE_NOT_OBSERVED',
-            'model_version': 'OHLCV_RELATIVE_EXPOSURE_V2',
+            'model_version': 'OHLCV_PUBLIC_DERIVATIVES_CALIBRATED_V3',
             'weight_unit': 'relative_participation',
             'model_confidence': min(70.0, 20.0 + self.total_events * 5.0),
             'coverage_bars': len(self.price_history),
-            'observed_liquidations': False
+            'observed_liquidations': False,
+            'public_derivatives_calibrated': (
+                (self.last_public_calibration or {}).get('status')
+                == 'PUBLIC_MARKET_CALIBRATED'
+            ),
+            'calibration': dict(self.last_public_calibration or {})
         }
     
     def _empty_data(self):
@@ -24672,11 +24974,21 @@ class LiquidationHeatmap:
             'total_spikes': 0,
             'total_bins_historical': 0,
             'data_type': 'MODEL_ESTIMATE_NOT_OBSERVED',
-            'model_version': 'OHLCV_RELATIVE_EXPOSURE_V2',
+            'model_version': 'OHLCV_PUBLIC_DERIVATIVES_CALIBRATED_V3',
             'weight_unit': 'relative_participation',
             'model_confidence': 0,
             'coverage_bars': len(self.price_history),
-            'observed_liquidations': False
+            'observed_liquidations': False,
+            'public_derivatives_calibrated': False,
+            'calibration': {
+                'status': 'LEGACY_FALLBACK',
+                'source': 'OHLCV_ONLY',
+                'quality': 0.0,
+                'long_factor': 1.0,
+                'short_factor': 1.0,
+                'observed_market_inputs': False,
+                'observed_liquidations': False,
+            }
         }
 
 

@@ -1220,7 +1220,7 @@
                         <div class="card-header d-flex justify-content-between align-items-center bg-danger bg-opacity-25">
                             <h5 class="mb-0">
                                 <i class="fas fa-fire me-2" style="color: #FF5B5B;"></i>
-                                {% if is_multiasset|default(false) %}Mapa de Liquidez / Barridos (proxy){% else %}Mapa de Calor de Liquidaciones{% endif %}
+                                {% if is_multiasset|default(false) %}Mapa de Calor de Liquidez / Liquidación Estimada{% else %}Mapa de Calor de Liquidaciones Estimadas{% endif %}
                             </h5>
                             <div class="btn-group btn-group-sm">
                                 <button class="btn btn-outline-secondary btn-move" data-direction="up">
@@ -1241,25 +1241,25 @@
                             <div class="row mt-3">
                                 <div class="col-md-3 col-6">
                                     <div class="border-start border-3 border-danger ps-2">
-                                        <small class="text-muted d-block">LONG acumulado</small>
+                                        <small class="text-muted d-block">Presión LONG relativa</small>
                                         <strong id="liquidation-long-weight" class="h6">--</strong>
                                     </div>
                                 </div>
                                 <div class="col-md-3 col-6">
                                     <div class="border-start border-3 border-warning ps-2">
-                                        <small class="text-muted d-block">SHORT acumulado</small>
+                                        <small class="text-muted d-block">Presión SHORT relativa</small>
                                         <strong id="liquidation-short-weight" class="h6">--</strong>
                                     </div>
                                 </div>
                                 <div class="col-md-3 col-6">
                                     <div class="border-start border-3 border-info ps-2">
-                                        <small class="text-muted d-block">Bins activos</small>
+                                        <small class="text-muted d-block">Zonas activas</small>
                                         <strong id="liquidation-active-bins" class="h6">0</strong>
                                     </div>
                                 </div>
                                 <div class="col-md-3 col-6">
                                     <div class="border-start border-3 border-secondary ps-2">
-                                        <small class="text-muted d-block">Congelados</small>
+                                        <small class="text-muted d-block">Zonas tocadas</small>
                                         <strong id="liquidation-frozen-bins" class="h6">0</strong>
                                     </div>
                                 </div>
@@ -1269,14 +1269,14 @@
                                 <small class="text-muted">
                                     <i class="fas fa-info-circle me-1" style="color: #FF5B5B;"></i>
                                     <strong>Interpretación:</strong> 
-                                    <span id="liquidation-interpretation">{% if is_multiasset|default(false) %}Analizando pools técnicos de liquidez; no representa liquidaciones reales del exchange.{% else %}Analizando pools de liquidez...{% endif %}</span>
+                                    <span id="liquidation-interpretation">Intensidad relativa estimada. Cuando hay datos públicos disponibles se calibra con derivados observables; no representa posiciones privadas ni montos exactos de liquidación.</span>
                                 </small>
                                 <div class="mt-1">
                                     <small class="text-muted">
                                         <span style="color: #FF5B5B;">🔴 Rojo = alta densidad</span> | 
                                         <span style="color: #FFD700;">🟡 Amarillo = media</span> | 
                                         <span style="color: #00C076;">🟢 Verde = baja</span> |
-                                        <span style="border-bottom: 1px dotted white;">⋯ punteado = congelado</span>
+                                        <span style="color:#aab4c0;">La zona termina cuando el precio la alcanza</span>
                                     </small>
                                 </div>
                             </div>
