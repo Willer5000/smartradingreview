@@ -8898,25 +8898,10 @@ function updateLiquidationHeatmap(data) {
     if (activeEl) activeEl.textContent = activeBins.length;
     if (frozenEl) frozenEl.textContent = frozenBins.length;
 
-    let interpretation;
-    if (longPct >= 65) {
-        interpretation = 'Mayor concentración estimada de exposición LONG. Los bloques amarillo/naranja/rojo inferiores concentran mayor intensidad relativa.';
-    } else if (shortPct >= 65) {
-        interpretation = 'Mayor concentración estimada de exposición SHORT. Los bloques amarillo/naranja/rojo superiores concentran mayor intensidad relativa.';
-    } else {
-        interpretation = 'Distribución relativamente equilibrada. El mapa celular permite distinguir clusters de mayor intensidad y el corredor oscuro deja libre el recorrido del precio.';
-    }
-
-    if (calibration.status === 'PUBLIC_MARKET_CALIBRATED') {
-        const oi = Number(calibration.open_interest_change_pct || 0);
-        interpretation += ' Calibración pública activa · OI ' + (oi >= 0 ? '+' : '') + oi.toFixed(2) + '%.';
-    } else {
-        interpretation += ' Sin calibración pública disponible: se conserva el modelo base.';
-    }
-    interpretation += ' El color representa intensidad relativa estimada; no montos exactos de liquidación.';
-
     const interpretationEl = document.getElementById('liquidation-interpretation');
-    if (interpretationEl) interpretationEl.textContent = interpretation;
+    if (interpretationEl) {
+        interpretationEl.textContent = '🔴🟡 Mayor concentración → vigilar reacción del precio. 🟢🔵 Menor intensidad. Usar como confluencia, no como señal aislada.';
+    }
 
     const layout = {
         title: {
