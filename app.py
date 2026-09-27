@@ -34407,6 +34407,106 @@ def _multiasset_is_executable(result):
             result.get('is_executable', levels.get('is_executable', True)) is not False)
 
 
+def _commit16_public_market_context(market_hours=None, execution_context=None, market_regime=None):
+    """Public market context for the header.
+
+    Presentation-only. It translates already-computed evidence into
+    conventional trader language and performs ZERO I/O. Internal committee,
+    specialist, weighting and learning terminology is never exposed.
+    """
+    market_hours = market_hours if isinstance(market_hours, dict) else {}
+    execution_context = execution_context if isinstance(execution_context, dict) else {}
+    market_regime = market_regime if isinstance(market_regime, dict) else {}
+
+    def _num(value, default=0.0):
+        try:
+            return float(value if value is not None else default)
+        except (TypeError, ValueError):
+            return float(default)
+
+    activity = max(0.0, min(100.0, _num(execution_context.get('activity_score'), 50.0)))
+    shock = max(0.0, min(100.0, _num(execution_context.get('shock_score'), 0.0)))
+    volume_ratio = max(0.0, _num(execution_context.get('volume_ratio'), 1.0))
+    range_ratio = max(0.0, _num(execution_context.get('range_ratio'), 1.0))
+
+    if activity >= 82:
+        activity_label = 'MUY ALTA'
+        activity_tone = 'danger' if shock >= 85 else 'success'
+    elif activity >= 64:
+        activity_label = 'ALTA'
+        activity_tone = 'success'
+    elif activity >= 42:
+        activity_label = 'MODERADA'
+        activity_tone = 'warning'
+    else:
+        activity_label = 'BAJA'
+        activity_tone = 'secondary'
+
+    if shock >= 85:
+        condition = 'MOVIMIENTO EXCEPCIONAL'
+    elif shock >= 65:
+        condition = 'ACTIVIDAD ANORMAL'
+    elif activity >= 64:
+        condition = 'MERCADO ACTIVO'
+    elif activity < 42:
+        condition = 'MERCADO CALMO'
+    else:
+        condition = 'CONDICIONES NORMALES'
+
+    session_name = str(market_hours.get('session_name') or '').strip()
+    session_code = str(market_hours.get('session') or execution_context.get('session') or 'UNKNOWN').upper()
+    if not session_name:
+        session_name = {
+            'ASIAN': 'Asiática',
+            'EUROPEAN': 'Europea',
+            'AMERICAN': 'Americana',
+        }.get(session_code, 'Sin identificar')
+    else:
+        session_name = {
+            'Asiático': 'Asiática',
+            'Europeo': 'Europea',
+            'Americano': 'Americana',
+        }.get(session_name, session_name)
+
+    day_name = str(market_hours.get('day_name') or '').strip() or '—'
+    day_icon = str(market_hours.get('day_icon') or '📅')
+    session_icon = str(market_hours.get('session_icon') or '🕒')
+
+    regime = str(
+        execution_context.get('market_regime')
+        or market_regime.get('regime')
+        or market_regime.get('state')
+        or ''
+    ).upper()
+
+    evidence_parts = [
+        f'volumen relativo {volume_ratio:.2f}x',
+        f'rango relativo {range_ratio:.2f}x',
+    ]
+    if regime and regime not in ('UNKNOWN', 'NONE', 'N/A'):
+        evidence_parts.append(f'régimen {regime.replace("_", " ").lower()}')
+
+    return {
+        'session_name': session_name,
+        'session_icon': session_icon,
+        'day_name': day_name,
+        'day_icon': day_icon,
+        'activity_label': activity_label,
+        'activity_score': round(activity, 1),
+        'activity_tone': activity_tone,
+        'condition': condition,
+        'volume_ratio': round(volume_ratio, 2),
+        'range_ratio': round(range_ratio, 2),
+        'evidence': ' · '.join(evidence_parts),
+        'note': (
+            'La sesión y el día describen el calendario; la actividad se clasifica '
+            'con volumen y rango observados, no por una etiqueta fija de horario.'
+        ),
+    }
+
+
+
+
 def _multiasset_public_analysis_candidate(result):
     """Public, trader-readable classification of one already-cached analysis."""
     result = result if isinstance(result, dict) else {}
