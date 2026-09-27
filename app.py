@@ -21008,6 +21008,16 @@ class TradingExpertSystem:
                 'structure': self._make_serializable(structure),
                 'correlation': self._make_serializable(correlation),
                 'market_hours': self._make_serializable(market_hours),
+                # Commit 16.1 — contexto de mercado público, en terminología
+                # convencional. No expone nombres de comités, especialistas,
+                # pesos internos ni reglas de aprendizaje.
+                'market_context': self._make_serializable(
+                    _commit16_public_market_context(
+                        market_hours=market_hours,
+                        execution_context=commit16_execution_context,
+                        market_regime=market_regime,
+                    )
+                ),
                 'confirmation': self._make_serializable(confirmation),
                 'time_factor': self._make_serializable(time_factor),
                 'sentiment': self._make_serializable(sentiment),
@@ -33735,6 +33745,274 @@ def _multiasset_is_executable(result):
             str(levels.get('publication_status') or result.get('publication_status') or '').upper() == 'EXECUTABLE_SIGNAL' and
             result.get('is_executable', levels.get('is_executable', True)) is not False)
 
+def _commit16_public_market_context(market_hours=None, execution_context=None, market_regime=None):
+    """Public market context for the header.
+
+    Presentation-only. It translates already-computed evidence into
+    conventional trader language and performs ZERO I/O. Internal committee,
+    specialist, weighting and learning terminology is never exposed.
+    """
+    market_hours = market_hours if isinstance(market_hours, dict) else {}
+    execution_context = execution_context if isinstance(execution_context, dict) else {}
+    market_regime = market_regime if isinstance(market_regime, dict) else {}
+
+    def _num(value, default=0.0):
+        try:
+            return float(value if value is not None else default)
+        except (TypeError, ValueError):
+            return float(default)
+
+    activity = max(0.0, min(100.0, _num(execution_context.get('activity_score'), 50.0)))
+    shock = max(0.0, min(100.0, _num(execution_context.get('shock_score'), 0.0)))
+    volume_ratio = max(0.0, _num(execution_context.get('volume_ratio'), 1.0))
+    range_ratio = max(0.0, _num(execution_context.get('range_ratio'), 1.0))
+
+    if activity >= 82:
+        activity_label = 'MUY ALTA'
+        activity_tone = 'danger' if shock >= 85 else 'success'
+    elif activity >= 64:
+        activity_label = 'ALTA'
+        activity_tone = 'success'
+    elif activity >= 42:
+        activity_label = 'MODERADA'
+        activity_tone = 'warning'
+    else:
+        activity_label = 'BAJA'
+        activity_tone = 'secondary'
+
+    if shock >= 85:
+        condition = 'MOVIMIENTO EXCEPCIONAL'
+    elif shock >= 65:
+        condition = 'ACTIVIDAD ANORMAL'
+    elif activity >= 64:
+        condition = 'MERCADO ACTIVO'
+    elif activity < 42:
+        condition = 'MERCADO CALMO'
+    else:
+        condition = 'CONDICIONES NORMALES'
+
+    session_name = str(market_hours.get('session_name') or '').strip()
+    session_code = str(market_hours.get('session') or execution_context.get('session') or 'UNKNOWN').upper()
+    if not session_name:
+        session_name = {
+            'ASIAN': 'Asiática',
+            'EUROPEAN': 'Europea',
+            'AMERICAN': 'Americana',
+        }.get(session_code, 'Sin identificar')
+    else:
+        session_name = {
+            'Asiático': 'Asiática',
+            'Europeo': 'Europea',
+            'Americano': 'Americana',
+        }.get(session_name, session_name)
+
+    day_name = str(market_hours.get('day_name') or '').strip() or '—'
+    day_icon = str(market_hours.get('day_icon') or '📅')
+    session_icon = str(market_hours.get('session_icon') or '🕒')
+
+    regime = str(
+        execution_context.get('market_regime')
+        or market_regime.get('regime')
+        or market_regime.get('state')
+        or ''
+    ).upper()
+
+    evidence_parts = [
+        f'volumen relativo {volume_ratio:.2f}x',
+        f'rango relativo {range_ratio:.2f}x',
+    ]
+    if regime and regime not in ('UNKNOWN', 'NONE', 'N/A'):
+        evidence_parts.append(f'régimen {regime.replace("_", " ").lower()}')
+
+    return {
+        'session_name': session_name,
+        'session_icon': session_icon,
+        'day_name': day_name,
+        'day_icon': day_icon,
+        'activity_label': activity_label,
+        'activity_score': round(activity, 1),
+        'activity_tone': activity_tone,
+        'condition': condition,
+        'volume_ratio': round(volume_ratio, 2),
+        'range_ratio': round(range_ratio, 2),
+        'evidence': ' · '.join(evidence_parts),
+        'note': (
+            'La sesión y el día describen el calendario; la actividad se clasifica '
+            'con volumen y rango observados, no por una etiqueta fija de horario.'
+        ),
+    }
+
+
+def _multiasset_public_analysis_candidate(result):
+    """Public, trader-readable classification of one already-cached analysis."""
+    result = result if isinstance(result, dict) else {}
+    decision = result.get('decision') or {}
+    levels = result.get('levels') or {}
+
+    def _num(value, default=0.0):
+        try:
+            return float(value if value is not None else default)
+        except (TypeError, ValueError):
+            return float(default)
+
+    action = str(decision.get('action') or 'NO_OPERAR').upper()
+    confidence = _num(decision.get('confidence'), 0.0)
+    directional = action in ('LONG', 'SHORT')
+    publication = str(
+        levels.get('publication_status')
+        or result.get('publication_status')
+        or ('ANALYSIS_ONLY' if levels.get('is_rejected') else 'EXECUTABLE_SIGNAL')
+    ).upper()
+    executable = bool(
+        directional
+        and publication == 'EXECUTABLE_SIGNAL'
+        and result.get('is_executable', levels.get('is_executable', True)) is not False
+    )
+
+    safety_raw = levels.get('execution_safety')
+    safety = _num(safety_raw, 0.0) if safety_raw is not None else None
+    rr = _num(levels.get('risk_reward'), 0.0)
+
+    if executable:
+        classification = 'EXECUTABLE_SIGNAL'
+        status_label = 'SEÑAL EJECUTABLE'
+        reason = 'La configuración técnica cumple los requisitos actuales de ejecución.'
+    elif directional:
+        classification = 'ANALYSIS_ONLY'
+        status_label = 'HIPÓTESIS DIRECCIONAL · NO EJECUTABLE'
+        rejected = str(levels.get('rejected_reason') or result.get('rejected_reason') or '').strip()
+        if rejected:
+            public_reason = rejected
+            replacements = {
+                'committee': 'evaluación técnica',
+                'comité': 'evaluación técnica',
+                'specialist': 'evaluación técnica',
+                'especialista': 'evaluación técnica',
+                'publication gate': 'filtro final',
+                'gate': 'filtro',
+                'router': 'revisión inicial',
+                'shadow': 'evaluación',
+            }
+            for src, dst in replacements.items():
+                public_reason = public_reason.replace(src, dst).replace(src.upper(), dst)
+            reason = public_reason[:260]
+        elif rr > 0:
+            reason = (
+                f'Existe dirección {action}, pero la combinación actual de niveles, '
+                f'riesgo y R/R ({rr:.2f}) no supera todavía los requisitos de ejecución.'
+            )
+        else:
+            reason = (
+                f'Existe dirección {action}, pero la calidad conjunta de la entrada, '
+                'protección y objetivo todavía no es suficiente para publicarla.'
+            )
+    else:
+        classification = 'NO_TRADE'
+        status_label = 'SIN SEÑAL DIRECCIONAL'
+        reason = 'No hay una dirección LONG/SHORT con confirmación técnica suficiente en este análisis.'
+
+    # Presentation only: these rows are never manually saveable in Multi-Activo.
+    # The label helps the existing UI explain why a directional idea is not an
+    # official signal without changing any execution threshold.
+    if safety is not None and safety >= 65:
+        risk_class = 'MEDIUM'
+    else:
+        risk_class = 'HIGH'
+
+    return {
+        'signal_id': str(result.get('signal_id') or ''),
+        'symbol': result.get('symbol'),
+        'timeframe': result.get('timeframe'),
+        'display_name': result.get('display_name'),
+        'asset_class': result.get('asset_class'),
+        'classification': classification,
+        'engine_publication_status': publication,
+        'status_label': status_label,
+        'reason': reason,
+        'active_reason': reason,
+        'action': action,
+        'confidence': round(confidence, 2),
+        'directional': directional,
+        'is_executable': executable,
+        'is_active': executable,
+        'manual_save_allowed': False,
+        'manual_risk_class': risk_class,
+        'manual_risk_reason': reason,
+        'manual_requires_ack': False,
+        'entry': levels.get('entry'),
+        'stop_loss': levels.get('stop_loss'),
+        'take_profit': levels.get('take_profit'),
+        'leverage': levels.get('leverage'),
+        'risk_reward': rr if rr > 0 else None,
+        'execution_safety': safety,
+        'source_candle_timestamp': result.get('source_candle_timestamp'),
+        'source_candle_close_timestamp': result.get('source_candle_close_timestamp'),
+        'current_price': result.get('live_price') or result.get('current_price'),
+        'source_context': 'MULTIASSET_PUBLIC_DIAGNOSTIC',
+    }
+
+
+def _multiasset_public_visibility(analyses):
+    """Compact public observability from analyses already present in RAM."""
+    rows = []
+    for result in (analyses or {}).values():
+        if isinstance(result, dict):
+            rows.append(_multiasset_public_analysis_candidate(result))
+
+    status_order = {'EXECUTABLE_SIGNAL': 0, 'ANALYSIS_ONLY': 1, 'NO_TRADE': 2}
+    rows.sort(
+        key=lambda item: (
+            status_order.get(str(item.get('classification')), 9),
+            -float(item.get('confidence') or 0),
+            str(item.get('symbol') or ''),
+            str(item.get('timeframe') or ''),
+        )
+    )
+
+    directional_hidden = [
+        dict(item) for item in rows
+        if item.get('classification') == 'ANALYSIS_ONLY'
+        and item.get('directional')
+    ]
+    executable_count = sum(
+        1 for item in rows
+        if item.get('classification') == 'EXECUTABLE_SIGNAL'
+    )
+    analysis_only_count = sum(
+        1 for item in rows
+        if item.get('classification') == 'ANALYSIS_ONLY'
+    )
+    no_trade_count = sum(
+        1 for item in rows
+        if item.get('classification') == 'NO_TRADE'
+    )
+    summary = {
+        # Compatibilidad con el diagnóstico visual ya usado por Futures.
+        'total_analyzed': len(rows),
+        'executable': executable_count,
+        'active_now': executable_count,
+        'analysis_only': analysis_only_count,
+        'no_trade': no_trade_count,
+        'errors': 0,
+        # Contexto adicional para Multi-Activo, en lenguaje público.
+        'markets_in_universe': 7,
+        'full_analyses_available': len(rows),
+        'directional_non_executable': analysis_only_count,
+        'without_direction': no_trade_count,
+        'coverage_complete': len(rows) >= 7,
+        'public_note': (
+            f'Hay {len(rows)} análisis completos disponibles en memoria de un universo de 7 mercados. '
+            'Cero señales significa cero configuraciones ejecutables entre esos análisis disponibles; '
+            'no implica que se haya forzado una entrada.'
+        ),
+    }
+    return {
+        'candidates': rows,
+        'other_directional_signals': directional_hidden,
+        'summary': summary,
+    }
+
+
 def _multiasset_run_analysis(symbol, timeframe, owner='multi-background'):
     engine=_get_multiasset_system()
     if engine is None:
@@ -33864,10 +34142,14 @@ def api_multiasset_opportunities():
         for (symbol,timeframe),result in analyses.items():
             if isinstance(result,dict) and _multiasset_is_executable(result):
                 signals.append(_multiasset_signal_row(result,'ACTIVE_CONFIRMED'))
+        visibility = _multiasset_public_visibility(analyses)
         return jsonify({
             'success':True,'total':len(signals),'signals':signals,
             'count':len(signals),'opportunities':signals,'processing_selected':False,
             'router':rows,'shortlist':[r for r in rows if r.get('deep_candidate')][:MULTIASSET_DEEP_LIMIT],
+            'analysis_summary':visibility['summary'],
+            'analysis_candidates':visibility['candidates'],
+            'other_directional_signals':visibility['other_directional_signals'],
             'resource_policy':{'scanner_db_writes':0,'scanner_ai_calls':0,'deep_limit':MULTIASSET_DEEP_LIMIT},
             'timestamp':datetime.now(bolivia_tz).isoformat(),
         })
@@ -33901,7 +34183,17 @@ def api_multiasset_signals_previous():
             row=_multiasset_signal_row(result,'PREVIOUS_CONFIRMED')
             if row['confidence']>=min_conf: signals.append(row)
         signals.sort(key=lambda x:-x['confidence'])
-        return jsonify({'success':True,'warming_up':False,'running':False,'cache_ready':bool(analyses),'total':len(signals),'active_count':len(signals),'signals':signals,'other_directional_signals':[],'analysis_candidates':[],'progress':{'total':7,'completed':len(analyses),'errors':0},'timestamp':datetime.now(bolivia_tz).isoformat()})
+        visibility = _multiasset_public_visibility(analyses)
+        return jsonify({
+            'success':True,'warming_up':False,'running':False,'cache_ready':bool(analyses),
+            'total':len(signals),'active_count':len(signals),'signals':signals,
+            'other_directional_signals':visibility['other_directional_signals'],
+            'analysis_candidates':visibility['candidates'],
+            'analysis_summary':visibility['summary'],
+            'message':visibility['summary']['public_note'],
+            'progress':{'total':7,'completed':len(analyses),'errors':0},
+            'timestamp':datetime.now(bolivia_tz).isoformat()
+        })
     except Exception as exc:
         return jsonify({'success':False,'error':str(exc)[:180]}),500
 
@@ -33917,11 +34209,15 @@ def api_multiasset_signals_active():
             if isinstance(result,dict) and _multiasset_is_executable(result):
                 signals.append(_multiasset_signal_row(result,'ACTIVE_CONFIRMED'))
         signals.sort(key=lambda x:-float(x.get('confidence') or 0))
+        visibility = _multiasset_public_visibility(analyses)
         return jsonify({
             'success':True,'warming_up':False,'running':False,
             'cache_ready':bool(analyses),'total':len(signals),'signals':signals,
-            'other_directional_signals':[],'vigent_other_directional_signals':[],
-            'analysis_candidates':[],
+            'other_directional_signals':visibility['other_directional_signals'],
+            'vigent_other_directional_signals':[],
+            'analysis_candidates':visibility['candidates'],
+            'analysis_summary':visibility['summary'],
+            'message':visibility['summary']['public_note'],
             'progress':{'total':7,'completed':len(analyses),'errors':0},
             'timestamp':datetime.now(bolivia_tz).isoformat()
         })

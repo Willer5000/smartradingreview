@@ -2979,6 +2979,7 @@ window.runCompleteAnalysis = function() {
 
                 if (data.partial && data.data?.decision) {
                     window.currentAnalysis = data.data;
+                    if (typeof window.updateMarketSessionInfo === 'function') window.updateMarketSessionInfo();
                     try {
                         updateInstantRecommendation(data.data);
                     } catch (partialErr) {
@@ -2993,7 +2994,7 @@ window.runCompleteAnalysis = function() {
                             <strong>⏳ ${isMulti ? 'Preparando análisis Multi-Activo' : 'Preparando gráficos Futures'}.</strong>
                             <div class="small mt-2">
                                 ${isMulti
-                                    ? 'El Router, el precio y el último análisis válido siguen disponibles mientras el motor compartido termina el turno anterior.'
+                                    ? 'La revisión de oportunidades, el precio y el último análisis válido siguen disponibles mientras termina el análisis en curso.'
                                     : 'El último estado del mercado seguirá visible mientras termina el payload gráfico.'}
                             </div>
                         </div>
@@ -3015,10 +3016,10 @@ window.runCompleteAnalysis = function() {
                     if (recommendationEl) {
                         recommendationEl.innerHTML = `
                             <div class="alert alert-warning mb-0">
-                                <strong>⚠️ ${isMulti ? 'El motor compartido sigue ocupado' : 'Los gráficos tardaron más de lo esperado'}.</strong>
+                                <strong>⚠️ ${isMulti ? 'El análisis sigue ocupado' : 'Los gráficos tardaron más de lo esperado'}.</strong>
                                 <div class="small mt-2">
                                     ${isMulti
-                                        ? 'No se seguirá haciendo polling. La página, el Router y el precio continúan disponibles; reintenta cuando quieras.'
+                                        ? 'La actualización automática se detuvo para evitar esperas innecesarias. La página y el precio continúan disponibles; reintenta cuando quieras.'
                                         : 'La página sigue disponible. Puedes reintentar sin recargarla.'}
                                 </div>
                                 <button type="button" class="btn btn-sm btn-outline-warning mt-2"
@@ -3072,6 +3073,7 @@ window.runCompleteAnalysis = function() {
                     clearTimeout(window.__SPOT_ANALYSIS_RETRY_TIMER__);
                 }
                 window.currentAnalysis = data.data;
+                    if (typeof window.updateMarketSessionInfo === 'function') window.updateMarketSessionInfo();
                 // ============================================================
                 // MOSTRAR TGP
                 // ============================================================
@@ -3631,7 +3633,7 @@ window.runCompleteAnalysis = function() {
                                 <strong>⏳ ${isMulti ? 'Esperando turno Multi-Activo' : 'Preparando gráficos Futures'}.</strong>
                                 <div class="small mt-2">
                                     ${isMulti
-                                        ? `El motor compartido está terminando otro trabajo. Intento acotado ${retryCount + 1}/${maxBusyRetries}.`
+                                        ? `El análisis está terminando otra tarea. Intento ${retryCount + 1}/${maxBusyRetries}.`
                                         : `El análisis se ejecuta en segundo plano para mantener la página disponible. Intento ${retryCount + 1}.`}
                                 </div>
                             </div>
@@ -3671,7 +3673,7 @@ window.runCompleteAnalysis = function() {
                         <strong>⚠️ ${window.IS_MULTI_ASSET_PAGE ? 'El análisis Multi-Activo no pudo tomar el turno compartido' : 'El análisis Futures tardó más de lo esperado'}.</strong>
                         <div class="small mt-2">
                             ${error?.message || 'El servidor está ocupado temporalmente.'}
-                            ${window.IS_MULTI_ASSET_PAGE ? '<br>El Router y el precio siguen disponibles; no se continuará haciendo polling automático.' : ''}
+                            ${window.IS_MULTI_ASSET_PAGE ? '<br>La revisión de oportunidades y el precio siguen disponibles; la actualización automática queda pausada.' : ''}
                         </div>
                         <button
                             type="button"
@@ -3844,6 +3846,7 @@ function getInstantRecommendation(attempt = 1) {
             // Guardar análisis actual
             window.currentAnalysis =
                 analysisData;
+            if (typeof window.updateMarketSessionInfo === 'function') window.updateMarketSessionInfo();
             // ============================================================
             // ASEGURAR NIVELES DE TRADING
             // ============================================================
@@ -8508,49 +8511,38 @@ function updateLiquidationHeatmap(data) {
     const timeframe = data.timeframe || data?.data?.timeframe || window.currentInterval || '4h';
     const calibration = liquidation.calibration || {};
 
-    // COMMIT 14.1.5 — VISUAL-ONLY / CELLULAR HISTOGRAM
-    // Mantiene intactos bins, pesos y calibración del backend. El frontend sólo
-    // cambia la representación: zonas como celdas tiempo×precio con espesor e
-    // intensidad variables, en vez de bandas horizontales continuas.
     let maxBars;
     switch (timeframe) {
-        case '5m': maxBars = 250; break;
-        case '15m': maxBars = 240; break;
-        case '30m': maxBars = 225; break;
-        case '1h': maxBars = 210; break;
-        case '2h': maxBars = 195; break;
-        case '4h': maxBars = 185; break;
-        case '12h': maxBars = 165; break;
-        case '1D': maxBars = 145; break;
-        case '1W': maxBars = 108; break;
-        default: maxBars = 185;
+        case '5m': maxBars = 180; break;
+        case '15m': maxBars = 180; break;
+        case '30m': maxBars = 170; break;
+        case '1h': maxBars = 160; break;
+        case '2h': maxBars = 150; break;
+        case '4h': maxBars = 140; break;
+        case '12h': maxBars = 120; break;
+        case '1D': maxBars = 100; break;
+        case '1W': maxBars = 80; break;
+        default: maxBars = 140;
     }
 
     maxBars = Math.max(2, Math.min(maxBars, df.time.length));
-    const start = df.time.length - maxBars;
-    const dates = df.time.slice(start).map(d => new Date(d));
-    const open = df.open.slice(start).map(Number);
-    const high = df.high.slice(start).map(Number);
-    const low = df.low.slice(start).map(Number);
-    const close = df.close.slice(start).map(Number);
-    const volume = Array.isArray(df.volume) ? df.volume.slice(start).map(Number) : [];
+    const dates = df.time.slice(-maxBars).map(d => new Date(d));
+    const open = df.open.slice(-maxBars).map(Number);
+    const high = df.high.slice(-maxBars).map(Number);
+    const low = df.low.slice(-maxBars).map(Number);
+    const close = df.close.slice(-maxBars).map(Number);
     const currentPrice = Number(data.current_price || close[close.length - 1] || 0);
 
     const validPrices = [...high, ...low].filter(Number.isFinite);
     if (!validPrices.length || !Number.isFinite(currentPrice) || currentPrice <= 0) return;
 
-    const inVisualRange = bin => {
-        const bottom = Number(bin.price_bottom);
-        const top = Number(bin.price_top);
-        const center = (bottom + top) / 2;
-        return [bottom, top, center].every(Number.isFinite)
-            && center > 0
-            && Math.abs(center - currentPrice) / currentPrice <= 0.36;
-    };
-
-    const relevantActive = activeBins.filter(inVisualRange);
-    const relevantFrozen = frozenBins.slice(-340).filter(inVisualRange);
-    const relevant = [...relevantActive, ...relevantFrozen];
+    // El frontend visualiza sólo el entorno operativo; el backend conserva
+    // todos los bins para análisis, aprendizaje y demás consumidores.
+    const relevant = [...activeBins, ...frozenBins.slice(-240)].filter(bin => {
+        const center = (Number(bin.price_top) + Number(bin.price_bottom)) / 2;
+        if (!Number.isFinite(center) || center <= 0) return false;
+        return Math.abs(center - currentPrice) / currentPrice <= 0.35;
+    });
 
     let minPrice = Math.min(...validPrices);
     let maxPrice = Math.max(...validPrices);
@@ -8560,273 +8552,77 @@ function updateLiquidationHeatmap(data) {
         if (Number.isFinite(b0)) minPrice = Math.min(minPrice, b0);
         if (Number.isFinite(b1)) maxPrice = Math.max(maxPrice, b1);
     });
-
     const rawRange = Math.max(maxPrice - minPrice, currentPrice * 0.01);
-    minPrice -= rawRange * 0.035;
-    maxPrice += rawRange * 0.035;
+    minPrice -= rawRange * 0.04;
+    maxPrice += rawRange * 0.04;
 
-    // Una malla visible tipo histograma/footprint. Menos columnas que velas para
-    // que cada bloque sea perceptible, pero suficiente detalle para la lectura.
-    const xCount = Math.max(36, Math.min(108, dates.length));
-    const yCount = 126;
+    // Heatmap ligero: máximo ~10k celdas, sensiblemente más eficiente que
+    // cientos de shapes Plotly de ancho completo.
+    const xCount = Math.max(2, Math.min(110, dates.length));
+    const yCount = 92;
     const xIdx = [];
     for (let i = 0; i < xCount; i++) {
         xIdx.push(Math.round(i * (dates.length - 1) / Math.max(1, xCount - 1)));
     }
-
     const xVals = xIdx.map(i => dates[i]);
     const yVals = Array.from({length: yCount}, (_, i) =>
         minPrice + (maxPrice - minPrice) * i / Math.max(1, yCount - 1)
     );
-    let z = Array.from({length: yCount}, () => Array(xCount).fill(0));
-    const priceCorridor = Array.from({length: yCount}, () => Array(xCount).fill(false));
+    const z = Array.from({length: yCount}, () => Array(xCount).fill(0));
 
     const firstMs = xVals[0].getTime();
     const lastMs = xVals[xVals.length - 1].getTime();
     const ySpan = Math.max(maxPrice - minPrice, 1e-12);
-    const yStep = ySpan / Math.max(1, yCount - 1);
 
     const indexForTime = ms => {
         if (!Number.isFinite(ms) || lastMs <= firstMs) return 0;
         const ratio = Math.max(0, Math.min(1, (ms - firstMs) / (lastMs - firstMs)));
         return Math.max(0, Math.min(xCount - 1, Math.round(ratio * (xCount - 1))));
     };
-
     const indexForPrice = price => {
         const ratio = Math.max(0, Math.min(1, (price - minPrice) / ySpan));
         return Math.max(0, Math.min(yCount - 1, Math.round(ratio * (yCount - 1))));
     };
 
-    const percentile = (arr, p) => {
-        if (!arr.length) return 0;
-        const sorted = [...arr].sort((a, b) => a - b);
-        const idx = Math.max(0, Math.min(sorted.length - 1, Math.round((sorted.length - 1) * p)));
-        return sorted[idx];
-    };
-
-    // Actividad observable del OHLCV: sólo modula visualmente la intensidad en
-    // el eje temporal. No crea ni desplaza niveles técnicos.
-    const trueRanges = high.map((h, i) => {
-        const l = low[i];
-        const prev = i > 0 ? close[i - 1] : close[i];
-        if (![h, l, prev].every(Number.isFinite)) return 0;
-        return Math.max(h - l, Math.abs(h - prev), Math.abs(l - prev));
-    });
-    const validRanges = trueRanges.filter(v => Number.isFinite(v) && v > 0);
-    const medianRange = Math.max(percentile(validRanges, 0.50), currentPrice * 1e-9);
-    const rangeScale = Math.max(percentile(validRanges, 0.86), medianRange);
-    const volumeScale = Math.max(
-        percentile(volume.filter(v => Number.isFinite(v) && v > 0), 0.86),
-        1e-12
-    );
-
-    let activity = xIdx.map(idx => {
-        const r = Math.max(0, Math.min(1, Number(trueRanges[idx] || 0) / rangeScale));
-        if (!volume.length) return r;
-        const v = Math.max(0, Math.min(1, Number(volume[idx] || 0) / volumeScale));
-        return 0.56 * r + 0.44 * v;
-    });
-
-    // Ventana corta: da bloques temporales coherentes y evita rayas uniformes.
-    activity = activity.map((value, i, arr) => {
-        let sum = 0;
-        let weight = 0;
-        for (let k = -2; k <= 2; k++) {
-            const j = i + k;
-            if (j < 0 || j >= arr.length) continue;
-            const w = k === 0 ? 3 : Math.abs(k) === 1 ? 2 : 1;
-            sum += arr[j] * w;
-            weight += w;
-        }
-        return weight ? sum / weight : value;
-    });
-
-    const weights = relevant
-        .map(bin => Number(bin.max_weight ?? bin.weight ?? 0))
-        .filter(v => Number.isFinite(v) && v > 0);
-    const visualWeightCap = Math.max(
-        percentile(weights, 0.93),
-        weights.length ? Math.max(...weights) * 0.74 : 1,
-        1e-12
-    );
-
-    const addCell = (yi, xi, value) => {
-        if (yi < 0 || yi >= yCount || xi < 0 || xi >= xCount || !Number.isFinite(value) || value <= 0) return;
-        z[yi][xi] += value;
-    };
-
-    // Para una zona activa reconstruimos únicamente su huella visual vigente:
-    // desde la última interacción histórica visible con ese rango. Si no hubo
-    // interacción dentro de la ventana, permanece visible desde el inicio.
-    const activeStartForBin = bin => {
+    let absoluteMax = 0;
+    relevant.forEach(bin => {
         const bottom = Number(bin.price_bottom);
         const top = Number(bin.price_top);
-        if (![bottom, top].every(Number.isFinite)) return 0;
-        let lastTouch = -1;
-        for (let xi = 0; xi < xCount; xi++) {
-            const idx = xIdx[xi];
-            const h = Number(high[idx]);
-            const l = Number(low[idx]);
-            if (!Number.isFinite(h) || !Number.isFinite(l)) continue;
-            if (h >= Math.min(bottom, top) && l <= Math.max(bottom, top)) lastTouch = xi;
-        }
-        // Evita que una interacción en las últimas dos celdas elimine toda la zona.
-        if (lastTouch >= 0 && lastTouch < xCount - 3) return lastTouch + 1;
-        return 0;
-    };
+        const weight = Number(bin.max_weight ?? bin.weight ?? 0);
+        if (![bottom, top, weight].every(Number.isFinite) || weight <= 0) return;
 
-    const paintCellularZone = (bin, mode) => {
-        const bottom = Number(bin.price_bottom);
-        const top = Number(bin.price_top);
-        const rawWeight = Number(bin.max_weight ?? bin.weight ?? 0);
-        if (![bottom, top, rawWeight].every(Number.isFinite) || rawWeight <= 0) return;
+        const createdMs = Date.parse(bin.created_at || xVals[0]);
+        const frozenMs = bin.frozen_at ? Date.parse(bin.frozen_at) : lastMs;
+        let x0 = indexForTime(Number.isFinite(createdMs) ? createdMs : firstMs);
+        let x1 = indexForTime(Number.isFinite(frozenMs) ? frozenMs : lastMs);
+        if (x1 < x0) [x0, x1] = [x1, x0];
 
         let y0 = indexForPrice(Math.min(bottom, top));
         let y1 = indexForPrice(Math.max(bottom, top));
         if (y1 < y0) [y0, y1] = [y1, y0];
-        const center = Math.round((y0 + y1) / 2);
-        const actualHalf = Math.max(1, Math.ceil((y1 - y0 + 1) / 2));
+        if (y1 === y0) {
+            y0 = Math.max(0, y0 - 1);
+            y1 = Math.min(yCount - 1, y1 + 1);
+        }
 
-        const weightRatio = Math.max(0, Math.min(1, rawWeight / visualWeightCap));
+        const historyFade = bin.frozen ? 0.58 : 1.0;
         const leverage = Number(bin.leverage || 0);
-        const leverageEmphasis = leverage >= 50 ? 1.05 : leverage >= 25 ? 1.025 : 1.0;
-        const baseIntensity = (mode === 'active'
-            ? 0.18 + 0.82 * Math.pow(weightRatio, 1.30)
-            : 0.08 + 0.52 * Math.pow(weightRatio, 1.26)
-        ) * leverageEmphasis;
+        const leverageEmphasis = leverage >= 50 ? 1.06 : leverage >= 25 ? 1.03 : 1.0;
+        const contribution = weight * historyFade * leverageEmphasis;
 
-        let x0 = 0;
-        let x1 = xCount - 1;
-        if (mode === 'active') {
-            x0 = activeStartForBin(bin);
-        } else {
-            const createdMs = Date.parse(bin.created_at || '');
-            const frozenMs = Date.parse(bin.frozen_at || '');
-            x0 = Number.isFinite(createdMs) ? indexForTime(createdMs) : 0;
-            x1 = Number.isFinite(frozenMs) ? indexForTime(frozenMs) : xCount - 1;
-            if (x1 < x0) [x0, x1] = [x1, x0];
-        }
-
-        for (let xi = x0; xi <= x1; xi++) {
-            const localActivity = Math.max(0, Math.min(1, activity[xi] || 0));
-            const age = (xi - x0) / Math.max(1, x1 - x0);
-
-            // Espesor variable = efecto histograma. Las zonas fuertes/activas
-            // ocupan más celdas; las débiles quedan en cian/verde más finas.
-            const extraHalf = Math.round(
-                (mode === 'active' ? 1.0 : 0.5)
-                + weightRatio * 2.5
-                + localActivity * 2.2
-            );
-            const halfWidth = Math.max(actualHalf, actualHalf + extraHalf);
-
-            // Intensidad temporal por actividad real. Se mantiene un piso para
-            // que una zona válida no desaparezca completamente.
-            const temporal = mode === 'active'
-                ? 0.52 + 0.34 * localActivity + 0.14 * age
-                : 0.42 + 0.30 * localActivity;
-            const core = baseIntensity * temporal;
-
-            for (let offset = -halfWidth; offset <= halfWidth; offset++) {
-                const yi = center + offset;
-                const d = Math.abs(offset) / Math.max(1, halfWidth);
-                // Perfil más "bloque" que gaussiano: centro casi plano y caída
-                // rápida en borde, similar a celdas de histograma.
-                let profile;
-                if (d <= 0.45) profile = 1.0;
-                else if (d <= 0.72) profile = 0.72;
-                else profile = 0.34;
-                addCell(yi, xi, core * profile);
+        for (let yi = y0; yi <= y1; yi++) {
+            for (let xi = x0; xi <= x1; xi++) {
+                z[yi][xi] += contribution;
+                if (z[yi][xi] > absoluteMax) absoluteMax = z[yi][xi];
             }
-
-            // Halo mínimo de contexto alrededor de cada bloque, sin llenar todo
-            // el eje Y ni convertirlo otra vez en bandas continuas.
-            addCell(center - halfWidth - 1, xi, core * 0.15);
-            addCell(center + halfWidth + 1, xi, core * 0.15);
         }
-    };
+    });
 
-    relevantFrozen.forEach(bin => paintCellularZone(bin, 'frozen'));
-    relevantActive.forEach(bin => paintCellularZone(bin, 'active'));
-
-    // Suavizado sólo horizontal y MUY ligero para que bloques contiguos formen
-    // clusters, pero se conserven visibles las celdas individuales.
-    const clustered = Array.from({length: yCount}, () => Array(xCount).fill(0));
-    for (let yi = 0; yi < yCount; yi++) {
-        for (let xi = 0; xi < xCount; xi++) {
-            const c = z[yi][xi];
-            const left = xi > 0 ? z[yi][xi - 1] : 0;
-            const right = xi + 1 < xCount ? z[yi][xi + 1] : 0;
-            clustered[yi][xi] = c * 0.84 + (left + right) * 0.08;
-        }
-    }
-    z = clustered;
-
-    const cellValues = [];
-    for (let yi = 0; yi < yCount; yi++) {
-        for (let xi = 0; xi < xCount; xi++) {
-            const value = z[yi][xi];
-            if (Number.isFinite(value) && value > 0.018) cellValues.push(value);
-        }
-    }
-    const cellCap = Math.max(percentile(cellValues, 0.982), 1e-12);
-
-    for (let yi = 0; yi < yCount; yi++) {
-        for (let xi = 0; xi < xCount; xi++) {
-            const raw = Math.max(0, Number(z[yi][xi] || 0));
-            if (raw <= 0) {
-                z[yi][xi] = 0;
-                continue;
-            }
-            const normalized = Math.max(0, Math.min(1, raw / cellCap));
-            z[yi][xi] = Math.pow(normalized, 1.17);
-        }
-    }
-
-    // Corredor del precio: suficientemente ancho para que velas y mechas queden
-    // legibles, pero no tanto como para borrar zonas cercanas de interés.
-    for (let xi = 0; xi < xCount; xi++) {
-        const idx = xIdx[xi];
-        const candleLow = Number(low[idx]);
-        const candleHigh = Number(high[idx]);
-        const tr = Math.max(Number(trueRanges[idx] || 0), medianRange);
-        if (![candleLow, candleHigh].every(Number.isFinite)) continue;
-
-        const pad = Math.max(
-            tr * 0.52,
-            medianRange * 0.54,
-            currentPrice * 0.00115,
-            yStep * 2.8
-        );
-        const feather = Math.max(pad * 1.45, yStep * 4.5);
-        const coreLow = candleLow - pad;
-        const coreHigh = candleHigh + pad;
-        const featherLow = candleLow - feather;
-        const featherHigh = candleHigh + feather;
-
+    if (absoluteMax > 0) {
         for (let yi = 0; yi < yCount; yi++) {
-            const price = yVals[yi];
-            if (price >= coreLow && price <= coreHigh) {
-                z[yi][xi] = 0;
-                priceCorridor[yi][xi] = true;
-                continue;
+            for (let xi = 0; xi < xCount; xi++) {
+                z[yi][xi] = Math.pow(z[yi][xi] / absoluteMax, 0.72);
             }
-            if (price >= featherLow && price < coreLow) {
-                const t = (coreLow - price) / Math.max(coreLow - featherLow, 1e-12);
-                z[yi][xi] *= 0.22 + 0.78 * Math.min(1, t);
-            } else if (price > coreHigh && price <= featherHigh) {
-                const t = (price - coreHigh) / Math.max(featherHigh - coreHigh, 1e-12);
-                z[yi][xi] *= 0.22 + 0.78 * Math.min(1, t);
-            }
-        }
-    }
-
-    // Cero real fuera de clusters: TradingDifferent deja fondo oscuro entre
-    // bloques. Sólo el propio halo de cada zona aporta cian/azul tenue.
-    for (let yi = 0; yi < yCount; yi++) {
-        for (let xi = 0; xi < xCount; xi++) {
-            if (priceCorridor[yi][xi]) continue;
-            if (z[yi][xi] < 0.018) z[yi][xi] = 0;
         }
     }
 
@@ -8838,34 +8634,19 @@ function updateLiquidationHeatmap(data) {
         name: 'Densidad estimada',
         zmin: 0,
         zmax: 1,
-        zsmooth: false,
-        // Separación fina entre celdas: lectura visual de histograma/footprint.
-        xgap: 1.15,
-        ygap: 1.05,
         showscale: false,
         hoverongaps: false,
-        opacity: 0.56,
         colorscale: [
-            [0.000, '#02040b'],
-            [0.045, '#071536'],
-            [0.110, '#0a2a5c'],
-            [0.190, '#0a4d80'],
-            [0.285, '#087f9f'],
-            [0.390, '#00b1ac'],
-            [0.500, '#10ca7c'],
-            [0.610, '#58d34e'],
-            [0.705, '#a4dc3b'],
-            [0.790, '#e5e33a'],
-            [0.860, '#ffd338'],
-            [0.915, '#ff9f31'],
-            [0.960, '#ff6530'],
-            [1.000, '#ff3045']
+            [0.00, '#080b0f'],
+            [0.08, '#0d2b2b'],
+            [0.22, '#13634e'],
+            [0.42, '#2ca75e'],
+            [0.62, '#d3c83d'],
+            [0.80, '#f29a32'],
+            [1.00, '#ff3f46']
         ],
-        hovertemplate:
-            '<b>Densidad estimada</b><br>' +
-            '%{x|%Y-%m-%d %H:%M}<br>' +
-            'Precio: %{y:,.6f}<br>' +
-            'Intensidad relativa: %{z:.0%}<extra></extra>'
+        hovertemplate: '<b>Zona de calor</b><br>%{x}<br>Precio: %{y:,.6f}<br>Intensidad relativa: %{z:.0%}<extra></extra>',
+        opacity: 0.92
     };
 
     const candleTrace = {
@@ -8876,11 +8657,9 @@ function updateLiquidationHeatmap(data) {
         close,
         type: 'candlestick',
         name: 'Precio',
-        increasing: {line: {color: '#19e6ad', width: 1.65}, fillcolor: '#19e6ad'},
-        decreasing: {line: {color: '#ff5366', width: 1.65}, fillcolor: '#ff5366'},
-        whiskerwidth: 0.32,
-        opacity: 1.0,
-        hoverlabel: {bgcolor: '#0b1018', font: {color: '#f1f5f9'}}
+        increasing: {line: {color: '#28d9a7', width: 1.15}, fillcolor: '#28d9a7'},
+        decreasing: {line: {color: '#ff626d', width: 1.15}, fillcolor: '#ff626d'},
+        whiskerwidth: 0.25
     };
 
     const longWeight = Math.max(0, Number(liquidation.total_long_weight || 0));
@@ -8898,45 +8677,50 @@ function updateLiquidationHeatmap(data) {
     if (activeEl) activeEl.textContent = activeBins.length;
     if (frozenEl) frozenEl.textContent = frozenBins.length;
 
-    const interpretationEl = document.getElementById('liquidation-interpretation');
-    if (interpretationEl) {
-        interpretationEl.textContent = '🔴🟡 Mayor concentración → vigilar reacción del precio. 🟢🔵 Menor intensidad. Usar como confluencia, no como señal aislada.';
+    let interpretation;
+    if (longPct >= 65) {
+        interpretation = 'Mayor concentración estimada de exposición LONG. Vigilar barridos y reacción en zonas inferiores.';
+    } else if (shortPct >= 65) {
+        interpretation = 'Mayor concentración estimada de exposición SHORT. Vigilar barridos y reacción en zonas superiores.';
+    } else {
+        interpretation = 'Distribución relativamente equilibrada. Priorizar las zonas de mayor intensidad y su reacción con el precio.';
     }
+
+    if (calibration.status === 'PUBLIC_MARKET_CALIBRATED') {
+        const oi = Number(calibration.open_interest_change_pct || 0);
+        interpretation += ' Calibración pública activa · OI ' + (oi >= 0 ? '+' : '') + oi.toFixed(2) + '%.';
+    } else {
+        interpretation += ' Sin calibración pública disponible: se conserva el modelo base.';
+    }
+    const interpretationEl = document.getElementById('liquidation-interpretation');
+    if (interpretationEl) interpretationEl.textContent = interpretation;
 
     const layout = {
         title: {
-            text: 'Calor de liquidaciones (' + timeframe + ') · ' + activeBins.length + ' zonas activas',
-            font: {color: '#eef4fb', size: 14},
-            x: 0.015,
-            xanchor: 'left',
-            y: 0.985,
-            yanchor: 'top'
+            text: 'Calor de liquidaciones estimadas (' + timeframe + ') · ' + activeBins.length + ' zonas activas',
+            font: {color: '#e8edf4', size: 14},
+            x: 0.02,
+            xanchor: 'left'
         },
         xaxis: {
             type: 'date',
             range: [dates[0], dates[dates.length - 1]],
             showgrid: false,
-            zeroline: false,
             rangeslider: {visible: false},
-            fixedrange: false,
-            tickfont: {color: '#a9b5c3', size: 10},
-            linecolor: 'rgba(160,175,190,0.16)',
-            mirror: false
+            fixedrange: false
         },
         yaxis: {
             range: [minPrice, maxPrice],
-            showgrid: false,
-            zeroline: false,
+            showgrid: true,
+            gridcolor: 'rgba(130,145,160,0.10)',
             tickformat: currentPrice >= 1000 ? ',.0f' : currentPrice >= 1 ? '.3f' : '.6f',
             side: 'right',
-            fixedrange: false,
-            tickfont: {color: '#dfe7ef', size: 10},
-            linecolor: 'rgba(160,175,190,0.16)'
+            fixedrange: false
         },
-        height: 480,
-        margin: {l: 10, r: 72, t: 46, b: 34},
-        paper_bgcolor: '#03050a',
-        plot_bgcolor: '#03050a',
+        height: 450,
+        margin: {l: 16, r: 70, t: 42, b: 28},
+        paper_bgcolor: '#080b0f',
+        plot_bgcolor: '#080b0f',
         showlegend: false,
         shapes: [{
             type: 'line',
@@ -8946,12 +8730,10 @@ function updateLiquidationHeatmap(data) {
             x1: 1,
             y0: currentPrice,
             y1: currentPrice,
-            line: {color: 'rgba(235,241,247,0.58)', width: 1, dash: 'dot'}
+            line: {color: 'rgba(255,255,255,0.50)', width: 1, dash: 'dot'}
         }],
         hovermode: 'closest',
-        dragmode: 'pan',
-        uirevision: 'liq-heatmap-14-1-5-' + timeframe,
-        font: {color: '#dfe7ef'}
+        dragmode: 'pan'
     };
 
     Plotly.react(
@@ -8969,7 +8751,6 @@ function updateLiquidationHeatmap(data) {
         chartDiv.innerHTML = '<div class="alert alert-danger">No se pudo dibujar el mapa de calor.</div>';
     });
 }
-
 
 // ============ ZONAS DINÁMICAS DE TRADING ============
 function updateTradingZones(data) {
@@ -11442,89 +11223,152 @@ function updateCalendarInfo() {
     }
 }
 
-// ============ ACTUALIZAR INFORMACIÓN DE MERCADO (HORARIOS) ============
+// ============ CONTEXTO DE MERCADO — COMMIT 16.1 ============
 window.updateMarketSessionInfo = function() {
     try {
         const now = new Date();
-        const boliviaTime = new Date(now.toLocaleString("en-US", {timeZone: "America/La_Paz"}));
+        const boliviaTime = new Date(
+            now.toLocaleString("en-US", {timeZone: "America/La_Paz"})
+        );
         const hour = boliviaTime.getHours();
-        const weekday = boliviaTime.getDay(); // 0=Domingo, 1=Lunes, ..., 6=Sábado
-        
+        const weekday = boliviaTime.getDay();
+
+        // La sesión y el día son datos de calendario. NO implican por sí solos
+        // liquidez alta/baja, mercado bueno/malo ni una decisión de trading.
         let sessionIcon = '🌏';
-        let sessionName = 'Asiático';
-        let liquidity = 'Baja';
+        let sessionName = 'Asiática';
         let sessionClass = 'bg-info';
-        
-        // Sesión Asiática: 19:00 - 03:00
+
         if ((hour >= 19 && hour <= 23) || (hour >= 0 && hour < 3)) {
             sessionIcon = '🌏';
-            sessionName = 'Asiático';
-            liquidity = 'Baja';
+            sessionName = 'Asiática';
             sessionClass = 'bg-info';
-        }
-        // Sesión Europea: 03:00 - 11:00
-        else if (hour >= 3 && hour < 11) {
+        } else if (hour >= 3 && hour < 11) {
             sessionIcon = '🇪🇺';
-            sessionName = 'Europeo';
-            liquidity = 'Alta';
+            sessionName = 'Europea';
             sessionClass = 'bg-primary';
-        }
-        // Sesión Americana: 11:00 - 19:00
-        else if (hour >= 11 && hour < 19) {
+        } else if (hour >= 11 && hour < 19) {
             sessionIcon = '🇺🇸';
-            sessionName = 'Americano';
-            liquidity = 'Muy Alta';
+            sessionName = 'Americana';
             sessionClass = 'bg-success';
         }
-        
-        // Solapamiento Europa-América (11:00 - 15:00)
+
         if (hour >= 11 && hour < 15) {
-            sessionName += ' + América';
-            liquidity = 'Máxima';
-            sessionClass = 'bg-warning';
+            sessionName = 'Europa + América';
+            sessionClass = 'bg-warning text-dark';
         }
-        
-        // Días de la semana
-        const dayNames = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
-        const dayIcons = ['🏖️', '📆', '📊', '📊', '📊', '🏁', '🏖️'];
-        const dayColors = ['secondary', 'warning', 'success', 'success', 'success', 'danger', 'secondary'];
-        
-        let dayIcon = dayIcons[weekday];
-        let dayName = dayNames[weekday];
-        let dayClass = dayColors[weekday];
-        
-        // Actualizar DOM
+
+        const dayNames = [
+            'Domingo', 'Lunes', 'Martes', 'Miércoles',
+            'Jueves', 'Viernes', 'Sábado'
+        ];
+        const dayName = dayNames[weekday];
+
+        // Cuando existe un análisis actual usamos la evidencia calculada en
+        // backend: volumen relativo + rango observado + régimen/contexto.
+        // Nunca mostramos nombres internos de arquitectura.
+        const analysis =
+            window.currentAnalysis
+            || (typeof currentAnalysis !== 'undefined' ? currentAnalysis : null)
+            || null;
+        const marketContext =
+            analysis && analysis.market_context && typeof analysis.market_context === 'object'
+                ? analysis.market_context
+                : null;
+
+        let activityLabel = 'ESPERANDO ANÁLISIS';
+        let activityClass = 'text-muted';
+        let condition = 'Contexto pendiente';
+        let statusClass = 'badge bg-secondary';
+        let evidence = (
+            'La sesión y el día son informativos. '
+            + 'La actividad se actualizará con evidencia del mercado cuando haya un análisis disponible.'
+        );
+
+        if (marketContext) {
+            if (marketContext.session_name) sessionName = String(marketContext.session_name);
+            if (marketContext.session_icon) sessionIcon = String(marketContext.session_icon);
+
+            activityLabel = String(
+                marketContext.activity_label || 'MODERADA'
+            ).toUpperCase();
+
+            const tone = String(marketContext.activity_tone || 'secondary').toLowerCase();
+            activityClass = {
+                success: 'text-success',
+                warning: 'text-warning',
+                danger: 'text-danger',
+                secondary: 'text-muted',
+                info: 'text-info'
+            }[tone] || 'text-muted';
+
+            condition = String(
+                marketContext.condition || 'CONDICIONES NORMALES'
+            ).replaceAll('_', ' ');
+
+            statusClass = {
+                success: 'badge bg-success',
+                warning: 'badge bg-warning text-dark',
+                danger: 'badge bg-danger',
+                secondary: 'badge bg-secondary',
+                info: 'badge bg-info'
+            }[tone] || 'badge bg-secondary';
+
+            evidence = String(
+                marketContext.evidence
+                || marketContext.note
+                || 'Actividad estimada con datos observados del mercado.'
+            );
+        }
+
         const sessionIconEl = document.getElementById('market-session-icon');
         const sessionBadgeEl = document.getElementById('market-session-badge');
-        const liquidityEl = document.getElementById('market-liquidity');
+        const activityEl = document.getElementById('market-liquidity');
         const dayIconEl = document.getElementById('market-day-icon');
         const dayNameEl = document.getElementById('market-day-name');
         const marketStatusEl = document.getElementById('market-status');
-        
+
         if (sessionIconEl) sessionIconEl.textContent = sessionIcon;
+
         if (sessionBadgeEl) {
             sessionBadgeEl.textContent = `Sesión ${sessionName}`;
             sessionBadgeEl.className = `badge ${sessionClass} me-2`;
+            sessionBadgeEl.title = 'Franja horaria de mercado. No implica por sí sola mayor o menor actividad.';
         }
-        if (liquidityEl) liquidityEl.textContent = `Liquidez: ${liquidity}`;
-        if (dayIconEl) dayIconEl.textContent = dayIcon;
+
+        if (activityEl) {
+            activityEl.textContent = `Actividad: ${activityLabel}`;
+            activityEl.className = `${activityClass} me-3`;
+            activityEl.title = evidence;
+        }
+
+        if (dayIconEl) {
+            dayIconEl.textContent = (
+                marketContext && marketContext.day_icon
+                    ? String(marketContext.day_icon)
+                    : '📅'
+            );
+        }
+
         if (dayNameEl) {
-            dayNameEl.textContent = dayName;
-            dayNameEl.className = `badge bg-${dayClass} me-3`;
+            dayNameEl.textContent = (
+                marketContext && marketContext.day_name
+                    ? String(marketContext.day_name)
+                    : dayName
+            );
+            dayNameEl.className = 'badge bg-secondary me-3';
+            dayNameEl.title = (
+                'Día calendario. Su efecto no se presume: '
+                + 'la lectura de actividad depende de los datos observados.'
+            );
         }
-        
-        // Actualizar estado del mercado
+
         if (marketStatusEl) {
-            if (weekday === 0 || weekday === 6) {
-                marketStatusEl.textContent = 'Fin de Semana';
-                marketStatusEl.className = 'badge bg-secondary';
-            } else if (hour >= 9 && hour < 17) {
-                marketStatusEl.textContent = 'Horario Principal';
-                marketStatusEl.className = 'badge bg-success';
-            } else {
-                marketStatusEl.textContent = 'Horario Extendido';
-                marketStatusEl.className = 'badge bg-warning';
-            }
+            marketStatusEl.textContent = condition
+                .toLowerCase()
+                .replace(/\b\w/g, c => c.toUpperCase());
+            marketStatusEl.className = statusClass;
+            marketStatusEl.title = evidence;
         }
     } catch (error) {
         console.error('Error en updateMarketSessionInfo:', error);
