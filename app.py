@@ -4,6 +4,7 @@
 import os
 import uuid
 import json
+import hashlib
 import time
 import math
 import random
@@ -346,10 +347,21 @@ def _commit15_security_headers(response):
     response.headers['X-Robots-Tag'] = 'noindex, nofollow, noarchive'
 
     # Evita que, después de cerrar sesión, el botón Atrás muestre una copia
-    # cacheada del HTML privado. JS/CSS estáticos conservan su caché normal.
+    # cacheada del HTML privado.
     if response.mimetype == 'text/html' or request.path.startswith('/api/auth/'):
         response.headers['Cache-Control'] = 'no-store, max-age=0'
         response.headers['Pragma'] = 'no-cache'
+
+    # COMMIT 17 — RESOURCE & BANDWIDTH GOVERNOR.
+    # Los assets estáticos usan URL versionada desde la plantilla; por eso se
+    # pueden conservar siete días en el navegador sin riesgo de servir una
+    # versión anterior después de un deploy. No cambia HTML ni aspecto visual.
+    if request.path.startswith('/static/'):
+        if request.query_string:
+            response.headers['Cache-Control'] = 'private, max-age=604800, immutable'
+        else:
+            response.headers['Cache-Control'] = 'private, max-age=3600, must-revalidate'
+        response.headers['Vary'] = 'Accept-Encoding'
 
     # El login no depende de CDNs: puede usar una CSP estricta sin afectar el
     # dashboard, Plotly ni los recursos existentes de la aplicación.
@@ -24483,8 +24495,18 @@ class LiquidationPublicCalibration:
     - Binance USD-M como fuente principal y Bybit como fallback público.
     """
 
-    SUCCESS_TTL_SECONDS = 900
-    FAILURE_TTL_SECONDS = 180
+    # Commit 17: un único contexto público de derivados por símbolo.
+    # La geometría del heatmap sigue siendo específica de cada timeframe; sólo
+    # la recalibración pública (OI/ratio/taker) se comparte para no descargar
+    # tres endpoints por cada TF del mismo activo.
+    SUCCESS_TTL_SECONDS = max(1800, int(os.environ.get(
+        'LIQUIDATION_PUBLIC_CALIBRATION_TTL_SECONDS', '1800'
+    ) or 1800))
+    FAILURE_TTL_SECONDS = max(180, int(os.environ.get(
+        'LIQUIDATION_PUBLIC_CALIBRATION_FAILURE_TTL_SECONDS', '300'
+    ) or 300))
+    SHARED_BINANCE_PERIOD = '1h'
+    SHARED_BYBIT_PERIOD = '1h'
     _cache = {}
     _lock = threading.RLock()
     _network_gate = threading.BoundedSemaphore(2)
@@ -24706,18 +24728,20 @@ class LiquidationPublicCalibration:
                 'observed_liquidations': False,
             }
 
-        key = (normalized, str(timeframe or '4h'))
+        # Compartido por símbolo: BTC 30m/1h/2h/4h reutilizan el mismo
+        # snapshot público. La forma/zonas del heatmap continúan saliendo del
+        # OHLCV de su timeframe; sólo el factor moderado usa este contexto.
+        key = normalized
         now = time.monotonic()
         with cls._lock:
             cached = cls._cache.get(key)
             if cached and now < cached.get('_expires_at', 0):
                 return {k: v for k, v in cached.items() if k != '_expires_at'}
 
-        binance_period, bybit_period = cls._periods(timeframe)
         with cls._network_gate:
-            result = cls._fetch_binance(normalized, binance_period)
+            result = cls._fetch_binance(normalized, cls.SHARED_BINANCE_PERIOD)
             if result is None:
-                result = cls._fetch_bybit(normalized, bybit_period)
+                result = cls._fetch_bybit(normalized, cls.SHARED_BYBIT_PERIOD)
 
         if result is None:
             result = {
@@ -28573,93 +28597,370 @@ def health():
 # === CORRECCIÓN: app.py - Manejo de errores en rutas API ===
 # Ubicación: Reemplazar rutas  y /api/telegram/test
 
-@app.route('/api/price')
-def api_price():
-    """
-    Endpoint LIGERO: solo devuelve el precio actual del par/timeframe.
-    
-    A diferencia de /api/analyze (que ejecuta 9 traders + 10 capas + 20 indicadores,
-    tarda 2-5s con caché frío y satura Render Free si se llama cada 5s), este
-    endpoint solo:
-      1. Consulta las velas de KuCoin (usa caché HTTP con TTL corto)
-      2. Extrae el precio de cierre de la última vela
-      3. Retorna en <50ms
-    
-    Uso desde frontend: `setInterval` de precio en vivo cada 5s.
+# ============================================================================
+# COMMIT 17 — RESOURCE & BANDWIDTH GOVERNOR / SHARED MARKET PRICE HUB
+# ============================================================================
+# Objetivo: reducir tráfico iniciado por Render sin cambiar decisiones de trading
+# ni la interfaz. El precio ligero se comparte entre frontend/monitores y la vela
+# completa se usa como ancla con TTL corto. Ninguna de estas cachés persiste.
+_MARKET_PRICE_HUB_LOCK = threading.RLock()
+_MARKET_PRICE_HUB = {}
+_MARKET_PRICE_HUB_MAX_ENTRIES = 64
+_MARKET_PRICE_HTTP_SESSION = requests.Session()
+_PRICE_CANDLE_ANCHOR_LOCK = threading.RLock()
+_PRICE_CANDLE_ANCHOR = {}
+_PRICE_CANDLE_ANCHOR_MAX_ENTRIES = 24
+_PRICE_CANDLE_ANCHOR_TTL_SECONDS = max(
+    45,
+    int(os.environ.get('PRICE_CANDLE_ANCHOR_TTL_SECONDS', '120') or 120),
+)
+_RESOURCE_GOVERNOR_STATS_LOCK = threading.Lock()
+_RESOURCE_GOVERNOR_STATS = {
+    'price_hub_hits': 0,
+    'price_hub_network': 0,
+    'price_anchor_hits': 0,
+    'price_anchor_network': 0,
+    'futures_snapshot_writes': 0,
+    'futures_snapshot_skips': 0,
+    'multiasset_router_scans': 0,
+    'multiasset_router_reuses': 0,
+}
+
+
+def _rg_count(key, amount=1):
+    try:
+        with _RESOURCE_GOVERNOR_STATS_LOCK:
+            _RESOURCE_GOVERNOR_STATS[key] = int(_RESOURCE_GOVERNOR_STATS.get(key, 0) or 0) + int(amount)
+    except Exception:
+        pass
+
+
+def _bounded_cache_put(cache, key, value, max_entries):
+    cache[key] = value
+    if len(cache) <= max_entries:
+        return
+    try:
+        oldest = sorted(
+            cache.items(),
+            key=lambda item: float((item[1] or {}).get('ts') or 0.0),
+        )
+        for old_key, _ in oldest[:-max(1, int(max_entries * 0.75))]:
+            cache.pop(old_key, None)
+    except Exception:
+        while len(cache) > max_entries:
+            cache.pop(next(iter(cache)), None)
+
+
+def _fetch_spot_level1_price_light(symbol):
+    normalized = str(symbol or '').upper().replace('/', '-')
+    try:
+        response = _MARKET_PRICE_HTTP_SESSION.get(
+            'https://api.kucoin.com/api/v1/market/orderbook/level1',
+            params={'symbol': normalized},
+            timeout=4,
+        )
+        response.raise_for_status()
+        payload = response.json() or {}
+        if str(payload.get('code')) != '200000':
+            return None
+        price = float((payload.get('data') or {}).get('price') or 0)
+        return price if price > 0 else None
+    except Exception:
+        return None
+
+
+def _fetch_futures_mark_price_light(symbol):
+    try:
+        fs = _configured_futures_module()
+        contract = str((getattr(fs, 'FUTURES_CONTRACT_SYMBOLS', {}) or {}).get(symbol) or '')
+        if not contract:
+            return None
+        session_obj = fs._get_futures_http_session()
+        url = fs.KUCOIN_FUTURES_MARK_PRICE_URL.format(symbol=contract)
+        response = session_obj.get(url, timeout=4)
+        response.raise_for_status()
+        payload = response.json() or {}
+        if str(payload.get('code')) != '200000':
+            return None
+        price = float((payload.get('data') or {}).get('value') or 0)
+        return price if price > 0 else None
+    except Exception:
+        return None
+
+
+def _fetch_multiasset_price_light(symbol):
+    """Best-effort price-only transport for Multi-Activo.
+
+    Commit 12 deliberately hides transport symbols. We only use an explicit
+    live-price method or an explicit contract map if the module exposes it;
+    otherwise /api/price falls back to its short-lived candle anchor.
     """
     try:
-        symbol = request.args.get('symbol', 'BTC-USDT')
-        interval = request.args.get('interval', '1D')
+        engine = _get_multiasset_system()
+        if engine is not None:
+            for method_name in ('get_live_price', 'get_mark_price', 'get_ticker_price'):
+                method = getattr(engine, method_name, None)
+                if callable(method):
+                    try:
+                        price = float(method(symbol) or 0)
+                        if price > 0:
+                            return price
+                    except Exception:
+                        pass
+
+        import multiasset_system as multi_mod
+        contract = None
+        for mapping_name in (
+            'MULTIASSET_CONTRACT_SYMBOLS',
+            'MULTIASSET_TRANSPORT_SYMBOLS',
+            'KUCOIN_CONTRACT_SYMBOLS',
+        ):
+            mapping = getattr(multi_mod, mapping_name, None)
+            if isinstance(mapping, dict):
+                contract = str(mapping.get(symbol) or '')
+                if contract:
+                    break
+        if not contract:
+            return None
+        response = _MARKET_PRICE_HTTP_SESSION.get(
+            'https://api-futures.kucoin.com/api/v1/ticker',
+            params={'symbol': contract},
+            timeout=4,
+        )
+        response.raise_for_status()
+        payload = response.json() or {}
+        if str(payload.get('code')) != '200000':
+            return None
+        data = payload.get('data') or {}
+        price = float(data.get('price') or data.get('markPrice') or 0)
+        return price if price > 0 else None
+    except Exception:
+        return None
+
+
+def _market_price_hub_get(market, symbol, max_age_seconds=20):
+    market = str(market or 'spot').strip().lower()
+    symbol = str(symbol or '').upper().replace('/', '-')
+    key = (market, symbol)
+    now_mono = time.monotonic()
+    ttl = max(5.0, float(max_age_seconds or 20))
+
+    with _MARKET_PRICE_HUB_LOCK:
+        cached = _MARKET_PRICE_HUB.get(key) or {}
+        age = now_mono - float(cached.get('ts') or 0.0)
+        try:
+            cached_price = float(cached.get('price') or 0)
+        except Exception:
+            cached_price = 0.0
+        if cached_price > 0 and age < ttl:
+            _rg_count('price_hub_hits')
+            return cached_price
+
+    if market == 'futures':
+        price = _fetch_futures_mark_price_light(symbol)
+    elif market == 'multiasset':
+        price = _fetch_multiasset_price_light(symbol)
+    else:
+        price = _fetch_spot_level1_price_light(symbol)
+
+    if price is not None and float(price) > 0:
+        _rg_count('price_hub_network')
+        with _MARKET_PRICE_HUB_LOCK:
+            _bounded_cache_put(
+                _MARKET_PRICE_HUB,
+                key,
+                {'price': float(price), 'ts': now_mono},
+                _MARKET_PRICE_HUB_MAX_ENTRIES,
+            )
+        return float(price)
+
+    # Fail-open: if transport failed, allow a slightly stale cached quote.
+    with _MARKET_PRICE_HUB_LOCK:
+        cached = _MARKET_PRICE_HUB.get(key) or {}
+        try:
+            cached_price = float(cached.get('price') or 0)
+        except Exception:
+            cached_price = 0.0
+        if cached_price > 0:
+            return cached_price
+    return None
+
+
+def _load_price_candle_anchor(market, symbol, interval):
+    """Return last/previous candle rows, refreshing OHLCV at most once per TTL."""
+    market = str(market or 'spot').strip().lower()
+    symbol = str(symbol or '').upper().replace('/', '-')
+    interval = str(interval or '1D')
+    key = (market, symbol, interval)
+    now_mono = time.monotonic()
+
+    with _PRICE_CANDLE_ANCHOR_LOCK:
+        cached = _PRICE_CANDLE_ANCHOR.get(key) or {}
+        if cached and now_mono - float(cached.get('ts') or 0.0) < _PRICE_CANDLE_ANCHOR_TTL_SECONDS:
+            _rg_count('price_anchor_hits')
+            return dict(cached)
+
+    try:
+        if market == 'multiasset':
+            engine = _get_multiasset_system()
+            df = engine.get_kucoin_data(symbol, interval) if engine is not None else None
+        elif market == 'futures':
+            engine = _get_futures_system()
+            df = engine.get_kucoin_data(symbol, interval) if engine is not None else None
+        else:
+            from kucoin_cache import fetch_kucoin_candles
+            df = fetch_kucoin_candles(symbol, interval, timeout=8)
+    except Exception:
+        df = None
+
+    if df is None or getattr(df, 'empty', True):
+        with _PRICE_CANDLE_ANCHOR_LOCK:
+            cached = _PRICE_CANDLE_ANCHOR.get(key)
+            return dict(cached) if isinstance(cached, dict) else None
+
+    last_row = df.iloc[-1]
+    previous_close = float(df['close'].iloc[-2]) if len(df) >= 2 else float(last_row.get('close') or 0)
+    last_time = last_row.get('time')
+    try:
+        last_time_iso = last_time.isoformat()
+    except Exception:
+        last_time_iso = str(last_time)
+
+    def _num(name, fallback=0.0):
+        try:
+            value = float(last_row.get(name) or fallback)
+            return value if math.isfinite(value) else float(fallback)
+        except Exception:
+            return float(fallback)
+
+    anchor_value = {
+        'ts': now_mono,
+        'time': last_time_iso,
+        'open': _num('open'),
+        'high': _num('high'),
+        'low': _num('low'),
+        'close': _num('close'),
+        'volume': _num('volume'),
+        'previous_close': previous_close,
+    }
+    _rg_count('price_anchor_network')
+    with _PRICE_CANDLE_ANCHOR_LOCK:
+        _bounded_cache_put(
+            _PRICE_CANDLE_ANCHOR,
+            key,
+            anchor_value,
+            _PRICE_CANDLE_ANCHOR_MAX_ENTRIES,
+        )
+    return dict(anchor_value)
+
+
+@app.route('/api/price')
+def api_price():
+    """Precio visual ligero con ancla OHLCV compartida.
+
+    Commit 17 separa dos necesidades que antes viajaban juntas cada 30 s:
+    - precio actual: ticker/mark-price pequeño compartido en RAM;
+    - OHLCV de la vela abierta: ancla refrescada cada ~120 s.
+
+    El contrato JSON que consume el frontend se conserva, por lo que la
+    experiencia visual no cambia y este endpoint sigue sin confirmar señales.
+    """
+    try:
+        symbol = str(request.args.get('symbol', 'BTC-USDT') or 'BTC-USDT').upper().replace('/', '-')
+        interval = str(request.args.get('interval', '1D') or '1D')
         market = str(request.args.get('market') or 'spot').strip().lower()
+        if market not in ('spot', 'futures', 'multiasset'):
+            market = 'spot'
 
-        # RC9.7.5: Futures must visualize its real perpetual contract, not the
-        # Spot market. This endpoint remains display-only; trading decisions are
-        # still produced by the corresponding closed-candle analysis pipeline.
-        try:
-            if market == 'multiasset':
-                multi_market = _get_multiasset_system()
-                df = multi_market.get_kucoin_data(symbol, interval) if multi_market is not None else None
-            elif market == 'futures':
-                futures_market = _get_futures_system()
-                df = futures_market.get_kucoin_data(symbol, interval) if futures_market is not None else None
-            else:
-                from kucoin_cache import fetch_kucoin_candles
-                df = fetch_kucoin_candles(symbol, interval, timeout=8)
-        except Exception as e:
-            return jsonify({'success': False, 'error': f'fetch failed: {e}'}), 500
-        
-        if df is None or df.empty:
+        anchor = _load_price_candle_anchor(market, symbol, interval)
+        if not anchor:
             return jsonify({'success': False, 'error': 'sin datos'}), 503
-        
-        current_price = float(df['close'].iloc[-1])
-        previous_close = float(df['close'].iloc[-2]) if len(df) >= 2 else current_price
-        change_pct = ((current_price - previous_close) / previous_close * 100) if previous_close > 0 else 0.0
 
-        # RC9.7.12: /api/price mantiene el tick visual de 30 s. La Señal
-        # Activa se recalcula por una ruta INTRABAR_PREVIEW separada; este
-        # endpoint ligero no decide ni confirma señales por sí solo.
-        last_row = df.iloc[-1]
-        last_time = last_row.get('time')
-        try:
-            last_time_iso = last_time.isoformat()
-        except Exception:
-            last_time_iso = str(last_time)
-        current_volume = 0.0
-        try:
-            current_volume = float(last_row.get('volume') or 0.0)
-            if not math.isfinite(current_volume):
-                current_volume = 0.0
-        except Exception:
-            current_volume = 0.0
+        # El navegador consulta cada 30 s. Un TTL de 20 s evita que un monitor
+        # interno y el frontend dupliquen la misma petición en la misma ventana.
+        current_price = _market_price_hub_get(
+            market,
+            symbol,
+            max_age_seconds=20,
+        )
+        if current_price is None:
+            current_price = float(anchor.get('close') or 0)
+        if not current_price or current_price <= 0:
+            return jsonify({'success': False, 'error': 'sin precio'}), 503
 
+        previous_close = float(anchor.get('previous_close') or current_price)
+        change_pct = (
+            (float(current_price) - previous_close) / previous_close * 100.0
+            if previous_close > 0 else 0.0
+        )
+
+        # Mantener el mismo overlay visible. Entre refreshes OHLCV, el tick
+        # actualiza close/high/low en RAM; no inventa volumen ni decisiones.
         current_candle = {
-            'time': last_time_iso,
-            'open': float(last_row.get('open')),
-            'high': float(last_row.get('high')),
-            'low': float(last_row.get('low')),
-            'close': float(last_row.get('close')),
-            # RC9.7.7: volumen de la vela abierta exclusivamente para la
-            # previsualización de indicadores. Nunca entra al análisis cerrado.
-            'volume': current_volume,
+            'time': anchor.get('time'),
+            'open': float(anchor.get('open') or current_price),
+            'high': max(float(anchor.get('high') or current_price), float(current_price)),
+            'low': min(float(anchor.get('low') or current_price), float(current_price)),
+            'close': float(current_price),
+            'volume': float(anchor.get('volume') or 0.0),
             'forming': True,
             'is_forming': True,
         }
-        
+
+        # Conservar el extremo alcanzado durante la vida del ancla para que el
+        # gráfico no "olvide" un high/low entre dos polls OHLCV.
+        key = (market, symbol, interval)
+        with _PRICE_CANDLE_ANCHOR_LOCK:
+            cached = _PRICE_CANDLE_ANCHOR.get(key)
+            if isinstance(cached, dict):
+                cached['high'] = current_candle['high']
+                cached['low'] = current_candle['low']
+                cached['close'] = float(current_price)
+
         return jsonify({
             'success': True,
             'symbol': symbol,
             'timeframe': interval,
             'market': market,
-            'current_price': current_price,
+            'current_price': float(current_price),
             'previous_close': previous_close,
             'change_pct': change_pct,
             'current_candle': current_candle,
             'active_signal_uses_forming_candle': True,
             'confirmation_uses_closed_candle': True,
-            'timestamp': datetime.now(bolivia_tz).isoformat()
+            'timestamp': datetime.now(bolivia_tz).isoformat(),
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/resource-governor/status')
+def api_resource_governor_status():
+    """Read-only local counters; no external calls and no UI polling."""
+    try:
+        with _RESOURCE_GOVERNOR_STATS_LOCK:
+            stats = dict(_RESOURCE_GOVERNOR_STATS)
+        with _MARKET_PRICE_HUB_LOCK:
+            price_cache_entries = len(_MARKET_PRICE_HUB)
+        with _PRICE_CANDLE_ANCHOR_LOCK:
+            candle_anchor_entries = len(_PRICE_CANDLE_ANCHOR)
+        return jsonify({
+            'success': True,
+            'stats': stats,
+            'runtime_cache': {
+                'price_entries': price_cache_entries,
+                'candle_anchor_entries': candle_anchor_entries,
+            },
+            'policy': {
+                'price_anchor_ttl_seconds': _PRICE_CANDLE_ANCHOR_TTL_SECONDS,
+                'futures_snapshot_min_interval_seconds': globals().get('_FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS', 900),
+                'futures_snapshot_checkpoint_seconds': globals().get('_FUTURES_SNAPSHOT_CHECKPOINT_SECONDS', 900),
+                'liquidation_public_ttl_seconds': LiquidationPublicCalibration.SUCCESS_TTL_SECONDS,
+            },
+            'note': 'Contadores locales desde el último reinicio; no realizan consultas externas.',
+        })
+    except Exception as exc:
+        return jsonify({'success': False, 'error': str(exc)[:180]}), 500
 
 
 @app.route('/api/analyze')
@@ -33694,6 +33995,17 @@ _MULTI_AUTO_DONE = set()
 _MULTI_AUTO_LOCK = threading.Lock()
 _MULTI_AUTO_DAILY = {'day': None, 'count': 0}
 
+# Commit 17: el Router conserva sus últimas 7 filas en RAM. Cuando el último
+# barrido muestra actividad/deep candidates, mantiene 15 min; en mercado quieto
+# extiende a 30 min. El análisis profundo y sus gates NO cambian.
+_MULTI_ROUTER_STATE_LOCK = threading.Lock()
+_MULTI_ROUTER_STATE = {
+    'rows': [],
+    'next_scan_at': 0.0,
+    'last_scan_at': 0.0,
+    'interval_seconds': 900,
+}
+
 def _get_multiasset_system():
     try:
         from multiasset_system import multiasset_system
@@ -34059,33 +34371,61 @@ def _multiasset_compact_telegram(result):
     return _send_confirmed_signal_telegram('multiasset', result)
 
 def _multiasset_background_tick():
-    """Piggyback barato sobre el loop Futures existente: cero thread extra.
+    """Piggyback resource-governed Multi-Activo scan.
 
-    Scanner: 7 requests secuenciales cada 15 min, sin DB/IA. Deep analysis sólo
-    para shortlist y sólo en ventana de cierre 4h/1D o Fast Lane 1h de alta calidad.
+    Commit 17 keeps the same deep-analysis rules and daily caps. Only the cheap
+    7-symbol Router cadence adapts: 15 min while opportunity/activity is high,
+    30 min when the last scan was quiet. Cached rows remain available between
+    scans so a 4h/1D/1h close window is not missed.
     """
     try:
         if str(os.getenv('MULTIASSET_ENABLED','1')).lower() in ('0','false','no','off'):
             return
         from multiasset_system import scan_opportunities, MULTIASSET_DEEP_LIMIT, MULTIASSET_AUTO_DEEP_DAILY_MAX
         now=datetime.now(timezone.utc)
+        now_mono=time.monotonic()
         with _MULTI_AUTO_LOCK:
             today=now.strftime('%Y-%m-%d')
             if _MULTI_AUTO_DAILY.get('day') != today:
                 _MULTI_AUTO_DAILY.update({'day':today,'count':0})
             if int(_MULTI_AUTO_DAILY.get('count') or 0) >= MULTIASSET_AUTO_DEEP_DAILY_MAX:
                 return
-        rows=scan_opportunities('4h', force=False)
+
+        with _MULTI_ROUTER_STATE_LOCK:
+            cached_rows=list(_MULTI_ROUTER_STATE.get('rows') or [])
+            next_scan=float(_MULTI_ROUTER_STATE.get('next_scan_at') or 0.0)
+
+        if cached_rows and now_mono < next_scan:
+            rows=cached_rows
+            _rg_count('multiasset_router_reuses')
+        else:
+            rows=scan_opportunities('4h', force=False) or []
+            _rg_count('multiasset_router_scans')
+            top_score=max(
+                [float((row or {}).get('router_score') or 0) for row in rows]
+                or [0.0]
+            )
+            has_deep=any(bool((row or {}).get('deep_candidate')) for row in rows)
+            # No tocar el criterio de oportunidad: sólo cuándo volver a pedir el
+            # scanner. Alta actividad conserva la cadencia histórica de 15 min.
+            interval=900 if (has_deep or top_score >= 72.0) else 1800
+            with _MULTI_ROUTER_STATE_LOCK:
+                _MULTI_ROUTER_STATE.update({
+                    'rows': list(rows),
+                    'last_scan_at': now_mono,
+                    'next_scan_at': now_mono + interval,
+                    'interval_seconds': interval,
+                })
+
         if not rows:
             return
         candidates=[r for r in rows if r.get('deep_candidate')][:MULTIASSET_DEEP_LIMIT]
         due=[]
-        # 4h is the main executable lane. Daily gives independent swing coverage.
+        # Se conservan exactamente las ventanas ejecutables preexistentes.
         if now.hour % 4 == 0 and now.minute <= 15:
             due.extend((r['symbol'],'4h') for r in candidates)
         if now.hour == 0 and now.minute <= 20:
             due.extend((r['symbol'],'1D') for r in candidates)
-        # Dynamic 1h Fast Lane only for exceptionally active top candidate.
         if now.minute <= 10 and candidates and float(candidates[0].get('router_score') or 0) >= 82:
             due.insert(0,(candidates[0]['symbol'],'1h'))
         for symbol,tf in due:
@@ -34103,7 +34443,6 @@ def _multiasset_background_tick():
                     for old in list(_MULTI_AUTO_DONE)[:30]: _MULTI_AUTO_DONE.discard(old)
             if _multiasset_is_executable(result):
                 _multiasset_compact_telegram(result)
-            # One deep cell per 20s loop max: protects RAM/CPU and UI priority.
             return
     except Exception as exc:
         print(f"⚠️ Multi-Activo background tick: {str(exc)[:160]}")
@@ -35680,6 +36019,9 @@ def _futures_snapshot_ttl_seconds(serial_data):
 def _load_futures_cache_from_disk():
     """Compat name: restore Futures snapshot from Supabase, never /tmp."""
     global _futures_analysis_cache
+    global _FUTURES_LAST_SNAPSHOT_HASH
+    global _FUTURES_LAST_SNAPSHOT_SAVE_AT
+    global _FUTURES_SNAPSHOT_MERGE_PENDING
     print('📂 [FUT] Buscando snapshot persistido en Supabase...')
     try:
         from runtime_persistence import load_runtime_snapshot
@@ -35711,6 +36053,12 @@ def _load_futures_cache_from_disk():
         with _futures_analysis_cache['lock']:
             _futures_analysis_cache['data'] = data
             _futures_analysis_cache['ts'] = ts
+        try:
+            _FUTURES_LAST_SNAPSHOT_HASH = _futures_snapshot_fingerprint(payload.get('data') or {})
+            _FUTURES_LAST_SNAPSHOT_SAVE_AT = time.monotonic()
+            _FUTURES_SNAPSHOT_MERGE_PENDING = False
+        except Exception:
+            pass
         print(
             f"✅ [FUT] Snapshot Supabase aplicado: "
             f"{len(data.get('analysis') or {})} pares ({int(age)}s)"
@@ -35747,26 +36095,75 @@ def _trigger_futures_fast_restore():
     return True
 
 
-_FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS = max(30, int(os.environ.get(
-    'FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS', '120'
-) or 120))
+_FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS = max(900, int(os.environ.get(
+    'FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS', '900'
+) or 900))
+_FUTURES_SNAPSHOT_CHECKPOINT_SECONDS = max(
+    _FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS,
+    int(os.environ.get('FUTURES_SNAPSHOT_CHECKPOINT_SECONDS', '900') or 900),
+)
 _FUTURES_LAST_SNAPSHOT_SAVE_AT = 0.0
+_FUTURES_LAST_SNAPSHOT_HASH = None
+_FUTURES_SNAPSHOT_MERGE_PENDING = True
 _FUTURES_SNAPSHOT_SAVE_LOCK = threading.Lock()
 
 
-def _save_futures_cache_to_disk(force=False):
-    """Persist compact Futures state without destructive cold-start overwrite."""
+def _futures_snapshot_fingerprint(serial_data):
+    """Hash sólo del estado durable; excluye telemetría que cambia cada tick."""
+    volatile_keys = {
+        'current_price', 'live_price', 'last_shadow_live_at',
+        'shadow_mfe_r', 'shadow_mae_r', 'timestamp', 'updated_at',
+        'cache_age', 'tiempo_restante', 'time_remaining',
+    }
+
+    def clean(value):
+        if isinstance(value, dict):
+            return {
+                str(k): clean(v)
+                for k, v in value.items()
+                if str(k) not in volatile_keys
+            }
+        if isinstance(value, (list, tuple)):
+            return [clean(v) for v in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
+
+    try:
+        raw = json.dumps(
+            clean(serial_data or {}),
+            sort_keys=True,
+            separators=(',', ':'),
+            ensure_ascii=True,
+        ).encode('utf-8')
+        return hashlib.sha256(raw).hexdigest()
+    except Exception:
+        return None
+
+
+def _save_futures_cache_to_disk(force=False, reason='periodic'):
+    """Persist Futures only on meaningful change + 15 min safety checkpoint.
+
+    RAM remains real-time. Supabase is durable recovery storage, not a mirror of
+    every market tick. Lifecycle transitions may force a save; volatile prices,
+    MFE/MAE and timestamps do not by themselves trigger a write.
+    """
     global _FUTURES_LAST_SNAPSHOT_SAVE_AT
+    global _FUTURES_LAST_SNAPSHOT_HASH
+    global _FUTURES_SNAPSHOT_MERGE_PENDING
+
     try:
         now_mono = time.monotonic()
-        if not force:
-            with _FUTURES_SNAPSHOT_SAVE_LOCK:
-                if (
-                    _FUTURES_LAST_SNAPSHOT_SAVE_AT > 0
-                    and now_mono - _FUTURES_LAST_SNAPSHOT_SAVE_AT
-                    < _FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS
-                ):
-                    return True
+        with _FUTURES_SNAPSHOT_SAVE_LOCK:
+            since_last = (
+                now_mono - _FUTURES_LAST_SNAPSHOT_SAVE_AT
+                if _FUTURES_LAST_SNAPSHOT_SAVE_AT > 0
+                else 999999.0
+            )
+            if not force and since_last < _FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS:
+                _rg_count('futures_snapshot_skips')
+                return True
+
         from runtime_persistence import load_runtime_snapshot, save_runtime_snapshot
         cache = _futures_analysis_cache
         if not cache.get('data'):
@@ -35775,35 +36172,54 @@ def _save_futures_cache_to_disk(force=False):
         if not serial_data:
             return False
 
-        # RC9.7.11: an incremental request can finish before the deferred boot
-        # restore. If the previous-process snapshot has broader coverage, merge
-        # it instead of replacing it with one combo. Current keys always win,
-        # so a newly analysed combo is never rolled back.
-        try:
-            stored = load_runtime_snapshot(
-                'futures', 'analysis_cache', allow_expired=False
+        # Una única fusión defensiva por proceso protege el arranque parcial sin
+        # convertir cada checkpoint en READ + WRITE contra Supabase.
+        if _FUTURES_SNAPSHOT_MERGE_PENDING:
+            try:
+                stored = load_runtime_snapshot(
+                    'futures', 'analysis_cache', allow_expired=False
+                )
+                old_payload = (stored or {}).get('payload') or {}
+                if int(old_payload.get('schema_version', 0) or 0) == _FUTURES_CACHE_SCHEMA_VERSION:
+                    old_serial = old_payload.get('data') or {}
+                    old_analysis = dict(old_serial.get('analysis_serial') or {})
+                    new_analysis = dict(serial_data.get('analysis_serial') or {})
+                    if len(old_analysis) > len(new_analysis):
+                        merged_analysis = dict(old_analysis)
+                        merged_analysis.update(new_analysis)
+                        old_lifecycle = dict(old_serial.get('lifecycle') or {})
+                        new_lifecycle = dict(serial_data.get('lifecycle') or {})
+                        merged_lifecycle = dict(old_lifecycle)
+                        merged_lifecycle.update(new_lifecycle)
+                        serial_data['analysis_serial'] = merged_analysis
+                        serial_data['lifecycle'] = merged_lifecycle
+                        print(
+                            '🛡️ [FUT] Snapshot parcial fusionado una vez '
+                            f'({len(new_analysis)}→{len(merged_analysis)} análisis)',
+                            flush=True,
+                        )
+            except Exception as merge_error:
+                print(f'⚠️ [FUT] merge inicial omitido: {merge_error}', flush=True)
+            finally:
+                _FUTURES_SNAPSHOT_MERGE_PENDING = False
+
+        fingerprint = _futures_snapshot_fingerprint(serial_data)
+        with _FUTURES_SNAPSHOT_SAVE_LOCK:
+            since_last = (
+                now_mono - _FUTURES_LAST_SNAPSHOT_SAVE_AT
+                if _FUTURES_LAST_SNAPSHOT_SAVE_AT > 0
+                else 999999.0
             )
-            old_payload = (stored or {}).get('payload') or {}
-            if int(old_payload.get('schema_version', 0) or 0) == _FUTURES_CACHE_SCHEMA_VERSION:
-                old_serial = old_payload.get('data') or {}
-                old_analysis = dict(old_serial.get('analysis_serial') or {})
-                new_analysis = dict(serial_data.get('analysis_serial') or {})
-                if len(old_analysis) > len(new_analysis):
-                    merged_analysis = dict(old_analysis)
-                    merged_analysis.update(new_analysis)
-                    old_lifecycle = dict(old_serial.get('lifecycle') or {})
-                    new_lifecycle = dict(serial_data.get('lifecycle') or {})
-                    merged_lifecycle = dict(old_lifecycle)
-                    merged_lifecycle.update(new_lifecycle)
-                    serial_data['analysis_serial'] = merged_analysis
-                    serial_data['lifecycle'] = merged_lifecycle
-                    print(
-                        '🛡️ [FUT] Snapshot parcial fusionado con estado persistido '
-                        f'({len(new_analysis)}→{len(merged_analysis)} análisis)',
-                        flush=True,
-                    )
-        except Exception as merge_error:
-            print(f'⚠️ [FUT] merge pre-save omitido: {merge_error}', flush=True)
+            same_state = bool(
+                fingerprint
+                and _FUTURES_LAST_SNAPSHOT_HASH
+                and fingerprint == _FUTURES_LAST_SNAPSHOT_HASH
+            )
+            # Hash dedup elimina escrituras repetidas. Cada 15 min se permite un
+            # checkpoint de recuperación aunque sólo haya cambiado telemetría.
+            if same_state and since_last < _FUTURES_SNAPSHOT_CHECKPOINT_SECONDS:
+                _rg_count('futures_snapshot_skips')
+                return True
 
         payload = {
             'schema_version': _FUTURES_CACHE_SCHEMA_VERSION,
@@ -35817,9 +36233,12 @@ def _save_futures_cache_to_disk(force=False):
         if ok:
             with _FUTURES_SNAPSHOT_SAVE_LOCK:
                 _FUTURES_LAST_SNAPSHOT_SAVE_AT = now_mono
+                if fingerprint:
+                    _FUTURES_LAST_SNAPSHOT_HASH = fingerprint
+            _rg_count('futures_snapshot_writes')
             print(
                 f"💾 [FUT] Snapshot Supabase guardado "
-                f"({len(serial_data.get('analysis_serial', {}))} pares)"
+                f"({len(serial_data.get('analysis_serial', {}))} pares · {reason})"
             )
         return ok
     except Exception as e:
@@ -41992,47 +42411,13 @@ _SPOT_LEVEL1_CACHE_TTL_SECONDS = 20
 
 
 def _spot_live_market_price(symbol):
-    """Precio Spot ligero para detectar Entry sin recalcular indicadores.
-
-    Usa KuCoin level1; no carga OHLCV ni ejecuta traders. Si falla, el monitor
-    puede conservar el precio cacheado de la señal y reintentar en el próximo
-    ciclo.
-    """
-    normalized = str(symbol or '').replace('/', '-')
-    now_mono = time.monotonic()
-    with _SPOT_LEVEL1_CACHE_LOCK:
-        cached = _SPOT_LEVEL1_CACHE.get(normalized) or {}
-        if cached and (now_mono - float(cached.get('ts') or 0.0)) < _SPOT_LEVEL1_CACHE_TTL_SECONDS:
-            try:
-                price = float(cached.get('price') or 0)
-                if price > 0:
-                    return price
-            except Exception:
-                pass
+    """Precio Spot ligero compartido por frontend y monitor de Entry."""
     try:
-        response = requests.get(
-            'https://api.kucoin.com/api/v1/market/orderbook/level1',
-            params={'symbol': normalized},
-            timeout=4,
+        return _market_price_hub_get(
+            'spot',
+            str(symbol or '').replace('/', '-'),
+            max_age_seconds=20,
         )
-        response.raise_for_status()
-        payload = response.json() or {}
-        if str(payload.get('code')) != '200000':
-            return None
-        data = payload.get('data') or {}
-        price = float(data.get('price') or 0)
-        if price > 0:
-            with _SPOT_LEVEL1_CACHE_LOCK:
-                _SPOT_LEVEL1_CACHE[normalized] = {'price': price, 'ts': now_mono}
-                if len(_SPOT_LEVEL1_CACHE) > 12:
-                    oldest = sorted(
-                        _SPOT_LEVEL1_CACHE.items(),
-                        key=lambda item: float((item[1] or {}).get('ts') or 0.0),
-                    )
-                    for old_key, _ in oldest[:-8]:
-                        _SPOT_LEVEL1_CACHE.pop(old_key, None)
-            return price
-        return None
     except Exception as exc:
         print(f"⚠️ monitor_entries: precio Spot {symbol}: {str(exc)[:120]}")
         return None
@@ -49838,26 +50223,57 @@ def _build_futures_standard_message(user, symbol, timeframe, result, lifecycle_r
     ]
     return '\n'.join(lines)
 
-def _futures_live_mark_price(symbol):
-    """One lightweight public request; never allocates an OHLCV DataFrame."""
+def _futures_live_mark_price(symbol, max_age_seconds=20):
+    """Shared mark-price cache used by Futures UI/lifecycle monitors."""
     try:
-        fs = _configured_futures_module()
-        contract = str((getattr(fs, 'FUTURES_CONTRACT_SYMBOLS', {}) or {}).get(symbol) or '')
-        if not contract:
-            return None
-        session = fs._get_futures_http_session()
-        url = fs.KUCOIN_FUTURES_MARK_PRICE_URL.format(symbol=contract)
-        response = session.get(url, timeout=4)
-        response.raise_for_status()
-        payload = response.json() or {}
-        if str(payload.get('code')) != '200000':
-            return None
-        data = payload.get('data') or {}
-        price = float(data.get('value') or 0)
-        return price if price > 0 else None
+        return _market_price_hub_get(
+            'futures',
+            symbol,
+            max_age_seconds=max_age_seconds,
+        )
     except Exception as exc:
         print(f'⚠️ [9.6 ENTRY ZONE] mark price {symbol}: {str(exc)[:120]}')
         return None
+
+
+def _futures_shadow_poll_ttl(rows):
+    """Adaptive network TTL without changing the 20 s lifecycle evaluation.
+
+    The loop still evaluates state every 20 s. Only the external quote refresh
+    slows down when every tracked level is far away; near Entry/SL/TP it returns
+    to the original 20 s cadence.
+    """
+    ttl = 90.0
+    for row in rows or []:
+        try:
+            (_symbol, _tf, record, _result, _profile,
+             entry, sl, tp, action, status, _validity) = row
+            last = float(
+                record.get('current_price')
+                or record.get('entry_touched_price')
+                or 0
+            )
+            if last <= 0:
+                ttl = min(ttl, 20.0)
+                continue
+            if status == 'entry_touched':
+                risk = abs(float(entry) - float(sl)) or max(abs(float(entry)) * 0.005, 1e-9)
+                distance_r = min(
+                    abs(last - float(sl)) / risk,
+                    abs(last - float(tp)) / risk,
+                )
+                ttl = min(ttl, 20.0 if distance_r <= 0.40 else 35.0)
+            else:
+                distance_pct = abs(last - float(entry)) / max(abs(float(entry)), 1e-9) * 100.0
+                if distance_pct <= 0.60:
+                    ttl = min(ttl, 20.0)
+                elif distance_pct <= 1.50:
+                    ttl = min(ttl, 45.0)
+                else:
+                    ttl = min(ttl, 90.0)
+        except Exception:
+            ttl = min(ttl, 20.0)
+    return max(20.0, min(90.0, ttl))
 
 
 def _futures_official_entry_event_key(user, record):
@@ -49973,17 +50389,24 @@ def futures_standard_alert_loop():
                 ))
 
             if not candidates:
-                time.sleep(20)
+                # Sin señales Futures en seguimiento no hay razón para consultar
+                # mark-price cada 20 s. Multi-Activo ya fue evaluado arriba.
+                time.sleep(60)
                 continue
 
-            # RC9.7.14: mark-price shadow monitor for ALL Confirmed/Vigent
-            # official signals, even if nobody saved/entered them. This is
-            # deliberately lightweight: no OHLCV, indicators, AI or DB writes.
-            live_symbols = sorted({row[0] for row in candidates})
+            # RC9.7.14 + Commit 17: el lifecycle se evalúa cada 20 s, pero el
+            # quote externo se comparte y adapta según proximidad a Entry/SL/TP.
+            rows_by_symbol = {}
+            for row in candidates:
+                rows_by_symbol.setdefault(row[0], []).append(row)
             live_by_symbol = {
-                symbol: _futures_live_mark_price(symbol)
-                for symbol in live_symbols
+                symbol: _futures_live_mark_price(
+                    symbol,
+                    max_age_seconds=_futures_shadow_poll_ttl(rows),
+                )
+                for symbol, rows in rows_by_symbol.items()
             }
+            meaningful_lifecycle_change = False
 
             for (
                 symbol, timeframe, record, result, profile,
@@ -50040,6 +50463,9 @@ def futures_standard_alert_loop():
                     if shadow_status == 'entry_touched' and validity.get('expired'):
                         shadow_status = 'expired'
                         record['close_reason'] = 'expired_after_entry_unsaved'
+
+                if shadow_status != status:
+                    meaningful_lifecycle_change = True
 
                 record['current_price'] = float(current)
                 record['last_shadow_live_at'] = now_iso
@@ -50119,6 +50545,14 @@ def futures_standard_alert_loop():
                             f'{user} · {symbol} {timeframe} {action} @ {current:.8g} '
                             f'[{status}]'
                         )
+
+            # Persistir inmediatamente sólo transiciones operativas relevantes.
+            # Current price/MFE/MAE por sí solos siguen en RAM y no generan I/O.
+            if meaningful_lifecycle_change:
+                _save_futures_cache_to_disk(
+                    force=True,
+                    reason='lifecycle-transition',
+                )
         except Exception as exc:
             print(f'❌ futures_standard_alert_loop: {exc}')
         time.sleep(20)
