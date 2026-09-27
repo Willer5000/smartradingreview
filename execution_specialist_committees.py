@@ -1,0 +1,833 @@
+"""Commit 16 - Specialist Execution Committees.
+
+Deterministic, local-only specialist deliberation for Entry, Stop Loss and
+Take Profit.  No network, database or LLM calls.  The committees do not create
+a LONG/SHORT thesis; they evaluate the execution geometry of an already
+selected thesis using evidence that the analysis has already loaded.
+
+Design principle:
+    * no "near is good" / "deep is safe" rule;
+    * distance is only one item of evidence (fill probability / noise);
+    * every candidate is evaluated by several independent specialist lenses;
+    * market, strategy, regime, volatility and live context change relevance;
+    * Spot, Futures and Multi-Asset have different execution strictness;
+    * a specialist abstains when its evidence is unavailable instead of
+      fabricating a score.
+"""
+from __future__ import annotations
+
+from math import sqrt
+from statistics import median
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+VERSION = "COMMIT16_SPECIALIST_EXECUTION_COMMITTEES_V3"
+
+MULTI_ASSET_CLASS = {
+    "SPY-USDT": "US_INDEX", "QQQ-USDT": "US_INDEX",
+    "CL-USDT": "ENERGY", "NATGAS-USDT": "ENERGY",
+    "COPPER-USDT": "INDUSTRIAL_METAL", "XAG-USDT": "PRECIOUS_METAL",
+    "KSTR-USDT": "CHINA_INDEX",
+}
+
+
+def _f(value: Any, default: float = 0.0) -> float:
+    try:
+        out = float(value)
+        return out if out == out else default
+    except Exception:
+        return default
+
+
+def _clip(value: float, lo: float = 0.0, hi: float = 100.0) -> float:
+    return max(lo, min(hi, float(value)))
+
+
+def _d(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _seq(mapping: Dict[str, Any], key: str) -> List[float]:
+    out: List[float] = []
+    for item in (mapping.get(key) or []):
+        try:
+            out.append(float(item))
+        except Exception:
+            pass
+    return out
+
+
+def _weighted_mean(items: Iterable[Tuple[float, float]]) -> Optional[float]:
+    vals = [(float(v), max(0.0, float(w))) for v, w in items if v is not None and w > 0]
+    if not vals:
+        return None
+    den = sum(w for _, w in vals)
+    return sum(v * w for v, w in vals) / den if den > 0 else None
+
+
+def _consensus(scores: List[float]) -> float:
+    if len(scores) < 2:
+        return 50.0
+    mean = sum(scores) / len(scores)
+    var = sum((s - mean) ** 2 for s in scores) / len(scores)
+    # Low dispersion => stronger agreement.  A disagreement is information,
+    # not an automatic veto.
+    return _clip(100.0 - sqrt(var) * 2.15)
+
+
+def _activity_ratio_score(ratio: float) -> float:
+    ratio = max(0.0, ratio)
+    if ratio <= 0.45:
+        return 18.0
+    if ratio <= 1.0:
+        return 18.0 + 37.0 * (ratio - 0.45) / 0.55
+    if ratio <= 2.0:
+        return 55.0 + 45.0 * (ratio - 1.0)
+    return 100.0
+
+
+def build_execution_context(*, structure=None, volume=None, volatility=None,
+                            market_hours=None, sentiment=None, macro_context=None,
+                            market_regime=None, symbol=None, timeframe=None,
+                            market_type=None) -> Dict[str, Any]:
+    """Observed execution context; calendar labels are tags, not fixed alpha.
+
+    It deliberately uses only data already loaded in the current analysis.
+    Therefore a weekend/Asian-session prior cannot override an actual shock in
+    volume/range/macro conditions, and this function adds zero bandwidth.
+    """
+    structure, volume, volatility = _d(structure), _d(volume), _d(volatility)
+    market_hours, sentiment = _d(market_hours), _d(sentiment)
+    macro_context, market_regime = _d(macro_context), _d(market_regime)
+    df = _d(structure.get("df"))
+
+    highs, lows, vols = _seq(df, "high"), _seq(df, "low"), _seq(df, "volume")
+    n = min(len(highs), len(lows))
+    ranges = [max(0.0, highs[i] - lows[i]) for i in range(n)]
+    recent_n = min(4, n)
+    recent_ranges = [x for x in ranges[-recent_n:] if x > 0] if recent_n else []
+    base_ranges = [x for x in ranges[max(0, n-36):max(0, n-recent_n)] if x > 0]
+    atr = _f(volatility.get("atr"), 0.0)
+    live_range = median(recent_ranges) if recent_ranges else atr
+    base_range = median(base_ranges) if base_ranges else atr
+    range_ratio = live_range / base_range if base_range > 0 else 1.0
+
+    volume_ratio = _f(volume.get("volume_ratio"), 0.0)
+    if volume_ratio <= 0 and vols:
+        rv = [x for x in vols[-min(4, len(vols)):] if x >= 0]
+        bv = [x for x in vols[max(0, len(vols)-36):max(0, len(vols)-len(rv))] if x > 0]
+        if rv and bv:
+            volume_ratio = median(rv) / max(median(bv), 1e-12)
+    if volume_ratio <= 0:
+        volume_ratio = 1.0
+
+    activity = _clip(0.55 * _activity_ratio_score(volume_ratio) + 0.45 * _activity_ratio_score(range_ratio))
+    shock = _clip(max(0.0, volume_ratio - 1.25) * 52.0 + max(0.0, range_ratio - 1.25) * 52.0)
+
+    macro_risk = str(macro_context.get("risk_level") or "UNKNOWN").upper()
+    posture = str(macro_context.get("futures_posture") or macro_context.get("posture") or "NORMAL").upper()
+    if macro_risk == "CRITICAL" or posture == "NO_NEW_TRADES":
+        shock = max(shock, 95.0)
+    elif macro_risk == "HIGH" or posture in {"CAUTION", "WAIT_EVENT"}:
+        shock = max(shock, 72.0)
+
+    sentiment_value = _f(sentiment.get("current_value"), 50.0)
+    market = str(market_type or "").lower()
+    sym = str(symbol or "").upper()
+    asset_class = MULTI_ASSET_CLASS.get(sym, "CRYPTO" if market != "multiasset" else "OTHER")
+
+    return {
+        "version": VERSION,
+        "market_type": market,
+        "symbol": sym,
+        "timeframe": str(timeframe or ""),
+        "asset_class": asset_class,
+        "session": str(market_hours.get("session") or "UNKNOWN"),
+        "day_type": str(market_hours.get("day_type") or "UNKNOWN"),
+        "calendar_authority": "CONTEXT_TAG_ONLY",
+        "volume_ratio": round(volume_ratio, 4),
+        "range_ratio": round(range_ratio, 4),
+        "activity_score": round(activity, 2),
+        "shock_score": round(shock, 2),
+        "macro_risk": macro_risk,
+        "macro_posture": posture,
+        "sentiment_value": round(sentiment_value, 2),
+        "sentiment_bias": str(sentiment.get("sentiment_bias") or "neutral"),
+        "market_regime": str(market_regime.get("regime") or market_regime.get("state") or "UNKNOWN"),
+    }
+
+
+
+
+def _extract_price_levels(payload: Any, limit: int = 24) -> List[float]:
+    """Best-effort extraction from already-loaded liquidation/microstructure payloads.
+
+    The function is intentionally conservative and never opens a network call.
+    """
+    out: List[float] = []
+    stack = [payload]
+    seen = 0
+    while stack and len(out) < limit and seen < 120:
+        seen += 1
+        item = stack.pop()
+        if isinstance(item, dict):
+            for key in ("price", "level", "center", "price_level", "liq_price"):
+                value = _f(item.get(key), 0.0)
+                if value > 0:
+                    out.append(value)
+            for key, value in item.items():
+                if key in {"price","level","center","price_level","liq_price"}:
+                    continue
+                if isinstance(value, (dict, list, tuple)):
+                    stack.append(value)
+        elif isinstance(item, (list, tuple)):
+            stack.extend(list(item)[:40])
+    # preserve order, deduplicate
+    clean=[]
+    for x in out:
+        if not any(abs(x-y) <= max(abs(x)*1e-7,1e-10) for y in clean):
+            clean.append(x)
+    return clean[:limit]
+
+def _append_candidate(out: List[Dict[str, Any]], price: Any, family: str,
+                      source: str, strength: Any = 2.0, anchor: Optional[float] = None) -> None:
+    p = _f(price, 0.0)
+    if p <= 0:
+        return
+    # Deduplicate nearby representations without erasing independent evidence.
+    for row in out:
+        if abs(_f(row.get("price")) - p) <= max(abs(p) * 1e-7, 1e-10):
+            fams = row.setdefault("families", set())
+            fams.add(family)
+            row["strength"] = max(_f(row.get("strength"), 1.0), _f(strength, 2.0))
+            if source and source not in row.setdefault("sources", []):
+                row["sources"].append(source)
+            return
+    out.append({
+        "price": p, "family": family, "families": {family},
+        "source": source, "sources": [source] if source else [],
+        "strength": max(1.0, min(3.0, _f(strength, 2.0))),
+        "anchor": anchor,
+    })
+
+
+def _iter_swing_prices(structure: Dict[str, Any], key: str):
+    for item in structure.get(key, []) or []:
+        if isinstance(item, dict):
+            p = _f(item.get("price"), 0.0)
+            s = _f(item.get("strength"), 3.0)
+        else:
+            p, s = _f(item, 0.0), 2.0
+        if p > 0:
+            yield p, s
+
+
+def _volume_profile(structure: Dict[str, Any]) -> Dict[str, Any]:
+    return _d(structure.get("volume_profile") or structure.get("vp") or {})
+
+
+def _collect_entry_candidates(structure: Dict[str, Any], direction: str,
+                              baseline: float, liquidation=None) -> List[Dict[str, Any]]:
+    s = _d(structure)
+    long_side = direction == "long"
+    out: List[Dict[str, Any]] = []
+    _append_candidate(out, baseline, "baseline", "Entry base", 2.0)
+
+    for p in s.get("supports" if long_side else "resistances", []) or []:
+        _append_candidate(out, p, "structure", "Soporte" if long_side else "Resistencia", 2.0)
+    for p, st in _iter_swing_prices(s, "pivot_lows" if long_side else "pivot_highs"):
+        _append_candidate(out, p, "swing", "Swing", st)
+
+    for ob in s.get("order_blocks", []) or []:
+        if not isinstance(ob, dict):
+            continue
+        if str(ob.get("type") or "").lower() != ("bullish" if long_side else "bearish"):
+            continue
+        pr = ob.get("price_range") or []
+        if len(pr) >= 2:
+            _append_candidate(out, pr[1] if long_side else pr[0], "smc_poi", "Order Block", 3 if ob.get("strength") == "strong" else 2)
+
+    for fvg in s.get("fair_value_gaps", []) or []:
+        if not isinstance(fvg, dict) or fvg.get("filled", True):
+            continue
+        if str(fvg.get("type") or "").lower() != ("bullish" if long_side else "bearish"):
+            continue
+        _append_candidate(out, fvg.get("gap_top" if long_side else "gap_bottom"), "smc_poi", "FVG", 2)
+
+    fib = _d(s.get("fib_retracements") or s.get("fibonacci") or s.get("fib_levels"))
+    for name, value in fib.items():
+        if str(name) in {"0.382", "0.5", "0.50", "0.618", "0.786"}:
+            _append_candidate(out, value, "fib", f"Fib {name}", 3 if str(name) in {"0.618", "0.786"} else 2)
+
+    vp = _volume_profile(s)
+    _append_candidate(out, vp.get("poc"), "value", "POC", 3)
+    _append_candidate(out, vp.get("val" if long_side else "vah"), "value", "Value Area", 2)
+    for node in vp.get("hvn_nodes", []) or []:
+        if isinstance(node, dict):
+            _append_candidate(out, node.get("price"), "value", "HVN", 3)
+
+    indicators = _d(s.get("indicators"))
+    for key, label in (("ema20", "EMA20"), ("ema50", "EMA50"), ("ema200", "EMA200"), ("vwap", "VWAP")):
+        _append_candidate(out, indicators.get(key) or s.get(key), "dynamic_value", label, 2)
+
+    for key in ("liquidity_pools", "liquidity_zones"):
+        for item in s.get(key, []) or []:
+            if isinstance(item, dict):
+                side = str(item.get("side") or item.get("type") or "").lower()
+                # Entry wants sell-side liquidity for longs and buy-side for shorts.
+                wanted = ("sell" in side or "low" in side) if long_side else ("buy" in side or "high" in side)
+                if wanted or not side:
+                    _append_candidate(out, item.get("price") or item.get("level"), "liquidity", "Liquidity", _f(item.get("strength"), 2))
+    for lp in _extract_price_levels(liquidation):
+        if (long_side and lp <= baseline) or ((not long_side) and lp >= baseline):
+            _append_candidate(out, lp, "liquidation", "Liquidation / liquidity map", 2)
+    return out
+
+
+def _collect_sl_candidates(structure: Dict[str, Any], direction: str, entry: float,
+                           baseline: float, atr: float, activity: float) -> List[Dict[str, Any]]:
+    s = _d(structure)
+    long_side = direction == "long"
+    out: List[Dict[str, Any]] = []
+    _append_candidate(out, baseline, "baseline", "SL base", 2.0)
+
+    # Noise buffer follows observed activity. It is a buffer behind a real
+    # invalidation anchor, never a free-standing ATR stop.
+    noise_mult = 0.14 + 0.18 * _clip(activity, 0, 100) / 100.0
+    buffer_abs = max(atr * noise_mult, abs(entry) * 0.0004)
+
+    anchors: List[Tuple[float, str, float]] = []
+    for p in s.get("supports" if long_side else "resistances", []) or []:
+        v = _f(p, 0.0)
+        if v > 0: anchors.append((v, "Estructura", 2.0))
+    for p, st in _iter_swing_prices(s, "pivot_lows" if long_side else "pivot_highs"):
+        anchors.append((p, "Swing", max(2.0, st)))
+    for ob in s.get("order_blocks", []) or []:
+        if not isinstance(ob, dict): continue
+        if str(ob.get("type") or "").lower() != ("bullish" if long_side else "bearish"): continue
+        pr = ob.get("price_range") or []
+        if len(pr) >= 2:
+            anchors.append((_f(pr[0] if long_side else pr[1], 0.0), "Order Block", 3.0))
+    for fvg in s.get("fair_value_gaps", []) or []:
+        if not isinstance(fvg, dict): continue
+        if str(fvg.get("type") or "").lower() != ("bullish" if long_side else "bearish"): continue
+        p = _f(fvg.get("gap_bottom" if long_side else "gap_top"), 0.0)
+        if p > 0: anchors.append((p, "FVG", 2.0))
+
+    for anchor, source, strength in anchors:
+        if anchor <= 0: continue
+        # Only structural anchors located beyond Entry in the invalidation side.
+        if (long_side and anchor >= entry) or ((not long_side) and anchor <= entry):
+            continue
+        stop = anchor - buffer_abs if long_side else anchor + buffer_abs
+        _append_candidate(out, stop, "structural_invalidation", f"Detrás de {source}", strength, anchor=anchor)
+    return out
+
+
+def _collect_tp_candidates(structure: Dict[str, Any], direction: str, entry: float,
+                           baseline: float, atr: float, liquidation=None) -> List[Dict[str, Any]]:
+    s = _d(structure)
+    long_side = direction == "long"
+    out: List[Dict[str, Any]] = []
+    _append_candidate(out, baseline, "baseline", "TP base", 2.0)
+
+    for p in s.get("resistances" if long_side else "supports", []) or []:
+        _append_candidate(out, p, "structure_target", "Resistencia" if long_side else "Soporte", 2.0)
+    for p, st in _iter_swing_prices(s, "pivot_highs" if long_side else "pivot_lows"):
+        _append_candidate(out, p, "swing_target", "Swing target", st)
+
+    for ob in s.get("order_blocks", []) or []:
+        if not isinstance(ob, dict): continue
+        if str(ob.get("type") or "").lower() != ("bearish" if long_side else "bullish"): continue
+        pr = ob.get("price_range") or []
+        if len(pr) >= 2:
+            _append_candidate(out, pr[0] if long_side else pr[1], "opposing_poi", "Order Block contrario", 3 if ob.get("strength") == "strong" else 2)
+    for fvg in s.get("fair_value_gaps", []) or []:
+        if not isinstance(fvg, dict) or fvg.get("filled", True): continue
+        if str(fvg.get("type") or "").lower() != ("bearish" if long_side else "bullish"): continue
+        _append_candidate(out, fvg.get("gap_bottom" if long_side else "gap_top"), "opposing_poi", "FVG contrario", 2)
+
+    vp = _volume_profile(s)
+    _append_candidate(out, vp.get("poc"), "value_target", "POC", 2)
+    _append_candidate(out, vp.get("vah" if long_side else "val"), "value_target", "Value Area", 2)
+    for node in vp.get("hvn_nodes", []) or []:
+        if isinstance(node, dict): _append_candidate(out, node.get("price"), "value_target", "HVN", 3)
+
+    fib = _d(s.get("fib_extensions") or s.get("fib_levels") or s.get("fibonacci"))
+    for name, value in fib.items():
+        if str(name) in {"1.0", "1", "1.272", "1.414", "1.618", "2.0", "2"}:
+            _append_candidate(out, value, "fib_target", f"Fib ext {name}", 2 if str(name) != "1.618" else 3)
+
+    for key in ("liquidity_pools", "liquidity_zones"):
+        for item in s.get(key, []) or []:
+            if not isinstance(item, dict): continue
+            side = str(item.get("side") or item.get("type") or "").lower()
+            wanted = ("buy" in side or "high" in side) if long_side else ("sell" in side or "low" in side)
+            if wanted or not side:
+                _append_candidate(out, item.get("price") or item.get("level"), "liquidity_target", "Liquidity target", _f(item.get("strength"), 2))
+
+    for lp in _extract_price_levels(liquidation):
+        if (long_side and lp > entry) or ((not long_side) and lp < entry):
+            _append_candidate(out, lp, "liquidation_target", "Liquidation / liquidity target", 2)
+
+    # Front-edge candidates are alternatives considered by the TP committee,
+    # not mandatory cuts. A strong opposing zone may be approached from the
+    # safer side when that alternative has better expected utility.
+    buffer_abs = max(atr * 0.12, abs(entry) * 0.00035)
+    snapshot = list(out)
+    for row in snapshot:
+        if row.get("family") in {"structure_target", "swing_target", "opposing_poi", "value_target", "liquidity_target"}:
+            p = _f(row.get("price"), 0.0)
+            if p <= 0: continue
+            capture = p - buffer_abs if long_side else p + buffer_abs
+            _append_candidate(out, capture, "capture_before_reaction", f"Captura antes de {row.get('source')}", _f(row.get("strength"), 2), anchor=p)
+    return out
+
+
+def _is_correct_side(price: float, reference: float, direction: str, role: str) -> bool:
+    if role == "entry":
+        return price <= reference if direction == "long" else price >= reference
+    if role == "sl":
+        return price < reference if direction == "long" else price > reference
+    return price > reference if direction == "long" else price < reference
+
+
+def _cluster_evidence(candidate: Dict[str, Any], universe: List[Dict[str, Any]], atr: float) -> Tuple[int, float]:
+    p = _f(candidate.get("price"), 0.0)
+    radius = max(atr * 0.30, abs(p) * 0.0012)
+    families = set(candidate.get("families") or {candidate.get("family")})
+    strength = _f(candidate.get("strength"), 1.0)
+    for other in universe:
+        if other is candidate: continue
+        if abs(_f(other.get("price")) - p) <= radius:
+            families.update(other.get("families") or {other.get("family")})
+            strength += min(2.0, _f(other.get("strength"), 1.0)) * 0.45
+    return len({f for f in families if f}), min(6.0, strength)
+
+
+def _strategy_family(setup_family: Any) -> str:
+    text = str(setup_family or "").upper()
+    if "SWEEP" in text or "REVERS" in text: return "SWEEP_REVERSAL"
+    if "BREAK" in text or "RETEST" in text: return "BREAKOUT_RETEST"
+    if "MEAN" in text or "VALUE" in text: return "MEAN_REVERSION"
+    if "TREND" in text or "PULLBACK" in text: return "TREND_PULLBACK"
+    if "ROTATION" in text: return "ROTATION"
+    return text or "UNSPECIFIED"
+
+
+def _entry_specialists(candidate, universe, *, direction, current_price, atr,
+                       structure, trend, momentum, volatility, setup_family,
+                       context, market_type) -> Dict[str, float]:
+    p = _f(candidate.get("price"), 0.0)
+    if p <= 0 or atr <= 0: return {}
+    fam = str(candidate.get("family") or "")
+    independent, strength = _cluster_evidence(candidate, universe, atr)
+
+    # 1) Reaction / structure specialist.
+    reaction = _clip(32 + strength * 9 + max(0, independent - 1) * 8)
+    if fam == "baseline": reaction = max(reaction, 50.0)
+
+    # 2) Smart-money / liquidity specialist.
+    smc_ctx = _d(structure.get("smc") or structure.get("smart_money"))
+    smc_events = sum(bool(smc_ctx.get(k) or structure.get(k)) for k in ("liquidity_sweep", "sweep", "mss", "bos", "displacement"))
+    smc = 45.0 + smc_events * 8.0
+    if fam in {"smc_poi", "liquidity", "swing"}: smc += 12.0
+    smc = _clip(smc)
+
+    # 3) Strategy specialist: relevance depends on the active setup, not distance.
+    setup = _strategy_family(setup_family)
+    compat = {
+        "SWEEP_REVERSAL": {"smc_poi", "liquidity", "swing", "structure", "fib"},
+        "BREAKOUT_RETEST": {"structure", "smc_poi", "dynamic_value", "value"},
+        "TREND_PULLBACK": {"smc_poi", "fib", "dynamic_value", "structure", "value"},
+        "MEAN_REVERSION": {"value", "dynamic_value", "structure", "fib", "swing"},
+        "ROTATION": {"value", "structure", "dynamic_value"},
+    }
+    strategy = 62.0 if fam in compat.get(setup, set()) else 50.0
+    if fam == "baseline": strategy = 54.0
+
+    # 4) Reachability/timing specialist. It estimates fill probability only;
+    # it does not say that near or deep is intrinsically better.
+    d_atr = abs(current_price - p) / max(atr, 1e-12)
+    activity = _f(context.get("activity_score"), 50.0)
+    tf = str(context.get("timeframe") or "")
+    horizon = {"30m":1.35,"1h":1.55,"2h":1.75,"4h":2.05,"12h":2.5,"1D":3.0,"1W":3.4}.get(tf, 2.0)
+    horizon *= 0.80 + activity / 250.0
+    reach = _clip(100.0 - max(0.0, d_atr - 0.15) / max(horizon, 0.25) * 58.0)
+    # A chased/extended current price can make an immediate entry less safe.
+    extension = str(_d(trend).get("direction") or "").lower()
+    if d_atr < 0.18 and setup in {"TREND_PULLBACK", "MEAN_REVERSION", "SWEEP_REVERSAL"}:
+        reach = min(reach, 78.0)
+
+    # 5) Volatility/noise specialist.
+    shock = _f(context.get("shock_score"), 0.0)
+    noise = 76.0
+    if d_atr < 0.18 and shock >= 65: noise -= 24.0
+    if d_atr > horizon * 1.15: noise -= 18.0
+    noise = _clip(noise)
+
+    # 6) Flow/value specialist. Abstains softly when unavailable.
+    flow = 50.0
+    if fam in {"value", "dynamic_value"}: flow += 20.0
+    if fam in {"liquidation", "liquidity"}: flow += 12.0
+    volume = _d(structure.get("volume_profile"))
+    if volume: flow += 6.0
+    if _d(structure.get("order_flow") or structure.get("orderflow") or structure.get("microstructure")): flow += 8.0
+    flow = _clip(flow)
+
+    # 7) Context/market specialist: dynamic activity/macro modifies confidence,
+    # never selects a price only because of weekday/session.
+    context_score = 68.0
+    macro = str(context.get("macro_risk") or "UNKNOWN")
+    if macro == "CRITICAL": context_score -= 28.0
+    elif macro == "HIGH": context_score -= 12.0
+    if shock >= 85 and d_atr < 0.20: context_score -= 10.0
+    if market_type == "spot": context_score += 3.0
+    context_score = _clip(context_score)
+
+    return {
+        "reaction": reaction, "smc": smc, "strategy": strategy,
+        "reachability": reach, "volatility": noise, "flow": flow,
+        "context": context_score,
+    }
+
+
+def _sl_specialists(candidate, universe, *, direction, entry, tp_hint, atr,
+                    structure, setup_family, context, market_type) -> Dict[str, float]:
+    p = _f(candidate.get("price"), 0.0)
+    if p <= 0 or atr <= 0: return {}
+    d_atr = abs(entry - p) / max(atr, 1e-12)
+    independent, strength = _cluster_evidence(candidate, universe, atr)
+    anchor = _f(candidate.get("anchor"), 0.0)
+
+    # Invalidation specialist: candidate created behind a real anchor receives
+    # stronger evidence than a distance-only baseline.
+    invalidation = 48.0 + strength * 8.0 + max(0, independent - 1) * 5.0
+    if candidate.get("family") == "structural_invalidation": invalidation += 12.0
+    if anchor > 0: invalidation += 7.0
+    invalidation = _clip(invalidation)
+
+    # Noise specialist: derives from observed activity instead of fixed TF sweet spots.
+    activity = _f(context.get("activity_score"), 50.0)
+    shock = _f(context.get("shock_score"), 0.0)
+    expected_noise = 0.65 + activity / 140.0 + shock / 260.0
+    noise = _clip(82.0 - abs(d_atr - expected_noise) * 27.0)
+    # Too tight is more dangerous than somewhat wide; risk specialist handles width.
+    if d_atr < expected_noise * 0.65: noise -= 22.0
+    noise = _clip(noise)
+
+    # Reaction-collision specialist checks whether SL lies inside another strong
+    # reaction cluster rather than merely "how far" it is.
+    reaction_universe = _collect_entry_candidates(structure, direction, entry)
+    collision = 92.0
+    for lvl in reaction_universe:
+        lp = _f(lvl.get("price"), 0.0)
+        if lp <= 0: continue
+        fams, st = _cluster_evidence(lvl, reaction_universe, atr)
+        radius = max(atr * (0.18 + 0.04 * min(fams, 3)), abs(lp) * 0.0008)
+        if abs(p - lp) <= radius and st >= 3.0:
+            collision -= min(62.0, 16.0 + st * 7.0 + fams * 5.0)
+    collision = _clip(collision)
+
+    # Liquidity/stop-hunt specialist: just beyond swing/liquidity is preferred
+    # over exactly on it, but does not demand a universal distance.
+    liquidity = 62.0
+    if candidate.get("family") == "structural_invalidation": liquidity += 15.0
+    if anchor > 0 and abs(p - anchor) >= atr * 0.10: liquidity += 8.0
+    liquidity = _clip(liquidity)
+
+    # Risk/economics specialist.
+    risk = 78.0
+    if tp_hint and _f(tp_hint) > 0:
+        rr = abs(_f(tp_hint) - entry) / max(abs(entry - p), 1e-12)
+        if rr < 1.4: risk -= 45.0
+        elif rr < 1.8: risk -= 24.0
+        elif rr <= 3.5: risk += 8.0
+        elif rr > 5.0: risk -= 10.0
+    if d_atr > 4.0: risk -= 28.0
+    risk = _clip(risk)
+
+    # Strategy specialist: reversals need invalidation beyond the extreme;
+    # breakouts need the reclaimed/broken structure to fail.
+    setup = _strategy_family(setup_family)
+    strategy = 68.0
+    if setup in {"SWEEP_REVERSAL", "MEAN_REVERSION"} and anchor > 0: strategy += 8.0
+    if setup in {"BREAKOUT_RETEST", "TREND_PULLBACK"} and candidate.get("family") == "structural_invalidation": strategy += 8.0
+    strategy = _clip(strategy)
+
+    return {"invalidation":invalidation,"noise":noise,"reaction_collision":collision,
+            "liquidity":liquidity,"risk":risk,"strategy":strategy}
+
+
+def _path_barrier_score(tp: float, entry: float, direction: str, structure: Dict[str, Any], atr: float, liquidation=None) -> float:
+    targets = _collect_tp_candidates(structure, direction, entry, tp, atr, liquidation=liquidation)
+    penalty = 0.0
+    for row in targets:
+        p = _f(row.get("price"), 0.0)
+        if p <= 0 or abs(p - tp) <= atr * 0.12: continue
+        between = entry < p < tp if direction == "long" else entry > p > tp
+        if not between: continue
+        fams, st = _cluster_evidence(row, targets, atr)
+        if st >= 3.0 and fams >= 2:
+            penalty += min(24.0, 5.0 + st * 2.5 + fams * 3.0)
+    return _clip(100.0 - min(75.0, penalty))
+
+
+def _tp_specialists(candidate, universe, *, direction, entry, sl, atr, structure,
+                    trend, momentum, volatility, setup_family, context, market_type, liquidation=None) -> Dict[str, float]:
+    p = _f(candidate.get("price"), 0.0)
+    if p <= 0 or atr <= 0: return {}
+    d_atr = abs(p - entry) / max(atr, 1e-12)
+    independent, strength = _cluster_evidence(candidate, universe, atr)
+
+    target = _clip(34.0 + strength * 8.5 + max(0, independent-1) * 7.0)
+    if candidate.get("family") in {"liquidity_target", "swing_target", "opposing_poi", "structure_target"}: target += 8.0
+    target = _clip(target)
+
+    path = _path_barrier_score(p, entry, direction, structure, atr, liquidation=liquidation)
+
+    # Touch probability specialist combines distance with actual market state.
+    activity = _f(context.get("activity_score"), 50.0)
+    shock = _f(context.get("shock_score"), 0.0)
+    regime = str(context.get("market_regime") or "").upper()
+    trend_dir = str(_d(trend).get("direction") or "").lower()
+    aligned = (direction == "long" and "bull" in trend_dir) or (direction == "short" and "bear" in trend_dir)
+    capacity = 1.5 + activity / 90.0 + (0.35 if aligned else 0.0)
+    if "TREND" in regime: capacity += 0.35
+    if shock >= 80: capacity += 0.25
+    touch = _clip(100.0 - max(0.0, d_atr - 0.35) / max(capacity, 0.5) * 72.0)
+
+    # Momentum continuation specialist can support a farther TP when the path is
+    # clean; exhaustion can prefer a nearer capture. It never hardcodes distance.
+    mom_dir = str(_d(momentum).get("direction") or "").lower()
+    mom_aligned = (direction == "long" and "bull" in mom_dir) or (direction == "short" and "bear" in mom_dir)
+    continuation = 68.0 + (14.0 if mom_aligned else -6.0)
+    if path < 55: continuation -= 14.0
+    continuation = _clip(continuation)
+
+    # Economics specialist: profitable AND realistic.
+    rr = abs(p - entry) / max(abs(entry - sl), 1e-12)
+    economics = 88.0
+    if rr < 1.3: economics = 20.0
+    elif rr < 1.8: economics = 48.0
+    elif rr <= 3.5: economics = 92.0
+    elif rr <= 4.5: economics = 80.0
+    else: economics = 55.0
+
+    setup = _strategy_family(setup_family)
+    strategy = 68.0
+    if setup in {"BREAKOUT_RETEST", "TREND_PULLBACK"} and candidate.get("family") in {"liquidity_target","swing_target","fib_target"}: strategy += 8.0
+    if setup in {"SWEEP_REVERSAL", "MEAN_REVERSION"} and candidate.get("family") in {"value_target","structure_target","capture_before_reaction"}: strategy += 8.0
+    strategy = _clip(strategy)
+
+    context_score = 72.0
+    if str(context.get("macro_risk") or "") == "CRITICAL": context_score -= 24.0
+    if shock >= 85 and path < 60: context_score -= 10.0
+    context_score = _clip(context_score)
+
+    return {"target":target,"path":path,"touch_probability":touch,
+            "continuation":continuation,"economics":economics,
+            "strategy":strategy,"context":context_score}
+
+
+def _weights_for(role: str, market_type: str) -> Dict[str, float]:
+    market = str(market_type or "spot").lower()
+    if role == "entry":
+        # Spot is slightly more tolerant; derivatives demand reaction + fill quality.
+        base = {"reaction":1.25,"smc":1.20,"strategy":1.05,"reachability":1.15,
+                "volatility":0.85,"flow":0.85,"context":0.75}
+        if market in {"futures","multiasset"}:
+            base.update({"reaction":1.35,"smc":1.30,"reachability":1.25,"volatility":1.0})
+        return base
+    if role == "sl":
+        base = {"invalidation":1.35,"noise":1.05,"reaction_collision":1.25,
+                "liquidity":1.0,"risk":1.15,"strategy":0.9}
+        if market == "spot": base["risk"] = 1.0
+        return base
+    return {"target":1.20,"path":1.25,"touch_probability":1.25,
+            "continuation":0.95,"economics":1.25,"strategy":0.9,"context":0.7}
+
+
+def _harmonic(values: Iterable[float]) -> Optional[float]:
+    vals=[max(1.0, min(100.0, float(v))) for v in values if v is not None]
+    if not vals:
+        return None
+    return len(vals) / sum(1.0/v for v in vals)
+
+
+def _score_candidate(scores: Dict[str, float], weights: Dict[str, float], role: str = "") -> Tuple[float, float]:
+    pairs = [(scores[k], weights.get(k, 1.0)) for k in scores if k in weights]
+    agg = _weighted_mean(pairs)
+    if agg is None: return 0.0, 0.0
+    agree = _consensus(list(scores.values()))
+
+    # Each committee has a small set of indispensable specialist dimensions.
+    # Harmonic synthesis prevents one excellent opinion from hiding a very weak
+    # one, without introducing a near/deep/close/far price rule.
+    if role == "entry":
+        core = _harmonic([scores.get("reaction"), scores.get("reachability"), scores.get("strategy")])
+        final = (core or agg) * 0.62 + agg * 0.28 + agree * 0.10
+    elif role == "sl":
+        core = _harmonic([scores.get("invalidation"), scores.get("noise"), scores.get("reaction_collision"), scores.get("risk")])
+        final = (core or agg) * 0.68 + agg * 0.24 + agree * 0.08
+    elif role == "tp":
+        core = _harmonic([scores.get("target"), scores.get("path"), scores.get("touch_probability"), scores.get("economics")])
+        final = (core or agg) * 0.72 + agg * 0.22 + agree * 0.06
+    else:
+        final = agg * 0.88 + agree * 0.12
+    return _clip(final), agree
+
+
+def _choose(candidates: List[Dict[str, Any]], scorer, weights: Dict[str, float], predicate, role: str = "") -> Optional[Dict[str, Any]]:
+    ranked = []
+    for c in candidates:
+        p = _f(c.get("price"), 0.0)
+        if p <= 0 or not predicate(p):
+            continue
+        scores = scorer(c)
+        total, consensus = _score_candidate(scores, weights, role=role)
+        row = dict(c)
+        row["committee_score"] = round(total, 2)
+        row["consensus"] = round(consensus, 2)
+        row["specialist_scores"] = {k: round(v,2) for k,v in scores.items()}
+        ranked.append(row)
+    if not ranked: return None
+    ranked.sort(key=lambda r: (r["committee_score"], r["consensus"]), reverse=True)
+    return ranked[0]
+
+
+def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float,
+                                    baseline_tp: float, direction: str,
+                                    current_price: float, atr: float,
+                                    structure=None, trend=None, momentum=None,
+                                    volatility=None, setup_family=None, liquidation=None,
+                                    market_type="spot", symbol=None, timeframe=None,
+                                    execution_context=None) -> Dict[str, Any]:
+    """Run separate Entry, SL and TP specialist committees.
+
+    No committee starts from a distance rule.  Near/mid/deep levels are all
+    candidates and may win if the combined specialist evidence supports them.
+    """
+    structure, trend, momentum, volatility = _d(structure), _d(trend), _d(momentum), _d(volatility)
+    context = dict(_d(execution_context))
+    context.setdefault("market_type", str(market_type or "spot").lower())
+    context.setdefault("symbol", str(symbol or ""))
+    context.setdefault("timeframe", str(timeframe or ""))
+    market = str(market_type or "spot").lower()
+    direction = str(direction or "long").lower()
+    atr = max(_f(atr, 0.0), abs(_f(current_price, 0.0)) * 1e-6, 1e-12)
+
+    # ENTRY COMMITTEE -----------------------------------------------------
+    entry_candidates = _collect_entry_candidates(structure, direction, _f(baseline_entry), liquidation=liquidation)
+    entry = _choose(
+        entry_candidates,
+        lambda c: _entry_specialists(c, entry_candidates, direction=direction,
+            current_price=_f(current_price), atr=atr, structure=structure,
+            trend=trend, momentum=momentum, volatility=volatility,
+            setup_family=setup_family, context=context, market_type=market),
+        _weights_for("entry", market),
+        lambda p: _is_correct_side(p, _f(current_price), direction, "entry"),
+        role="entry",
+    )
+    if not entry:
+        return {"success":False,"reason":"ENTRY_COMMITTEE_NO_CANDIDATE","version":VERSION}
+    entry_price = _f(entry.get("price"))
+
+    # SL COMMITTEE --------------------------------------------------------
+    sl_candidates = _collect_sl_candidates(structure, direction, entry_price,
+                                           _f(baseline_sl), atr,
+                                           _f(context.get("activity_score"),50.0))
+    sl = _choose(
+        sl_candidates,
+        lambda c: _sl_specialists(c, sl_candidates, direction=direction,
+            entry=entry_price, tp_hint=_f(baseline_tp), atr=atr,
+            structure=structure, setup_family=setup_family, context=context,
+            market_type=market),
+        _weights_for("sl", market),
+        lambda p: _is_correct_side(p, entry_price, direction, "sl"),
+        role="sl",
+    )
+    if not sl:
+        return {"success":False,"reason":"SL_COMMITTEE_NO_STRUCTURAL_INVALIDATION",
+                "version":VERSION,"entry":entry_price,"entry_committee":entry}
+    sl_price = _f(sl.get("price"))
+
+    # TP COMMITTEE --------------------------------------------------------
+    tp_candidates = _collect_tp_candidates(structure, direction, entry_price,
+                                           _f(baseline_tp), atr, liquidation=liquidation)
+    tp = _choose(
+        tp_candidates,
+        lambda c: _tp_specialists(c, tp_candidates, direction=direction,
+            entry=entry_price, sl=sl_price, atr=atr, structure=structure,
+            trend=trend, momentum=momentum, volatility=volatility,
+            setup_family=setup_family, context=context, market_type=market, liquidation=liquidation),
+        _weights_for("tp", market),
+        lambda p: _is_correct_side(p, entry_price, direction, "tp"),
+        role="tp",
+    )
+    if not tp:
+        return {"success":False,"reason":"TP_COMMITTEE_NO_REALISTIC_TARGET",
+                "version":VERSION,"entry":entry_price,"stop_loss":sl_price,
+                "entry_committee":entry,"sl_committee":sl}
+    tp_price = _f(tp.get("price"))
+
+    risk = abs(entry_price - sl_price)
+    reward = abs(tp_price - entry_price)
+    rr = reward / max(risk, 1e-12)
+
+    # Geometry quality is descriptive. Publication still uses the existing
+    # Safety/RR/Publication Gate; committees do not lower those safeguards.
+    composite = _weighted_mean([
+        (_f(entry.get("committee_score")), 1.0),
+        (_f(sl.get("committee_score")), 1.0),
+        (_f(tp.get("committee_score")), 1.0),
+    ]) or 0.0
+
+    return {
+        "success": True,
+        "version": VERSION,
+        "market_type": market,
+        "entry": entry_price,
+        "stop_loss": sl_price,
+        "take_profit": tp_price,
+        "risk_reward": round(rr, 4),
+        "geometry_quality": round(composite, 2),
+        "entry_quality": round(_f(entry.get("committee_score")), 2),
+        "sl_quality": round(_f(sl.get("committee_score")), 2),
+        "tp_quality": round(_f(tp.get("committee_score")), 2),
+        # Internal deliberation is returned to the caller for logging/tests only.
+        # app.py does not expose specialist names to the frontend.
+        "entry_committee": entry,
+        "sl_committee": sl,
+        "tp_committee": tp,
+    }
+
+
+def leverage_committee_context(*, entry: float, stop_loss: float, take_profit: float,
+                               atr: float, execution_safety: float = 0.0,
+                               market_type: str = "futures",
+                               execution_context=None) -> Dict[str, Any]:
+    """Context packet for the existing leverage engine.
+
+    Commit 16 deliberately does not replace the already deployed risk-budget
+    leverage policy.  It ensures that leverage is assessed only *after* the
+    specialist committees have finalized geometry and provides descriptive
+    quality/risk context without forcing x1/x2 or inflating leverage.
+    """
+    ctx = _d(execution_context)
+    e, s, t = _f(entry), _f(stop_loss), _f(take_profit)
+    risk_pct = abs(e-s)/max(abs(e),1e-12)*100.0
+    reward_pct = abs(t-e)/max(abs(e),1e-12)*100.0
+    atr_pct = abs(_f(atr))/max(abs(e),1e-12)*100.0
+    return {
+        "version": VERSION,
+        "market_type": str(market_type or "futures").lower(),
+        "risk_pct": round(risk_pct,4),
+        "reward_pct": round(reward_pct,4),
+        "atr_pct": round(atr_pct,4),
+        "risk_reward": round(reward_pct/max(risk_pct,1e-12),4),
+        "execution_safety": round(_clip(execution_safety),2),
+        "activity_score": round(_f(ctx.get("activity_score"),50.0),2),
+        "shock_score": round(_f(ctx.get("shock_score"),0.0),2),
+        "authority": "CONTEXT_FOR_EXISTING_LEVERAGE_POLICY",
+        "does_not_force_low_leverage": True,
+    }

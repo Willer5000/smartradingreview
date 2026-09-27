@@ -16717,7 +16717,7 @@ class TradingExpertSystem:
             diagnostics
         )
     
-    def calculate_entry_levels(self, decision, trend, momentum, volatility, structure, symbol, timeframe, liquidation=None):
+    def calculate_entry_levels(self, decision, trend, momentum, volatility, structure, symbol, timeframe, liquidation=None, execution_context=None):
         """
         Calcula niveles de entrada, SL y TP.
         
@@ -17072,6 +17072,126 @@ class TradingExpertSystem:
                         'ANALYSIS_ONLY'
                 }
             
+            # ==========================================================
+            # COMMIT 16 — SPECIALIST EXECUTION COMMITTEES
+            # ==========================================================
+            # Entry, SL and TP are no longer coordinated through a "near/deep"
+            # rule.  Three independent specialist committees reconsider the
+            # baseline geometry using the strategy, structure, SMC/POI evidence,
+            # reachability, volatility/noise, path barriers, market context and
+            # whichever tools are already available in the current analysis.
+            #
+            # Near / medium / deep levels are all valid candidates. Distance is
+            # evidence for fill/noise only, never a preferred outcome by itself.
+            # ==========================================================
+            commit16_committee = {}
+            commit16_reject_reason = None
+            _multi_symbols = {
+                'SPY-USDT','QQQ-USDT','CL-USDT','NATGAS-USDT',
+                'COPPER-USDT','XAG-USDT','KSTR-USDT'
+            }
+            _market_scope = (
+                'multiasset'
+                if str(symbol or '').upper() in _multi_symbols
+                else ('futures' if is_futures else 'spot')
+            )
+            try:
+                from execution_specialist_committees import coordinate_execution_committees
+                commit16_committee = coordinate_execution_committees(
+                    baseline_entry=float(entry),
+                    baseline_sl=float(sl_price),
+                    baseline_tp=float(tp_price),
+                    direction=direction,
+                    current_price=float(current_price),
+                    atr=float(atr or 0),
+                    structure=structure,
+                    trend=trend,
+                    momentum=momentum,
+                    volatility=volatility,
+                    setup_family=setup_family,
+                    liquidation=liquidation,
+                    market_type=_market_scope,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    execution_context=(execution_context or {}),
+                ) or {}
+                if commit16_committee.get('success'):
+                    _old_entry, _old_sl, _old_tp = float(entry), float(sl_price), float(tp_price)
+                    entry = float(commit16_committee.get('entry') or entry)
+                    sl_price = float(commit16_committee.get('stop_loss') or sl_price)
+                    tp_price = float(commit16_committee.get('take_profit') or tp_price)
+
+                    # Public fields remain technical and generic. Internal
+                    # specialist identities/votes never flow to frontend.
+                    entry_score = int(round(float(commit16_committee.get('entry_quality') or entry_score or 0)))
+                    sl_score = float(commit16_committee.get('sl_quality') or sl_score or 0)
+                    tp_score = float(commit16_committee.get('tp_quality') or tp_score or 0)
+                    entry_source = (
+                        'Zona seleccionada por evaluación técnica coordinada'
+                        if abs(entry - _old_entry) > max(abs(_old_entry) * 1e-10, 1e-12)
+                        else entry_source
+                    )
+                    sl_source = (
+                        'Invalidación seleccionada por evaluación técnica coordinada'
+                        if abs(sl_price - _old_sl) > max(abs(_old_sl) * 1e-10, 1e-12)
+                        else sl_source
+                    )
+                    tp_source = (
+                        'Objetivo seleccionado por evaluación técnica coordinada'
+                        if abs(tp_price - _old_tp) > max(abs(_old_tp) * 1e-10, 1e-12)
+                        else tp_source
+                    )
+
+                    _distance_atr = abs(float(current_price) - entry) / max(float(atr), 1e-12)
+                    entry_quality.update({
+                        'version': 'COMMIT16_SPECIALIST_EXECUTION_COMMITTEES_V3',
+                        'entry_quality_score': float(entry_score),
+                        'smc_raw_score': max(
+                            float(entry_quality.get('smc_raw_score') or 0),
+                            float(entry_score),
+                        ),
+                        'distance_atr_current': round(_distance_atr, 4),
+                        'distance_pct_current': round(
+                            abs(float(current_price) - entry)
+                            / max(float(current_price), 1e-12)
+                            * 100,
+                            4,
+                        ),
+                        'entry_timing_mode': 'SPECIALIST_COMMITTEE',
+                    })
+                else:
+                    # Fail closed only when the specialist committee has enough
+                    # information to say geometry is not defendable. Runtime
+                    # errors still fail-open to the already-audited baseline.
+                    _reason = str(commit16_committee.get('reason') or '')
+                    if _reason and not _reason.startswith('FAIL_OPEN'):
+                        commit16_reject_reason = _reason
+            except Exception as _committee_error:
+                commit16_committee = {
+                    'success': False,
+                    'reason': f'FAIL_OPEN:{type(_committee_error).__name__}'
+                }
+
+            # The existing leverage policy is intentionally not replaced here.
+            # It receives the FINAL Entry/SL/TP geometry downstream and remains
+            # responsible for the maximum technically permissible leverage.
+            try:
+                if is_futures:
+                    from execution_specialist_committees import leverage_committee_context
+                    _leverage_context = leverage_committee_context(
+                        entry=float(entry),
+                        stop_loss=float(sl_price),
+                        take_profit=float(tp_price),
+                        atr=float(atr or 0),
+                        execution_safety=float(entry_score or 0),
+                        market_type=_market_scope,
+                        execution_context=(execution_context or {}),
+                    )
+                else:
+                    _leverage_context = {}
+            except Exception:
+                _leverage_context = {}
+
             # ============ CALCULAR R/R ============
             reward = abs(tp_price - entry)
             risk = abs(entry - sl_price)
@@ -17095,9 +17215,9 @@ class TradingExpertSystem:
             except (TypeError, ValueError):
                 minimum_viable_rr, maximum_technical_rr = 1.8, 4.5
 
-            non_executable_reason = None
+            non_executable_reason = commit16_reject_reason or None
 
-            if rr < minimum_viable_rr:
+            if non_executable_reason is None and rr < minimum_viable_rr:
                 non_executable_reason = (
                     f"R/R desfavorable "
                     f"{rr:.2f} < {minimum_viable_rr:.2f}"
@@ -17107,7 +17227,7 @@ class TradingExpertSystem:
                     f"R/R {rr:.2f} < piso técnico {minimum_viable_rr:.2f}"
                 )
 
-            elif rr > maximum_technical_rr:
+            elif non_executable_reason is None and rr > maximum_technical_rr:
                 non_executable_reason = (
                     f"R/R fuera del horizonte técnico "
                     f"{rr:.2f} > {maximum_technical_rr:.2f}"
@@ -20131,6 +20251,45 @@ class TradingExpertSystem:
                     futures_risk_allocation_fraction
                 )
 
+            # ==========================================================
+            # COMMIT 16 — LIVE EXECUTION CONTEXT (NO EXTRA I/O)
+            # ==========================================================
+            # Session/day are preserved as context labels, while current
+            # liquidity/activity is inferred from already-loaded volume/range
+            # plus macro/sentiment/regime. No new API/DB/LLM request is added.
+            _commit16_market_type = (
+                'multiasset'
+                if str(symbol or '').upper() in {
+                    'SPY-USDT','QQQ-USDT','CL-USDT','NATGAS-USDT',
+                    'COPPER-USDT','XAG-USDT','KSTR-USDT'
+                }
+                else analysis_system_type
+            )
+            try:
+                from execution_specialist_committees import build_execution_context
+                commit16_execution_context = build_execution_context(
+                    structure=structure,
+                    volume=volume,
+                    volatility=volatility,
+                    market_hours=market_hours,
+                    sentiment=sentiment,
+                    macro_context=macro_context_snapshot,
+                    market_regime=market_regime,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    market_type=_commit16_market_type,
+                )
+            except Exception as _commit16_context_error:
+                commit16_execution_context = {
+                    'version': 'COMMIT16_CONTEXT_FAILOPEN',
+                    'market_type': _commit16_market_type,
+                    'symbol': symbol,
+                    'timeframe': timeframe,
+                    'activity_score': 50.0,
+                    'shock_score': 0.0,
+                    'reason': type(_commit16_context_error).__name__,
+                }
+
             # ============ NIVELES ============
             levels = {}
             if accion_consenso in ['COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT']:
@@ -20144,7 +20303,8 @@ class TradingExpertSystem:
                         structure,
                         symbol,
                         timeframe,
-                        liquidation=liquidation_data
+                        liquidation=liquidation_data,
+                        execution_context=commit16_execution_context
                     )
                     
                     # RC9.7.11: Futures reutiliza EXACTAMENTE la fracción
@@ -33747,9 +33907,26 @@ def api_multiasset_signals_previous():
 
 @app.route('/api/multiasset/signals/active', methods=['GET'])
 def api_multiasset_signals_active():
-    # Commit 12 V1 does not duplicate a second lifecycle store. Fresh executable
-    # analyses are exposed in /previous; saved/entered positions live in Guardian.
-    return jsonify({'success':True,'warming_up':False,'running':False,'cache_ready':True,'total':0,'signals':[],'other_directional_signals':[],'vigent_other_directional_signals':[],'analysis_candidates':[],'progress':{'total':7,'completed':0,'errors':0},'timestamp':datetime.now(bolivia_tz).isoformat()})
+    # Commit 16: expose ONLY executable analyses already present in RAM cache.
+    # No additional scan, exchange request, Supabase query/write or deep analysis.
+    try:
+        with _MULTI_ASSET_CACHE['lock']:
+            analyses=dict(_MULTI_ASSET_CACHE.get('analysis') or {})
+        signals=[]
+        for result in analyses.values():
+            if isinstance(result,dict) and _multiasset_is_executable(result):
+                signals.append(_multiasset_signal_row(result,'ACTIVE_CONFIRMED'))
+        signals.sort(key=lambda x:-float(x.get('confidence') or 0))
+        return jsonify({
+            'success':True,'warming_up':False,'running':False,
+            'cache_ready':bool(analyses),'total':len(signals),'signals':signals,
+            'other_directional_signals':[],'vigent_other_directional_signals':[],
+            'analysis_candidates':[],
+            'progress':{'total':7,'completed':len(analyses),'errors':0},
+            'timestamp':datetime.now(bolivia_tz).isoformat()
+        })
+    except Exception as exc:
+        return jsonify({'success':False,'error':str(exc)[:180]}),500
 
 @app.route('/api/multiasset/correlation', methods=['GET'])
 def api_multiasset_correlation():
