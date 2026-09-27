@@ -17107,6 +17107,35 @@ class TradingExpertSystem:
                 if str(symbol or '').upper() in _multi_symbols
                 else ('futures' if is_futures else 'spot')
             )
+            # Commit 17.1: the execution committees refine PRICE LEVELS only.
+            # They are not a second signal gate and they do not replace the
+            # already-calibrated Entry/SL/TP quality scales consumed by Safety,
+            # ReviewTrader and Publication.  If no coherent refinement exists,
+            # the pre-Commit-16 audited baseline is preserved.
+            try:
+                _commit_rr_floor = max(
+                    1.0,
+                    float((execution_geometry_profile or {}).get('technical_rr_floor') or 1.8)
+                )
+                _commit_rr_ceiling = max(
+                    _commit_rr_floor,
+                    float((execution_geometry_profile or {}).get('technical_rr_ceiling') or 4.5)
+                )
+                _commit_pref_rr_min = max(
+                    _commit_rr_floor,
+                    float((execution_geometry_profile or {}).get('preferred_rr_min') or 2.0)
+                )
+                _commit_pref_rr_max = min(
+                    _commit_rr_ceiling,
+                    max(
+                        _commit_pref_rr_min,
+                        float((execution_geometry_profile or {}).get('preferred_rr_max') or 3.2)
+                    )
+                )
+            except (TypeError, ValueError):
+                _commit_rr_floor, _commit_rr_ceiling = 1.8, 4.5
+                _commit_pref_rr_min, _commit_pref_rr_max = 2.0, 3.2
+
             try:
                 from execution_specialist_committees import coordinate_execution_committees
                 commit16_committee = coordinate_execution_committees(
@@ -17126,6 +17155,10 @@ class TradingExpertSystem:
                     symbol=symbol,
                     timeframe=timeframe,
                     execution_context=(execution_context or {}),
+                    rr_floor=_commit_rr_floor,
+                    rr_ceiling=_commit_rr_ceiling,
+                    preferred_rr_min=_commit_pref_rr_min,
+                    preferred_rr_max=_commit_pref_rr_max,
                 ) or {}
                 if commit16_committee.get('success'):
                     _old_entry, _old_sl, _old_tp = float(entry), float(sl_price), float(tp_price)
@@ -17133,11 +17166,10 @@ class TradingExpertSystem:
                     sl_price = float(commit16_committee.get('stop_loss') or sl_price)
                     tp_price = float(commit16_committee.get('take_profit') or tp_price)
 
-                    # Public fields remain technical and generic. Internal
-                    # specialist identities/votes never flow to frontend.
-                    entry_score = int(round(float(commit16_committee.get('entry_quality') or entry_score or 0)))
-                    sl_score = float(commit16_committee.get('sl_quality') or sl_score or 0)
-                    tp_score = float(commit16_committee.get('tp_quality') or tp_score or 0)
+                    # IMPORTANT: committee_score is an INTERNAL ranking scale.
+                    # Do NOT copy it into entry_score/sl_score/tp_score.  Those
+                    # three legacy-compatible metrics keep the same semantics
+                    # and thresholds they had before Commit 16.
                     entry_source = (
                         'Zona seleccionada por evaluación técnica coordinada'
                         if abs(entry - _old_entry) > max(abs(_old_entry) * 1e-10, 1e-12)
@@ -17154,14 +17186,32 @@ class TradingExpertSystem:
                         else tp_source
                     )
 
+                    # Keep reachability metadata causally aligned with the FINAL
+                    # Entry while preserving the established quality-score scale.
                     _distance_atr = abs(float(current_price) - entry) / max(float(atr), 1e-12)
+                    try:
+                        _ideal_min = float(entry_quality.get('ideal_min_atr') or 0.45)
+                        _ideal_max = float(entry_quality.get('ideal_max_atr') or 1.50)
+                        _max_reach = float(entry_quality.get('max_reach_atr') or 2.50)
+                        if _distance_atr <= _ideal_min:
+                            _reach = (
+                                70.0 + 30.0 * (_distance_atr / max(_ideal_min, 1e-9))
+                                if _ideal_min > 0 else 85.0
+                            )
+                        elif _distance_atr <= _ideal_max:
+                            _reach = 100.0
+                        elif _distance_atr <= _max_reach:
+                            _reach = 100.0 - 60.0 * (
+                                (_distance_atr - _ideal_max)
+                                / max(0.01, _max_reach - _ideal_max)
+                            )
+                        else:
+                            _reach = 0.0
+                        _reach = max(0.0, min(100.0, _reach))
+                    except Exception:
+                        _reach = float(entry_quality.get('reachability_score') or 0)
+
                     entry_quality.update({
-                        'version': 'COMMIT16_SPECIALIST_EXECUTION_COMMITTEES_V3',
-                        'entry_quality_score': float(entry_score),
-                        'smc_raw_score': max(
-                            float(entry_quality.get('smc_raw_score') or 0),
-                            float(entry_score),
-                        ),
                         'distance_atr_current': round(_distance_atr, 4),
                         'distance_pct_current': round(
                             abs(float(current_price) - entry)
@@ -17169,20 +17219,21 @@ class TradingExpertSystem:
                             * 100,
                             4,
                         ),
-                        'entry_timing_mode': 'SPECIALIST_COMMITTEE',
+                        'reachability_score': round(_reach, 2),
+                        'entry_timing_mode': 'COORDINATED_EXECUTION',
                     })
                 else:
-                    # Fail closed only when the specialist committee has enough
-                    # information to say geometry is not defendable. Runtime
-                    # errors still fail-open to the already-audited baseline.
-                    _reason = str(commit16_committee.get('reason') or '')
-                    if _reason and not _reason.startswith('FAIL_OPEN'):
-                        commit16_reject_reason = _reason
+                    # 17.1: no extra veto.  The specialist layer is a bounded
+                    # geometry refinement; the audited baseline remains valid
+                    # input for the existing RR/Safety/Publication gates.
+                    commit16_reject_reason = None
             except Exception as _committee_error:
                 commit16_committee = {
                     'success': False,
-                    'reason': f'FAIL_OPEN:{type(_committee_error).__name__}'
+                    'reason': f'FAIL_OPEN:{type(_committee_error).__name__}',
+                    'fallback_to_baseline': True,
                 }
+                commit16_reject_reason = None
 
             # The existing leverage policy is intentionally not replaced here.
             # It receives the FINAL Entry/SL/TP geometry downstream and remains

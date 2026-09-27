@@ -1,4 +1,4 @@
-"""Commit 16 - Specialist Execution Committees.
+"""Commit 17.1 - Specialist Execution Committees · Joint Geometry Reconciliation.
 
 Deterministic, local-only specialist deliberation for Entry, Stop Loss and
 Take Profit.  No network, database or LLM calls.  The committees do not create
@@ -20,7 +20,7 @@ from math import sqrt
 from statistics import median
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-VERSION = "COMMIT16_SPECIALIST_EXECUTION_COMMITTEES_V3"
+VERSION = "COMMIT17_1_EXECUTION_RECONCILIATION_V4"
 
 MULTI_ASSET_CLASS = {
     "SPY-USDT": "US_INDEX", "QQQ-USDT": "US_INDEX",
@@ -677,8 +677,16 @@ def _score_candidate(scores: Dict[str, float], weights: Dict[str, float], role: 
     return _clip(final), agree
 
 
-def _choose(candidates: List[Dict[str, Any]], scorer, weights: Dict[str, float], predicate, role: str = "") -> Optional[Dict[str, Any]]:
-    ranked = []
+def _rank_candidates(candidates: List[Dict[str, Any]], scorer,
+                     weights: Dict[str, float], predicate,
+                     role: str = "") -> List[Dict[str, Any]]:
+    """Rank all admissible candidates for one execution role.
+
+    Commit 17.1 keeps the specialist committees as *price selectors*.  The
+    ranking is internal and does not change LONG/SHORT thesis, Safety or
+    publication thresholds.
+    """
+    ranked: List[Dict[str, Any]] = []
     for c in candidates:
         p = _f(c.get("price"), 0.0)
         if p <= 0 or not predicate(p):
@@ -688,11 +696,65 @@ def _choose(candidates: List[Dict[str, Any]], scorer, weights: Dict[str, float],
         row = dict(c)
         row["committee_score"] = round(total, 2)
         row["consensus"] = round(consensus, 2)
-        row["specialist_scores"] = {k: round(v,2) for k,v in scores.items()}
+        row["specialist_scores"] = {k: round(v, 2) for k, v in scores.items()}
         ranked.append(row)
-    if not ranked: return None
     ranked.sort(key=lambda r: (r["committee_score"], r["consensus"]), reverse=True)
-    return ranked[0]
+    return ranked
+
+
+def _choose(candidates: List[Dict[str, Any]], scorer,
+            weights: Dict[str, float], predicate,
+            role: str = "") -> Optional[Dict[str, Any]]:
+    ranked = _rank_candidates(candidates, scorer, weights, predicate, role=role)
+    return ranked[0] if ranked else None
+
+
+def _rr_quality(rr: float, floor: float, ceiling: float,
+                preferred_min: float, preferred_max: float) -> float:
+    """Describe economic fit without fabricating levels.
+
+    Only combinations already inside the existing technical R/R interval reach
+    this function.  It merely prefers the central working band; it never lowers
+    the deployed floor/ceiling.
+    """
+    rr = _f(rr, 0.0)
+    floor = max(0.01, _f(floor, 1.8))
+    ceiling = max(floor, _f(ceiling, 4.5))
+    preferred_min = max(floor, _f(preferred_min, 2.0))
+    preferred_max = min(ceiling, max(preferred_min, _f(preferred_max, 3.2)))
+    if rr < floor or rr > ceiling:
+        return 0.0
+    if preferred_min <= rr <= preferred_max:
+        return 100.0
+    if rr < preferred_min:
+        span = max(0.01, preferred_min - floor)
+        return _clip(62.0 + 38.0 * (rr - floor) / span)
+    span = max(0.01, ceiling - preferred_max)
+    return _clip(62.0 + 38.0 * (ceiling - rr) / span)
+
+
+def _joint_geometry_score(entry_row: Dict[str, Any], sl_row: Dict[str, Any],
+                          tp_row: Dict[str, Any], rr: float,
+                          rr_floor: float, rr_ceiling: float,
+                          preferred_rr_min: float,
+                          preferred_rr_max: float) -> float:
+    """Score the *combination*, not another trading thesis.
+
+    A high Entry score cannot hide a poor SL/TP and vice versa.  The harmonic
+    core keeps all three roles relevant, while the existing R/R interval acts
+    only as an economic compatibility check.
+    """
+    role_scores = [
+        _f(entry_row.get("committee_score"), 0.0),
+        _f(sl_row.get("committee_score"), 0.0),
+        _f(tp_row.get("committee_score"), 0.0),
+    ]
+    core = _harmonic(role_scores) or 0.0
+    mean = sum(role_scores) / 3.0 if role_scores else 0.0
+    rr_score = _rr_quality(
+        rr, rr_floor, rr_ceiling, preferred_rr_min, preferred_rr_max
+    )
+    return _clip(core * 0.56 + mean * 0.31 + rr_score * 0.13)
 
 
 def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float,
@@ -701,106 +763,204 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
                                     structure=None, trend=None, momentum=None,
                                     volatility=None, setup_family=None, liquidation=None,
                                     market_type="spot", symbol=None, timeframe=None,
-                                    execution_context=None) -> Dict[str, Any]:
-    """Run separate Entry, SL and TP specialist committees.
+                                    execution_context=None,
+                                    rr_floor: float = 1.8,
+                                    rr_ceiling: float = 4.5,
+                                    preferred_rr_min: float = 2.0,
+                                    preferred_rr_max: float = 3.2) -> Dict[str, Any]:
+    """Coordinate Entry, SL and TP without becoming a second signal committee.
 
-    No committee starts from a distance rule.  Near/mid/deep levels are all
-    candidates and may win if the combined specialist evidence supports them.
+    Commit 17.1 responsibilities are intentionally narrow:
+      * the trading thesis/direction already exists before this function;
+      * Entry committee ranks prices for that thesis;
+      * SL committee ranks invalidation prices for each viable Entry;
+      * TP committee ranks structural targets for each Entry+SL pair;
+      * a bounded reconciliation pass chooses the best *joint* geometry that
+        already respects the deployed technical R/R interval.
+
+    If no improved/coherent combination exists, the caller must preserve the
+    pre-Commit-16 audited baseline instead of treating this helper as a veto.
     """
-    structure, trend, momentum, volatility = _d(structure), _d(trend), _d(momentum), _d(volatility)
+    structure, trend, momentum, volatility = (
+        _d(structure), _d(trend), _d(momentum), _d(volatility)
+    )
     context = dict(_d(execution_context))
     context.setdefault("market_type", str(market_type or "spot").lower())
     context.setdefault("symbol", str(symbol or ""))
     context.setdefault("timeframe", str(timeframe or ""))
     market = str(market_type or "spot").lower()
     direction = str(direction or "long").lower()
-    atr = max(_f(atr, 0.0), abs(_f(current_price, 0.0)) * 1e-6, 1e-12)
+    current_price = _f(current_price, 0.0)
+    atr = max(_f(atr, 0.0), abs(current_price) * 1e-6, 1e-12)
 
-    # ENTRY COMMITTEE -----------------------------------------------------
-    entry_candidates = _collect_entry_candidates(structure, direction, _f(baseline_entry), liquidation=liquidation)
-    entry = _choose(
+    rr_floor = max(1.0, _f(rr_floor, 1.8))
+    rr_ceiling = max(rr_floor, _f(rr_ceiling, 4.5))
+    preferred_rr_min = max(rr_floor, _f(preferred_rr_min, 2.0))
+    preferred_rr_max = min(
+        rr_ceiling,
+        max(preferred_rr_min, _f(preferred_rr_max, 3.2)),
+    )
+
+    # ENTRY ---------------------------------------------------------------
+    # The existing anti-chase contract is retained: LONG entry is at/below
+    # current price; SHORT entry is at/above current price.  Breakout setups
+    # are expected to arrive here *after* confirmation, so Entry searches the
+    # retest/reaction zone and never acts as a breakout trigger.
+    entry_candidates = _collect_entry_candidates(
+        structure, direction, _f(baseline_entry), liquidation=liquidation
+    )
+    entry_ranked = _rank_candidates(
         entry_candidates,
-        lambda c: _entry_specialists(c, entry_candidates, direction=direction,
-            current_price=_f(current_price), atr=atr, structure=structure,
+        lambda c: _entry_specialists(
+            c, entry_candidates, direction=direction,
+            current_price=current_price, atr=atr, structure=structure,
             trend=trend, momentum=momentum, volatility=volatility,
-            setup_family=setup_family, context=context, market_type=market),
+            setup_family=setup_family, context=context, market_type=market,
+        ),
         _weights_for("entry", market),
-        lambda p: _is_correct_side(p, _f(current_price), direction, "entry"),
+        lambda p: _is_correct_side(p, current_price, direction, "entry"),
         role="entry",
     )
-    if not entry:
-        return {"success":False,"reason":"ENTRY_COMMITTEE_NO_CANDIDATE","version":VERSION}
-    entry_price = _f(entry.get("price"))
+    if not entry_ranked:
+        return {
+            "success": False,
+            "reason": "NO_EXECUTION_REFINEMENT_ENTRY",
+            "version": VERSION,
+            "fallback_to_baseline": True,
+        }
 
-    # SL COMMITTEE --------------------------------------------------------
-    sl_candidates = _collect_sl_candidates(structure, direction, entry_price,
-                                           _f(baseline_sl), atr,
-                                           _f(context.get("activity_score"),50.0))
-    sl = _choose(
-        sl_candidates,
-        lambda c: _sl_specialists(c, sl_candidates, direction=direction,
-            entry=entry_price, tp_hint=_f(baseline_tp), atr=atr,
-            structure=structure, setup_family=setup_family, context=context,
-            market_type=market),
-        _weights_for("sl", market),
-        lambda p: _is_correct_side(p, entry_price, direction, "sl"),
-        role="sl",
-    )
-    if not sl:
-        return {"success":False,"reason":"SL_COMMITTEE_NO_STRUCTURAL_INVALIDATION",
-                "version":VERSION,"entry":entry_price,"entry_committee":entry}
-    sl_price = _f(sl.get("price"))
+    # Bounded search: enough alternatives to reconcile geometry while keeping
+    # CPU/RAM deterministic and tiny.  No I/O is introduced.
+    best_combo: Optional[Dict[str, Any]] = None
+    entry_limit = min(7, len(entry_ranked))
 
-    # TP COMMITTEE --------------------------------------------------------
-    tp_candidates = _collect_tp_candidates(structure, direction, entry_price,
-                                           _f(baseline_tp), atr, liquidation=liquidation)
-    tp = _choose(
-        tp_candidates,
-        lambda c: _tp_specialists(c, tp_candidates, direction=direction,
-            entry=entry_price, sl=sl_price, atr=atr, structure=structure,
-            trend=trend, momentum=momentum, volatility=volatility,
-            setup_family=setup_family, context=context, market_type=market, liquidation=liquidation),
-        _weights_for("tp", market),
-        lambda p: _is_correct_side(p, entry_price, direction, "tp"),
-        role="tp",
-    )
-    if not tp:
-        return {"success":False,"reason":"TP_COMMITTEE_NO_REALISTIC_TARGET",
-                "version":VERSION,"entry":entry_price,"stop_loss":sl_price,
-                "entry_committee":entry,"sl_committee":sl}
-    tp_price = _f(tp.get("price"))
+    for entry_rank, entry_row in enumerate(entry_ranked[:entry_limit]):
+        entry_price = _f(entry_row.get("price"), 0.0)
+        if entry_price <= 0:
+            continue
 
-    risk = abs(entry_price - sl_price)
-    reward = abs(tp_price - entry_price)
-    rr = reward / max(risk, 1e-12)
+        sl_candidates = _collect_sl_candidates(
+            structure, direction, entry_price, _f(baseline_sl), atr,
+            _f(context.get("activity_score"), 50.0),
+        )
+        sl_ranked = _rank_candidates(
+            sl_candidates,
+            lambda c: _sl_specialists(
+                c, sl_candidates, direction=direction, entry=entry_price,
+                tp_hint=_f(baseline_tp), atr=atr, structure=structure,
+                setup_family=setup_family, context=context, market_type=market,
+            ),
+            _weights_for("sl", market),
+            lambda p: _is_correct_side(p, entry_price, direction, "sl"),
+            role="sl",
+        )
+        if not sl_ranked:
+            continue
 
-    # Geometry quality is descriptive. Publication still uses the existing
-    # Safety/RR/Publication Gate; committees do not lower those safeguards.
-    composite = _weighted_mean([
-        (_f(entry.get("committee_score")), 1.0),
-        (_f(sl.get("committee_score")), 1.0),
-        (_f(tp.get("committee_score")), 1.0),
-    ]) or 0.0
+        for sl_rank, sl_row in enumerate(sl_ranked[:min(8, len(sl_ranked))]):
+            sl_price = _f(sl_row.get("price"), 0.0)
+            risk = abs(entry_price - sl_price)
+            if risk <= 0:
+                continue
 
+            tp_candidates = _collect_tp_candidates(
+                structure, direction, entry_price, _f(baseline_tp), atr,
+                liquidation=liquidation,
+            )
+            tp_ranked = _rank_candidates(
+                tp_candidates,
+                lambda c: _tp_specialists(
+                    c, tp_candidates, direction=direction, entry=entry_price,
+                    sl=sl_price, atr=atr, structure=structure, trend=trend,
+                    momentum=momentum, volatility=volatility,
+                    setup_family=setup_family, context=context,
+                    market_type=market, liquidation=liquidation,
+                ),
+                _weights_for("tp", market),
+                lambda p: _is_correct_side(p, entry_price, direction, "tp"),
+                role="tp",
+            )
+            if not tp_ranked:
+                continue
+
+            for tp_rank, tp_row in enumerate(tp_ranked[:min(12, len(tp_ranked))]):
+                tp_price = _f(tp_row.get("price"), 0.0)
+                reward = abs(tp_price - entry_price)
+                rr = reward / max(risk, 1e-12)
+
+                # Existing economics are preserved exactly: committees may
+                # search alternatives, but never lower the deployed R/R floor
+                # or raise its technical ceiling to force a signal.
+                if rr < rr_floor or rr > rr_ceiling:
+                    continue
+
+                joint = _joint_geometry_score(
+                    entry_row, sl_row, tp_row, rr,
+                    rr_floor, rr_ceiling,
+                    preferred_rr_min, preferred_rr_max,
+                )
+
+                combo = {
+                    "joint_score": round(joint, 2),
+                    "risk_reward": round(rr, 4),
+                    "entry": entry_price,
+                    "stop_loss": sl_price,
+                    "take_profit": tp_price,
+                    "entry_committee": entry_row,
+                    "sl_committee": sl_row,
+                    "tp_committee": tp_row,
+                    "ranks": {
+                        "entry": entry_rank + 1,
+                        "sl": sl_rank + 1,
+                        "tp": tp_rank + 1,
+                    },
+                }
+                if (
+                    best_combo is None
+                    or combo["joint_score"] > best_combo["joint_score"]
+                    or (
+                        combo["joint_score"] == best_combo["joint_score"]
+                        and abs(combo["risk_reward"] - 2.6)
+                        < abs(best_combo["risk_reward"] - 2.6)
+                    )
+                ):
+                    best_combo = combo
+
+    if best_combo is None:
+        return {
+            "success": False,
+            "reason": "NO_EXECUTABLE_GEOMETRY_REFINEMENT",
+            "version": VERSION,
+            "fallback_to_baseline": True,
+            "rr_floor": round(rr_floor, 4),
+            "rr_ceiling": round(rr_ceiling, 4),
+        }
+
+    entry_row = best_combo["entry_committee"]
+    sl_row = best_combo["sl_committee"]
+    tp_row = best_combo["tp_committee"]
+
+    # Committee scores remain internal selection diagnostics.  The caller keeps
+    # the established legacy Entry/SL/TP quality scale for Safety/ReviewTrader/
+    # Publication, preventing Commit 16 from silently changing those thresholds.
     return {
         "success": True,
         "version": VERSION,
         "market_type": market,
-        "entry": entry_price,
-        "stop_loss": sl_price,
-        "take_profit": tp_price,
-        "risk_reward": round(rr, 4),
-        "geometry_quality": round(composite, 2),
-        "entry_quality": round(_f(entry.get("committee_score")), 2),
-        "sl_quality": round(_f(sl.get("committee_score")), 2),
-        "tp_quality": round(_f(tp.get("committee_score")), 2),
-        # Internal deliberation is returned to the caller for logging/tests only.
-        # app.py does not expose specialist names to the frontend.
-        "entry_committee": entry,
-        "sl_committee": sl,
-        "tp_committee": tp,
+        "entry": best_combo["entry"],
+        "stop_loss": best_combo["stop_loss"],
+        "take_profit": best_combo["take_profit"],
+        "risk_reward": best_combo["risk_reward"],
+        "geometry_quality": best_combo["joint_score"],
+        "entry_quality": round(_f(entry_row.get("committee_score")), 2),
+        "sl_quality": round(_f(sl_row.get("committee_score")), 2),
+        "tp_quality": round(_f(tp_row.get("committee_score")), 2),
+        "reconciled": True,
+        "ranks": best_combo["ranks"],
+        "entry_committee": entry_row,
+        "sl_committee": sl_row,
+        "tp_committee": tp_row,
     }
-
 
 def leverage_committee_context(*, entry: float, stop_loss: float, take_profit: float,
                                atr: float, execution_safety: float = 0.0,
@@ -808,7 +968,7 @@ def leverage_committee_context(*, entry: float, stop_loss: float, take_profit: f
                                execution_context=None) -> Dict[str, Any]:
     """Context packet for the existing leverage engine.
 
-    Commit 16 deliberately does not replace the already deployed risk-budget
+    Commit 17.1 deliberately does not replace the already deployed risk-budget
     leverage policy.  It ensures that leverage is assessed only *after* the
     specialist committees have finalized geometry and provides descriptive
     quality/risk context without forcing x1/x2 or inflating leverage.
