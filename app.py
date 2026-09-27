@@ -33671,14 +33671,10 @@ def api_kpis_frontend_signals():
         # performance remains in Analytics; the header only reports the local
         # resource-governed analysis cache.
         if market_filter == 'multiasset':
-            with _MULTI_ASSET_CACHE['lock']:
-                analyses = [
-                    dict(v or {})
-                    for v in (_MULTI_ASSET_CACHE.get('analysis') or {}).values()
-                    if isinstance(v, dict)
-                ]
+            analyses_map = _multiasset_combined_analyses(fresh_only=True)
+            analyses = [dict(v or {}) for v in analyses_map.values() if isinstance(v, dict)]
             total = len(analyses)
-            active = sum(1 for row in analyses if _multiasset_is_executable(row))
+            active = sum(1 for row in analyses if _multiasset_signal_is_vigent(row))
             return jsonify({
                 'success': True,
                 'data': {
@@ -34035,20 +34031,44 @@ def _get_futures_system():
 
 
 # ============================================================================
-# COMMIT 12 — MULTI-ACTIVO RESOURCE-GOVERNED RUNTIME
+# COMMIT 17.2 — MULTI-ACTIVO RUNTIME RELIABILITY
+# ============================================================================
+# Alcance estricto: transporte, frescura, scheduling, persistencia compacta y
+# observabilidad. NO modifica dirección, estrategias, Safety, Entry, SL, TP,
+# leverage, pesos, Macro Gate ni Publication Gate.
 # ============================================================================
 _MULTI_ASSET_CACHE = {
     'lock': threading.RLock(),
     'analysis': {},
     'updated_at': 0.0,
 }
+_MULTI_ASSET_COMPACT_LOCK = threading.RLock()
+_MULTI_ASSET_COMPACT = {
+    'items': {},
+    'restore_attempted': False,
+    'restored': False,
+    'restored_count': 0,
+    'last_persist_at': 0.0,
+    'persist_ok': None,
+    'restore_error': None,
+    'durable_db_available': None,
+}
+_MULTI_ASSET_COMPACT_MAX = 21  # 7 símbolos × 3 TF; sólo resumen compacto.
+_MULTI_ASSET_SNAPSHOT_NAMESPACE = 'multiasset'
+_MULTI_ASSET_SNAPSHOT_KEY = 'deep_cache_v1'
+_MULTI_ASSET_SNAPSHOT_TTL_SECONDS = 3 * 24 * 3600
+_MULTI_ASSET_SNAPSHOT_MIN_WRITE_SECONDS = 120
+
 _MULTI_AUTO_DONE = set()
 _MULTI_AUTO_LOCK = threading.Lock()
-_MULTI_AUTO_DAILY = {'day': None, 'count': 0}
+_MULTI_AUTO_DAILY = {'day': None, 'count': 0, 'context_count': 0}
+_MULTI_DAILY_CONTEXT_EXTRA_MAX = 2  # 1D: no roba cupo a la vía principal 4h.
+_MULTI_DEEP_RETRY = {}
+_MULTI_CLOSE_REFRESHED = set()
 
-# Commit 17: el Router conserva sus últimas 7 filas en RAM. Cuando el último
-# barrido muestra actividad/deep candidates, mantiene 15 min; en mercado quieto
-# extiende a 30 min. El análisis profundo y sus gates NO cambian.
+# Commit 17 conserva el último ranking 4h para evitar scans redundantes. 17.2
+# corrige dos cosas: deep_candidate NO equivale a actividad (siempre hay top-2),
+# y los cierres 4h/1D/1h pueden forzar UN refresh causal de vela cerrada.
 _MULTI_ROUTER_STATE_LOCK = threading.Lock()
 _MULTI_ROUTER_STATE = {
     'rows': [],
@@ -34056,6 +34076,44 @@ _MULTI_ROUTER_STATE = {
     'last_scan_at': 0.0,
     'interval_seconds': 900,
 }
+_MULTI_RUNTIME_STATUS_LOCK = threading.RLock()
+_MULTI_RUNTIME_STATUS = {
+    'version': 'COMMIT17_2_MULTI_RUNTIME_RELIABILITY',
+    'started_at': datetime.now(timezone.utc).isoformat(),
+    'last_tick_at': None,
+    'last_router_scan_at': None,
+    'last_router_timeframe': None,
+    'last_router_rows': 0,
+    'last_deep_attempt_at': None,
+    'last_deep_success_at': None,
+    'last_deep_error_at': None,
+    'last_deep_error': None,
+    'last_deep_symbol': None,
+    'last_deep_timeframe': None,
+    'deep_successes': 0,
+    'deep_errors': 0,
+    'busy_deferrals': 0,
+    'close_forced_scans': 0,
+}
+
+
+def _multiasset_status_update(**kwargs):
+    try:
+        with _MULTI_RUNTIME_STATUS_LOCK:
+            _MULTI_RUNTIME_STATUS.update(kwargs)
+    except Exception:
+        pass
+
+
+def _multiasset_status_increment(key, amount=1):
+    try:
+        with _MULTI_RUNTIME_STATUS_LOCK:
+            _MULTI_RUNTIME_STATUS[key] = int(
+                _MULTI_RUNTIME_STATUS.get(key, 0) or 0
+            ) + int(amount)
+    except Exception:
+        pass
+
 
 def _get_multiasset_system():
     try:
@@ -34065,15 +34123,253 @@ def _get_multiasset_system():
         print(f"⚠️ MultiAssetSystem no disponible: {exc}")
         return None
 
-def _multiasset_cache_result(symbol, timeframe, result):
+
+def _multiasset_compact_result(result, *, origin='LIVE'):
+    """Resumen bounded suficiente para señal/diagnóstico, no para recalcular."""
+    result = result if isinstance(result, dict) else {}
+    decision = result.get('decision') if isinstance(result.get('decision'), dict) else {}
+    levels = result.get('levels') if isinstance(result.get('levels'), dict) else {}
+    macro = result.get('multiasset_macro') if isinstance(result.get('multiasset_macro'), dict) else {}
+    strategy = result.get('multiasset_strategy_bank') if isinstance(result.get('multiasset_strategy_bank'), dict) else {}
+    route = result.get('multiasset_strategy_route') if isinstance(result.get('multiasset_strategy_route'), dict) else {}
+
+    level_keys = (
+        'entry','stop_loss','take_profit','leverage','risk_reward','roi_tp','roi_sl',
+        'execution_safety','publication_status','publication_eligible','is_executable',
+        'rejected_reason','entry_score','sl_reliability','tp_quality_score','valid_until',
+        'entry_reachability_score','entry_distance_atr','entry_distance_pct',
+    )
+    compact_levels = {k: levels.get(k) for k in level_keys if levels.get(k) is not None}
+    compact = {
+        'success': bool(result.get('success', True)),
+        'signal_id': str(result.get('signal_id') or ''),
+        'symbol': result.get('symbol'),
+        'timeframe': result.get('timeframe'),
+        'display_name': result.get('display_name'),
+        'asset_class': result.get('asset_class'),
+        'system_type': result.get('system_type') or 'futures',
+        'market': 'multiasset',
+        'market_segment': 'MULTIASSET',
+        'decision': {
+            'action': str(decision.get('action') or 'NO_OPERAR').upper(),
+            'confidence': decision.get('confidence'),
+        },
+        'levels': compact_levels,
+        'publication_status': result.get('publication_status') or levels.get('publication_status'),
+        'publication_eligible': result.get('publication_eligible', levels.get('publication_eligible')),
+        'is_executable': result.get('is_executable', levels.get('is_executable')),
+        'rejected_reason': result.get('rejected_reason') or levels.get('rejected_reason'),
+        'source_candle_timestamp': result.get('source_candle_timestamp'),
+        'source_candle_close_timestamp': result.get('source_candle_close_timestamp'),
+        'current_price': result.get('current_price'),
+        'live_price': result.get('live_price'),
+        'valid_until': result.get('valid_until') or levels.get('valid_until'),
+        'message': str(result.get('message') or '')[:900],
+        'multiasset_macro': {
+            k: macro.get(k) for k in (
+                'gate','reason','risk_level','directional_bias','next_event_hours','next_event'
+            ) if macro.get(k) is not None
+        },
+        'multiasset_strategy_bank': {
+            k: strategy.get(k) for k in (
+                'asset_class','symbol','timeframe','regime','volatility_regime','session',
+                'preferred_for_context','learning_cell'
+            ) if strategy.get(k) is not None
+        },
+        'multiasset_strategy_route': {
+            k: route.get(k) for k in ('selected_family','confirmation_score')
+            if route.get(k) is not None
+        },
+        '_multi_cache_origin': str(origin or 'LIVE').upper(),
+        '_multi_cached_at': time.time(),
+    }
+    return compact
+
+
+def _multiasset_compact_put(result, *, origin='LIVE'):
+    compact = _multiasset_compact_result(result, origin=origin)
+    symbol = str(compact.get('symbol') or '')
+    timeframe = str(compact.get('timeframe') or '')
+    if not symbol or not timeframe:
+        return False
+    key = (symbol, timeframe)
+    with _MULTI_ASSET_COMPACT_LOCK:
+        _MULTI_ASSET_COMPACT['items'][key] = compact
+        if len(_MULTI_ASSET_COMPACT['items']) > _MULTI_ASSET_COMPACT_MAX:
+            ordered = sorted(
+                _MULTI_ASSET_COMPACT['items'].items(),
+                key=lambda item: float((item[1] or {}).get('_multi_cached_at') or 0.0),
+            )
+            for old_key, _ in ordered[:-_MULTI_ASSET_COMPACT_MAX]:
+                _MULTI_ASSET_COMPACT['items'].pop(old_key, None)
+    return True
+
+
+def _multiasset_persist_compact_snapshot(*, force=False):
+    now = time.monotonic()
+    with _MULTI_ASSET_COMPACT_LOCK:
+        last = float(_MULTI_ASSET_COMPACT.get('last_persist_at') or 0.0)
+        if not force and now - last < _MULTI_ASSET_SNAPSHOT_MIN_WRITE_SECONDS:
+            return True
+        items = list((_MULTI_ASSET_COMPACT.get('items') or {}).values())
+    if not items:
+        return False
+    payload = {
+        'version': 'COMMIT17_2_MULTI_COMPACT_V1',
+        'saved_at': datetime.now(timezone.utc).isoformat(),
+        'items': items[-_MULTI_ASSET_COMPACT_MAX:],
+    }
+    durable_available = None
+    try:
+        from supabase_client import supabase_db
+        durable_available = bool(
+            getattr(supabase_db, 'enabled', False)
+            and not bool(getattr(supabase_db, 'provider_restricted', lambda: False)())
+        )
+    except Exception:
+        durable_available = False
+    with _MULTI_ASSET_COMPACT_LOCK:
+        _MULTI_ASSET_COMPACT['durable_db_available'] = durable_available
+
+    try:
+        from runtime_persistence import save_runtime_snapshot
+        ok = bool(save_runtime_snapshot(
+            _MULTI_ASSET_SNAPSHOT_NAMESPACE,
+            _MULTI_ASSET_SNAPSHOT_KEY,
+            payload,
+            ttl_seconds=_MULTI_ASSET_SNAPSHOT_TTL_SECONDS,
+        ))
+    except Exception as exc:
+        ok = False
+        _multiasset_status_update(last_deep_error=f'compact_persist:{str(exc)[:120]}')
+    with _MULTI_ASSET_COMPACT_LOCK:
+        _MULTI_ASSET_COMPACT['last_persist_at'] = now
+        _MULTI_ASSET_COMPACT['persist_ok'] = ok
+    return ok
+
+
+def _multiasset_restore_compact_snapshot_once():
+    with _MULTI_ASSET_COMPACT_LOCK:
+        if _MULTI_ASSET_COMPACT.get('restore_attempted'):
+            return bool(_MULTI_ASSET_COMPACT.get('restored'))
+        _MULTI_ASSET_COMPACT['restore_attempted'] = True
+    try:
+        from runtime_persistence import load_runtime_snapshot
+        stored = load_runtime_snapshot(
+            _MULTI_ASSET_SNAPSHOT_NAMESPACE,
+            _MULTI_ASSET_SNAPSHOT_KEY,
+            allow_expired=True,
+        )
+        payload = (stored or {}).get('payload') or {}
+        items = payload.get('items') if isinstance(payload, dict) else []
+        saved_at = payload.get('saved_at') if isinstance(payload, dict) else None
+        # Nunca resucitar diagnósticos indefinidamente. El snapshot dura 72h y
+        # cada señal se vuelve a filtrar por vigencia antes de mostrarse activa.
+        if saved_at:
+            try:
+                saved = pd.Timestamp(saved_at)
+                saved = saved.tz_localize('UTC') if saved.tz is None else saved.tz_convert('UTC')
+                if (pd.Timestamp.now(tz='UTC') - saved).total_seconds() > _MULTI_ASSET_SNAPSHOT_TTL_SECONDS:
+                    items = []
+            except Exception:
+                pass
+        restored = 0
+        if isinstance(items, list):
+            for item in items[-_MULTI_ASSET_COMPACT_MAX:]:
+                if not isinstance(item, dict):
+                    continue
+                item = dict(item)
+                item['_multi_cache_origin'] = 'RESTORED'
+                item['_multi_cached_at'] = float(item.get('_multi_cached_at') or time.time())
+                if _multiasset_compact_put(item, origin='RESTORED'):
+                    restored += 1
+        with _MULTI_ASSET_COMPACT_LOCK:
+            _MULTI_ASSET_COMPACT['restored'] = restored > 0
+            _MULTI_ASSET_COMPACT['restored_count'] = restored
+        return restored > 0
+    except Exception as exc:
+        with _MULTI_ASSET_COMPACT_LOCK:
+            _MULTI_ASSET_COMPACT['restore_error'] = str(exc)[:160]
+        return False
+
+
+def _multiasset_result_age_seconds(result):
+    raw = (result or {}).get('source_candle_close_timestamp') or (result or {}).get('source_candle_timestamp')
+    if not raw:
+        return None
+    try:
+        ts = pd.Timestamp(raw)
+        ts = ts.tz_localize('UTC') if ts.tz is None else ts.tz_convert('UTC')
+        return max(0, int((pd.Timestamp.now(tz='UTC') - ts).total_seconds()))
+    except Exception:
+        return None
+
+
+def _multiasset_signal_is_vigent(result):
+    if not _multiasset_is_executable(result):
+        return False
+    timeframe = str((result or {}).get('timeframe') or '4h')
+    try:
+        validity_fn = globals().get('_futures_signal_validity')
+        if callable(validity_fn):
+            return not bool(validity_fn(result, timeframe).get('expired'))
+    except Exception:
+        pass
+    age = _multiasset_result_age_seconds(result)
+    tf_seconds = {'1h':3600, '4h':14400, '1D':86400}.get(timeframe, 14400)
+    return age is None or age <= tf_seconds * 6
+
+
+def _multiasset_analysis_is_fresh(result):
+    if _multiasset_signal_is_vigent(result):
+        return True
+    timeframe = str((result or {}).get('timeframe') or '4h')
+    age = _multiasset_result_age_seconds(result)
+    if age is None:
+        return str((result or {}).get('_multi_cache_origin') or 'LIVE') == 'LIVE'
+    tf_seconds = {'1h':3600, '4h':14400, '1D':86400}.get(timeframe, 14400)
+    return age <= tf_seconds * 2
+
+
+def _multiasset_combined_analyses(*, fresh_only=True):
+    _multiasset_restore_compact_snapshot_once()
+    combined = {}
+    with _MULTI_ASSET_COMPACT_LOCK:
+        for key, value in (_MULTI_ASSET_COMPACT.get('items') or {}).items():
+            if isinstance(value, dict):
+                combined[key] = dict(value)
     with _MULTI_ASSET_CACHE['lock']:
-        _MULTI_ASSET_CACHE['analysis'][(str(symbol), str(timeframe))] = dict(result or {})
+        for key, value in (_MULTI_ASSET_CACHE.get('analysis') or {}).items():
+            if isinstance(value, dict):
+                combined[key] = dict(value)
+    if fresh_only:
+        combined = {
+            key: value for key, value in combined.items()
+            if _multiasset_analysis_is_fresh(value)
+        }
+    return combined
+
+
+def _multiasset_cache_result(symbol, timeframe, result):
+    # Un fallo transitorio jamás reemplaza el último análisis válido ni se
+    # presenta como NO_OPERAR. Eso era indistinguible de una decisión técnica.
+    if not isinstance(result, dict) or result.get('success') is False:
+        return False
+    normalized = dict(result)
+    normalized.setdefault('symbol', str(symbol))
+    normalized.setdefault('timeframe', str(timeframe))
+    with _MULTI_ASSET_CACHE['lock']:
+        _MULTI_ASSET_CACHE['analysis'][(str(symbol), str(timeframe))] = normalized
         _MULTI_ASSET_CACHE['updated_at'] = time.time()
-        # Límite duro: sólo 2 análisis profundos por TF caliente + contexto reciente.
+        # Full analyses can be large. Keep the historical RAM ceiling of 8.
         if len(_MULTI_ASSET_CACHE['analysis']) > 8:
             keys = list(_MULTI_ASSET_CACHE['analysis'].keys())
             for old in keys[:-8]:
                 _MULTI_ASSET_CACHE['analysis'].pop(old, None)
+    _multiasset_compact_put(normalized, origin='LIVE')
+    _multiasset_persist_compact_snapshot(force=_multiasset_is_executable(normalized))
+    return True
+
 
 def _multiasset_signal_row(result, source_context='PREVIOUS_CONFIRMED'):
     result = result or {}
@@ -34100,110 +34396,15 @@ def _multiasset_signal_row(result, source_context='PREVIOUS_CONFIRMED'):
         'multiasset_macro': result.get('multiasset_macro'),
         'multiasset_specialist': result.get('multiasset_specialist'),
         'multiasset_strategy_bank': result.get('multiasset_strategy_bank'),
+        'cache_origin': result.get('_multi_cache_origin') or 'LIVE',
     }
+
 
 def _multiasset_is_executable(result):
     decision=(result or {}).get('decision') or {}; levels=(result or {}).get('levels') or {}
     return (str(decision.get('action') or '').upper() in ('LONG','SHORT') and
             str(levels.get('publication_status') or result.get('publication_status') or '').upper() == 'EXECUTABLE_SIGNAL' and
             result.get('is_executable', levels.get('is_executable', True)) is not False)
-
-def _commit16_public_market_context(market_hours=None, execution_context=None, market_regime=None):
-    """Public market context for the header.
-
-    Presentation-only. It translates already-computed evidence into
-    conventional trader language and performs ZERO I/O. Internal committee,
-    specialist, weighting and learning terminology is never exposed.
-    """
-    market_hours = market_hours if isinstance(market_hours, dict) else {}
-    execution_context = execution_context if isinstance(execution_context, dict) else {}
-    market_regime = market_regime if isinstance(market_regime, dict) else {}
-
-    def _num(value, default=0.0):
-        try:
-            return float(value if value is not None else default)
-        except (TypeError, ValueError):
-            return float(default)
-
-    activity = max(0.0, min(100.0, _num(execution_context.get('activity_score'), 50.0)))
-    shock = max(0.0, min(100.0, _num(execution_context.get('shock_score'), 0.0)))
-    volume_ratio = max(0.0, _num(execution_context.get('volume_ratio'), 1.0))
-    range_ratio = max(0.0, _num(execution_context.get('range_ratio'), 1.0))
-
-    if activity >= 82:
-        activity_label = 'MUY ALTA'
-        activity_tone = 'danger' if shock >= 85 else 'success'
-    elif activity >= 64:
-        activity_label = 'ALTA'
-        activity_tone = 'success'
-    elif activity >= 42:
-        activity_label = 'MODERADA'
-        activity_tone = 'warning'
-    else:
-        activity_label = 'BAJA'
-        activity_tone = 'secondary'
-
-    if shock >= 85:
-        condition = 'MOVIMIENTO EXCEPCIONAL'
-    elif shock >= 65:
-        condition = 'ACTIVIDAD ANORMAL'
-    elif activity >= 64:
-        condition = 'MERCADO ACTIVO'
-    elif activity < 42:
-        condition = 'MERCADO CALMO'
-    else:
-        condition = 'CONDICIONES NORMALES'
-
-    session_name = str(market_hours.get('session_name') or '').strip()
-    session_code = str(market_hours.get('session') or execution_context.get('session') or 'UNKNOWN').upper()
-    if not session_name:
-        session_name = {
-            'ASIAN': 'Asiática',
-            'EUROPEAN': 'Europea',
-            'AMERICAN': 'Americana',
-        }.get(session_code, 'Sin identificar')
-    else:
-        session_name = {
-            'Asiático': 'Asiática',
-            'Europeo': 'Europea',
-            'Americano': 'Americana',
-        }.get(session_name, session_name)
-
-    day_name = str(market_hours.get('day_name') or '').strip() or '—'
-    day_icon = str(market_hours.get('day_icon') or '📅')
-    session_icon = str(market_hours.get('session_icon') or '🕒')
-
-    regime = str(
-        execution_context.get('market_regime')
-        or market_regime.get('regime')
-        or market_regime.get('state')
-        or ''
-    ).upper()
-
-    evidence_parts = [
-        f'volumen relativo {volume_ratio:.2f}x',
-        f'rango relativo {range_ratio:.2f}x',
-    ]
-    if regime and regime not in ('UNKNOWN', 'NONE', 'N/A'):
-        evidence_parts.append(f'régimen {regime.replace("_", " ").lower()}')
-
-    return {
-        'session_name': session_name,
-        'session_icon': session_icon,
-        'day_name': day_name,
-        'day_icon': day_icon,
-        'activity_label': activity_label,
-        'activity_score': round(activity, 1),
-        'activity_tone': activity_tone,
-        'condition': condition,
-        'volume_ratio': round(volume_ratio, 2),
-        'range_ratio': round(range_ratio, 2),
-        'evidence': ' · '.join(evidence_parts),
-        'note': (
-            'La sesión y el día describen el calendario; la actividad se clasifica '
-            'con volumen y rango observados, no por una etiqueta fija de horario.'
-        ),
-    }
 
 
 def _multiasset_public_analysis_candidate(result):
@@ -34230,6 +34431,7 @@ def _multiasset_public_analysis_candidate(result):
         directional
         and publication == 'EXECUTABLE_SIGNAL'
         and result.get('is_executable', levels.get('is_executable', True)) is not False
+        and _multiasset_signal_is_vigent(result)
     )
 
     safety_raw = levels.get('execution_safety')
@@ -34274,9 +34476,6 @@ def _multiasset_public_analysis_candidate(result):
         status_label = 'SIN SEÑAL DIRECCIONAL'
         reason = 'No hay una dirección LONG/SHORT con confirmación técnica suficiente en este análisis.'
 
-    # Presentation only: these rows are never manually saveable in Multi-Activo.
-    # The label helps the existing UI explain why a directional idea is not an
-    # official signal without changing any execution threshold.
     if safety is not None and safety >= 65:
         risk_class = 'MEDIUM'
     else:
@@ -34310,13 +34509,44 @@ def _multiasset_public_analysis_candidate(result):
         'execution_safety': safety,
         'source_candle_timestamp': result.get('source_candle_timestamp'),
         'source_candle_close_timestamp': result.get('source_candle_close_timestamp'),
+        'source_age_seconds': _multiasset_result_age_seconds(result),
         'current_price': result.get('live_price') or result.get('current_price'),
         'source_context': 'MULTIASSET_PUBLIC_DIAGNOSTIC',
+        'cache_origin': result.get('_multi_cache_origin') or 'LIVE',
     }
 
 
+def _multiasset_runtime_public_status():
+    _multiasset_restore_compact_snapshot_once()
+    with _MULTI_RUNTIME_STATUS_LOCK:
+        status = dict(_MULTI_RUNTIME_STATUS)
+    with _MULTI_ASSET_CACHE['lock']:
+        full_count = len(_MULTI_ASSET_CACHE.get('analysis') or {})
+    with _MULTI_ASSET_COMPACT_LOCK:
+        compact_count = len(_MULTI_ASSET_COMPACT.get('items') or {})
+        status['snapshot_restored'] = bool(_MULTI_ASSET_COMPACT.get('restored'))
+        status['snapshot_restored_count'] = int(_MULTI_ASSET_COMPACT.get('restored_count') or 0)
+        status['snapshot_save_ok_failopen'] = _MULTI_ASSET_COMPACT.get('persist_ok')
+        status['snapshot_durable_db_available'] = _MULTI_ASSET_COMPACT.get('durable_db_available')
+        status['snapshot_restore_error'] = _MULTI_ASSET_COMPACT.get('restore_error')
+    with _MULTI_AUTO_LOCK:
+        status['deep_daily_count'] = int(_MULTI_AUTO_DAILY.get('count') or 0)
+        status['daily_context_count'] = int(_MULTI_AUTO_DAILY.get('context_count') or 0)
+        status['daily_context_extra_max'] = _MULTI_DAILY_CONTEXT_EXTRA_MAX
+        status['completed_buckets'] = len(_MULTI_AUTO_DONE)
+        status['retry_buckets'] = len(_MULTI_DEEP_RETRY)
+    status['full_analysis_cache'] = full_count
+    status['compact_analysis_cache'] = compact_count
+    try:
+        from multiasset_system import router_cache_status
+        status['scanner_cache'] = router_cache_status()
+    except Exception:
+        status['scanner_cache'] = {}
+    return status
+
+
 def _multiasset_public_visibility(analyses):
-    """Compact public observability from analyses already present in RAM."""
+    """Compact public observability from fresh analyses already available."""
     rows = []
     for result in (analyses or {}).values():
         if isinstance(result, dict):
@@ -34337,37 +34567,50 @@ def _multiasset_public_visibility(analyses):
         if item.get('classification') == 'ANALYSIS_ONLY'
         and item.get('directional')
     ]
-    executable_count = sum(
-        1 for item in rows
-        if item.get('classification') == 'EXECUTABLE_SIGNAL'
-    )
-    analysis_only_count = sum(
-        1 for item in rows
-        if item.get('classification') == 'ANALYSIS_ONLY'
-    )
-    no_trade_count = sum(
-        1 for item in rows
-        if item.get('classification') == 'NO_TRADE'
-    )
+    executable_count = sum(1 for item in rows if item.get('classification') == 'EXECUTABLE_SIGNAL')
+    analysis_only_count = sum(1 for item in rows if item.get('classification') == 'ANALYSIS_ONLY')
+    no_trade_count = sum(1 for item in rows if item.get('classification') == 'NO_TRADE')
+    unique_symbols = sorted({str(item.get('symbol') or '') for item in rows if item.get('symbol')})
+    tf_coverage = {}
+    for item in rows:
+        tf = str(item.get('timeframe') or '')
+        if tf:
+            tf_coverage[tf] = tf_coverage.get(tf, 0) + 1
+    runtime = _multiasset_runtime_public_status()
+    errors = int(runtime.get('deep_errors') or 0)
+
+    if not rows and errors:
+        public_note = (
+            'No hay análisis completos frescos disponibles y se registraron fallos de ejecución. '
+            'Este estado NO debe interpretarse como NO OPERAR técnico.'
+        )
+    elif not rows:
+        public_note = (
+            'Aún no hay análisis profundos frescos disponibles. El sistema puede estar esperando '
+            'una ventana de cierre; cero señales todavía no prueba ausencia de oportunidad.'
+        )
+    else:
+        public_note = (
+            f'Hay {len(rows)} análisis completos frescos disponibles sobre {len(unique_symbols)} mercados. '
+            f'Señales ejecutables: {executable_count}; hipótesis no ejecutables: {analysis_only_count}; '
+            f'sin dirección: {no_trade_count}.'
+        )
+
     summary = {
-        # Compatibilidad con el diagnóstico visual ya usado por Futures.
         'total_analyzed': len(rows),
         'executable': executable_count,
         'active_now': executable_count,
         'analysis_only': analysis_only_count,
         'no_trade': no_trade_count,
-        'errors': 0,
-        # Contexto adicional para Multi-Activo, en lenguaje público.
+        'errors': errors,
         'markets_in_universe': 7,
+        'unique_markets_analyzed': len(unique_symbols),
         'full_analyses_available': len(rows),
         'directional_non_executable': analysis_only_count,
         'without_direction': no_trade_count,
-        'coverage_complete': len(rows) >= 7,
-        'public_note': (
-            f'Hay {len(rows)} análisis completos disponibles en memoria de un universo de 7 mercados. '
-            'Cero señales significa cero configuraciones ejecutables entre esos análisis disponibles; '
-            'no implica que se haya forzado una entrada.'
-        ),
+        'coverage_complete': len(unique_symbols) >= 7,
+        'coverage_by_timeframe': tf_coverage,
+        'public_note': public_note,
     }
     return {
         'candidates': rows,
@@ -34379,16 +34622,20 @@ def _multiasset_public_visibility(analyses):
 def _multiasset_run_analysis(symbol, timeframe, owner='multi-background'):
     engine=_get_multiasset_system()
     if engine is None:
+        _multiasset_status_increment('deep_errors')
+        _multiasset_status_update(
+            last_deep_error_at=datetime.now(timezone.utc).isoformat(),
+            last_deep_error='MultiAssetSystem no disponible',
+        )
         return {'success':False,'error':'MultiAssetSystem no disponible'}
 
     is_ui = str(owner or '').startswith('multi-ui:')
     if is_ui:
-        # QA 12.1: a human opening Multi-Activo has the same priority as Spot
-        # and Futures. No extra worker is created; background simply yields.
         _mark_system_interactive_priority(seconds=120)
 
     acquired=_acquire_heavy_analysis(owner, timeout=6.0 if is_ui else 0.0)
     if not acquired:
+        _multiasset_status_increment('busy_deferrals')
         with _MULTI_ASSET_CACHE['lock']:
             cached=dict((_MULTI_ASSET_CACHE.get('analysis') or {}).get((str(symbol),str(timeframe))) or {})
         if cached:
@@ -34406,98 +34653,272 @@ def _multiasset_run_analysis(symbol, timeframe, owner='multi-background'):
             'busy':True,
             'deferred':True,
             'retry_after_ms':7000,
-            'error':'Motor compartido ocupado; el Router y el precio siguen disponibles.'
+            'error':'Motor compartido ocupado; el escáner y el precio siguen disponibles.'
         }
     try:
+        _multiasset_status_update(
+            last_deep_attempt_at=datetime.now(timezone.utc).isoformat(),
+            last_deep_symbol=str(symbol),
+            last_deep_timeframe=str(timeframe),
+        )
         result=engine.analyze_multiasset_market(symbol,timeframe,closed_candle_only=True)
         if isinstance(result,dict):
             result.setdefault('symbol',symbol); result.setdefault('timeframe',timeframe)
+        if isinstance(result,dict) and result.get('success') is not False:
             _multiasset_cache_result(symbol,timeframe,result)
-        return result
+            _multiasset_status_increment('deep_successes')
+            _multiasset_status_update(
+                last_deep_success_at=datetime.now(timezone.utc).isoformat(),
+                last_deep_error=None,
+            )
+        else:
+            err = str((result or {}).get('error') or 'análisis profundo sin resultado válido')[:180]
+            _multiasset_status_increment('deep_errors')
+            _multiasset_status_update(
+                last_deep_error_at=datetime.now(timezone.utc).isoformat(),
+                last_deep_error=err,
+            )
+        return result if isinstance(result,dict) else {'success':False,'error':'Resultado Multi-Activo inválido'}
+    except Exception as exc:
+        _multiasset_status_increment('deep_errors')
+        _multiasset_status_update(
+            last_deep_error_at=datetime.now(timezone.utc).isoformat(),
+            last_deep_error=str(exc)[:180],
+        )
+        return {'success':False,'symbol':symbol,'timeframe':timeframe,'error':str(exc)[:180]}
     finally:
         _release_heavy_analysis(owner)
 
+
 def _multiasset_compact_telegram(result):
-    # Reutiliza el canal CONFIRMED durable de 10.2: texto + deep-link, sin imagen/PDF.
     return _send_confirmed_signal_telegram('multiasset', result)
 
-def _multiasset_background_tick():
-    """Piggyback resource-governed Multi-Activo scan.
 
-    Commit 17 keeps the same deep-analysis rules and daily caps. Only the cheap
-    7-symbol Router cadence adapts: 15 min while opportunity/activity is high,
-    30 min when the last scan was quiet. Cached rows remain available between
-    scans so a 4h/1D/1h close window is not missed.
+def _multiasset_close_plan(now):
+    """Pure helper: executable close windows with a short exchange-settle grace."""
+    now = now.astimezone(timezone.utc)
+    settled = bool(now.minute > 0 or now.second >= 45)
+    day = now.strftime('%Y-%m-%d')
+    return {
+        '4h': {
+            'due': bool(settled and now.hour % 4 == 0 and now.minute <= 15),
+            'key': f"4h|{day}|{now.hour:02d}",
+        },
+        '1D': {
+            'due': bool(settled and now.hour == 0 and now.minute <= 20),
+            'key': f"1D|{day}",
+        },
+        '1h': {
+            'due': bool(settled and now.minute <= 10),
+            'key': f"1h|{day}|{now.hour:02d}",
+        },
+    }
+
+
+def _multiasset_mark_close_refresh(key):
+    with _MULTI_AUTO_LOCK:
+        _MULTI_CLOSE_REFRESHED.add(str(key))
+        if len(_MULTI_CLOSE_REFRESHED) > 96:
+            for old in list(_MULTI_CLOSE_REFRESHED)[:32]:
+                _MULTI_CLOSE_REFRESHED.discard(old)
+
+
+def _multiasset_close_refresh_done(key):
+    with _MULTI_AUTO_LOCK:
+        return str(key) in _MULTI_CLOSE_REFRESHED
+
+
+def _multiasset_scan(timeframe, *, force=False, forced_close=False):
+    from multiasset_system import scan_opportunities
+    rows = scan_opportunities(str(timeframe), force=bool(force)) or []
+    _rg_count('multiasset_router_scans')
+    _multiasset_status_update(
+        last_router_scan_at=datetime.now(timezone.utc).isoformat(),
+        last_router_timeframe=str(timeframe),
+        last_router_rows=len(rows),
+    )
+    if forced_close:
+        _multiasset_status_increment('close_forced_scans')
+    return rows
+
+
+def _multiasset_retry_ready(bucket, now_mono):
+    with _MULTI_AUTO_LOCK:
+        row = _MULTI_DEEP_RETRY.get(bucket) or {}
+        return now_mono >= float(row.get('next_retry_at') or 0.0)
+
+
+def _multiasset_record_retry(bucket, error):
+    with _MULTI_AUTO_LOCK:
+        row = dict(_MULTI_DEEP_RETRY.get(bucket) or {})
+        attempts = int(row.get('attempts') or 0) + 1
+        row.update({
+            'attempts': attempts,
+            'next_retry_at': time.monotonic() + min(180, 60 * attempts),
+            'error': str(error or '')[:160],
+        })
+        _MULTI_DEEP_RETRY[bucket] = row
+        if attempts >= 3:
+            # Stop retry storm inside the same candle bucket. Do NOT consume the
+            # daily successful-analysis budget; next candle bucket retries fresh.
+            _MULTI_AUTO_DONE.add(bucket)
+        if len(_MULTI_DEEP_RETRY) > 80:
+            for old in list(_MULTI_DEEP_RETRY)[:30]:
+                _MULTI_DEEP_RETRY.pop(old, None)
+
+
+def _multiasset_background_tick():
+    """Close-aware, bounded Multi-Activo scheduler.
+
+    Trading logic is untouched. This function only guarantees that the shortlist
+    is based on a fresh CLOSED candle at executable windows, retries transient
+    failures, and keeps a compact restart-safe diagnostic cache.
     """
     try:
         if str(os.getenv('MULTIASSET_ENABLED','1')).lower() in ('0','false','no','off'):
             return
-        from multiasset_system import scan_opportunities, MULTIASSET_DEEP_LIMIT, MULTIASSET_AUTO_DEEP_DAILY_MAX
+        from multiasset_system import MULTIASSET_DEEP_LIMIT, MULTIASSET_AUTO_DEEP_DAILY_MAX
+        _multiasset_restore_compact_snapshot_once()
         now=datetime.now(timezone.utc)
         now_mono=time.monotonic()
+        _multiasset_status_update(last_tick_at=now.isoformat())
+
         with _MULTI_AUTO_LOCK:
             today=now.strftime('%Y-%m-%d')
             if _MULTI_AUTO_DAILY.get('day') != today:
-                _MULTI_AUTO_DAILY.update({'day':today,'count':0})
-            if int(_MULTI_AUTO_DAILY.get('count') or 0) >= MULTIASSET_AUTO_DEEP_DAILY_MAX:
-                return
+                _MULTI_AUTO_DAILY.update({'day':today,'count':0,'context_count':0})
+                _MULTI_AUTO_DONE.clear()
+                _MULTI_DEEP_RETRY.clear()
 
-        with _MULTI_ROUTER_STATE_LOCK:
-            cached_rows=list(_MULTI_ROUTER_STATE.get('rows') or [])
-            next_scan=float(_MULTI_ROUTER_STATE.get('next_scan_at') or 0.0)
+        plan = _multiasset_close_plan(now)
 
-        if cached_rows and now_mono < next_scan:
-            rows=cached_rows
-            _rg_count('multiasset_router_reuses')
+        # ---------- 4h main lane ----------
+        rows_4h = []
+        force_4h = plan['4h']['due'] and not _multiasset_close_refresh_done(plan['4h']['key'])
+        if force_4h:
+            rows_4h = _multiasset_scan('4h', force=True, forced_close=True)
+            if rows_4h:
+                _multiasset_mark_close_refresh(plan['4h']['key'])
         else:
-            rows=scan_opportunities('4h', force=False) or []
-            _rg_count('multiasset_router_scans')
-            top_score=max(
-                [float((row or {}).get('router_score') or 0) for row in rows]
-                or [0.0]
-            )
-            has_deep=any(bool((row or {}).get('deep_candidate')) for row in rows)
-            # No tocar el criterio de oportunidad: sólo cuándo volver a pedir el
-            # scanner. Alta actividad conserva la cadencia histórica de 15 min.
-            interval=900 if (has_deep or top_score >= 72.0) else 1800
+            with _MULTI_ROUTER_STATE_LOCK:
+                cached_rows=list(_MULTI_ROUTER_STATE.get('rows') or [])
+                next_scan=float(_MULTI_ROUTER_STATE.get('next_scan_at') or 0.0)
+            if cached_rows and now_mono < next_scan:
+                rows_4h=cached_rows
+                _rg_count('multiasset_router_reuses')
+            else:
+                rows_4h=_multiasset_scan('4h', force=False)
+
+        if rows_4h:
+            top_score=max([float((row or {}).get('router_score') or 0) for row in rows_4h] or [0.0])
+            # Commit 17 used has_deep, but top-2 are ALWAYS marked deep_candidate;
+            # therefore quiet=30m was unreachable. Activity comes from score.
+            interval=900 if top_score >= 72.0 else 1800
             with _MULTI_ROUTER_STATE_LOCK:
                 _MULTI_ROUTER_STATE.update({
-                    'rows': list(rows),
-                    'last_scan_at': now_mono,
-                    'next_scan_at': now_mono + interval,
-                    'interval_seconds': interval,
+                    'rows':list(rows_4h),
+                    'last_scan_at':now_mono,
+                    'next_scan_at':now_mono+interval,
+                    'interval_seconds':interval,
                 })
 
-        if not rows:
-            return
-        candidates=[r for r in rows if r.get('deep_candidate')][:MULTIASSET_DEEP_LIMIT]
+        candidates_4h=[r for r in rows_4h if r.get('deep_candidate')][:MULTIASSET_DEEP_LIMIT]
         due=[]
-        # Se conservan exactamente las ventanas ejecutables preexistentes.
-        if now.hour % 4 == 0 and now.minute <= 15:
-            due.extend((r['symbol'],'4h') for r in candidates)
-        if now.hour == 0 and now.minute <= 20:
-            due.extend((r['symbol'],'1D') for r in candidates)
-        if now.minute <= 10 and candidates and float(candidates[0].get('router_score') or 0) >= 82:
-            due.insert(0,(candidates[0]['symbol'],'1h'))
+        if plan['4h']['due']:
+            due.extend((r['symbol'],'4h') for r in candidates_4h)
+
+        # ---------- 1D independent ranking ----------
+        # Pre-17.2 selected the daily lane using the 4h ranking. A daily setup
+        # must be shortlisted with daily closed candles, without changing any
+        # strategy or publication threshold.
+        if plan['1D']['due']:
+            rows_1d=[]
+            key=plan['1D']['key']
+            if not _multiasset_close_refresh_done(key):
+                rows_1d=_multiasset_scan('1D', force=True, forced_close=True)
+                if rows_1d:
+                    _multiasset_mark_close_refresh(key)
+            else:
+                try:
+                    from multiasset_system import scan_opportunities
+                    rows_1d=scan_opportunities('1D', force=False) or []
+                    _rg_count('multiasset_router_reuses')
+                except Exception:
+                    rows_1d=[]
+            candidates_1d=[r for r in rows_1d if r.get('deep_candidate')][:MULTIASSET_DEEP_LIMIT]
+            due.extend((r['symbol'],'1D') for r in candidates_1d)
+
+        # ---------- 1h Fast Lane ----------
+        # Preserve the original high-activity trigger. Only when 4h activity is
+        # exceptional do we spend one 1h seven-symbol scan and choose by 1h data.
+        top_4h=max([float((r or {}).get('router_score') or 0) for r in rows_4h] or [0.0])
+        if plan['1h']['due'] and top_4h >= 82.0:
+            rows_1h=[]
+            key=plan['1h']['key']
+            if not _multiasset_close_refresh_done(key):
+                rows_1h=_multiasset_scan('1h', force=True, forced_close=True)
+                if rows_1h:
+                    _multiasset_mark_close_refresh(key)
+            else:
+                try:
+                    from multiasset_system import scan_opportunities
+                    rows_1h=scan_opportunities('1h', force=False) or []
+                    _rg_count('multiasset_router_reuses')
+                except Exception:
+                    rows_1h=[]
+            candidates_1h=[r for r in rows_1h if r.get('deep_candidate')][:1]
+            due[0:0]=[(r['symbol'],'1h') for r in candidates_1h]
+
+        # Dedupe while preserving priority/order.
+        due=list(dict.fromkeys(due))
+        if not due:
+            return
+
         for symbol,tf in due:
+            with _MULTI_AUTO_LOCK:
+                if tf == '1D':
+                    if int(_MULTI_AUTO_DAILY.get('context_count') or 0) >= _MULTI_DAILY_CONTEXT_EXTRA_MAX:
+                        continue
+                elif int(_MULTI_AUTO_DAILY.get('count') or 0) >= MULTIASSET_AUTO_DEEP_DAILY_MAX:
+                    continue
             bucket=f"{symbol}|{tf}|{now.strftime('%Y-%m-%d')}|{now.hour // (1 if tf=='1h' else (4 if tf=='4h' else 24))}"
             with _MULTI_AUTO_LOCK:
                 if bucket in _MULTI_AUTO_DONE:
                     continue
+            if not _multiasset_retry_ready(bucket, now_mono):
+                continue
+
             result=_multiasset_run_analysis(symbol,tf,owner=f'multi-background:{symbol}:{tf}')
             if result.get('busy'):
                 return
+            if not result.get('success', False):
+                _multiasset_record_retry(bucket, result.get('error'))
+                return
+
             with _MULTI_AUTO_LOCK:
                 _MULTI_AUTO_DONE.add(bucket)
-                _MULTI_AUTO_DAILY['count'] = int(_MULTI_AUTO_DAILY.get('count') or 0) + 1
+                _MULTI_DEEP_RETRY.pop(bucket, None)
+                if tf == '1D':
+                    _MULTI_AUTO_DAILY['context_count'] = int(_MULTI_AUTO_DAILY.get('context_count') or 0) + 1
+                else:
+                    _MULTI_AUTO_DAILY['count'] = int(_MULTI_AUTO_DAILY.get('count') or 0) + 1
                 if len(_MULTI_AUTO_DONE)>80:
-                    for old in list(_MULTI_AUTO_DONE)[:30]: _MULTI_AUTO_DONE.discard(old)
+                    for old in list(_MULTI_AUTO_DONE)[:30]:
+                        _MULTI_AUTO_DONE.discard(old)
+
             if _multiasset_is_executable(result):
                 _multiasset_compact_telegram(result)
+
+            # One full analysis per 20s lifecycle loop remains the hard resource
+            # ceiling. The next candidate is handled by the next existing tick.
             return
     except Exception as exc:
+        _multiasset_status_increment('deep_errors')
+        _multiasset_status_update(
+            last_deep_error_at=datetime.now(timezone.utc).isoformat(),
+            last_deep_error=f'background:{str(exc)[:160]}',
+        )
         print(f"⚠️ Multi-Activo background tick: {str(exc)[:160]}")
-
 
 def _get_review_trader():
     """Obtiene la instancia de ReviewTrader o None si no está disponible"""
@@ -34526,11 +34947,10 @@ def api_multiasset_opportunities():
         from multiasset_system import scan_opportunities, MULTIASSET_DEEP_LIMIT
         tf=str(request.args.get('timeframe') or '4h')
         rows=scan_opportunities(tf, force=False)
-        with _MULTI_ASSET_CACHE['lock']:
-            analyses=dict(_MULTI_ASSET_CACHE['analysis'])
+        analyses=_multiasset_combined_analyses(fresh_only=True)
         signals=[]
-        for (symbol,timeframe),result in analyses.items():
-            if isinstance(result,dict) and _multiasset_is_executable(result):
+        for result in analyses.values():
+            if isinstance(result,dict) and _multiasset_signal_is_vigent(result):
                 signals.append(_multiasset_signal_row(result,'ACTIVE_CONFIRMED'))
         visibility = _multiasset_public_visibility(analyses)
         return jsonify({
@@ -34540,7 +34960,11 @@ def api_multiasset_opportunities():
             'analysis_summary':visibility['summary'],
             'analysis_candidates':visibility['candidates'],
             'other_directional_signals':visibility['other_directional_signals'],
-            'resource_policy':{'scanner_db_writes':0,'scanner_ai_calls':0,'deep_limit':MULTIASSET_DEEP_LIMIT},
+            'runtime_status':_multiasset_runtime_public_status(),
+            'resource_policy':{
+                'scanner_db_writes':0,'scanner_ai_calls':0,'deep_limit':MULTIASSET_DEEP_LIMIT,
+                'full_analysis_per_lifecycle_tick':1,'compact_snapshot_only':True
+            },
             'timestamp':datetime.now(bolivia_tz).isoformat(),
         })
     except Exception as exc:
@@ -34565,15 +34989,17 @@ def api_multiasset_analyze():
 def api_multiasset_signals_previous():
     try:
         min_conf=float(request.args.get('min_confidence',55) or 55)
-        with _MULTI_ASSET_CACHE['lock']:
-            analyses=dict(_MULTI_ASSET_CACHE['analysis'])
+        analyses=_multiasset_combined_analyses(fresh_only=True)
         signals=[]
         for result in analyses.values():
-            if not isinstance(result,dict) or not _multiasset_is_executable(result): continue
+            if not isinstance(result,dict) or not _multiasset_signal_is_vigent(result):
+                continue
             row=_multiasset_signal_row(result,'PREVIOUS_CONFIRMED')
-            if row['confidence']>=min_conf: signals.append(row)
+            if row['confidence']>=min_conf:
+                signals.append(row)
         signals.sort(key=lambda x:-x['confidence'])
         visibility = _multiasset_public_visibility(analyses)
+        runtime = _multiasset_runtime_public_status()
         return jsonify({
             'success':True,'warming_up':False,'running':False,'cache_ready':bool(analyses),
             'total':len(signals),'active_count':len(signals),'signals':signals,
@@ -34581,7 +35007,8 @@ def api_multiasset_signals_previous():
             'analysis_candidates':visibility['candidates'],
             'analysis_summary':visibility['summary'],
             'message':visibility['summary']['public_note'],
-            'progress':{'total':7,'completed':len(analyses),'errors':0},
+            'runtime_status':runtime,
+            'progress':{'total':7,'completed':visibility['summary']['unique_markets_analyzed'],'errors':runtime.get('deep_errors',0)},
             'timestamp':datetime.now(bolivia_tz).isoformat()
         })
     except Exception as exc:
@@ -34589,17 +35016,17 @@ def api_multiasset_signals_previous():
 
 @app.route('/api/multiasset/signals/active', methods=['GET'])
 def api_multiasset_signals_active():
-    # Commit 16: expose ONLY executable analyses already present in RAM cache.
-    # No additional scan, exchange request, Supabase query/write or deep analysis.
+    # Commit 17.2: read-only combined cache. Restored compact results survive a
+    # restart, but only technically vigent EXECUTABLE_SIGNAL rows count active.
     try:
-        with _MULTI_ASSET_CACHE['lock']:
-            analyses=dict(_MULTI_ASSET_CACHE.get('analysis') or {})
+        analyses=_multiasset_combined_analyses(fresh_only=True)
         signals=[]
         for result in analyses.values():
-            if isinstance(result,dict) and _multiasset_is_executable(result):
+            if isinstance(result,dict) and _multiasset_signal_is_vigent(result):
                 signals.append(_multiasset_signal_row(result,'ACTIVE_CONFIRMED'))
         signals.sort(key=lambda x:-float(x.get('confidence') or 0))
         visibility = _multiasset_public_visibility(analyses)
+        runtime = _multiasset_runtime_public_status()
         return jsonify({
             'success':True,'warming_up':False,'running':False,
             'cache_ready':bool(analyses),'total':len(signals),'signals':signals,
@@ -34608,8 +35035,29 @@ def api_multiasset_signals_active():
             'analysis_candidates':visibility['candidates'],
             'analysis_summary':visibility['summary'],
             'message':visibility['summary']['public_note'],
-            'progress':{'total':7,'completed':len(analyses),'errors':0},
+            'runtime_status':runtime,
+            'progress':{'total':7,'completed':visibility['summary']['unique_markets_analyzed'],'errors':runtime.get('deep_errors',0)},
             'timestamp':datetime.now(bolivia_tz).isoformat()
+        })
+    except Exception as exc:
+        return jsonify({'success':False,'error':str(exc)[:180]}),500
+
+
+@app.route('/api/multiasset/runtime-status', methods=['GET'])
+def api_multiasset_runtime_status():
+    """Diagnóstico cache-only. No exchange, no IA y no análisis profundo."""
+    try:
+        user=_authenticated_user()
+        if not user:
+            return jsonify({'success':False,'error':'Debes iniciar sesión.'}),401
+        analyses=_multiasset_combined_analyses(fresh_only=True)
+        visibility=_multiasset_public_visibility(analyses)
+        return jsonify({
+            'success':True,
+            'user':user,
+            'runtime':_multiasset_runtime_public_status(),
+            'analysis_summary':visibility['summary'],
+            'timestamp':datetime.now(bolivia_tz).isoformat(),
         })
     except Exception as exc:
         return jsonify({'success':False,'error':str(exc)[:180]}),500
@@ -46581,8 +47029,7 @@ def _build_ai_manual_comparison(target):
         cache=(_get_or_refresh_futures_analysis(force_wait=False) or {})
         analysis_map=cache.get('analysis',{}) or {}
     else:
-        with _MULTI_ASSET_CACHE['lock']:
-            analysis_map=dict(_MULTI_ASSET_CACHE.get('analysis') or {})
+        analysis_map=_multiasset_combined_analyses(fresh_only=True)
 
     rows_by_symbol={symbol:[] for symbol in requested_symbols[:7]}
     for key,result in analysis_map.items():
@@ -46684,8 +47131,7 @@ def _ai_cross_market_cached_snapshot():
     # Multi-Asset: use only the bounded analysis cache built by user/router work.
     multi_rows=[]
     try:
-        with _MULTI_ASSET_CACHE['lock']:
-            analyses=dict(_MULTI_ASSET_CACHE.get('analysis') or {})
+        analyses=_multiasset_combined_analyses(fresh_only=True)
         for key,result in analyses.items():
             if not isinstance(result,dict):
                 continue
@@ -47009,8 +47455,7 @@ def _build_ai_advisor_context(
         except Exception:
             context['personal_risk_profile'] = {}
 
-        with _MULTI_ASSET_CACHE['lock']:
-            analysis_map = dict(_MULTI_ASSET_CACHE.get('analysis') or {})
+        analysis_map = _multiasset_combined_analyses(fresh_only=True)
 
         for key, result in analysis_map.items():
             if not isinstance(result, dict):
