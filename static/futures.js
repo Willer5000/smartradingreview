@@ -589,6 +589,65 @@ window.openManualAnalysisSave = function(
     );
 };
 function futRenderAnalysisDiagnostics(json, context) {
+    // Commit 17.4 FINAL — una señal direccional confirmada puede estar
+    // esperando una geometría ejecutable. Se muestra separada de las
+    // hipótesis ANALYSIS_ONLY y no habilita entrada/guardado hasta que
+    // Entry/SL/TP estén listos.
+    const pendingExecution = Array.isArray(json && json.confirmed_pending_execution)
+        ? json.confirmed_pending_execution
+        : [];
+
+    let pendingHtml = '';
+    if (pendingExecution.length > 0) {
+        let pendingRows = '';
+        pendingExecution.forEach(candidate => {
+            const action = String(candidate.action || '').toUpperCase();
+            if (action !== 'LONG' && action !== 'SHORT') return;
+            const isLong = action === 'LONG';
+            const badge = isLong ? 'success' : 'danger';
+            const symbol = futEscapeHtml(String(candidate.symbol || '').replace('-', '/'));
+            const timeframe = futEscapeHtml(candidate.timeframe || '--');
+            const confidence = fmtConfidence(candidate.confidence);
+            const reason = futEscapeHtml(
+                candidate.reason
+                || 'La dirección está confirmada; la ejecución todavía espera una zona operable.'
+            );
+            pendingRows += `
+                <div class="border-top border-secondary py-2"
+                     style="cursor:pointer;"
+                     onclick="window.changeToSignal('${String(candidate.symbol || '').replace(/'/g, "\'")}', '${String(candidate.timeframe || '').replace(/'/g, "\'")}')">
+                    <div class="d-flex flex-wrap justify-content-between gap-1">
+                        <div>
+                            <span class="badge bg-${badge} me-1">${action}</span>
+                            <strong>${symbol}</strong>
+                            <span class="badge bg-dark ms-1">${timeframe}</span>
+                        </div>
+                        <div>
+                            <span class="badge bg-info text-dark">CONFIRMADA · ESPERANDO EJECUCIÓN</span>
+                            <span class="badge bg-secondary ms-1">${confidence}%</span>
+                        </div>
+                    </div>
+                    <div class="small text-light mt-1">${reason}</div>
+                    <div class="small text-muted mt-1">
+                        La dirección no fue anulada. El sistema espera una combinación Entry/SL/TP operable antes de habilitar la entrada.
+                    </div>
+                </div>
+            `;
+        });
+        if (pendingRows) {
+            pendingHtml = `
+                <details class="mt-2 px-2 pb-2" open>
+                    <summary class="text-info" style="cursor:pointer;">
+                        Señales confirmadas esperando ejecución (${pendingExecution.length})
+                    </summary>
+                    <div class="mt-2" style="max-height:320px; overflow-y:auto;">
+                        ${pendingRows}
+                    </div>
+                </details>
+            `;
+        }
+    }
+
     // RC9.7.6 — en las listas de señales sólo interesan otras hipótesis
     // LONG/SHORT de riesgo MEDIO/ALTO. NO_OPERAR / ESPERAR / PRECAUCIÓN y
     // errores de datos siguen disponibles para aprendizaje interno, pero no
@@ -640,7 +699,7 @@ function futRenderAnalysisDiagnostics(json, context) {
     const title = 'Por qué no aparecen otras señales';
 
     if (candidates.length === 0) {
-        return `
+        return pendingHtml + `
             <details class="mt-2 px-2 pb-2">
                 <summary class="text-secondary" style="cursor:pointer;">
                     ${title} (0)
@@ -791,7 +850,7 @@ function futRenderAnalysisDiagnostics(json, context) {
         `;
     });
 
-    return `
+    return pendingHtml + `
         <details class="mt-2 px-2 pb-2">
             <summary class="text-warning" style="cursor:pointer;">
                 ${title} (${candidates.length})

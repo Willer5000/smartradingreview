@@ -1,0 +1,18 @@
+VALIDACIÓN COMMIT 17.4 FINAL R3
+
+qa_commit17_3.py: 54/54 PASS
+qa_commit17_4.py: 29/29 PASS
+qa_commit17_4_final_decoupling.py: 10/10 PASS
+qa_commit17_4_final_execution_quality.py: 6/6 PASS
+qa_commit17_4_final_r3_closure.py: 15/15 PASS
+Python py_compile: PASS
+node --check static/futures.js: PASS
+node --check static/script.js: PASS
+
+R3 resource delta:
+- nuevas requests externas: 0
+- nuevas llamadas LLM/Groq: 0
+- nuevas escrituras Supabase: 0
+- nuevos workers/threads: 0
+- router Multi-Activo: usa el mismo OHLCV ya descargado
+- macro Multi-Activo pre-tesis: reutiliza caché fetch_if_stale=False

@@ -437,13 +437,25 @@ def build_contingency_playbook(
     research = dict(research_prior or {})
     research_state = _u(research.get("state")) or "UNAVAILABLE"
 
-    # A known negative/decayed cell is NOT rescued by a default strategy.
-    blocked_by_research = research_state in _NEGATIVE_RESEARCH or bool(research.get("recycle_required"))
+    # Commit 17.4 FINAL R3 — Contingency must reuse the same statistical
+    # reasoning already decided by Operational Intelligence.  Older releases
+    # treated *any* NEGATIVE_OOS/DEGRADED label as a hard veto, which silently
+    # reintroduced a second gate after the adaptive layer had correctly
+    # distinguished small-N warnings from robust negative evidence.
+    op_context = dict((operational or {}).get("context") or {})
+    op_research_reasoning = dict(op_context.get("research_reasoning") or {})
+    if op_research_reasoning:
+        blocked_by_research = bool(op_research_reasoning.get("hard_block"))
+    else:
+        # Backward-compatible fallback when this helper is called outside the
+        # 17.4 orchestrator.  Keep the legacy conservative behaviour only in
+        # that degraded path.
+        blocked_by_research = research_state in _NEGATIVE_RESEARCH or bool(research.get("recycle_required"))
     champion_governs = research_state in _POSITIVE_RESEARCH
     active = not champion_governs and not blocked_by_research
     active_reason = (
         "VALIDATED_CHAMPION_AVAILABLE" if champion_governs else
-        "KNOWN_NEGATIVE_OR_DECAY" if blocked_by_research else
+        "ROBUST_NEGATIVE_OR_DECAY" if blocked_by_research else
         "RESEARCH_UNAVAILABLE" if research_state == "UNAVAILABLE" else
         "ACTION_CELL_NOT_YET_VALIDATED"
     )
@@ -454,6 +466,7 @@ def build_contingency_playbook(
 
     macro_risk = _u(groups["macro"].get("risk"))
     macro_posture = _u(groups["macro"].get("futures_posture"))
+    op_macro_reasoning = dict(op_context.get("macro_reasoning") or {})
     data_ok = bool(groups["structure_liquidity"].get("current_price")) and groups["coverage"]["available_groups"] >= 6
 
     selected_dir = committee_dir if committee_dir != "NEUTRAL" else directional
@@ -502,9 +515,17 @@ def build_contingency_playbook(
         "context_known": regime not in {"", "UNKNOWN"},
         "volatility_known": vol_state != "UNKNOWN",
         "independent_market_evidence": len(live_families) >= family_requirement,
-        "macro_safe": not (
-            market == "FUTURES"
-            and (macro_risk == "CRITICAL" or macro_posture in {"BLOCK", "HALT", "NO_TRADE"})
+        # Reuse 17.4 macro authority: HIGH/CRITICAL raises the required
+        # quality/margin upstream; only an imminent/unmodelled event is a hard
+        # hold for a NEW entry.  This prevents Contingency from undoing the
+        # adaptive reasoning with the old CRITICAL==veto rule.
+        "macro_safe": (
+            not bool(op_macro_reasoning.get("hard_block_new_entry"))
+            if op_macro_reasoning
+            else not (
+                market == "FUTURES"
+                and macro_posture in {"BLOCK", "HALT", "NO_TRADE", "NO_NEW_TRADES"}
+            )
         ),
         "research_not_negative": not blocked_by_research,
         # Backward-compatible gate name: for an autonomous/learned-live path

@@ -20,7 +20,7 @@ from math import sqrt
 from statistics import median
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-VERSION = "COMMIT17_1_EXECUTION_RECONCILIATION_V4"
+VERSION = "COMMIT17_4_FINAL_EXECUTION_QUALITY_V5"
 
 MULTI_ASSET_CLASS = {
     "SPY-USDT": "US_INDEX", "QQQ-USDT": "US_INDEX",
@@ -502,7 +502,8 @@ def _entry_specialists(candidate, universe, *, direction, current_price, atr,
 
 
 def _sl_specialists(candidate, universe, *, direction, entry, tp_hint, atr,
-                    structure, setup_family, context, market_type) -> Dict[str, float]:
+                    structure, setup_family, context, market_type,
+                    leverage_hint: float = 1.0) -> Dict[str, float]:
     p = _f(candidate.get("price"), 0.0)
     if p <= 0 or atr <= 0: return {}
     d_atr = abs(entry - p) / max(atr, 1e-12)
@@ -545,7 +546,10 @@ def _sl_specialists(candidate, universe, *, direction, entry, tp_hint, atr,
     if anchor > 0 and abs(p - anchor) >= atr * 0.10: liquidity += 8.0
     liquidity = _clip(liquidity)
 
-    # Risk/economics specialist.
+    # Risk/economics specialist.  For derivatives the SL is also ranked by
+    # the approximate margin impact at the leverage that the volatility engine
+    # is currently considering.  This is a ranking input only: it cannot veto
+    # the LONG/SHORT thesis and the canonical leverage engine still runs later.
     risk = 78.0
     if tp_hint and _f(tp_hint) > 0:
         rr = abs(_f(tp_hint) - entry) / max(abs(entry - p), 1e-12)
@@ -554,6 +558,20 @@ def _sl_specialists(candidate, universe, *, direction, entry, tp_hint, atr,
         elif rr <= 3.5: risk += 8.0
         elif rr > 5.0: risk -= 10.0
     if d_atr > 4.0: risk -= 28.0
+    lev = 1.0 if str(market_type).lower() == "spot" else max(1.0, min(100.0, _f(leverage_hint, 1.0)))
+    risk_move_pct = abs(entry - p) / max(abs(entry), 1e-12) * 100.0
+    margin_loss_pct = risk_move_pct * lev
+    # Prefer a technically valid invalidation whose leveraged loss is material
+    # but not excessive.  Position sizing remains responsible for account risk.
+    if str(market_type).lower() in {"futures", "multiasset"}:
+        if margin_loss_pct <= 12.0:
+            risk += 8.0
+        elif margin_loss_pct <= 18.0:
+            risk += 2.0
+        elif margin_loss_pct <= 25.0:
+            risk -= 12.0
+        else:
+            risk -= min(38.0, 16.0 + (margin_loss_pct - 25.0) * 0.8)
     risk = _clip(risk)
 
     # Strategy specialist: reversals need invalidation beyond the extreme;
@@ -584,7 +602,8 @@ def _path_barrier_score(tp: float, entry: float, direction: str, structure: Dict
 
 
 def _tp_specialists(candidate, universe, *, direction, entry, sl, atr, structure,
-                    trend, momentum, volatility, setup_family, context, market_type, liquidation=None) -> Dict[str, float]:
+                    trend, momentum, volatility, setup_family, context, market_type,
+                    liquidation=None, leverage_hint: float = 1.0) -> Dict[str, float]:
     p = _f(candidate.get("price"), 0.0)
     if p <= 0 or atr <= 0: return {}
     d_atr = abs(p - entry) / max(atr, 1e-12)
@@ -615,7 +634,10 @@ def _tp_specialists(candidate, universe, *, direction, entry, sl, atr, structure
     if path < 55: continuation -= 14.0
     continuation = _clip(continuation)
 
-    # Economics specialist: profitable AND realistic.
+    # Economics specialist: profitable AND realistic.  For derivatives the
+    # committee also asks whether the expected price move is economically
+    # meaningful at the *indicative* leverage already produced by volatility.
+    # This does not force leverage and cannot create/veto a directional signal.
     rr = abs(p - entry) / max(abs(entry - sl), 1e-12)
     economics = 88.0
     if rr < 1.3: economics = 20.0
@@ -623,6 +645,24 @@ def _tp_specialists(candidate, universe, *, direction, entry, sl, atr, structure
     elif rr <= 3.5: economics = 92.0
     elif rr <= 4.5: economics = 80.0
     else: economics = 55.0
+    lev = 1.0 if str(market_type).lower() == "spot" else max(1.0, min(100.0, _f(leverage_hint, 1.0)))
+    reward_move_pct = abs(p - entry) / max(abs(entry), 1e-12) * 100.0
+    risk_move_pct = abs(entry - sl) / max(abs(entry), 1e-12) * 100.0
+    margin_reward_pct = reward_move_pct * lev
+    margin_risk_pct = risk_move_pct * lev
+    if str(market_type).lower() in {"futures", "multiasset"}:
+        min_margin_roi = max(3.0, _f(context.get("min_margin_roi_pct"), 5.0))
+        if margin_reward_pct < min_margin_roi:
+            economics -= min(36.0, 12.0 + (min_margin_roi - margin_reward_pct) * 5.0)
+        elif margin_reward_pct <= 18.0:
+            economics += 6.0
+        elif margin_reward_pct > 45.0:
+            # Very distant targets can look attractive only because leverage
+            # magnifies ROI; touch/path specialists must remain dominant.
+            economics -= 8.0
+        if margin_risk_pct > 25.0:
+            economics -= min(20.0, 6.0 + (margin_risk_pct - 25.0) * 0.5)
+        economics = _clip(economics)
 
     setup = _strategy_family(setup_family)
     strategy = 68.0
@@ -778,7 +818,8 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
                                     rr_floor: float = 1.8,
                                     rr_ceiling: float = 4.5,
                                     preferred_rr_min: float = 2.0,
-                                    preferred_rr_max: float = 3.2) -> Dict[str, Any]:
+                                    preferred_rr_max: float = 3.2,
+                                    leverage_hint: float = 1.0) -> Dict[str, Any]:
     """Coordinate Entry, SL and TP without becoming a second signal committee.
 
     Commit 17.1 responsibilities are intentionally narrow:
@@ -801,6 +842,8 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
     context.setdefault("timeframe", str(timeframe or ""))
     market = str(market_type or "spot").lower()
     direction = str(direction or "long").lower()
+    leverage_hint = 1.0 if market == "spot" else max(1.0, min(100.0, _f(leverage_hint, 1.0)))
+    context.setdefault("leverage_hint", round(leverage_hint, 4))
     current_price = _f(current_price, 0.0)
     atr = max(_f(atr, 0.0), abs(current_price) * 1e-6, 1e-12)
 
@@ -860,6 +903,7 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
                 c, sl_candidates, direction=direction, entry=entry_price,
                 tp_hint=_f(baseline_tp), atr=atr, structure=structure,
                 setup_family=setup_family, context=context, market_type=market,
+                leverage_hint=leverage_hint,
             ),
             _weights_for("sl", market),
             lambda p: _is_correct_side(p, entry_price, direction, "sl"),
@@ -886,6 +930,7 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
                     momentum=momentum, volatility=volatility,
                     setup_family=setup_family, context=context,
                     market_type=market, liquidation=liquidation,
+                    leverage_hint=leverage_hint,
                 ),
                 _weights_for("tp", market),
                 lambda p: _is_correct_side(p, entry_price, direction, "tp"),
@@ -962,6 +1007,7 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
         "stop_loss": best_combo["stop_loss"],
         "take_profit": best_combo["take_profit"],
         "risk_reward": best_combo["risk_reward"],
+        "indicative_leverage": round(leverage_hint, 2),
         "geometry_quality": best_combo["joint_score"],
         "entry_quality": round(_f(entry_row.get("committee_score")), 2),
         "sl_quality": round(_f(sl_row.get("committee_score")), 2),

@@ -17024,178 +17024,48 @@ class TradingExpertSystem:
                 geometry_profile=execution_geometry_profile
             )
             if sl_price is None:
-                print(f"   ⚠️ RECHAZADO: sin SL válido")
-                return self._build_rejected_levels(current_price, symbol, "Sin SL válido")
-            
-            # 2. SELECCIONAR TP ÓPTIMO con SL como referencia económica
-            tp_price, tp_source, tp_score = self._select_optimal_tp(
-                direction,
-                structure,
-                entry,
-                current_price,
-                volatility,
-                timeframe,
-                leverage=leverage,
-                is_futures=is_futures,
-                sl_price=sl_price,
-                liquidation=liquidation,
-                geometry_profile=execution_geometry_profile
-            )
+                # Commit 17.4 FINAL — the signal direction is already confirmed.
+                # Missing baseline geometry is an execution problem, not a reason
+                # to rewrite LONG/SHORT into NO_OPERAR/ANALYSIS_ONLY.  The joint
+                # execution committees below still get a chance to recover a
+                # structural SL/TP from the already-loaded evidence.
+                print(f"   ⚠️ Baseline SL no disponible; comité de ejecución intentará resolver geometría")
+                sl_price = 0.0
+                sl_source = 'Pendiente de invalidación estructural'
+                sl_score = 0
+
+            # 2. SELECCIONAR TP ÓPTIMO con SL como referencia económica.
+            # If baseline SL is missing we skip the legacy TP selector and let
+            # the coordinated committees search the joint geometry directly.
+            if float(sl_price or 0) > 0:
+                tp_price, tp_source, tp_score = self._select_optimal_tp(
+                    direction,
+                    structure,
+                    entry,
+                    current_price,
+                    volatility,
+                    timeframe,
+                    leverage=leverage,
+                    is_futures=is_futures,
+                    sl_price=sl_price,
+                    liquidation=liquidation,
+                    geometry_profile=execution_geometry_profile
+                )
+            else:
+                tp_price, tp_source, tp_score = (
+                    None,
+                    'Pendiente de objetivo estructural',
+                    0,
+                )
             if tp_price is None:
                 print(
-                    f"   ⚠️ SIN TP ESTRUCTURAL VÁLIDO: "
-                    f"{tp_source}"
+                    f"   ⚠️ Baseline TP no disponible: {tp_source}. "
+                    "El comité de ejecución intentará resolver geometría."
                 )
+                tp_price = 0.0
+                tp_source = str(tp_source or 'Pendiente de objetivo estructural')
+                tp_score = 0
 
-                return {
-                    'entry':
-                        self._round_price(
-                            entry,
-                            symbol
-                        ),
-
-                    # Mantener también el diagnóstico Entry SMC aunque
-                    # el setup termine ANALYSIS_ONLY por ausencia de TP.
-                    'entry_source':
-                        str(
-                            entry_source
-                            or ''
-                        ),
-
-                    'entry_score':
-                        round(
-                            float(
-                                entry_score
-                                or 0
-                            ),
-                            1
-                        ),
-
-                    # ================================================
-                    # QUALITY ENGINE Q1
-                    # ================================================
-
-                    'entry_quality_version':
-                        str(
-                            entry_quality.get(
-                                'version',
-                                'RC9_8_EXECUTION_GEOMETRY_V1'
-                            )
-                        ),
-
-                    'entry_smc_raw_score':
-                        round(
-                            float(
-                                entry_quality.get(
-                                    'smc_raw_score',
-                                    entry_score
-                                )
-                                or 0
-                            ),
-                            2
-                        ),
-
-                    'entry_reachability_score':
-                        round(
-                            float(
-                                entry_quality.get(
-                                    'reachability_score',
-                                    0
-                                )
-                                or 0
-                            ),
-                            2
-                        ),
-
-                    'entry_distance_atr':
-                        entry_quality.get(
-                            'distance_atr_current'
-                        ),
-
-                    'entry_distance_pct':
-                        entry_quality.get(
-                            'distance_pct_current'
-                        ),
-
-                    'entry_reachability_label':
-                        str(
-                            entry_quality.get(
-                                'label',
-                                'N/A'
-                            )
-                        ),
-
-                    'entry_market_location': str(entry_quality.get('market_location', 'MID_RANGE')),
-                    'entry_location_context': str(entry_quality.get('location_context', 'UNKNOWN')),
-                    'entry_timing_mode': str(entry_quality.get('entry_timing_mode', 'STRUCTURAL_PULLBACK')),
-                    'entry_independent_confluence_families': int(entry_quality.get('independent_confluence_families', 1) or 1),
-                    'entry_location_basis': str(entry_quality.get('location_basis', 'UNKNOWN')),
-                    'entry_structural_range_position': entry_quality.get('structural_range_position'),
-                    'entry_directional_extension': bool(entry_quality.get('directional_extension', False)),
-                    'entry_location_adjustment': float(entry_quality.get('location_adjustment', 0) or 0),
-                    'entry_ema_confluence': list(entry_quality.get('ema_confluence') or []),
-                    'entry_ema_confluence_bonus': float(entry_quality.get('ema_confluence_bonus', 0) or 0),
-                    'entry_atr_role': str(entry_quality.get('atr_role', 'NORMALIZER_NOT_ENTRY_SOURCE')),
-
-                    'stop_loss':
-                        self._round_price(
-                            sl_price,
-                            symbol
-                        ),
-
-                    'take_profit':
-                        None,
-
-                    'leverage':
-                        int(leverage),
-
-                    'risk_reward':
-                        0,
-
-                    'suggested_size':
-                        0,
-
-                    'tp_source':
-                        tp_source,
-
-                    'sl_source':
-                        sl_source,
-
-                    'tp_probability':
-                        0,
-
-                    'tp_quality_score':
-                        0,
-
-                    'tp_quality_label':
-                        'NO DISPONIBLE',
-
-                    'sl_reliability':
-                        round(
-                            sl_score / 100,
-                            2
-                        ),
-
-                    'min_tp_distance_pct':
-                        self._calculate_min_tp_distance_pct(
-                            timeframe,
-                            leverage,
-                            is_futures
-                        ),
-
-                    'rejected_reason':
-                        tp_source,
-
-                    'is_rejected':
-                        True,
-
-                    'is_executable':
-                        False,
-
-                    'publication_status':
-                        'ANALYSIS_ONLY'
-                }
-            
             # ==========================================================
             # COMMIT 16 — SPECIALIST EXECUTION COMMITTEES
             # ==========================================================
@@ -17271,6 +17141,7 @@ class TradingExpertSystem:
                     rr_ceiling=_commit_rr_ceiling,
                     preferred_rr_min=_commit_pref_rr_min,
                     preferred_rr_max=_commit_pref_rr_max,
+                    leverage_hint=float(leverage or 1),
                 ) or {}
                 if commit16_committee.get('success'):
                     _old_entry, _old_sl, _old_tp = float(entry), float(sl_price), float(tp_price)
@@ -17390,26 +17261,45 @@ class TradingExpertSystem:
             except (TypeError, ValueError):
                 minimum_viable_rr, maximum_technical_rr = 1.8, 4.5
 
-            non_executable_reason = commit16_reject_reason or None
+            # Commit 17.4 FINAL — signal confirmation and execution readiness
+            # are two different contracts.  Entry/SL/TP/RR can delay execution
+            # but cannot erase an already-confirmed directional signal.
+            execution_pending_reason = commit16_reject_reason or None
 
-            if non_executable_reason is None and rr < minimum_viable_rr:
-                non_executable_reason = (
-                    f"R/R desfavorable "
-                    f"{rr:.2f} < {minimum_viable_rr:.2f}"
+            geometry_complete = bool(
+                float(entry or 0) > 0
+                and float(sl_price or 0) > 0
+                and float(tp_price or 0) > 0
+                and (
+                    (direction == 'long' and float(sl_price) < float(entry) < float(tp_price))
+                    or
+                    (direction == 'short' and float(tp_price) < float(entry) < float(sl_price))
+                )
+            )
+
+            if not geometry_complete:
+                execution_pending_reason = (
+                    execution_pending_reason
+                    or 'Geometría Entry/SL/TP todavía no resuelta'
+                )
+                print('   ⏳ SEÑAL CONFIRMADA · ejecución pendiente de geometría')
+
+            elif rr < minimum_viable_rr:
+                execution_pending_reason = (
+                    f"R/R disponible {rr:.2f} < piso técnico {minimum_viable_rr:.2f}"
                 )
                 print(
-                    f"   ⚠️ ANALYSIS_ONLY: "
-                    f"R/R {rr:.2f} < piso técnico {minimum_viable_rr:.2f}"
+                    f"   ⏳ SEÑAL CONFIRMADA · R/R {rr:.2f} todavía no viable "
+                    f"(< {minimum_viable_rr:.2f})"
                 )
 
-            elif non_executable_reason is None and rr > maximum_technical_rr:
-                non_executable_reason = (
-                    f"R/R fuera del horizonte técnico "
-                    f"{rr:.2f} > {maximum_technical_rr:.2f}"
+            elif rr > maximum_technical_rr:
+                execution_pending_reason = (
+                    f"R/R disponible {rr:.2f} > horizonte técnico {maximum_technical_rr:.2f}"
                 )
                 print(
-                    f"   ⚠️ ANALYSIS_ONLY: "
-                    f"R/R {rr:.2f} > techo técnico {maximum_technical_rr:.2f}"
+                    f"   ⏳ SEÑAL CONFIRMADA · target fuera de horizonte técnico "
+                    f"({rr:.2f} > {maximum_technical_rr:.2f})"
                 )
 
 
@@ -17420,7 +17310,9 @@ class TradingExpertSystem:
                 leverage = max(1, int(leverage * 0.8))
             
             # ============ TAMAÑO SUGERIDO ============
-            if tp_score >= 80 and sl_score >= 70:
+            if execution_pending_reason is not None:
+                suggested_size = 0.0
+            elif tp_score >= 80 and sl_score >= 70:
                 suggested_size = 1.0
             elif tp_score >= 60 and sl_score >= 60:
                 suggested_size = 0.75
@@ -17614,23 +17506,24 @@ class TradingExpertSystem:
                         is_futures
                     ),
 
-                'rejected_reason':
-                    non_executable_reason,
-
-                'is_rejected':
-                    bool(
-                        non_executable_reason
-                    ),
-
-                'is_executable':
-                    non_executable_reason is None,
-
-                'publication_status':
-                    (
-                        'EXECUTABLE_SIGNAL'
-                        if non_executable_reason is None
-                        else 'ANALYSIS_ONLY'
-                    )
+                # Commit 17.4 FINAL — the directional signal exists
+                # independently from execution readiness.
+                'signal_confirmed': True,
+                'signal_confirmation_status': 'CONFIRMED_DIRECTIONAL',
+                'execution_ready': execution_pending_reason is None,
+                'execution_status': (
+                    'READY' if execution_pending_reason is None
+                    else 'PENDING_EXECUTION'
+                ),
+                'execution_pending_reason': execution_pending_reason,
+                'rejected_reason': None,
+                'is_rejected': False,
+                'is_executable': execution_pending_reason is None,
+                'publication_status': (
+                    'EXECUTABLE_SIGNAL'
+                    if execution_pending_reason is None
+                    else 'CONFIRMED_PENDING_EXECUTION'
+                )
             }
             
             print(
@@ -17708,9 +17601,15 @@ class TradingExpertSystem:
     
             'execution_safety_label': 'RECHAZAR',
     
-            'rejected_reason': reason,
-    
-            'is_rejected': True
+            'signal_confirmed': True,
+            'signal_confirmation_status': 'CONFIRMED_DIRECTIONAL',
+            'execution_ready': False,
+            'execution_status': 'PENDING_EXECUTION',
+            'execution_pending_reason': reason,
+            'publication_status': 'CONFIRMED_PENDING_EXECUTION',
+            'rejected_reason': None,
+            'is_rejected': False,
+            'is_executable': False
         }
 
     def _mark_levels_non_executable(
@@ -17889,7 +17788,7 @@ class TradingExpertSystem:
         - sólo actúa sobre SPOT;
         - nunca crea COMPRA_SPOT o VENTA_SPOT;
         - nunca cambia Entry / SL / TP;
-        - únicamente puede convertir una señal tardía en ESPERAR;
+        - nunca reescribe COMPRA_SPOT/VENTA_SPOT; sólo marca ejecución pendiente;
         - Futures queda completamente fuera de esta función.
         """
 
@@ -18191,22 +18090,11 @@ class TradingExpertSystem:
             'applied'
         ] = True
 
-        result[
-            'final_action'
-        ] = 'ESPERAR'
-
-        result[
-            'final_confidence'
-        ] = max(
-            55.0,
-            min(
-                80.0,
-                float(
-                    confidence
-                    or 0
-                )
-            )
-        )
+        # Direction/confidence are preserved; this helper only reports that
+        # the current Entry is stale and should wait for a new executable zone.
+        result['final_action'] = action_text
+        result['final_confidence'] = float(confidence or 0)
+        result['execution_pending'] = True
 
         if target_already_reached:
 
@@ -20008,6 +19896,30 @@ class TradingExpertSystem:
                     'production_change': False,
                 }
 
+            # ==========================================================
+            # COMMIT 17.4 FINAL R3 — MARKET-SPECIFIC CONTEXT HOOK
+            # ==========================================================
+            # Multi-Activo reuses the common Futures engine, but its macro/event
+            # relevance is class-specific (indices, energy, metals, China).
+            # The subclass may therefore replace the generic cached macro packet
+            # BEFORE Operational Intelligence builds the thesis.  The hook is
+            # cache-only and must never add network/LLM/DB work.
+            try:
+                _market_context_hook = getattr(self, '_market_macro_context_override', None)
+                if callable(_market_context_hook):
+                    _market_context_value = _market_context_hook(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        generic_snapshot=macro_context_snapshot,
+                    )
+                    if isinstance(_market_context_value, dict) and _market_context_value:
+                        macro_context_snapshot = _market_context_value
+            except Exception as _market_context_error:
+                print(
+                    "⚠️ Contexto macro específico no disponible; "
+                    f"se conserva el snapshot compartido: {_market_context_error}"
+                )
+
             # ============ CONSTRUIR CAPAS PARA TRADERS ============
             capas = {
                 'system_type': analysis_system_type,
@@ -20587,25 +20499,11 @@ class TradingExpertSystem:
                     accion_consenso
                 )
 
-                accion_consenso = str(
-                    spot_execution_quality.get(
-                        'final_action'
-                    )
-                    or 'ESPERAR'
-                )
-
-                confianza_consenso = float(
-                    spot_execution_quality.get(
-                        'final_confidence',
-                        confianza_consenso
-                    )
-                    or 0
-                )
-
-                # ======================================================
-                # EXPLICARLO AL USUARIO
-                # ======================================================
-
+                # Commit 17.4 FINAL R3 — Anti-FOMO is an EXECUTION guard,
+                # not a second directional committee.  A confirmed Spot thesis
+                # stays COMPRA_SPOT/VENTA_SPOT; only the current execution is
+                # marked pending so the system can wait for a fresh reaction
+                # zone without pretending the signal never existed.
                 if not isinstance(
                     razones_consenso,
                     list
@@ -20617,7 +20515,7 @@ class TradingExpertSystem:
 
                 razones_consenso.append(
                     (
-                        '36X anti-FOMO: se conserva el setup técnico de '
+                        '36X anti-FOMO: se conserva la señal técnica de '
                         f'{original_action_36x}, '
                         'pero no se persigue el precio. '
                         + str(
@@ -20629,35 +20527,17 @@ class TradingExpertSystem:
                     )
                 )
 
-                # ======================================================
-                # LOS NIVELES SE CONSERVAN PARA AUDITORÍA
-                # ======================================================
-                #
-                # No borramos Entry/SL/TP.
-                #
-                # Simplemente ya NO son ejecutables al precio actual.
-                # ======================================================
-
-                levels[
-                    'is_executable'
-                ] = False
-
-                levels[
-                    'publication_status'
-                ] = 'ANALYSIS_ONLY'
-
-                levels[
-                    'suggested_size'
-                ] = 0
-
-                levels[
-                    'rejected_reason'
-                ] = str(
-                    spot_execution_quality.get(
-                        'reason'
-                    )
-                    or 'ENTRY_MISSED'
-                )
+                levels['signal_confirmed'] = True
+                levels['signal_confirmation_status'] = 'CONFIRMED_DIRECTIONAL'
+                levels['execution_ready'] = False
+                levels['execution_status'] = 'PENDING_EXECUTION'
+                levels['is_executable'] = False
+                levels['publication_status'] = 'CONFIRMED_PENDING_EXECUTION'
+                levels['suggested_size'] = 0
+                levels['rejected_reason'] = None
+                levels['execution_pending_reason'] = str(
+                    spot_execution_quality.get('reason') or 'ENTRY_MISSED'
+                )[:320]
             
             # ==========================================================
             # RC9.2 — SETUP-AWARE EXECUTION GUARD
@@ -20678,16 +20558,27 @@ class TradingExpertSystem:
                     )
                     if operational_execution.get('applied'):
                         _original_operational_action = str(accion_consenso)
-                        accion_consenso = str(operational_execution.get('action') or 'ESPERAR').upper()
-                        confianza_consenso = min(float(confianza_consenso or 0), 68.0 if analysis_system_type == 'futures' else 72.0)
+                        # Direction is immutable here.  This layer only says
+                        # whether the already-confirmed thesis has an executable
+                        # geometry *now*.  It cannot rewrite LONG/SHORT.
                         for _r in operational_execution.get('reasons') or []:
                             if _r and _r not in razones_consenso:
                                 razones_consenso.append(str(_r))
+                        levels['signal_confirmed'] = True
+                        levels['signal_confirmation_status'] = 'CONFIRMED_DIRECTIONAL'
+                        levels['execution_ready'] = False
+                        levels['execution_status'] = 'PENDING_EXECUTION'
                         levels['is_executable'] = False
-                        levels['publication_status'] = 'ANALYSIS_ONLY'
+                        levels['publication_status'] = 'CONFIRMED_PENDING_EXECUTION'
                         levels['suggested_size'] = 0
-                        levels['rejected_reason'] = '; '.join(operational_execution.get('reasons') or [])[:320]
-                        print(f"🧠 [RC9.2 EXECUTION] {_original_operational_action} → {accion_consenso}")
+                        levels['rejected_reason'] = None
+                        levels['execution_pending_reason'] = '; '.join(
+                            operational_execution.get('reasons') or []
+                        )[:320]
+                        print(
+                            f"🧠 [RC9.2 EXECUTION] {_original_operational_action} "
+                            "confirmada; ejecución pendiente"
+                        )
                 except Exception as _execution_guard_error:
                     operational_execution = {'applied': False, 'action': accion_consenso, 'error': str(_execution_guard_error)[:160]}
 
@@ -21171,6 +21062,17 @@ class TradingExpertSystem:
                     'conviction': conviction
                 },
                 'levels': {k: float(v) if isinstance(v, (int, float)) else v for k, v in levels.items()},
+                'signal_confirmed': bool(accion_consenso in ('COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT')),
+                'signal_confirmation_status': (
+                    'CONFIRMED_DIRECTIONAL'
+                    if accion_consenso in ('COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT')
+                    else 'NO_DIRECTIONAL_SIGNAL'
+                ),
+                'execution_ready': bool(levels.get('is_executable', False)),
+                'execution_status': str(
+                    levels.get('execution_status')
+                    or ('READY' if levels.get('is_executable') else 'NOT_READY')
+                ),
                 'spot_execution_quality':
                     self._make_serializable(
                         spot_execution_quality
@@ -25943,9 +25845,13 @@ class TraderMacro(TraderBase):
                     )
                     return 'NO_OPERAR', 85, estrategias, razones
                 if macro_risk == 'CRITICAL':
+                    # Commit 17.4: riesgo macro crítico sin evento inminente no
+                    # borra una tesis técnica. Eleva cautela; el orquestador
+                    # adaptativo ya exige más calidad/margen y Safety conserva
+                    # la autoridad final. Sólo NO_NEW_TRADES es embargo duro.
                     estrategias.append('MACRO_NEWS_RISK')
-                    razones.append('Contexto macro crítico: veto prudencial a nuevas entradas; no define dirección')
-                    return 'NO_OPERAR', 70, estrategias, razones
+                    razones.append('Contexto macro crítico: eleva la exigencia técnica y la cautela; no define ni veta por sí solo la dirección')
+                    return 'PRECAUCION', 70, estrategias, razones
                 if macro_risk == 'HIGH':
                     estrategias.append('MACRO_NEWS_RISK')
                     razones.append('Contexto macro alto: cautela; se exige mayor confluencia técnica')
@@ -34466,6 +34372,14 @@ def _multiasset_public_analysis_candidate(result):
         or result.get('publication_status')
         or ('ANALYSIS_ONLY' if levels.get('is_rejected') else 'EXECUTABLE_SIGNAL')
     ).upper()
+    signal_confirmed = bool(
+        result.get('signal_confirmed')
+        or levels.get('signal_confirmed')
+        or (directional and publication in {
+            'EXECUTABLE_SIGNAL', 'CONFIRMED_PENDING_EXECUTION',
+            'EDGE_BLOCKED', 'AI_BLOCKED'
+        })
+    )
     executable = bool(
         directional
         and publication == 'EXECUTABLE_SIGNAL'
@@ -34481,10 +34395,15 @@ def _multiasset_public_analysis_candidate(result):
         classification = 'EXECUTABLE_SIGNAL'
         status_label = 'SEÑAL EJECUTABLE'
         reason = 'La configuración técnica cumple los requisitos actuales de ejecución.'
-    elif directional:
-        classification = 'ANALYSIS_ONLY'
-        status_label = 'HIPÓTESIS DIRECCIONAL · NO EJECUTABLE'
-        rejected = str(levels.get('rejected_reason') or result.get('rejected_reason') or '').strip()
+    elif directional and signal_confirmed:
+        classification = 'CONFIRMED_PENDING_EXECUTION'
+        status_label = 'SEÑAL CONFIRMADA · ESPERANDO EJECUCIÓN'
+        rejected = str(
+            levels.get('execution_pending_reason')
+            or levels.get('rejected_reason')
+            or result.get('rejected_reason')
+            or ''
+        ).strip()
         if rejected:
             public_reason = rejected
             replacements = {
@@ -34507,9 +34426,13 @@ def _multiasset_public_analysis_candidate(result):
             )
         else:
             reason = (
-                f'Existe dirección {action}, pero la calidad conjunta de la entrada, '
-                'protección y objetivo todavía no es suficiente para publicarla.'
+                f'La dirección {action} está confirmada, pero la calidad conjunta '
+                'de entrada, protección y objetivo todavía no habilita la ejecución.'
             )
+    elif directional:
+        classification = 'ANALYSIS_ONLY'
+        status_label = 'HIPÓTESIS DIRECCIONAL · NO CONFIRMADA'
+        reason = 'Existe dirección preliminar, pero todavía no alcanza el contrato de señal confirmada.'
     else:
         classification = 'NO_TRADE'
         status_label = 'SIN SEÑAL DIRECCIONAL'
@@ -34534,6 +34457,9 @@ def _multiasset_public_analysis_candidate(result):
         'action': action,
         'confidence': round(confidence, 2),
         'directional': directional,
+        'signal_confirmed': signal_confirmed,
+        'execution_ready': executable,
+        'execution_status': ('READY' if executable else 'PENDING_EXECUTION' if signal_confirmed else 'NOT_READY'),
         'is_executable': executable,
         'is_active': executable,
         'manual_save_allowed': False,
@@ -34591,7 +34517,12 @@ def _multiasset_public_visibility(analyses):
         if isinstance(result, dict):
             rows.append(_multiasset_public_analysis_candidate(result))
 
-    status_order = {'EXECUTABLE_SIGNAL': 0, 'ANALYSIS_ONLY': 1, 'NO_TRADE': 2}
+    status_order = {
+        'EXECUTABLE_SIGNAL': 0,
+        'CONFIRMED_PENDING_EXECUTION': 1,
+        'ANALYSIS_ONLY': 2,
+        'NO_TRADE': 3,
+    }
     rows.sort(
         key=lambda item: (
             status_order.get(str(item.get('classification')), 9),
@@ -34601,12 +34532,18 @@ def _multiasset_public_visibility(analyses):
         )
     )
 
+    confirmed_pending = [
+        dict(item) for item in rows
+        if item.get('classification') == 'CONFIRMED_PENDING_EXECUTION'
+        and item.get('directional')
+    ]
     directional_hidden = [
         dict(item) for item in rows
         if item.get('classification') == 'ANALYSIS_ONLY'
         and item.get('directional')
     ]
     executable_count = sum(1 for item in rows if item.get('classification') == 'EXECUTABLE_SIGNAL')
+    confirmed_pending_count = len(confirmed_pending)
     analysis_only_count = sum(1 for item in rows if item.get('classification') == 'ANALYSIS_ONLY')
     no_trade_count = sum(1 for item in rows if item.get('classification') == 'NO_TRADE')
     unique_symbols = sorted({str(item.get('symbol') or '') for item in rows if item.get('symbol')})
@@ -34631,21 +34568,22 @@ def _multiasset_public_visibility(analyses):
     else:
         public_note = (
             f'Hay {len(rows)} análisis completos frescos disponibles sobre {len(unique_symbols)} mercados. '
-            f'Señales ejecutables: {executable_count}; hipótesis no ejecutables: {analysis_only_count}; '
-            f'sin dirección: {no_trade_count}.'
+            f'Señales ejecutables: {executable_count}; confirmadas esperando ejecución: {confirmed_pending_count}; '
+            f'hipótesis no confirmadas: {analysis_only_count}; sin dirección: {no_trade_count}.'
         )
 
     summary = {
         'total_analyzed': len(rows),
         'executable': executable_count,
         'active_now': executable_count,
+        'confirmed_pending_execution': confirmed_pending_count,
         'analysis_only': analysis_only_count,
         'no_trade': no_trade_count,
         'errors': errors,
         'markets_in_universe': 7,
         'unique_markets_analyzed': len(unique_symbols),
         'full_analyses_available': len(rows),
-        'directional_non_executable': analysis_only_count,
+        'directional_non_executable': analysis_only_count + confirmed_pending_count,
         'without_direction': no_trade_count,
         'coverage_complete': len(unique_symbols) >= 7,
         'coverage_by_timeframe': tf_coverage,
@@ -34653,6 +34591,7 @@ def _multiasset_public_visibility(analyses):
     }
     return {
         'candidates': rows,
+        'confirmed_pending_execution': confirmed_pending,
         'other_directional_signals': directional_hidden,
         'summary': summary,
     }
@@ -34998,6 +34937,7 @@ def api_multiasset_opportunities():
             'router':rows,'shortlist':[r for r in rows if r.get('deep_candidate')][:MULTIASSET_DEEP_LIMIT],
             'analysis_summary':visibility['summary'],
             'analysis_candidates':visibility['candidates'],
+            'confirmed_pending_execution':visibility['confirmed_pending_execution'],
             'other_directional_signals':visibility['other_directional_signals'],
             'runtime_status':_multiasset_runtime_public_status(),
             'resource_policy':{
@@ -35042,6 +34982,7 @@ def api_multiasset_signals_previous():
         return jsonify({
             'success':True,'warming_up':False,'running':False,'cache_ready':bool(analyses),
             'total':len(signals),'active_count':len(signals),'signals':signals,
+            'confirmed_pending_execution':visibility['confirmed_pending_execution'],
             'other_directional_signals':visibility['other_directional_signals'],
             'analysis_candidates':visibility['candidates'],
             'analysis_summary':visibility['summary'],
@@ -35069,6 +35010,7 @@ def api_multiasset_signals_active():
         return jsonify({
             'success':True,'warming_up':False,'running':False,
             'cache_ready':bool(analyses),'total':len(signals),'signals':signals,
+            'confirmed_pending_execution':visibility['confirmed_pending_execution'],
             'other_directional_signals':visibility['other_directional_signals'],
             'vigent_other_directional_signals':[],
             'analysis_candidates':visibility['candidates'],
@@ -35155,14 +35097,23 @@ def api_multiasset_position_guardian():
         if not signals:
             return jsonify({'success':True,'user':user,'positions':[],'count':0})
         engine=_get_multiasset_system(); positions=[]
-        try:
-            from macro_context import get_macro_context_snapshot
-            macro=get_macro_context_snapshot(fetch_if_stale=False) or {}
-        except Exception: macro={}
         for sig in signals:
             symbol=str(sig.get('symbol') or ''); tf=str(sig.get('timeframe') or '')
             snapshot=_guardian_prepare_futures_market_data(engine,symbol,tf) if engine else None
             if not snapshot: continue
+            # Commit 17.4 FINAL R3 — Guardian receives the same class-specific
+            # macro/session context used by Multi-Asset entry reasoning.  The
+            # helper is cache-only (fetch_if_stale=False), so no extra network
+            # call is introduced.
+            try:
+                from multiasset_system import MULTIASSET_SYMBOLS as _MA_META, _macro_context_for_asset as _ma_macro
+                macro=_ma_macro((_MA_META.get(symbol) or {})) or {}
+            except Exception:
+                try:
+                    from macro_context import get_macro_context_snapshot
+                    macro=get_macro_context_snapshot(fetch_if_stale=False) or {}
+                except Exception:
+                    macro={}
             if sig.get('status')=='entry_touched':
                 advice=portfolio_guardian.evaluate_futures_position(signal=sig,current_price=snapshot['current_price'],candles=snapshot['candles'],macro_context=macro)
             else:
@@ -39359,18 +39310,26 @@ def _classify_futures_analysis_result(
 
     classification = 'EXECUTABLE_SIGNAL'
     reason = 'Cumple los filtros actuales de publicación.'
+    signal_confirmed = bool(
+        result.get('signal_confirmed')
+        or levels.get('signal_confirmed')
+        or (directional and engine_status in {
+            'EXECUTABLE_SIGNAL', 'CONFIRMED_PENDING_EXECUTION',
+            'EDGE_BLOCKED', 'AI_BLOCKED'
+        })
+    )
 
     if not directional:
         classification = 'NO_TRADE'
         reason = _futures_reason_text(
             decision.get('reason') or decision.get('razones'),
-            'El comité no alcanzó consenso suficiente para LONG o SHORT.'
+            'No existe una tesis LONG/SHORT confirmada.'
         )
-    elif engine_status != 'EXECUTABLE_SIGNAL':
-        classification = 'ANALYSIS_ONLY'
+    elif engine_status == 'CONFIRMED_PENDING_EXECUTION' or (signal_confirmed and engine_status != 'EXECUTABLE_SIGNAL'):
+        classification = 'CONFIRMED_PENDING_EXECUTION'
         reason = _futures_reason_text(
-            rejection_reason,
-            'Existe dirección, pero el motor la marcó como no ejecutable.'
+            levels.get('execution_pending_reason') or rejection_reason,
+            'La dirección está confirmada; Entry/SL/TP aún esperan una geometría ejecutable.'
         )
     elif confidence < float(min_confidence or 0):
         classification = 'ANALYSIS_ONLY'
@@ -39379,8 +39338,12 @@ def _classify_futures_analysis_result(
             f'{float(min_confidence):.1f}%.'
         )
     elif entry <= 0 or stop_loss <= 0 or take_profit <= 0:
-        classification = 'ANALYSIS_ONLY'
-        reason = 'Entry, Stop Loss o Take Profit no son válidos.'
+        classification = 'CONFIRMED_PENDING_EXECUTION' if signal_confirmed else 'ANALYSIS_ONLY'
+        reason = (
+            'Señal direccional confirmada; Entry/SL/TP todavía no están completos.'
+            if signal_confirmed
+            else 'Entry, Stop Loss o Take Profit no son válidos.'
+        )
     else:
         try:
             _configured_futures_module()
@@ -39433,9 +39396,15 @@ def _classify_futures_analysis_result(
                 'Cumple los filtros de publicación, pero no existe un registro '
                 'activo de seguimiento.'
             )
+    elif classification == 'CONFIRMED_PENDING_EXECUTION':
+        status_label = 'SEÑAL CONFIRMADA · ESPERANDO EJECUCIÓN'
+        active_reason = (
+            'La dirección ya está confirmada. Entry/SL/TP continúan buscando '
+            'una geometría operable; todavía no se habilita la entrada.'
+        )
     elif classification == 'ANALYSIS_ONLY':
-        status_label = 'ANÁLISIS DIRECCIONAL · NO EJECUTABLE'
-        active_reason = 'No se publica como señal activa.'
+        status_label = 'ANÁLISIS DIRECCIONAL · NO CONFIRMADO PARA EJECUCIÓN'
+        active_reason = 'Permanece como análisis, no como señal confirmada.'
     elif classification == 'NO_TRADE':
         status_label = 'NO OPERAR'
         active_reason = 'No existe una operación direccional que seguir.'
@@ -39454,6 +39423,13 @@ def _classify_futures_analysis_result(
         'action': action,
         'confidence': round(confidence, 2),
         'directional': directional,
+        'signal_confirmed': signal_confirmed,
+        'execution_ready': classification == 'EXECUTABLE_SIGNAL',
+        'execution_status': (
+            'READY' if classification == 'EXECUTABLE_SIGNAL'
+            else 'PENDING_EXECUTION' if classification == 'CONFIRMED_PENDING_EXECUTION'
+            else 'NOT_READY'
+        ),
         'is_executable': classification == 'EXECUTABLE_SIGNAL',
         'manual_save_allowed':
             bool(
@@ -39583,9 +39559,10 @@ def _build_futures_analysis_visibility(cache, min_confidence):
 
     status_order = {
         'EXECUTABLE_SIGNAL': 0,
-        'ANALYSIS_ONLY': 1,
-        'NO_TRADE': 2,
-        'ANALYSIS_ERROR': 3,
+        'CONFIRMED_PENDING_EXECUTION': 1,
+        'ANALYSIS_ONLY': 2,
+        'NO_TRADE': 3,
+        'ANALYSIS_ERROR': 4,
     }
     candidates.sort(
         key=lambda item: (
@@ -39605,6 +39582,10 @@ def _build_futures_analysis_visibility(cache, min_confidence):
         'active_now': sum(
             1 for item in candidates
             if item.get('is_active')
+        ),
+        'confirmed_pending_execution': sum(
+            1 for item in candidates
+            if item['classification'] == 'CONFIRMED_PENDING_EXECUTION'
         ),
         'analysis_only': sum(
             1 for item in candidates
@@ -39627,6 +39608,25 @@ def _build_futures_analysis_visibility(cache, min_confidence):
         'summary': summary,
         'candidates': candidates,
     }
+
+
+def _futures_confirmed_pending_execution_candidates(visibility):
+    """Confirmed direction, execution not ready yet. No manual override implied."""
+    rows = []
+    for raw in (visibility or {}).get('candidates') or []:
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get('classification') or '').upper() != 'CONFIRMED_PENDING_EXECUTION':
+            continue
+        action = str(raw.get('action') or '').upper()
+        if action not in ('LONG', 'SHORT'):
+            continue
+        item = dict(raw)
+        item['source_context'] = 'CONFIRMED_PENDING_EXECUTION'
+        item['manual_save_allowed'] = False
+        rows.append(item)
+    rows.sort(key=lambda item: (-float(item.get('confidence') or 0), str(item.get('symbol') or ''), str(item.get('timeframe') or '')))
+    return rows
 
 
 def _futures_directional_hidden_candidates(
@@ -40077,6 +40077,8 @@ def api_futures_signals_active():
                 visibility['summary'],
             'analysis_candidates':
                 visibility['candidates'],
+            'confirmed_pending_execution':
+                _futures_confirmed_pending_execution_candidates(visibility),
             # Hipótesis MEDIUM/HIGH del análisis ACTUAL: sólo navegación
             # y diagnóstico; no guardables hasta que exista cierre confirmado.
             'other_directional_signals':
@@ -40547,6 +40549,8 @@ def api_futures_signals_previous():
                 visibility['summary'],
             'analysis_candidates':
                 visibility['candidates'],
+            'confirmed_pending_execution':
+                _futures_confirmed_pending_execution_candidates(visibility),
             'other_directional_signals':
                 _futures_directional_hidden_candidates(
                     visibility,

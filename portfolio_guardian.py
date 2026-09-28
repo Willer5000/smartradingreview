@@ -6899,6 +6899,15 @@ class PortfolioGuardian:
                 and not structure_deteriorated
                 and context_highs and context_lows
             ):
+                # Commit 17.4 FINAL QUALITY: Guardian never extends exactly
+                # onto the next reaction swing.  It captures on the front edge
+                # of that zone, increasing touch probability and reducing the
+                # chance that price reacts at the exact TP line.  Leverage only
+                # decides whether the incremental extension is economically
+                # meaningful; it never fabricates a farther target.
+                reaction_buffer = max(risk_abs * 0.06, abs(tp) * 0.00035)
+                min_incremental_margin_roi = 0.75
+                lev_for_extension = max(1.0, float(leverage or 1))
                 if action == 'LONG':
                     # Para ampliar TP necesitamos una resistencia/swing que ya
                     # existía en el contexto cerrado. Usar sólo velas post-Entry
@@ -6906,18 +6915,30 @@ class PortfolioGuardian:
                     # hubiese sido tocado.
                     targets = sorted({float(x) for x in context_highs if float(x) > tp})
                     if targets:
-                        candidate_tp = targets[0]
+                        reaction_level = targets[0]
+                        candidate_tp = reaction_level - reaction_buffer
                         extension = candidate_tp - tp
-                        if risk_abs * 0.15 <= extension <= risk_abs * 1.25:
+                        incremental_roi = (extension / max(abs(current_price), 1e-12)) * 100.0 * lev_for_extension
+                        if (
+                            risk_abs * 0.15 <= extension <= risk_abs * 1.25
+                            and incremental_roi >= min_incremental_margin_roi
+                            and candidate_tp > current_price
+                        ):
                             suggested_tp = candidate_tp
                 else:
                     targets = sorted(
                         {float(x) for x in context_lows if float(x) < tp}, reverse=True
                     )
                     if targets:
-                        candidate_tp = targets[0]
+                        reaction_level = targets[0]
+                        candidate_tp = reaction_level + reaction_buffer
                         extension = tp - candidate_tp
-                        if risk_abs * 0.15 <= extension <= risk_abs * 1.25:
+                        incremental_roi = (extension / max(abs(current_price), 1e-12)) * 100.0 * lev_for_extension
+                        if (
+                            risk_abs * 0.15 <= extension <= risk_abs * 1.25
+                            and incremental_roi >= min_incremental_margin_roi
+                            and candidate_tp < current_price
+                        ):
                             suggested_tp = candidate_tp
 
             # ----------------------------------------------------------
@@ -7031,7 +7052,7 @@ class PortfolioGuardian:
                         f'en retest/confirmación (RR incremental {scale_in_rr:.2f})'
                     )
                 if extends:
-                    pieces.append('extender TP al siguiente swing estructural real')
+                    pieces.append('extender TP hacia el siguiente swing estructural, capturando antes de la zona de reacción')
                 reason = 'Se propone ' + '; '.join(pieces) + '. No se ejecuta automáticamente.'
                 trade_state = 'OPPORTUNITY' if adds else 'HEALTHY'
 

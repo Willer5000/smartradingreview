@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-VERSION = "COMMIT17_3_1_SIGNAL_PATH_RECOVERY_V1"
+VERSION = "COMMIT17_4_ADAPTIVE_REASONING_ORCHESTRATOR_V2_SIGNAL_EXECUTION_DECOUPLED"
 
 DIRECTIONAL_ACTIONS = {"LONG", "SHORT", "COMPRA_SPOT", "VENTA_SPOT"}
 NON_DIRECTIONAL_ACTIONS = {"ESPERAR", "PRECAUCION", "NO_OPERAR"}
@@ -46,7 +46,83 @@ MULTIASSET_SYMBOLS = {
     "SPY-USDT", "QQQ-USDT", "CL-USDT", "NATGAS-USDT",
     "COPPER-USDT", "XAG-USDT", "KSTR-USDT",
 }
-MULTIASSET_EXECUTION_TFS = {"30M", "1H", "2H", "4H"}
+MULTIASSET_EXECUTION_TFS = {"1H", "4H", "1D"}
+
+# Commit 17.4 — Multi-Asset is a first-class market segment, not a crypto
+# Futures alias.  These are routing semantics only; no symbol-specific alpha is
+# encoded here.  Strategy/volatility thresholds are shared by asset class.
+MULTIASSET_ASSET_CLASS = {
+    "SPY-USDT": "US_INDEX", "QQQ-USDT": "US_INDEX",
+    "CL-USDT": "ENERGY", "NATGAS-USDT": "ENERGY",
+    "COPPER-USDT": "INDUSTRIAL_METAL", "XAG-USDT": "PRECIOUS_METAL",
+    "KSTR-USDT": "CHINA_INDEX",
+}
+
+_MULTI_MTF_ROLE_PROFILES: Dict[str, Dict[str, Sequence[str]]] = {
+    "1H": {"context": ("1D",), "structure": ("4H",), "setup": ("1H",), "timing": ("1H",)},
+    "4H": {"context": ("1D",), "structure": ("4H",), "setup": ("4H",), "timing": ("1H",)},
+    "1D": {"context": ("1D",), "structure": ("1D",), "setup": ("1D",), "timing": ("4H",)},
+}
+
+_MULTI_FAMILIES = {
+    "US_INDEX": ("MOMENTUM_CONTINUATION", "TREND_PULLBACK", "BREAKOUT_RETEST", "COMPRESSION_EXPANSION", "STRUCTURE_REVERSAL", "MEAN_REVERSION"),
+    "ENERGY": ("MOMENTUM_CONTINUATION", "BREAKOUT_RETEST", "COMPRESSION_EXPANSION", "STRUCTURE_REVERSAL", "TREND_PULLBACK", "MEAN_REVERSION"),
+    "INDUSTRIAL_METAL": ("TREND_PULLBACK", "BREAKOUT_RETEST", "COMPRESSION_EXPANSION", "MOMENTUM_CONTINUATION", "STRUCTURE_REVERSAL", "MEAN_REVERSION"),
+    "PRECIOUS_METAL": ("TREND_PULLBACK", "MEAN_REVERSION", "BREAKOUT_RETEST", "COMPRESSION_EXPANSION", "MOMENTUM_CONTINUATION", "STRUCTURE_REVERSAL"),
+    "CHINA_INDEX": ("BREAKOUT_RETEST", "COMPRESSION_EXPANSION", "TREND_PULLBACK", "MOMENTUM_CONTINUATION", "STRUCTURE_REVERSAL", "MEAN_REVERSION"),
+}
+
+
+def market_segment_for(market: Any, symbol: Any) -> str:
+    if _u(market) == "SPOT":
+        return "SPOT"
+    if _u(symbol) in MULTIASSET_SYMBOLS:
+        return "MULTIASSET"
+    return "FUTURES"
+
+
+def market_objective_for(market: Any, symbol: Any) -> str:
+    segment = market_segment_for(market, symbol)
+    sym = _u(symbol)
+    if segment == "SPOT":
+        if sym == "BTC-USDT": return "PORTFOLIO_SNOWBALL_ACCUMULATE_SATOSHIS_AND_USDT"
+        if sym == "PAXG-USDT": return "PORTFOLIO_SNOWBALL_ACCUMULATE_GOLD_AND_USDT"
+        if sym == "PAXG-BTC": return "PORTFOLIO_SNOWBALL_ROTATE_BTC_GOLD_RELATIVE_UNITS"
+        return "PORTFOLIO_SNOWBALL"
+    if segment == "MULTIASSET":
+        return "RAPID_CLASS_AWARE_EXPECTANCY_R_WITH_TECHNICAL_INVALIDATION"
+    return "RAPID_CRYPTO_EXPECTANCY_R_WITH_TECHNICAL_INVALIDATION"
+
+
+def timeframe_reasoning_profile(market: Any, symbol: Any, timeframe: Any) -> Dict[str, Any]:
+    segment = market_segment_for(market, symbol)
+    tf = _u(timeframe)
+    rc = futures_risk_class_for(symbol) if segment == "FUTURES" else segment
+    # Structural thresholds by horizon/class. They are deliberately coarse and
+    # not fitted per symbol, preventing parameter proliferation/overfitting.
+    if segment == "SPOT":
+        adx_strong = {"4H":23.0,"12H":22.0,"1D":21.0,"1W":20.0}.get(tf,22.0)
+        adx_weak = 16.0
+        tempo = "ACCUMULATION_SWING"
+    elif segment == "MULTIASSET":
+        cls = MULTIASSET_ASSET_CLASS.get(_u(symbol), "MULTIASSET")
+        base = {"US_INDEX":21.0,"ENERGY":23.0,"INDUSTRIAL_METAL":22.0,"PRECIOUS_METAL":21.0,"CHINA_INDEX":23.0}.get(cls,22.0)
+        adx_strong = base + (1.0 if tf == "1H" else -1.0 if tf == "1D" else 0.0)
+        adx_weak = max(15.0, adx_strong - 7.0)
+        tempo = "FAST_INTRADAY" if tf == "1H" else "TACTICAL" if tf == "4H" else "SWING_CONTEXT"
+    else:
+        base = {"30M":24.0,"1H":23.0,"2H":22.0,"4H":21.0,"12H":20.0,"1D":19.0}.get(tf,22.0)
+        if rc == "HIGH": base += 2.0
+        elif rc == "MEDIUM": base += 1.0
+        adx_strong = base
+        adx_weak = max(16.0, base - 7.0)
+        tempo = "VERY_FAST" if rc == "HIGH" else "FAST" if rc == "MEDIUM" else "CONTROLLED_FAST"
+    return {
+        "segment": segment, "timeframe": tf, "risk_class": rc, "tempo": tempo,
+        "adx_strong": round(adx_strong,1), "adx_weak": round(adx_weak,1),
+        "objective": market_objective_for(market, symbol),
+        "policy": "HORIZON_AND_CLASS_CONTEXT_NOT_SYMBOL_FITTED",
+    }
 
 
 def is_multiasset_cell(market: Any, symbol: Any, timeframe: Any, action: Any) -> bool:
@@ -116,21 +192,74 @@ def canonical_regime(value: Any) -> str:
     return mapping.get(raw, raw if raw else "BALANCE")
 
 
-def canonical_volatility(volatility: Mapping[str, Any] | None, regime_raw: Any = None) -> str:
+def volatility_reasoning(volatility: Mapping[str, Any] | None, regime_raw: Any = None, *, market: Any = "", symbol: Any = "", timeframe: Any = "") -> Dict[str, Any]:
+    """Classify volatility primarily from relative state already in memory.
+
+    No new candles/API calls are introduced. Percentiles/ratios are used when
+    available; absolute ATR/BB thresholds are only a conservative fallback.
+    """
     v = dict(volatility or {})
-    if bool(v.get("squeeze_on")) or int(_f(v.get("squeeze_length"))) > 0:
-        return "COMPRESSION"
+    profile = timeframe_reasoning_profile(market, symbol, timeframe)
+    segment = profile.get("segment")
     ftm = _u(v.get("ftm_state") or v.get("state") or v.get("regime"))
+    squeeze = bool(v.get("squeeze_on")) or int(_f(v.get("squeeze_length"))) > 0
     atr_pct = _f(v.get("atr_pct"))
     width = _f(v.get("bb_width"))
+    width_prev = _f(v.get("bb_width_prev"))
+    vol_ratio = _f(v.get("volatility_ratio"), 1.0)
+    atr_p = _f(v.get("atr_percentile") or v.get("volatility_percentile"), -1.0)
+    width_p = _f(v.get("bb_width_percentile"), -1.0)
+    if 0 <= atr_p <= 1: atr_p *= 100.0
+    if 0 <= width_p <= 1: width_p *= 100.0
+    width_growth = (width / width_prev) if width_prev > 0 and width >= 0 else 1.0
     raw_regime = _u(regime_raw)
-    if raw_regime in {"HIGH_VOLATILITY", "VOLATILITY_SHOCK"} or ftm in {"EXTREME", "SHOCK"}:
-        return "SHOCK"
-    if ftm in {"HIGH", "EXPANSION", "VOLATILE", "HIGH_EXPANSION"} or atr_pct >= 4.0 or width >= 5.0:
-        return "EXPANSION"
-    if atr_pct > 0 and atr_pct <= 0.75 and width > 0 and width <= 1.25:
-        return "LOW"
-    return "NORMAL"
+
+    state = "NORMAL"; basis = []
+    if squeeze:
+        state = "COMPRESSION"; basis.append("SQUEEZE_ACTIVE")
+    elif raw_regime in {"HIGH_VOLATILITY", "VOLATILITY_SHOCK"} or ftm in {"EXTREME", "SHOCK"}:
+        state = "SHOCK"; basis.append("SHOCK_STATE")
+    elif ftm in {"HIGH", "EXPANSION", "VOLATILE", "HIGH_EXPANSION"}:
+        state = "EXPANSION"; basis.append("RELATIVE_STATE_EXPANSION")
+    elif atr_p >= 85 or width_p >= 85 or vol_ratio >= 1.35 or (vol_ratio >= 1.15 and width_growth >= 1.10):
+        state = "EXPANSION"; basis.append("RELATIVE_EXPANSION")
+    elif (0 <= atr_p <= 20) or (0 <= width_p <= 20) or (vol_ratio > 0 and vol_ratio <= 0.72 and width_growth <= 1.0):
+        state = "LOW"; basis.append("RELATIVE_LOW_VOLATILITY")
+    else:
+        # Fallback only when richer relative evidence is absent. The bands differ
+        # by market/horizon, not by individual symbol outcome history.
+        tf = _u(timeframe)
+        if segment == "SPOT":
+            exp_atr = {"4H":3.2,"12H":4.0,"1D":5.0,"1W":8.0}.get(tf,4.0)
+            low_atr = {"4H":0.65,"12H":0.9,"1D":1.2,"1W":1.8}.get(tf,0.8)
+        elif segment == "MULTIASSET":
+            cls = MULTIASSET_ASSET_CLASS.get(_u(symbol), "MULTIASSET")
+            base = {"US_INDEX":1.5,"ENERGY":3.0,"INDUSTRIAL_METAL":2.2,"PRECIOUS_METAL":2.0,"CHINA_INDEX":2.5}.get(cls,2.2)
+            factor = {"1H":0.65,"4H":1.0,"1D":1.55}.get(tf,1.0)
+            exp_atr = base * factor; low_atr = exp_atr * 0.24
+        else:
+            rc = futures_risk_class_for(symbol)
+            base = {"CORE1":2.2,"CORE2":2.6,"MEDIUM":3.1,"HIGH":3.8}.get(rc,2.8)
+            factor = {"30M":0.55,"1H":0.70,"2H":0.85,"4H":1.0,"12H":1.35,"1D":1.65}.get(tf,1.0)
+            exp_atr = base * factor; low_atr = exp_atr * 0.24
+        if atr_pct > 0 and atr_pct >= exp_atr:
+            state = "EXPANSION"; basis.append("CONTEXTUAL_ATR_FALLBACK")
+        elif atr_pct > 0 and atr_pct <= low_atr and (width <= 0 or width_growth <= 1.0):
+            state = "LOW"; basis.append("CONTEXTUAL_LOW_ATR_FALLBACK")
+        else:
+            basis.append("NORMAL_RELATIVE_STATE")
+    return {
+        "state": state, "basis": basis, "segment": segment, "timeframe": _u(timeframe),
+        "atr_pct": round(atr_pct,4), "volatility_ratio": round(vol_ratio,4),
+        "bb_width": round(width,4), "bb_width_growth": round(width_growth,4),
+        "atr_percentile": None if atr_p < 0 else round(atr_p,2),
+        "bb_width_percentile": None if width_p < 0 else round(width_p,2),
+        "resource_policy": "REUSE_EXISTING_FEATURES_NO_EXTRA_FETCH",
+    }
+
+
+def canonical_volatility(volatility: Mapping[str, Any] | None, regime_raw: Any = None, *, market: Any = "", symbol: Any = "", timeframe: Any = "") -> str:
+    return str(volatility_reasoning(volatility, regime_raw, market=market, symbol=symbol, timeframe=timeframe).get("state") or "NORMAL")
 
 
 def official_universe_cells() -> List[Tuple[str, str, str, str]]:
@@ -204,11 +333,14 @@ _RISK_MTF_PROFILES: Dict[str, Dict[str, Dict[str, Sequence[str]]]] = {
 
 def _mtf_profile_for(market: Any, timeframe: Any, symbol: Any = "") -> Dict[str, Sequence[str]]:
     market_u, timeframe_u = _u(market), _u(timeframe)
+    if market_u == "FUTURES" and _u(symbol) in MULTIASSET_SYMBOLS:
+        return dict(_MULTI_MTF_ROLE_PROFILES.get(timeframe_u, {"setup": (timeframe_u,), "timing": (timeframe_u,)}))
     if market_u == "FUTURES":
         rc = futures_risk_class_for(symbol)
         if timeframe_u in _RISK_MTF_PROFILES.get(rc, {}):
             return dict(_RISK_MTF_PROFILES[rc][timeframe_u])
     return dict(_MTF_ROLE_PROFILES.get(market_u, {}).get(timeframe_u, {"setup": (timeframe_u,), "timing": (timeframe_u,)}))
+
 
 def mtf_required_timeframes(market: Any, timeframe: Any, symbol: Any = "") -> List[str]:
     roles = _mtf_profile_for(market, timeframe, symbol)
@@ -487,15 +619,18 @@ def build_independent_thesis(*, layers: Mapping[str, Any], mtf_context: Mapping[
     trend_dir = _norm_direction(trend.get("direction"))
     adx = _f(trend.get("adx"))
     plus_di = _f(trend.get("plus_di")); minus_di = _f(trend.get("minus_di"))
+    tf_profile = timeframe_reasoning_profile(market, symbol, timeframe)
+    adx_strong = _f(tf_profile.get("adx_strong"), 25.0)
+    adx_weak = _f(tf_profile.get("adx_weak"), 18.0)
     trend_score = 0.0
     if trend_dir == "BULLISH": trend_score = 0.55
     elif trend_dir == "BEARISH": trend_score = -0.55
-    if adx >= 25:
+    if adx >= adx_strong:
         if plus_di > minus_di + 2: trend_score = max(trend_score, 0.85)
         elif minus_di > plus_di + 2: trend_score = min(trend_score, -0.85)
-    elif adx < 18:
+    elif adx < adx_weak:
         trend_score *= 0.45
-    add_family("trend", trend_score, f"ADX {adx:.1f}; +DI {plus_di:.1f}; -DI {minus_di:.1f}", 1.0)
+    add_family("trend", trend_score, f"ADX {adx:.1f} (fuerte≥{adx_strong:.1f}); +DI {plus_di:.1f}; -DI {minus_di:.1f}", 1.0)
 
     # Structure/liquidity family.
     struct_dir = _norm_direction(structure.get("direction") or structure.get("structure_direction"))
@@ -574,7 +709,10 @@ def build_independent_thesis(*, layers: Mapping[str, Any], mtf_context: Mapping[
     add_family("multiframe", mtf_score, str(mtf_context.get("public_summary") or "multiframe incompleto"), 1.15)
 
     # Macro: risk context, never a sole direction maker.
-    macro_bias = _norm_direction(macro.get("bias") or macro.get("direction") or macro.get("market_bias"))
+    macro_bias = _norm_direction(
+        macro.get("bias") or macro.get("directional_bias")
+        or macro.get("direction") or macro.get("market_bias")
+    )
     macro_risk = _u(macro.get("risk_level") or macro.get("risk"))
     macro_score = 0.3 if macro_bias == "BULLISH" else -0.3 if macro_bias == "BEARISH" else 0.0
     add_family("macro", macro_score, f"sesgo {macro_bias.lower()}; riesgo {macro_risk or 'desconocido'}", 0.45)
@@ -590,11 +728,20 @@ def build_independent_thesis(*, layers: Mapping[str, Any], mtf_context: Mapping[
     long_families = [k for k,v in families.items() if v["score"] >= 0.45]
     short_families = [k for k,v in families.items() if v["score"] <= -0.45]
     market_u = _u(market)
-    risk_class = futures_risk_class_for(symbol) if market_u == "FUTURES" else "SPOT"
-    # Anti-overfitting differentiation is structural, not symbol-optimized:
-    # faster/higher-risk Futures require one more independent family or margin.
-    min_families = 3 if market_u == "SPOT" else (5 if risk_class == "HIGH" else 4)
-    margin_required = 0.9 if market_u == "SPOT" else (1.45 if risk_class == "HIGH" else 1.25 if risk_class == "MEDIUM" else 1.15)
+    segment = market_segment_for(market_u, symbol)
+    if segment == "SPOT":
+        risk_class = "SPOT"; min_families = 3; margin_required = 0.90
+    elif segment == "MULTIASSET":
+        asset_class = MULTIASSET_ASSET_CLASS.get(_u(symbol), "MULTIASSET")
+        risk_class = f"MULTI_{asset_class}"
+        min_families = 4
+        margin_required = {"US_INDEX":1.15,"ENERGY":1.30,"INDUSTRIAL_METAL":1.22,"PRECIOUS_METAL":1.18,"CHINA_INDEX":1.30}.get(asset_class,1.22)
+    else:
+        risk_class = futures_risk_class_for(symbol)
+        min_families = 5 if risk_class == "HIGH" else 4
+        margin_required = 1.45 if risk_class == "HIGH" else 1.25 if risk_class == "MEDIUM" else 1.15
+    # Anti-overfitting differentiation is structural by market/class/horizon,
+    # never fitted to an individual symbol's recent wins.
     margin = abs(long_score - short_score)
     direction = "NEUTRAL"
     active = long_families if long_score > short_score else short_families
@@ -647,6 +794,106 @@ def _research_positive(row: Mapping[str, Any] | None) -> bool:
 
 def _research_negative(row: Mapping[str, Any] | None) -> bool:
     return _research_state(row) in _NEGATIVE_RESEARCH_STATES or bool((row or {}).get("recycle_required"))
+
+
+def _research_reasoning(row: Mapping[str, Any] | None) -> Dict[str, Any]:
+    row = dict(row or {})
+    state = _research_state(row)
+    penalty = max(0.0, _f(row.get("penalty_score")))
+    hard = False; reason = "ADVISORY_OR_NO_NEGATIVE_EVIDENCE"
+    best_neg = dict(row.get("best_negative") or {})
+    best_pos = dict(row.get("best_positive") or {})
+    if state in {"NEGATIVE_OOS", "REJECTED_OOS"}:
+        n = int(_f(best_neg.get("oos_n")))
+        exp = _f(best_neg.get("oos_exp_r"), 0.0)
+        hard = bool(n >= 20 and exp <= -0.15)
+        reason = "ROBUST_NEGATIVE_OOS" if hard else "NEGATIVE_OOS_INSUFFICIENT_FOR_HARD_BLOCK"
+    elif state in {"SHADOW_DIVERGED", "ALPHA_DECAY", "DEGRADED", "REVOKED"} or bool(row.get("recycle_required")):
+        shadow_n = int(_f(best_pos.get("shadow_n")))
+        recent_n = int(_f(best_pos.get("recent8_n")))
+        recent_exp = _f(best_pos.get("recent8_expectancy_r"), 0.0)
+        hard = bool((shadow_n >= 12 and _f(best_pos.get("shadow_exp_r"), 0.0) < 0) or (recent_n >= 8 and recent_exp < 0))
+        reason = "ROBUST_LIVE_ALPHA_DECAY" if hard else "DECAY_WARNING_NOT_YET_HARD_BLOCK"
+    quality_extra = min(5.0, penalty / 8.0) if not hard else 0.0
+    margin_extra = min(0.35, penalty / 100.0) if not hard else 0.0
+    return {"state":state,"hard_block":hard,"reason":reason,"penalty_score":round(penalty,2),"quality_extra":round(quality_extra,2),"margin_extra":round(margin_extra,3)}
+
+
+def _macro_reasoning(macro: Mapping[str, Any] | None, *, segment: str) -> Dict[str, Any]:
+    m = dict(macro or {})
+    risk = _u(m.get("risk_level") or m.get("current_risk_level") or m.get("risk"))
+    posture = _u(m.get("futures_posture") or m.get("posture"))
+    gate = _u(m.get("gate"))
+    hours = _f(m.get("next_event_hours") or ((m.get("next_high_impact_event") or {}).get("hours_until")), 9999.0)
+    hard = bool(posture == "NO_NEW_TRADES" or gate == "WAIT_EVENT")
+    quality_extra = 0.0; margin_extra = 0.0
+    session = _u(m.get("market_session"))
+    asset_class = _u(m.get("asset_class"))
+    reasons: List[str] = []
+    if not hard:
+        if risk == "CRITICAL":
+            quality_extra += 4.0; margin_extra += 0.30; reasons.append("ELEVATED_MACRO_RISK")
+        elif risk == "HIGH":
+            quality_extra += 2.0; margin_extra += 0.15; reasons.append("ELEVATED_MACRO_RISK")
+        # Multi-Asset synthetic contracts can trade outside the underlying's
+        # main session.  Off-hours are not a veto, but require cleaner evidence
+        # because spreads/liquidity/price discovery can differ from cash hours.
+        if _u(segment) == "MULTIASSET" and ("OFFHOURS" in session or "CLOSED" in session):
+            quality_extra += 1.5; margin_extra += 0.10; reasons.append("UNDERLYING_OFFHOURS")
+    return {
+        "risk":risk or "UNKNOWN", "posture":posture or "NORMAL", "gate":gate or "NORMAL",
+        "market_session":session or None, "asset_class":asset_class or None,
+        "next_event_hours":None if hours >= 9990 else round(hours,2),
+        "hard_block_new_entry":hard,
+        "reason":"IMMINENT_EVENT_RISK" if hard else "+".join(reasons) if reasons else "NORMAL",
+        "quality_extra":round(quality_extra,2), "margin_extra":round(margin_extra,3),
+        "policy":"MACRO_AND_SESSION_MODIFY_REQUIREMENTS;_ONLY_IMMINENT_UNMODELLED_EVENT_BLOCKS_NEW_ENTRY",
+    }
+
+
+def _multiasset_strategy_reasoning(*, selected_action: str, regime: str, vol_state: str, thesis: Mapping[str, Any], symbol: Any, timeframe: Any, macro_reasoning: Mapping[str, Any]) -> Dict[str, Any]:
+    cls = MULTIASSET_ASSET_CLASS.get(_u(symbol), "MULTIASSET")
+    eligible = list(_MULTI_FAMILIES.get(cls) or _MULTI_FAMILIES.get("US_INDEX") or ())
+    families = dict((thesis or {}).get("families") or {})
+    desired = action_direction(selected_action)
+    sign = 1.0 if desired == "BULLISH" else -1.0
+    scores: Dict[str, float] = {}
+    for fam in eligible:
+        score = 50.0
+        if fam in {"MOMENTUM_CONTINUATION","TREND_PULLBACK"}:
+            score += 12 if regime in {"TREND_UP","TREND_DOWN"} else -5
+            score += 10 if sign * _f((families.get("trend") or {}).get("score")) >= 0.45 else -5
+            score += 8 if sign * _f((families.get("momentum") or {}).get("score")) >= 0.45 else 0
+        elif fam == "COMPRESSION_EXPANSION":
+            score += 14 if vol_state in {"COMPRESSION","EXPANSION"} else -6
+            score += 10 if sign * _f((families.get("expansion") or {}).get("score")) >= 0.45 else 0
+        elif fam == "STRUCTURE_REVERSAL":
+            score += 13 if regime == "TRANSITION" else 0
+            score += 12 if sign * _f((families.get("structure") or {}).get("score")) >= 0.45 else -4
+            score += 6 if sign * _f((families.get("momentum") or {}).get("score")) >= 0.45 else 0
+        elif fam == "BREAKOUT_RETEST":
+            score += 8 if regime in {"TREND_UP","TREND_DOWN","TRANSITION"} else 0
+            score += 10 if sign * _f((families.get("structure") or {}).get("score")) >= 0.45 else 0
+            score += 6 if sign * _f((families.get("volume") or {}).get("score")) >= 0.45 else 0
+        elif fam == "MEAN_REVERSION":
+            score += 14 if regime == "BALANCE" else -8
+            score += 6 if vol_state in {"LOW","NORMAL"} else -4
+        if cls == "ENERGY" and fam in {"MOMENTUM_CONTINUATION","COMPRESSION_EXPANSION","BREAKOUT_RETEST"}: score += 3
+        if cls == "US_INDEX" and fam in {"TREND_PULLBACK","MEAN_REVERSION","BREAKOUT_RETEST"}: score += 2
+        if cls == "PRECIOUS_METAL" and fam in {"TREND_PULLBACK","MEAN_REVERSION","STRUCTURE_REVERSAL"}: score += 2
+        if bool(macro_reasoning.get("hard_block_new_entry")): score -= 30
+        scores[fam] = max(0.0, min(100.0, score))
+    family = max(scores, key=scores.get) if scores else "NONE"
+    quality = scores.get(family, 0.0)
+    return {
+        "id":f"MULTI_{cls}_{_u(timeframe)}_{family}", "family":family, "quality":round(quality,2),
+        "confirmations":[f"asset_class={cls}",f"regime={regime}",f"volatility={vol_state}"], "conflicts":[],
+        "regime_match":quality >= 64.0, "volatility_match":quality >= 64.0,
+        "asset_class":cls, "eligible_strategy_count":len(eligible), "candidate_scores":scores,
+        "specialization_key":f"MULTI|{cls}|{_u(symbol)}|{_u(timeframe)}|{selected_action}|{family}",
+        "learning_cell":f"MULTI::{cls}::{_u(symbol)}::{_u(timeframe)}::{regime}::{vol_state}::{family}",
+        "authority":"ADAPTIVE_MULTI_CONTEXT_ROUTER_V2",
+    }
 
 
 def _mtf_execution_gate(
@@ -723,278 +970,189 @@ def prepare_operational_intelligence(
     *, layers: Mapping[str, Any], symbol: Any, timeframe: Any, system_type: Any,
     mtf_context: Mapping[str, Any], research_candidates: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> Dict[str, Any]:
-    """Build the final pre-Safety candidate from learned + default intelligence.
+    """Adaptive pre-Safety orchestrator: objective -> context -> thesis -> strategy.
 
-    Learned evidence is evaluated *before* internal specialist opinions. It never
-    bypasses live market support or Safety. A known negative exact action cannot
-    be rescued by a default playbook.
+    It never calls networks/DB/LLMs and never bypasses the downstream
+    Entry/SL/TP/Safety/Publication gates. Hard blocks are reserved for evidence
+    that is genuinely non-modelled (imminent event) or statistically robust.
     """
     market = "FUTURES" if _u(system_type) == "FUTURES" else "SPOT"
-    is_multiasset = bool(market == "FUTURES" and _u(symbol) in MULTIASSET_SYMBOLS)
+    segment = market_segment_for(market, symbol)
+    is_multiasset = segment == "MULTIASSET"
     raw_regime = (layers.get("market_regime") or {}).get("regime")
     regime = canonical_regime(raw_regime)
-    vol_state = canonical_volatility(layers.get("volatility") or {}, raw_regime)
+    vol_reason = volatility_reasoning(layers.get("volatility") or {}, raw_regime, market=market, symbol=symbol, timeframe=timeframe)
+    vol_state = str(vol_reason.get("state") or "NORMAL")
+    tf_profile = timeframe_reasoning_profile(market, symbol, timeframe)
     thesis = build_independent_thesis(layers=layers, mtf_context=mtf_context, market=market, symbol=symbol, timeframe=timeframe)
-    research_map = {
-        canonical_action(key, market): dict(value or {})
-        for key, value in dict(research_candidates or {}).items()
-    }
+    research_map = {canonical_action(key, market): dict(value or {}) for key, value in dict(research_candidates or {}).items()}
 
-    # Commit 9.5 — one normalized technical snapshot feeds both the strategy
-    # selector and the public DecisionEvidence layer.  This prevents a strategy
-    # from being decided with one representation of an indicator and explained
-    # with another.  Missing values remain missing; nothing is synthesized.
     try:
         from contingency_strategy_engine import _indicator_groups
         indicator_groups = _indicator_groups(dict(layers))
         indicator_groups["multi_timeframe"] = dict(mtf_context or {})
     except Exception as exc:
-        indicator_groups = {
-            "multi_timeframe": dict(mtf_context or {}),
-            "normalization_error": str(exc)[:160],
-        }
+        indicator_groups = {"multi_timeframe": dict(mtf_context or {}), "normalization_error": str(exc)[:160]}
 
     bullish_action = "LONG" if market == "FUTURES" else "COMPRA_SPOT"
     bearish_action = "SHORT" if market == "FUTURES" else "VENTA_SPOT"
     long_support = len(thesis.get("long_families") or [])
     short_support = len(thesis.get("short_families") or [])
     learned_support_min = 3 if market == "FUTURES" else 2
-
-    thesis_action = thesis.get("action") or "NO_OPERAR"
-    selected_action = thesis_action
+    selected_action = thesis.get("action") or "NO_OPERAR"
     selected_prior: Dict[str, Any] = {}
     specialist_source = "THESIS"
 
-    # If the purely live thesis is neutral, a validated learned specialist may
-    # open a *candidate* only when current independent families already support
-    # the same side. This lets learned and default intelligence interleave while
-    # refusing historical edge that the current market contradicts.
     if selected_action not in DIRECTIONAL_ACTIONS:
         candidates: List[Tuple[float, str, Dict[str, Any]]] = []
-        for action, support_count in (
-            (bullish_action, long_support), (bearish_action, short_support)
-        ):
+        for action, support_count in ((bullish_action,long_support),(bearish_action,short_support)):
             prior = research_map.get(action) or {}
-            if not _research_positive(prior) or support_count < learned_support_min:
-                continue
+            if not _research_positive(prior) or support_count < learned_support_min: continue
             score = _f(prior.get("support_score")) - _f(prior.get("penalty_score"))
             candidates.append((score, action, prior))
         if candidates:
-            candidates.sort(key=lambda row: row[0], reverse=True)
-            best = candidates[0]
-            # Ambiguous learned priors do not manufacture direction.
-            if len(candidates) == 1 or best[0] >= candidates[1][0] + 0.15:
-                selected_action = best[1]
-                selected_prior = best[2]
-                specialist_source = "LEARNED"
+            candidates.sort(key=lambda row: row[0], reverse=True); best=candidates[0]
+            if len(candidates)==1 or best[0] >= candidates[1][0] + 0.15:
+                selected_action=best[1]; selected_prior=best[2]; specialist_source="LEARNED"
     else:
         selected_prior = research_map.get(selected_action) or {}
-        if _research_positive(selected_prior):
-            specialist_source = "LEARNED"
+        if _research_positive(selected_prior): specialist_source="LEARNED"
 
-    blocked_by_research = bool(
-        selected_action in DIRECTIONAL_ACTIONS
-        and _research_negative(research_map.get(selected_action) or {})
-    )
+    research_reason = _research_reasoning(research_map.get(selected_action) or {}) if selected_action in DIRECTIONAL_ACTIONS else _research_reasoning({})
+    macro_reason = _macro_reasoning(layers.get("macro_context") or {}, segment=segment)
 
-    strategy: Dict[str, Any] = {
-        "id": "NO_PLAYBOOK", "family": "NONE", "quality": 0.0,
-        "confirmations": [], "conflicts": [],
-    }
+    strategy: Dict[str, Any] = {"id":"NO_PLAYBOOK","family":"NONE","quality":0.0,"confirmations":[],"conflicts":[]}
     if selected_action in DIRECTIONAL_ACTIONS:
         if is_multiasset:
-            # Multi-Asset has its own asset-class strategy router in
-            # multiasset_system.py.  Do not force a crypto default playbook here;
-            # the independent thesis may proceed through the common Futures
-            # Entry/Safety/Publication gates and is annotated by that router later.
-            strategy = {
-                "id": "MULTIASSET_DELEGATED_PLAYBOOK",
-                "family": "MULTIASSET_DELEGATED",
-                "quality": 0.0,
-                "confirmations": [],
-                "conflicts": [],
-                "regime_match": True,
-                "volatility_match": True,
-                "delegated_to": "MULTIASSET_STRATEGY_BANK",
-            }
+            strategy = _multiasset_strategy_reasoning(
+                selected_action=selected_action, regime=regime, vol_state=vol_state, thesis=thesis,
+                symbol=symbol, timeframe=timeframe, macro_reasoning=macro_reason,
+            )
         else:
             try:
                 from default_strategy_bank import select_strategy
-                _selected_prior_for_strategy = research_map.get(selected_action) or {}
+                prior_for_strategy = research_map.get(selected_action) or {}
                 strategy = select_strategy(
-                    selected_action, regime, vol_state, indicator_groups,
-                    symbol=_u(symbol), timeframe=_u(timeframe), market=market,
-                    preferred_family=str(_selected_prior_for_strategy.get("group_prior_strategy_family") or ""),
+                    selected_action, regime, vol_state, indicator_groups, symbol=_u(symbol),
+                    timeframe=_u(timeframe), market=market,
+                    preferred_family=str(prior_for_strategy.get("group_prior_strategy_family") or ""),
                 )
             except Exception as exc:
-                strategy = {
-                    "id":"NO_PLAYBOOK", "family":"NONE", "quality":0.0,
-                    "confirmations":[], "conflicts":[], "error":str(exc)[:160],
-                }
+                strategy={"id":"NO_PLAYBOOK","family":"NONE","quality":0.0,"confirmations":[],"conflicts":[],"error":str(exc)[:160]}
 
-    official = bool(
-        selected_action in DIRECTIONAL_ACTIONS
-        and (
-            is_official_cell(market, symbol, timeframe, selected_action)
-            or is_multiasset_cell(market, symbol, timeframe, selected_action)
-        )
-    )
+    official = bool(selected_action in DIRECTIONAL_ACTIONS and (is_official_cell(market,symbol,timeframe,selected_action) or is_multiasset_cell(market,symbol,timeframe,selected_action)))
     risk_profile = (
-        {"risk_class": "MULTIASSET", "name": "MULTIASSET_CONTEXTUAL", "risk_budget_multiplier": 1.0}
-        if is_multiasset
-        else futures_exit_profile_for(symbol) if market == "FUTURES"
-        else {"risk_class": "SPOT", "name": "PORTFOLIO", "risk_budget_multiplier": 1.0}
+        {"risk_class": f"MULTI_{MULTIASSET_ASSET_CLASS.get(_u(symbol),'MULTIASSET')}", "name":"MULTIASSET_CLASS_AWARE", "risk_budget_multiplier":1.0, "max_entry_wait_bars": 2 if _u(timeframe)=="1H" else 3 if _u(timeframe)=="4H" else 4}
+        if is_multiasset else futures_exit_profile_for(symbol) if market=="FUTURES" else {"risk_class":"SPOT","name":"PORTFOLIO_SNOWBALL","risk_budget_multiplier":1.0}
     )
-    risk_class = str(risk_profile.get("risk_class") or ("SPOT" if market == "SPOT" else "CORE1"))
-    # A default strategy is a technical contingency path, not a prerequisite
-    # for market intelligence. An autonomous thesis may proceed to the existing
-    # Entry/SL/TP/Safety gates at a stricter quality threshold.
-    min_quality = 78.0 if market == "FUTURES" else 70.0
-    autonomous_min_quality = (
-        76.0 if market == "SPOT"
-        else 87.0 if risk_class == "HIGH"
-        else 84.0 if risk_class == "MEDIUM"
-        else 82.0
-    )
+    risk_class=str(risk_profile.get("risk_class") or ("SPOT" if market=="SPOT" else "CORE1"))
+    min_quality = 78.0 if market=="FUTURES" else 70.0
+    autonomous_min_quality = 76.0 if market=="SPOT" else 87.0 if risk_class=="HIGH" else 84.0 if risk_class=="MEDIUM" else 83.0 if is_multiasset else 82.0
+    # Context raises requirements instead of deleting a valid thesis.
+    adaptive_quality_min = autonomous_min_quality + _f(macro_reason.get("quality_extra")) + _f(research_reason.get("quality_extra"))
+    adaptive_margin_min = _f(thesis.get("required_direction_margin"),1.0) + _f(macro_reason.get("margin_extra")) + _f(research_reason.get("margin_extra"))
+
     mtf_usable, mtf_gate_mode = _mtf_execution_gate(
-        mtf_context=mtf_context, thesis=thesis, strategy=strategy,
-        selected_action=selected_action, market=market, risk_class=risk_class,
-        timeframe=timeframe, is_multiasset=is_multiasset,
+        mtf_context=mtf_context, thesis=thesis, strategy=strategy, selected_action=selected_action,
+        market=market, risk_class=risk_class, timeframe=timeframe, is_multiasset=is_multiasset,
     )
-    support_count = (
-        long_support if action_direction(selected_action) == "BULLISH" else short_support
-    )
-    thesis_ok = bool(
-        thesis.get("direction") in {"BULLISH", "BEARISH"}
-        and float(thesis.get("quality") or 0) >= min_quality
-    )
+    support_count = long_support if action_direction(selected_action)=="BULLISH" else short_support
+    thesis_ok = bool(thesis.get("direction") in {"BULLISH","BEARISH"} and _f(thesis.get("quality")) >= min_quality)
+    contextual_strength_ok = bool(_f(thesis.get("margin")) >= adaptive_margin_min)
     autonomous_thesis_ok = bool(
-        thesis.get("direction") in {"BULLISH", "BEARISH"}
-        and float(thesis.get("quality") or 0) >= autonomous_min_quality
-        and support_count >= int(thesis.get("required_independent_families") or (4 if market == "FUTURES" else 3))
-        and mtf_usable
+        thesis.get("direction") in {"BULLISH","BEARISH"}
+        and _f(thesis.get("quality")) >= adaptive_quality_min
+        and support_count >= int(thesis.get("required_independent_families") or (4 if market=="FUTURES" else 3))
+        and contextual_strength_ok and mtf_usable
     )
-    learned_live_ok = bool(
-        specialist_source == "LEARNED"
-        and support_count >= learned_support_min
-        and mtf_usable
-    )
-    strategy_ok = bool(
-        float(strategy.get("quality") or 0) >= min_quality
-        and strategy.get("regime_match", True)
-        and strategy.get("volatility_match", True)
-    )
-    default_path_ok = bool(thesis_ok and strategy_ok)
-    candidate_source = "NONE"
-    if learned_live_ok and strategy_ok:
-        candidate_source = "LEARNED+DEFAULT"
-    elif learned_live_ok:
-        candidate_source = "LEARNED+LIVE"
-    elif default_path_ok:
-        candidate_source = "THESIS+DEFAULT"
-    elif autonomous_thesis_ok:
-        candidate_source = "THESIS_AUTONOMOUS"
+    learned_live_ok = bool(specialist_source=="LEARNED" and support_count>=learned_support_min and contextual_strength_ok and mtf_usable)
+    # Multi-Asset strategy quality is context routing, not a backtested alpha score.
+    strategy_min = 68.0 if is_multiasset else min_quality
+    strategy_ok = bool(_f(strategy.get("quality")) >= strategy_min and strategy.get("regime_match",True) and strategy.get("volatility_match",True))
+    default_path_ok = bool(thesis_ok and strategy_ok and contextual_strength_ok)
+    candidate_source="NONE"
+    if learned_live_ok and strategy_ok: candidate_source="LEARNED+DEFAULT"
+    elif learned_live_ok: candidate_source="LEARNED+LIVE"
+    elif default_path_ok: candidate_source="THESIS+DEFAULT"
+    elif autonomous_thesis_ok: candidate_source="THESIS_AUTONOMOUS"
 
-    candidate_ready = bool(
-        official
-        and selected_action in DIRECTIONAL_ACTIONS
-        and not blocked_by_research
-        and candidate_source != "NONE"
-        and mtf_usable
-        and not (market == "FUTURES" and _u(thesis.get("macro_risk")) == "CRITICAL")
-    )
-    candidate_blockers: List[str] = []
-    if selected_action not in DIRECTIONAL_ACTIONS:
-        candidate_blockers.append("NO_DIRECTIONAL_THESIS")
-    if selected_action in DIRECTIONAL_ACTIONS and not official:
-        candidate_blockers.append("OUTSIDE_GOVERNED_OPERATIONAL_CELL")
-    if blocked_by_research:
-        candidate_blockers.append("NEGATIVE_RESEARCH_EVIDENCE")
-    if selected_action in DIRECTIONAL_ACTIONS and candidate_source == "NONE":
-        candidate_blockers.append("NO_ELIGIBLE_LIVE_OR_DEFAULT_PATH")
-    if not mtf_usable:
-        candidate_blockers.append(mtf_gate_mode)
-    if market == "FUTURES" and _u(thesis.get("macro_risk")) == "CRITICAL":
-        candidate_blockers.append("MACRO_CRITICAL")
-
+    hard_research = bool(research_reason.get("hard_block"))
+    hard_macro = bool(macro_reason.get("hard_block_new_entry")) and market=="FUTURES"
+    candidate_ready = bool(official and selected_action in DIRECTIONAL_ACTIONS and not hard_research and not hard_macro and candidate_source!="NONE" and mtf_usable)
+    blockers: List[str] = []
+    if selected_action not in DIRECTIONAL_ACTIONS: blockers.append("NO_DIRECTIONAL_THESIS")
+    if selected_action in DIRECTIONAL_ACTIONS and not official: blockers.append("OUTSIDE_GOVERNED_OPERATIONAL_CELL")
+    if hard_research: blockers.append(str(research_reason.get("reason") or "ROBUST_NEGATIVE_RESEARCH"))
+    if hard_macro: blockers.append("IMMINENT_UNMODELLED_MACRO_EVENT")
+    if selected_action in DIRECTIONAL_ACTIONS and candidate_source=="NONE": blockers.append("NO_ELIGIBLE_CONTEXTUAL_PATH")
+    if not mtf_usable: blockers.append(mtf_gate_mode)
+    if selected_action in DIRECTIONAL_ACTIONS and not contextual_strength_ok: blockers.append("CONTEXT_REQUIRES_STRONGER_DIRECTIONAL_MARGIN")
 
     return {
-        "version": VERSION,
-        "market": market,
-        "risk_class": risk_profile.get("risk_class"),
-        "exit_profile": risk_profile.get("name"),
-        "risk_budget_multiplier": risk_profile.get("risk_budget_multiplier", 1.0),
-        "max_entry_wait_bars": risk_profile.get("max_entry_wait_bars"),
-        "symbol": _u(symbol),
-        "timeframe": _u(timeframe),
-        "context": {"regime": regime, "volatility": vol_state},
-        "multi_timeframe": dict(mtf_context or {}),
-        "thesis": thesis,
-        "default_strategy": strategy,
-        # Public evidence and DynamicZones consume the same normalized market
-        # snapshot that the strategy bank evaluated.  This is metadata only; it
-        # carries no extra authority and cannot bypass Safety.
-        "indicator_groups": indicator_groups,
-        "decision_evidence": {
-            "version": "COMMIT9_5_DECISION_EVIDENCE_V1",
-            "selected_indicators": list(strategy.get("indicators") or []),
-            "functional_evidence": list(strategy.get("functional_evidence") or []),
-            "independent_families": list(strategy.get("independent_functional_families") or []),
-            "thesis_families": list(thesis.get("independent_support_families") or []),
-            "candidate_source": candidate_source,
-            "default_archetype_id": strategy.get("archetype_id"),
-            "default_specialization_key": strategy.get("specialization_key"),
+        "version":VERSION, "market":market, "operational_segment":segment,
+        "market_objective":market_objective_for(market,symbol),
+        "risk_class":risk_profile.get("risk_class"), "exit_profile":risk_profile.get("name"),
+        "risk_budget_multiplier":risk_profile.get("risk_budget_multiplier",1.0), "max_entry_wait_bars":risk_profile.get("max_entry_wait_bars"),
+        "symbol":_u(symbol), "timeframe":_u(timeframe),
+        "context":{"regime":regime,"volatility":vol_state,"timeframe_profile":tf_profile,"volatility_reasoning":vol_reason,"macro_reasoning":macro_reason,"research_reasoning":research_reason},
+        "multi_timeframe":dict(mtf_context or {}), "thesis":thesis, "default_strategy":strategy,
+        "indicator_groups":indicator_groups,
+        "decision_evidence":{
+            "version":"COMMIT17_4_DECISION_EVIDENCE_V2", "selected_indicators":list(strategy.get("indicators") or []),
+            "functional_evidence":list(strategy.get("functional_evidence") or []), "independent_families":list(strategy.get("independent_functional_families") or []),
+            "thesis_families":list(thesis.get("independent_support_families") or []), "candidate_source":candidate_source,
+            "default_archetype_id":strategy.get("archetype_id"), "default_specialization_key":strategy.get("specialization_key"),
         },
-        "selected_specialist_source": specialist_source,
-        "candidate_source": candidate_source,
-        "autonomous_thesis_min_quality": autonomous_min_quality,
-        "default_strategy_required": False,
-        "selected_research_prior": selected_prior,
-        "group_prior_advisory": dict(research_map.get(selected_action) or {}) if str((research_map.get(selected_action) or {}).get("state") or "") == "GROUP_PRIOR" else {},
-        "research_candidates": research_map,
-        "research_blocks_selected_action": blocked_by_research,
-        "candidate_action": selected_action if candidate_ready else "NO_OPERAR",
-        "candidate_ready": candidate_ready,
-        "official_cell": official,
-        "operational_segment": "MULTIASSET" if is_multiasset else market,
-        "mtf_usable": mtf_usable,
-        "mtf_gate_mode": mtf_gate_mode,
-        "candidate_blockers": candidate_blockers,
-        "mtf_complete": bool((mtf_context or {}).get("complete")),
-        "never_bypass_safety": True,
+        "selected_specialist_source":specialist_source, "candidate_source":candidate_source,
+        "autonomous_thesis_min_quality":round(autonomous_min_quality,2), "adaptive_quality_min":round(adaptive_quality_min,2),
+        "adaptive_margin_min":round(adaptive_margin_min,3), "default_strategy_required":False,
+        "selected_research_prior":selected_prior,
+        "group_prior_advisory":dict(research_map.get(selected_action) or {}) if str((research_map.get(selected_action) or {}).get("state") or "")=="GROUP_PRIOR" else {},
+        "research_candidates":research_map, "research_blocks_selected_action":hard_research,
+        "candidate_action":selected_action if candidate_ready else "NO_OPERAR", "candidate_ready":candidate_ready,
+        "official_cell":official, "mtf_usable":mtf_usable, "mtf_gate_mode":mtf_gate_mode, "candidate_blockers":blockers,
+        "mtf_complete":bool((mtf_context or {}).get("complete")),
+        "reasoning_policy":"OBJECTIVE_CONTEXT_VOLATILITY_MTF_STRATEGY_SPECIALISTS_EXECUTION_SAFETY_LEARNING",
+        "resource_policy":{"extra_network_calls":0,"extra_db_writes":0,"extra_llm_calls":0,"extra_workers":0},
+        "never_bypass_safety":True,
     }
 
-def moderator_candidate(operational: Mapping[str, Any], votes: Iterable[Mapping[str, Any]], market: Any) -> Dict[str, Any]:
-    """Return a thesis-first candidate without using a simple trader majority.
 
-    The candidate still needs at least one internal specialist to independently
-    support it. Strong opposite support does not flip direction; it downgrades.
+def moderator_candidate(operational: Mapping[str, Any], votes: Iterable[Mapping[str, Any]], market: Any) -> Dict[str, Any]:
+    """Thesis-first moderation: specialists challenge/confirm, never vote by majority.
+
+    Absence of a legacy directional vote is no longer an automatic veto when the
+    independent thesis is exceptionally strong. Strong contradictory specialists
+    still raise the execution bar or force PRECAUCION.
     """
-    action = canonical_action(operational.get("candidate_action"), _u(market))
+    action=canonical_action(operational.get("candidate_action"),_u(market))
     if action not in DIRECTIONAL_ACTIONS or not operational.get("candidate_ready"):
-        return {"use": False, "action": "NO_OPERAR", "reason": "THESIS_NOT_READY"}
-    same = 0; opposite = 0; caution = 0
-    desired = action_direction(action)
+        return {"use":False,"action":"NO_OPERAR","reason":"THESIS_NOT_READY"}
+    desired=action_direction(action); same=0; opposite=0; caution=0; same_strength=0.0; opposite_strength=0.0
     for vote in votes or []:
-        va = canonical_action(vote.get("accion_normalizada") or vote.get("accion") or vote.get("accion_original"), _u(market))
-        vd = action_direction(va)
-        conf = _f(vote.get("confianza_original") or vote.get("confianza"))
-        if vd == desired and conf >= 55: same += 1
-        elif vd in {"BULLISH","BEARISH"} and vd != desired and conf >= 65: opposite += 1
-        elif va in {"PRECAUCION","ESPERAR","NO_OPERAR"} and conf >= 70: caution += 1
-    if opposite >= 2:
-        return {"use": False, "action": "PRECAUCION", "reason": "SPECIALIST_CONTRADICTION", "same":same, "opposite":opposite, "caution":caution}
-    if same < 1:
-        return {"use": False, "action": "ESPERAR", "reason": "NO_INDEPENDENT_SPECIALIST_CONFIRMATION", "same":same, "opposite":opposite, "caution":caution}
-    thesis_quality = _f((operational.get("thesis") or {}).get("quality"))
-    strategy_quality = _f((operational.get("default_strategy") or {}).get("quality"))
-    source = str(operational.get("candidate_source") or "")
-    if source == "THESIS_AUTONOMOUS" or strategy_quality <= 0:
-        confidence_base = thesis_quality
-    else:
-        confidence_base = 0.60 * thesis_quality + 0.40 * strategy_quality
-    confidence = min(88.0, max(60.0, confidence_base))
-    return {"use": True, "action": action, "confidence": round(confidence,2), "reason":"THESIS_AND_SPECIALIST_ALIGNED", "candidate_source":source, "same":same, "opposite":opposite, "caution":caution}
+        va=canonical_action(vote.get("accion_normalizada") or vote.get("accion") or vote.get("accion_original"),_u(market)); vd=action_direction(va)
+        conf=_f(vote.get("confianza_original") or vote.get("confianza"))
+        if vd==desired and conf>=55: same+=1; same_strength+=conf
+        elif vd in {"BULLISH","BEARISH"} and vd!=desired and conf>=65: opposite+=1; opposite_strength+=conf
+        elif va in {"PRECAUCION","ESPERAR","NO_OPERAR"} and conf>=70: caution+=1
+    thesis=dict(operational.get("thesis") or {}); strategy=dict(operational.get("default_strategy") or {})
+    tq=_f(thesis.get("quality")); sq=_f(strategy.get("quality")); margin=_f(thesis.get("margin")); req_margin=_f(operational.get("adaptive_margin_min") or thesis.get("required_direction_margin"),1.0)
+    support=len(thesis.get("independent_support_families") or []); req_support=int(thesis.get("required_independent_families") or 4)
+    exceptional=bool(tq>=max(88.0,_f(operational.get("adaptive_quality_min"))+2.0) and margin>=req_margin+0.55 and support>=req_support and sq>=68.0)
+
+    if opposite>=3 or (opposite>=2 and opposite_strength > same_strength + 80 and not exceptional):
+        return {"use":False,"action":"PRECAUCION","reason":"MATERIAL_SPECIALIST_CONTRADICTION","same":same,"opposite":opposite,"caution":caution}
+    if same<1 and not exceptional:
+        return {"use":False,"action":"ESPERAR","reason":"SPECIALISTS_NOT_YET_CONFIRMING_STRONG_THESIS","same":same,"opposite":opposite,"caution":caution}
+
+    source=str(operational.get("candidate_source") or "")
+    confidence_base=tq if source=="THESIS_AUTONOMOUS" or sq<=0 else 0.62*tq+0.38*sq
+    if same<1: confidence_base-=5.0
+    if opposite: confidence_base-=min(8.0,3.0*opposite)
+    if caution>=2: confidence_base-=3.0
+    confidence=min(88.0,max(60.0,confidence_base))
+    reason="EXCEPTIONAL_THESIS_WITH_NON_DIRECTIONAL_SPECIALISTS" if same<1 else "THESIS_AND_SPECIALISTS_CONTEXTUALLY_ALIGNED"
+    return {"use":True,"action":action,"confidence":round(confidence,2),"reason":reason,"candidate_source":source,"same":same,"opposite":opposite,"caution":caution,"exceptional_thesis":exceptional}
 
 
 def execution_setup_guard(*, action: Any, levels: Mapping[str, Any] | None, setup_family: Any, market: Any, timeframe: Any) -> Dict[str, Any]:
@@ -1041,9 +1199,26 @@ def execution_setup_guard(*, action: Any, levels: Mapping[str, Any] | None, setu
     if family == "TREND_PULLBACK" and quality < (62 if _u(market)=="FUTURES" else 55):
         reasons.append("el retroceso no llega a una zona de entrada suficientemente defendible")
     if reasons:
-        final = "PRECAUCION" if geometry and _u(market)=="FUTURES" else "ESPERAR"
-        return {"applied": True, "action": final, "status":"SETUP_NOT_EXECUTABLE", "reasons":reasons, "original_action":action}
-    return {"applied": False, "action": action, "status":"SETUP_EXECUTABLE", "reasons":[]}
+        # Commit 17.4 FINAL — execution can wait, direction cannot be rewritten here.
+        # The thesis/market decision already exists before this helper.  Entry/SL/TP
+        # readiness is an execution state, never a second directional vote.
+        return {
+            "applied": True,
+            "action": action,
+            "status": "EXECUTION_PENDING",
+            "execution_ready": False,
+            "reasons": reasons,
+            "original_action": action,
+            "direction_preserved": True,
+        }
+    return {
+        "applied": False,
+        "action": action,
+        "status": "EXECUTION_READY",
+        "execution_ready": True,
+        "reasons": [],
+        "direction_preserved": True,
+    }
 
 
 _AUDIT = official_universe_audit()
