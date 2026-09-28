@@ -1,0 +1,293 @@
+=== COMMIT 17.5.7 QA ===
+UTC 2026-09-28T23:26:51Z
+
+$ python -m py_compile app.py execution_specialist_committees.py backtest_commit17_5_7_evidence.py
+OK
+
+$ python qa_commit17_5_6_execution_quality_visibility.py
+test_01_files_compile (__main__.Commit1756QA.test_01_files_compile) ... ok
+test_02_version_and_hard_guard_exported (__main__.Commit1756QA.test_02_version_and_hard_guard_exported) ... ok
+test_03_long_sl_on_strong_support_is_conflict (__main__.Commit1756QA.test_03_long_sl_on_strong_support_is_conflict) ... ok
+test_04_long_sl_beyond_support_is_clear (__main__.Commit1756QA.test_04_long_sl_beyond_support_is_clear) ... ok
+test_05_short_sl_on_strong_resistance_is_conflict (__main__.Commit1756QA.test_05_short_sl_on_strong_resistance_is_conflict) ... ok
+test_06_short_sl_beyond_resistance_is_clear (__main__.Commit1756QA.test_06_short_sl_beyond_resistance_is_clear) ... ok
+test_07_committee_filters_conflicting_stops_before_selection (__main__.Commit1756QA.test_07_committee_filters_conflicting_stops_before_selection) ... ok
+test_08_final_derivatives_geometry_has_same_hard_guard (__main__.Commit1756QA.test_08_final_derivatives_geometry_has_same_hard_guard) ... ok
+test_09_guard_error_is_fail_safe_not_fail_open (__main__.Commit1756QA.test_09_guard_error_is_fail_safe_not_fail_open) ... ok
+test_10_original_refinement_quality_bounds_remain (__main__.Commit1756QA.test_10_original_refinement_quality_bounds_remain) ... ok
+test_11_downstream_execution_setup_guard_still_participates (__main__.Commit1756QA.test_11_downstream_execution_setup_guard_still_participates) ... ok
+test_12_fast_lane_1h_uses_own_closed_router (__main__.Commit1756QA.test_12_fast_lane_1h_uses_own_closed_router) ... ok
+test_13_no_new_separate_daily_fast_lane_quota (__main__.Commit1756QA.test_13_no_new_separate_daily_fast_lane_quota) ... ok
+test_14_existing_global_resource_guard_is_preserved (__main__.Commit1756QA.test_14_existing_global_resource_guard_is_preserved) ... ok
+test_15_multiasset_active_is_not_hardcoded_empty (__main__.Commit1756QA.test_15_multiasset_active_is_not_hardcoded_empty) ... ok
+test_16_funnel_is_authenticated_and_cache_only (__main__.Commit1756QA.test_16_funnel_is_authenticated_and_cache_only) ... ok
+test_17_multiasset_vigency_respects_explicit_expiry (__main__.Commit1756QA.test_17_multiasset_vigency_respects_explicit_expiry) ... ok
+test_18_leverage_formulas_are_not_replaced_by_a_low_fixed_cap (__main__.Commit1756QA.test_18_leverage_formulas_are_not_replaced_by_a_low_fixed_cap) ... ok
+test_19_telegram_has_no_1756_quantity_cap_marker (__main__.Commit1756QA.test_19_telegram_has_no_1756_quantity_cap_marker) ... ok
+test_20_public_telemetry_contains_sl_conflict_without_internal_votes (__main__.Commit1756QA.test_20_public_telemetry_contains_sl_conflict_without_internal_votes) ... ok
+
+----------------------------------------------------------------------
+Ran 20 tests in 2.556s
+
+OK
+
+$ python qa_commit17_5_7_backtest_evidence.py
+test_01_files_compile (__main__.Commit1757QA.test_01_files_compile) ... ok
+test_02_committee_is_exact_1756_execution_engine (__main__.Commit1757QA.test_02_committee_is_exact_1756_execution_engine) ... ok
+test_03_spot_is_untouched (__main__.Commit1757QA.test_03_spot_is_untouched) ... ok
+test_04_x2_futures_becomes_analysis_only_without_inflation (__main__.Commit1757QA.test_04_x2_futures_becomes_analysis_only_without_inflation) ... ok
+test_05_x3_multiasset_becomes_analysis_only (__main__.Commit1757QA.test_05_x3_multiasset_becomes_analysis_only) ... ok
+test_06_x4_plus_is_not_downgraded (__main__.Commit1757QA.test_06_x4_plus_is_not_downgraded) ... ok
+test_07_entry_evidence_class_full_sequence (__main__.Commit1757QA.test_07_entry_evidence_class_full_sequence) ... ok
+test_08_entry_evidence_class_is_diagnostic_not_veto (__main__.Commit1757QA.test_08_entry_evidence_class_is_diagnostic_not_veto) ... ok
+test_09_product_floor_is_exactly_four_not_a_leverage_rewrite (__main__.Commit1757QA.test_09_product_floor_is_exactly_four_not_a_leverage_rewrite) ... ok
+test_10_policy_is_wired_after_final_futures_risk_layer (__main__.Commit1757QA.test_10_policy_is_wired_after_final_futures_risk_layer) ... ok
+test_11_multiasset_policy_runs_before_cache_and_telegram (__main__.Commit1757QA.test_11_multiasset_policy_runs_before_cache_and_telegram) ... ok
+test_12_no_signal_quantity_quota_added (__main__.Commit1757QA.test_12_no_signal_quantity_quota_added) ... ok
+test_13_1756_sl_semantic_guard_is_preserved (__main__.Commit1757QA.test_13_1756_sl_semantic_guard_is_preserved) ... ok
+test_14_policy_does_not_change_core_entry_sl_tp_thresholds (__main__.Commit1757QA.test_14_policy_does_not_change_core_entry_sl_tp_thresholds) ... ok
+
+----------------------------------------------------------------------
+Ran 14 tests in 0.416s
+
+OK
+
+$ python backtest_commit17_5_7_evidence.py
+{
+  "clean_logged_backtest": {
+    "filters": {
+      "valid_entry_sl_tp": true,
+      "risk_reward_between": [
+        1.0,
+        6.0
+      ],
+      "futures_timeframes": [
+        "30m",
+        "1h",
+        "2h",
+        "4h",
+        "12h",
+        "1D"
+      ],
+      "spot_timeframes": [
+        "4h",
+        "12h",
+        "1D",
+        "1W"
+      ],
+      "resolved_only_for_wr_expectancy": [
+        "tp_hit",
+        "sl_hit"
+      ]
+    },
+    "futures": {
+      "resolved": 346,
+      "tp": 77,
+      "sl": 269,
+      "wr_pct": 22.25,
+      "gross_expectancy_r_proxy": -0.1324,
+      "profit_factor_proxy": 0.83,
+      "avg_modeled_net_r": -0.2406,
+      "expired": 447,
+      "avg_mfe_r": 0.89,
+      "avg_mae_r": 0.825,
+      "by_timeframe": {
+        "30m": {
+          "resolved": 125,
+          "tp": 44,
+          "sl": 81,
+          "wr_pct": 35.2,
+          "gross_expectancy_r_proxy": 0.32,
+          "avg_modeled_net_r": 0.76,
+          "expired": 232,
+          "avg_mfe_r": 1.007,
+          "avg_mae_r": 0.722
+        },
+        "1h": {
+          "resolved": 120,
+          "tp": 11,
+          "sl": 109,
+          "wr_pct": 9.17,
+          "gross_expectancy_r_proxy": -0.642,
+          "avg_modeled_net_r": -0.907,
+          "expired": 113,
+          "avg_mfe_r": 0.859,
+          "avg_mae_r": 0.919
+        },
+        "2h": {
+          "resolved": 78,
+          "tp": 16,
+          "sl": 62,
+          "wr_pct": 20.51,
+          "gross_expectancy_r_proxy": -0.184,
+          "avg_modeled_net_r": -1.061,
+          "expired": 79,
+          "avg_mfe_r": 0.783,
+          "avg_mae_r": 0.837
+        },
+        "4h": {
+          "resolved": 23,
+          "tp": 6,
+          "sl": 17,
+          "wr_pct": 26.09,
+          "gross_expectancy_r_proxy": 0.244,
+          "avg_modeled_net_r": -0.044,
+          "expired": 23,
+          "avg_mfe_r": 0.778,
+          "avg_mae_r": 0.848
+        }
+      }
+    },
+    "spot": {
+      "resolved": 16,
+      "tp": 9,
+      "sl": 7,
+      "wr_pct": 56.25,
+      "gross_expectancy_r_proxy": 1.3656,
+      "profit_factor_proxy": 4.121,
+      "avg_modeled_net_r": null,
+      "expired": 6,
+      "avg_mfe_r": 0.712,
+      "avg_mae_r": 0.483,
+      "warning": "Sample is too small for a robust profitability conclusion and does not include a complete cost/rotation accounting model.",
+      "by_pair_timeframe": {
+        "PAXG-BTC|4h": {
+          "resolved": 7,
+          "tp": 5,
+          "sl": 2,
+          "wr_pct": 71.43,
+          "gross_expectancy_r_proxy": 2.167,
+          "profit_factor_proxy": 8.585,
+          "expired": 1
+        },
+        "BTC-USDT|1D": {
+          "resolved": 2,
+          "tp": 1,
+          "sl": 1,
+          "wr_pct": 50.0,
+          "gross_expectancy_r_proxy": 1.29,
+          "profit_factor_proxy": 3.58,
+          "expired": 0
+        },
+        "BTC-USDT|4h": {
+          "resolved": 2,
+          "tp": 0,
+          "sl": 2,
+          "wr_pct": 0.0,
+          "gross_expectancy_r_proxy": -1.0,
+          "profit_factor_proxy": 0.0,
+          "expired": 2
+        },
+        "PAXG-USDT|4h": {
+          "resolved": 2,
+          "tp": 1,
+          "sl": 1,
+          "wr_pct": 50.0,
+          "gross_expectancy_r_proxy": 0.815,
+          "profit_factor_proxy": 2.63,
+          "expired": 1
+        }
+      }
+    }
+  },
+  "stop_forensics": {
+    "futures_sl_hits_with_forensics": 521,
+    "wick_out": 22,
+    "reclaimed_entry_after_stop": 37,
+    "reclaimed_entry_after_stop_pct": 7.1,
+    "tp_reached_after_stop": 3,
+    "tp_reached_after_stop_pct": 0.58,
+    "possibly_tight": 13,
+    "false_invalidation_to_target": 3,
+    "avg_best_favorable_r_after_stop": 0.151,
+    "interpretation": "Rebound after SL exists but is a minority. Evidence does not support globally widening all stops."
+  },
+  "expiry_forensics": {
+    "futures_expired": 1146,
+    "avg_mfe_r": 0.41,
+    "avg_target_progress": 0.168,
+    "reached_1r": 169,
+    "reached_70pct_target": 63,
+    "reached_90pct_target": 19,
+    "interpretation": "Most expired trades did not approach TP. Evidence does not support globally shortening TP as the primary fix."
+  },
+  "multiasset_proxy": {
+    "production_history_available": false,
+    "source": "vivek-v-rao/OHLC-Vol prices_ohlc.csv",
+    "period": [
+      "2022-01-01",
+      "2026-04-15"
+    ],
+    "symbols": [
+      "SPY",
+      "QQQ",
+      "USO",
+      "GLD"
+    ],
+    "method": "Closed daily candle strict Structure proxy: confirmed 5x5 pivots, sweep rejection/BOS, next-open entry, structural invalidation plus 0.20 ATR buffer, nearest structural target, RR 1.8-4.5, 12-bar horizon. No volume/macro/session/order book/Strategy Bank. USO and GLD are proxies, not the exact CL/XAG contracts.",
+    "aggregate": {
+      "signals": 74,
+      "resolved": 59,
+      "tp": 10,
+      "sl": 49,
+      "expired": 15,
+      "wr_pct": 16.95,
+      "expectancy_r": -0.3714,
+      "profit_factor": 0.553,
+      "max_drawdown_r": 24.761,
+      "avg_mfe_r": 1.456,
+      "avg_mae_r": 1.687
+    },
+    "by_symbol": {
+      "SPY": {
+        "signals": 20,
+        "resolved": 16,
+        "tp": 5,
+        "sl": 11,
+        "expired": 4,
+        "wr_pct": 31.25,
+        "expectancy_r": 0.1119,
+        "profit_factor": 1.163,
+        "validation30_expectancy_r": -0.051,
+        "validation30_profit_factor": 0.936
+      },
+      "QQQ": {
+        "signals": 22,
+        "resolved": 21,
+        "tp": 2,
+        "sl": 19,
+        "expired": 1,
+        "wr_pct": 9.52,
+        "expectancy_r": -0.6244,
+        "profit_factor": 0.31,
+        "validation30_expectancy_r": -0.4345,
+        "validation30_profit_factor": 0.493
+      },
+      "USO": {
+        "signals": 19,
+        "resolved": 13,
+        "tp": 1,
+        "sl": 12,
+        "expired": 6,
+        "wr_pct": 7.69,
+        "expectancy_r": -0.5977,
+        "profit_factor": 0.352,
+        "validation30_expectancy_r": -1.0,
+        "validation30_profit_factor": 0.0
+      },
+      "GLD": {
+        "signals": 13,
+        "resolved": 9,
+        "tp": 2,
+        "sl": 7,
+        "expired": 4,
+        "wr_pct": 22.22,
+        "expectancy_r": -0.3133,
+        "profit_factor": 0.597,
+        "validation30_expectancy_r": -1.0,
+        "validation30_profit_factor": 0.0
+      }
+    },
+    "interpretation": "A generic structure/geometry recipe is not enough for Multi-Asset. This supports preserving asset-specific Strategy Bank, macro/session/volatility routing instead of copying crypto logic. It is not a profitability backtest of the production Multi-Asset engine."
+  }
+}

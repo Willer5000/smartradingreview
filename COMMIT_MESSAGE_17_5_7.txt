@@ -1,0 +1,8 @@
+Commit 17.5.7 - backtest evidence and derivative publication quality
+
+- preserve 17.5.6 Entry/SL/TP execution engine and SL reaction guard
+- add versioned Entry evidence diagnostics for future OOS cohorts
+- keep V6 leverage untouched; x1-x3 derivatives become ANALYSIS_ONLY
+- never inflate leverage or move Entry/SL/TP to pass publication
+- apply fail-safe to Futures, Multi-Asset, frontend lists and Telegram
+- include three-market backtest/audit and reproducible read-only SQL

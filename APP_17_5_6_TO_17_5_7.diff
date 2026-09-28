@@ -1,0 +1,257 @@
+--- /mnt/data/c1756/app.py	2026-09-28 23:05:49.565858248 +0000
++++ app.py	2026-09-28 23:25:21.161094768 +0000
+@@ -900,6 +900,18 @@
+                 or 'LEGACY_ENTRY'
+             ),
+ 
++            # 17.5.7: public-safe cohort stamp for future version-matched
++            # backtests. This is diagnostic evidence, never a probability.
++            'backtest_evidence_policy_version': str(
++                levels.get('backtest_evidence_policy_version', '') or ''
++            ),
++            'entry_evidence_class': str(
++                levels.get('entry_evidence_class', '') or ''
++            ),
++            'entry_evidence_probability_status': str(
++                levels.get('entry_evidence_probability_status', '') or ''
++            ),
++
+             'entry_smc_raw_score': _optional_float(
+                 levels.get(
+                     'entry_smc_raw_score'
+@@ -1017,6 +1029,12 @@
+                     ''
+                 )
+                 or ''
++            ),
++            'leverage': _optional_float(levels.get('leverage')),
++            'leverage_product_fit': bool(levels.get('leverage_product_fit', True)),
++            'sl_reaction_conflict': bool(levels.get('sl_reaction_conflict', False)),
++            'execution_refinement_version': str(
++                levels.get('execution_refinement_version', '') or ''
+             )
+         },
+ 
+@@ -32026,6 +32044,7 @@
+         for (symbol, tf), result in (cache.get('analysis') or {}).items():
+             if not result or not result.get('success'):
+                 continue
++            result = _apply_17_5_7_backtest_evidence_policy(result, 'futures')
+             decision = result.get('decision', {}) or {}
+             action = decision.get('action', 'NO_OPERAR')
+             if action not in ('LONG', 'SHORT'):
+@@ -34063,11 +34082,154 @@
+         'multiasset_strategy_bank': result.get('multiasset_strategy_bank'),
+     }
+ 
++# ============================================================================
++# COMMIT 17.5.7 — BACKTEST-EVIDENCE PUBLICATION POLICY
++# ============================================================================
++# Historical evidence (2026-08-21..2026-09-18) is NOT a version-matched replay
++# of 17.5.6.  It may therefore protect product/publication semantics, but it must
++# not silently retune Entry/SL/TP scores, Strategy Bank, Safety or leverage V6.
++#
++# One robust product-level finding is preserved here: low-leverage x1-x3
++# derivative signals were economically weak in the logged historical cohort and
++# the product objective explicitly rejects presenting x2/x3 as premium Futures.
++# The engine NEVER raises leverage to pass this gate.  Technical levels and the
++# leverage selected by V6 remain visible as ANALYSIS_ONLY.
++_BACKTEST_EVIDENCE_POLICY_VERSION = '17.5.7_BACKTEST_EVIDENCE_V1'
++_DERIVATIVE_PREMIUM_MIN_LEVERAGE = 4
++
++
++def _derivative_premium_leverage_ok(leverage):
++    try:
++        return int(float(leverage or 0)) >= int(_DERIVATIVE_PREMIUM_MIN_LEVERAGE)
++    except (TypeError, ValueError):
++        return False
++
++
++def _entry_evidence_class(levels):
++    """Public-safe diagnostic label; never a calibrated probability.
++
++    The historical counterfactual cohort favored liquidity/sweep/MSS/POI
++    execution over generic baseline execution, especially at 30m/1h/2h.
++    17.5.7 records that evidence class for future version-matched validation but
++    deliberately does NOT turn the old cohort into a new hard Entry threshold.
++    """
++    levels = levels or {}
++    try:
++        families = int(levels.get('entry_independent_confluence_families') or 0)
++    except (TypeError, ValueError):
++        families = 0
++    sweep = bool(levels.get('entry_sweep_confirmed'))
++    mss = bool(levels.get('entry_mss_bos_confirmed'))
++    displacement = bool(levels.get('entry_displacement_confirmed'))
++    liquidity = bool(levels.get('entry_liquidity_pool_near'))
++    source = str(levels.get('entry_source') or '').lower()
++    structural_source = any(token in source for token in (
++        'order block', 'fvg', 'liquidity', 'sweep', 'swing',
++        'soporte', 'resistencia', 'poc', 'value', 'fib',
++    ))
++    if sweep and (mss or displacement) and (liquidity or structural_source):
++        return 'LIQUIDITY_SWEEP_STRUCTURE_POI'
++    if families >= 2 or (mss and displacement) or structural_source:
++        return 'STRUCTURAL_CONFLUENCE'
++    return 'BASIC_TECHNICAL_EVIDENCE'
++
++
++def _apply_17_5_7_backtest_evidence_policy(result, market='futures'):
++    """Evidence-informed, fail-safe publication layer for derivatives.
++
++    Scope is intentionally narrow:
++      * does not change direction, Entry, SL, TP, R/R, Safety or leverage;
++      * stamps a public-safe Entry evidence class for future cohort validation;
++      * keeps technically safe x1-x3 derivative setups as ANALYSIS_ONLY instead
++        of inflating leverage merely to make them look profitable/premium.
++
++    Spot is returned unchanged.  Multi-Asset receives the same derivative
++    leverage product-fit rule after its asset-specific strategy/macro hook.
++    """
++    if not isinstance(result, dict):
++        return result
++    market = str(market or '').strip().lower()
++    if market not in ('futures', 'multiasset'):
++        return result
++
++    out = dict(result)
++    levels = dict(out.get('levels') or {})
++    decision = out.get('decision') or {}
++    action = str(
++        decision.get('action') if isinstance(decision, dict)
++        else decision
++    ).upper()
++
++    levels['backtest_evidence_policy_version'] = _BACKTEST_EVIDENCE_POLICY_VERSION
++    levels['entry_evidence_class'] = _entry_evidence_class(levels)
++    levels['entry_evidence_probability_status'] = 'DIAGNOSTIC_NOT_CALIBRATED'
++    levels['derivative_premium_min_leverage'] = int(_DERIVATIVE_PREMIUM_MIN_LEVERAGE)
++
++    try:
++        leverage = int(float(levels.get('leverage') or 0))
++    except (TypeError, ValueError):
++        leverage = 0
++    levels['leverage_product_fit'] = bool(_derivative_premium_leverage_ok(leverage))
++
++    publication = str(
++        levels.get('publication_status')
++        or out.get('publication_status')
++        or ('ANALYSIS_ONLY' if levels.get('is_rejected') else 'EXECUTABLE_SIGNAL')
++    ).upper()
++
++    if (
++        action in ('LONG', 'SHORT')
++        and publication == 'EXECUTABLE_SIGNAL'
++        and leverage > 0
++        and not _derivative_premium_leverage_ok(leverage)
++    ):
++        reason = (
++            f'Apalancamiento técnico {leverage}x: válido como análisis, pero '
++            f'por debajo del perfil premium mínimo '
++            f'{_DERIVATIVE_PREMIUM_MIN_LEVERAGE}x. '
++            'No se aumenta el leverage ni se mueve Entry/SL/TP para aprobarlo.'
++        )
++        previous = str(levels.get('rejected_reason') or '').strip()
++        levels['rejected_reason'] = (previous + '; ' + reason).strip('; ') if previous else reason
++        levels['is_rejected'] = True
++        levels['is_executable'] = False
++        levels['publication_status'] = 'ANALYSIS_ONLY'
++        levels['low_leverage_product_fit_gate'] = True
++        out['is_executable'] = False
++        out['publication_status'] = 'ANALYSIS_ONLY'
++        out['publication_eligible'] = False
++        out['rejected_reason'] = levels['rejected_reason']
++
++        gate = dict(out.get('futures_publication_gate') or {})
++        reasons = list(gate.get('reasons') or [])
++        codes = list(gate.get('reason_codes') or [])
++        if reason not in reasons:
++            reasons.append(reason)
++        if 'LOW_LEVERAGE_PRODUCT_FIT' not in codes:
++            codes.append('LOW_LEVERAGE_PRODUCT_FIT')
++        gate.update({
++            'eligible': False,
++            'tier': 'ANALYSIS_ONLY',
++            'reasons': reasons,
++            'reason_codes': codes,
++            'backtest_evidence_policy_version': _BACKTEST_EVIDENCE_POLICY_VERSION,
++            'minimum_premium_leverage': int(_DERIVATIVE_PREMIUM_MIN_LEVERAGE),
++            'leverage_was_not_increased': True,
++        })
++        out['futures_publication_gate'] = gate
++    else:
++        levels.setdefault('low_leverage_product_fit_gate', False)
++
++    out['levels'] = levels
++    return out
++
++
+ def _multiasset_is_executable(result):
+-    decision=(result or {}).get('decision') or {}; levels=(result or {}).get('levels') or {}
++    guarded = _apply_17_5_7_backtest_evidence_policy(result, 'multiasset')
++    decision=(guarded or {}).get('decision') or {}; levels=(guarded or {}).get('levels') or {}
+     return (str(decision.get('action') or '').upper() in ('LONG','SHORT') and
+-            str(levels.get('publication_status') or result.get('publication_status') or '').upper() == 'EXECUTABLE_SIGNAL' and
+-            result.get('is_executable', levels.get('is_executable', True)) is not False)
++            str(levels.get('publication_status') or guarded.get('publication_status') or '').upper() == 'EXECUTABLE_SIGNAL' and
++            guarded.get('is_executable', levels.get('is_executable', True)) is not False)
+ 
+ def _parse_utc_iso(value):
+     if not value:
+@@ -34198,6 +34360,7 @@
+         result=engine.analyze_multiasset_market(symbol,timeframe,closed_candle_only=True)
+         if isinstance(result,dict):
+             result.setdefault('symbol',symbol); result.setdefault('timeframe',timeframe)
++            result=_apply_17_5_7_backtest_evidence_policy(result,'multiasset')
+             if result.get('success') is not False:
+                 _multiasset_cache_result(symbol,timeframe,result)
+             return result
+@@ -35827,6 +35990,7 @@
+             result = _apply_profitability_router(result, symbol, timeframe)
+             result = _apply_96_futures_risk_policy(result, symbol, timeframe)
+             result = _apply_36s_futures_ai_control(result, symbol, timeframe)
++            result = _apply_17_5_7_backtest_evidence_policy(result, 'futures')
+             result = _enrich_futures_public_message(result)
+             ui_result = _compact_futures_ui_result(result)
+             ui_result = _compact_fast_futures_ui_result(
+@@ -37544,6 +37708,9 @@
+                     )
+                 )
+ 
++            # 17.5.7 applies on every returned closed-candle snapshot, including
++            # a reused identity restored after deploy. It can only downgrade.
++            r = _apply_17_5_7_backtest_evidence_policy(r, 'futures')
+             r = _enrich_futures_public_message(r)
+ 
+             # Hotfix 14.7: ReviewTrader already persisted the rich research
+@@ -39287,6 +39454,9 @@
+                 if not _leverage_in_valid_range(leverage, tf):
+                     filter_stats['leverage_out_of_range'] += 1
+                     continue
++                if not _derivative_premium_leverage_ok(leverage):
++                    filter_stats['leverage_out_of_range'] += 1
++                    continue
+             except Exception:
+                 pass
+ 
+@@ -39724,6 +39894,11 @@
+                     ] += 1
+                 
+                     continue
++                if not _derivative_premium_leverage_ok(leverage):
++                    filter_stats[
++                        'leverage_out_of_range'
++                    ] += 1
++                    continue
+             except Exception:
+                 pass
+             
+@@ -41936,6 +42111,8 @@
+     """Envía una confirmación oficial; nunca una hipótesis intrabar/manual."""
+     signal = signal or {}
+     market = str(market or '').strip().lower()
++    if market in ('futures', 'multiasset'):
++        signal = _apply_17_5_7_backtest_evidence_policy(signal, market)
+     symbol = str(signal.get('symbol') or '').upper().replace('/', '-')
+     timeframe = str(signal.get('timeframe') or '')
+     decision = signal.get('decision') or {}

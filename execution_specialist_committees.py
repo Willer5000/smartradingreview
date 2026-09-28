@@ -20,7 +20,7 @@ from math import isfinite, sqrt
 from statistics import median
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-VERSION = "COMMIT17_5_4_ADMISSIBLE_EXECUTION_REFINEMENT_V1"
+VERSION = "COMMIT17_5_6_EXECUTION_QUALITY_VISIBILITY_V1"
 
 MULTI_ASSET_CLASS = {
     "SPY-USDT": "US_INDEX", "QQQ-USDT": "US_INDEX",
@@ -509,6 +509,75 @@ def _cluster_evidence(candidate: Dict[str, Any], universe: List[Dict[str, Any]],
     return len({f for f in families if f}), min(6.0, strength)
 
 
+def evaluate_sl_reaction_conflict(*, structure: Dict[str, Any], direction: str,
+                                  entry: float, stop_loss: float, atr: float) -> Dict[str, Any]:
+    """Hard semantic guard: a stop cannot sit inside a strong same-direction reaction zone.
+
+    The rule is intentionally local-only and uses the same already-loaded structural
+    candidates as Entry.  It does not move the stop, invent a new ATR target or create
+    a trade.  It only identifies the contradiction "this is still a plausible reaction
+    zone for my thesis, therefore it is not yet a clean invalidation point".
+
+    A stop is considered clear when it is sufficiently beyond the reaction cluster on
+    the invalidation side.  The clearance radius scales with ATR and price so the rule
+    is not tied to one symbol or timeframe.
+    """
+    direction = str(direction or "").lower()
+    entry = _f(entry, 0.0)
+    stop_loss = _f(stop_loss, 0.0)
+    atr = _f(atr, 0.0)
+    if direction not in {"long", "short"} or min(entry, stop_loss, atr) <= 0:
+        return {"conflict": False, "reason": "INSUFFICIENT_INPUT"}
+    if not _is_correct_side(stop_loss, entry, direction, "sl"):
+        return {"conflict": True, "reason": "SL_WRONG_SIDE", "level": entry,
+                "source": "Entry", "distance_atr": 0.0}
+
+    reaction_universe = _collect_entry_candidates(_execution_structure(_d(structure)), direction, entry)
+    best = None
+    for lvl in reaction_universe:
+        lp = _f(lvl.get("price"), 0.0)
+        if lp <= 0:
+            continue
+        # Only reaction anchors located on the actual invalidation side matter.
+        if direction == "long" and lp >= entry:
+            continue
+        if direction == "short" and lp <= entry:
+            continue
+        fams, strength = _cluster_evidence(lvl, reaction_universe, atr)
+        family = str(lvl.get("family") or "")
+        explicit_poi = family in {"smc_poi", "swing", "structure", "value", "dynamic_value", "liquidity"}
+        strong = (fams >= 2 and strength >= 3.0) or strength >= 4.5 or (explicit_poi and strength >= 3.0)
+        if not strong:
+            continue
+
+        # A valid stop must be beyond, not on top of, the reaction cluster.
+        clearance = max(atr * (0.12 + 0.02 * min(fams, 4)), abs(lp) * 0.0006)
+        if direction == "long":
+            inside = stop_loss >= (lp - clearance)
+            signed_clearance = (lp - stop_loss) / max(atr, 1e-12)
+        else:
+            inside = stop_loss <= (lp + clearance)
+            signed_clearance = (stop_loss - lp) / max(atr, 1e-12)
+        if not inside:
+            continue
+
+        distance_atr = abs(stop_loss - lp) / max(atr, 1e-12)
+        row = {
+            "conflict": True,
+            "reason": "SL_INSIDE_STRONG_REACTION_ZONE",
+            "level": round(lp, 12),
+            "source": str(lvl.get("source") or family or "reaction"),
+            "families": int(fams),
+            "strength": round(float(strength), 3),
+            "distance_atr": round(distance_atr, 4),
+            "required_clearance_atr": round(clearance / max(atr, 1e-12), 4),
+            "signed_clearance_atr": round(signed_clearance, 4),
+        }
+        if best is None or row["distance_atr"] < best["distance_atr"]:
+            best = row
+    return best or {"conflict": False, "reason": "CLEAR_INVALIDATION"}
+
+
 def _strategy_family(setup_family: Any) -> str:
     text = str(setup_family or "").upper()
     # Commit 17.3: explicit generic families first so a structure reversal is
@@ -643,6 +712,11 @@ def _sl_specialists(candidate, universe, *, direction, entry, tp_hint, atr,
         if abs(p - lp) <= radius and st >= 3.0:
             collision -= min(62.0, 16.0 + st * 7.0 + fams * 5.0)
     collision = _clip(collision)
+    hard_conflict = evaluate_sl_reaction_conflict(
+        structure=structure, direction=direction, entry=entry, stop_loss=p, atr=atr
+    )
+    if hard_conflict.get("conflict"):
+        collision = 0.0
 
     # Liquidity/stop-hunt specialist: just beyond swing/liquidity is preferred
     # over exactly on it, but does not demand a universal distance.
@@ -1068,6 +1142,7 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
     # CPU/RAM deterministic and tiny.  No I/O is introduced.
     best_combo: Optional[Dict[str, Any]] = None
     admissibility_rejections = 0
+    sl_reaction_rejections = 0
     entry_limit = min(7, len(entry_ranked))
 
     for entry_rank, entry_row in enumerate(entry_ranked[:entry_limit]):
@@ -1083,6 +1158,21 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
             sl_candidates, structure=structure, direction=direction, entry=entry_price,
             atr=atr, activity=_activity,
         )
+        # 17.5.6: score cannot compensate a semantic contradiction.  A stop
+        # that still sits inside a strong reaction zone for the thesis is not
+        # a valid invalidation candidate.  Keep the baseline benchmark for
+        # comparison, but never select a conflicting SL as the refined winner.
+        filtered_sl_candidates = []
+        for _sl_row in sl_candidates:
+            _sl_check = evaluate_sl_reaction_conflict(
+                structure=structure, direction=direction, entry=entry_price,
+                stop_loss=_f(_sl_row.get("price"), 0.0), atr=atr,
+            )
+            if _sl_check.get("conflict"):
+                sl_reaction_rejections += 1
+                continue
+            filtered_sl_candidates.append(_sl_row)
+        sl_candidates = filtered_sl_candidates
         sl_ranked = _rank_candidates(
             sl_candidates,
             lambda c: _sl_specialists(
@@ -1202,6 +1292,7 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
             "version": VERSION,
             "fallback_to_baseline": True,
             "admissibility_rejections": admissibility_rejections,
+            "sl_reaction_rejections": sl_reaction_rejections,
         }
 
     entry_row = best_combo["entry_committee"]
@@ -1214,6 +1305,7 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
     return {
         "success": True,
         "admissibility_rejections": admissibility_rejections,
+        "sl_reaction_rejections": sl_reaction_rejections,
         "version": VERSION,
         "market_type": market,
         "entry": best_combo["entry"],

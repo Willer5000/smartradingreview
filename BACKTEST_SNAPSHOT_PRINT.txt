@@ -1,0 +1,238 @@
+{
+  "clean_logged_backtest": {
+    "filters": {
+      "valid_entry_sl_tp": true,
+      "risk_reward_between": [
+        1.0,
+        6.0
+      ],
+      "futures_timeframes": [
+        "30m",
+        "1h",
+        "2h",
+        "4h",
+        "12h",
+        "1D"
+      ],
+      "spot_timeframes": [
+        "4h",
+        "12h",
+        "1D",
+        "1W"
+      ],
+      "resolved_only_for_wr_expectancy": [
+        "tp_hit",
+        "sl_hit"
+      ]
+    },
+    "futures": {
+      "resolved": 346,
+      "tp": 77,
+      "sl": 269,
+      "wr_pct": 22.25,
+      "gross_expectancy_r_proxy": -0.1324,
+      "profit_factor_proxy": 0.83,
+      "avg_modeled_net_r": -0.2406,
+      "expired": 447,
+      "avg_mfe_r": 0.89,
+      "avg_mae_r": 0.825,
+      "by_timeframe": {
+        "30m": {
+          "resolved": 125,
+          "tp": 44,
+          "sl": 81,
+          "wr_pct": 35.2,
+          "gross_expectancy_r_proxy": 0.32,
+          "avg_modeled_net_r": 0.76,
+          "expired": 232,
+          "avg_mfe_r": 1.007,
+          "avg_mae_r": 0.722
+        },
+        "1h": {
+          "resolved": 120,
+          "tp": 11,
+          "sl": 109,
+          "wr_pct": 9.17,
+          "gross_expectancy_r_proxy": -0.642,
+          "avg_modeled_net_r": -0.907,
+          "expired": 113,
+          "avg_mfe_r": 0.859,
+          "avg_mae_r": 0.919
+        },
+        "2h": {
+          "resolved": 78,
+          "tp": 16,
+          "sl": 62,
+          "wr_pct": 20.51,
+          "gross_expectancy_r_proxy": -0.184,
+          "avg_modeled_net_r": -1.061,
+          "expired": 79,
+          "avg_mfe_r": 0.783,
+          "avg_mae_r": 0.837
+        },
+        "4h": {
+          "resolved": 23,
+          "tp": 6,
+          "sl": 17,
+          "wr_pct": 26.09,
+          "gross_expectancy_r_proxy": 0.244,
+          "avg_modeled_net_r": -0.044,
+          "expired": 23,
+          "avg_mfe_r": 0.778,
+          "avg_mae_r": 0.848
+        }
+      }
+    },
+    "spot": {
+      "resolved": 16,
+      "tp": 9,
+      "sl": 7,
+      "wr_pct": 56.25,
+      "gross_expectancy_r_proxy": 1.3656,
+      "profit_factor_proxy": 4.121,
+      "avg_modeled_net_r": null,
+      "expired": 6,
+      "avg_mfe_r": 0.712,
+      "avg_mae_r": 0.483,
+      "warning": "Sample is too small for a robust profitability conclusion and does not include a complete cost/rotation accounting model.",
+      "by_pair_timeframe": {
+        "PAXG-BTC|4h": {
+          "resolved": 7,
+          "tp": 5,
+          "sl": 2,
+          "wr_pct": 71.43,
+          "gross_expectancy_r_proxy": 2.167,
+          "profit_factor_proxy": 8.585,
+          "expired": 1
+        },
+        "BTC-USDT|1D": {
+          "resolved": 2,
+          "tp": 1,
+          "sl": 1,
+          "wr_pct": 50.0,
+          "gross_expectancy_r_proxy": 1.29,
+          "profit_factor_proxy": 3.58,
+          "expired": 0
+        },
+        "BTC-USDT|4h": {
+          "resolved": 2,
+          "tp": 0,
+          "sl": 2,
+          "wr_pct": 0.0,
+          "gross_expectancy_r_proxy": -1.0,
+          "profit_factor_proxy": 0.0,
+          "expired": 2
+        },
+        "PAXG-USDT|4h": {
+          "resolved": 2,
+          "tp": 1,
+          "sl": 1,
+          "wr_pct": 50.0,
+          "gross_expectancy_r_proxy": 0.815,
+          "profit_factor_proxy": 2.63,
+          "expired": 1
+        }
+      }
+    }
+  },
+  "stop_forensics": {
+    "futures_sl_hits_with_forensics": 521,
+    "wick_out": 22,
+    "reclaimed_entry_after_stop": 37,
+    "reclaimed_entry_after_stop_pct": 7.1,
+    "tp_reached_after_stop": 3,
+    "tp_reached_after_stop_pct": 0.58,
+    "possibly_tight": 13,
+    "false_invalidation_to_target": 3,
+    "avg_best_favorable_r_after_stop": 0.151,
+    "interpretation": "Rebound after SL exists but is a minority. Evidence does not support globally widening all stops."
+  },
+  "expiry_forensics": {
+    "futures_expired": 1146,
+    "avg_mfe_r": 0.41,
+    "avg_target_progress": 0.168,
+    "reached_1r": 169,
+    "reached_70pct_target": 63,
+    "reached_90pct_target": 19,
+    "interpretation": "Most expired trades did not approach TP. Evidence does not support globally shortening TP as the primary fix."
+  },
+  "multiasset_proxy": {
+    "production_history_available": false,
+    "source": "vivek-v-rao/OHLC-Vol prices_ohlc.csv",
+    "period": [
+      "2022-01-01",
+      "2026-04-15"
+    ],
+    "symbols": [
+      "SPY",
+      "QQQ",
+      "USO",
+      "GLD"
+    ],
+    "method": "Closed daily candle strict Structure proxy: confirmed 5x5 pivots, sweep rejection/BOS, next-open entry, structural invalidation plus 0.20 ATR buffer, nearest structural target, RR 1.8-4.5, 12-bar horizon. No volume/macro/session/order book/Strategy Bank. USO and GLD are proxies, not the exact CL/XAG contracts.",
+    "aggregate": {
+      "signals": 74,
+      "resolved": 59,
+      "tp": 10,
+      "sl": 49,
+      "expired": 15,
+      "wr_pct": 16.95,
+      "expectancy_r": -0.3714,
+      "profit_factor": 0.553,
+      "max_drawdown_r": 24.761,
+      "avg_mfe_r": 1.456,
+      "avg_mae_r": 1.687
+    },
+    "by_symbol": {
+      "SPY": {
+        "signals": 20,
+        "resolved": 16,
+        "tp": 5,
+        "sl": 11,
+        "expired": 4,
+        "wr_pct": 31.25,
+        "expectancy_r": 0.1119,
+        "profit_factor": 1.163,
+        "validation30_expectancy_r": -0.051,
+        "validation30_profit_factor": 0.936
+      },
+      "QQQ": {
+        "signals": 22,
+        "resolved": 21,
+        "tp": 2,
+        "sl": 19,
+        "expired": 1,
+        "wr_pct": 9.52,
+        "expectancy_r": -0.6244,
+        "profit_factor": 0.31,
+        "validation30_expectancy_r": -0.4345,
+        "validation30_profit_factor": 0.493
+      },
+      "USO": {
+        "signals": 19,
+        "resolved": 13,
+        "tp": 1,
+        "sl": 12,
+        "expired": 6,
+        "wr_pct": 7.69,
+        "expectancy_r": -0.5977,
+        "profit_factor": 0.352,
+        "validation30_expectancy_r": -1.0,
+        "validation30_profit_factor": 0.0
+      },
+      "GLD": {
+        "signals": 13,
+        "resolved": 9,
+        "tp": 2,
+        "sl": 7,
+        "expired": 4,
+        "wr_pct": 22.22,
+        "expectancy_r": -0.3133,
+        "profit_factor": 0.597,
+        "validation30_expectancy_r": -1.0,
+        "validation30_profit_factor": 0.0
+      }
+    },
+    "interpretation": "A generic structure/geometry recipe is not enough for Multi-Asset. This supports preserving asset-specific Strategy Bank, macro/session/volatility routing instead of copying crypto logic. It is not a profitability backtest of the production Multi-Asset engine."
+  }
+}
