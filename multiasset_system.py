@@ -66,24 +66,28 @@ MULTIASSET_STRATEGY_BANK = {
     'US_INDEX': [
         'SWEEP_MSS_POI', 'VWAP_SESSION_PULLBACK', 'BREAKOUT_RETEST',
         'COMPRESSION_EXPANSION', 'TREND_PULLBACK', 'POST_MACRO_CONFIRMATION',
-        'MEAN_REVERSION_SELECTIVE',
+        'MEAN_REVERSION_SELECTIVE', 'MOMENTUM_CONTINUATION', 'STRUCTURE_REVERSAL',
     ],
     'ENERGY': [
         'SWEEP_MSS_POI', 'TREND_PULLBACK', 'BREAKOUT_RETEST',
         'COMPRESSION_EXPANSION', 'POST_EVENT_CONFIRMATION',
-        'VOLATILITY_RETEST',
+        'VOLATILITY_RETEST', 'MEAN_REVERSION_SELECTIVE',
+        'MOMENTUM_CONTINUATION', 'STRUCTURE_REVERSAL',
     ],
     'INDUSTRIAL_METAL': [
         'SWEEP_MSS_POI', 'TREND_PULLBACK', 'BREAKOUT_RETEST',
-        'COMPRESSION_EXPANSION', 'MACRO_TREND_CONFIRMATION',
+        'COMPRESSION_EXPANSION', 'MACRO_TREND_CONFIRMATION', 'MEAN_REVERSION_SELECTIVE',
+        'MOMENTUM_CONTINUATION', 'STRUCTURE_REVERSAL',
     ],
     'PRECIOUS_METAL': [
         'SWEEP_MSS_POI', 'TREND_PULLBACK', 'MEAN_REVERSION_SELECTIVE',
-        'BREAKOUT_RETEST', 'RATES_USD_CONFIRMATION',
+        'BREAKOUT_RETEST', 'RATES_USD_CONFIRMATION', 'COMPRESSION_EXPANSION',
+        'MOMENTUM_CONTINUATION', 'STRUCTURE_REVERSAL',
     ],
     'CHINA_INDEX': [
         'SWEEP_MSS_POI', 'TREND_PULLBACK', 'BREAKOUT_RETEST',
         'COMPRESSION_EXPANSION', 'ASIA_SESSION_RETEST', 'MACRO_TREND_CONFIRMATION',
+        'MEAN_REVERSION_SELECTIVE', 'MOMENTUM_CONTINUATION', 'STRUCTURE_REVERSAL',
     ],
 }
 SPECIALIST_BY_CLASS = {
@@ -185,17 +189,17 @@ def _strategy_context(meta: Dict, timeframe: str, result: Dict) -> Dict:
     families=list(MULTIASSET_STRATEGY_BANK.get(meta['asset_class']) or [])
     preferred=[]
     if regime == 'TRENDING':
-        preferred += [x for x in families if x in ('TREND_PULLBACK','SWEEP_MSS_POI','BREAKOUT_RETEST','VWAP_SESSION_PULLBACK','MACRO_TREND_CONFIRMATION')]
+        preferred += [x for x in families if x in ('MOMENTUM_CONTINUATION','TREND_PULLBACK','SWEEP_MSS_POI','BREAKOUT_RETEST','VWAP_SESSION_PULLBACK','MACRO_TREND_CONFIRMATION')]
     elif regime == 'RANGING':
         preferred += [x for x in families if x in ('MEAN_REVERSION_SELECTIVE','SWEEP_MSS_POI','COMPRESSION_EXPANSION')]
     else:
-        preferred += [x for x in families if x in ('SWEEP_MSS_POI','COMPRESSION_EXPANSION','BREAKOUT_RETEST')]
+        preferred += [x for x in families if x in ('STRUCTURE_REVERSAL','SWEEP_MSS_POI','COMPRESSION_EXPANSION','BREAKOUT_RETEST')]
     if volatility == 'HIGH':
-        preferred += [x for x in families if x in ('VOLATILITY_RETEST','POST_EVENT_CONFIRMATION','POST_MACRO_CONFIRMATION')]
+        preferred += [x for x in families if x in ('MOMENTUM_CONTINUATION','COMPRESSION_EXPANSION','VOLATILITY_RETEST','POST_EVENT_CONFIRMATION','POST_MACRO_CONFIRMATION')]
     # Preserve order, no strategy is promoted by name alone; ReviewTrader still governs authority.
     preferred=list(dict.fromkeys(preferred))[:4]
     return {
-        'bank_version':'MULTI_BANK_V1',
+        'bank_version':'MULTI_BANK_V17_3',
         'asset_class':meta['asset_class'],
         'symbol':meta['code'], 'timeframe':timeframe,
         'regime':regime, 'volatility_regime':volatility,
@@ -379,6 +383,13 @@ def _route_strategy_family(result: Dict, strategy: Dict, macro: Dict) -> Dict:
             score += 18 if ('BREAKOUT' in blob or 'RUPTURA' in blob) else 0; score += 8 if ('RETEST' in blob or 'RETROCESO' in blob) else 0
         elif family == 'COMPRESSION_EXPANSION':
             score += 15 if ('SQUEEZE' in blob or 'COMPRESSION' in blob or 'COMPRESI' in blob) else 0; score += 8 if strategy.get('volatility_regime') == 'HIGH' else 0
+        elif family == 'MOMENTUM_CONTINUATION':
+            score += 18 if strategy.get('regime') == 'TRENDING' else 0
+            score += 10 if strategy.get('volatility_regime') == 'HIGH' else 0
+            score += 8 if ('MOMENTUM' in blob or 'MACD' in blob or 'ADX' in blob or 'VOLUME' in blob or 'VOLUMEN' in blob) else 0
+        elif family == 'STRUCTURE_REVERSAL':
+            score += 16 if ('MSS' in blob or 'BOS' in blob or 'STRUCTURE' in blob or 'ESTRUCTURA' in blob) else 0
+            score += 10 if ('DIVERGEN' in blob or 'REVERS' in blob or 'ORDER_BLOCK' in blob or 'FVG' in blob) else 0
         elif family == 'MEAN_REVERSION_SELECTIVE':
             score += 18 if strategy.get('regime') == 'RANGING' else 0; score += 8 if ('RSI' in blob or 'BOLLINGER' in blob) else 0
         elif family in ('POST_EVENT_CONFIRMATION','POST_MACRO_CONFIRMATION'):

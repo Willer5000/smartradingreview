@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-VERSION = "RC9_7_THESIS_CONTINGENCY_RESILIENCE_V1"
+VERSION = "COMMIT17_3_OPPORTUNITY_COVERAGE_V1"
 
 DIRECTIONAL_ACTIONS = {"LONG", "SHORT", "COMPRA_SPOT", "VENTA_SPOT"}
 NON_DIRECTIONAL_ACTIONS = {"ESPERAR", "PRECAUCION", "NO_OPERAR"}
@@ -452,6 +452,7 @@ def build_independent_thesis(*, layers: Mapping[str, Any], mtf_context: Mapping[
     momentum = dict(layers.get("momentum") or {})
     volume = dict(layers.get("volume") or {})
     structure = dict(layers.get("structure") or {})
+    volatility = dict(layers.get("volatility") or {})
     macro = dict(layers.get("macro_context") or {})
     liquidation = dict(layers.get("liquidation") or {})
 
@@ -515,6 +516,32 @@ def build_independent_thesis(*, layers: Mapping[str, Any], mtf_context: Mapping[
     elif ratio >= 1.2 and vol_score: vol_score = 0.85 if vol_score > 0 else -0.85
     add_family("volume", vol_score, f"volumen {ratio:.2f}x; OBV {obv.lower() if obv!='NEUTRAL' else 'neutral'}", 0.9)
 
+    # Commit 17.3 — volatility expansion is a separate *bounded* evidence family.
+    # It closes the accidental HIGH-risk 5-of-5 dependency on structure without
+    # lowering the required family count.  It cannot create direction by itself:
+    # only an expanding envelope with price clearly on one side contributes.
+    vol_ratio = _f(volatility.get("volatility_ratio"), 1.0)
+    bb_width = _f(volatility.get("bb_width"), 0.0)
+    bb_width_prev = _f(volatility.get("bb_width_prev"), 0.0)
+    bb_position = _f(volatility.get("bb_position"), 0.5)
+    squeeze_on = bool(volatility.get("squeeze_on"))
+    operable = bool(volatility.get("operability", True))
+    width_expanding = bool(
+        (vol_ratio >= 1.15)
+        or (bb_width_prev > 0 and bb_width >= bb_width_prev * 1.10)
+    )
+    expansion_score = 0.0
+    if operable and width_expanding and not squeeze_on:
+        if bb_position >= 0.72:
+            expansion_score = 0.55 if vol_ratio < 1.50 else 0.65
+        elif bb_position <= 0.28:
+            expansion_score = -0.55 if vol_ratio < 1.50 else -0.65
+    add_family(
+        "expansion", expansion_score,
+        f"expansión vol {vol_ratio:.2f}x; BB pos {bb_position:.2f}; ancho {bb_width:.2f}/{bb_width_prev:.2f}",
+        0.75,
+    )
+
     # Multi-timeframe is one independent family.
     mtf_dir = _norm_direction(mtf_context.get("dominant_direction"))
     mtf_alignment = _u(mtf_context.get("alignment"))
@@ -576,7 +603,7 @@ def build_independent_thesis(*, layers: Mapping[str, Any], mtf_context: Mapping[
         "timeframe": _u(timeframe),
         "required_independent_families": min_families,
         "required_direction_margin": round(margin_required, 3),
-        "anti_overfit_rule": "ONE_REPRESENTATIVE_EFFECT_PER_CORRELATED_FAMILY",
+        "anti_overfit_rule": "ONE_REPRESENTATIVE_EFFECT_PER_CORRELATED_FAMILY; HIGH_KEEPS_5_SUPPORTS_FROM_A_BROADER_INDEPENDENT_SET",
     }
 
 
@@ -861,6 +888,20 @@ def execution_setup_guard(*, action: Any, levels: Mapping[str, Any] | None, setu
         structural = any(token in source.lower() for token in ("order block", "fvg", "support", "resistance", "poc", "fibonacci", "retest"))
         if not structural and not (mss or displacement):
             reasons.append("la ruptura todavía no tiene retest o zona estructural suficientemente definida")
+    if family == "MOMENTUM_CONTINUATION":
+        structural = any(token in source.lower() for token in ("order block", "fvg", "support", "resistance", "vwap", "poc", "swing", "retest"))
+        if quality < (64 if _u(market)=="FUTURES" else 56):
+            reasons.append("la continuación de momentum aún no ofrece una zona de reacción suficientemente defendible")
+        elif not structural and not displacement:
+            reasons.append("la continuación tiene impulso, pero todavía no ofrece micro-retest/POI para entrar sin perseguir precio")
+    if family == "COMPRESSION_EXPANSION":
+        structural = any(token in source.lower() for token in ("fvg", "support", "resistance", "vwap", "poc", "retest", "swing"))
+        if not structural and not (mss or displacement):
+            reasons.append("la expansión de volatilidad todavía no tiene liberación y zona de reacción defendible")
+    if family == "STRUCTURE_REVERSAL":
+        structural = any(token in source.lower() for token in ("order block", "fvg", "support", "resistance", "swing", "fibonacci"))
+        if not (mss or structural):
+            reasons.append("la reversión de estructura todavía no confirma invalidación/reacción suficiente")
     if family == "TREND_PULLBACK" and quality < (62 if _u(market)=="FUTURES" else 55):
         reasons.append("el retroceso no llega a una zona de entrada suficientemente defendible")
     if reasons:

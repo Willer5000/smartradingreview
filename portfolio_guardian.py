@@ -6718,6 +6718,9 @@ class PortfolioGuardian:
             'scale_in_rr': None,
             'progress_r': 0.0,
             'tp_progress_ratio': 0.0,
+            'mfe_r_seen': 0.0,
+            'giveback_r': 0.0,
+            'profit_lock_triggered': False,
             'momentum_with_position': False,
             'trade_state': 'HEALTHY',
             'management_reason': (
@@ -6766,6 +6769,10 @@ class PortfolioGuardian:
 
             progress_r = favorable_abs / risk_abs
             tp_progress_ratio = favorable_abs / reward_abs
+            risk_pct = (risk_abs / max(entry, 1e-12)) * 100.0
+            mfe_r_seen = max(0.0, float(mfe_pct or 0.0) / max(risk_pct, 1e-12))
+            giveback_r = max(0.0, mfe_r_seen - progress_r)
+            profit_lock_triggered = False
 
             # Invalidación tiene prioridad. El tiempo nunca basta por sí solo.
             if thesis_invalidated:
@@ -6775,6 +6782,9 @@ class PortfolioGuardian:
                     'trade_state': 'INVALIDATED',
                     'progress_r': round(progress_r, 3),
                     'tp_progress_ratio': round(tp_progress_ratio, 3),
+                    'mfe_r_seen': round(mfe_r_seen, 3),
+                    'giveback_r': round(giveback_r, 3),
+                    'profit_lock_triggered': False,
                     'momentum_with_position': bool(momentum_with_position),
                     'management_reason': (
                         'La tesis técnica quedó invalidada por estructura '
@@ -6792,6 +6802,9 @@ class PortfolioGuardian:
                     'suggested_reduce_pct': reduce_pct,
                     'progress_r': round(progress_r, 3),
                     'tp_progress_ratio': round(tp_progress_ratio, 3),
+                    'mfe_r_seen': round(mfe_r_seen, 3),
+                    'giveback_r': round(giveback_r, 3),
+                    'profit_lock_triggered': False,
                     'momentum_with_position': bool(momentum_with_position),
                     'management_reason': (
                         f'Existe deterioro confirmado pero no invalidación '
@@ -6835,6 +6848,47 @@ class PortfolioGuardian:
                     candidate = max(candidate, current_price + risk_abs * 0.14)
                     if candidate < sl - risk_abs * 0.01 and candidate > current_price:
                         suggested_sl = candidate
+
+            # ----------------------------------------------------------
+            # COMMIT 17.3 — MFE GIVEBACK PROFIT LOCK.
+            # ----------------------------------------------------------
+            # The previous Guardian protected mainly from *current* progress. A
+            # trade could reach >1R, give much of it back, and fall below that
+            # trigger. We now remember the favorable excursion already observed
+            # and propose a structural stop when material giveback appears.
+            # This never widens risk, never crosses current price and never EXITs
+            # merely because profit retraced. Existing counterfactual Guardian
+            # calibration can still suppress harmful low-urgency PROTECT actions.
+            giveback_threshold = max(0.35, mfe_r_seen * 0.30)
+            if (
+                mfe_r_seen >= 0.90
+                and progress_r > 0.12
+                and giveback_r >= giveback_threshold
+                and highs and lows
+            ):
+                recent_highs = [float(x) for x in highs[-3:]]
+                recent_lows = [float(x) for x in lows[-3:]]
+                lock_r = min(0.35, max(0.0, (mfe_r_seen - 0.75) * 0.28))
+                if action == 'LONG':
+                    recent_support = min(recent_lows)
+                    structural_lock = recent_support - risk_abs * 0.08
+                    profit_floor = entry + risk_abs * lock_r
+                    candidate = max(sl, profit_floor, structural_lock)
+                    candidate = min(candidate, current_price - risk_abs * 0.12)
+                    if candidate > sl + risk_abs * 0.01 and candidate < current_price:
+                        if suggested_sl is None or candidate > suggested_sl:
+                            suggested_sl = candidate
+                            profit_lock_triggered = True
+                else:
+                    recent_resistance = max(recent_highs)
+                    structural_lock = recent_resistance + risk_abs * 0.08
+                    profit_floor = entry - risk_abs * lock_r
+                    candidate = min(sl, profit_floor, structural_lock)
+                    candidate = max(candidate, current_price + risk_abs * 0.12)
+                    if candidate < sl - risk_abs * 0.01 and candidate > current_price:
+                        if suggested_sl is None or candidate < suggested_sl:
+                            suggested_sl = candidate
+                            profit_lock_triggered = True
 
             # ----------------------------------------------------------
             # EXTEND — sólo a un swing real posterior al TP.
@@ -6963,9 +7017,14 @@ class PortfolioGuardian:
             else:
                 pieces = []
                 if protects:
-                    pieces.append(
-                        f'proteger beneficio/riesgo tras avanzar {progress_r:.2f}R'
-                    )
+                    if profit_lock_triggered:
+                        pieces.append(
+                            f'proteger beneficio tras MFE {mfe_r_seen:.2f}R y retroceso de {giveback_r:.2f}R'
+                        )
+                    else:
+                        pieces.append(
+                            f'proteger beneficio/riesgo tras avanzar {progress_r:.2f}R'
+                        )
                 if adds:
                     pieces.append(
                         f'aumentar sólo {suggested_add_position_pct:.0f}% de la posición '
@@ -6987,6 +7046,9 @@ class PortfolioGuardian:
                 'scale_in_rr': round(scale_in_rr, 3) if scale_in_rr is not None else None,
                 'progress_r': round(progress_r, 3),
                 'tp_progress_ratio': round(tp_progress_ratio, 3),
+                'mfe_r_seen': round(mfe_r_seen, 3),
+                'giveback_r': round(giveback_r, 3),
+                'profit_lock_triggered': bool(profit_lock_triggered),
                 'momentum_with_position': bool(momentum_with_position),
                 'trade_state': trade_state,
                 'management_reason': reason,
@@ -7366,6 +7428,9 @@ class PortfolioGuardian:
                 'scale_in_rr': management.get('scale_in_rr'),
                 'progress_r': management.get('progress_r', 0.0),
                 'tp_progress_ratio': management.get('tp_progress_ratio', 0.0),
+                'guardian_mfe_r_seen': management.get('mfe_r_seen', round(mfe_r, 3)),
+                'guardian_giveback_r': management.get('giveback_r', 0.0),
+                'guardian_profit_lock_triggered': bool(management.get('profit_lock_triggered', False)),
                 'momentum_with_position': management.get('momentum_with_position', False),
                 'management_reason': management.get('management_reason', ''),
                 'macro_risk_level': macro_level,

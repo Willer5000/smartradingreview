@@ -406,10 +406,17 @@ def _cluster_evidence(candidate: Dict[str, Any], universe: List[Dict[str, Any]],
 
 def _strategy_family(setup_family: Any) -> str:
     text = str(setup_family or "").upper()
-    if "SWEEP" in text or "REVERS" in text: return "SWEEP_REVERSAL"
+    # Commit 17.3: explicit generic families first so a structure reversal is
+    # not accidentally classified as SWEEP and expansion is not forced into
+    # BREAKOUT_RETEST.  This changes only price-level specialization.
+    if "MOMENTUM_CONTINUATION" in text or ("MOMENTUM" in text and "CONTINU" in text): return "MOMENTUM_CONTINUATION"
+    if "COMPRESSION_EXPANSION" in text or "SQUEEZE_EXPANSION" in text: return "COMPRESSION_EXPANSION"
+    if "STRUCTURE_REVERSAL" in text or "TREND_REVERSAL" in text: return "STRUCTURE_REVERSAL"
+    if "SWEEP" in text: return "SWEEP_REVERSAL"
     if "BREAK" in text or "RETEST" in text: return "BREAKOUT_RETEST"
     if "MEAN" in text or "VALUE" in text: return "MEAN_REVERSION"
     if "TREND" in text or "PULLBACK" in text: return "TREND_PULLBACK"
+    if "REVERS" in text: return "STRUCTURE_REVERSAL"
     if "ROTATION" in text: return "ROTATION"
     return text or "UNSPECIFIED"
 
@@ -441,6 +448,9 @@ def _entry_specialists(candidate, universe, *, direction, current_price, atr,
         "TREND_PULLBACK": {"smc_poi", "fib", "dynamic_value", "structure", "value"},
         "MEAN_REVERSION": {"value", "dynamic_value", "structure", "fib", "swing"},
         "ROTATION": {"value", "structure", "dynamic_value"},
+        "MOMENTUM_CONTINUATION": {"dynamic_value", "structure", "smc_poi", "swing", "value"},
+        "COMPRESSION_EXPANSION": {"structure", "smc_poi", "dynamic_value", "value", "swing"},
+        "STRUCTURE_REVERSAL": {"smc_poi", "structure", "swing", "fib", "liquidity", "dynamic_value"},
     }
     strategy = 62.0 if fam in compat.get(setup, set()) else 50.0
     if fam == "baseline": strategy = 54.0
@@ -551,7 +561,8 @@ def _sl_specialists(candidate, universe, *, direction, entry, tp_hint, atr,
     setup = _strategy_family(setup_family)
     strategy = 68.0
     if setup in {"SWEEP_REVERSAL", "MEAN_REVERSION"} and anchor > 0: strategy += 8.0
-    if setup in {"BREAKOUT_RETEST", "TREND_PULLBACK"} and candidate.get("family") == "structural_invalidation": strategy += 8.0
+    if setup in {"BREAKOUT_RETEST", "TREND_PULLBACK", "MOMENTUM_CONTINUATION", "COMPRESSION_EXPANSION"} and candidate.get("family") == "structural_invalidation": strategy += 8.0
+    if setup == "STRUCTURE_REVERSAL" and candidate.get("family") == "structural_invalidation" and anchor > 0: strategy += 10.0
     strategy = _clip(strategy)
 
     return {"invalidation":invalidation,"noise":noise,"reaction_collision":collision,
@@ -615,8 +626,8 @@ def _tp_specialists(candidate, universe, *, direction, entry, sl, atr, structure
 
     setup = _strategy_family(setup_family)
     strategy = 68.0
-    if setup in {"BREAKOUT_RETEST", "TREND_PULLBACK"} and candidate.get("family") in {"liquidity_target","swing_target","fib_target"}: strategy += 8.0
-    if setup in {"SWEEP_REVERSAL", "MEAN_REVERSION"} and candidate.get("family") in {"value_target","structure_target","capture_before_reaction"}: strategy += 8.0
+    if setup in {"BREAKOUT_RETEST", "TREND_PULLBACK", "MOMENTUM_CONTINUATION", "COMPRESSION_EXPANSION"} and candidate.get("family") in {"liquidity_target","swing_target","fib_target"}: strategy += 8.0
+    if setup in {"SWEEP_REVERSAL", "MEAN_REVERSION", "STRUCTURE_REVERSAL"} and candidate.get("family") in {"value_target","structure_target","capture_before_reaction","opposing_poi"}: strategy += 8.0
     strategy = _clip(strategy)
 
     context_score = 72.0

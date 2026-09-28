@@ -7187,13 +7187,13 @@ class TradingExpertSystem:
             },
             # ============ NUEVAS PLANTILLAS PARA LIQUIDACIONES (CATEGORÍA 40) ============
             'liquidation_bullish_opportunity': {
-                'template': 'LIQUIDACIONES: {total_short_below:.1f}M en SHORT por debajo de ${price:.2f}, posible squeeze alcista. ',
+                'template': 'MAPA DE LIQUIDACIONES ESTIMADO: concentración SHORT relativa dominante; posible squeeze alcista si el precio confirma. ',
                 'type': 'liquidaciones',
                 'order': 40,
                 'condition': 'liquidation_bullish_opportunity'
             },
             'liquidation_bearish_opportunity': {
-                'template': 'LIQUIDACIONES: {total_long_above:.1f}M en LONG por encima de ${price:.2f}, probable atracción bajista. ',
+                'template': 'MAPA DE LIQUIDACIONES ESTIMADO: concentración LONG relativa dominante; posible presión bajista si el precio confirma. ',
                 'type': 'liquidaciones',
                 'order': 40,
                 'condition': 'liquidation_bearish_opportunity'
@@ -8975,56 +8975,122 @@ class TradingExpertSystem:
                     
                     print(f"   📊 Sentimiento mapeado: {current_value} ({classification}) - {sentiment_bias}")
             
-            # ============ NUEVA SECCIÓN: CONDICIONES DE LIQUIDACIONES ============
+            # ============ LIQUIDATION MAP · RELATIVE-PARTICIPATION CONTRACT ============
+            # Commit 17.3-LM: desde Commit 14 el heatmap ya no expresa USD ni
+            # liquidaciones observadas. Sus pesos son unidades relativas de
+            # participación calibradas con mercado público. Por eso esta capa
+            # jamás compara contra umbrales legacy de 50M/100M/200M.
             if liquidation and isinstance(liquidation, dict):
-                active_bins = liquidation.get('active_bins', [])
-                total_long_bins = liquidation.get('total_long_bins', 0)
-                total_short_bins = liquidation.get('total_short_bins', 0)
-                total_long_weight = liquidation.get('total_long_weight', 0)
-                total_short_weight = liquidation.get('total_short_weight', 0)
-                total_spikes = liquidation.get('total_spikes', 0)
-                
-                # Convertir a millones para facilitar lectura
-                long_weight_m = total_long_weight / 1_000_000
-                short_weight_m = total_short_weight / 1_000_000
-                
-                # Condición 1: Oportunidad alcista por acumulación de SHORTS (resistencia)
-                if total_short_weight > 100_000_000 and total_short_bins > 20:  # Más de 100M en shorts
-                    condiciones.append('liquidation_bearish_opportunity')  # Shorts arriba = resistencia bajista
-                    print(f"   🔴 Condición: liquidation_bearish_opportunity ({short_weight_m:.1f}M shorts en {total_short_bins} bins)")
-                
-                # Condición 2: Oportunidad bajista por acumulación de LONGS (soporte)
-                if total_long_weight > 100_000_000 and total_long_bins > 20:  # Más de 100M en longs
-                    condiciones.append('liquidation_bullish_opportunity')  # Longs abajo = soporte alcista
-                    print(f"   🟢 Condición: liquidation_bullish_opportunity ({long_weight_m:.1f}M longs en {total_long_bins} bins)")
-                
-                # Condición 3: Alta concentración (pocos bins pero muy pesados)
-                if total_long_bins < 10 and total_long_weight > 100_000_000:
-                    condiciones.append('heavy_long_concentration')
-                    print(f"   🟢 Condición: heavy_long_concentration ({long_weight_m:.1f}M en {total_long_bins} bins)")
-                
-                if total_short_bins < 10 and total_short_weight > 100_000_000:
-                    condiciones.append('heavy_short_concentration')
-                    print(f"   🔴 Condición: heavy_short_concentration ({short_weight_m:.1f}M en {total_short_bins} bins)")
-                
-                # Condición 4: Actividad reciente (spikes)
-                if total_spikes > 5:
-                    condiciones.append('recent_spike_activity')
-                    print(f"   ⚡ Condición: recent_spike_activity ({total_spikes} spikes)")
-                
-                # Condición 5: Equilibrio de liquidaciones
-                if abs(total_long_bins - total_short_bins) < 10 and total_long_bins > 30:
-                    condiciones.append('liquidity_balance')
-                    print(f"   ⚖️ Condición: liquidity_balance ({total_long_bins}L vs {total_short_bins}S)")
-                
-                # Condición 6: Sobreacumulación (posible reversión)
-                if total_long_bins > 100 and total_long_weight > 200_000_000:
-                    condiciones.append('long_extreme')
-                    print(f"   ⚠️ Condición: long_extreme ({total_long_bins} bins, {long_weight_m:.1f}M)")
-                
-                if total_short_bins > 100 and total_short_weight > 200_000_000:
-                    condiciones.append('short_extreme')
-                    print(f"   ⚠️ Condición: short_extreme ({total_short_bins} bins, {short_weight_m:.1f}M)")
+                active_bins = liquidation.get('active_bins', []) or []
+                total_long_bins = int(liquidation.get('total_long_bins', 0) or 0)
+                total_short_bins = int(liquidation.get('total_short_bins', 0) or 0)
+                total_long_weight = max(0.0, float(liquidation.get('total_long_weight', 0) or 0))
+                total_short_weight = max(0.0, float(liquidation.get('total_short_weight', 0) or 0))
+                total_spikes = int(liquidation.get('total_spikes', 0) or 0)
+                model_confidence = max(0.0, min(70.0, float(liquidation.get('model_confidence', 0) or 0)))
+                relative_contract = (
+                    liquidation.get('data_type') == 'MODEL_ESTIMATE_NOT_OBSERVED'
+                    and liquidation.get('weight_unit') == 'relative_participation'
+                )
+
+                total_weight = total_long_weight + total_short_weight
+                long_share = total_long_weight / total_weight if total_weight > 0 else 0.5
+                short_share = total_short_weight / total_weight if total_weight > 0 else 0.5
+                long_dominance = total_long_weight / max(total_short_weight, 1e-9)
+                short_dominance = total_short_weight / max(total_long_weight, 1e-9)
+                active_count = len(active_bins)
+
+                def _side_peak_intensity(side):
+                    values = []
+                    for item in active_bins:
+                        if not isinstance(item, dict) or str(item.get('side', '')).lower() != side:
+                            continue
+                        try:
+                            intensity = float(item.get('intensity', 0) or 0)
+                        except (TypeError, ValueError):
+                            intensity = 0.0
+                        if intensity > 0:
+                            values.append(intensity)
+                    return max(values) if values else 0.0
+
+                long_peak = _side_peak_intensity('long')
+                short_peak = _side_peak_intensity('short')
+
+                if not relative_contract:
+                    print('   ⚠️ Liquidation Map ignorado en condiciones: contrato de unidad no relativo')
+                else:
+                    # Sólo se permite dirección cuando el proxy tiene cobertura
+                    # mínima. Mismos pisos conceptuales que TraderLiquidation.
+                    directional_ready = active_count >= 6 and model_confidence >= 45.0
+
+                    # SHORT exposure por encima del precio es combustible de
+                    # squeeze ALCISTA; LONG exposure por debajo es combustible
+                    # de liquidación BAJISTA. El mapa no decide por sí solo.
+                    if directional_ready and short_dominance >= 1.35 and total_short_bins >= 3:
+                        condiciones.append('liquidation_bullish_opportunity')
+                        print(
+                            f"   🟢 Condición: liquidation_bullish_opportunity "
+                            f"(SHORT {short_share*100:.1f}% · {short_dominance:.2f}x · conf {model_confidence:.0f}%)"
+                        )
+
+                    if directional_ready and long_dominance >= 1.35 and total_long_bins >= 3:
+                        condiciones.append('liquidation_bearish_opportunity')
+                        print(
+                            f"   🔴 Condición: liquidation_bearish_opportunity "
+                            f"(LONG {long_share*100:.1f}% · {long_dominance:.2f}x · conf {model_confidence:.0f}%)"
+                        )
+
+                    # Concentración = pocos bins relativos, pero uno o varios
+                    # están entre las zonas más intensas del propio heatmap.
+                    concentration_cap = max(10, int(max(active_count, 1) * 0.30))
+                    if total_long_bins and total_long_bins <= concentration_cap and long_share >= 0.58 and long_peak >= 85:
+                        condiciones.append('heavy_long_concentration')
+                        print(
+                            f"   🔴 Condición: heavy_long_concentration "
+                            f"({total_long_bins} bins · pico {long_peak:.0f}/100 · share {long_share*100:.1f}%)"
+                        )
+
+                    if total_short_bins and total_short_bins <= concentration_cap and short_share >= 0.58 and short_peak >= 85:
+                        condiciones.append('heavy_short_concentration')
+                        print(
+                            f"   🟢 Condición: heavy_short_concentration "
+                            f"({total_short_bins} bins · pico {short_peak:.0f}/100 · share {short_share*100:.1f}%)"
+                        )
+
+                    # Actividad reciente conserva semántica temporal: no depende
+                    # de la unidad del peso.
+                    if total_spikes > 5:
+                        condiciones.append('recent_spike_activity')
+                        print(f"   ⚡ Condición: recent_spike_activity ({total_spikes} eventos modelados)")
+
+                    # Balance usa proporciones, no diferencias absolutas que
+                    # cambian según el número de bins del timeframe.
+                    bin_ratio = total_long_bins / max(total_short_bins, 1)
+                    if (
+                        directional_ready
+                        and 0.45 <= long_share <= 0.55
+                        and 0.67 <= bin_ratio <= 1.50
+                    ):
+                        condiciones.append('liquidity_balance')
+                        print(
+                            f"   ⚖️ Condición: liquidity_balance "
+                            f"({long_share*100:.1f}%L/{short_share*100:.1f}%S · {total_long_bins}L/{total_short_bins}S)"
+                        )
+
+                    # Extremos relativos requieren dominancia + cobertura + pico.
+                    if directional_ready and model_confidence >= 55 and long_dominance >= 1.75 and total_long_bins >= 12 and long_peak >= 80:
+                        condiciones.append('long_extreme')
+                        print(
+                            f"   ⚠️ Condición: long_extreme "
+                            f"({long_dominance:.2f}x · pico {long_peak:.0f}/100)"
+                        )
+
+                    if directional_ready and model_confidence >= 55 and short_dominance >= 1.75 and total_short_bins >= 12 and short_peak >= 80:
+                        condiciones.append('short_extreme')
+                        print(
+                            f"   ⚠️ Condición: short_extreme "
+                            f"({short_dominance:.2f}x · pico {short_peak:.0f}/100)"
+                        )
             # =====================================================================
            
             
@@ -12958,6 +13024,9 @@ class TradingExpertSystem:
         # LIQUIDITY POOLS
         # ==============================================================
         active_bins = []
+        liquidation_model_confidence = 0.0
+        liquidation_public_calibrated = False
+        liquidation_calibration_quality = 0.0
     
         if isinstance(liquidation, dict):
             active_bins = (
@@ -12967,6 +13036,23 @@ class TradingExpertSystem:
                 )
                 or []
             )
+            try:
+                liquidation_model_confidence = max(
+                    0.0,
+                    min(70.0, float(liquidation.get('model_confidence', 0) or 0))
+                )
+            except (TypeError, ValueError):
+                liquidation_model_confidence = 0.0
+            liquidation_public_calibrated = bool(
+                liquidation.get('public_derivatives_calibrated', False)
+            )
+            try:
+                liquidation_calibration_quality = max(
+                    0.0,
+                    min(100.0, float((liquidation.get('calibration') or {}).get('quality', 0) or 0))
+                )
+            except (TypeError, ValueError):
+                liquidation_calibration_quality = 0.0
     
         for bin_data in active_bins:
     
@@ -12992,6 +13078,13 @@ class TradingExpertSystem:
                 or bin_data.get('weight', 0)
                 or 0
             )
+            try:
+                intensity = max(
+                    0.0,
+                    min(100.0, float(bin_data.get('intensity', 0) or 0))
+                )
+            except (TypeError, ValueError):
+                intensity = 0.0
     
             if top <= 0 or bottom <= 0:
                 continue
@@ -13037,6 +13130,10 @@ class TradingExpertSystem:
                         'type': 'liquidity',
                         'liquidity_side': 'short',
                         'liquidity_weight': weight,
+                        'liquidity_intensity': intensity,
+                        'liquidity_model_confidence': liquidation_model_confidence,
+                        'liquidity_public_calibrated': liquidation_public_calibrated,
+                        'liquidity_calibration_quality': liquidation_calibration_quality,
                         'distance_atr': distance_atr,
                         'distance_pct': distance_pct
                     })
@@ -13076,6 +13173,10 @@ class TradingExpertSystem:
                         'type': 'liquidity',
                         'liquidity_side': 'long',
                         'liquidity_weight': weight,
+                        'liquidity_intensity': intensity,
+                        'liquidity_model_confidence': liquidation_model_confidence,
+                        'liquidity_public_calibrated': liquidation_public_calibrated,
+                        'liquidity_calibration_quality': liquidation_calibration_quality,
                         'distance_atr': distance_atr,
                         'distance_pct': distance_pct
                     })
@@ -14363,37 +14464,48 @@ class TradingExpertSystem:
                 'type'
             ) == 'liquidity':
     
-                weight = float(
-                    candidate.get(
-                        'liquidity_weight',
-                        0
+                # Commit 17.3-LM: el heatmap moderno trabaja en
+                # `relative_participation`, no USD. La calidad del pool se toma
+                # de su intensidad 0-100 relativa al propio mapa y se modula
+                # suavemente por la cobertura/confianza del modelo público.
+                try:
+                    intensity = max(
+                        0.0,
+                        min(100.0, float(candidate.get('liquidity_intensity', 0) or 0))
                     )
-                    or 0
-                )
-    
-                # El peso es relativo al resto de bins.
-                # ======================================================
-                # COMMIT 36W
-                # LIQUIDITY SCORE NORMALIZADO 0-100
-                # ======================================================
-                #
-                # Después se aplica el peso del 25%.
-                # ======================================================
+                except (TypeError, ValueError):
+                    intensity = 0.0
 
-                if weight > 100_000_000:
-                    liquidity_bonus = 100
+                try:
+                    model_confidence = max(
+                        0.0,
+                        min(70.0, float(candidate.get('liquidity_model_confidence', 0) or 0))
+                    )
+                except (TypeError, ValueError):
+                    model_confidence = 0.0
 
-                elif weight > 50_000_000:
-                    liquidity_bonus = 80
+                try:
+                    calibration_quality = max(
+                        0.0,
+                        min(100.0, float(candidate.get('liquidity_calibration_quality', 0) or 0))
+                    )
+                except (TypeError, ValueError):
+                    calibration_quality = 0.0
 
-                elif weight > 10_000_000:
-                    liquidity_bonus = 60
-
-                elif weight > 1_000_000:
-                    liquidity_bonus = 40
-
+                confidence_factor = 0.72 + 0.28 * (model_confidence / 70.0)
+                if candidate.get('liquidity_public_calibrated'):
+                    # Calibración pública disponible: conserva casi toda la
+                    # intensidad y pondera suavemente su calidad observable.
+                    calibration_factor = 0.92 + 0.08 * (calibration_quality / 100.0)
                 else:
-                    liquidity_bonus = 20
+                    # Fallback OHLCV-only: sigue siendo útil como geometría,
+                    # pero recibe menos autoridad en el ranking de TP.
+                    calibration_factor = 0.84
+
+                liquidity_bonus = max(
+                    0.0,
+                    min(100.0, intensity * confidence_factor * calibration_factor)
+                )
     
             # ==========================================================
             # TP DEMASIADO CERCA DE ENTRY
@@ -24174,6 +24286,9 @@ class DynamicZones:
             'BREAKOUT_RETEST': 'Ruptura y retest',
             'TREND_BREAK': 'Ruptura de tendencia',
             'ROTATION': 'Rotación Spot',
+            'MOMENTUM_CONTINUATION': 'Continuación de momentum',
+            'COMPRESSION_EXPANSION': 'Expansión tras compresión',
+            'STRUCTURE_REVERSAL': 'Reversión estructural confirmada',
         }.get(str(family or '').upper(), 'Estructura de mercado')
 
     def _collect_structural_candidates(self, side, structure, groups, current_price, atr_abs, family):
@@ -24191,6 +24306,9 @@ class DynamicZones:
             'MEAN_REVERSION': {'vwap': 7.0, 'poc': 6.5, 'hvn': 6.0, 'support': 5.5, 'resistance': 5.5, 'fib': 4.0, 'ob': 3.5, 'fvg': 3.0, 'sweep': 4.0, 'stop_hunt': 4.0},
             'ROTATION': {'vwap': 6.0, 'poc': 6.0, 'hvn': 5.0, 'support': 5.0, 'resistance': 5.0, 'fib': 4.0, 'ob': 3.5, 'fvg': 3.0},
             'TREND_BREAK': {'support': 7.0, 'resistance': 7.0, 'fvg': 5.5, 'ob': 5.5, 'poc': 4.0, 'fib': 4.0, 'sweep': 4.0, 'stop_hunt': 4.0},
+            'MOMENTUM_CONTINUATION': {'fvg': 7.0, 'support': 6.5, 'resistance': 6.5, 'ob': 6.0, 'vwap': 5.5, 'poc': 4.5, 'hvn': 4.0, 'fib': 4.0, 'sweep': 3.0, 'stop_hunt': 3.0},
+            'COMPRESSION_EXPANSION': {'support': 7.0, 'resistance': 7.0, 'fvg': 6.5, 'ob': 5.5, 'vwap': 4.5, 'poc': 4.0, 'hvn': 4.0, 'fib': 3.5, 'sweep': 3.0, 'stop_hunt': 3.0},
+            'STRUCTURE_REVERSAL': {'ob': 7.0, 'fvg': 6.5, 'support': 6.0, 'resistance': 6.0, 'sweep': 5.0, 'stop_hunt': 5.0, 'fib': 4.5, 'vwap': 4.0, 'poc': 4.0, 'hvn': 3.5},
         }
         priorities = family_priority.get(family, family_priority['TREND_PULLBACK'])
 
@@ -24207,7 +24325,11 @@ class DynamicZones:
                 return
             # A retest can live slightly beyond the current price.  Anything far
             # away is not a useful dynamic zone for the active setup.
-            side_slack = (0.65 if family in {'BREAKOUT_RETEST','TREND_BREAK'} else 0.15) * atr_abs
+            side_slack = (
+                0.65 if family in {'BREAKOUT_RETEST','TREND_BREAK','COMPRESSION_EXPANSION'}
+                else 0.35 if family in {'MOMENTUM_CONTINUATION','STRUCTURE_REVERSAL'}
+                else 0.15
+            ) * atr_abs
             if side > 0 and center > current_price + side_slack:
                 return
             if side < 0 and center < current_price - side_slack:
@@ -25372,6 +25494,7 @@ class LiquidationHeatmap:
             'data_type': 'MODEL_ESTIMATE_NOT_OBSERVED',
             'model_version': 'OHLCV_PUBLIC_DERIVATIVES_CALIBRATED_V3',
             'weight_unit': 'relative_participation',
+            'interpretation_version': 'RELATIVE_PARTICIPATION_CONSUMERS_V1',
             'model_confidence': min(70.0, 20.0 + self.total_events * 5.0),
             'coverage_bars': len(self.price_history),
             'observed_liquidations': False,
@@ -25396,6 +25519,7 @@ class LiquidationHeatmap:
             'data_type': 'MODEL_ESTIMATE_NOT_OBSERVED',
             'model_version': 'OHLCV_PUBLIC_DERIVATIVES_CALIBRATED_V3',
             'weight_unit': 'relative_participation',
+            'interpretation_version': 'RELATIVE_PARTICIPATION_CONSUMERS_V1',
             'model_confidence': 0,
             'coverage_bars': len(self.price_history),
             'observed_liquidations': False,
@@ -27493,202 +27617,14 @@ class TraderLiquidation(TraderBase):
         super().__init__("El Liquidador", "liquidaciones", peso_base=1.3)
         
     def _votar_legacy(self, capas, symbol, timeframe):
-        # Valores por defecto
-        accion = 'NO_OPERAR'
-        confianza = 0
-        estrategias = []
-        razones = []
-        
-        try:
-            # ============ OBTENER CAPAS NECESARIAS ============
-            liquidation = capas.get('liquidation', {})
-            if not liquidation or not isinstance(liquidation, dict):
-                return accion, confianza, estrategias, razones
-            
-            structure = capas.get('structure', {})
-            trend = capas.get('trend', {})
-            volume = capas.get('volume', {})
-            momentum = capas.get('momentum', {})
-            
-            current_price = structure.get('current_price', 0)
-            if current_price == 0:
-                return accion, confianza, estrategias, razones
-            
-            # ============ EXTRAER DATOS DEL HEATMAP ============
-            active_bins = liquidation.get('active_bins', [])
-            frozen_bins = liquidation.get('frozen_bins', [])
-            total_long_bins = liquidation.get('total_long_bins', 0)
-            total_short_bins = liquidation.get('total_short_bins', 0)
-            total_long_weight = liquidation.get('total_long_weight', 0)
-            total_short_weight = liquidation.get('total_short_weight', 0)
-            last_spike_bar = liquidation.get('last_spike_bar')
-            total_spikes = liquidation.get('total_spikes', 0)
-            
-            # Calcular pesos en millones
-            long_weight_m = total_long_weight / 1_000_000
-            short_weight_m = total_short_weight / 1_000_000
-            
-            print(f"\n📊 TRADER LIQUIDACIÓN - {symbol} {timeframe}")
-            print(f"   Long bins: {total_long_bins}, Short bins: {total_short_bins}")
-            print(f"   Long weight: {long_weight_m:.1f}M, Short weight: {short_weight_m:.1f}M")
-            print(f"   Total spikes: {total_spikes}")
-            print(f"   Bins congelados: {len(frozen_bins)}")
-            
-            # ============ ESTRATEGIA 1: DOMINANCIA DE LARGOS (SOPORTE) ============
-            if total_long_bins > total_short_bins * 1.5 and total_long_weight > 50_000_000:
-                # Precio por debajo de los principales soportes LONG
-                if active_bins:
-                    long_prices = [b.get('price_top', 0) for b in active_bins if b.get('side') == 'long']
-                    if long_prices and current_price < sum(long_prices[:5]) / 5:
-                        confianza_base = 70
-                        
-                        volume_ratio = volume.get('volume_ratio', 1) if volume else 1
-                        if volume_ratio > 1.5:
-                            confianza = confianza_base + 10
-                            razones.append(f"volumen {volume_ratio:.1f}x confirma acumulación")
-                        else:
-                            confianza = confianza_base
-                        
-                        if timeframe in ['4h', '12h'] and symbol == 'BTC-USDT':
-                            accion = 'LONG'
-                        else:
-                            accion = 'COMPRA_SPOT'
-                        
-                        estrategias.append('LONG_DOMINANCE_SUPPORT')
-                        razones.append(f"{total_long_bins} bins LONG (${long_weight_m:.1f}M) actuando como soporte")
-            
-            # ============ ESTRATEGIA 2: DOMINANCIA DE CORTOS (RESISTENCIA) ============
-            elif total_short_bins > total_long_bins * 1.5 and total_short_weight > 50_000_000:
-                # Precio por encima de las principales resistencias SHORT
-                if active_bins:
-                    short_prices = [b.get('price_bottom', 0) for b in active_bins if b.get('side') == 'short']
-                    if short_prices and current_price > sum(short_prices[:5]) / 5:
-                        confianza_base = 70
-                        
-                        volume_ratio = volume.get('volume_ratio', 1) if volume else 1
-                        if volume_ratio > 1.5:
-                            confianza = confianza_base + 10
-                            razones.append(f"volumen {volume_ratio:.1f}x confirma distribución")
-                        else:
-                            confianza = confianza_base
-                        
-                        if timeframe in ['4h', '12h'] and symbol == 'BTC-USDT':
-                            accion = 'SHORT'
-                        else:
-                            accion = 'VENTA_SPOT'
-                        
-                        estrategias.append('SHORT_DOMINANCE_RESISTANCE')
-                        razones.append(f"{total_short_bins} bins SHORT (${short_weight_m:.1f}M) actuando como resistencia")
-            
-            # ============ ESTRATEGIA 3: ACUMULACIÓN DE SPIKES (ACTIVIDAD RECIENTE) ============
-            elif total_spikes > 5:
-                # Determinar dirección basada en el flujo
-                if total_long_weight > total_short_weight * 1.3:
-                    confianza = 65
-                    accion = 'COMPRA_SPOT'
-                    estrategias.append('SPIKE_ACCUMULATION_LONG')
-                    razones.append(f"{total_spikes} spikes recientes con acumulación LONG de ${long_weight_m:.1f}M")
-                
-                elif total_short_weight > total_long_weight * 1.3:
-                    confianza = 65
-                    accion = 'VENTA_SPOT'
-                    estrategias.append('SPIKE_ACCUMULATION_SHORT')
-                    razones.append(f"{total_spikes} spikes recientes con acumulación SHORT de ${short_weight_m:.1f}M")
-            
-            # ============ ESTRATEGIA 4: EQUILIBRIO DE BINS ============
-            elif abs(total_long_bins - total_short_bins) < 10 and total_long_bins > 20:
-                accion = 'ESPERAR'
-                confianza = 60
-                estrategias.append('LIQUIDITY_BALANCE')
-                razones.append(f"equilibrio de bins ({total_long_bins}L vs {total_short_bins}S) - esperar dirección")
-            
-            # ============ ESTRATEGIA 5: POCOS BINS PERO MUY PESADOS ============
-            elif total_long_bins < 10 and total_long_weight > 100_000_000:
-                confianza = 75
-                accion = 'COMPRA_SPOT'
-                estrategias.append('HEAVY_LONG_CONCENTRATION')
-                razones.append(f"concentración LONG de ${long_weight_m:.1f}M en solo {total_long_bins} bins")
-            
-            elif total_short_bins < 10 and total_short_weight > 100_000_000:
-                confianza = 75
-                accion = 'VENTA_SPOT'
-                estrategias.append('HEAVY_SHORT_CONCENTRATION')
-                razones.append(f"concentración SHORT de ${short_weight_m:.1f}M en solo {total_short_bins} bins")
-            
-            # ============ ESTRATEGIA 6: SEÑAL CONTRARIA (SOBREEXTENSIÓN) ============
-            else:
-                if total_long_bins > 100 and total_long_weight > 200_000_000:
-                    rsi = momentum.get('indicators', {}).get('rsi', 50) if momentum else 50
-                    if rsi > 70:
-                        confianza = 70
-                        accion = 'VENTA_SPOT'
-                        estrategias.append('LONG_EXTREME_REVERSAL')
-                        razones.append(f"sobreacumulación LONG ({total_long_bins} bins) con RSI {rsi:.1f}")
-                
-                elif total_short_bins > 100 and total_short_weight > 200_000_000:
-                    rsi = momentum.get('indicators', {}).get('rsi', 50) if momentum else 50
-                    if rsi < 30:
-                        confianza = 70
-                        accion = 'COMPRA_SPOT'
-                        estrategias.append('SHORT_EXTREME_REVERSAL')
-                        razones.append(f"sobreacumulación SHORT ({total_short_bins} bins) con RSI {rsi:.1f}")
-            
-            # ============ ESTRATEGIA 7: BINS CONGELADOS RECIENTES ============
-            if not accion != 'NO_OPERAR' and frozen_bins:
-                # Verificar si hay congelamientos recientes (últimos 5 bins)
-                ultimos_congelados = frozen_bins[-5:]
-                direccion_congelados = {}
-                
-                for bin_obj in ultimos_congelados:
-                    side = bin_obj.get('side') if isinstance(bin_obj, dict) else getattr(bin_obj, 'side', None)
-                    if side:
-                        direccion_congelados[side] = direccion_congelados.get(side, 0) + 1
-                
-                if direccion_congelados.get('long', 0) >= 3:
-                    confianza = 60
-                    accion = 'VENTA_SPOT'
-                    estrategias.append('RECENT_LONG_LIQUIDATIONS')
-                    razones.append(f"{direccion_congelados['long']} liquidaciones LONG recientes - posible presión bajista")
-                
-                elif direccion_congelados.get('short', 0) >= 3:
-                    confianza = 60
-                    accion = 'COMPRA_SPOT'
-                    estrategias.append('RECENT_SHORT_LIQUIDATIONS')
-                    razones.append(f"{direccion_congelados['short']} liquidaciones SHORT recientes - posible presión alcista")
-            
-            # ============ AJUSTES POR PAR Y TEMPORALIDAD ============
-            if symbol == 'PAXG-USDT':
-                if accion in ['LONG', 'SHORT']:
-                    accion = 'COMPRA_SPOT' if accion == 'LONG' else 'VENTA_SPOT'
-                    confianza = int(confianza * 0.8)
-            
-            elif symbol == 'PAXG-BTC':
-                confianza = int(confianza * 0.7)
-            
-            if timeframe == '1W':
-                if total_long_weight < 200_000_000 and total_short_weight < 200_000_000:
-                    accion = 'NO_OPERAR'
-                    confianza = 0
-            
-            # ============ LIMITAR CONFIANZA ============
-            confianza = min(100, max(0, confianza))
-            
-            # Si no hay acción pero hay actividad, sugerir ESPERAR
-            if accion == 'NO_OPERAR' and (total_long_bins > 10 or total_short_bins > 10):
-                accion = 'ESPERAR'
-                confianza = 55
-                estrategias.append('LIQUIDITY_PRESENT')
-                razones.append(f"liquidez detectada ({total_long_bins}L/{total_short_bins}S bins)")
-            
-            print(f"   Estrategias: {estrategias}")
-            print(f"   Decisión: {accion} (confianza {confianza}%)")
-            
-        except Exception as e:
-            print(f"❌ Error en TraderLiquidation.votar: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        return accion, confianza, estrategias, razones
+        """Compatibilidad: delega al analista relativo vigente.
+
+        La implementación histórica interpretaba los pesos como USD y contenía
+        umbrales 50M/100M/200M incompatibles con `relative_participation`.
+        Se conserva el nombre por compatibilidad, pero ya no existe una segunda
+        semántica del Liquidation Map.
+        """
+        return self.votar(capas, symbol, timeframe)
 
     def votar(self, capas, symbol, timeframe):
         """Usa el heatmap sólo como proxy de riesgo y únicamente en Futuros."""
@@ -27702,8 +27638,11 @@ class TraderLiquidation(TraderBase):
                 return accion, confianza, estrategias, razones
 
             liquidation = capas.get('liquidation', {}) or {}
-            if liquidation.get('data_type') != 'MODEL_ESTIMATE_NOT_OBSERVED':
-                razones.append('Heatmap sin contrato de datos verificable; Liquidador se abstiene')
+            if (
+                liquidation.get('data_type') != 'MODEL_ESTIMATE_NOT_OBSERVED'
+                or liquidation.get('weight_unit') != 'relative_participation'
+            ):
+                razones.append('Heatmap sin contrato relativo verificable; Liquidador se abstiene')
                 return accion, confianza, estrategias, razones
 
             active_bins = liquidation.get('active_bins', []) or []

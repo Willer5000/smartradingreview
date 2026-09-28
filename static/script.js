@@ -8908,7 +8908,7 @@ function updateLiquidationHeatmap(data) {
 
     const layout = {
         title: {
-            text: 'Calor de liquidaciones (' + timeframe + ') · ' + activeBins.length + ' zonas activas',
+            text: 'Calor de liquidaciones estimadas (' + timeframe + ') · ' + activeBins.length + ' zonas activas',
             font: {color: '#eef4fb', size: 14},
             x: 0.015,
             xanchor: 'left',
@@ -11992,14 +11992,23 @@ function _macroRenderBadge(snapshot) {
     const current = String(snapshot?.current_risk_level || snapshot?.risk_level || 'UNKNOWN').toUpperCase();
     const next = String(snapshot?.next_event_risk_level || '').toUpperCase();
     const hours = Number(snapshot?.next_event_hours);
-    badge.className = `macro-risk-badge ${_macroRiskClass(current)}`;
-    let label = `<i class="fas fa-globe-americas" aria-hidden="true"></i> MACRO AHORA · ${_macroRiskLabel(current)}`;
+    const errors = Array.isArray(snapshot?.errors) ? snapshot.errors.filter(Boolean) : [];
+    const items = Array.isArray(snapshot?.ticker_items) ? snapshot.ticker_items.filter(item => item && String(item.text || '').trim()) : [];
+    const partial = errors.length > 0;
+    const noUsableContext = partial && items.length === 0 && !(snapshot?.next_high_impact_event);
+    const displayCurrent = noUsableContext ? 'UNKNOWN' : current;
+    badge.className = `macro-risk-badge ${_macroRiskClass(displayCurrent)}`;
+    const statusLabel = noUsableContext ? 'SIN DATO' : partial ? 'PARCIAL' : _macroRiskLabel(current);
+    let label = `<i class="fas fa-globe-americas" aria-hidden="true"></i> MACRO AHORA · ${statusLabel}`;
     if (next && next !== 'UNKNOWN') label += ` <span class="opacity-75">| PRÓXIMO · ${_macroRiskLabel(next)}</span>`;
     badge.innerHTML = label;
     const nextEvent = snapshot?.next_high_impact_event || {};
-    badge.title = nextEvent?.title_es
-        ? `Riesgo actual: ${_macroRiskLabel(current)}. Próximo evento: ${nextEvent.title_es}${Number.isFinite(hours) ? ` en ${Math.max(0, hours).toFixed(hours < 24 ? 1 : 0)} h` : ''}.`
+    const prefix = partial
+        ? 'Contexto macro incompleto (fail-open): trading técnico continúa sin convertir el dato faltante en señal.'
         : `Riesgo macro actual: ${_macroRiskLabel(current)}.`;
+    badge.title = nextEvent?.title_es
+        ? `${prefix} Próximo evento: ${nextEvent.title_es}${Number.isFinite(hours) ? ` en ${Math.max(0, hours).toFixed(hours < 24 ? 1 : 0)} h` : ''}.`
+        : prefix;
 }
 
 function _macroMoney(value) {

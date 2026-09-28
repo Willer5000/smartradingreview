@@ -15,7 +15,7 @@ from collections import Counter, defaultdict
 from futures_universe import all_symbols as _fut_all_symbols, risk_class_for as _fut_risk_class, exit_profile_for as _fut_exit_profile
 from typing import Any, Dict, List, Mapping
 
-VERSION = "RC9_7_SPECIALIZED_CONTINGENCY_BANK_V1"
+VERSION = "COMMIT17_3_OPPORTUNITY_COVERAGE_V1"
 
 INDICATOR_UNIVERSE = {
     "sma", "ema_stack", "adx_dmi", "supertrend", "ichimoku", "psar",
@@ -40,11 +40,20 @@ STRATEGIES: List[Dict[str, Any]] = [
     {"id":"SPOT_VALUE_RECLAIM","actions":["COMPRA_SPOT"],"family":"MEAN_REVERSION","indicators":["vwap","bollinger","rsi","stochastic","williams_r","mfi","obv","volume_profile_poc","hvn_lvn","candlestick_patterns","support_resistance"]},
     {"id":"SPOT_TREND_PULLBACK_ACCUMULATION","actions":["COMPRA_SPOT"],"family":"TREND_PULLBACK","indicators":["sma","ema_stack","adx_dmi","supertrend","ichimoku","psar","hidden_divergence","atr","order_block","fvg","volume_ratio","market_session","whale_proxy"]},
     {"id":"SPOT_BREAKOUT_RETEST_ACCUMULATION","actions":["COMPRA_SPOT"],"family":"BREAKOUT_RETEST","indicators":["squeeze","ftmaverick","bollinger","macd","adx_dmi","volume_ratio","force_index","obv","hvn_lvn","fibonacci","candlestick_patterns","market_session"]},
+    # Commit 17.3 — generic opportunity archetypes. These are market-state
+    # families, not symbol-tuned strategies. They reuse the existing indicator
+    # universe and remain subject to thesis, Entry/SL/TP, Safety and economics.
+    {"id":"SPOT_MOMENTUM_CONTINUATION_ACCUMULATION","actions":["COMPRA_SPOT"],"family":"MOMENTUM_CONTINUATION","indicators":["ema_stack","adx_dmi","supertrend","macd","rsi","rsi_maverick","bollinger","atr","volume_ratio","force_index","obv","fvg","support_resistance","market_session"]},
+    {"id":"SPOT_COMPRESSION_EXPANSION_ACCUMULATION","actions":["COMPRA_SPOT"],"family":"COMPRESSION_EXPANSION","indicators":["squeeze","bollinger","ftmaverick","macd","adx_dmi","volume_ratio","force_index","obv","fvg","support_resistance","hvn_lvn","market_session"]},
+    {"id":"SPOT_STRUCTURE_REVERSAL_ACCUMULATION","actions":["COMPRA_SPOT"],"family":"STRUCTURE_REVERSAL","indicators":["regular_divergence","rsi","macd","order_block","fvg","support_resistance","candlestick_patterns","volume_ratio","obv","mfi","atr","fibonacci"]},
     {"id":"SPOT_CEILING_DISTRIBUTION","actions":["VENTA_SPOT"],"family":"SWEEP_REVERSAL","indicators":["rsi","rsi_maverick","regular_divergence","liquidity_sweep","stop_hunt","order_block","volume_ratio","mfi","whale_proxy","atr","support_resistance"]},
     {"id":"SPOT_OVEREXTENSION_EXIT","actions":["VENTA_SPOT"],"family":"MEAN_REVERSION","indicators":["vwap","bollinger","cci","stochastic","williams_r","mfi","volume_profile_poc","hvn_lvn","candlestick_patterns","support_resistance","sentiment"]},
     {"id":"SPOT_TREND_BREAK_EXIT","actions":["VENTA_SPOT"],"family":"TREND_BREAK","indicators":["ema_stack","adx_dmi","supertrend","ichimoku","psar","macd","hidden_divergence","fvg","volume_ratio","obv","macro_context","correlation_rotation"]},
     {"id":"SPOT_BTC_PAXG_ROTATION","actions":["COMPRA_SPOT","VENTA_SPOT"],"family":"ROTATION","indicators":["correlation_rotation","macro_context","sentiment","sma","ema_stack","adx_dmi","rsi","vwap","volume_profile_poc","hvn_lvn","market_session"]},
     {"id":"SPOT_MOMENTUM_EXHAUSTION_EXIT","actions":["VENTA_SPOT"],"family":"MOMENTUM_EXIT","indicators":["rsi","rsi_maverick","macd","regular_divergence","volume_ratio","force_index","mfi","obv","bollinger","atr","support_resistance","candlestick_patterns","sentiment"]},
+    {"id":"SPOT_BEARISH_MOMENTUM_CONTINUATION_EXIT","actions":["VENTA_SPOT"],"family":"MOMENTUM_CONTINUATION","indicators":["ema_stack","adx_dmi","supertrend","macd","rsi","rsi_maverick","bollinger","atr","volume_ratio","force_index","obv","fvg","support_resistance","market_session"]},
+    {"id":"SPOT_COMPRESSION_BREAKDOWN_EXIT","actions":["VENTA_SPOT"],"family":"COMPRESSION_EXPANSION","indicators":["squeeze","bollinger","ftmaverick","macd","adx_dmi","volume_ratio","force_index","obv","fvg","support_resistance","hvn_lvn","market_session"]},
+    {"id":"SPOT_STRUCTURE_REVERSAL_EXIT","actions":["VENTA_SPOT"],"family":"STRUCTURE_REVERSAL","indicators":["regular_divergence","rsi","macd","order_block","fvg","support_resistance","candlestick_patterns","volume_ratio","obv","mfi","atr","fibonacci"]},
     # Whale-specific archetypes requested by the desk.  The event is sourced
     # only from 12H/1D/1W anomalous-volume context and remains valid for a
     # maximum of seven source bars.  A lower-TF reaction is still required.
@@ -56,10 +65,16 @@ STRATEGIES: List[Dict[str, Any]] = [
     {"id":"FUT_LONG_BREAKOUT_RETEST","actions":["LONG"],"family":"BREAKOUT_RETEST","indicators":["squeeze","ftmaverick","bollinger","macd","adx_dmi","volume_ratio","force_index","obv","hvn_lvn","volume_profile_poc","fibonacci","candlestick_patterns","liquidation_map","market_session"]},
     {"id":"FUT_LONG_TREND_PULLBACK","actions":["LONG"],"family":"TREND_PULLBACK","indicators":["ema_stack","adx_dmi","supertrend","ichimoku","psar","rsi","hidden_divergence","atr","order_block","fvg","volume_ratio","macro_context","whale_proxy"]},
     {"id":"FUT_LONG_VALUE_REVERSAL","actions":["LONG"],"family":"MEAN_REVERSION","indicators":["vwap","bollinger","rsi","stochastic","williams_r","cci","force_index","mfi","volume_profile_poc","support_resistance","regular_divergence","sentiment"]},
+    {"id":"FUT_LONG_MOMENTUM_CONTINUATION","actions":["LONG"],"family":"MOMENTUM_CONTINUATION","indicators":["ema_stack","adx_dmi","supertrend","macd","rsi","rsi_maverick","bollinger","atr","volume_ratio","force_index","obv","fvg","order_block","support_resistance","liquidation_map","market_session"]},
+    {"id":"FUT_LONG_COMPRESSION_EXPANSION","actions":["LONG"],"family":"COMPRESSION_EXPANSION","indicators":["squeeze","bollinger","ftmaverick","macd","adx_dmi","volume_ratio","force_index","obv","fvg","support_resistance","hvn_lvn","liquidation_map","market_session"]},
+    {"id":"FUT_LONG_STRUCTURE_REVERSAL","actions":["LONG"],"family":"STRUCTURE_REVERSAL","indicators":["regular_divergence","rsi_maverick","macd","order_block","fvg","support_resistance","candlestick_patterns","volume_ratio","obv","mfi","atr","fibonacci","liquidation_map"]},
     {"id":"FUT_SHORT_SWEEP_MSS","actions":["SHORT"],"family":"SWEEP_REVERSAL","indicators":["liquidity_sweep","stop_hunt","order_block","fvg","regular_divergence","hidden_divergence","rsi_maverick","volume_ratio","whale_proxy","iceberg","liquidation_map","atr","support_resistance"]},
     {"id":"FUT_SHORT_BREAKDOWN_RETEST","actions":["SHORT"],"family":"BREAKOUT_RETEST","indicators":["squeeze","ftmaverick","bollinger","macd","adx_dmi","volume_ratio","force_index","obv","hvn_lvn","volume_profile_poc","fibonacci","candlestick_patterns","liquidation_map","market_session"]},
     {"id":"FUT_SHORT_TREND_PULLBACK","actions":["SHORT"],"family":"TREND_PULLBACK","indicators":["ema_stack","adx_dmi","supertrend","ichimoku","psar","rsi","hidden_divergence","atr","order_block","fvg","volume_ratio","macro_context"]},
     {"id":"FUT_SHORT_VALUE_REVERSAL","actions":["SHORT"],"family":"MEAN_REVERSION","indicators":["vwap","bollinger","rsi","stochastic","williams_r","cci","force_index","mfi","volume_profile_poc","support_resistance","regular_divergence","sentiment"]},
+    {"id":"FUT_SHORT_MOMENTUM_CONTINUATION","actions":["SHORT"],"family":"MOMENTUM_CONTINUATION","indicators":["ema_stack","adx_dmi","supertrend","macd","rsi","rsi_maverick","bollinger","atr","volume_ratio","force_index","obv","fvg","order_block","support_resistance","liquidation_map","market_session"]},
+    {"id":"FUT_SHORT_COMPRESSION_EXPANSION","actions":["SHORT"],"family":"COMPRESSION_EXPANSION","indicators":["squeeze","bollinger","ftmaverick","macd","adx_dmi","volume_ratio","force_index","obv","fvg","support_resistance","hvn_lvn","liquidation_map","market_session"]},
+    {"id":"FUT_SHORT_STRUCTURE_REVERSAL","actions":["SHORT"],"family":"STRUCTURE_REVERSAL","indicators":["regular_divergence","rsi_maverick","macd","order_block","fvg","support_resistance","candlestick_patterns","volume_ratio","obv","mfi","atr","fibonacci","liquidation_map"]},
 ]
 
 RC9_SUPPORTED = {
@@ -85,6 +100,9 @@ _FAMILY_TIMEFRAMES = {
         "ROTATION": ["4H", "12H", "1D", "1W"],
         "MOMENTUM_EXIT": ["4H", "12H", "1D", "1W"],
         "WHALE_REACTION": ["4H", "12H", "1D"],
+        "MOMENTUM_CONTINUATION": ["4H", "12H", "1D", "1W"],
+        "COMPRESSION_EXPANSION": ["4H", "12H", "1D", "1W"],
+        "STRUCTURE_REVERSAL": ["4H", "12H", "1D", "1W"],
     },
     "FUTURES": {
         "SWEEP_REVERSAL": ["30M", "1H", "2H", "4H"],
@@ -92,6 +110,9 @@ _FAMILY_TIMEFRAMES = {
         "TREND_PULLBACK": ["1H", "2H", "4H", "12H", "1D"],
         "BREAKOUT_RETEST": ["30M", "1H", "2H", "4H", "12H"],
         "WHALE_REACTION": ["4H", "12H", "1D"],
+        "MOMENTUM_CONTINUATION": ["30M", "1H", "2H", "4H", "12H", "1D"],
+        "COMPRESSION_EXPANSION": ["30M", "1H", "2H", "4H", "12H", "1D"],
+        "STRUCTURE_REVERSAL": ["30M", "1H", "2H", "4H", "12H", "1D"],
     },
 }
 
@@ -104,6 +125,9 @@ _FAMILY_REGIMES = {
     "ROTATION": ["BALANCE", "TREND_UP", "TREND_DOWN", "TRANSITION", "VOLATILITY_SHOCK"],
     "MOMENTUM_EXIT": ["TREND_UP", "TREND_DOWN", "TRANSITION", "VOLATILITY_SHOCK", "BALANCE"],
     "WHALE_REACTION": ["BALANCE", "TRANSITION", "TREND_UP", "TREND_DOWN"],
+    "MOMENTUM_CONTINUATION": ["TREND_UP", "TREND_DOWN", "TRANSITION", "VOLATILITY_SHOCK"],
+    "COMPRESSION_EXPANSION": ["BALANCE", "RANGE", "RANGING", "TRANSITION", "TREND_UP", "TREND_DOWN", "VOLATILITY_SHOCK"],
+    "STRUCTURE_REVERSAL": ["TRANSITION", "BALANCE", "RANGE", "RANGING", "TREND_UP", "TREND_DOWN"],
 }
 _FAMILY_VOLATILITY = {
     "SWEEP_REVERSAL": ["LOW", "NORMAL", "EXPANSION", "COMPRESSION"],
@@ -114,6 +138,9 @@ _FAMILY_VOLATILITY = {
     "ROTATION": ["LOW", "NORMAL", "EXPANSION", "SHOCK"],
     "MOMENTUM_EXIT": ["LOW", "NORMAL", "EXPANSION", "SHOCK"],
     "WHALE_REACTION": ["LOW", "NORMAL", "EXPANSION", "COMPRESSION"],
+    "MOMENTUM_CONTINUATION": ["NORMAL", "EXPANSION", "SHOCK"],
+    "COMPRESSION_EXPANSION": ["COMPRESSION", "NORMAL", "EXPANSION", "SHOCK"],
+    "STRUCTURE_REVERSAL": ["LOW", "NORMAL", "EXPANSION"],
 }
 
 # Correlated tools share a cap.  This is the anti-overfitting contract: e.g.
@@ -215,7 +242,8 @@ def _indicator_effect(name: str, groups: Mapping[str, Any], *, side: int, family
         effect=sig*side; detail=f"RSI {x:.1f}"
     elif name == "rsi_maverick":
         x=_f(m.get("rsi_maverick"),.5); available=m.get("rsi_maverick") is not None
-        sig=1 if x<=.25 else -1 if x>=.75 else (1 if x>.55 and family=="TREND_PULLBACK" else -1 if x<.45 and family=="TREND_PULLBACK" else 0)
+        continuation_family = family in {"TREND_PULLBACK", "MOMENTUM_CONTINUATION", "COMPRESSION_EXPANSION"}
+        sig=1 if x<=.25 else -1 if x>=.75 else (1 if x>.55 and continuation_family else -1 if x<.45 and continuation_family else 0)
         effect=sig*side; detail=f"RSI Maverick {x:.2f}"
     elif name == "macd":
         x=_f(m.get("macd_histogram")); available=m.get("macd_histogram") is not None; effect=(1 if x>0 else -1 if x<0 else 0)*side; detail=f"MACD hist {x:.4f}"
@@ -225,7 +253,7 @@ def _indicator_effect(name: str, groups: Mapping[str, Any], *, side: int, family
     elif name == "williams_r":
         x=_f(m.get("williams"),-50); available=m.get("williams") is not None; sig=1 if x<-80 else -1 if x>-20 else 0; effect=sig*side; detail=f"Williams %R {x:.1f}"
     elif name == "cci":
-        x=_f(m.get("cci")); available=m.get("cci") is not None; sig=1 if x<-100 else -1 if x>100 else (1 if x>25 and family=="TREND_PULLBACK" else -1 if x<-25 and family=="TREND_PULLBACK" else 0); effect=sig*side; detail=f"CCI {x:.1f}"
+        x=_f(m.get("cci")); available=m.get("cci") is not None; continuation_family = family in {"TREND_PULLBACK", "MOMENTUM_CONTINUATION", "COMPRESSION_EXPANSION"}; sig=1 if x<-100 else -1 if x>100 else (1 if x>25 and continuation_family else -1 if x<-25 and continuation_family else 0); effect=sig*side; detail=f"CCI {x:.1f}"
     elif name == "regular_divergence":
         rows=m.get("divergences") or []; available=bool(rows); effect=1.0 if _contains_direction(rows,side) else -1.0 if _contains_direction(rows,-side) else 0.0; detail="divergencia regular"
     elif name == "hidden_divergence":
@@ -241,7 +269,8 @@ def _indicator_effect(name: str, groups: Mapping[str, Any], *, side: int, family
         raw=v.get("ftm_state"); available=raw not in (None,"","NEUTRAL"); effect=_bool_dir(raw)*side; detail=f"Fuerza Maverick {_u(raw)}"
     elif name == "squeeze":
         on=bool(v.get("squeeze_on")); length=int(_f(v.get("squeeze_length"))); available=(v.get("squeeze_on") is not None)
-        effect=.75 if on and family=="BREAKOUT_RETEST" and length<12 else -.35 if on and length>=12 else 0.0; detail=f"squeeze {'activo' if on else 'inactivo'} ({length} velas)"
+        expansion_family = family in {"BREAKOUT_RETEST", "COMPRESSION_EXPANSION"}
+        effect=.75 if on and expansion_family and length<12 else -.35 if on and length>=12 else 0.0; detail=f"squeeze {'activo' if on else 'inactivo'} ({length} velas)"
     elif name == "volume_ratio":
         x=_f(f.get("volume_ratio"),1); available=f.get("volume_ratio") is not None; effect=.65 if x>=1.2 else .25 if x>=1.05 else -.45 if x<.65 else 0.0; detail=f"volumen {x:.2f}x"
     elif name == "force_index":
@@ -381,7 +410,7 @@ def _functional_probe_groups(side: int, family: str) -> Dict[str, Any]:
         "volatility": {
             "available": True, "atr_pct": 2.0, "bb_position": bbpos,
             "bb_width": 2.0, "ftm_state": raw_dir,
-            "squeeze_on": family == "BREAKOUT_RETEST", "squeeze_length": 4,
+            "squeeze_on": family in {"BREAKOUT_RETEST", "COMPRESSION_EXPANSION"}, "squeeze_length": 4,
         },
         "volume_flow": {
             "available": True, "volume_ratio": 1.40,
@@ -579,22 +608,44 @@ def coverage_matrix() -> Dict[str, Any]:
 
 def _choose_family(action: str, regime: str, vol_state: str, groups: Mapping[str, Any], symbol: str) -> str:
     m=groups.get("momentum") or {}; st=groups.get("structure_liquidity") or {}; rot=groups.get("rotation") or {}; mtf=groups.get("multi_timeframe") or {}
+    t=groups.get("trend") or {}; vf=groups.get("volume_flow") or {}; vv=groups.get("volatility") or {}
     direction=1 if action in {"LONG","COMPRA_SPOT"} else -1
     rsi=_f(m.get("rsi"),50); rsim=_f(m.get("rsi_maverick"),.5)
     divs=list(m.get("divergences") or [])
-    has_reversal=bool(st.get("has_liquidity_sweep") or st.get("has_stop_hunt") or divs)
+    has_sweep=bool(st.get("has_liquidity_sweep") or st.get("has_stop_hunt"))
+    aligned_divergence=_contains_direction(divs,direction)
+    bull_patterns=int(_f(st.get("bullish_patterns_count"),0)); bear_patterns=int(_f(st.get("bearish_patterns_count"),0))
+    pattern_reversal_aligned=(direction>0 and bull_patterns>bear_patterns) or (direction<0 and bear_patterns>bull_patterns)
+    has_reversal=bool(has_sweep or aligned_divergence or pattern_reversal_aligned)
     extreme=(direction>0 and (rsi<=42 or rsim<=.25)) or (direction<0 and (rsi>=58 or rsim>=.75))
     rotation=_u(rot.get("signal")) not in {"","NONE","NEUTRAL"}
     whale=dict(mtf.get("whale_context") or {})
+    trend_aligned=_bool_dir(t.get("direction"))*direction > 0
+    momentum_aligned=_bool_dir(m.get("direction"))*direction > 0
+    obv_aligned=_bool_dir(vf.get("obv_trend"))*direction > 0
+    volume_ratio=_f(vf.get("volume_ratio"),1.0)
+    flow_aligned=obv_aligned or (volume_ratio >= 1.15)
+    structure_aligned=_bool_dir(st.get("direction"))*direction > 0
+    squeeze=bool(vv.get("squeeze_on")) or vol_state in {"SQUEEZE","COMPRESSION"}
+    expansion=vol_state in {"EXPANSION","SHOCK","HIGH_EXPANSION","VOLATILITY_SHOCK"}
     # Confirmed/pending higher-TF anomalous-volume context is a *setup selector*,
     # never an automatic trade. Current-TF momentum/structure still has to pass.
     whale_reaction=bool(whale.get("active"))
     if action in {"COMPRA_SPOT","VENTA_SPOT"} and rotation and "PAXG" in symbol: return "ROTATION"
     if whale_reaction and direction>0 and regime in {"BALANCE","TRANSITION","TREND_UP"}: return "WHALE_REACTION"
-    if vol_state in {"SQUEEZE","COMPRESSION"}: return "BREAKOUT_RETEST"
-    if regime in {"RANGING","BALANCE","RANGE"} and (has_reversal or extreme): return "SWEEP_REVERSAL"
+    # A volatility squeeze/release is not the same thing as a classical retest.
+    if squeeze: return "COMPRESSION_EXPANSION"
+    # Reversal after a confirmed structural change does not require a liquidity
+    # sweep.  SWEEP_REVERSAL remains the preferred family when a sweep exists.
+    if regime in {"TRANSITION","RANGING","BALANCE","RANGE"} and has_reversal and structure_aligned and not has_sweep:
+        return "STRUCTURE_REVERSAL"
+    if regime in {"RANGING","BALANCE","RANGE"} and (has_sweep or extreme): return "SWEEP_REVERSAL"
     if regime in {"RANGING","BALANCE","RANGE"}: return "MEAN_REVERSION"
-    if vol_state in {"EXPANSION","SHOCK","HIGH_EXPANSION","VOLATILITY_SHOCK"}: return "BREAKOUT_RETEST"
+    # Strong impulse with trend+momentum+flow alignment is a continuation setup,
+    # not automatically a breakout-retest. Entry remains no-chase downstream.
+    if expansion and trend_aligned and momentum_aligned and flow_aligned:
+        return "MOMENTUM_CONTINUATION"
+    if expansion: return "BREAKOUT_RETEST"
     if action=="VENTA_SPOT" and regime in {"TREND_DOWN","TRANSITION"}: return "TREND_BREAK"
     if action=="VENTA_SPOT" and (extreme or has_reversal): return "MOMENTUM_EXIT"
     return "TREND_PULLBACK"
