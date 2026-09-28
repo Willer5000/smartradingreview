@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-VERSION = "COMMIT17_3_OPPORTUNITY_COVERAGE_V1"
+VERSION = "COMMIT17_3_1_SIGNAL_PATH_RECOVERY_V1"
 
 DIRECTIONAL_ACTIONS = {"LONG", "SHORT", "COMPRA_SPOT", "VENTA_SPOT"}
 NON_DIRECTIONAL_ACTIONS = {"ESPERAR", "PRECAUCION", "NO_OPERAR"}
@@ -35,6 +35,27 @@ from futures_universe import (
 
 FUTURES_SYMBOLS = tuple(_futures_all_symbols())
 SPOT_EXECUTION_TFS = ("4H", "12H", "1D", "1W")
+
+# Commit 17.3.1 — Multi-Asset reuses the Futures execution engine but is not
+# part of the crypto Futures universe in futures_universe.py.  The thesis layer
+# must therefore recognize these contracts as governed operational cells instead
+# of rejecting them as ``official_cell=False`` before the Multi-Asset router can
+# annotate the result.  Keep this list deliberately small and identical to the
+# production Multi-Asset universe; it is a routing contract, not alpha.
+MULTIASSET_SYMBOLS = {
+    "SPY-USDT", "QQQ-USDT", "CL-USDT", "NATGAS-USDT",
+    "COPPER-USDT", "XAG-USDT", "KSTR-USDT",
+}
+MULTIASSET_EXECUTION_TFS = {"30M", "1H", "2H", "4H"}
+
+
+def is_multiasset_cell(market: Any, symbol: Any, timeframe: Any, action: Any) -> bool:
+    return bool(
+        _u(market) == "FUTURES"
+        and _u(symbol) in MULTIASSET_SYMBOLS
+        and _u(timeframe) in MULTIASSET_EXECUTION_TFS
+        and canonical_action(action, "FUTURES") in {"LONG", "SHORT"}
+    )
 
 
 def _u(value: Any) -> str:
@@ -628,6 +649,76 @@ def _research_negative(row: Mapping[str, Any] | None) -> bool:
     return _research_state(row) in _NEGATIVE_RESEARCH_STATES or bool((row or {}).get("recycle_required"))
 
 
+def _mtf_execution_gate(
+    *, mtf_context: Mapping[str, Any], thesis: Mapping[str, Any],
+    strategy: Mapping[str, Any], selected_action: Any, market: str,
+    risk_class: str, timeframe: Any, is_multiasset: bool = False,
+) -> Tuple[bool, str]:
+    """Context-aware MTF gate without weakening the normal alignment rule.
+
+    A blanket ``not conflict`` veto prevents the very first technically mature
+    reversal/impulse from ever becoming executable: by definition the faster
+    frames turn before the higher context frame.  Commit 17.3 added families for
+    those states, but the old blanket gate still discarded them.
+
+    Exception policy is intentionally narrow:
+    - only crypto Futures CORE/MEDIUM, 30M/1H/2H; HIGH remains strict;
+    - only transition-capable families;
+    - structure + setup + timing roles must already agree with the candidate;
+    - higher ``context`` may be the sole disagreement;
+    - at least the normal number of independent *local* families must agree and
+      the thesis margin must be stronger than the normal directional threshold.
+    Multi-Asset remains aligned-MTF only in this hotfix; its bug is the governed
+    cell routing, not a request to relax its context gate.
+    """
+    if not bool((mtf_context or {}).get("conflict")):
+        return True, "MTF_ALIGNED_OR_NON_CONFLICT"
+    if _u(market) != "FUTURES" or is_multiasset:
+        return False, "MTF_CONFLICT"
+    if _u(risk_class) == "HIGH" or _u(timeframe) not in {"30M", "1H", "2H"}:
+        return False, "MTF_CONFLICT_STRICT_PROFILE"
+
+    family = _u((strategy or {}).get("family"))
+    if family not in {"STRUCTURE_REVERSAL", "MOMENTUM_CONTINUATION", "COMPRESSION_EXPANSION"}:
+        return False, "MTF_CONFLICT_FAMILY_NOT_TRANSITION_CAPABLE"
+
+    desired = action_direction(selected_action)
+    if desired not in {"BULLISH", "BEARISH"}:
+        return False, "MTF_CONFLICT_NO_DIRECTION"
+
+    roles = dict((mtf_context or {}).get("roles") or {})
+    role_dirs = {name: _u((roles.get(name) or {}).get("direction")) for name in ("context", "structure", "setup", "timing")}
+
+    # Internal disagreement inside structure/setup/timing is never waived.
+    for name in ("structure", "setup", "timing"):
+        if role_dirs.get(name) == "CONFLICT":
+            return False, f"MTF_{name.upper()}_INTERNAL_CONFLICT"
+        if role_dirs.get(name) != desired:
+            return False, f"MTF_{name.upper()}_NOT_ALIGNED"
+
+    # The exception exists only for a lagging/opposite higher context. If context
+    # already agrees, the conflict originated elsewhere and should remain blocked.
+    context_dir = role_dirs.get("context")
+    if context_dir == desired:
+        return False, "MTF_CONFLICT_NOT_CONTEXT_ONLY"
+
+    families = dict((thesis or {}).get("families") or {})
+    threshold = 0.45 if desired == "BULLISH" else -0.45
+    local_names = ("trend", "structure", "momentum", "volume", "expansion")
+    if desired == "BULLISH":
+        local_support = [n for n in local_names if _f((families.get(n) or {}).get("score")) >= threshold]
+    else:
+        local_support = [n for n in local_names if _f((families.get(n) or {}).get("score")) <= threshold]
+    required = int((thesis or {}).get("required_independent_families") or 4)
+    margin = _f((thesis or {}).get("margin"))
+    margin_required = _f((thesis or {}).get("required_direction_margin"), 1.15)
+    if len(local_support) < required:
+        return False, "MTF_TRANSITION_LOCAL_SUPPORT_INSUFFICIENT"
+    if margin < margin_required + 0.60:
+        return False, "MTF_TRANSITION_MARGIN_INSUFFICIENT"
+    return True, "MTF_CONTEXT_LAG_TRANSITION_CONFIRMED"
+
+
 def prepare_operational_intelligence(
     *, layers: Mapping[str, Any], symbol: Any, timeframe: Any, system_type: Any,
     mtf_context: Mapping[str, Any], research_candidates: Mapping[str, Mapping[str, Any]] | None = None,
@@ -639,6 +730,7 @@ def prepare_operational_intelligence(
     be rescued by a default playbook.
     """
     market = "FUTURES" if _u(system_type) == "FUTURES" else "SPOT"
+    is_multiasset = bool(market == "FUTURES" and _u(symbol) in MULTIASSET_SYMBOLS)
     raw_regime = (layers.get("market_regime") or {}).get("regime")
     regime = canonical_regime(raw_regime)
     vol_state = canonical_volatility(layers.get("volatility") or {}, raw_regime)
@@ -710,25 +802,49 @@ def prepare_operational_intelligence(
         "confirmations": [], "conflicts": [],
     }
     if selected_action in DIRECTIONAL_ACTIONS:
-        try:
-            from default_strategy_bank import select_strategy
-            _selected_prior_for_strategy = research_map.get(selected_action) or {}
-            strategy = select_strategy(
-                selected_action, regime, vol_state, indicator_groups,
-                symbol=_u(symbol), timeframe=_u(timeframe), market=market,
-                preferred_family=str(_selected_prior_for_strategy.get("group_prior_strategy_family") or ""),
-            )
-        except Exception as exc:
+        if is_multiasset:
+            # Multi-Asset has its own asset-class strategy router in
+            # multiasset_system.py.  Do not force a crypto default playbook here;
+            # the independent thesis may proceed through the common Futures
+            # Entry/Safety/Publication gates and is annotated by that router later.
             strategy = {
-                "id":"NO_PLAYBOOK", "family":"NONE", "quality":0.0,
-                "confirmations":[], "conflicts":[], "error":str(exc)[:160],
+                "id": "MULTIASSET_DELEGATED_PLAYBOOK",
+                "family": "MULTIASSET_DELEGATED",
+                "quality": 0.0,
+                "confirmations": [],
+                "conflicts": [],
+                "regime_match": True,
+                "volatility_match": True,
+                "delegated_to": "MULTIASSET_STRATEGY_BANK",
             }
+        else:
+            try:
+                from default_strategy_bank import select_strategy
+                _selected_prior_for_strategy = research_map.get(selected_action) or {}
+                strategy = select_strategy(
+                    selected_action, regime, vol_state, indicator_groups,
+                    symbol=_u(symbol), timeframe=_u(timeframe), market=market,
+                    preferred_family=str(_selected_prior_for_strategy.get("group_prior_strategy_family") or ""),
+                )
+            except Exception as exc:
+                strategy = {
+                    "id":"NO_PLAYBOOK", "family":"NONE", "quality":0.0,
+                    "confirmations":[], "conflicts":[], "error":str(exc)[:160],
+                }
 
-    official = (
+    official = bool(
         selected_action in DIRECTIONAL_ACTIONS
-        and is_official_cell(market, symbol, timeframe, selected_action)
+        and (
+            is_official_cell(market, symbol, timeframe, selected_action)
+            or is_multiasset_cell(market, symbol, timeframe, selected_action)
+        )
     )
-    risk_profile = futures_exit_profile_for(symbol) if market == "FUTURES" else {"risk_class": "SPOT", "name": "PORTFOLIO", "risk_budget_multiplier": 1.0}
+    risk_profile = (
+        {"risk_class": "MULTIASSET", "name": "MULTIASSET_CONTEXTUAL", "risk_budget_multiplier": 1.0}
+        if is_multiasset
+        else futures_exit_profile_for(symbol) if market == "FUTURES"
+        else {"risk_class": "SPOT", "name": "PORTFOLIO", "risk_budget_multiplier": 1.0}
+    )
     risk_class = str(risk_profile.get("risk_class") or ("SPOT" if market == "SPOT" else "CORE1"))
     # A default strategy is a technical contingency path, not a prerequisite
     # for market intelligence. An autonomous thesis may proceed to the existing
@@ -740,7 +856,11 @@ def prepare_operational_intelligence(
         else 84.0 if risk_class == "MEDIUM"
         else 82.0
     )
-    mtf_usable = not bool((mtf_context or {}).get("conflict"))
+    mtf_usable, mtf_gate_mode = _mtf_execution_gate(
+        mtf_context=mtf_context, thesis=thesis, strategy=strategy,
+        selected_action=selected_action, market=market, risk_class=risk_class,
+        timeframe=timeframe, is_multiasset=is_multiasset,
+    )
     support_count = (
         long_support if action_direction(selected_action) == "BULLISH" else short_support
     )
@@ -783,6 +903,19 @@ def prepare_operational_intelligence(
         and mtf_usable
         and not (market == "FUTURES" and _u(thesis.get("macro_risk")) == "CRITICAL")
     )
+    candidate_blockers: List[str] = []
+    if selected_action not in DIRECTIONAL_ACTIONS:
+        candidate_blockers.append("NO_DIRECTIONAL_THESIS")
+    if selected_action in DIRECTIONAL_ACTIONS and not official:
+        candidate_blockers.append("OUTSIDE_GOVERNED_OPERATIONAL_CELL")
+    if blocked_by_research:
+        candidate_blockers.append("NEGATIVE_RESEARCH_EVIDENCE")
+    if selected_action in DIRECTIONAL_ACTIONS and candidate_source == "NONE":
+        candidate_blockers.append("NO_ELIGIBLE_LIVE_OR_DEFAULT_PATH")
+    if not mtf_usable:
+        candidate_blockers.append(mtf_gate_mode)
+    if market == "FUTURES" and _u(thesis.get("macro_risk")) == "CRITICAL":
+        candidate_blockers.append("MACRO_CRITICAL")
 
 
     return {
@@ -823,7 +956,10 @@ def prepare_operational_intelligence(
         "candidate_action": selected_action if candidate_ready else "NO_OPERAR",
         "candidate_ready": candidate_ready,
         "official_cell": official,
+        "operational_segment": "MULTIASSET" if is_multiasset else market,
         "mtf_usable": mtf_usable,
+        "mtf_gate_mode": mtf_gate_mode,
+        "candidate_blockers": candidate_blockers,
         "mtf_complete": bool((mtf_context or {}).get("complete")),
         "never_bypass_safety": True,
     }
