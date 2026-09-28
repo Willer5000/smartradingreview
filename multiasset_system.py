@@ -28,7 +28,7 @@ from futures_system import (
     _track_futures_network_response,
 )
 
-MULTIASSET_VERSION = 'COMMIT17_4_MULTI_FIRST_CLASS_REASONING_V1'
+MULTIASSET_VERSION = 'COMMIT12_1_MULTI_V1_QA_RESOURCE_GOVERNED'
 MULTIASSET_ENABLED = str(os.getenv('MULTIASSET_ENABLED', '1')).lower() not in ('0','false','no','off')
 MULTIASSET_DEEP_LIMIT = max(1, min(2, int(os.getenv('MULTIASSET_DEEP_LIMIT', '2') or 2)))
 MULTIASSET_ROUTER_TTL_SECONDS = max(300, int(os.getenv('MULTIASSET_ROUTER_TTL_SECONDS', '900') or 900))
@@ -66,28 +66,24 @@ MULTIASSET_STRATEGY_BANK = {
     'US_INDEX': [
         'SWEEP_MSS_POI', 'VWAP_SESSION_PULLBACK', 'BREAKOUT_RETEST',
         'COMPRESSION_EXPANSION', 'TREND_PULLBACK', 'POST_MACRO_CONFIRMATION',
-        'MEAN_REVERSION_SELECTIVE', 'MOMENTUM_CONTINUATION', 'STRUCTURE_REVERSAL',
+        'MEAN_REVERSION_SELECTIVE',
     ],
     'ENERGY': [
         'SWEEP_MSS_POI', 'TREND_PULLBACK', 'BREAKOUT_RETEST',
         'COMPRESSION_EXPANSION', 'POST_EVENT_CONFIRMATION',
-        'VOLATILITY_RETEST', 'MEAN_REVERSION_SELECTIVE',
-        'MOMENTUM_CONTINUATION', 'STRUCTURE_REVERSAL',
+        'VOLATILITY_RETEST',
     ],
     'INDUSTRIAL_METAL': [
         'SWEEP_MSS_POI', 'TREND_PULLBACK', 'BREAKOUT_RETEST',
-        'COMPRESSION_EXPANSION', 'MACRO_TREND_CONFIRMATION', 'MEAN_REVERSION_SELECTIVE',
-        'MOMENTUM_CONTINUATION', 'STRUCTURE_REVERSAL',
+        'COMPRESSION_EXPANSION', 'MACRO_TREND_CONFIRMATION',
     ],
     'PRECIOUS_METAL': [
         'SWEEP_MSS_POI', 'TREND_PULLBACK', 'MEAN_REVERSION_SELECTIVE',
-        'BREAKOUT_RETEST', 'RATES_USD_CONFIRMATION', 'COMPRESSION_EXPANSION',
-        'MOMENTUM_CONTINUATION', 'STRUCTURE_REVERSAL',
+        'BREAKOUT_RETEST', 'RATES_USD_CONFIRMATION',
     ],
     'CHINA_INDEX': [
         'SWEEP_MSS_POI', 'TREND_PULLBACK', 'BREAKOUT_RETEST',
         'COMPRESSION_EXPANSION', 'ASIA_SESSION_RETEST', 'MACRO_TREND_CONFIRMATION',
-        'MEAN_REVERSION_SELECTIVE', 'MOMENTUM_CONTINUATION', 'STRUCTURE_REVERSAL',
     ],
 }
 SPECIALIST_BY_CLASS = {
@@ -99,10 +95,7 @@ SPECIALIST_BY_CLASS = {
 }
 
 _router_lock = threading.Lock()
-_router_cache = {
-    tf: {'stored_at': 0.0, 'rows': []}
-    for tf in MULTIASSET_TIMEFRAMES
-}
+_router_cache = {'stored_at':0.0, 'timeframe':None, 'rows':[]}
 _contract_lock = threading.Lock()
 _contract_cache: Dict[str, Dict] = {}
 
@@ -167,52 +160,46 @@ def _macro_context_for_asset(meta: Dict) -> Dict:
     return {
         'available':True, 'gate':gate, 'reason':reason,
         'risk_level':current_risk, 'directional_bias':bias,
-        'market_session': _market_session(asset_class),
-        'asset_class': asset_class,
         'next_event_hours': None if hours >= 9990 else round(hours,2),
         'next_event': next_event.get('title') or next_event.get('name') or next_event.get('event'),
-        'policy':'CONTEXTUAL_REQUIREMENTS_IMMINENT_EVENT_ONLY_HARD_HOLD',
+        'policy':'CONFIRM_OR_VETO_ONLY_NEVER_CREATE_DIRECTION',
         'affects_direction':False,
     }
 
 
 def _strategy_context(meta: Dict, timeframe: str, result: Dict) -> Dict:
-    """Expose the same early reasoning used by Operational Intelligence.
-
-    No second set of absolute volatility/ADX rules is allowed here: that would
-    make Multi-Asset disagree with the decision engine that already evaluated it.
-    """
-    op=dict(result.get('operational_intelligence') or {})
-    ctx=dict(op.get('context') or {})
-    early=dict(op.get('default_strategy') or {})
-    regime=str(ctx.get('regime') or 'BALANCE').upper()
-    volatility=str(ctx.get('volatility') or 'NORMAL').upper()
-    asset_class=meta.get('asset_class')
-    families=list(MULTIASSET_STRATEGY_BANK.get(asset_class) or [])
-    selected=str(early.get('family') or '').upper()
+    levels=result.get('levels') or {}
+    trend=result.get('trend') or {}
+    adx=_safe_float(trend.get('adx') or levels.get('adx'))
+    atr_pct=_safe_float(levels.get('atr_pct') or result.get('atr_pct'))
+    if adx >= 28:
+        regime='TRENDING'
+    elif adx and adx < 18:
+        regime='RANGING'
+    else:
+        regime='MIXED'
+    volatility='HIGH' if atr_pct >= 3.0 else ('LOW' if atr_pct and atr_pct < 0.8 else 'NORMAL')
+    families=list(MULTIASSET_STRATEGY_BANK.get(meta['asset_class']) or [])
     preferred=[]
-    if selected and selected not in {'NONE','MULTIASSET_DELEGATED'}:
-        preferred.append(selected)
-    if regime in {'TRENDING','TREND_UP','TREND_DOWN'}:
-        preferred += [x for x in families if x in ('MOMENTUM_CONTINUATION','TREND_PULLBACK','BREAKOUT_RETEST','VWAP_SESSION_PULLBACK','MACRO_TREND_CONFIRMATION')]
-    elif regime in {'RANGING','BALANCE','RANGE'}:
+    if regime == 'TRENDING':
+        preferred += [x for x in families if x in ('TREND_PULLBACK','SWEEP_MSS_POI','BREAKOUT_RETEST','VWAP_SESSION_PULLBACK','MACRO_TREND_CONFIRMATION')]
+    elif regime == 'RANGING':
         preferred += [x for x in families if x in ('MEAN_REVERSION_SELECTIVE','SWEEP_MSS_POI','COMPRESSION_EXPANSION')]
     else:
-        preferred += [x for x in families if x in ('STRUCTURE_REVERSAL','SWEEP_MSS_POI','COMPRESSION_EXPANSION','BREAKOUT_RETEST')]
-    if volatility in {'HIGH','EXPANSION','SHOCK'}:
-        preferred += [x for x in families if x in ('MOMENTUM_CONTINUATION','COMPRESSION_EXPANSION','VOLATILITY_RETEST','POST_EVENT_CONFIRMATION','POST_MACRO_CONFIRMATION')]
+        preferred += [x for x in families if x in ('SWEEP_MSS_POI','COMPRESSION_EXPANSION','BREAKOUT_RETEST')]
+    if volatility == 'HIGH':
+        preferred += [x for x in families if x in ('VOLATILITY_RETEST','POST_EVENT_CONFIRMATION','POST_MACRO_CONFIRMATION')]
+    # Preserve order, no strategy is promoted by name alone; ReviewTrader still governs authority.
     preferred=list(dict.fromkeys(preferred))[:4]
-    vol_reason=dict(ctx.get('volatility_reasoning') or {})
     return {
-        'bank_version':'MULTI_BANK_V17_4', 'asset_class':asset_class,
-        'symbol':meta.get('code'), 'timeframe':timeframe, 'regime':regime,
-        'volatility_regime':volatility, 'volatility_reasoning':vol_reason,
-        'session':_market_session(asset_class), 'families':families,
-        'preferred_for_context':preferred, 'selected_family':selected or None,
-        'selected_quality':early.get('quality'),
-        'authority':'EARLY_OPERATIONAL_REASONING_SHARED_WITH_EXECUTION',
-        'learning_cell':early.get('learning_cell') or f"MULTI::{asset_class}::{meta.get('code')}::{timeframe}::{regime}::{volatility}",
-        'resource_policy':'NO_EXTRA_FETCH_NO_LLM_NO_DB_WRITE',
+        'bank_version':'MULTI_BANK_V1',
+        'asset_class':meta['asset_class'],
+        'symbol':meta['code'], 'timeframe':timeframe,
+        'regime':regime, 'volatility_regime':volatility,
+        'session':_market_session(meta['asset_class']),
+        'families':families, 'preferred_for_context':preferred,
+        'authority':'CONTEXT_ROUTING_ONLY_REVIEWTRADER_GOVERNS',
+        'learning_cell':f"MULTI::{meta['asset_class']}::{meta['code']}::{timeframe}::{regime}::{volatility}",
     }
 
 
@@ -270,121 +257,25 @@ def _router_fetch(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
             parsed.append([pd.to_datetime(int(row[0]),unit='ms',utc=True),*[_safe_float(x) for x in row[1:6]]])
         if len(parsed)<30: return None
         df=pd.DataFrame(parsed,columns=['timestamp','open','high','low','close','volume']).sort_values('timestamp')
-
-        # COMMIT 17.2 — el scanner debe razonar sobre la misma realidad causal
-        # que el análisis profundo: velas CERRADAS. KuCoin puede devolver la
-        # vela actualmente en formación; usarla aquí deprime volumen/ATR al
-        # inicio de cada periodo y puede alterar el shortlist precisamente en
-        # la ventana de cierre. Se deja una pequeña gracia de asentamiento.
-        now_utc = pd.Timestamp.now(tz='UTC')
-        close_grace_seconds = 15
-        closed_cutoff = now_utc - pd.Timedelta(
-            seconds=int(gran * 60) + close_grace_seconds
-        )
-        df = df[df['timestamp'] <= closed_cutoff]
-        if len(df) < 30:
-            return None
         return df.tail(MULTIASSET_ROUTER_CANDLES).reset_index(drop=True)
     except Exception:
         return None
 
 
 def _router_score(df: pd.DataFrame) -> Dict:
-    """High-recall contextual router using the SAME cached OHLCV.
-
-    The router is not a signal generator.  Its only job is to choose which
-    Multi-Asset cells deserve the bounded deep analysis.  Older logic strongly
-    favoured trend/momentum and could therefore starve mean-reversion, reversal
-    or compression-release setups before the real strategy engine saw them.
-    R3 scores several broad opportunity lanes and forwards the strongest one.
-    No extra request, DB write or LLM call is introduced.
-    """
-    close=df['close'].astype(float); high=df['high'].astype(float); low=df['low'].astype(float); vol=df['volume'].astype(float)
+    close=df['close']; high=df['high']; low=df['low']; vol=df['volume']
     ema12=close.ewm(span=12,adjust=False).mean(); ema26=close.ewm(span=26,adjust=False).mean()
-    ema50=close.ewm(span=50,adjust=False).mean()
-    ret1=(close.iloc[-1]/close.iloc[-2]-1) if len(close)>2 and close.iloc[-2] else 0.0
-    ret12=(close.iloc[-1]/close.iloc[-13]-1) if len(close)>13 and close.iloc[-13] else 0.0
+    ret12=(close.iloc[-1]/close.iloc[-13]-1) if len(close)>13 and close.iloc[-13] else 0
     tr=pd.concat([(high-low),(high-close.shift()).abs(),(low-close.shift()).abs()],axis=1).max(axis=1)
-    atr_series=tr.rolling(14,min_periods=8).mean()
-    atr=float(atr_series.iloc[-1] or 0.0)
-    atr_pct=(atr/close.iloc[-1]*100) if close.iloc[-1] else 0.0
-    atr_pct_series=(atr_series/close.replace(0,float('nan'))*100).dropna().tail(40)
-    atr_rank=(float((atr_pct_series <= atr_pct).mean())*100.0) if len(atr_pct_series)>=8 else 50.0
-
-    vol_base=float(vol.tail(20).mean() or 0.0)
-    vol_ratio=(float(vol.iloc[-1])/max(1e-9,vol_base))
-    range_pct=((high-low)/close.replace(0,float('nan'))*100).dropna()
-    range_now=float(range_pct.iloc[-1]) if len(range_pct) else 0.0
-    range_base=float(range_pct.tail(20).median() or 0.0)
-    range_ratio=range_now/max(1e-9,range_base) if range_base>0 else 1.0
-
-    ma20=close.rolling(20,min_periods=10).mean(); sd20=close.rolling(20,min_periods=10).std(ddof=0)
-    bb_width=(4.0*sd20/ma20.replace(0,float('nan'))*100).dropna()
-    bb_now=float(bb_width.iloc[-1]) if len(bb_width) else 0.0
-    bb_prev=float(bb_width.iloc[-2]) if len(bb_width)>1 else bb_now
-    bb_hist=bb_width.tail(40)
-    bb_rank=(float((bb_hist <= bb_now).mean())*100.0) if len(bb_hist)>=8 else 50.0
-    bb_growth=bb_now/max(1e-9,bb_prev) if bb_prev>0 else 1.0
-
-    delta=close.diff(); gain=delta.clip(lower=0).rolling(14,min_periods=8).mean(); loss=(-delta.clip(upper=0)).rolling(14,min_periods=8).mean()
-    rs=(float(gain.iloc[-1] or 0.0)/max(1e-12,float(loss.iloc[-1]))) if len(loss) and len(gain) and float(loss.iloc[-1] or 0)>0 else None
-    if rs is None:
-        rsi=100.0 if len(gain) and float(gain.iloc[-1] or 0)>0 else 50.0
-    else:
-        rsi=100.0-(100.0/(1.0+float(rs)))
-
-    trend_sep=abs(float(ema12.iloc[-1])/max(1e-9,float(ema26.iloc[-1]))-1.0)
-    trend_lane=min(100.0, trend_sep*2600.0 + min(28.0,abs(ret12)*850.0) + min(18.0,max(0.0,vol_ratio-0.7)*16.0))
-
-    expansion_lane=min(100.0,
-        max(0.0,(atr_rank-45.0))*0.75 +
-        max(0.0,(bb_rank-45.0))*0.55 +
-        max(0.0,(range_ratio-1.0))*28.0 +
-        max(0.0,(vol_ratio-0.8))*18.0
-    )
-
-    dist_atr=abs(float(close.iloc[-1])-float(ema26.iloc[-1]))/max(atr,1e-9)
-    rsi_extreme=max(0.0,35.0-rsi, rsi-65.0)
-    reversal_raw=(
-        max(0.0,dist_atr-0.8)*24.0 +
-        rsi_extreme*1.5 +
-        min(18.0,max(0.0,vol_ratio-0.8)*15.0) +
-        (12.0 if (ret1<0 and close.iloc[-1]>ema26.iloc[-1]) or (ret1>0 and close.iloc[-1]<ema26.iloc[-1]) else 0.0)
-    )
-    sustained_trend = bool(
-        (ema12.iloc[-1] > ema26.iloc[-1] and ret12 > 0 and close.iloc[-1] > ema26.iloc[-1])
-        or (ema12.iloc[-1] < ema26.iloc[-1] and ret12 < 0 and close.iloc[-1] < ema26.iloc[-1])
-    )
-    # Extension alone is not a reversal.  A smooth trend can remain far from
-    # its EMA and show an extreme RSI for many bars.  The router therefore
-    # suppresses the mean-reversion lane while the latest bar still confirms
-    # the sustained trend; an actual counter-move/structure change can restore it.
-    if sustained_trend and ((ret12 > 0 and ret1 > 0) or (ret12 < 0 and ret1 < 0)):
-        reversal_raw *= 0.35
-    reversal_lane=min(100.0,reversal_raw)
-
-    compression_base=max(0.0,35.0-atr_rank)*0.8 + max(0.0,35.0-bb_rank)*0.65
-    release=max(0.0,(range_ratio-1.0))*32.0 + max(0.0,(bb_growth-1.0))*90.0 + max(0.0,(vol_ratio-0.9))*16.0
-    compression_release_lane=min(100.0, compression_base + release)
-
-    lanes={
-        'TREND_MOMENTUM':trend_lane,
-        'EXPANSION_BREAKOUT':expansion_lane,
-        'REVERSAL_MEAN_REVERSION':reversal_lane,
-        'COMPRESSION_RELEASE':compression_release_lane,
-    }
-    lane=max(lanes,key=lanes.get)
-    score=max(0.0,min(100.0,lanes[lane]))
-
+    atr=tr.rolling(14).mean().iloc[-1]; atr_pct=(atr/close.iloc[-1]*100) if close.iloc[-1] else 0
+    vol_ratio=(vol.iloc[-1]/max(1e-9,vol.tail(20).mean()))
+    trend_strength=min(35, abs(ema12.iloc[-1]/max(1e-9,ema26.iloc[-1])-1)*2500)
+    momentum=min(25,abs(ret12)*800)
+    activity=min(20,max(0,(vol_ratio-0.6)*14))
+    usable_vol=min(20,max(0,atr_pct*5))
+    score=max(0,min(100,trend_strength+momentum+activity+usable_vol))
     direction='LONG_BIAS' if ema12.iloc[-1]>ema26.iloc[-1] and ret12>0 else ('SHORT_BIAS' if ema12.iloc[-1]<ema26.iloc[-1] and ret12<0 else 'MIXED')
-    return {
-        'score':round(score,1),'bias':direction,'router_lane':lane,
-        'lane_scores':{k:round(v,1) for k,v in lanes.items()},
-        'atr_pct':round(atr_pct,3),'atr_percentile':round(atr_rank,1),
-        'bb_width_percentile':round(bb_rank,1),'volume_ratio':round(vol_ratio,2),
-        'last_price':round(float(close.iloc[-1]),8),
-        'resource_policy':'SAME_OHLCV_NO_EXTRA_FETCH',
-    }
+    return {'score':round(score,1),'bias':direction,'atr_pct':round(atr_pct,3),'volume_ratio':round(vol_ratio,2),'last_price':round(float(close.iloc[-1]),8)}
 
 
 def scan_opportunities(timeframe: str='4h', force: bool=False) -> List[Dict]:
@@ -392,12 +283,8 @@ def scan_opportunities(timeframe: str='4h', force: bool=False) -> List[Dict]:
     if timeframe not in MULTIASSET_TIMEFRAMES: timeframe='4h'
     now=time.monotonic()
     with _router_lock:
-        cached = _router_cache.setdefault(timeframe, {'stored_at': 0.0, 'rows': []})
-        if (
-            not force
-            and now - float(cached.get('stored_at') or 0.0) < MULTIASSET_ROUTER_TTL_SECONDS
-        ):
-            return [dict(x) for x in (cached.get('rows') or [])]
+        if (not force and _router_cache['timeframe']==timeframe and now-_router_cache['stored_at']<MULTIASSET_ROUTER_TTL_SECONDS):
+            return [dict(x) for x in _router_cache['rows']]
     rows=[]
     for symbol,meta in MULTIASSET_SYMBOLS.items():
         df=_router_fetch(symbol,timeframe)
@@ -407,74 +294,53 @@ def scan_opportunities(timeframe: str='4h', force: bool=False) -> List[Dict]:
         session=_market_session(meta['asset_class']); penalty=8 if 'OFFHOURS' in session or 'CLOSED' in session else 0
         macro_penalty=12 if macro.get('gate')=='WAIT_EVENT' else (4 if macro.get('gate')=='CAUTION' else 0)
         effective=max(0,round(q['score']-penalty-macro_penalty,1))
-        source_candle_timestamp = None
-        try:
-            source_candle_timestamp = df['timestamp'].iloc[-1].isoformat()
-        except Exception:
-            pass
         rows.append({
             'symbol':symbol,'code':meta['code'],'display_name':meta['name'],'asset_class':meta['asset_class'],'group':meta['group'],
             'timeframe':timeframe,'router_score':effective,'raw_score':q['score'],'bias':q['bias'],
-            'atr_pct':q['atr_pct'],'atr_percentile':q.get('atr_percentile'),'bb_width_percentile':q.get('bb_width_percentile'),
-            'volume_ratio':q['volume_ratio'],'last_price':q['last_price'],
-            'router_lane':q.get('router_lane'),'lane_scores':q.get('lane_scores') or {},
+            'atr_pct':q['atr_pct'],'volume_ratio':q['volume_ratio'],'last_price':q['last_price'],
             'session':session,'macro_gate':macro.get('gate'),'deep_candidate':False,
-            'source_candle_timestamp':source_candle_timestamp,
-            'closed_candle_only':True,
         })
     rows.sort(key=lambda x:x['router_score'],reverse=True)
     for row in rows[:MULTIASSET_DEEP_LIMIT]: row['deep_candidate']=True
     with _router_lock:
-        _router_cache[timeframe] = {
-            'stored_at': now,
-            'rows': [dict(x) for x in rows],
-        }
+        _router_cache.update({'stored_at':now,'timeframe':timeframe,'rows':[dict(x) for x in rows]})
     return rows
 
 
-def router_cache_status() -> Dict:
-    """Cache-only diagnostics; never performs exchange requests."""
-    now = time.monotonic()
-    payload = {}
-    with _router_lock:
-        for timeframe in MULTIASSET_TIMEFRAMES:
-            row = _router_cache.get(timeframe) or {}
-            rows = list(row.get('rows') or [])
-            payload[timeframe] = {
-                'age_seconds': (
-                    max(0, round(now - float(row.get('stored_at') or 0.0), 1))
-                    if row.get('stored_at') else None
-                ),
-                'rows': len(rows),
-                'source_candle_timestamp': (
-                    rows[0].get('source_candle_timestamp') if rows else None
-                ),
-            }
-    return payload
-
-
 def _route_strategy_family(result: Dict, strategy: Dict, macro: Dict) -> Dict:
-    """Presentation/audit router; early Operational Intelligence owns selection."""
-    op=dict(result.get('operational_intelligence') or {})
-    early=dict(op.get('default_strategy') or {})
-    selected=str(early.get('family') or strategy.get('selected_family') or '').upper() or None
-    early_scores=dict(early.get('candidate_scores') or {})
-    if selected:
-        return {
-            'selected_family':selected,
-            'confirmation_score':round(_safe_float(early.get('quality') or strategy.get('selected_quality')),1),
-            'candidates':early_scores,
-            'authority':'ADAPTIVE_CONTEXT_ROUTER_V2_EARLY',
-            'creates_direction':False,
-            'changes_entry_sl_tp':False,
-            'learning_scope':early.get('learning_cell') or strategy.get('learning_cell'),
-            'reasoning_source':'operational_intelligence',
-        }
-    # Fail-safe audit only; never manufactures a direction if early reasoning was unavailable.
+    """Deterministic market-specific strategy router; no LLM and no direction creation."""
+    preferred=list(strategy.get('preferred_for_context') or [])
+    blob=str({
+        'message': result.get('message'),
+        'levels': result.get('levels'),
+        'structure': result.get('structure'),
+        'patterns': result.get('patterns'),
+    }).upper()
+    scores={}
+    for family in preferred:
+        score=45.0
+        if family == 'SWEEP_MSS_POI':
+            score += 12 if 'SWEEP' in blob else 0; score += 12 if ('MSS' in blob or 'STRUCTURE' in blob) else 0; score += 8 if ('FVG' in blob or 'ORDER_BLOCK' in blob or 'POI' in blob) else 0
+        elif family in ('TREND_PULLBACK','VWAP_SESSION_PULLBACK'):
+            score += 18 if strategy.get('regime') == 'TRENDING' else 0; score += 10 if ('RETEST' in blob or 'PULLBACK' in blob or 'VWAP' in blob or 'EMA' in blob) else 0
+        elif family == 'BREAKOUT_RETEST':
+            score += 18 if ('BREAKOUT' in blob or 'RUPTURA' in blob) else 0; score += 8 if ('RETEST' in blob or 'RETROCESO' in blob) else 0
+        elif family == 'COMPRESSION_EXPANSION':
+            score += 15 if ('SQUEEZE' in blob or 'COMPRESSION' in blob or 'COMPRESI' in blob) else 0; score += 8 if strategy.get('volatility_regime') == 'HIGH' else 0
+        elif family == 'MEAN_REVERSION_SELECTIVE':
+            score += 18 if strategy.get('regime') == 'RANGING' else 0; score += 8 if ('RSI' in blob or 'BOLLINGER' in blob) else 0
+        elif family in ('POST_EVENT_CONFIRMATION','POST_MACRO_CONFIRMATION'):
+            score += 12 if macro.get('risk_level') in ('HIGH','CRITICAL') and macro.get('gate') != 'WAIT_EVENT' else 0
+        scores[family]=min(100.0,score)
+    selected=max(scores,key=scores.get) if scores else None
     return {
-        'selected_family':None,'confirmation_score':0.0,'candidates':{},
-        'authority':'NO_EARLY_STRATEGY_AVAILABLE','creates_direction':False,
-        'changes_entry_sl_tp':False,'learning_scope':strategy.get('learning_cell'),
+        'selected_family':selected,
+        'confirmation_score':round(scores.get(selected,0.0),1) if selected else 0.0,
+        'candidates':scores,
+        'authority':'CONTEXT_FILTER_ONLY_INITIAL_V1',
+        'creates_direction':False,
+        'changes_entry_sl_tp':False,
+        'learning_scope':strategy.get('learning_cell'),
     }
 
 
@@ -496,9 +362,9 @@ def _specialist_evaluation(meta: Dict, strategy: Dict, macro: Dict, result: Dict
     return {
         'name':SPECIALIST_BY_CLASS.get(asset_class,'Multi-Asset Specialist'),
         'macro_specialist':'Macro / Intermarket Specialist',
-        'mode':'CONTEXT_REASONING_SPECIALIST_V2','changes_direction':False,
+        'mode':'CONTEXT_AND_VETO_ONLY','changes_direction':False,
         'observations':observations[:5],
-        'entry_policy':'Context>Structure>Setup>Timing>POI>Entry; invalidation defines SL',
+        'entry_policy':'Liquidity>Sweep>MSS>Displacement>POI>Entry',
     }
 
 
@@ -593,15 +459,6 @@ def _humanize_multiasset_message(message, symbol, meta, macro, strategy):
 class MultiAssetAnalysis(FuturesAnalysis):
     """Futures execution engine with Multi-Asset market semantics."""
     def _market_label(self): return 'MULTI-ACTIVO'
-    def _market_macro_context_override(self, *, symbol, timeframe=None, generic_snapshot=None):
-        # Feed class-specific macro/session relevance into the thesis BEFORE
-        # strategy selection.  _macro_context_for_asset reuses the existing
-        # macro cache with fetch_if_stale=False, so this costs zero extra egress.
-        meta=MULTIASSET_SYMBOLS.get(str(symbol or '').upper().replace('/','-')) or {}
-        specific=_macro_context_for_asset(meta) if meta else {}
-        if not specific.get('available'):
-            return dict(generic_snapshot or {})
-        return specific
     def _market_symbols(self): return MULTIASSET_SYMBOLS
     def _market_all_symbols(self): return MULTIASSET_SYMBOLS
     def _market_timeframes(self): return MULTIASSET_TIMEFRAMES

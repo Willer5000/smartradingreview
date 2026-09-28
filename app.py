@@ -4,7 +4,6 @@
 import os
 import uuid
 import json
-import hashlib
 import time
 import math
 import random
@@ -141,28 +140,7 @@ if not app.secret_key:
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SECURE'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-app.config['SESSION_COOKIE_NAME'] = 'smartrading_session'
-app.config['SESSION_COOKIE_PATH'] = '/'
-# Commit 15: sesión privada con expiración deslizante. Mientras exista actividad
-# legítima, Flask renueva el vencimiento; una sesión abandonada expira.
-app.config['SESSION_PERMANENT'] = True
-app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=12)
-app.config['SESSION_REFRESH_EACH_REQUEST'] = True
-
-
-# --------------------------------------------------------------------------
-# COMMIT 15 — SECURITY LOCKDOWN
-# --------------------------------------------------------------------------
-# Objetivo: la aplicación es PRIVADA POR DEFECTO. Sin una sesión válida sólo
-# se exponen /login, /api/auth/login, /api/auth/me y un /health mínimo para
-# Render. Los jobs machine-to-machine conservan X-Auth-Key y fallan cerrados si
-# SCHEDULED_AUTH_KEY no existe.
-# --------------------------------------------------------------------------
-_AUTH_FAILURE_LOCK = threading.Lock()
-_AUTH_FAILURES = {}
-_AUTH_FAILURE_WINDOW_SECONDS = 15 * 60
-_AUTH_FAILURE_LIMIT = 7
-_AUTH_BLOCK_SECONDS = 15 * 60
+app.config['SESSION_PERMANENT'] = False
 
 
 def _auth_users():
@@ -211,171 +189,6 @@ def _require_auth():
         }), 401
 
     return user
-
-
-
-def _safe_next_path(value):
-    """Acepta sólo rutas locales para evitar redirecciones externas."""
-    value = str(value or '').strip()
-    if not value.startswith('/') or value.startswith('//'):
-        return '/'
-    return value
-
-
-def _auth_rate_key(user):
-    """Clave de rate-limit por origen + usuario sin confiar en headers."""
-    remote = str(request.remote_addr or 'unknown')[:96]
-    normalized_user = str(user or '').strip().lower()[:64]
-    return f'{remote}|{normalized_user}'
-
-
-def _auth_rate_block_remaining(user):
-    """Segundos restantes de bloqueo por demasiados intentos fallidos."""
-    now = time.time()
-    key = _auth_rate_key(user)
-    with _AUTH_FAILURE_LOCK:
-        state = _AUTH_FAILURES.get(key)
-        if not state:
-            return 0
-        blocked_until = float(state.get('blocked_until') or 0.0)
-        if blocked_until > now:
-            return max(1, int(blocked_until - now))
-        failures = [
-            float(ts) for ts in (state.get('failures') or [])
-            if now - float(ts) <= _AUTH_FAILURE_WINDOW_SECONDS
-        ]
-        if failures:
-            state['failures'] = failures
-            state['blocked_until'] = 0.0
-        else:
-            _AUTH_FAILURES.pop(key, None)
-        return 0
-
-
-def _auth_record_failure(user):
-    now = time.time()
-    key = _auth_rate_key(user)
-    with _AUTH_FAILURE_LOCK:
-        state = _AUTH_FAILURES.setdefault(key, {
-            'failures': [],
-            'blocked_until': 0.0,
-        })
-        failures = [
-            float(ts) for ts in (state.get('failures') or [])
-            if now - float(ts) <= _AUTH_FAILURE_WINDOW_SECONDS
-        ]
-        failures.append(now)
-        state['failures'] = failures
-        if len(failures) >= _AUTH_FAILURE_LIMIT:
-            state['blocked_until'] = now + _AUTH_BLOCK_SECONDS
-
-
-def _auth_clear_failures(user):
-    key = _auth_rate_key(user)
-    with _AUTH_FAILURE_LOCK:
-        _AUTH_FAILURES.pop(key, None)
-
-
-def _valid_machine_auth():
-    """Autenticación exclusiva para jobs internos programados."""
-    import hmac
-    expected = str(os.getenv('SCHEDULED_AUTH_KEY', '') or '')
-    provided = str(request.headers.get('X-Auth-Key', '') or '')
-    return bool(
-        expected
-        and provided
-        and hmac.compare_digest(provided, expected)
-    )
-
-
-_PUBLIC_UNAUTHENTICATED_PATHS = {
-    '/login',
-    '/api/auth/login',
-    '/api/auth/me',
-    '/health',
-}
-
-_MACHINE_AUTH_PATHS = {
-    '/api/run_scheduled',
-    '/api/review/run_now',
-    '/api/review/fix_confidence_overflow',
-    '/api/admin/dedup_signals',
-}
-
-
-@app.before_request
-def _commit15_private_by_default():
-    """Bloquea TODO el sistema salvo las excepciones explícitas."""
-    path = str(request.path or '/')
-
-    if path in _PUBLIC_UNAUTHENTICATED_PATHS:
-        return None
-
-    if _authenticated_user():
-        return None
-
-    if path in _MACHINE_AUTH_PATHS and _valid_machine_auth():
-        return None
-
-    if path.startswith('/api/'):
-        return jsonify({
-            'success': False,
-            'authenticated': False,
-            'error': 'Autenticación requerida'
-        }), 401
-
-    # Páginas, assets y deep-links: nunca entregar contenido del sistema antes
-    # del login. Se conserva el destino para volver exactamente allí después.
-    from urllib.parse import urlencode
-    target = request.full_path if request.query_string else request.path
-    target = _safe_next_path(target.rstrip('?'))
-    return redirect('/login?' + urlencode({'next': target}))
-
-
-@app.after_request
-def _commit15_security_headers(response):
-    """Headers que endurecen la aplicación sin alterar Plotly/JS actual."""
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    response.headers['X-Frame-Options'] = 'DENY'
-    response.headers['Referrer-Policy'] = 'no-referrer'
-    response.headers['Permissions-Policy'] = (
-        'camera=(), microphone=(), geolocation=(), payment=()'
-    )
-    response.headers['Strict-Transport-Security'] = (
-        'max-age=31536000; includeSubDomains'
-    )
-    response.headers['X-Robots-Tag'] = 'noindex, nofollow, noarchive'
-
-    # Evita que, después de cerrar sesión, el botón Atrás muestre una copia
-    # cacheada del HTML privado.
-    if response.mimetype == 'text/html' or request.path.startswith('/api/auth/'):
-        response.headers['Cache-Control'] = 'no-store, max-age=0'
-        response.headers['Pragma'] = 'no-cache'
-
-    # COMMIT 17 — RESOURCE & BANDWIDTH GOVERNOR.
-    # Los assets estáticos usan URL versionada desde la plantilla; por eso se
-    # pueden conservar siete días en el navegador sin riesgo de servir una
-    # versión anterior después de un deploy. No cambia HTML ni aspecto visual.
-    if request.path.startswith('/static/'):
-        if request.query_string:
-            response.headers['Cache-Control'] = 'private, max-age=604800, immutable'
-        else:
-            response.headers['Cache-Control'] = 'private, max-age=3600, must-revalidate'
-        response.headers['Vary'] = 'Accept-Encoding'
-
-    # El login no depende de CDNs: puede usar una CSP estricta sin afectar el
-    # dashboard, Plotly ni los recursos existentes de la aplicación.
-    if request.path == '/login':
-        response.headers['Content-Security-Policy'] = (
-            "default-src 'none'; "
-            "style-src 'unsafe-inline'; "
-            "script-src 'unsafe-inline'; "
-            "connect-src 'self'; "
-            "form-action 'self'; "
-            "base-uri 'none'; "
-            "frame-ancestors 'none'"
-        )
-    return response
 # ============================================================================
 # COMMIT 16 — RESEARCH FEDERATION V1.2 / SHADOW BRIDGE
 # Sólo lectura para UI; el tracker live es fail-open y no modifica señales.
@@ -7187,13 +7000,13 @@ class TradingExpertSystem:
             },
             # ============ NUEVAS PLANTILLAS PARA LIQUIDACIONES (CATEGORÍA 40) ============
             'liquidation_bullish_opportunity': {
-                'template': 'MAPA DE LIQUIDACIONES ESTIMADO: concentración SHORT relativa dominante; posible squeeze alcista si el precio confirma. ',
+                'template': 'LIQUIDACIONES: {total_short_below:.1f}M en SHORT por debajo de ${price:.2f}, posible squeeze alcista. ',
                 'type': 'liquidaciones',
                 'order': 40,
                 'condition': 'liquidation_bullish_opportunity'
             },
             'liquidation_bearish_opportunity': {
-                'template': 'MAPA DE LIQUIDACIONES ESTIMADO: concentración LONG relativa dominante; posible presión bajista si el precio confirma. ',
+                'template': 'LIQUIDACIONES: {total_long_above:.1f}M en LONG por encima de ${price:.2f}, probable atracción bajista. ',
                 'type': 'liquidaciones',
                 'order': 40,
                 'condition': 'liquidation_bearish_opportunity'
@@ -8975,122 +8788,56 @@ class TradingExpertSystem:
                     
                     print(f"   📊 Sentimiento mapeado: {current_value} ({classification}) - {sentiment_bias}")
             
-            # ============ LIQUIDATION MAP · RELATIVE-PARTICIPATION CONTRACT ============
-            # Commit 17.3-LM: desde Commit 14 el heatmap ya no expresa USD ni
-            # liquidaciones observadas. Sus pesos son unidades relativas de
-            # participación calibradas con mercado público. Por eso esta capa
-            # jamás compara contra umbrales legacy de 50M/100M/200M.
+            # ============ NUEVA SECCIÓN: CONDICIONES DE LIQUIDACIONES ============
             if liquidation and isinstance(liquidation, dict):
-                active_bins = liquidation.get('active_bins', []) or []
-                total_long_bins = int(liquidation.get('total_long_bins', 0) or 0)
-                total_short_bins = int(liquidation.get('total_short_bins', 0) or 0)
-                total_long_weight = max(0.0, float(liquidation.get('total_long_weight', 0) or 0))
-                total_short_weight = max(0.0, float(liquidation.get('total_short_weight', 0) or 0))
-                total_spikes = int(liquidation.get('total_spikes', 0) or 0)
-                model_confidence = max(0.0, min(70.0, float(liquidation.get('model_confidence', 0) or 0)))
-                relative_contract = (
-                    liquidation.get('data_type') == 'MODEL_ESTIMATE_NOT_OBSERVED'
-                    and liquidation.get('weight_unit') == 'relative_participation'
-                )
-
-                total_weight = total_long_weight + total_short_weight
-                long_share = total_long_weight / total_weight if total_weight > 0 else 0.5
-                short_share = total_short_weight / total_weight if total_weight > 0 else 0.5
-                long_dominance = total_long_weight / max(total_short_weight, 1e-9)
-                short_dominance = total_short_weight / max(total_long_weight, 1e-9)
-                active_count = len(active_bins)
-
-                def _side_peak_intensity(side):
-                    values = []
-                    for item in active_bins:
-                        if not isinstance(item, dict) or str(item.get('side', '')).lower() != side:
-                            continue
-                        try:
-                            intensity = float(item.get('intensity', 0) or 0)
-                        except (TypeError, ValueError):
-                            intensity = 0.0
-                        if intensity > 0:
-                            values.append(intensity)
-                    return max(values) if values else 0.0
-
-                long_peak = _side_peak_intensity('long')
-                short_peak = _side_peak_intensity('short')
-
-                if not relative_contract:
-                    print('   ⚠️ Liquidation Map ignorado en condiciones: contrato de unidad no relativo')
-                else:
-                    # Sólo se permite dirección cuando el proxy tiene cobertura
-                    # mínima. Mismos pisos conceptuales que TraderLiquidation.
-                    directional_ready = active_count >= 6 and model_confidence >= 45.0
-
-                    # SHORT exposure por encima del precio es combustible de
-                    # squeeze ALCISTA; LONG exposure por debajo es combustible
-                    # de liquidación BAJISTA. El mapa no decide por sí solo.
-                    if directional_ready and short_dominance >= 1.35 and total_short_bins >= 3:
-                        condiciones.append('liquidation_bullish_opportunity')
-                        print(
-                            f"   🟢 Condición: liquidation_bullish_opportunity "
-                            f"(SHORT {short_share*100:.1f}% · {short_dominance:.2f}x · conf {model_confidence:.0f}%)"
-                        )
-
-                    if directional_ready and long_dominance >= 1.35 and total_long_bins >= 3:
-                        condiciones.append('liquidation_bearish_opportunity')
-                        print(
-                            f"   🔴 Condición: liquidation_bearish_opportunity "
-                            f"(LONG {long_share*100:.1f}% · {long_dominance:.2f}x · conf {model_confidence:.0f}%)"
-                        )
-
-                    # Concentración = pocos bins relativos, pero uno o varios
-                    # están entre las zonas más intensas del propio heatmap.
-                    concentration_cap = max(10, int(max(active_count, 1) * 0.30))
-                    if total_long_bins and total_long_bins <= concentration_cap and long_share >= 0.58 and long_peak >= 85:
-                        condiciones.append('heavy_long_concentration')
-                        print(
-                            f"   🔴 Condición: heavy_long_concentration "
-                            f"({total_long_bins} bins · pico {long_peak:.0f}/100 · share {long_share*100:.1f}%)"
-                        )
-
-                    if total_short_bins and total_short_bins <= concentration_cap and short_share >= 0.58 and short_peak >= 85:
-                        condiciones.append('heavy_short_concentration')
-                        print(
-                            f"   🟢 Condición: heavy_short_concentration "
-                            f"({total_short_bins} bins · pico {short_peak:.0f}/100 · share {short_share*100:.1f}%)"
-                        )
-
-                    # Actividad reciente conserva semántica temporal: no depende
-                    # de la unidad del peso.
-                    if total_spikes > 5:
-                        condiciones.append('recent_spike_activity')
-                        print(f"   ⚡ Condición: recent_spike_activity ({total_spikes} eventos modelados)")
-
-                    # Balance usa proporciones, no diferencias absolutas que
-                    # cambian según el número de bins del timeframe.
-                    bin_ratio = total_long_bins / max(total_short_bins, 1)
-                    if (
-                        directional_ready
-                        and 0.45 <= long_share <= 0.55
-                        and 0.67 <= bin_ratio <= 1.50
-                    ):
-                        condiciones.append('liquidity_balance')
-                        print(
-                            f"   ⚖️ Condición: liquidity_balance "
-                            f"({long_share*100:.1f}%L/{short_share*100:.1f}%S · {total_long_bins}L/{total_short_bins}S)"
-                        )
-
-                    # Extremos relativos requieren dominancia + cobertura + pico.
-                    if directional_ready and model_confidence >= 55 and long_dominance >= 1.75 and total_long_bins >= 12 and long_peak >= 80:
-                        condiciones.append('long_extreme')
-                        print(
-                            f"   ⚠️ Condición: long_extreme "
-                            f"({long_dominance:.2f}x · pico {long_peak:.0f}/100)"
-                        )
-
-                    if directional_ready and model_confidence >= 55 and short_dominance >= 1.75 and total_short_bins >= 12 and short_peak >= 80:
-                        condiciones.append('short_extreme')
-                        print(
-                            f"   ⚠️ Condición: short_extreme "
-                            f"({short_dominance:.2f}x · pico {short_peak:.0f}/100)"
-                        )
+                active_bins = liquidation.get('active_bins', [])
+                total_long_bins = liquidation.get('total_long_bins', 0)
+                total_short_bins = liquidation.get('total_short_bins', 0)
+                total_long_weight = liquidation.get('total_long_weight', 0)
+                total_short_weight = liquidation.get('total_short_weight', 0)
+                total_spikes = liquidation.get('total_spikes', 0)
+                
+                # Convertir a millones para facilitar lectura
+                long_weight_m = total_long_weight / 1_000_000
+                short_weight_m = total_short_weight / 1_000_000
+                
+                # Condición 1: Oportunidad alcista por acumulación de SHORTS (resistencia)
+                if total_short_weight > 100_000_000 and total_short_bins > 20:  # Más de 100M en shorts
+                    condiciones.append('liquidation_bearish_opportunity')  # Shorts arriba = resistencia bajista
+                    print(f"   🔴 Condición: liquidation_bearish_opportunity ({short_weight_m:.1f}M shorts en {total_short_bins} bins)")
+                
+                # Condición 2: Oportunidad bajista por acumulación de LONGS (soporte)
+                if total_long_weight > 100_000_000 and total_long_bins > 20:  # Más de 100M en longs
+                    condiciones.append('liquidation_bullish_opportunity')  # Longs abajo = soporte alcista
+                    print(f"   🟢 Condición: liquidation_bullish_opportunity ({long_weight_m:.1f}M longs en {total_long_bins} bins)")
+                
+                # Condición 3: Alta concentración (pocos bins pero muy pesados)
+                if total_long_bins < 10 and total_long_weight > 100_000_000:
+                    condiciones.append('heavy_long_concentration')
+                    print(f"   🟢 Condición: heavy_long_concentration ({long_weight_m:.1f}M en {total_long_bins} bins)")
+                
+                if total_short_bins < 10 and total_short_weight > 100_000_000:
+                    condiciones.append('heavy_short_concentration')
+                    print(f"   🔴 Condición: heavy_short_concentration ({short_weight_m:.1f}M en {total_short_bins} bins)")
+                
+                # Condición 4: Actividad reciente (spikes)
+                if total_spikes > 5:
+                    condiciones.append('recent_spike_activity')
+                    print(f"   ⚡ Condición: recent_spike_activity ({total_spikes} spikes)")
+                
+                # Condición 5: Equilibrio de liquidaciones
+                if abs(total_long_bins - total_short_bins) < 10 and total_long_bins > 30:
+                    condiciones.append('liquidity_balance')
+                    print(f"   ⚖️ Condición: liquidity_balance ({total_long_bins}L vs {total_short_bins}S)")
+                
+                # Condición 6: Sobreacumulación (posible reversión)
+                if total_long_bins > 100 and total_long_weight > 200_000_000:
+                    condiciones.append('long_extreme')
+                    print(f"   ⚠️ Condición: long_extreme ({total_long_bins} bins, {long_weight_m:.1f}M)")
+                
+                if total_short_bins > 100 and total_short_weight > 200_000_000:
+                    condiciones.append('short_extreme')
+                    print(f"   ⚠️ Condición: short_extreme ({total_short_bins} bins, {short_weight_m:.1f}M)")
             # =====================================================================
            
             
@@ -13024,9 +12771,6 @@ class TradingExpertSystem:
         # LIQUIDITY POOLS
         # ==============================================================
         active_bins = []
-        liquidation_model_confidence = 0.0
-        liquidation_public_calibrated = False
-        liquidation_calibration_quality = 0.0
     
         if isinstance(liquidation, dict):
             active_bins = (
@@ -13036,23 +12780,22 @@ class TradingExpertSystem:
                 )
                 or []
             )
+
+        # Commit 17.5 — the current heatmap uses relative participation units,
+        # not notional USD.  Normalize bin strength inside the already-loaded
+        # map so TP ranking can distinguish a strong pool from a weak one
+        # without any extra API call and without changing signal generation.
+        active_bin_weights = []
+        for _bin in active_bins:
+            if not isinstance(_bin, dict):
+                continue
             try:
-                liquidation_model_confidence = max(
-                    0.0,
-                    min(70.0, float(liquidation.get('model_confidence', 0) or 0))
-                )
+                _w = float(_bin.get('max_weight', 0) or _bin.get('weight', 0) or 0)
             except (TypeError, ValueError):
-                liquidation_model_confidence = 0.0
-            liquidation_public_calibrated = bool(
-                liquidation.get('public_derivatives_calibrated', False)
-            )
-            try:
-                liquidation_calibration_quality = max(
-                    0.0,
-                    min(100.0, float((liquidation.get('calibration') or {}).get('quality', 0) or 0))
-                )
-            except (TypeError, ValueError):
-                liquidation_calibration_quality = 0.0
+                _w = 0.0
+            if _w > 0:
+                active_bin_weights.append(_w)
+        max_active_bin_weight = max(active_bin_weights) if active_bin_weights else 0.0
     
         for bin_data in active_bins:
     
@@ -13078,13 +12821,11 @@ class TradingExpertSystem:
                 or bin_data.get('weight', 0)
                 or 0
             )
-            try:
-                intensity = max(
-                    0.0,
-                    min(100.0, float(bin_data.get('intensity', 0) or 0))
-                )
-            except (TypeError, ValueError):
-                intensity = 0.0
+            liquidity_intensity = (
+                max(0.0, min(1.0, weight / max_active_bin_weight))
+                if max_active_bin_weight > 0
+                else 0.0
+            )
     
             if top <= 0 or bottom <= 0:
                 continue
@@ -13130,10 +12871,7 @@ class TradingExpertSystem:
                         'type': 'liquidity',
                         'liquidity_side': 'short',
                         'liquidity_weight': weight,
-                        'liquidity_intensity': intensity,
-                        'liquidity_model_confidence': liquidation_model_confidence,
-                        'liquidity_public_calibrated': liquidation_public_calibrated,
-                        'liquidity_calibration_quality': liquidation_calibration_quality,
+                        'liquidity_intensity': round(liquidity_intensity, 4),
                         'distance_atr': distance_atr,
                         'distance_pct': distance_pct
                     })
@@ -13173,10 +12911,7 @@ class TradingExpertSystem:
                         'type': 'liquidity',
                         'liquidity_side': 'long',
                         'liquidity_weight': weight,
-                        'liquidity_intensity': intensity,
-                        'liquidity_model_confidence': liquidation_model_confidence,
-                        'liquidity_public_calibrated': liquidation_public_calibrated,
-                        'liquidity_calibration_quality': liquidation_calibration_quality,
+                        'liquidity_intensity': round(liquidity_intensity, 4),
                         'distance_atr': distance_atr,
                         'distance_pct': distance_pct
                     })
@@ -13866,7 +13601,7 @@ class TradingExpertSystem:
     
         return candidates
     
-    def _collect_sl_candidates(self, direction, structure, current_price, volatility, timeframe):
+    def _collect_sl_candidates(self, direction, structure, current_price, volatility, timeframe, geometry_profile=None):
         """
         Recolecta candidatos para SL. La lógica es INVERSA al TP:
         - Para LONG: SL debe estar POR DEBAJO del precio (donde se invalida la tesis)
@@ -13877,6 +13612,53 @@ class TradingExpertSystem:
         """
         candidates = []
         atr = volatility.get('atr', current_price * 0.02) or (current_price * 0.02)
+
+        # Commit 17.5 — use the already-computed execution profile to place
+        # stops *behind* reaction/invalidation zones.  The previous code had a
+        # contextual sl_buffer_atr in the committee but candidate prices still
+        # used fixed 0.2/0.3 ATR offsets, which could put the stop almost on the
+        # natural reaction line.  This helper changes geometry only; it cannot
+        # create, veto or reverse a signal.
+        profile_buffer_atr = 0.25
+        if isinstance(geometry_profile, dict):
+            try:
+                profile_buffer_atr = float(geometry_profile.get('sl_buffer_atr') or profile_buffer_atr)
+            except (TypeError, ValueError):
+                profile_buffer_atr = 0.25
+        profile_buffer_atr = max(0.18, min(0.55, profile_buffer_atr))
+
+        def _sl_clearance_atr(candidate_type):
+            floors = {
+                'sweep': 0.36,
+                'swing': 0.34,
+                'support': 0.34,
+                'resistance': 0.34,
+                'ob': 0.30,
+                'fvg': 0.26,
+                'va': 0.24,
+            }
+            floor = floors.get(str(candidate_type or '').lower(), 0.24)
+            return max(floor, profile_buffer_atr)
+
+        def _sl_candidate(anchor, source, strength, candidate_type, extra=None):
+            clearance_atr = _sl_clearance_atr(candidate_type)
+            anchor = float(anchor)
+            price = (
+                anchor - atr * clearance_atr
+                if direction == 'long'
+                else anchor + atr * clearance_atr
+            )
+            out = {
+                'price': price,
+                'source': source,
+                'strength': strength,
+                'type': candidate_type,
+                'anchor_price': anchor,
+                'buffer_atr': round(clearance_atr, 4),
+            }
+            if isinstance(extra, dict):
+                out.update(extra)
+            return out
         
         if direction == 'long':
             # SL debajo del precio
@@ -13888,12 +13670,12 @@ class TradingExpertSystem:
                     p_price = p.get('price', 0)
                     if 0 < p_price < current_price:
                         # SL un poco DEBAJO del pivote (para dar margen)
-                        candidates.append({
-                            'price': p_price - atr * 0.3,
-                            'source': f"Debajo swing low ${p_price:.2f}",
-                            'strength': 3,
-                            'type': 'swing'
-                        })
+                        candidates.append(_sl_candidate(
+                            p_price,
+                            f"Debajo swing low ${p_price:.2f}",
+                            3,
+                            'swing'
+                        ))
             
             # 2. Debajo de OB alcista
             for ob in structure.get('order_blocks', []):
@@ -13902,14 +13684,13 @@ class TradingExpertSystem:
                 if ob.get('type') == 'bullish':
                     price_range = ob.get('price_range', [0, 0])
                     if len(price_range) >= 2 and price_range[0] < current_price:
-                        sl_price = price_range[0] - atr * 0.2
                         strength = 3 if ob.get('strength') == 'strong' else 2
-                        candidates.append({
-                            'price': sl_price,
-                            'source': f"Debajo OB alcista ${price_range[0]:.2f}",
-                            'strength': strength,
-                            'type': 'ob'
-                        })
+                        candidates.append(_sl_candidate(
+                            price_range[0],
+                            f"Debajo OB alcista ${price_range[0]:.2f}",
+                            strength,
+                            'ob'
+                        ))
             
             # 3. Debajo de FVG alcista sin rellenar
             for fvg in structure.get('fair_value_gaps', []):
@@ -13918,12 +13699,12 @@ class TradingExpertSystem:
                 if fvg.get('type') == 'bullish':
                     gap_bottom = fvg.get('gap_bottom', 0)
                     if 0 < gap_bottom < current_price:
-                        candidates.append({
-                            'price': gap_bottom - atr * 0.2,
-                            'source': f"Debajo FVG alcista ${gap_bottom:.2f}",
-                            'strength': 2,
-                            'type': 'fvg'
-                        })
+                        candidates.append(_sl_candidate(
+                            gap_bottom,
+                            f"Debajo FVG alcista ${gap_bottom:.2f}",
+                            2,
+                            'fvg'
+                        ))
             # ==========================================================
             # 4. DETRÁS DE LIQUIDITY SWEEP ALCISTA
             # ==========================================================
@@ -13957,44 +13738,36 @@ class TradingExpertSystem:
                 if sweep_level >= current_price:
                     continue
 
-                # Buffer pequeño detrás del sweep.
-                # No queremos colocar exactamente el SL
-                # sobre el mínimo barrido.
-                sweep_sl = (
-                    sweep_level
-                    - atr * 0.25
-                )
-
-                candidates.append({
-                    'price': sweep_sl,
-                    'source': (
+                candidates.append(_sl_candidate(
+                    sweep_level,
+                    (
                         f"Detrás Liquidity Sweep "
                         f"${sweep_level:.2f}"
                     ),
-                    'strength': 3,
-                    'type': 'sweep',
-                    'sweep_level': sweep_level
-                })           
+                    3,
+                    'sweep',
+                    {'sweep_level': sweep_level}
+                ))           
             # 5. Debajo del soporte más cercano
             nearest_support = structure.get('nearest_support')
             if nearest_support and nearest_support < current_price:
-                candidates.append({
-                    'price': nearest_support - atr * 0.3,
-                    'source': f"Debajo soporte ${nearest_support:.2f}",
-                    'strength': 3,
-                    'type': 'support'
-                })
+                candidates.append(_sl_candidate(
+                    nearest_support,
+                    f"Debajo soporte ${nearest_support:.2f}",
+                    3,
+                    'support'
+                ))
             
             # 6. Debajo del VAL (Value Area Low)
             vp = structure.get('volume_profile', {}) or {}
             val = vp.get('val', 0)
             if val and val < current_price:
-                candidates.append({
-                    'price': val - atr * 0.2,
-                    'source': f"Debajo VAL ${val:.2f}",
-                    'strength': 2,
-                    'type': 'va'
-                })
+                candidates.append(_sl_candidate(
+                    val,
+                    f"Debajo VAL ${val:.2f}",
+                    2,
+                    'va'
+                ))
             
             # 7. Fallback: entry - 2 * ATR
             candidates.append({
@@ -14012,12 +13785,12 @@ class TradingExpertSystem:
                 if isinstance(p, dict):
                     p_price = p.get('price', 0)
                     if p_price > current_price:
-                        candidates.append({
-                            'price': p_price + atr * 0.3,
-                            'source': f"Encima swing high ${p_price:.2f}",
-                            'strength': 3,
-                            'type': 'swing'
-                        })
+                        candidates.append(_sl_candidate(
+                            p_price,
+                            f"Encima swing high ${p_price:.2f}",
+                            3,
+                            'swing'
+                        ))
 
             # ==========================================================
             # DETRÁS DE LIQUIDITY SWEEP BAJISTA
@@ -14046,21 +13819,16 @@ class TradingExpertSystem:
                 if sweep_level <= current_price:
                     continue
 
-                sweep_sl = (
-                    sweep_level
-                    + atr * 0.25
-                )
-
-                candidates.append({
-                    'price': sweep_sl,
-                    'source': (
+                candidates.append(_sl_candidate(
+                    sweep_level,
+                    (
                         f"Detrás Liquidity Sweep "
                         f"${sweep_level:.2f}"
                     ),
-                    'strength': 3,
-                    'type': 'sweep',
-                    'sweep_level': sweep_level
-                })            
+                    3,
+                    'sweep',
+                    {'sweep_level': sweep_level}
+                ))            
 
             for ob in structure.get('order_blocks', []):
                 if not isinstance(ob, dict):
@@ -14068,14 +13836,13 @@ class TradingExpertSystem:
                 if ob.get('type') == 'bearish':
                     price_range = ob.get('price_range', [0, 0])
                     if len(price_range) >= 2 and price_range[1] > current_price:
-                        sl_price = price_range[1] + atr * 0.2
                         strength = 3 if ob.get('strength') == 'strong' else 2
-                        candidates.append({
-                            'price': sl_price,
-                            'source': f"Encima OB bajista ${price_range[1]:.2f}",
-                            'strength': strength,
-                            'type': 'ob'
-                        })
+                        candidates.append(_sl_candidate(
+                            price_range[1],
+                            f"Encima OB bajista ${price_range[1]:.2f}",
+                            strength,
+                            'ob'
+                        ))
             
             for fvg in structure.get('fair_value_gaps', []):
                 if not isinstance(fvg, dict) or fvg.get('filled', True):
@@ -14083,31 +13850,31 @@ class TradingExpertSystem:
                 if fvg.get('type') == 'bearish':
                     gap_top = fvg.get('gap_top', 0)
                     if gap_top > current_price:
-                        candidates.append({
-                            'price': gap_top + atr * 0.2,
-                            'source': f"Encima FVG bajista ${gap_top:.2f}",
-                            'strength': 2,
-                            'type': 'fvg'
-                        })
+                        candidates.append(_sl_candidate(
+                            gap_top,
+                            f"Encima FVG bajista ${gap_top:.2f}",
+                            2,
+                            'fvg'
+                        ))
             
             nearest_resistance = structure.get('nearest_resistance')
             if nearest_resistance and nearest_resistance > current_price:
-                candidates.append({
-                    'price': nearest_resistance + atr * 0.3,
-                    'source': f"Encima resistencia ${nearest_resistance:.2f}",
-                    'strength': 3,
-                    'type': 'resistance'
-                })
+                candidates.append(_sl_candidate(
+                    nearest_resistance,
+                    f"Encima resistencia ${nearest_resistance:.2f}",
+                    3,
+                    'resistance'
+                ))
             
             vp = structure.get('volume_profile', {}) or {}
             vah = vp.get('vah', 0)
             if vah and vah > current_price:
-                candidates.append({
-                    'price': vah + atr * 0.2,
-                    'source': f"Encima VAH ${vah:.2f}",
-                    'strength': 2,
-                    'type': 'va'
-                })
+                candidates.append(_sl_candidate(
+                    vah,
+                    f"Encima VAH ${vah:.2f}",
+                    2,
+                    'va'
+                ))
             
             candidates.append({
                 'price': current_price + atr * 2.0,
@@ -14464,48 +14231,39 @@ class TradingExpertSystem:
                 'type'
             ) == 'liquidity':
     
-                # Commit 17.3-LM: el heatmap moderno trabaja en
-                # `relative_participation`, no USD. La calidad del pool se toma
-                # de su intensidad 0-100 relativa al propio mapa y se modula
-                # suavemente por la cobertura/confianza del modelo público.
-                try:
-                    intensity = max(
-                        0.0,
-                        min(100.0, float(candidate.get('liquidity_intensity', 0) or 0))
+                weight = float(
+                    candidate.get(
+                        'liquidity_weight',
+                        0
                     )
-                except (TypeError, ValueError):
-                    intensity = 0.0
-
-                try:
-                    model_confidence = max(
-                        0.0,
-                        min(70.0, float(candidate.get('liquidity_model_confidence', 0) or 0))
-                    )
-                except (TypeError, ValueError):
-                    model_confidence = 0.0
-
-                try:
-                    calibration_quality = max(
-                        0.0,
-                        min(100.0, float(candidate.get('liquidity_calibration_quality', 0) or 0))
-                    )
-                except (TypeError, ValueError):
-                    calibration_quality = 0.0
-
-                confidence_factor = 0.72 + 0.28 * (model_confidence / 70.0)
-                if candidate.get('liquidity_public_calibrated'):
-                    # Calibración pública disponible: conserva casi toda la
-                    # intensidad y pondera suavemente su calidad observable.
-                    calibration_factor = 0.92 + 0.08 * (calibration_quality / 100.0)
-                else:
-                    # Fallback OHLCV-only: sigue siendo útil como geometría,
-                    # pero recibe menos autoridad en el ranking de TP.
-                    calibration_factor = 0.84
-
-                liquidity_bonus = max(
-                    0.0,
-                    min(100.0, intensity * confidence_factor * calibration_factor)
+                    or 0
                 )
+
+                # Commit 17.5 — the recalibrated heatmap uses
+                # `relative_participation`, so million-dollar thresholds are
+                # semantically invalid here.  Prefer the normalized intensity
+                # already computed from the same active bins.  Keep a bounded
+                # legacy fallback only for older cached payloads.
+                try:
+                    intensity = float(candidate.get('liquidity_intensity'))
+                except (TypeError, ValueError):
+                    intensity = -1.0
+
+                if 0.0 <= intensity <= 1.0:
+                    # Preserve a non-zero baseline for any real pool while
+                    # letting the strongest current cluster receive full weight.
+                    liquidity_bonus = 20.0 + 80.0 * (intensity ** 0.5)
+                else:
+                    if weight > 100_000_000:
+                        liquidity_bonus = 100
+                    elif weight > 50_000_000:
+                        liquidity_bonus = 80
+                    elif weight > 10_000_000:
+                        liquidity_bonus = 60
+                    elif weight > 1_000_000:
+                        liquidity_bonus = 40
+                    else:
+                        liquidity_bonus = 20
     
             # ==========================================================
             # TP DEMASIADO CERCA DE ENTRY
@@ -14556,6 +14314,18 @@ class TradingExpertSystem:
                 + far_penalty
                 + rr_penalty
             )
+
+            # Commit 17.5 — a TP deliberately captured before the raw reaction
+            # boundary deserves a bounded touch-quality bonus.  This offsets
+            # the small R/R reduction caused by front-running the barrier and
+            # prevents a safer TP from being ranked worse merely because it is
+            # a few basis points closer.
+            try:
+                capture_atr = max(0.0, float(candidate.get('capture_buffer_atr') or 0))
+            except (TypeError, ValueError):
+                capture_atr = 0.0
+            if capture_atr > 0:
+                score += min(10.0, 10.0 * (capture_atr / 0.12))
 
             # ==========================================================
             # RC9.8 — CONTEXTUAL TARGET GEOMETRY
@@ -14685,6 +14455,33 @@ class TradingExpertSystem:
             * band_penalty
         )
 
+        # Commit 17.5 — reaction-line clearance.  A structurally valid stop
+        # should sit behind the invalidation zone, not exactly where price is
+        # statistically likely to react.  This is a bounded ranking term only:
+        # it does not veto the trade and it does not alter the directional
+        # signal.
+        if str(candidate.get('type') or '').lower() != 'atr':
+            try:
+                actual_clearance_atr = float(candidate.get('buffer_atr') or 0)
+            except (TypeError, ValueError):
+                actual_clearance_atr = 0.0
+            preferred_clearance_atr = 0.32
+            if isinstance(geometry_profile, dict):
+                try:
+                    preferred_clearance_atr = max(
+                        0.28,
+                        float(geometry_profile.get('sl_buffer_atr') or 0.24) + 0.06
+                    )
+                except (TypeError, ValueError):
+                    preferred_clearance_atr = 0.32
+            if actual_clearance_atr > 0:
+                if actual_clearance_atr + 0.03 < preferred_clearance_atr:
+                    total_score -= 12.0
+                elif actual_clearance_atr <= preferred_clearance_atr + 0.14:
+                    total_score += 6.0
+                elif actual_clearance_atr > preferred_clearance_atr + 0.28:
+                    total_score -= 4.0
+
         # ==============================================================
         # COMMIT 36W
         # NORMALIZAR SL A 0-100
@@ -14784,6 +14581,79 @@ class TradingExpertSystem:
                 technical_rr_floor = 1.8
                 preferred_rr_min = 2.0
                 technical_rr_ceiling = 4.5
+
+        # Commit 17.5 — executable TP sits slightly *before* the raw reaction
+        # boundary.  The analytical target remains preserved as raw_price.
+        # The buffer is automatically reduced when necessary so it cannot turn
+        # an otherwise viable structural target below the contextual R/R floor.
+        try:
+            atr_abs = float((geometry_profile or {}).get('_atr_abs') or volatility.get('atr') or 0)
+        except (TypeError, ValueError):
+            atr_abs = 0.0
+        try:
+            capture_buffer_atr = float((geometry_profile or {}).get('tp_capture_buffer_atr') or 0.10)
+        except (TypeError, ValueError):
+            capture_buffer_atr = 0.10
+        capture_buffer_atr = max(0.04, min(0.22, capture_buffer_atr))
+
+        target_type_factor = {
+            'liquidity': 1.10,
+            'swing': 1.00,
+            'support': 1.00,
+            'resistance': 1.00,
+            'hvn': 0.95,
+            'va': 0.95,
+            'ob': 0.90,
+            'fvg': 0.80,
+            'fib': 0.80,
+        }
+        prepared_candidates = []
+        risk_abs = (
+            abs(float(entry) - float(sl_price))
+            if sl_price and float(sl_price) > 0 and entry and float(entry) > 0
+            else 0.0
+        )
+        for candidate in candidates:
+            candidate = dict(candidate)
+            try:
+                raw_target = float(candidate.get('price') or 0)
+            except (TypeError, ValueError):
+                raw_target = 0.0
+            if raw_target <= 0 or atr_abs <= 0:
+                prepared_candidates.append(candidate)
+                continue
+
+            factor = target_type_factor.get(str(candidate.get('type') or '').lower(), 0.85)
+            desired_buffer = atr_abs * capture_buffer_atr * factor
+            raw_move = abs(raw_target - float(entry))
+            desired_buffer = min(desired_buffer, raw_move * 0.22)
+
+            if risk_abs > 0:
+                min_move_for_floor = risk_abs * technical_rr_floor
+                available_buffer = max(0.0, raw_move - min_move_for_floor)
+                desired_buffer = min(desired_buffer, available_buffer)
+
+            if direction == 'long':
+                executable_target = raw_target - desired_buffer
+                if executable_target <= entry:
+                    executable_target = raw_target
+                    desired_buffer = 0.0
+            else:
+                executable_target = raw_target + desired_buffer
+                if executable_target >= entry:
+                    executable_target = raw_target
+                    desired_buffer = 0.0
+
+            candidate['raw_price'] = raw_target
+            candidate['price'] = executable_target
+            candidate['capture_buffer_atr'] = round(
+                desired_buffer / atr_abs if atr_abs > 0 else 0.0, 4
+            )
+            if desired_buffer > 0:
+                candidate['source'] = f"{candidate.get('source') or 'TP estructural'} · captura antes de reacción"
+            prepared_candidates.append(candidate)
+
+        candidates = prepared_candidates
         
         # ============ Calcular MIN distance como múltiplo del SL ============
         sl_distance_pct = None
@@ -15072,7 +14942,8 @@ class TradingExpertSystem:
             structure,
             reference_price,
             volatility,
-            timeframe
+            timeframe,
+            geometry_profile=geometry_profile
         )
     
         if not candidates:
@@ -15281,6 +15152,20 @@ class TradingExpertSystem:
             relevant_pool_distance = None
             relevant_pool_weight = 0.0
             relevant_pool_price = None
+            relevant_pool_intensity = 0.0
+            relevant_pool_rank = None
+
+            active_weights = []
+            for _bin in active_bins:
+                if not isinstance(_bin, dict):
+                    continue
+                try:
+                    _w = float(_bin.get('max_weight', 0) or _bin.get('weight', 0) or 0)
+                except (TypeError, ValueError):
+                    _w = 0.0
+                if _w > 0:
+                    active_weights.append(_w)
+            max_active_weight = max(active_weights) if active_weights else 0.0
     
             for bin_data in active_bins:
     
@@ -15327,14 +15212,24 @@ class TradingExpertSystem:
                     continue
     
                 distance = abs(previous_close - center)
-    
-                if (
-                    relevant_pool_distance is None
-                    or distance < relevant_pool_distance
-                ):
+                intensity = (
+                    max(0.0, min(1.0, weight / max_active_weight))
+                    if max_active_weight > 0
+                    else 0.0
+                )
+                distance_atr = distance / atr if atr > 0 else 999.0
+
+                # Prefer the nearest pool, but when two pools are comparably
+                # close let the stronger relative-participation cluster win.
+                # This improves Entry context without changing the +15 bounded
+                # liquidity contribution or directional signal logic.
+                pool_rank = distance_atr - min(0.30, intensity * 0.30)
+                if relevant_pool_rank is None or pool_rank < relevant_pool_rank:
+                    relevant_pool_rank = pool_rank
                     relevant_pool_distance = distance
                     relevant_pool_weight = weight
                     relevant_pool_price = center
+                    relevant_pool_intensity = intensity
     
             # ----------------------------------------------------------
             # RESULTADO
@@ -15351,7 +15246,8 @@ class TradingExpertSystem:
                 'liquidity_pool_near': pool_near,
                 'liquidity_pool_price': relevant_pool_price,
                 'liquidity_pool_distance': relevant_pool_distance,
-                'liquidity_pool_weight': relevant_pool_weight
+                'liquidity_pool_weight': relevant_pool_weight,
+                'liquidity_pool_intensity': round(relevant_pool_intensity, 4)
             }
     
         except Exception as e:
@@ -16841,194 +16737,7 @@ class TradingExpertSystem:
             diagnostics
         )
     
-    def _execution_geometry_valid(self, decision, levels):
-        """True only when a confirmed thesis has a complete coherent geometry."""
-        if not isinstance(levels, dict):
-            return False
-        try:
-            entry = float(levels.get('entry') or 0)
-            sl = float(levels.get('stop_loss') or 0)
-            tp = float(levels.get('take_profit') or 0)
-        except (TypeError, ValueError):
-            return False
-        action = str(decision or '').upper()
-        if entry <= 0 or sl <= 0 or tp <= 0:
-            return False
-        if action in ('LONG', 'COMPRA_SPOT'):
-            return sl < entry < tp
-        if action in ('SHORT', 'VENTA_SPOT'):
-            return tp < entry < sl
-        return False
-
-    def _recover_confirmed_execution_levels(
-        self, decision, trend, momentum, volatility, structure, symbol, timeframe,
-        liquidation=None, execution_context=None, failure_reason=None
-    ):
-        """Recover Entry/SL/TP after the thesis is already confirmed.
-
-        Commit 17.4.1 contract:
-        - this function NEVER creates LONG/SHORT;
-        - it is called only after the directional thesis already exists;
-        - Entry/SL/TP specialists must return the best usable geometry;
-        - a legacy selector/runtime exception cannot silently turn a confirmed
-          signal into Entry=current price, SL=0, TP=0, leverage=0.
-        """
-        structure = structure if isinstance(structure, dict) else {}
-        trend = trend if isinstance(trend, dict) else {}
-        momentum = momentum if isinstance(momentum, dict) else {}
-        volatility = volatility if isinstance(volatility, dict) else {}
-        action = str(decision or '').upper()
-        direction = 'long' if action in ('LONG', 'COMPRA_SPOT') else 'short'
-        is_futures = action in ('LONG', 'SHORT')
-        current_price = float(structure.get('current_price') or 0)
-        if current_price <= 0:
-            return self._get_default_levels(current_price, symbol)
-
-        atr = float(volatility.get('atr') or 0)
-        if atr <= 0:
-            atr_pct_raw = float(volatility.get('atr_pct') or 0)
-            atr = current_price * max(0.002, atr_pct_raw / 100.0 if atr_pct_raw > 0 else 0.02)
-        atr = max(atr, current_price * 1e-5)
-
-        base_leverage = float(volatility.get('suggested_leverage') or (10 if is_futures else 1))
-        if is_futures:
-            if str(timeframe) in ('5m','15m','30m'):
-                leverage = int(max(5, min(50, base_leverage)))
-            elif str(timeframe) in ('1h','2h','4h'):
-                leverage = int(max(3, min(20, base_leverage)))
-            else:
-                leverage = int(max(1, min(10, base_leverage)))
-        else:
-            leverage = 1
-
-        multi_symbols = {
-            'SPY-USDT','QQQ-USDT','CL-USDT','NATGAS-USDT',
-            'COPPER-USDT','XAG-USDT','KSTR-USDT'
-        }
-        market_scope = (
-            'multiasset' if str(symbol or '').upper() in multi_symbols
-            else ('futures' if is_futures else 'spot')
-        )
-        setup_family = str(
-            ((structure.get('_contingency_playbook') or {}).get('setup_family'))
-            or ''
-        ).upper()
-
-        combo = {}
-        try:
-            from execution_specialist_committees import coordinate_execution_committees
-            combo = coordinate_execution_committees(
-                baseline_entry=0.0,
-                baseline_sl=0.0,
-                baseline_tp=0.0,
-                direction=direction,
-                current_price=current_price,
-                atr=atr,
-                structure=structure,
-                trend=trend,
-                momentum=momentum,
-                volatility=volatility,
-                setup_family=setup_family,
-                liquidation=liquidation,
-                market_type=market_scope,
-                symbol=symbol,
-                timeframe=timeframe,
-                execution_context=(execution_context or {}),
-                rr_floor=1.8,
-                rr_ceiling=4.5,
-                preferred_rr_min=2.0,
-                preferred_rr_max=3.2,
-                leverage_hint=float(leverage or 1),
-            ) or {}
-        except Exception as committee_error:
-            combo = {
-                'success': False,
-                'reason': f'COMMITTEE_RECOVERY_ERROR:{type(committee_error).__name__}',
-            }
-
-        if combo.get('success'):
-            entry = float(combo.get('entry') or 0)
-            sl = float(combo.get('stop_loss') or 0)
-            tp = float(combo.get('take_profit') or 0)
-            rr = float(combo.get('risk_reward') or 0)
-            entry_score = max(50.0, min(95.0, float(combo.get('entry_quality') or 50.0)))
-            sl_score = max(50.0, min(95.0, float(combo.get('sl_quality') or 50.0)))
-            tp_score = max(50.0, min(95.0, float(combo.get('tp_quality') or 50.0)))
-            entry_source = str(((combo.get('entry_committee') or {}).get('source')) or 'Zona seleccionada por comité Entry')
-            sl_source = str(((combo.get('sl_committee') or {}).get('source')) or 'Invalidación seleccionada por comité SL')
-            tp_source = str(((combo.get('tp_committee') or {}).get('source')) or 'Objetivo seleccionado por comité TP')
-            recovery_mode = str(combo.get('recovery_mode') or 'SPECIALIST_COMMITTEE_RECOVERY')
-        else:
-            # Last-resort deterministic geometry is still AFTER the confirmed
-            # thesis and uses ATR only as noise normalization.  It prevents a
-            # software exception from leaking zero levels to the user; it does
-            # not create a trading direction.
-            previous_close = float(structure.get('previous_close') or current_price)
-            if direction == 'long':
-                entry = min(previous_close, current_price - 0.35 * atr)
-                risk = max(1.10 * atr, abs(entry) * 0.001)
-                sl = entry - risk
-                tp = entry + risk * 2.0
-            else:
-                entry = max(previous_close, current_price + 0.35 * atr)
-                risk = max(1.10 * atr, abs(entry) * 0.001)
-                sl = entry + risk
-                tp = entry - risk * 2.0
-            rr = 2.0
-            entry_score = sl_score = tp_score = 50.0
-            entry_source = 'Zona de reacción técnica de contingencia'
-            sl_source = 'Invalidación protegida por ruido/volatilidad'
-            tp_source = 'Objetivo económico técnico de contingencia'
-            recovery_mode = 'LOCAL_LAST_RESORT_AFTER_COMMITTEE_FAILURE'
-
-        recovered = {
-            'entry': self._round_price(entry, symbol),
-            'entry_source': entry_source,
-            'entry_score': round(entry_score, 1),
-            'entry_quality_version': '17.4.1_RUNTIME_RECOVERY',
-            'entry_smc_raw_score': round(entry_score, 2),
-            'entry_reachability_score': 50.0,
-            'entry_reachability_label': 'RECOVERED_AFTER_RUNTIME_FAILURE',
-            'entry_timing_mode': 'COORDINATED_EXECUTION_RECOVERY',
-            'entry_independent_confluence_families': 1,
-            'entry_location_basis': 'ALREADY_CONFIRMED_THESIS',
-            'entry_atr_role': 'NORMALIZER_NOT_SIGNAL_SOURCE',
-            'stop_loss': self._round_price(sl, symbol),
-            'take_profit': self._round_price(tp, symbol),
-            'leverage': int(max(1, leverage)),
-            'risk_reward': round(float(rr or 0), 2),
-            'minimum_viable_rr': 1.8,
-            'maximum_technical_rr': 4.5,
-            'suggested_size': 0.5,
-            'tp_source': tp_source,
-            'sl_source': sl_source,
-            'quality_score_version': '17.4.1_RUNTIME_RECOVERY',
-            'tp_probability': round(tp_score / 100.0, 2),
-            'tp_quality_score': round(tp_score, 1),
-            'tp_quality_label': 'MEDIA' if tp_score < 70 else 'ALTA',
-            'sl_reliability': round(sl_score / 100.0, 2),
-            'min_tp_distance_pct': self._calculate_min_tp_distance_pct(timeframe, max(1, leverage), is_futures),
-            'signal_confirmed': True,
-            'signal_confirmation_status': 'CONFIRMED_DIRECTIONAL',
-            'execution_ready': True,
-            'execution_status': 'READY',
-            'execution_pending_reason': None,
-            'rejected_reason': None,
-            'is_rejected': False,
-            'is_executable': True,
-            'publication_status': 'EXECUTABLE_SIGNAL',
-            'execution_recovery_mode': recovery_mode,
-            'execution_recovery_diagnostic': str(failure_reason or combo.get('reason') or '')[:180],
-        }
-        if not self._execution_geometry_valid(action, recovered):
-            # This should be unreachable; fail visibly rather than publish zeros.
-            recovered = self._get_default_levels(current_price, symbol)
-            recovered['publication_status'] = 'ANALYSIS_ERROR'
-            recovered['rejected_reason'] = 'EXECUTION_GEOMETRY_RECOVERY_FAILED'
-            recovered['execution_recovery_diagnostic'] = str(failure_reason or combo.get('reason') or '')[:180]
-        return recovered
-
-    def calculate_entry_levels(self, decision, trend, momentum, volatility, structure, symbol, timeframe, liquidation=None, execution_context=None):
+    def calculate_entry_levels(self, decision, trend, momentum, volatility, structure, symbol, timeframe, liquidation=None):
         """
         Calcula niveles de entrada, SL y TP.
         
@@ -17211,232 +16920,178 @@ class TradingExpertSystem:
                 geometry_profile=execution_geometry_profile
             )
             if sl_price is None:
-                # Commit 17.4 FINAL — the signal direction is already confirmed.
-                # Missing baseline geometry is an execution problem, not a reason
-                # to rewrite LONG/SHORT into NO_OPERAR/ANALYSIS_ONLY.  The joint
-                # execution committees below still get a chance to recover a
-                # structural SL/TP from the already-loaded evidence.
-                print(f"   ⚠️ Baseline SL no disponible; comité de ejecución intentará resolver geometría")
-                sl_price = 0.0
-                sl_source = 'Pendiente de invalidación estructural'
-                sl_score = 0
-
-            # 2. SELECCIONAR TP ÓPTIMO con SL como referencia económica.
-            # If baseline SL is missing we skip the legacy TP selector and let
-            # the coordinated committees search the joint geometry directly.
-            if float(sl_price or 0) > 0:
-                tp_price, tp_source, tp_score = self._select_optimal_tp(
-                    direction,
-                    structure,
-                    entry,
-                    current_price,
-                    volatility,
-                    timeframe,
-                    leverage=leverage,
-                    is_futures=is_futures,
-                    sl_price=sl_price,
-                    liquidation=liquidation,
-                    geometry_profile=execution_geometry_profile
-                )
-            else:
-                tp_price, tp_source, tp_score = (
-                    None,
-                    'Pendiente de objetivo estructural',
-                    0,
-                )
+                print(f"   ⚠️ RECHAZADO: sin SL válido")
+                return self._build_rejected_levels(current_price, symbol, "Sin SL válido")
+            
+            # 2. SELECCIONAR TP ÓPTIMO con SL como referencia económica
+            tp_price, tp_source, tp_score = self._select_optimal_tp(
+                direction,
+                structure,
+                entry,
+                current_price,
+                volatility,
+                timeframe,
+                leverage=leverage,
+                is_futures=is_futures,
+                sl_price=sl_price,
+                liquidation=liquidation,
+                geometry_profile=execution_geometry_profile
+            )
             if tp_price is None:
                 print(
-                    f"   ⚠️ Baseline TP no disponible: {tp_source}. "
-                    "El comité de ejecución intentará resolver geometría."
+                    f"   ⚠️ SIN TP ESTRUCTURAL VÁLIDO: "
+                    f"{tp_source}"
                 )
-                tp_price = 0.0
-                tp_source = str(tp_source or 'Pendiente de objetivo estructural')
-                tp_score = 0
 
-            # ==========================================================
-            # COMMIT 16 — SPECIALIST EXECUTION COMMITTEES
-            # ==========================================================
-            # Entry, SL and TP are no longer coordinated through a "near/deep"
-            # rule.  Three independent specialist committees reconsider the
-            # baseline geometry using the strategy, structure, SMC/POI evidence,
-            # reachability, volatility/noise, path barriers, market context and
-            # whichever tools are already available in the current analysis.
-            #
-            # Near / medium / deep levels are all valid candidates. Distance is
-            # evidence for fill/noise only, never a preferred outcome by itself.
-            # ==========================================================
-            commit16_committee = {}
-            commit16_reject_reason = None
-            _multi_symbols = {
-                'SPY-USDT','QQQ-USDT','CL-USDT','NATGAS-USDT',
-                'COPPER-USDT','XAG-USDT','KSTR-USDT'
-            }
-            _market_scope = (
-                'multiasset'
-                if str(symbol or '').upper() in _multi_symbols
-                else ('futures' if is_futures else 'spot')
-            )
-            # Commit 17.1: the execution committees refine PRICE LEVELS only.
-            # They are not a second signal gate and they do not replace the
-            # already-calibrated Entry/SL/TP quality scales consumed by Safety,
-            # ReviewTrader and Publication.  If no coherent refinement exists,
-            # the pre-Commit-16 audited baseline is preserved.
-            try:
-                _commit_rr_floor = max(
-                    1.0,
-                    float((execution_geometry_profile or {}).get('technical_rr_floor') or 1.8)
-                )
-                _commit_rr_ceiling = max(
-                    _commit_rr_floor,
-                    float((execution_geometry_profile or {}).get('technical_rr_ceiling') or 4.5)
-                )
-                _commit_pref_rr_min = max(
-                    _commit_rr_floor,
-                    float((execution_geometry_profile or {}).get('preferred_rr_min') or 2.0)
-                )
-                _commit_pref_rr_max = min(
-                    _commit_rr_ceiling,
-                    max(
-                        _commit_pref_rr_min,
-                        float((execution_geometry_profile or {}).get('preferred_rr_max') or 3.2)
-                    )
-                )
-            except (TypeError, ValueError):
-                _commit_rr_floor, _commit_rr_ceiling = 1.8, 4.5
-                _commit_pref_rr_min, _commit_pref_rr_max = 2.0, 3.2
-
-            try:
-                from execution_specialist_committees import coordinate_execution_committees
-                commit16_committee = coordinate_execution_committees(
-                    baseline_entry=float(entry),
-                    baseline_sl=float(sl_price),
-                    baseline_tp=float(tp_price),
-                    direction=direction,
-                    current_price=float(current_price),
-                    atr=float(atr or 0),
-                    structure=structure,
-                    trend=trend,
-                    momentum=momentum,
-                    volatility=volatility,
-                    setup_family=setup_family,
-                    liquidation=liquidation,
-                    market_type=_market_scope,
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    execution_context=(execution_context or {}),
-                    rr_floor=_commit_rr_floor,
-                    rr_ceiling=_commit_rr_ceiling,
-                    preferred_rr_min=_commit_pref_rr_min,
-                    preferred_rr_max=_commit_pref_rr_max,
-                    leverage_hint=float(leverage or 1),
-                ) or {}
-                if commit16_committee.get('success'):
-                    _old_entry, _old_sl, _old_tp = float(entry), float(sl_price), float(tp_price)
-                    entry = float(commit16_committee.get('entry') or entry)
-                    sl_price = float(commit16_committee.get('stop_loss') or sl_price)
-                    tp_price = float(commit16_committee.get('take_profit') or tp_price)
-
-                    # IMPORTANT: committee_score is an INTERNAL ranking scale.
-                    # Do NOT copy it into entry_score/sl_score/tp_score.  Those
-                    # three legacy-compatible metrics keep the same semantics
-                    # and thresholds they had before Commit 16.
-                    entry_source = (
-                        'Zona seleccionada por evaluación técnica coordinada'
-                        if abs(entry - _old_entry) > max(abs(_old_entry) * 1e-10, 1e-12)
-                        else entry_source
-                    )
-                    sl_source = (
-                        'Invalidación seleccionada por evaluación técnica coordinada'
-                        if abs(sl_price - _old_sl) > max(abs(_old_sl) * 1e-10, 1e-12)
-                        else sl_source
-                    )
-                    tp_source = (
-                        'Objetivo seleccionado por evaluación técnica coordinada'
-                        if abs(tp_price - _old_tp) > max(abs(_old_tp) * 1e-10, 1e-12)
-                        else tp_source
-                    )
-
-                    # R4: preserve calibrated legacy quality when it exists.  If a
-                    # legacy selector had no candidate at all (score 0), the
-                    # committee score is the only real quality evidence available;
-                    # use it as a bounded fallback instead of letting downstream
-                    # Safety interpret a successfully recovered level as quality 0.
-                    if float(entry_score or 0) <= 0:
-                        entry_score = max(50.0, min(95.0, float(commit16_committee.get('entry_quality') or 50.0)))
-                    if float(sl_score or 0) <= 0:
-                        sl_score = max(50.0, min(95.0, float(commit16_committee.get('sl_quality') or 50.0)))
-                    if float(tp_score or 0) <= 0:
-                        tp_score = max(50.0, min(95.0, float(commit16_committee.get('tp_quality') or 50.0)))
-
-                    # Keep reachability metadata causally aligned with the FINAL
-                    # Entry while preserving the established quality-score scale.
-                    _distance_atr = abs(float(current_price) - entry) / max(float(atr), 1e-12)
-                    try:
-                        _ideal_min = float(entry_quality.get('ideal_min_atr') or 0.45)
-                        _ideal_max = float(entry_quality.get('ideal_max_atr') or 1.50)
-                        _max_reach = float(entry_quality.get('max_reach_atr') or 2.50)
-                        if _distance_atr <= _ideal_min:
-                            _reach = (
-                                70.0 + 30.0 * (_distance_atr / max(_ideal_min, 1e-9))
-                                if _ideal_min > 0 else 85.0
-                            )
-                        elif _distance_atr <= _ideal_max:
-                            _reach = 100.0
-                        elif _distance_atr <= _max_reach:
-                            _reach = 100.0 - 60.0 * (
-                                (_distance_atr - _ideal_max)
-                                / max(0.01, _max_reach - _ideal_max)
-                            )
-                        else:
-                            _reach = 0.0
-                        _reach = max(0.0, min(100.0, _reach))
-                    except Exception:
-                        _reach = float(entry_quality.get('reachability_score') or 0)
-
-                    entry_quality.update({
-                        'distance_atr_current': round(_distance_atr, 4),
-                        'distance_pct_current': round(
-                            abs(float(current_price) - entry)
-                            / max(float(current_price), 1e-12)
-                            * 100,
-                            4,
+                return {
+                    'entry':
+                        self._round_price(
+                            entry,
+                            symbol
                         ),
-                        'reachability_score': round(_reach, 2),
-                        'entry_timing_mode': 'COORDINATED_EXECUTION',
-                    })
-                else:
-                    # 17.1: no extra veto.  The specialist layer is a bounded
-                    # geometry refinement; the audited baseline remains valid
-                    # input for the existing RR/Safety/Publication gates.
-                    commit16_reject_reason = None
-            except Exception as _committee_error:
-                commit16_committee = {
-                    'success': False,
-                    'reason': f'FAIL_OPEN:{type(_committee_error).__name__}',
-                    'fallback_to_baseline': True,
+
+                    # Mantener también el diagnóstico Entry SMC aunque
+                    # el setup termine ANALYSIS_ONLY por ausencia de TP.
+                    'entry_source':
+                        str(
+                            entry_source
+                            or ''
+                        ),
+
+                    'entry_score':
+                        round(
+                            float(
+                                entry_score
+                                or 0
+                            ),
+                            1
+                        ),
+
+                    # ================================================
+                    # QUALITY ENGINE Q1
+                    # ================================================
+
+                    'entry_quality_version':
+                        str(
+                            entry_quality.get(
+                                'version',
+                                'RC9_8_EXECUTION_GEOMETRY_V1'
+                            )
+                        ),
+
+                    'entry_smc_raw_score':
+                        round(
+                            float(
+                                entry_quality.get(
+                                    'smc_raw_score',
+                                    entry_score
+                                )
+                                or 0
+                            ),
+                            2
+                        ),
+
+                    'entry_reachability_score':
+                        round(
+                            float(
+                                entry_quality.get(
+                                    'reachability_score',
+                                    0
+                                )
+                                or 0
+                            ),
+                            2
+                        ),
+
+                    'entry_distance_atr':
+                        entry_quality.get(
+                            'distance_atr_current'
+                        ),
+
+                    'entry_distance_pct':
+                        entry_quality.get(
+                            'distance_pct_current'
+                        ),
+
+                    'entry_reachability_label':
+                        str(
+                            entry_quality.get(
+                                'label',
+                                'N/A'
+                            )
+                        ),
+
+                    'entry_market_location': str(entry_quality.get('market_location', 'MID_RANGE')),
+                    'entry_location_context': str(entry_quality.get('location_context', 'UNKNOWN')),
+                    'entry_timing_mode': str(entry_quality.get('entry_timing_mode', 'STRUCTURAL_PULLBACK')),
+                    'entry_independent_confluence_families': int(entry_quality.get('independent_confluence_families', 1) or 1),
+                    'entry_location_basis': str(entry_quality.get('location_basis', 'UNKNOWN')),
+                    'entry_structural_range_position': entry_quality.get('structural_range_position'),
+                    'entry_directional_extension': bool(entry_quality.get('directional_extension', False)),
+                    'entry_location_adjustment': float(entry_quality.get('location_adjustment', 0) or 0),
+                    'entry_ema_confluence': list(entry_quality.get('ema_confluence') or []),
+                    'entry_ema_confluence_bonus': float(entry_quality.get('ema_confluence_bonus', 0) or 0),
+                    'entry_atr_role': str(entry_quality.get('atr_role', 'NORMALIZER_NOT_ENTRY_SOURCE')),
+
+                    'stop_loss':
+                        self._round_price(
+                            sl_price,
+                            symbol
+                        ),
+
+                    'take_profit':
+                        None,
+
+                    'leverage':
+                        int(leverage),
+
+                    'risk_reward':
+                        0,
+
+                    'suggested_size':
+                        0,
+
+                    'tp_source':
+                        tp_source,
+
+                    'sl_source':
+                        sl_source,
+
+                    'tp_probability':
+                        0,
+
+                    'tp_quality_score':
+                        0,
+
+                    'tp_quality_label':
+                        'NO DISPONIBLE',
+
+                    'sl_reliability':
+                        round(
+                            sl_score / 100,
+                            2
+                        ),
+
+                    'min_tp_distance_pct':
+                        self._calculate_min_tp_distance_pct(
+                            timeframe,
+                            leverage,
+                            is_futures
+                        ),
+
+                    'rejected_reason':
+                        tp_source,
+
+                    'is_rejected':
+                        True,
+
+                    'is_executable':
+                        False,
+
+                    'publication_status':
+                        'ANALYSIS_ONLY'
                 }
-                commit16_reject_reason = None
-
-            # The existing leverage policy is intentionally not replaced here.
-            # It receives the FINAL Entry/SL/TP geometry downstream and remains
-            # responsible for the maximum technically permissible leverage.
-            try:
-                if is_futures:
-                    from execution_specialist_committees import leverage_committee_context
-                    _leverage_context = leverage_committee_context(
-                        entry=float(entry),
-                        stop_loss=float(sl_price),
-                        take_profit=float(tp_price),
-                        atr=float(atr or 0),
-                        execution_safety=float(entry_score or 0),
-                        market_type=_market_scope,
-                        execution_context=(execution_context or {}),
-                    )
-                else:
-                    _leverage_context = {}
-            except Exception:
-                _leverage_context = {}
-
+            
             # ============ CALCULAR R/R ============
             reward = abs(tp_price - entry)
             risk = abs(entry - sl_price)
@@ -17460,90 +17115,28 @@ class TradingExpertSystem:
             except (TypeError, ValueError):
                 minimum_viable_rr, maximum_technical_rr = 1.8, 4.5
 
-            # Commit 17.4 FINAL R4 — SIGNAL => MANDATORY EXECUTION GEOMETRY
-            # The LONG/SHORT/Spot thesis is already confirmed before this point.
-            # Entry/SL/TP committees therefore have one job: return the best
-            # executable geometry for that thesis.  They do NOT have authority to
-            # convert a confirmed signal into a waiting/no-trade state.
-            execution_pending_reason = None
+            non_executable_reason = None
 
-            geometry_complete = bool(
-                float(entry or 0) > 0
-                and float(sl_price or 0) > 0
-                and float(tp_price or 0) > 0
-                and (
-                    (direction == 'long' and float(sl_price) < float(entry) < float(tp_price))
-                    or
-                    (direction == 'short' and float(tp_price) < float(entry) < float(sl_price))
+            if rr < minimum_viable_rr:
+                non_executable_reason = (
+                    f"R/R desfavorable "
+                    f"{rr:.2f} < {minimum_viable_rr:.2f}"
                 )
-            )
+                print(
+                    f"   ⚠️ ANALYSIS_ONLY: "
+                    f"R/R {rr:.2f} < piso técnico {minimum_viable_rr:.2f}"
+                )
 
-            if not geometry_complete:
-                # Ultimate local recovery.  This should only execute on malformed
-                # or extremely sparse structure because the coordinated committees
-                # already contain their own recovery universe.  Still, a confirmed
-                # signal must never leave the user with LONG/SHORT and no levels.
-                _entry_recovery = float(entry or 0)
-                if _entry_recovery <= 0:
-                    _entry_recovery = (
-                        float(current_price) - 0.45 * float(atr)
-                        if direction == 'long'
-                        else float(current_price) + 0.45 * float(atr)
-                    )
-                    entry_source = 'Zona de reacción técnica por volatilidad'
-                _risk_recovery = max(float(atr) * 1.10, abs(_entry_recovery) * 0.001)
-                sl_price = (
-                    _entry_recovery - _risk_recovery
-                    if direction == 'long'
-                    else _entry_recovery + _risk_recovery
+            elif rr > maximum_technical_rr:
+                non_executable_reason = (
+                    f"R/R fuera del horizonte técnico "
+                    f"{rr:.2f} > {maximum_technical_rr:.2f}"
                 )
-                _rr_recovery = max(
-                    minimum_viable_rr,
-                    min(2.2, maximum_technical_rr)
+                print(
+                    f"   ⚠️ ANALYSIS_ONLY: "
+                    f"R/R {rr:.2f} > techo técnico {maximum_technical_rr:.2f}"
                 )
-                tp_price = (
-                    _entry_recovery + _risk_recovery * _rr_recovery
-                    if direction == 'long'
-                    else _entry_recovery - _risk_recovery * _rr_recovery
-                )
-                entry = _entry_recovery
-                sl_source = 'Invalidación protegida por ruido/volatilidad'
-                tp_source = 'Objetivo técnico reconciliado por volatilidad y economía'
-                if float(entry_score or 0) <= 0:
-                    entry_score = 50.0
-                if float(sl_score or 0) <= 0:
-                    sl_score = 50.0
-                if float(tp_score or 0) <= 0:
-                    tp_score = 50.0
-                reward = abs(tp_price - entry)
-                risk = abs(entry - sl_price)
-                rr = reward / max(risk, 1e-12)
-                geometry_complete = True
-                print('   🛠️ Geometría de ejecución recuperada localmente para señal confirmada')
 
-            # The coordinated search is expected to return an R/R inside the
-            # deployed interval.  If rounding or an old baseline leaves it just
-            # outside, reconcile the TARGET (never the signal direction) to the
-            # nearest technical band.  This is an execution correction, not a gate.
-            if geometry_complete and (rr < minimum_viable_rr or rr > maximum_technical_rr):
-                _risk = max(abs(float(entry) - float(sl_price)), 1e-12)
-                _target_rr = max(
-                    minimum_viable_rr,
-                    min(
-                        maximum_technical_rr,
-                        max(2.0, min(2.6, (minimum_viable_rr + maximum_technical_rr) / 2.0))
-                    )
-                )
-                tp_price = (
-                    float(entry) + _risk * _target_rr
-                    if direction == 'long'
-                    else float(entry) - _risk * _target_rr
-                )
-                tp_source = 'Objetivo técnico reconciliado por comité de ejecución'
-                reward = abs(float(tp_price) - float(entry))
-                risk = abs(float(entry) - float(sl_price))
-                rr = reward / max(risk, 1e-12)
-                print(f'   🛠️ TP reconciliado a R/R técnico 1:{rr:.2f} sin alterar la señal')
 
             # ============ AJUSTAR APALANCAMIENTO POR VOLATILIDAD ============
             if atr_pct > 0.05:  # > 5%
@@ -17552,9 +17145,7 @@ class TradingExpertSystem:
                 leverage = max(1, int(leverage * 0.8))
             
             # ============ TAMAÑO SUGERIDO ============
-            if execution_pending_reason is not None:
-                suggested_size = 0.0
-            elif tp_score >= 80 and sl_score >= 70:
+            if tp_score >= 80 and sl_score >= 70:
                 suggested_size = 1.0
             elif tp_score >= 60 and sl_score >= 60:
                 suggested_size = 0.75
@@ -17748,18 +17339,23 @@ class TradingExpertSystem:
                         is_futures
                     ),
 
-                # R4 contract: a signal is published only after the execution
-                # specialists have supplied Entry + SL + TP.  Execution geometry
-                # cannot veto or postpone an already confirmed direction.
-                'signal_confirmed': True,
-                'signal_confirmation_status': 'CONFIRMED_DIRECTIONAL',
-                'execution_ready': True,
-                'execution_status': 'READY',
-                'execution_pending_reason': None,
-                'rejected_reason': None,
-                'is_rejected': False,
-                'is_executable': True,
-                'publication_status': 'EXECUTABLE_SIGNAL'
+                'rejected_reason':
+                    non_executable_reason,
+
+                'is_rejected':
+                    bool(
+                        non_executable_reason
+                    ),
+
+                'is_executable':
+                    non_executable_reason is None,
+
+                'publication_status':
+                    (
+                        'EXECUTABLE_SIGNAL'
+                        if non_executable_reason is None
+                        else 'ANALYSIS_ONLY'
+                    )
             }
             
             print(
@@ -17782,13 +17378,6 @@ class TradingExpertSystem:
             print(f"❌ Error en calculate_entry_levels (FASE 3): {e}")
             import traceback
             traceback.print_exc()
-            if str(decision or '').upper() in ('COMPRA_SPOT','VENTA_SPOT','LONG','SHORT'):
-                print('🛠️ [17.4.1] Recuperando geometría obligatoria tras excepción de runtime')
-                return self._recover_confirmed_execution_levels(
-                    decision, trend, momentum, volatility, structure, symbol, timeframe,
-                    liquidation=liquidation, execution_context=execution_context,
-                    failure_reason=f'{type(e).__name__}:{str(e)[:120]}',
-                )
             return self._get_default_levels(current_price if 'current_price' in locals() else 0, symbol)
     
     def _build_rejected_levels(
@@ -17844,15 +17433,9 @@ class TradingExpertSystem:
     
             'execution_safety_label': 'RECHAZAR',
     
-            'signal_confirmed': True,
-            'signal_confirmation_status': 'CONFIRMED_DIRECTIONAL',
-            'execution_ready': False,
-            'execution_status': 'PENDING_EXECUTION',
-            'execution_pending_reason': reason,
-            'publication_status': 'CONFIRMED_PENDING_EXECUTION',
-            'rejected_reason': None,
-            'is_rejected': False,
-            'is_executable': False
+            'rejected_reason': reason,
+    
+            'is_rejected': True
         }
 
     def _mark_levels_non_executable(
@@ -18031,7 +17614,7 @@ class TradingExpertSystem:
         - sólo actúa sobre SPOT;
         - nunca crea COMPRA_SPOT o VENTA_SPOT;
         - nunca cambia Entry / SL / TP;
-        - nunca reescribe COMPRA_SPOT/VENTA_SPOT; sólo marca ejecución pendiente;
+        - únicamente puede convertir una señal tardía en ESPERAR;
         - Futures queda completamente fuera de esta función.
         """
 
@@ -18333,11 +17916,22 @@ class TradingExpertSystem:
             'applied'
         ] = True
 
-        # Direction/confidence are preserved; this helper only reports that
-        # the current Entry is stale and should wait for a new executable zone.
-        result['final_action'] = action_text
-        result['final_confidence'] = float(confidence or 0)
-        result['execution_pending'] = True
+        result[
+            'final_action'
+        ] = 'ESPERAR'
+
+        result[
+            'final_confidence'
+        ] = max(
+            55.0,
+            min(
+                80.0,
+                float(
+                    confidence
+                    or 0
+                )
+            )
+        )
 
         if target_already_reached:
 
@@ -20139,30 +19733,6 @@ class TradingExpertSystem:
                     'production_change': False,
                 }
 
-            # ==========================================================
-            # COMMIT 17.4 FINAL R3 — MARKET-SPECIFIC CONTEXT HOOK
-            # ==========================================================
-            # Multi-Activo reuses the common Futures engine, but its macro/event
-            # relevance is class-specific (indices, energy, metals, China).
-            # The subclass may therefore replace the generic cached macro packet
-            # BEFORE Operational Intelligence builds the thesis.  The hook is
-            # cache-only and must never add network/LLM/DB work.
-            try:
-                _market_context_hook = getattr(self, '_market_macro_context_override', None)
-                if callable(_market_context_hook):
-                    _market_context_value = _market_context_hook(
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        generic_snapshot=macro_context_snapshot,
-                    )
-                    if isinstance(_market_context_value, dict) and _market_context_value:
-                        macro_context_snapshot = _market_context_value
-            except Exception as _market_context_error:
-                print(
-                    "⚠️ Contexto macro específico no disponible; "
-                    f"se conserva el snapshot compartido: {_market_context_error}"
-                )
-
             # ============ CONSTRUIR CAPAS PARA TRADERS ============
             capas = {
                 'system_type': analysis_system_type,
@@ -20581,45 +20151,6 @@ class TradingExpertSystem:
                     futures_risk_allocation_fraction
                 )
 
-            # ==========================================================
-            # COMMIT 16 — LIVE EXECUTION CONTEXT (NO EXTRA I/O)
-            # ==========================================================
-            # Session/day are preserved as context labels, while current
-            # liquidity/activity is inferred from already-loaded volume/range
-            # plus macro/sentiment/regime. No new API/DB/LLM request is added.
-            _commit16_market_type = (
-                'multiasset'
-                if str(symbol or '').upper() in {
-                    'SPY-USDT','QQQ-USDT','CL-USDT','NATGAS-USDT',
-                    'COPPER-USDT','XAG-USDT','KSTR-USDT'
-                }
-                else analysis_system_type
-            )
-            try:
-                from execution_specialist_committees import build_execution_context
-                commit16_execution_context = build_execution_context(
-                    structure=structure,
-                    volume=volume,
-                    volatility=volatility,
-                    market_hours=market_hours,
-                    sentiment=sentiment,
-                    macro_context=macro_context_snapshot,
-                    market_regime=market_regime,
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    market_type=_commit16_market_type,
-                )
-            except Exception as _commit16_context_error:
-                commit16_execution_context = {
-                    'version': 'COMMIT16_CONTEXT_FAILOPEN',
-                    'market_type': _commit16_market_type,
-                    'symbol': symbol,
-                    'timeframe': timeframe,
-                    'activity_score': 50.0,
-                    'shock_score': 0.0,
-                    'reason': type(_commit16_context_error).__name__,
-                }
-
             # ============ NIVELES ============
             levels = {}
             if accion_consenso in ['COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT']:
@@ -20633,8 +20164,7 @@ class TradingExpertSystem:
                         structure,
                         symbol,
                         timeframe,
-                        liquidation=liquidation_data,
-                        execution_context=commit16_execution_context
+                        liquidation=liquidation_data
                     )
                     
                     # RC9.7.11: Futures reutiliza EXACTAMENTE la fracción
@@ -20679,24 +20209,13 @@ class TradingExpertSystem:
                         except Exception:
                             pass
                     
-                    if not self._execution_geometry_valid(accion_consenso, levels):
-                        print('⚠️ [17.4.1] Geometría inválida tras cálculo; recuperación obligatoria antes de publicación')
-                        levels = self._recover_confirmed_execution_levels(
-                            accion_consenso, trend, momentum, volatility, structure, symbol, timeframe,
-                            liquidation=liquidation_data, execution_context=commit16_execution_context,
-                            failure_reason='POST_CALC_INVALID_GEOMETRY',
-                        )
                     print(f"✅ Niveles calculados: Entry={levels['entry']}, SL={levels['stop_loss']}, TP={levels['take_profit']}")
                     
                 except Exception as e:
                     print(f"❌ ERROR en calculate_entry_levels: {e}")
                     import traceback
                     traceback.print_exc()
-                    levels = self._recover_confirmed_execution_levels(
-                        accion_consenso, trend, momentum, volatility, structure, symbol, timeframe,
-                        liquidation=liquidation_data, execution_context=commit16_execution_context,
-                        failure_reason=f'CALLER_EXCEPTION:{type(e).__name__}:{str(e)[:100]}',
-                    )
+                    levels = self._get_default_levels(structure.get('current_price', 0), symbol)
             else:
                 levels = self._get_default_levels(structure.get('current_price', 0), symbol)
 
@@ -20753,11 +20272,25 @@ class TradingExpertSystem:
                     accion_consenso
                 )
 
-                # Commit 17.4 FINAL R3 — Anti-FOMO is an EXECUTION guard,
-                # not a second directional committee.  A confirmed Spot thesis
-                # stays COMPRA_SPOT/VENTA_SPOT; only the current execution is
-                # marked pending so the system can wait for a fresh reaction
-                # zone without pretending the signal never existed.
+                accion_consenso = str(
+                    spot_execution_quality.get(
+                        'final_action'
+                    )
+                    or 'ESPERAR'
+                )
+
+                confianza_consenso = float(
+                    spot_execution_quality.get(
+                        'final_confidence',
+                        confianza_consenso
+                    )
+                    or 0
+                )
+
+                # ======================================================
+                # EXPLICARLO AL USUARIO
+                # ======================================================
+
                 if not isinstance(
                     razones_consenso,
                     list
@@ -20769,7 +20302,7 @@ class TradingExpertSystem:
 
                 razones_consenso.append(
                     (
-                        '36X anti-FOMO: se conserva la señal técnica de '
+                        '36X anti-FOMO: se conserva el setup técnico de '
                         f'{original_action_36x}, '
                         'pero no se persigue el precio. '
                         + str(
@@ -20781,27 +20314,35 @@ class TradingExpertSystem:
                     )
                 )
 
-                # R4: anti-FOMO is an advisory about *where* to enter, never
-                # a state that hides a confirmed signal.  The Entry committee has
-                # already supplied the non-chasing reaction level to wait for.
-                if not self._execution_geometry_valid(original_action_36x, levels):
-                    levels = self._recover_confirmed_execution_levels(
-                        original_action_36x, trend, momentum, volatility, structure, symbol, timeframe,
-                        liquidation=liquidation_data, execution_context=commit16_execution_context,
-                        failure_reason='ANTI_FOMO_INVALID_GEOMETRY',
+                # ======================================================
+                # LOS NIVELES SE CONSERVAN PARA AUDITORÍA
+                # ======================================================
+                #
+                # No borramos Entry/SL/TP.
+                #
+                # Simplemente ya NO son ejecutables al precio actual.
+                # ======================================================
+
+                levels[
+                    'is_executable'
+                ] = False
+
+                levels[
+                    'publication_status'
+                ] = 'ANALYSIS_ONLY'
+
+                levels[
+                    'suggested_size'
+                ] = 0
+
+                levels[
+                    'rejected_reason'
+                ] = str(
+                    spot_execution_quality.get(
+                        'reason'
                     )
-                if self._execution_geometry_valid(original_action_36x, levels):
-                    levels['signal_confirmed'] = True
-                    levels['signal_confirmation_status'] = 'CONFIRMED_DIRECTIONAL'
-                    levels['execution_ready'] = True
-                    levels['execution_status'] = 'READY'
-                    levels['is_executable'] = True
-                    levels['publication_status'] = 'EXECUTABLE_SIGNAL'
-                    levels['rejected_reason'] = None
-                    levels['execution_pending_reason'] = None
-                levels['anti_fomo_advisory'] = str(
-                    spot_execution_quality.get('reason') or 'WAIT_FOR_ENTRY_ZONE'
-                )[:320]
+                    or 'ENTRY_MISSED'
+                )
             
             # ==========================================================
             # RC9.2 — SETUP-AWARE EXECUTION GUARD
@@ -20822,35 +20363,16 @@ class TradingExpertSystem:
                     )
                     if operational_execution.get('applied'):
                         _original_operational_action = str(accion_consenso)
-                        # R4: this legacy setup guard is diagnostic only.  Its
-                        # observations feed the explanation, but the execution
-                        # committees have already resolved the best Entry/SL/TP.
-                        # It cannot create a second publication veto.
+                        accion_consenso = str(operational_execution.get('action') or 'ESPERAR').upper()
+                        confianza_consenso = min(float(confianza_consenso or 0), 68.0 if analysis_system_type == 'futures' else 72.0)
                         for _r in operational_execution.get('reasons') or []:
                             if _r and _r not in razones_consenso:
                                 razones_consenso.append(str(_r))
-                        levels['execution_advisories'] = list(
-                            operational_execution.get('reasons') or []
-                        )[:6]
-                        if not self._execution_geometry_valid(_original_operational_action, levels):
-                            levels = self._recover_confirmed_execution_levels(
-                                _original_operational_action, trend, momentum, volatility, structure, symbol, timeframe,
-                                liquidation=liquidation_data, execution_context=commit16_execution_context,
-                                failure_reason='LEGACY_SETUP_GUARD_INVALID_GEOMETRY',
-                            )
-                        if self._execution_geometry_valid(_original_operational_action, levels):
-                            levels['signal_confirmed'] = True
-                            levels['signal_confirmation_status'] = 'CONFIRMED_DIRECTIONAL'
-                            levels['execution_ready'] = True
-                            levels['execution_status'] = 'READY'
-                            levels['is_executable'] = True
-                            levels['publication_status'] = 'EXECUTABLE_SIGNAL'
-                            levels['execution_pending_reason'] = None
-                            levels['rejected_reason'] = None
-                        print(
-                            f"🧠 [RC9.2 EXECUTION] {_original_operational_action} "
-                            "mantiene geometría ejecutable; observaciones en modo advisory"
-                        )
+                        levels['is_executable'] = False
+                        levels['publication_status'] = 'ANALYSIS_ONLY'
+                        levels['suggested_size'] = 0
+                        levels['rejected_reason'] = '; '.join(operational_execution.get('reasons') or [])[:320]
+                        print(f"🧠 [RC9.2 EXECUTION] {_original_operational_action} → {accion_consenso}")
                 except Exception as _execution_guard_error:
                     operational_execution = {'applied': False, 'action': accion_consenso, 'error': str(_execution_guard_error)[:160]}
 
@@ -21334,17 +20856,6 @@ class TradingExpertSystem:
                     'conviction': conviction
                 },
                 'levels': {k: float(v) if isinstance(v, (int, float)) else v for k, v in levels.items()},
-                'signal_confirmed': bool(accion_consenso in ('COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT')),
-                'signal_confirmation_status': (
-                    'CONFIRMED_DIRECTIONAL'
-                    if accion_consenso in ('COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT')
-                    else 'NO_DIRECTIONAL_SIGNAL'
-                ),
-                'execution_ready': bool(levels.get('is_executable', False)),
-                'execution_status': str(
-                    levels.get('execution_status')
-                    or ('READY' if levels.get('is_executable') else 'NOT_READY')
-                ),
                 'spot_execution_quality':
                     self._make_serializable(
                         spot_execution_quality
@@ -21357,16 +20868,6 @@ class TradingExpertSystem:
                 'structure': self._make_serializable(structure),
                 'correlation': self._make_serializable(correlation),
                 'market_hours': self._make_serializable(market_hours),
-                # Commit 16.1 — contexto de mercado público, en terminología
-                # convencional. No expone nombres de comités, especialistas,
-                # pesos internos ni reglas de aprendizaje.
-                'market_context': self._make_serializable(
-                    _commit16_public_market_context(
-                        market_hours=market_hours,
-                        execution_context=commit16_execution_context,
-                        market_regime=market_regime,
-                    )
-                ),
                 'confirmation': self._make_serializable(confirmation),
                 'time_factor': self._make_serializable(time_factor),
                 'sentiment': self._make_serializable(sentiment),
@@ -24460,9 +23961,6 @@ class DynamicZones:
             'BREAKOUT_RETEST': 'Ruptura y retest',
             'TREND_BREAK': 'Ruptura de tendencia',
             'ROTATION': 'Rotación Spot',
-            'MOMENTUM_CONTINUATION': 'Continuación de momentum',
-            'COMPRESSION_EXPANSION': 'Expansión tras compresión',
-            'STRUCTURE_REVERSAL': 'Reversión estructural confirmada',
         }.get(str(family or '').upper(), 'Estructura de mercado')
 
     def _collect_structural_candidates(self, side, structure, groups, current_price, atr_abs, family):
@@ -24480,9 +23978,6 @@ class DynamicZones:
             'MEAN_REVERSION': {'vwap': 7.0, 'poc': 6.5, 'hvn': 6.0, 'support': 5.5, 'resistance': 5.5, 'fib': 4.0, 'ob': 3.5, 'fvg': 3.0, 'sweep': 4.0, 'stop_hunt': 4.0},
             'ROTATION': {'vwap': 6.0, 'poc': 6.0, 'hvn': 5.0, 'support': 5.0, 'resistance': 5.0, 'fib': 4.0, 'ob': 3.5, 'fvg': 3.0},
             'TREND_BREAK': {'support': 7.0, 'resistance': 7.0, 'fvg': 5.5, 'ob': 5.5, 'poc': 4.0, 'fib': 4.0, 'sweep': 4.0, 'stop_hunt': 4.0},
-            'MOMENTUM_CONTINUATION': {'fvg': 7.0, 'support': 6.5, 'resistance': 6.5, 'ob': 6.0, 'vwap': 5.5, 'poc': 4.5, 'hvn': 4.0, 'fib': 4.0, 'sweep': 3.0, 'stop_hunt': 3.0},
-            'COMPRESSION_EXPANSION': {'support': 7.0, 'resistance': 7.0, 'fvg': 6.5, 'ob': 5.5, 'vwap': 4.5, 'poc': 4.0, 'hvn': 4.0, 'fib': 3.5, 'sweep': 3.0, 'stop_hunt': 3.0},
-            'STRUCTURE_REVERSAL': {'ob': 7.0, 'fvg': 6.5, 'support': 6.0, 'resistance': 6.0, 'sweep': 5.0, 'stop_hunt': 5.0, 'fib': 4.5, 'vwap': 4.0, 'poc': 4.0, 'hvn': 3.5},
         }
         priorities = family_priority.get(family, family_priority['TREND_PULLBACK'])
 
@@ -24499,11 +23994,7 @@ class DynamicZones:
                 return
             # A retest can live slightly beyond the current price.  Anything far
             # away is not a useful dynamic zone for the active setup.
-            side_slack = (
-                0.65 if family in {'BREAKOUT_RETEST','TREND_BREAK','COMPRESSION_EXPANSION'}
-                else 0.35 if family in {'MOMENTUM_CONTINUATION','STRUCTURE_REVERSAL'}
-                else 0.15
-            ) * atr_abs
+            side_slack = (0.65 if family in {'BREAKOUT_RETEST','TREND_BREAK'} else 0.15) * atr_abs
             if side > 0 and center > current_price + side_slack:
                 return
             if side < 0 and center < current_price - side_slack:
@@ -24842,18 +24333,8 @@ class LiquidationPublicCalibration:
     - Binance USD-M como fuente principal y Bybit como fallback público.
     """
 
-    # Commit 17: un único contexto público de derivados por símbolo.
-    # La geometría del heatmap sigue siendo específica de cada timeframe; sólo
-    # la recalibración pública (OI/ratio/taker) se comparte para no descargar
-    # tres endpoints por cada TF del mismo activo.
-    SUCCESS_TTL_SECONDS = max(1800, int(os.environ.get(
-        'LIQUIDATION_PUBLIC_CALIBRATION_TTL_SECONDS', '1800'
-    ) or 1800))
-    FAILURE_TTL_SECONDS = max(180, int(os.environ.get(
-        'LIQUIDATION_PUBLIC_CALIBRATION_FAILURE_TTL_SECONDS', '300'
-    ) or 300))
-    SHARED_BINANCE_PERIOD = '1h'
-    SHARED_BYBIT_PERIOD = '1h'
+    SUCCESS_TTL_SECONDS = 900
+    FAILURE_TTL_SECONDS = 180
     _cache = {}
     _lock = threading.RLock()
     _network_gate = threading.BoundedSemaphore(2)
@@ -25075,20 +24556,18 @@ class LiquidationPublicCalibration:
                 'observed_liquidations': False,
             }
 
-        # Compartido por símbolo: BTC 30m/1h/2h/4h reutilizan el mismo
-        # snapshot público. La forma/zonas del heatmap continúan saliendo del
-        # OHLCV de su timeframe; sólo el factor moderado usa este contexto.
-        key = normalized
+        key = (normalized, str(timeframe or '4h'))
         now = time.monotonic()
         with cls._lock:
             cached = cls._cache.get(key)
             if cached and now < cached.get('_expires_at', 0):
                 return {k: v for k, v in cached.items() if k != '_expires_at'}
 
+        binance_period, bybit_period = cls._periods(timeframe)
         with cls._network_gate:
-            result = cls._fetch_binance(normalized, cls.SHARED_BINANCE_PERIOD)
+            result = cls._fetch_binance(normalized, binance_period)
             if result is None:
-                result = cls._fetch_bybit(normalized, cls.SHARED_BYBIT_PERIOD)
+                result = cls._fetch_bybit(normalized, bybit_period)
 
         if result is None:
             result = {
@@ -25668,7 +25147,6 @@ class LiquidationHeatmap:
             'data_type': 'MODEL_ESTIMATE_NOT_OBSERVED',
             'model_version': 'OHLCV_PUBLIC_DERIVATIVES_CALIBRATED_V3',
             'weight_unit': 'relative_participation',
-            'interpretation_version': 'RELATIVE_PARTICIPATION_CONSUMERS_V1',
             'model_confidence': min(70.0, 20.0 + self.total_events * 5.0),
             'coverage_bars': len(self.price_history),
             'observed_liquidations': False,
@@ -25693,7 +25171,6 @@ class LiquidationHeatmap:
             'data_type': 'MODEL_ESTIMATE_NOT_OBSERVED',
             'model_version': 'OHLCV_PUBLIC_DERIVATIVES_CALIBRATED_V3',
             'weight_unit': 'relative_participation',
-            'interpretation_version': 'RELATIVE_PARTICIPATION_CONSUMERS_V1',
             'model_confidence': 0,
             'coverage_bars': len(self.price_history),
             'observed_liquidations': False,
@@ -26117,13 +25594,9 @@ class TraderMacro(TraderBase):
                     )
                     return 'NO_OPERAR', 85, estrategias, razones
                 if macro_risk == 'CRITICAL':
-                    # Commit 17.4: riesgo macro crítico sin evento inminente no
-                    # borra una tesis técnica. Eleva cautela; el orquestador
-                    # adaptativo ya exige más calidad/margen y Safety conserva
-                    # la autoridad final. Sólo NO_NEW_TRADES es embargo duro.
                     estrategias.append('MACRO_NEWS_RISK')
-                    razones.append('Contexto macro crítico: eleva la exigencia técnica y la cautela; no define ni veta por sí solo la dirección')
-                    return 'PRECAUCION', 70, estrategias, razones
+                    razones.append('Contexto macro crítico: veto prudencial a nuevas entradas; no define dirección')
+                    return 'NO_OPERAR', 70, estrategias, razones
                 if macro_risk == 'HIGH':
                     estrategias.append('MACRO_NEWS_RISK')
                     razones.append('Contexto macro alto: cautela; se exige mayor confluencia técnica')
@@ -27795,14 +27268,202 @@ class TraderLiquidation(TraderBase):
         super().__init__("El Liquidador", "liquidaciones", peso_base=1.3)
         
     def _votar_legacy(self, capas, symbol, timeframe):
-        """Compatibilidad: delega al analista relativo vigente.
-
-        La implementación histórica interpretaba los pesos como USD y contenía
-        umbrales 50M/100M/200M incompatibles con `relative_participation`.
-        Se conserva el nombre por compatibilidad, pero ya no existe una segunda
-        semántica del Liquidation Map.
-        """
-        return self.votar(capas, symbol, timeframe)
+        # Valores por defecto
+        accion = 'NO_OPERAR'
+        confianza = 0
+        estrategias = []
+        razones = []
+        
+        try:
+            # ============ OBTENER CAPAS NECESARIAS ============
+            liquidation = capas.get('liquidation', {})
+            if not liquidation or not isinstance(liquidation, dict):
+                return accion, confianza, estrategias, razones
+            
+            structure = capas.get('structure', {})
+            trend = capas.get('trend', {})
+            volume = capas.get('volume', {})
+            momentum = capas.get('momentum', {})
+            
+            current_price = structure.get('current_price', 0)
+            if current_price == 0:
+                return accion, confianza, estrategias, razones
+            
+            # ============ EXTRAER DATOS DEL HEATMAP ============
+            active_bins = liquidation.get('active_bins', [])
+            frozen_bins = liquidation.get('frozen_bins', [])
+            total_long_bins = liquidation.get('total_long_bins', 0)
+            total_short_bins = liquidation.get('total_short_bins', 0)
+            total_long_weight = liquidation.get('total_long_weight', 0)
+            total_short_weight = liquidation.get('total_short_weight', 0)
+            last_spike_bar = liquidation.get('last_spike_bar')
+            total_spikes = liquidation.get('total_spikes', 0)
+            
+            # Calcular pesos en millones
+            long_weight_m = total_long_weight / 1_000_000
+            short_weight_m = total_short_weight / 1_000_000
+            
+            print(f"\n📊 TRADER LIQUIDACIÓN - {symbol} {timeframe}")
+            print(f"   Long bins: {total_long_bins}, Short bins: {total_short_bins}")
+            print(f"   Long weight: {long_weight_m:.1f}M, Short weight: {short_weight_m:.1f}M")
+            print(f"   Total spikes: {total_spikes}")
+            print(f"   Bins congelados: {len(frozen_bins)}")
+            
+            # ============ ESTRATEGIA 1: DOMINANCIA DE LARGOS (SOPORTE) ============
+            if total_long_bins > total_short_bins * 1.5 and total_long_weight > 50_000_000:
+                # Precio por debajo de los principales soportes LONG
+                if active_bins:
+                    long_prices = [b.get('price_top', 0) for b in active_bins if b.get('side') == 'long']
+                    if long_prices and current_price < sum(long_prices[:5]) / 5:
+                        confianza_base = 70
+                        
+                        volume_ratio = volume.get('volume_ratio', 1) if volume else 1
+                        if volume_ratio > 1.5:
+                            confianza = confianza_base + 10
+                            razones.append(f"volumen {volume_ratio:.1f}x confirma acumulación")
+                        else:
+                            confianza = confianza_base
+                        
+                        if timeframe in ['4h', '12h'] and symbol == 'BTC-USDT':
+                            accion = 'LONG'
+                        else:
+                            accion = 'COMPRA_SPOT'
+                        
+                        estrategias.append('LONG_DOMINANCE_SUPPORT')
+                        razones.append(f"{total_long_bins} bins LONG (${long_weight_m:.1f}M) actuando como soporte")
+            
+            # ============ ESTRATEGIA 2: DOMINANCIA DE CORTOS (RESISTENCIA) ============
+            elif total_short_bins > total_long_bins * 1.5 and total_short_weight > 50_000_000:
+                # Precio por encima de las principales resistencias SHORT
+                if active_bins:
+                    short_prices = [b.get('price_bottom', 0) for b in active_bins if b.get('side') == 'short']
+                    if short_prices and current_price > sum(short_prices[:5]) / 5:
+                        confianza_base = 70
+                        
+                        volume_ratio = volume.get('volume_ratio', 1) if volume else 1
+                        if volume_ratio > 1.5:
+                            confianza = confianza_base + 10
+                            razones.append(f"volumen {volume_ratio:.1f}x confirma distribución")
+                        else:
+                            confianza = confianza_base
+                        
+                        if timeframe in ['4h', '12h'] and symbol == 'BTC-USDT':
+                            accion = 'SHORT'
+                        else:
+                            accion = 'VENTA_SPOT'
+                        
+                        estrategias.append('SHORT_DOMINANCE_RESISTANCE')
+                        razones.append(f"{total_short_bins} bins SHORT (${short_weight_m:.1f}M) actuando como resistencia")
+            
+            # ============ ESTRATEGIA 3: ACUMULACIÓN DE SPIKES (ACTIVIDAD RECIENTE) ============
+            elif total_spikes > 5:
+                # Determinar dirección basada en el flujo
+                if total_long_weight > total_short_weight * 1.3:
+                    confianza = 65
+                    accion = 'COMPRA_SPOT'
+                    estrategias.append('SPIKE_ACCUMULATION_LONG')
+                    razones.append(f"{total_spikes} spikes recientes con acumulación LONG de ${long_weight_m:.1f}M")
+                
+                elif total_short_weight > total_long_weight * 1.3:
+                    confianza = 65
+                    accion = 'VENTA_SPOT'
+                    estrategias.append('SPIKE_ACCUMULATION_SHORT')
+                    razones.append(f"{total_spikes} spikes recientes con acumulación SHORT de ${short_weight_m:.1f}M")
+            
+            # ============ ESTRATEGIA 4: EQUILIBRIO DE BINS ============
+            elif abs(total_long_bins - total_short_bins) < 10 and total_long_bins > 20:
+                accion = 'ESPERAR'
+                confianza = 60
+                estrategias.append('LIQUIDITY_BALANCE')
+                razones.append(f"equilibrio de bins ({total_long_bins}L vs {total_short_bins}S) - esperar dirección")
+            
+            # ============ ESTRATEGIA 5: POCOS BINS PERO MUY PESADOS ============
+            elif total_long_bins < 10 and total_long_weight > 100_000_000:
+                confianza = 75
+                accion = 'COMPRA_SPOT'
+                estrategias.append('HEAVY_LONG_CONCENTRATION')
+                razones.append(f"concentración LONG de ${long_weight_m:.1f}M en solo {total_long_bins} bins")
+            
+            elif total_short_bins < 10 and total_short_weight > 100_000_000:
+                confianza = 75
+                accion = 'VENTA_SPOT'
+                estrategias.append('HEAVY_SHORT_CONCENTRATION')
+                razones.append(f"concentración SHORT de ${short_weight_m:.1f}M en solo {total_short_bins} bins")
+            
+            # ============ ESTRATEGIA 6: SEÑAL CONTRARIA (SOBREEXTENSIÓN) ============
+            else:
+                if total_long_bins > 100 and total_long_weight > 200_000_000:
+                    rsi = momentum.get('indicators', {}).get('rsi', 50) if momentum else 50
+                    if rsi > 70:
+                        confianza = 70
+                        accion = 'VENTA_SPOT'
+                        estrategias.append('LONG_EXTREME_REVERSAL')
+                        razones.append(f"sobreacumulación LONG ({total_long_bins} bins) con RSI {rsi:.1f}")
+                
+                elif total_short_bins > 100 and total_short_weight > 200_000_000:
+                    rsi = momentum.get('indicators', {}).get('rsi', 50) if momentum else 50
+                    if rsi < 30:
+                        confianza = 70
+                        accion = 'COMPRA_SPOT'
+                        estrategias.append('SHORT_EXTREME_REVERSAL')
+                        razones.append(f"sobreacumulación SHORT ({total_short_bins} bins) con RSI {rsi:.1f}")
+            
+            # ============ ESTRATEGIA 7: BINS CONGELADOS RECIENTES ============
+            if not accion != 'NO_OPERAR' and frozen_bins:
+                # Verificar si hay congelamientos recientes (últimos 5 bins)
+                ultimos_congelados = frozen_bins[-5:]
+                direccion_congelados = {}
+                
+                for bin_obj in ultimos_congelados:
+                    side = bin_obj.get('side') if isinstance(bin_obj, dict) else getattr(bin_obj, 'side', None)
+                    if side:
+                        direccion_congelados[side] = direccion_congelados.get(side, 0) + 1
+                
+                if direccion_congelados.get('long', 0) >= 3:
+                    confianza = 60
+                    accion = 'VENTA_SPOT'
+                    estrategias.append('RECENT_LONG_LIQUIDATIONS')
+                    razones.append(f"{direccion_congelados['long']} liquidaciones LONG recientes - posible presión bajista")
+                
+                elif direccion_congelados.get('short', 0) >= 3:
+                    confianza = 60
+                    accion = 'COMPRA_SPOT'
+                    estrategias.append('RECENT_SHORT_LIQUIDATIONS')
+                    razones.append(f"{direccion_congelados['short']} liquidaciones SHORT recientes - posible presión alcista")
+            
+            # ============ AJUSTES POR PAR Y TEMPORALIDAD ============
+            if symbol == 'PAXG-USDT':
+                if accion in ['LONG', 'SHORT']:
+                    accion = 'COMPRA_SPOT' if accion == 'LONG' else 'VENTA_SPOT'
+                    confianza = int(confianza * 0.8)
+            
+            elif symbol == 'PAXG-BTC':
+                confianza = int(confianza * 0.7)
+            
+            if timeframe == '1W':
+                if total_long_weight < 200_000_000 and total_short_weight < 200_000_000:
+                    accion = 'NO_OPERAR'
+                    confianza = 0
+            
+            # ============ LIMITAR CONFIANZA ============
+            confianza = min(100, max(0, confianza))
+            
+            # Si no hay acción pero hay actividad, sugerir ESPERAR
+            if accion == 'NO_OPERAR' and (total_long_bins > 10 or total_short_bins > 10):
+                accion = 'ESPERAR'
+                confianza = 55
+                estrategias.append('LIQUIDITY_PRESENT')
+                razones.append(f"liquidez detectada ({total_long_bins}L/{total_short_bins}S bins)")
+            
+            print(f"   Estrategias: {estrategias}")
+            print(f"   Decisión: {accion} (confianza {confianza}%)")
+            
+        except Exception as e:
+            print(f"❌ Error en TraderLiquidation.votar: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        return accion, confianza, estrategias, razones
 
     def votar(self, capas, symbol, timeframe):
         """Usa el heatmap sólo como proxy de riesgo y únicamente en Futuros."""
@@ -27816,11 +27477,8 @@ class TraderLiquidation(TraderBase):
                 return accion, confianza, estrategias, razones
 
             liquidation = capas.get('liquidation', {}) or {}
-            if (
-                liquidation.get('data_type') != 'MODEL_ESTIMATE_NOT_OBSERVED'
-                or liquidation.get('weight_unit') != 'relative_participation'
-            ):
-                razones.append('Heatmap sin contrato relativo verificable; Liquidador se abstiene')
+            if liquidation.get('data_type') != 'MODEL_ESTIMATE_NOT_OBSERVED':
+                razones.append('Heatmap sin contrato de datos verificable; Liquidador se abstiene')
                 return accion, confianza, estrategias, razones
 
             active_bins = liquidation.get('active_bins', []) or []
@@ -28649,24 +28307,21 @@ def api_auth_me():
 
 @app.route('/api/auth/login', methods=['POST'])
 def api_auth_login():
-    """Autenticación privada para Willer, Danilo y Damir."""
+    """
+    Autenticación server-side.
+
+    Body:
+        {
+            "user": "Willer",
+            "password": "..."
+        }
+    """
     import hmac
 
     data = request.get_json(silent=True) or {}
+
     user = str(data.get('user', '')).strip()
     password = str(data.get('password', ''))
-
-    blocked_for = _auth_rate_block_remaining(user)
-    if blocked_for > 0:
-        session.clear()
-        response = jsonify({
-            'success': False,
-            'authenticated': False,
-            'error': 'Demasiados intentos. Espera unos minutos.'
-        })
-        response.status_code = 429
-        response.headers['Retry-After'] = str(blocked_for)
-        return response
 
     users = _auth_users()
     expected_password = users.get(user, '')
@@ -28674,22 +28329,22 @@ def api_auth_login():
     if (
         not user
         or not expected_password
-        or not hmac.compare_digest(password, expected_password)
+        or not hmac.compare_digest(
+            password,
+            expected_password
+        )
     ):
-        _auth_record_failure(user)
         session.clear()
+
         return jsonify({
             'success': False,
             'authenticated': False,
             'error': 'Usuario o contraseña incorrectos'
         }), 401
 
-    _auth_clear_failures(user)
-    # session.clear() evita conservar datos de una sesión previa (session
-    # fixation). Flask vuelve a firmar la cookie con el secreto del servidor.
     session.clear()
     session['authenticated_user'] = user
-    session.permanent = True
+    session.permanent = False
 
     return jsonify({
         'success': True,
@@ -28710,15 +28365,6 @@ def api_auth_logout():
         'authenticated': False,
         'user': None
     })
-@app.route('/login')
-def login_page():
-    """Única pantalla visible antes de autenticarse."""
-    next_url = _safe_next_path(request.args.get('next'))
-    if _authenticated_user():
-        return redirect(next_url)
-    return render_template('login.html', next_url=next_url)
-
-
 @app.route('/')
 def index():
     return render_template('index.html', is_futures=False)
@@ -28759,376 +28405,105 @@ def analytics_page():
 
 @app.route('/health')
 def health():
-    """Health check público mínimo para Render, sin telemetría interna."""
-    return jsonify({'status': 'ok'})
+    """Health check para Render + telemetría de memoria no sensible."""
+    return jsonify({
+        'status': 'ok',
+        'timestamp': datetime.now(bolivia_tz).isoformat(),
+        'system': 'Crypto Trader Analyst Pro',
+        'version': '2.0',
+        'memory': _memory_runtime_state()
+    })
 
 # === CORRECCIÓN: app.py - Manejo de errores en rutas API ===
 # Ubicación: Reemplazar rutas  y /api/telegram/test
 
-# ============================================================================
-# COMMIT 17 — RESOURCE & BANDWIDTH GOVERNOR / SHARED MARKET PRICE HUB
-# ============================================================================
-# Objetivo: reducir tráfico iniciado por Render sin cambiar decisiones de trading
-# ni la interfaz. El precio ligero se comparte entre frontend/monitores y la vela
-# completa se usa como ancla con TTL corto. Ninguna de estas cachés persiste.
-_MARKET_PRICE_HUB_LOCK = threading.RLock()
-_MARKET_PRICE_HUB = {}
-_MARKET_PRICE_HUB_MAX_ENTRIES = 64
-_MARKET_PRICE_HTTP_SESSION = requests.Session()
-_PRICE_CANDLE_ANCHOR_LOCK = threading.RLock()
-_PRICE_CANDLE_ANCHOR = {}
-_PRICE_CANDLE_ANCHOR_MAX_ENTRIES = 24
-_PRICE_CANDLE_ANCHOR_TTL_SECONDS = max(
-    45,
-    int(os.environ.get('PRICE_CANDLE_ANCHOR_TTL_SECONDS', '120') or 120),
-)
-_RESOURCE_GOVERNOR_STATS_LOCK = threading.Lock()
-_RESOURCE_GOVERNOR_STATS = {
-    'price_hub_hits': 0,
-    'price_hub_network': 0,
-    'price_anchor_hits': 0,
-    'price_anchor_network': 0,
-    'futures_snapshot_writes': 0,
-    'futures_snapshot_skips': 0,
-    'multiasset_router_scans': 0,
-    'multiasset_router_reuses': 0,
-}
-
-
-def _rg_count(key, amount=1):
-    try:
-        with _RESOURCE_GOVERNOR_STATS_LOCK:
-            _RESOURCE_GOVERNOR_STATS[key] = int(_RESOURCE_GOVERNOR_STATS.get(key, 0) or 0) + int(amount)
-    except Exception:
-        pass
-
-
-def _bounded_cache_put(cache, key, value, max_entries):
-    cache[key] = value
-    if len(cache) <= max_entries:
-        return
-    try:
-        oldest = sorted(
-            cache.items(),
-            key=lambda item: float((item[1] or {}).get('ts') or 0.0),
-        )
-        for old_key, _ in oldest[:-max(1, int(max_entries * 0.75))]:
-            cache.pop(old_key, None)
-    except Exception:
-        while len(cache) > max_entries:
-            cache.pop(next(iter(cache)), None)
-
-
-def _fetch_spot_level1_price_light(symbol):
-    normalized = str(symbol or '').upper().replace('/', '-')
-    try:
-        response = _MARKET_PRICE_HTTP_SESSION.get(
-            'https://api.kucoin.com/api/v1/market/orderbook/level1',
-            params={'symbol': normalized},
-            timeout=4,
-        )
-        response.raise_for_status()
-        payload = response.json() or {}
-        if str(payload.get('code')) != '200000':
-            return None
-        price = float((payload.get('data') or {}).get('price') or 0)
-        return price if price > 0 else None
-    except Exception:
-        return None
-
-
-def _fetch_futures_mark_price_light(symbol):
-    try:
-        fs = _configured_futures_module()
-        contract = str((getattr(fs, 'FUTURES_CONTRACT_SYMBOLS', {}) or {}).get(symbol) or '')
-        if not contract:
-            return None
-        session_obj = fs._get_futures_http_session()
-        url = fs.KUCOIN_FUTURES_MARK_PRICE_URL.format(symbol=contract)
-        response = session_obj.get(url, timeout=4)
-        response.raise_for_status()
-        payload = response.json() or {}
-        if str(payload.get('code')) != '200000':
-            return None
-        price = float((payload.get('data') or {}).get('value') or 0)
-        return price if price > 0 else None
-    except Exception:
-        return None
-
-
-def _fetch_multiasset_price_light(symbol):
-    """Best-effort price-only transport for Multi-Activo.
-
-    Commit 12 deliberately hides transport symbols. We only use an explicit
-    live-price method or an explicit contract map if the module exposes it;
-    otherwise /api/price falls back to its short-lived candle anchor.
-    """
-    try:
-        engine = _get_multiasset_system()
-        if engine is not None:
-            for method_name in ('get_live_price', 'get_mark_price', 'get_ticker_price'):
-                method = getattr(engine, method_name, None)
-                if callable(method):
-                    try:
-                        price = float(method(symbol) or 0)
-                        if price > 0:
-                            return price
-                    except Exception:
-                        pass
-
-        import multiasset_system as multi_mod
-        contract = None
-        for mapping_name in (
-            'MULTIASSET_CONTRACT_SYMBOLS',
-            'MULTIASSET_TRANSPORT_SYMBOLS',
-            'KUCOIN_CONTRACT_SYMBOLS',
-        ):
-            mapping = getattr(multi_mod, mapping_name, None)
-            if isinstance(mapping, dict):
-                contract = str(mapping.get(symbol) or '')
-                if contract:
-                    break
-        if not contract:
-            return None
-        response = _MARKET_PRICE_HTTP_SESSION.get(
-            'https://api-futures.kucoin.com/api/v1/ticker',
-            params={'symbol': contract},
-            timeout=4,
-        )
-        response.raise_for_status()
-        payload = response.json() or {}
-        if str(payload.get('code')) != '200000':
-            return None
-        data = payload.get('data') or {}
-        price = float(data.get('price') or data.get('markPrice') or 0)
-        return price if price > 0 else None
-    except Exception:
-        return None
-
-
-def _market_price_hub_get(market, symbol, max_age_seconds=20):
-    market = str(market or 'spot').strip().lower()
-    symbol = str(symbol or '').upper().replace('/', '-')
-    key = (market, symbol)
-    now_mono = time.monotonic()
-    ttl = max(5.0, float(max_age_seconds or 20))
-
-    with _MARKET_PRICE_HUB_LOCK:
-        cached = _MARKET_PRICE_HUB.get(key) or {}
-        age = now_mono - float(cached.get('ts') or 0.0)
-        try:
-            cached_price = float(cached.get('price') or 0)
-        except Exception:
-            cached_price = 0.0
-        if cached_price > 0 and age < ttl:
-            _rg_count('price_hub_hits')
-            return cached_price
-
-    if market == 'futures':
-        price = _fetch_futures_mark_price_light(symbol)
-    elif market == 'multiasset':
-        price = _fetch_multiasset_price_light(symbol)
-    else:
-        price = _fetch_spot_level1_price_light(symbol)
-
-    if price is not None and float(price) > 0:
-        _rg_count('price_hub_network')
-        with _MARKET_PRICE_HUB_LOCK:
-            _bounded_cache_put(
-                _MARKET_PRICE_HUB,
-                key,
-                {'price': float(price), 'ts': now_mono},
-                _MARKET_PRICE_HUB_MAX_ENTRIES,
-            )
-        return float(price)
-
-    # Fail-open: if transport failed, allow a slightly stale cached quote.
-    with _MARKET_PRICE_HUB_LOCK:
-        cached = _MARKET_PRICE_HUB.get(key) or {}
-        try:
-            cached_price = float(cached.get('price') or 0)
-        except Exception:
-            cached_price = 0.0
-        if cached_price > 0:
-            return cached_price
-    return None
-
-
-def _load_price_candle_anchor(market, symbol, interval):
-    """Return last/previous candle rows, refreshing OHLCV at most once per TTL."""
-    market = str(market or 'spot').strip().lower()
-    symbol = str(symbol or '').upper().replace('/', '-')
-    interval = str(interval or '1D')
-    key = (market, symbol, interval)
-    now_mono = time.monotonic()
-
-    with _PRICE_CANDLE_ANCHOR_LOCK:
-        cached = _PRICE_CANDLE_ANCHOR.get(key) or {}
-        if cached and now_mono - float(cached.get('ts') or 0.0) < _PRICE_CANDLE_ANCHOR_TTL_SECONDS:
-            _rg_count('price_anchor_hits')
-            return dict(cached)
-
-    try:
-        if market == 'multiasset':
-            engine = _get_multiasset_system()
-            df = engine.get_kucoin_data(symbol, interval) if engine is not None else None
-        elif market == 'futures':
-            engine = _get_futures_system()
-            df = engine.get_kucoin_data(symbol, interval) if engine is not None else None
-        else:
-            from kucoin_cache import fetch_kucoin_candles
-            df = fetch_kucoin_candles(symbol, interval, timeout=8)
-    except Exception:
-        df = None
-
-    if df is None or getattr(df, 'empty', True):
-        with _PRICE_CANDLE_ANCHOR_LOCK:
-            cached = _PRICE_CANDLE_ANCHOR.get(key)
-            return dict(cached) if isinstance(cached, dict) else None
-
-    last_row = df.iloc[-1]
-    previous_close = float(df['close'].iloc[-2]) if len(df) >= 2 else float(last_row.get('close') or 0)
-    last_time = last_row.get('time')
-    try:
-        last_time_iso = last_time.isoformat()
-    except Exception:
-        last_time_iso = str(last_time)
-
-    def _num(name, fallback=0.0):
-        try:
-            value = float(last_row.get(name) or fallback)
-            return value if math.isfinite(value) else float(fallback)
-        except Exception:
-            return float(fallback)
-
-    anchor_value = {
-        'ts': now_mono,
-        'time': last_time_iso,
-        'open': _num('open'),
-        'high': _num('high'),
-        'low': _num('low'),
-        'close': _num('close'),
-        'volume': _num('volume'),
-        'previous_close': previous_close,
-    }
-    _rg_count('price_anchor_network')
-    with _PRICE_CANDLE_ANCHOR_LOCK:
-        _bounded_cache_put(
-            _PRICE_CANDLE_ANCHOR,
-            key,
-            anchor_value,
-            _PRICE_CANDLE_ANCHOR_MAX_ENTRIES,
-        )
-    return dict(anchor_value)
-
-
 @app.route('/api/price')
 def api_price():
-    """Precio visual ligero con ancla OHLCV compartida.
-
-    Commit 17 separa dos necesidades que antes viajaban juntas cada 30 s:
-    - precio actual: ticker/mark-price pequeño compartido en RAM;
-    - OHLCV de la vela abierta: ancla refrescada cada ~120 s.
-
-    El contrato JSON que consume el frontend se conserva, por lo que la
-    experiencia visual no cambia y este endpoint sigue sin confirmar señales.
+    """
+    Endpoint LIGERO: solo devuelve el precio actual del par/timeframe.
+    
+    A diferencia de /api/analyze (que ejecuta 9 traders + 10 capas + 20 indicadores,
+    tarda 2-5s con caché frío y satura Render Free si se llama cada 5s), este
+    endpoint solo:
+      1. Consulta las velas de KuCoin (usa caché HTTP con TTL corto)
+      2. Extrae el precio de cierre de la última vela
+      3. Retorna en <50ms
+    
+    Uso desde frontend: `setInterval` de precio en vivo cada 5s.
     """
     try:
-        symbol = str(request.args.get('symbol', 'BTC-USDT') or 'BTC-USDT').upper().replace('/', '-')
-        interval = str(request.args.get('interval', '1D') or '1D')
+        symbol = request.args.get('symbol', 'BTC-USDT')
+        interval = request.args.get('interval', '1D')
         market = str(request.args.get('market') or 'spot').strip().lower()
-        if market not in ('spot', 'futures', 'multiasset'):
-            market = 'spot'
 
-        anchor = _load_price_candle_anchor(market, symbol, interval)
-        if not anchor:
+        # RC9.7.5: Futures must visualize its real perpetual contract, not the
+        # Spot market. This endpoint remains display-only; trading decisions are
+        # still produced by the corresponding closed-candle analysis pipeline.
+        try:
+            if market == 'multiasset':
+                multi_market = _get_multiasset_system()
+                df = multi_market.get_kucoin_data(symbol, interval) if multi_market is not None else None
+            elif market == 'futures':
+                futures_market = _get_futures_system()
+                df = futures_market.get_kucoin_data(symbol, interval) if futures_market is not None else None
+            else:
+                from kucoin_cache import fetch_kucoin_candles
+                df = fetch_kucoin_candles(symbol, interval, timeout=8)
+        except Exception as e:
+            return jsonify({'success': False, 'error': f'fetch failed: {e}'}), 500
+        
+        if df is None or df.empty:
             return jsonify({'success': False, 'error': 'sin datos'}), 503
+        
+        current_price = float(df['close'].iloc[-1])
+        previous_close = float(df['close'].iloc[-2]) if len(df) >= 2 else current_price
+        change_pct = ((current_price - previous_close) / previous_close * 100) if previous_close > 0 else 0.0
 
-        # El navegador consulta cada 30 s. Un TTL de 20 s evita que un monitor
-        # interno y el frontend dupliquen la misma petición en la misma ventana.
-        current_price = _market_price_hub_get(
-            market,
-            symbol,
-            max_age_seconds=20,
-        )
-        if current_price is None:
-            current_price = float(anchor.get('close') or 0)
-        if not current_price or current_price <= 0:
-            return jsonify({'success': False, 'error': 'sin precio'}), 503
+        # RC9.7.12: /api/price mantiene el tick visual de 30 s. La Señal
+        # Activa se recalcula por una ruta INTRABAR_PREVIEW separada; este
+        # endpoint ligero no decide ni confirma señales por sí solo.
+        last_row = df.iloc[-1]
+        last_time = last_row.get('time')
+        try:
+            last_time_iso = last_time.isoformat()
+        except Exception:
+            last_time_iso = str(last_time)
+        current_volume = 0.0
+        try:
+            current_volume = float(last_row.get('volume') or 0.0)
+            if not math.isfinite(current_volume):
+                current_volume = 0.0
+        except Exception:
+            current_volume = 0.0
 
-        previous_close = float(anchor.get('previous_close') or current_price)
-        change_pct = (
-            (float(current_price) - previous_close) / previous_close * 100.0
-            if previous_close > 0 else 0.0
-        )
-
-        # Mantener el mismo overlay visible. Entre refreshes OHLCV, el tick
-        # actualiza close/high/low en RAM; no inventa volumen ni decisiones.
         current_candle = {
-            'time': anchor.get('time'),
-            'open': float(anchor.get('open') or current_price),
-            'high': max(float(anchor.get('high') or current_price), float(current_price)),
-            'low': min(float(anchor.get('low') or current_price), float(current_price)),
-            'close': float(current_price),
-            'volume': float(anchor.get('volume') or 0.0),
+            'time': last_time_iso,
+            'open': float(last_row.get('open')),
+            'high': float(last_row.get('high')),
+            'low': float(last_row.get('low')),
+            'close': float(last_row.get('close')),
+            # RC9.7.7: volumen de la vela abierta exclusivamente para la
+            # previsualización de indicadores. Nunca entra al análisis cerrado.
+            'volume': current_volume,
             'forming': True,
             'is_forming': True,
         }
-
-        # Conservar el extremo alcanzado durante la vida del ancla para que el
-        # gráfico no "olvide" un high/low entre dos polls OHLCV.
-        key = (market, symbol, interval)
-        with _PRICE_CANDLE_ANCHOR_LOCK:
-            cached = _PRICE_CANDLE_ANCHOR.get(key)
-            if isinstance(cached, dict):
-                cached['high'] = current_candle['high']
-                cached['low'] = current_candle['low']
-                cached['close'] = float(current_price)
-
+        
         return jsonify({
             'success': True,
             'symbol': symbol,
             'timeframe': interval,
             'market': market,
-            'current_price': float(current_price),
+            'current_price': current_price,
             'previous_close': previous_close,
             'change_pct': change_pct,
             'current_candle': current_candle,
             'active_signal_uses_forming_candle': True,
             'confirmation_uses_closed_candle': True,
-            'timestamp': datetime.now(bolivia_tz).isoformat(),
+            'timestamp': datetime.now(bolivia_tz).isoformat()
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/resource-governor/status')
-def api_resource_governor_status():
-    """Read-only local counters; no external calls and no UI polling."""
-    try:
-        with _RESOURCE_GOVERNOR_STATS_LOCK:
-            stats = dict(_RESOURCE_GOVERNOR_STATS)
-        with _MARKET_PRICE_HUB_LOCK:
-            price_cache_entries = len(_MARKET_PRICE_HUB)
-        with _PRICE_CANDLE_ANCHOR_LOCK:
-            candle_anchor_entries = len(_PRICE_CANDLE_ANCHOR)
-        return jsonify({
-            'success': True,
-            'stats': stats,
-            'runtime_cache': {
-                'price_entries': price_cache_entries,
-                'candle_anchor_entries': candle_anchor_entries,
-            },
-            'policy': {
-                'price_anchor_ttl_seconds': _PRICE_CANDLE_ANCHOR_TTL_SECONDS,
-                'futures_snapshot_min_interval_seconds': globals().get('_FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS', 900),
-                'futures_snapshot_checkpoint_seconds': globals().get('_FUTURES_SNAPSHOT_CHECKPOINT_SECONDS', 900),
-                'liquidation_public_ttl_seconds': LiquidationPublicCalibration.SUCCESS_TTL_SECONDS,
-            },
-            'note': 'Contadores locales desde el último reinicio; no realizan consultas externas.',
-        })
-    except Exception as exc:
-        return jsonify({'success': False, 'error': str(exc)[:180]}), 500
 
 
 @app.route('/api/analyze')
@@ -32346,18 +31721,12 @@ def api_saved_signals_create():
             data.get('source_context')
             or ''
         ).upper()
-        is_multiasset_source = source_context in (
-            'MULTIASSET_PREVIOUS_CONFIRMED',
-            'MULTIASSET_ACTIVE_CONFIRMED',
-        )
 
         if source_context not in (
             'PREVIOUS_CONFIRMED',
             'PREVIOUS_ANALYSIS_ONLY',
             'ACTIVE_CONFIRMED',
-            'ACTIVE_ANALYSIS_ONLY',
-            'MULTIASSET_PREVIOUS_CONFIRMED',
-            'MULTIASSET_ACTIVE_CONFIRMED'
+            'ACTIVE_ANALYSIS_ONLY'
         ):
             return jsonify({
                 'success': False,
@@ -32667,80 +32036,6 @@ def api_saved_signals_create():
                     data['source_valid_until'] = _lc.get('valid_until')
                     if str(_lc.get('lifecycle_status') or '') == 'entry_touched':
                         data['already_in_position'] = True
-
-        elif is_multiasset_source:
-            # Commit 17.4.1 — official Multi-Asset signals use the same saved
-            # signal lifecycle as Futures, but validation must come from the
-            # Multi-Asset cache rather than the crypto Futures lifecycle.
-            source_signal_id = str(data.get('source_signal_id') or '').strip()
-            if not source_signal_id:
-                return jsonify({'success': False, 'error': 'Falta source_signal_id de la señal Multi-Activo.'}), 400
-
-            source_result = None
-            for raw_result in _multiasset_combined_analyses(fresh_only=True).values():
-                if (
-                    isinstance(raw_result, dict)
-                    and str(raw_result.get('signal_id') or '') == source_signal_id
-                ):
-                    source_result = raw_result
-                    break
-
-            if source_result is None:
-                return jsonify({
-                    'success': False,
-                    'error': 'La señal Multi-Activo ya no está disponible o perdió vigencia. Actualiza la lista.'
-                }), 409
-            if not _multiasset_is_executable(source_result):
-                return jsonify({
-                    'success': False,
-                    'error': 'El análisis Multi-Activo ya no es una señal ejecutable.'
-                }), 409
-            if not _multiasset_signal_is_vigent(source_result):
-                return jsonify({
-                    'success': False,
-                    'error': 'La vigencia de la señal Multi-Activo ya finalizó.'
-                }), 409
-
-            source_decision = source_result.get('decision') or {}
-            source_levels = source_result.get('levels') or {}
-            _ma_action = str(source_decision.get('action') or '').upper()
-            try:
-                _ma_entry = float(source_levels.get('entry') or 0)
-                _ma_sl = float(source_levels.get('stop_loss') or 0)
-                _ma_tp = float(source_levels.get('take_profit') or 0)
-            except (TypeError, ValueError):
-                _ma_entry = _ma_sl = _ma_tp = 0.0
-            _ma_geo = bool(
-                _ma_entry > 0 and _ma_sl > 0 and _ma_tp > 0
-                and ((_ma_action == 'LONG' and _ma_sl < _ma_entry < _ma_tp)
-                     or (_ma_action == 'SHORT' and _ma_tp < _ma_entry < _ma_sl))
-            )
-            if not _ma_geo:
-                return jsonify({
-                    'success': False,
-                    'error': 'La señal Multi-Activo no conserva una geometría Entry/SL/TP válida.'
-                }), 409
-
-            # Canonical source snapshot. The modal can still edit personal
-            # levels, but the audit trail preserves the engine geometry.
-            data['symbol'] = source_result.get('symbol') or data.get('symbol')
-            data['timeframe'] = source_result.get('timeframe') or data.get('timeframe')
-            data['action'] = _ma_action
-            data['confidence'] = float(source_decision.get('confidence') or data.get('confidence') or 0)
-            data['source_signal_id'] = source_signal_id
-            data['candle_timestamp'] = source_result.get('source_candle_timestamp') or data.get('candle_timestamp')
-            data['source_valid_until'] = source_result.get('valid_until') or source_levels.get('valid_until')
-            data['execution_origin'] = 'SYSTEM_EXECUTABLE'
-            data['risk_class'] = 'PREMIUM'
-            data['system_executable'] = True
-            data['engine_publication_status'] = 'EXECUTABLE_SIGNAL'
-            data['execution_safety_at_save'] = source_levels.get('execution_safety')
-            data['original_risk_reward'] = source_levels.get('risk_reward')
-            data['original_confidence'] = float(source_decision.get('confidence') or 0)
-            data['original_entry'] = _ma_entry
-            data['original_stop_loss'] = _ma_sl
-            data['original_take_profit'] = _ma_tp
-            data['original_leverage'] = int(source_levels.get('leverage') or 1)
 
         else:
         
@@ -33868,10 +33163,14 @@ def api_kpis_frontend_signals():
         # performance remains in Analytics; the header only reports the local
         # resource-governed analysis cache.
         if market_filter == 'multiasset':
-            analyses_map = _multiasset_combined_analyses(fresh_only=True)
-            analyses = [dict(v or {}) for v in analyses_map.values() if isinstance(v, dict)]
+            with _MULTI_ASSET_CACHE['lock']:
+                analyses = [
+                    dict(v or {})
+                    for v in (_MULTI_ASSET_CACHE.get('analysis') or {}).values()
+                    if isinstance(v, dict)
+                ]
             total = len(analyses)
-            active = sum(1 for row in analyses if _multiasset_signal_is_vigent(row))
+            active = sum(1 for row in analyses if _multiasset_is_executable(row))
             return jsonify({
                 'success': True,
                 'data': {
@@ -34146,7 +33445,8 @@ def api_run_scheduled():
     """Ejecutar análisis programado para temporalidades específicas - CON GRÁFICOS Y PATRONES"""
     try:
         # Verificar autenticación simple (evitar ejecución no autorizada)
-        if not _valid_machine_auth():
+        auth_key = request.headers.get('X-Auth-Key')
+        if auth_key != os.environ.get('SCHEDULED_AUTH_KEY', 'crypto_trader_analyst_2025'):
             return jsonify({'success': False, 'error': 'No autorizado'}), 401
         
         data = request.get_json()
@@ -34228,89 +33528,16 @@ def _get_futures_system():
 
 
 # ============================================================================
-# COMMIT 17.2 — MULTI-ACTIVO RUNTIME RELIABILITY
-# ============================================================================
-# Alcance estricto: transporte, frescura, scheduling, persistencia compacta y
-# observabilidad. NO modifica dirección, estrategias, Safety, Entry, SL, TP,
-# leverage, pesos, Macro Gate ni Publication Gate.
+# COMMIT 12 — MULTI-ACTIVO RESOURCE-GOVERNED RUNTIME
 # ============================================================================
 _MULTI_ASSET_CACHE = {
     'lock': threading.RLock(),
     'analysis': {},
     'updated_at': 0.0,
 }
-_MULTI_ASSET_COMPACT_LOCK = threading.RLock()
-_MULTI_ASSET_COMPACT = {
-    'items': {},
-    'restore_attempted': False,
-    'restored': False,
-    'restored_count': 0,
-    'last_persist_at': 0.0,
-    'persist_ok': None,
-    'restore_error': None,
-    'durable_db_available': None,
-}
-_MULTI_ASSET_COMPACT_MAX = 21  # 7 símbolos × 3 TF; sólo resumen compacto.
-_MULTI_ASSET_SNAPSHOT_NAMESPACE = 'multiasset'
-_MULTI_ASSET_SNAPSHOT_KEY = 'deep_cache_v1'
-_MULTI_ASSET_SNAPSHOT_TTL_SECONDS = 3 * 24 * 3600
-_MULTI_ASSET_SNAPSHOT_MIN_WRITE_SECONDS = 120
-
 _MULTI_AUTO_DONE = set()
 _MULTI_AUTO_LOCK = threading.Lock()
-_MULTI_AUTO_DAILY = {'day': None, 'count': 0, 'context_count': 0}
-_MULTI_DAILY_CONTEXT_EXTRA_MAX = 2  # 1D: no roba cupo a la vía principal 4h.
-_MULTI_DEEP_RETRY = {}
-_MULTI_CLOSE_REFRESHED = set()
-
-# Commit 17 conserva el último ranking 4h para evitar scans redundantes. 17.2
-# corrige dos cosas: deep_candidate NO equivale a actividad (siempre hay top-2),
-# y los cierres 4h/1D/1h pueden forzar UN refresh causal de vela cerrada.
-_MULTI_ROUTER_STATE_LOCK = threading.Lock()
-_MULTI_ROUTER_STATE = {
-    'rows': [],
-    'next_scan_at': 0.0,
-    'last_scan_at': 0.0,
-    'interval_seconds': 900,
-}
-_MULTI_RUNTIME_STATUS_LOCK = threading.RLock()
-_MULTI_RUNTIME_STATUS = {
-    'version': 'COMMIT17_2_MULTI_RUNTIME_RELIABILITY',
-    'started_at': datetime.now(timezone.utc).isoformat(),
-    'last_tick_at': None,
-    'last_router_scan_at': None,
-    'last_router_timeframe': None,
-    'last_router_rows': 0,
-    'last_deep_attempt_at': None,
-    'last_deep_success_at': None,
-    'last_deep_error_at': None,
-    'last_deep_error': None,
-    'last_deep_symbol': None,
-    'last_deep_timeframe': None,
-    'deep_successes': 0,
-    'deep_errors': 0,
-    'busy_deferrals': 0,
-    'close_forced_scans': 0,
-}
-
-
-def _multiasset_status_update(**kwargs):
-    try:
-        with _MULTI_RUNTIME_STATUS_LOCK:
-            _MULTI_RUNTIME_STATUS.update(kwargs)
-    except Exception:
-        pass
-
-
-def _multiasset_status_increment(key, amount=1):
-    try:
-        with _MULTI_RUNTIME_STATUS_LOCK:
-            _MULTI_RUNTIME_STATUS[key] = int(
-                _MULTI_RUNTIME_STATUS.get(key, 0) or 0
-            ) + int(amount)
-    except Exception:
-        pass
-
+_MULTI_AUTO_DAILY = {'day': None, 'count': 0}
 
 def _get_multiasset_system():
     try:
@@ -34320,253 +33547,15 @@ def _get_multiasset_system():
         print(f"⚠️ MultiAssetSystem no disponible: {exc}")
         return None
 
-
-def _multiasset_compact_result(result, *, origin='LIVE'):
-    """Resumen bounded suficiente para señal/diagnóstico, no para recalcular."""
-    result = result if isinstance(result, dict) else {}
-    decision = result.get('decision') if isinstance(result.get('decision'), dict) else {}
-    levels = result.get('levels') if isinstance(result.get('levels'), dict) else {}
-    macro = result.get('multiasset_macro') if isinstance(result.get('multiasset_macro'), dict) else {}
-    strategy = result.get('multiasset_strategy_bank') if isinstance(result.get('multiasset_strategy_bank'), dict) else {}
-    route = result.get('multiasset_strategy_route') if isinstance(result.get('multiasset_strategy_route'), dict) else {}
-
-    level_keys = (
-        'entry','stop_loss','take_profit','leverage','risk_reward','roi_tp','roi_sl',
-        'execution_safety','publication_status','publication_eligible','is_executable',
-        'rejected_reason','entry_score','sl_reliability','tp_quality_score','valid_until',
-        'entry_reachability_score','entry_distance_atr','entry_distance_pct',
-    )
-    compact_levels = {k: levels.get(k) for k in level_keys if levels.get(k) is not None}
-    compact = {
-        'success': bool(result.get('success', True)),
-        'signal_id': str(result.get('signal_id') or ''),
-        'symbol': result.get('symbol'),
-        'timeframe': result.get('timeframe'),
-        'display_name': result.get('display_name'),
-        'asset_class': result.get('asset_class'),
-        'system_type': result.get('system_type') or 'futures',
-        'market': 'multiasset',
-        'market_segment': 'MULTIASSET',
-        'decision': {
-            'action': str(decision.get('action') or 'NO_OPERAR').upper(),
-            'confidence': decision.get('confidence'),
-        },
-        'levels': compact_levels,
-        'publication_status': result.get('publication_status') or levels.get('publication_status'),
-        'publication_eligible': result.get('publication_eligible', levels.get('publication_eligible')),
-        'is_executable': result.get('is_executable', levels.get('is_executable')),
-        'rejected_reason': result.get('rejected_reason') or levels.get('rejected_reason'),
-        'source_candle_timestamp': result.get('source_candle_timestamp'),
-        'source_candle_close_timestamp': result.get('source_candle_close_timestamp'),
-        'current_price': result.get('current_price'),
-        'live_price': result.get('live_price'),
-        'valid_until': result.get('valid_until') or levels.get('valid_until'),
-        'message': str(result.get('message') or '')[:900],
-        'multiasset_macro': {
-            k: macro.get(k) for k in (
-                'gate','reason','risk_level','directional_bias','next_event_hours','next_event'
-            ) if macro.get(k) is not None
-        },
-        'multiasset_strategy_bank': {
-            k: strategy.get(k) for k in (
-                'asset_class','symbol','timeframe','regime','volatility_regime','session',
-                'preferred_for_context','learning_cell'
-            ) if strategy.get(k) is not None
-        },
-        'multiasset_strategy_route': {
-            k: route.get(k) for k in ('selected_family','confirmation_score')
-            if route.get(k) is not None
-        },
-        '_multi_cache_origin': str(origin or 'LIVE').upper(),
-        '_multi_cached_at': time.time(),
-    }
-    return compact
-
-
-def _multiasset_compact_put(result, *, origin='LIVE'):
-    compact = _multiasset_compact_result(result, origin=origin)
-    symbol = str(compact.get('symbol') or '')
-    timeframe = str(compact.get('timeframe') or '')
-    if not symbol or not timeframe:
-        return False
-    key = (symbol, timeframe)
-    with _MULTI_ASSET_COMPACT_LOCK:
-        _MULTI_ASSET_COMPACT['items'][key] = compact
-        if len(_MULTI_ASSET_COMPACT['items']) > _MULTI_ASSET_COMPACT_MAX:
-            ordered = sorted(
-                _MULTI_ASSET_COMPACT['items'].items(),
-                key=lambda item: float((item[1] or {}).get('_multi_cached_at') or 0.0),
-            )
-            for old_key, _ in ordered[:-_MULTI_ASSET_COMPACT_MAX]:
-                _MULTI_ASSET_COMPACT['items'].pop(old_key, None)
-    return True
-
-
-def _multiasset_persist_compact_snapshot(*, force=False):
-    now = time.monotonic()
-    with _MULTI_ASSET_COMPACT_LOCK:
-        last = float(_MULTI_ASSET_COMPACT.get('last_persist_at') or 0.0)
-        if not force and now - last < _MULTI_ASSET_SNAPSHOT_MIN_WRITE_SECONDS:
-            return True
-        items = list((_MULTI_ASSET_COMPACT.get('items') or {}).values())
-    if not items:
-        return False
-    payload = {
-        'version': 'COMMIT17_2_MULTI_COMPACT_V1',
-        'saved_at': datetime.now(timezone.utc).isoformat(),
-        'items': items[-_MULTI_ASSET_COMPACT_MAX:],
-    }
-    durable_available = None
-    try:
-        from supabase_client import supabase_db
-        durable_available = bool(
-            getattr(supabase_db, 'enabled', False)
-            and not bool(getattr(supabase_db, 'provider_restricted', lambda: False)())
-        )
-    except Exception:
-        durable_available = False
-    with _MULTI_ASSET_COMPACT_LOCK:
-        _MULTI_ASSET_COMPACT['durable_db_available'] = durable_available
-
-    try:
-        from runtime_persistence import save_runtime_snapshot
-        ok = bool(save_runtime_snapshot(
-            _MULTI_ASSET_SNAPSHOT_NAMESPACE,
-            _MULTI_ASSET_SNAPSHOT_KEY,
-            payload,
-            ttl_seconds=_MULTI_ASSET_SNAPSHOT_TTL_SECONDS,
-        ))
-    except Exception as exc:
-        ok = False
-        _multiasset_status_update(last_deep_error=f'compact_persist:{str(exc)[:120]}')
-    with _MULTI_ASSET_COMPACT_LOCK:
-        _MULTI_ASSET_COMPACT['last_persist_at'] = now
-        _MULTI_ASSET_COMPACT['persist_ok'] = ok
-    return ok
-
-
-def _multiasset_restore_compact_snapshot_once():
-    with _MULTI_ASSET_COMPACT_LOCK:
-        if _MULTI_ASSET_COMPACT.get('restore_attempted'):
-            return bool(_MULTI_ASSET_COMPACT.get('restored'))
-        _MULTI_ASSET_COMPACT['restore_attempted'] = True
-    try:
-        from runtime_persistence import load_runtime_snapshot
-        stored = load_runtime_snapshot(
-            _MULTI_ASSET_SNAPSHOT_NAMESPACE,
-            _MULTI_ASSET_SNAPSHOT_KEY,
-            allow_expired=True,
-        )
-        payload = (stored or {}).get('payload') or {}
-        items = payload.get('items') if isinstance(payload, dict) else []
-        saved_at = payload.get('saved_at') if isinstance(payload, dict) else None
-        # Nunca resucitar diagnósticos indefinidamente. El snapshot dura 72h y
-        # cada señal se vuelve a filtrar por vigencia antes de mostrarse activa.
-        if saved_at:
-            try:
-                saved = pd.Timestamp(saved_at)
-                saved = saved.tz_localize('UTC') if saved.tz is None else saved.tz_convert('UTC')
-                if (pd.Timestamp.now(tz='UTC') - saved).total_seconds() > _MULTI_ASSET_SNAPSHOT_TTL_SECONDS:
-                    items = []
-            except Exception:
-                pass
-        restored = 0
-        if isinstance(items, list):
-            for item in items[-_MULTI_ASSET_COMPACT_MAX:]:
-                if not isinstance(item, dict):
-                    continue
-                item = dict(item)
-                item['_multi_cache_origin'] = 'RESTORED'
-                item['_multi_cached_at'] = float(item.get('_multi_cached_at') or time.time())
-                if _multiasset_compact_put(item, origin='RESTORED'):
-                    restored += 1
-        with _MULTI_ASSET_COMPACT_LOCK:
-            _MULTI_ASSET_COMPACT['restored'] = restored > 0
-            _MULTI_ASSET_COMPACT['restored_count'] = restored
-        return restored > 0
-    except Exception as exc:
-        with _MULTI_ASSET_COMPACT_LOCK:
-            _MULTI_ASSET_COMPACT['restore_error'] = str(exc)[:160]
-        return False
-
-
-def _multiasset_result_age_seconds(result):
-    raw = (result or {}).get('source_candle_close_timestamp') or (result or {}).get('source_candle_timestamp')
-    if not raw:
-        return None
-    try:
-        ts = pd.Timestamp(raw)
-        ts = ts.tz_localize('UTC') if ts.tz is None else ts.tz_convert('UTC')
-        return max(0, int((pd.Timestamp.now(tz='UTC') - ts).total_seconds()))
-    except Exception:
-        return None
-
-
-def _multiasset_signal_is_vigent(result):
-    if not _multiasset_is_executable(result):
-        return False
-    timeframe = str((result or {}).get('timeframe') or '4h')
-    try:
-        validity_fn = globals().get('_futures_signal_validity')
-        if callable(validity_fn):
-            return not bool(validity_fn(result, timeframe).get('expired'))
-    except Exception:
-        pass
-    age = _multiasset_result_age_seconds(result)
-    tf_seconds = {'1h':3600, '4h':14400, '1D':86400}.get(timeframe, 14400)
-    return age is None or age <= tf_seconds * 6
-
-
-def _multiasset_analysis_is_fresh(result):
-    if _multiasset_signal_is_vigent(result):
-        return True
-    timeframe = str((result or {}).get('timeframe') or '4h')
-    age = _multiasset_result_age_seconds(result)
-    if age is None:
-        return str((result or {}).get('_multi_cache_origin') or 'LIVE') == 'LIVE'
-    tf_seconds = {'1h':3600, '4h':14400, '1D':86400}.get(timeframe, 14400)
-    return age <= tf_seconds * 2
-
-
-def _multiasset_combined_analyses(*, fresh_only=True):
-    _multiasset_restore_compact_snapshot_once()
-    combined = {}
-    with _MULTI_ASSET_COMPACT_LOCK:
-        for key, value in (_MULTI_ASSET_COMPACT.get('items') or {}).items():
-            if isinstance(value, dict):
-                combined[key] = dict(value)
-    with _MULTI_ASSET_CACHE['lock']:
-        for key, value in (_MULTI_ASSET_CACHE.get('analysis') or {}).items():
-            if isinstance(value, dict):
-                combined[key] = dict(value)
-    if fresh_only:
-        combined = {
-            key: value for key, value in combined.items()
-            if _multiasset_analysis_is_fresh(value)
-        }
-    return combined
-
-
 def _multiasset_cache_result(symbol, timeframe, result):
-    # Un fallo transitorio jamás reemplaza el último análisis válido ni se
-    # presenta como NO_OPERAR. Eso era indistinguible de una decisión técnica.
-    if not isinstance(result, dict) or result.get('success') is False:
-        return False
-    normalized = dict(result)
-    normalized.setdefault('symbol', str(symbol))
-    normalized.setdefault('timeframe', str(timeframe))
     with _MULTI_ASSET_CACHE['lock']:
-        _MULTI_ASSET_CACHE['analysis'][(str(symbol), str(timeframe))] = normalized
+        _MULTI_ASSET_CACHE['analysis'][(str(symbol), str(timeframe))] = dict(result or {})
         _MULTI_ASSET_CACHE['updated_at'] = time.time()
-        # Full analyses can be large. Keep the historical RAM ceiling of 8.
+        # Límite duro: sólo 2 análisis profundos por TF caliente + contexto reciente.
         if len(_MULTI_ASSET_CACHE['analysis']) > 8:
             keys = list(_MULTI_ASSET_CACHE['analysis'].keys())
             for old in keys[:-8]:
                 _MULTI_ASSET_CACHE['analysis'].pop(old, None)
-    _multiasset_compact_put(normalized, origin='LIVE')
-    _multiasset_persist_compact_snapshot(force=_multiasset_is_executable(normalized))
-    return True
-
 
 def _multiasset_signal_row(result, source_context='PREVIOUS_CONFIRMED'):
     result = result or {}
@@ -34593,9 +33582,7 @@ def _multiasset_signal_row(result, source_context='PREVIOUS_CONFIRMED'):
         'multiasset_macro': result.get('multiasset_macro'),
         'multiasset_specialist': result.get('multiasset_specialist'),
         'multiasset_strategy_bank': result.get('multiasset_strategy_bank'),
-        'cache_origin': result.get('_multi_cache_origin') or 'LIVE',
     }
-
 
 def _multiasset_is_executable(result):
     decision=(result or {}).get('decision') or {}; levels=(result or {}).get('levels') or {}
@@ -34603,383 +33590,19 @@ def _multiasset_is_executable(result):
             str(levels.get('publication_status') or result.get('publication_status') or '').upper() == 'EXECUTABLE_SIGNAL' and
             result.get('is_executable', levels.get('is_executable', True)) is not False)
 
-
-def _commit16_public_market_context(market_hours=None, execution_context=None, market_regime=None):
-    """Public market context for the header.
-
-    Presentation-only. It translates already-computed evidence into
-    conventional trader language and performs ZERO I/O. Internal committee,
-    specialist, weighting and learning terminology is never exposed.
-    """
-    market_hours = market_hours if isinstance(market_hours, dict) else {}
-    execution_context = execution_context if isinstance(execution_context, dict) else {}
-    market_regime = market_regime if isinstance(market_regime, dict) else {}
-
-    def _num(value, default=0.0):
-        try:
-            return float(value if value is not None else default)
-        except (TypeError, ValueError):
-            return float(default)
-
-    activity = max(0.0, min(100.0, _num(execution_context.get('activity_score'), 50.0)))
-    shock = max(0.0, min(100.0, _num(execution_context.get('shock_score'), 0.0)))
-    volume_ratio = max(0.0, _num(execution_context.get('volume_ratio'), 1.0))
-    range_ratio = max(0.0, _num(execution_context.get('range_ratio'), 1.0))
-
-    if activity >= 82:
-        activity_label = 'MUY ALTA'
-        activity_tone = 'danger' if shock >= 85 else 'success'
-    elif activity >= 64:
-        activity_label = 'ALTA'
-        activity_tone = 'success'
-    elif activity >= 42:
-        activity_label = 'MODERADA'
-        activity_tone = 'warning'
-    else:
-        activity_label = 'BAJA'
-        activity_tone = 'secondary'
-
-    if shock >= 85:
-        condition = 'MOVIMIENTO EXCEPCIONAL'
-    elif shock >= 65:
-        condition = 'ACTIVIDAD ANORMAL'
-    elif activity >= 64:
-        condition = 'MERCADO ACTIVO'
-    elif activity < 42:
-        condition = 'MERCADO CALMO'
-    else:
-        condition = 'CONDICIONES NORMALES'
-
-    session_name = str(market_hours.get('session_name') or '').strip()
-    session_code = str(market_hours.get('session') or execution_context.get('session') or 'UNKNOWN').upper()
-    if not session_name:
-        session_name = {
-            'ASIAN': 'Asiática',
-            'EUROPEAN': 'Europea',
-            'AMERICAN': 'Americana',
-        }.get(session_code, 'Sin identificar')
-    else:
-        session_name = {
-            'Asiático': 'Asiática',
-            'Europeo': 'Europea',
-            'Americano': 'Americana',
-        }.get(session_name, session_name)
-
-    day_name = str(market_hours.get('day_name') or '').strip() or '—'
-    day_icon = str(market_hours.get('day_icon') or '📅')
-    session_icon = str(market_hours.get('session_icon') or '🕒')
-
-    regime = str(
-        execution_context.get('market_regime')
-        or market_regime.get('regime')
-        or market_regime.get('state')
-        or ''
-    ).upper()
-
-    evidence_parts = [
-        f'volumen relativo {volume_ratio:.2f}x',
-        f'rango relativo {range_ratio:.2f}x',
-    ]
-    if regime and regime not in ('UNKNOWN', 'NONE', 'N/A'):
-        evidence_parts.append(f'régimen {regime.replace("_", " ").lower()}')
-
-    return {
-        'session_name': session_name,
-        'session_icon': session_icon,
-        'day_name': day_name,
-        'day_icon': day_icon,
-        'activity_label': activity_label,
-        'activity_score': round(activity, 1),
-        'activity_tone': activity_tone,
-        'condition': condition,
-        'volume_ratio': round(volume_ratio, 2),
-        'range_ratio': round(range_ratio, 2),
-        'evidence': ' · '.join(evidence_parts),
-        'note': (
-            'La sesión y el día describen el calendario; la actividad se clasifica '
-            'con volumen y rango observados, no por una etiqueta fija de horario.'
-        ),
-    }
-
-
-
-
-def _multiasset_public_analysis_candidate(result):
-    """Public, trader-readable classification of one already-cached analysis."""
-    result = result if isinstance(result, dict) else {}
-    decision = result.get('decision') or {}
-    levels = result.get('levels') or {}
-
-    def _num(value, default=0.0):
-        try:
-            return float(value if value is not None else default)
-        except (TypeError, ValueError):
-            return float(default)
-
-    action = str(decision.get('action') or 'NO_OPERAR').upper()
-    confidence = _num(decision.get('confidence'), 0.0)
-    directional = action in ('LONG', 'SHORT')
-    publication = str(
-        levels.get('publication_status')
-        or result.get('publication_status')
-        or ('ANALYSIS_ONLY' if levels.get('is_rejected') else 'EXECUTABLE_SIGNAL')
-    ).upper()
-    signal_confirmed = bool(
-        result.get('signal_confirmed')
-        or levels.get('signal_confirmed')
-        or (directional and publication in {
-            'EXECUTABLE_SIGNAL', 'CONFIRMED_PENDING_EXECUTION',
-            'EDGE_BLOCKED', 'AI_BLOCKED'
-        })
-    )
-    _ma_entry = _num(levels.get('entry'), 0.0)
-    _ma_sl = _num(levels.get('stop_loss'), 0.0)
-    _ma_tp = _num(levels.get('take_profit'), 0.0)
-    _ma_geometry = bool(
-        _ma_entry > 0 and _ma_sl > 0 and _ma_tp > 0
-        and ((action == 'LONG' and _ma_sl < _ma_entry < _ma_tp)
-             or (action == 'SHORT' and _ma_tp < _ma_entry < _ma_sl))
-    )
-    executable = bool(
-        directional
-        and (publication == 'EXECUTABLE_SIGNAL' or (signal_confirmed and _ma_geometry))
-        and _multiasset_signal_is_vigent(result)
-    )
-
-    safety_raw = levels.get('execution_safety')
-    safety = _num(safety_raw, 0.0) if safety_raw is not None else None
-    rr = _num(levels.get('risk_reward'), 0.0)
-
-    if executable:
-        classification = 'EXECUTABLE_SIGNAL'
-        status_label = 'SEÑAL EJECUTABLE'
-        reason = 'La configuración técnica cumple los requisitos actuales de ejecución.'
-    elif directional and signal_confirmed and not _ma_geometry:
-        classification = 'LEGACY_INVALID_GEOMETRY'
-        status_label = 'REGISTRO LEGACY · REQUIERE RECÁLCULO'
-        reason = (
-            'La dirección quedó registrada por una versión anterior, pero Entry/SL/TP no son válidos. '
-            'No se presenta como señal operable; el siguiente análisis la reemplaza con geometría completa.'
-        )
-    elif directional and signal_confirmed:
-        classification = 'CONFIRMED_PENDING_EXECUTION'
-        status_label = 'SEÑAL CONFIRMADA · ESPERANDO EJECUCIÓN'
-        rejected = str(
-            levels.get('execution_pending_reason')
-            or levels.get('rejected_reason')
-            or result.get('rejected_reason')
-            or ''
-        ).strip()
-        if rejected:
-            public_reason = rejected
-            replacements = {
-                'committee': 'evaluación técnica',
-                'comité': 'evaluación técnica',
-                'specialist': 'evaluación técnica',
-                'especialista': 'evaluación técnica',
-                'publication gate': 'filtro final',
-                'gate': 'filtro',
-                'router': 'revisión inicial',
-                'shadow': 'evaluación',
-            }
-            for src, dst in replacements.items():
-                public_reason = public_reason.replace(src, dst).replace(src.upper(), dst)
-            reason = public_reason[:260]
-        elif rr > 0:
-            reason = (
-                f'Existe dirección {action}, pero la combinación actual de niveles, '
-                f'riesgo y R/R ({rr:.2f}) no supera todavía los requisitos de ejecución.'
-            )
-        else:
-            reason = (
-                f'La dirección {action} está confirmada, pero la calidad conjunta '
-                'de entrada, protección y objetivo todavía no habilita la ejecución.'
-            )
-    elif directional:
-        classification = 'ANALYSIS_ONLY'
-        status_label = 'HIPÓTESIS DIRECCIONAL · NO CONFIRMADA'
-        reason = 'Existe dirección preliminar, pero todavía no alcanza el contrato de señal confirmada.'
-    else:
-        classification = 'NO_TRADE'
-        status_label = 'SIN SEÑAL DIRECCIONAL'
-        reason = 'No hay una dirección LONG/SHORT con confirmación técnica suficiente en este análisis.'
-
-    if safety is not None and safety >= 65:
-        risk_class = 'MEDIUM'
-    else:
-        risk_class = 'HIGH'
-
-    return {
-        'signal_id': str(result.get('signal_id') or ''),
-        'symbol': result.get('symbol'),
-        'timeframe': result.get('timeframe'),
-        'display_name': result.get('display_name'),
-        'asset_class': result.get('asset_class'),
-        'classification': classification,
-        'engine_publication_status': publication,
-        'status_label': status_label,
-        'reason': reason,
-        'active_reason': reason,
-        'action': action,
-        'confidence': round(confidence, 2),
-        'directional': directional,
-        'signal_confirmed': signal_confirmed,
-        'execution_ready': executable,
-        'execution_status': ('READY' if executable else 'PENDING_EXECUTION' if signal_confirmed else 'NOT_READY'),
-        'is_executable': executable,
-        'is_active': executable,
-        'manual_save_allowed': bool(executable),
-        'manual_risk_class': risk_class,
-        'manual_risk_reason': reason,
-        'manual_requires_ack': False,
-        'entry': levels.get('entry'),
-        'stop_loss': levels.get('stop_loss'),
-        'take_profit': levels.get('take_profit'),
-        'leverage': levels.get('leverage'),
-        'risk_reward': rr if rr > 0 else None,
-        'execution_safety': safety,
-        'source_candle_timestamp': result.get('source_candle_timestamp'),
-        'source_candle_close_timestamp': result.get('source_candle_close_timestamp'),
-        'source_age_seconds': _multiasset_result_age_seconds(result),
-        'current_price': result.get('live_price') or result.get('current_price'),
-        'source_context': 'MULTIASSET_PUBLIC_DIAGNOSTIC',
-        'cache_origin': result.get('_multi_cache_origin') or 'LIVE',
-    }
-
-
-def _multiasset_runtime_public_status():
-    _multiasset_restore_compact_snapshot_once()
-    with _MULTI_RUNTIME_STATUS_LOCK:
-        status = dict(_MULTI_RUNTIME_STATUS)
-    with _MULTI_ASSET_CACHE['lock']:
-        full_count = len(_MULTI_ASSET_CACHE.get('analysis') or {})
-    with _MULTI_ASSET_COMPACT_LOCK:
-        compact_count = len(_MULTI_ASSET_COMPACT.get('items') or {})
-        status['snapshot_restored'] = bool(_MULTI_ASSET_COMPACT.get('restored'))
-        status['snapshot_restored_count'] = int(_MULTI_ASSET_COMPACT.get('restored_count') or 0)
-        status['snapshot_save_ok_failopen'] = _MULTI_ASSET_COMPACT.get('persist_ok')
-        status['snapshot_durable_db_available'] = _MULTI_ASSET_COMPACT.get('durable_db_available')
-        status['snapshot_restore_error'] = _MULTI_ASSET_COMPACT.get('restore_error')
-    with _MULTI_AUTO_LOCK:
-        status['deep_daily_count'] = int(_MULTI_AUTO_DAILY.get('count') or 0)
-        status['daily_context_count'] = int(_MULTI_AUTO_DAILY.get('context_count') or 0)
-        status['daily_context_extra_max'] = _MULTI_DAILY_CONTEXT_EXTRA_MAX
-        status['completed_buckets'] = len(_MULTI_AUTO_DONE)
-        status['retry_buckets'] = len(_MULTI_DEEP_RETRY)
-    status['full_analysis_cache'] = full_count
-    status['compact_analysis_cache'] = compact_count
-    try:
-        from multiasset_system import router_cache_status
-        status['scanner_cache'] = router_cache_status()
-    except Exception:
-        status['scanner_cache'] = {}
-    return status
-
-
-def _multiasset_public_visibility(analyses):
-    """Compact public observability from fresh analyses already available."""
-    rows = []
-    for result in (analyses or {}).values():
-        if isinstance(result, dict):
-            rows.append(_multiasset_public_analysis_candidate(result))
-
-    status_order = {
-        'EXECUTABLE_SIGNAL': 0,
-        'CONFIRMED_PENDING_EXECUTION': 1,
-        'ANALYSIS_ONLY': 2,
-        'NO_TRADE': 3,
-    }
-    rows.sort(
-        key=lambda item: (
-            status_order.get(str(item.get('classification')), 9),
-            -float(item.get('confidence') or 0),
-            str(item.get('symbol') or ''),
-            str(item.get('timeframe') or ''),
-        )
-    )
-
-    confirmed_pending = [
-        dict(item) for item in rows
-        if item.get('classification') == 'CONFIRMED_PENDING_EXECUTION'
-        and item.get('directional')
-    ]
-    directional_hidden = [
-        dict(item) for item in rows
-        if item.get('classification') == 'ANALYSIS_ONLY'
-        and item.get('directional')
-    ]
-    executable_count = sum(1 for item in rows if item.get('classification') == 'EXECUTABLE_SIGNAL')
-    confirmed_pending_count = len(confirmed_pending)
-    analysis_only_count = sum(1 for item in rows if item.get('classification') == 'ANALYSIS_ONLY')
-    no_trade_count = sum(1 for item in rows if item.get('classification') == 'NO_TRADE')
-    unique_symbols = sorted({str(item.get('symbol') or '') for item in rows if item.get('symbol')})
-    tf_coverage = {}
-    for item in rows:
-        tf = str(item.get('timeframe') or '')
-        if tf:
-            tf_coverage[tf] = tf_coverage.get(tf, 0) + 1
-    runtime = _multiasset_runtime_public_status()
-    errors = int(runtime.get('deep_errors') or 0)
-
-    if not rows and errors:
-        public_note = (
-            'No hay análisis completos frescos disponibles y se registraron fallos de ejecución. '
-            'Este estado NO debe interpretarse como NO OPERAR técnico.'
-        )
-    elif not rows:
-        public_note = (
-            'Aún no hay análisis profundos frescos disponibles. El sistema puede estar esperando '
-            'una ventana de cierre; cero señales todavía no prueba ausencia de oportunidad.'
-        )
-    else:
-        public_note = (
-            f'Hay {len(rows)} análisis completos frescos disponibles sobre {len(unique_symbols)} mercados. '
-            f'Señales ejecutables: {executable_count}; confirmadas esperando ejecución: {confirmed_pending_count}; '
-            f'hipótesis no confirmadas: {analysis_only_count}; sin dirección: {no_trade_count}.'
-        )
-
-    summary = {
-        'total_analyzed': len(rows),
-        'executable': executable_count,
-        'active_now': executable_count,
-        'confirmed_pending_execution': confirmed_pending_count,
-        'analysis_only': analysis_only_count,
-        'no_trade': no_trade_count,
-        'errors': errors,
-        'markets_in_universe': 7,
-        'unique_markets_analyzed': len(unique_symbols),
-        'full_analyses_available': len(rows),
-        'directional_non_executable': analysis_only_count + confirmed_pending_count,
-        'without_direction': no_trade_count,
-        'coverage_complete': len(unique_symbols) >= 7,
-        'coverage_by_timeframe': tf_coverage,
-        'public_note': public_note,
-    }
-    return {
-        'candidates': rows,
-        'confirmed_pending_execution': confirmed_pending,
-        'other_directional_signals': directional_hidden,
-        'summary': summary,
-    }
-
-
 def _multiasset_run_analysis(symbol, timeframe, owner='multi-background'):
     engine=_get_multiasset_system()
     if engine is None:
-        _multiasset_status_increment('deep_errors')
-        _multiasset_status_update(
-            last_deep_error_at=datetime.now(timezone.utc).isoformat(),
-            last_deep_error='MultiAssetSystem no disponible',
-        )
         return {'success':False,'error':'MultiAssetSystem no disponible'}
 
     is_ui = str(owner or '').startswith('multi-ui:')
     if is_ui:
+        # QA 12.1: a human opening Multi-Activo has the same priority as Spot
+        # and Futures. No extra worker is created; background simply yields.
         _mark_system_interactive_priority(seconds=120)
 
     acquired=_acquire_heavy_analysis(owner, timeout=6.0 if is_ui else 0.0)
     if not acquired:
-        _multiasset_status_increment('busy_deferrals')
         with _MULTI_ASSET_CACHE['lock']:
             cached=dict((_MULTI_ASSET_CACHE.get('analysis') or {}).get((str(symbol),str(timeframe))) or {})
         if cached:
@@ -34997,272 +33620,71 @@ def _multiasset_run_analysis(symbol, timeframe, owner='multi-background'):
             'busy':True,
             'deferred':True,
             'retry_after_ms':7000,
-            'error':'Motor compartido ocupado; el escáner y el precio siguen disponibles.'
+            'error':'Motor compartido ocupado; el Router y el precio siguen disponibles.'
         }
     try:
-        _multiasset_status_update(
-            last_deep_attempt_at=datetime.now(timezone.utc).isoformat(),
-            last_deep_symbol=str(symbol),
-            last_deep_timeframe=str(timeframe),
-        )
         result=engine.analyze_multiasset_market(symbol,timeframe,closed_candle_only=True)
         if isinstance(result,dict):
             result.setdefault('symbol',symbol); result.setdefault('timeframe',timeframe)
-        if isinstance(result,dict) and result.get('success') is not False:
             _multiasset_cache_result(symbol,timeframe,result)
-            _multiasset_status_increment('deep_successes')
-            _multiasset_status_update(
-                last_deep_success_at=datetime.now(timezone.utc).isoformat(),
-                last_deep_error=None,
-            )
-        else:
-            err = str((result or {}).get('error') or 'análisis profundo sin resultado válido')[:180]
-            _multiasset_status_increment('deep_errors')
-            _multiasset_status_update(
-                last_deep_error_at=datetime.now(timezone.utc).isoformat(),
-                last_deep_error=err,
-            )
-        return result if isinstance(result,dict) else {'success':False,'error':'Resultado Multi-Activo inválido'}
-    except Exception as exc:
-        _multiasset_status_increment('deep_errors')
-        _multiasset_status_update(
-            last_deep_error_at=datetime.now(timezone.utc).isoformat(),
-            last_deep_error=str(exc)[:180],
-        )
-        return {'success':False,'symbol':symbol,'timeframe':timeframe,'error':str(exc)[:180]}
+        return result
     finally:
         _release_heavy_analysis(owner)
 
-
 def _multiasset_compact_telegram(result):
+    # Reutiliza el canal CONFIRMED durable de 10.2: texto + deep-link, sin imagen/PDF.
     return _send_confirmed_signal_telegram('multiasset', result)
 
-
-def _multiasset_close_plan(now):
-    """Pure helper: executable close windows with a short exchange-settle grace."""
-    now = now.astimezone(timezone.utc)
-    settled = bool(now.minute > 0 or now.second >= 45)
-    day = now.strftime('%Y-%m-%d')
-    return {
-        '4h': {
-            'due': bool(settled and now.hour % 4 == 0 and now.minute <= 15),
-            'key': f"4h|{day}|{now.hour:02d}",
-        },
-        '1D': {
-            'due': bool(settled and now.hour == 0 and now.minute <= 20),
-            'key': f"1D|{day}",
-        },
-        '1h': {
-            'due': bool(settled and now.minute <= 10),
-            'key': f"1h|{day}|{now.hour:02d}",
-        },
-    }
-
-
-def _multiasset_mark_close_refresh(key):
-    with _MULTI_AUTO_LOCK:
-        _MULTI_CLOSE_REFRESHED.add(str(key))
-        if len(_MULTI_CLOSE_REFRESHED) > 96:
-            for old in list(_MULTI_CLOSE_REFRESHED)[:32]:
-                _MULTI_CLOSE_REFRESHED.discard(old)
-
-
-def _multiasset_close_refresh_done(key):
-    with _MULTI_AUTO_LOCK:
-        return str(key) in _MULTI_CLOSE_REFRESHED
-
-
-def _multiasset_scan(timeframe, *, force=False, forced_close=False):
-    from multiasset_system import scan_opportunities
-    rows = scan_opportunities(str(timeframe), force=bool(force)) or []
-    _rg_count('multiasset_router_scans')
-    _multiasset_status_update(
-        last_router_scan_at=datetime.now(timezone.utc).isoformat(),
-        last_router_timeframe=str(timeframe),
-        last_router_rows=len(rows),
-    )
-    if forced_close:
-        _multiasset_status_increment('close_forced_scans')
-    return rows
-
-
-def _multiasset_retry_ready(bucket, now_mono):
-    with _MULTI_AUTO_LOCK:
-        row = _MULTI_DEEP_RETRY.get(bucket) or {}
-        return now_mono >= float(row.get('next_retry_at') or 0.0)
-
-
-def _multiasset_record_retry(bucket, error):
-    with _MULTI_AUTO_LOCK:
-        row = dict(_MULTI_DEEP_RETRY.get(bucket) or {})
-        attempts = int(row.get('attempts') or 0) + 1
-        row.update({
-            'attempts': attempts,
-            'next_retry_at': time.monotonic() + min(180, 60 * attempts),
-            'error': str(error or '')[:160],
-        })
-        _MULTI_DEEP_RETRY[bucket] = row
-        if attempts >= 3:
-            # Stop retry storm inside the same candle bucket. Do NOT consume the
-            # daily successful-analysis budget; next candle bucket retries fresh.
-            _MULTI_AUTO_DONE.add(bucket)
-        if len(_MULTI_DEEP_RETRY) > 80:
-            for old in list(_MULTI_DEEP_RETRY)[:30]:
-                _MULTI_DEEP_RETRY.pop(old, None)
-
-
 def _multiasset_background_tick():
-    """Close-aware, bounded Multi-Activo scheduler.
+    """Piggyback barato sobre el loop Futures existente: cero thread extra.
 
-    Trading logic is untouched. This function only guarantees that the shortlist
-    is based on a fresh CLOSED candle at executable windows, retries transient
-    failures, and keeps a compact restart-safe diagnostic cache.
+    Scanner: 7 requests secuenciales cada 15 min, sin DB/IA. Deep analysis sólo
+    para shortlist y sólo en ventana de cierre 4h/1D o Fast Lane 1h de alta calidad.
     """
     try:
         if str(os.getenv('MULTIASSET_ENABLED','1')).lower() in ('0','false','no','off'):
             return
-        from multiasset_system import MULTIASSET_DEEP_LIMIT, MULTIASSET_AUTO_DEEP_DAILY_MAX
-        _multiasset_restore_compact_snapshot_once()
+        from multiasset_system import scan_opportunities, MULTIASSET_DEEP_LIMIT, MULTIASSET_AUTO_DEEP_DAILY_MAX
         now=datetime.now(timezone.utc)
-        now_mono=time.monotonic()
-        _multiasset_status_update(last_tick_at=now.isoformat())
-
         with _MULTI_AUTO_LOCK:
             today=now.strftime('%Y-%m-%d')
             if _MULTI_AUTO_DAILY.get('day') != today:
-                _MULTI_AUTO_DAILY.update({'day':today,'count':0,'context_count':0})
-                _MULTI_AUTO_DONE.clear()
-                _MULTI_DEEP_RETRY.clear()
-
-        plan = _multiasset_close_plan(now)
-
-        # ---------- 4h main lane ----------
-        rows_4h = []
-        force_4h = plan['4h']['due'] and not _multiasset_close_refresh_done(plan['4h']['key'])
-        if force_4h:
-            rows_4h = _multiasset_scan('4h', force=True, forced_close=True)
-            if rows_4h:
-                _multiasset_mark_close_refresh(plan['4h']['key'])
-        else:
-            with _MULTI_ROUTER_STATE_LOCK:
-                cached_rows=list(_MULTI_ROUTER_STATE.get('rows') or [])
-                next_scan=float(_MULTI_ROUTER_STATE.get('next_scan_at') or 0.0)
-            if cached_rows and now_mono < next_scan:
-                rows_4h=cached_rows
-                _rg_count('multiasset_router_reuses')
-            else:
-                rows_4h=_multiasset_scan('4h', force=False)
-
-        if rows_4h:
-            top_score=max([float((row or {}).get('router_score') or 0) for row in rows_4h] or [0.0])
-            # Commit 17 used has_deep, but top-2 are ALWAYS marked deep_candidate;
-            # therefore quiet=30m was unreachable. Activity comes from score.
-            interval=900 if top_score >= 72.0 else 1800
-            with _MULTI_ROUTER_STATE_LOCK:
-                _MULTI_ROUTER_STATE.update({
-                    'rows':list(rows_4h),
-                    'last_scan_at':now_mono,
-                    'next_scan_at':now_mono+interval,
-                    'interval_seconds':interval,
-                })
-
-        candidates_4h=[r for r in rows_4h if r.get('deep_candidate')][:MULTIASSET_DEEP_LIMIT]
-        due=[]
-        if plan['4h']['due']:
-            due.extend((r['symbol'],'4h') for r in candidates_4h)
-
-        # ---------- 1D independent ranking ----------
-        # Pre-17.2 selected the daily lane using the 4h ranking. A daily setup
-        # must be shortlisted with daily closed candles, without changing any
-        # strategy or publication threshold.
-        if plan['1D']['due']:
-            rows_1d=[]
-            key=plan['1D']['key']
-            if not _multiasset_close_refresh_done(key):
-                rows_1d=_multiasset_scan('1D', force=True, forced_close=True)
-                if rows_1d:
-                    _multiasset_mark_close_refresh(key)
-            else:
-                try:
-                    from multiasset_system import scan_opportunities
-                    rows_1d=scan_opportunities('1D', force=False) or []
-                    _rg_count('multiasset_router_reuses')
-                except Exception:
-                    rows_1d=[]
-            candidates_1d=[r for r in rows_1d if r.get('deep_candidate')][:MULTIASSET_DEEP_LIMIT]
-            due.extend((r['symbol'],'1D') for r in candidates_1d)
-
-        # ---------- 1h Fast Lane ----------
-        # Preserve the original high-activity trigger. Only when 4h activity is
-        # exceptional do we spend one 1h seven-symbol scan and choose by 1h data.
-        top_4h=max([float((r or {}).get('router_score') or 0) for r in rows_4h] or [0.0])
-        if plan['1h']['due'] and top_4h >= 82.0:
-            rows_1h=[]
-            key=plan['1h']['key']
-            if not _multiasset_close_refresh_done(key):
-                rows_1h=_multiasset_scan('1h', force=True, forced_close=True)
-                if rows_1h:
-                    _multiasset_mark_close_refresh(key)
-            else:
-                try:
-                    from multiasset_system import scan_opportunities
-                    rows_1h=scan_opportunities('1h', force=False) or []
-                    _rg_count('multiasset_router_reuses')
-                except Exception:
-                    rows_1h=[]
-            candidates_1h=[r for r in rows_1h if r.get('deep_candidate')][:1]
-            due[0:0]=[(r['symbol'],'1h') for r in candidates_1h]
-
-        # Dedupe while preserving priority/order.
-        due=list(dict.fromkeys(due))
-        if not due:
+                _MULTI_AUTO_DAILY.update({'day':today,'count':0})
+            if int(_MULTI_AUTO_DAILY.get('count') or 0) >= MULTIASSET_AUTO_DEEP_DAILY_MAX:
+                return
+        rows=scan_opportunities('4h', force=False)
+        if not rows:
             return
-
+        candidates=[r for r in rows if r.get('deep_candidate')][:MULTIASSET_DEEP_LIMIT]
+        due=[]
+        # 4h is the main executable lane. Daily gives independent swing coverage.
+        if now.hour % 4 == 0 and now.minute <= 15:
+            due.extend((r['symbol'],'4h') for r in candidates)
+        if now.hour == 0 and now.minute <= 20:
+            due.extend((r['symbol'],'1D') for r in candidates)
+        # Dynamic 1h Fast Lane only for exceptionally active top candidate.
+        if now.minute <= 10 and candidates and float(candidates[0].get('router_score') or 0) >= 82:
+            due.insert(0,(candidates[0]['symbol'],'1h'))
         for symbol,tf in due:
-            with _MULTI_AUTO_LOCK:
-                if tf == '1D':
-                    if int(_MULTI_AUTO_DAILY.get('context_count') or 0) >= _MULTI_DAILY_CONTEXT_EXTRA_MAX:
-                        continue
-                elif int(_MULTI_AUTO_DAILY.get('count') or 0) >= MULTIASSET_AUTO_DEEP_DAILY_MAX:
-                    continue
             bucket=f"{symbol}|{tf}|{now.strftime('%Y-%m-%d')}|{now.hour // (1 if tf=='1h' else (4 if tf=='4h' else 24))}"
             with _MULTI_AUTO_LOCK:
                 if bucket in _MULTI_AUTO_DONE:
                     continue
-            if not _multiasset_retry_ready(bucket, now_mono):
-                continue
-
             result=_multiasset_run_analysis(symbol,tf,owner=f'multi-background:{symbol}:{tf}')
             if result.get('busy'):
                 return
-            if not result.get('success', False):
-                _multiasset_record_retry(bucket, result.get('error'))
-                return
-
             with _MULTI_AUTO_LOCK:
                 _MULTI_AUTO_DONE.add(bucket)
-                _MULTI_DEEP_RETRY.pop(bucket, None)
-                if tf == '1D':
-                    _MULTI_AUTO_DAILY['context_count'] = int(_MULTI_AUTO_DAILY.get('context_count') or 0) + 1
-                else:
-                    _MULTI_AUTO_DAILY['count'] = int(_MULTI_AUTO_DAILY.get('count') or 0) + 1
+                _MULTI_AUTO_DAILY['count'] = int(_MULTI_AUTO_DAILY.get('count') or 0) + 1
                 if len(_MULTI_AUTO_DONE)>80:
-                    for old in list(_MULTI_AUTO_DONE)[:30]:
-                        _MULTI_AUTO_DONE.discard(old)
-
+                    for old in list(_MULTI_AUTO_DONE)[:30]: _MULTI_AUTO_DONE.discard(old)
             if _multiasset_is_executable(result):
                 _multiasset_compact_telegram(result)
-
-            # One full analysis per 20s lifecycle loop remains the hard resource
-            # ceiling. The next candidate is handled by the next existing tick.
+            # One deep cell per 20s loop max: protects RAM/CPU and UI priority.
             return
     except Exception as exc:
-        _multiasset_status_increment('deep_errors')
-        _multiasset_status_update(
-            last_deep_error_at=datetime.now(timezone.utc).isoformat(),
-            last_deep_error=f'background:{str(exc)[:160]}',
-        )
         print(f"⚠️ Multi-Activo background tick: {str(exc)[:160]}")
+
 
 def _get_review_trader():
     """Obtiene la instancia de ReviewTrader o None si no está disponible"""
@@ -35291,25 +33713,17 @@ def api_multiasset_opportunities():
         from multiasset_system import scan_opportunities, MULTIASSET_DEEP_LIMIT
         tf=str(request.args.get('timeframe') or '4h')
         rows=scan_opportunities(tf, force=False)
-        analyses=_multiasset_combined_analyses(fresh_only=True)
+        with _MULTI_ASSET_CACHE['lock']:
+            analyses=dict(_MULTI_ASSET_CACHE['analysis'])
         signals=[]
-        for result in analyses.values():
-            if isinstance(result,dict) and _multiasset_signal_is_vigent(result):
+        for (symbol,timeframe),result in analyses.items():
+            if isinstance(result,dict) and _multiasset_is_executable(result):
                 signals.append(_multiasset_signal_row(result,'ACTIVE_CONFIRMED'))
-        visibility = _multiasset_public_visibility(analyses)
         return jsonify({
             'success':True,'total':len(signals),'signals':signals,
             'count':len(signals),'opportunities':signals,'processing_selected':False,
             'router':rows,'shortlist':[r for r in rows if r.get('deep_candidate')][:MULTIASSET_DEEP_LIMIT],
-            'analysis_summary':visibility['summary'],
-            'analysis_candidates':visibility['candidates'],
-            'confirmed_pending_execution':visibility['confirmed_pending_execution'],
-            'other_directional_signals':visibility['other_directional_signals'],
-            'runtime_status':_multiasset_runtime_public_status(),
-            'resource_policy':{
-                'scanner_db_writes':0,'scanner_ai_calls':0,'deep_limit':MULTIASSET_DEEP_LIMIT,
-                'full_analysis_per_lifecycle_tick':1,'compact_snapshot_only':True
-            },
+            'resource_policy':{'scanner_db_writes':0,'scanner_ai_calls':0,'deep_limit':MULTIASSET_DEEP_LIMIT},
             'timestamp':datetime.now(bolivia_tz).isoformat(),
         })
     except Exception as exc:
@@ -35334,80 +33748,23 @@ def api_multiasset_analyze():
 def api_multiasset_signals_previous():
     try:
         min_conf=float(request.args.get('min_confidence',55) or 55)
-        analyses=_multiasset_combined_analyses(fresh_only=True)
+        with _MULTI_ASSET_CACHE['lock']:
+            analyses=dict(_MULTI_ASSET_CACHE['analysis'])
         signals=[]
         for result in analyses.values():
-            if not isinstance(result,dict) or not _multiasset_signal_is_vigent(result):
-                continue
+            if not isinstance(result,dict) or not _multiasset_is_executable(result): continue
             row=_multiasset_signal_row(result,'PREVIOUS_CONFIRMED')
-            if row['confidence']>=min_conf:
-                signals.append(row)
+            if row['confidence']>=min_conf: signals.append(row)
         signals.sort(key=lambda x:-x['confidence'])
-        visibility = _multiasset_public_visibility(analyses)
-        runtime = _multiasset_runtime_public_status()
-        return jsonify({
-            'success':True,'warming_up':False,'running':False,'cache_ready':bool(analyses),
-            'total':len(signals),'active_count':len(signals),'signals':signals,
-            'confirmed_pending_execution':visibility['confirmed_pending_execution'],
-            'other_directional_signals':visibility['other_directional_signals'],
-            'analysis_candidates':visibility['candidates'],
-            'analysis_summary':visibility['summary'],
-            'message':visibility['summary']['public_note'],
-            'runtime_status':runtime,
-            'progress':{'total':7,'completed':visibility['summary']['unique_markets_analyzed'],'errors':runtime.get('deep_errors',0)},
-            'timestamp':datetime.now(bolivia_tz).isoformat()
-        })
+        return jsonify({'success':True,'warming_up':False,'running':False,'cache_ready':bool(analyses),'total':len(signals),'active_count':len(signals),'signals':signals,'other_directional_signals':[],'analysis_candidates':[],'progress':{'total':7,'completed':len(analyses),'errors':0},'timestamp':datetime.now(bolivia_tz).isoformat()})
     except Exception as exc:
         return jsonify({'success':False,'error':str(exc)[:180]}),500
 
 @app.route('/api/multiasset/signals/active', methods=['GET'])
 def api_multiasset_signals_active():
-    # Commit 17.2: read-only combined cache. Restored compact results survive a
-    # restart, but only technically vigent EXECUTABLE_SIGNAL rows count active.
-    try:
-        analyses=_multiasset_combined_analyses(fresh_only=True)
-        signals=[]
-        for result in analyses.values():
-            if isinstance(result,dict) and _multiasset_signal_is_vigent(result):
-                signals.append(_multiasset_signal_row(result,'ACTIVE_CONFIRMED'))
-        signals.sort(key=lambda x:-float(x.get('confidence') or 0))
-        visibility = _multiasset_public_visibility(analyses)
-        runtime = _multiasset_runtime_public_status()
-        return jsonify({
-            'success':True,'warming_up':False,'running':False,
-            'cache_ready':bool(analyses),'total':len(signals),'signals':signals,
-            'confirmed_pending_execution':visibility['confirmed_pending_execution'],
-            'other_directional_signals':visibility['other_directional_signals'],
-            'vigent_other_directional_signals':[],
-            'analysis_candidates':visibility['candidates'],
-            'analysis_summary':visibility['summary'],
-            'message':visibility['summary']['public_note'],
-            'runtime_status':runtime,
-            'progress':{'total':7,'completed':visibility['summary']['unique_markets_analyzed'],'errors':runtime.get('deep_errors',0)},
-            'timestamp':datetime.now(bolivia_tz).isoformat()
-        })
-    except Exception as exc:
-        return jsonify({'success':False,'error':str(exc)[:180]}),500
-
-
-@app.route('/api/multiasset/runtime-status', methods=['GET'])
-def api_multiasset_runtime_status():
-    """Diagnóstico cache-only. No exchange, no IA y no análisis profundo."""
-    try:
-        user=_authenticated_user()
-        if not user:
-            return jsonify({'success':False,'error':'Debes iniciar sesión.'}),401
-        analyses=_multiasset_combined_analyses(fresh_only=True)
-        visibility=_multiasset_public_visibility(analyses)
-        return jsonify({
-            'success':True,
-            'user':user,
-            'runtime':_multiasset_runtime_public_status(),
-            'analysis_summary':visibility['summary'],
-            'timestamp':datetime.now(bolivia_tz).isoformat(),
-        })
-    except Exception as exc:
-        return jsonify({'success':False,'error':str(exc)[:180]}),500
+    # Commit 12 V1 does not duplicate a second lifecycle store. Fresh executable
+    # analyses are exposed in /previous; saved/entered positions live in Guardian.
+    return jsonify({'success':True,'warming_up':False,'running':False,'cache_ready':True,'total':0,'signals':[],'other_directional_signals':[],'vigent_other_directional_signals':[],'analysis_candidates':[],'progress':{'total':7,'completed':0,'errors':0},'timestamp':datetime.now(bolivia_tz).isoformat()})
 
 @app.route('/api/multiasset/correlation', methods=['GET'])
 def api_multiasset_correlation():
@@ -35463,23 +33820,14 @@ def api_multiasset_position_guardian():
         if not signals:
             return jsonify({'success':True,'user':user,'positions':[],'count':0})
         engine=_get_multiasset_system(); positions=[]
+        try:
+            from macro_context import get_macro_context_snapshot
+            macro=get_macro_context_snapshot(fetch_if_stale=False) or {}
+        except Exception: macro={}
         for sig in signals:
             symbol=str(sig.get('symbol') or ''); tf=str(sig.get('timeframe') or '')
             snapshot=_guardian_prepare_futures_market_data(engine,symbol,tf) if engine else None
             if not snapshot: continue
-            # Commit 17.4 FINAL R3 — Guardian receives the same class-specific
-            # macro/session context used by Multi-Asset entry reasoning.  The
-            # helper is cache-only (fetch_if_stale=False), so no extra network
-            # call is introduced.
-            try:
-                from multiasset_system import MULTIASSET_SYMBOLS as _MA_META, _macro_context_for_asset as _ma_macro
-                macro=_ma_macro((_MA_META.get(symbol) or {})) or {}
-            except Exception:
-                try:
-                    from macro_context import get_macro_context_snapshot
-                    macro=get_macro_context_snapshot(fetch_if_stale=False) or {}
-                except Exception:
-                    macro={}
             if sig.get('status')=='entry_touched':
                 advice=portfolio_guardian.evaluate_futures_position(signal=sig,current_price=snapshot['current_price'],candles=snapshot['candles'],macro_context=macro)
             else:
@@ -36874,9 +35222,6 @@ def _futures_snapshot_ttl_seconds(serial_data):
 def _load_futures_cache_from_disk():
     """Compat name: restore Futures snapshot from Supabase, never /tmp."""
     global _futures_analysis_cache
-    global _FUTURES_LAST_SNAPSHOT_HASH
-    global _FUTURES_LAST_SNAPSHOT_SAVE_AT
-    global _FUTURES_SNAPSHOT_MERGE_PENDING
     print('📂 [FUT] Buscando snapshot persistido en Supabase...')
     try:
         from runtime_persistence import load_runtime_snapshot
@@ -36908,12 +35253,6 @@ def _load_futures_cache_from_disk():
         with _futures_analysis_cache['lock']:
             _futures_analysis_cache['data'] = data
             _futures_analysis_cache['ts'] = ts
-        try:
-            _FUTURES_LAST_SNAPSHOT_HASH = _futures_snapshot_fingerprint(payload.get('data') or {})
-            _FUTURES_LAST_SNAPSHOT_SAVE_AT = time.monotonic()
-            _FUTURES_SNAPSHOT_MERGE_PENDING = False
-        except Exception:
-            pass
         print(
             f"✅ [FUT] Snapshot Supabase aplicado: "
             f"{len(data.get('analysis') or {})} pares ({int(age)}s)"
@@ -36950,75 +35289,26 @@ def _trigger_futures_fast_restore():
     return True
 
 
-_FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS = max(900, int(os.environ.get(
-    'FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS', '900'
-) or 900))
-_FUTURES_SNAPSHOT_CHECKPOINT_SECONDS = max(
-    _FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS,
-    int(os.environ.get('FUTURES_SNAPSHOT_CHECKPOINT_SECONDS', '900') or 900),
-)
+_FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS = max(30, int(os.environ.get(
+    'FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS', '120'
+) or 120))
 _FUTURES_LAST_SNAPSHOT_SAVE_AT = 0.0
-_FUTURES_LAST_SNAPSHOT_HASH = None
-_FUTURES_SNAPSHOT_MERGE_PENDING = True
 _FUTURES_SNAPSHOT_SAVE_LOCK = threading.Lock()
 
 
-def _futures_snapshot_fingerprint(serial_data):
-    """Hash sólo del estado durable; excluye telemetría que cambia cada tick."""
-    volatile_keys = {
-        'current_price', 'live_price', 'last_shadow_live_at',
-        'shadow_mfe_r', 'shadow_mae_r', 'timestamp', 'updated_at',
-        'cache_age', 'tiempo_restante', 'time_remaining',
-    }
-
-    def clean(value):
-        if isinstance(value, dict):
-            return {
-                str(k): clean(v)
-                for k, v in value.items()
-                if str(k) not in volatile_keys
-            }
-        if isinstance(value, (list, tuple)):
-            return [clean(v) for v in value]
-        if isinstance(value, (str, int, float, bool)) or value is None:
-            return value
-        return str(value)
-
-    try:
-        raw = json.dumps(
-            clean(serial_data or {}),
-            sort_keys=True,
-            separators=(',', ':'),
-            ensure_ascii=True,
-        ).encode('utf-8')
-        return hashlib.sha256(raw).hexdigest()
-    except Exception:
-        return None
-
-
-def _save_futures_cache_to_disk(force=False, reason='periodic'):
-    """Persist Futures only on meaningful change + 15 min safety checkpoint.
-
-    RAM remains real-time. Supabase is durable recovery storage, not a mirror of
-    every market tick. Lifecycle transitions may force a save; volatile prices,
-    MFE/MAE and timestamps do not by themselves trigger a write.
-    """
+def _save_futures_cache_to_disk(force=False):
+    """Persist compact Futures state without destructive cold-start overwrite."""
     global _FUTURES_LAST_SNAPSHOT_SAVE_AT
-    global _FUTURES_LAST_SNAPSHOT_HASH
-    global _FUTURES_SNAPSHOT_MERGE_PENDING
-
     try:
         now_mono = time.monotonic()
-        with _FUTURES_SNAPSHOT_SAVE_LOCK:
-            since_last = (
-                now_mono - _FUTURES_LAST_SNAPSHOT_SAVE_AT
-                if _FUTURES_LAST_SNAPSHOT_SAVE_AT > 0
-                else 999999.0
-            )
-            if not force and since_last < _FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS:
-                _rg_count('futures_snapshot_skips')
-                return True
-
+        if not force:
+            with _FUTURES_SNAPSHOT_SAVE_LOCK:
+                if (
+                    _FUTURES_LAST_SNAPSHOT_SAVE_AT > 0
+                    and now_mono - _FUTURES_LAST_SNAPSHOT_SAVE_AT
+                    < _FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS
+                ):
+                    return True
         from runtime_persistence import load_runtime_snapshot, save_runtime_snapshot
         cache = _futures_analysis_cache
         if not cache.get('data'):
@@ -37027,54 +35317,35 @@ def _save_futures_cache_to_disk(force=False, reason='periodic'):
         if not serial_data:
             return False
 
-        # Una única fusión defensiva por proceso protege el arranque parcial sin
-        # convertir cada checkpoint en READ + WRITE contra Supabase.
-        if _FUTURES_SNAPSHOT_MERGE_PENDING:
-            try:
-                stored = load_runtime_snapshot(
-                    'futures', 'analysis_cache', allow_expired=False
-                )
-                old_payload = (stored or {}).get('payload') or {}
-                if int(old_payload.get('schema_version', 0) or 0) == _FUTURES_CACHE_SCHEMA_VERSION:
-                    old_serial = old_payload.get('data') or {}
-                    old_analysis = dict(old_serial.get('analysis_serial') or {})
-                    new_analysis = dict(serial_data.get('analysis_serial') or {})
-                    if len(old_analysis) > len(new_analysis):
-                        merged_analysis = dict(old_analysis)
-                        merged_analysis.update(new_analysis)
-                        old_lifecycle = dict(old_serial.get('lifecycle') or {})
-                        new_lifecycle = dict(serial_data.get('lifecycle') or {})
-                        merged_lifecycle = dict(old_lifecycle)
-                        merged_lifecycle.update(new_lifecycle)
-                        serial_data['analysis_serial'] = merged_analysis
-                        serial_data['lifecycle'] = merged_lifecycle
-                        print(
-                            '🛡️ [FUT] Snapshot parcial fusionado una vez '
-                            f'({len(new_analysis)}→{len(merged_analysis)} análisis)',
-                            flush=True,
-                        )
-            except Exception as merge_error:
-                print(f'⚠️ [FUT] merge inicial omitido: {merge_error}', flush=True)
-            finally:
-                _FUTURES_SNAPSHOT_MERGE_PENDING = False
-
-        fingerprint = _futures_snapshot_fingerprint(serial_data)
-        with _FUTURES_SNAPSHOT_SAVE_LOCK:
-            since_last = (
-                now_mono - _FUTURES_LAST_SNAPSHOT_SAVE_AT
-                if _FUTURES_LAST_SNAPSHOT_SAVE_AT > 0
-                else 999999.0
+        # RC9.7.11: an incremental request can finish before the deferred boot
+        # restore. If the previous-process snapshot has broader coverage, merge
+        # it instead of replacing it with one combo. Current keys always win,
+        # so a newly analysed combo is never rolled back.
+        try:
+            stored = load_runtime_snapshot(
+                'futures', 'analysis_cache', allow_expired=False
             )
-            same_state = bool(
-                fingerprint
-                and _FUTURES_LAST_SNAPSHOT_HASH
-                and fingerprint == _FUTURES_LAST_SNAPSHOT_HASH
-            )
-            # Hash dedup elimina escrituras repetidas. Cada 15 min se permite un
-            # checkpoint de recuperación aunque sólo haya cambiado telemetría.
-            if same_state and since_last < _FUTURES_SNAPSHOT_CHECKPOINT_SECONDS:
-                _rg_count('futures_snapshot_skips')
-                return True
+            old_payload = (stored or {}).get('payload') or {}
+            if int(old_payload.get('schema_version', 0) or 0) == _FUTURES_CACHE_SCHEMA_VERSION:
+                old_serial = old_payload.get('data') or {}
+                old_analysis = dict(old_serial.get('analysis_serial') or {})
+                new_analysis = dict(serial_data.get('analysis_serial') or {})
+                if len(old_analysis) > len(new_analysis):
+                    merged_analysis = dict(old_analysis)
+                    merged_analysis.update(new_analysis)
+                    old_lifecycle = dict(old_serial.get('lifecycle') or {})
+                    new_lifecycle = dict(serial_data.get('lifecycle') or {})
+                    merged_lifecycle = dict(old_lifecycle)
+                    merged_lifecycle.update(new_lifecycle)
+                    serial_data['analysis_serial'] = merged_analysis
+                    serial_data['lifecycle'] = merged_lifecycle
+                    print(
+                        '🛡️ [FUT] Snapshot parcial fusionado con estado persistido '
+                        f'({len(new_analysis)}→{len(merged_analysis)} análisis)',
+                        flush=True,
+                    )
+        except Exception as merge_error:
+            print(f'⚠️ [FUT] merge pre-save omitido: {merge_error}', flush=True)
 
         payload = {
             'schema_version': _FUTURES_CACHE_SCHEMA_VERSION,
@@ -37088,12 +35359,9 @@ def _save_futures_cache_to_disk(force=False, reason='periodic'):
         if ok:
             with _FUTURES_SNAPSHOT_SAVE_LOCK:
                 _FUTURES_LAST_SNAPSHOT_SAVE_AT = now_mono
-                if fingerprint:
-                    _FUTURES_LAST_SNAPSHOT_HASH = fingerprint
-            _rg_count('futures_snapshot_writes')
             print(
                 f"💾 [FUT] Snapshot Supabase guardado "
-                f"({len(serial_data.get('analysis_serial', {}))} pares · {reason})"
+                f"({len(serial_data.get('analysis_serial', {}))} pares)"
             )
         return ok
     except Exception as e:
@@ -39676,40 +37944,18 @@ def _classify_futures_analysis_result(
 
     classification = 'EXECUTABLE_SIGNAL'
     reason = 'Cumple los filtros actuales de publicación.'
-    signal_confirmed = bool(
-        result.get('signal_confirmed')
-        or levels.get('signal_confirmed')
-        or (directional and engine_status in {
-            'EXECUTABLE_SIGNAL', 'CONFIRMED_PENDING_EXECUTION',
-            'EDGE_BLOCKED', 'AI_BLOCKED'
-        })
-    )
 
     if not directional:
         classification = 'NO_TRADE'
         reason = _futures_reason_text(
             decision.get('reason') or decision.get('razones'),
-            'No existe una tesis LONG/SHORT confirmada.'
+            'El comité no alcanzó consenso suficiente para LONG o SHORT.'
         )
-    elif signal_confirmed and entry > 0 and stop_loss > 0 and take_profit > 0 and (
-        (action == 'LONG' and stop_loss < entry < take_profit)
-        or (action == 'SHORT' and take_profit < entry < stop_loss)
-    ):
-        # R4 migration: old cached CONFIRMED_PENDING_EXECUTION rows that already
-        # contain coherent levels are immediately treated as normal signals.
-        classification = 'EXECUTABLE_SIGNAL'
-        reason = 'Señal confirmada con Entry, Stop Loss y Take Profit técnicamente definidos.'
-    elif signal_confirmed and (entry <= 0 or stop_loss <= 0 or take_profit <= 0):
-        classification = 'ANALYSIS_ERROR'
-        reason = (
-            'Registro legacy con geometría incompleta. No se considera señal confirmada operable; '
-            'el siguiente análisis debe reconstruir Entry/SL/TP.'
-        )
-    elif engine_status == 'CONFIRMED_PENDING_EXECUTION' or (signal_confirmed and engine_status != 'EXECUTABLE_SIGNAL'):
-        classification = 'CONFIRMED_PENDING_EXECUTION'
+    elif engine_status != 'EXECUTABLE_SIGNAL':
+        classification = 'ANALYSIS_ONLY'
         reason = _futures_reason_text(
-            levels.get('execution_pending_reason') or rejection_reason,
-            'Registro legacy pendiente; será recalculado con geometría obligatoria 17.4.1.'
+            rejection_reason,
+            'Existe dirección, pero el motor la marcó como no ejecutable.'
         )
     elif confidence < float(min_confidence or 0):
         classification = 'ANALYSIS_ONLY'
@@ -39718,12 +37964,8 @@ def _classify_futures_analysis_result(
             f'{float(min_confidence):.1f}%.'
         )
     elif entry <= 0 or stop_loss <= 0 or take_profit <= 0:
-        classification = 'CONFIRMED_PENDING_EXECUTION' if signal_confirmed else 'ANALYSIS_ONLY'
-        reason = (
-            'Señal direccional confirmada; Entry/SL/TP todavía no están completos.'
-            if signal_confirmed
-            else 'Entry, Stop Loss o Take Profit no son válidos.'
-        )
+        classification = 'ANALYSIS_ONLY'
+        reason = 'Entry, Stop Loss o Take Profit no son válidos.'
     else:
         try:
             _configured_futures_module()
@@ -39776,17 +38018,9 @@ def _classify_futures_analysis_result(
                 'Cumple los filtros de publicación, pero no existe un registro '
                 'activo de seguimiento.'
             )
-    elif classification == 'CONFIRMED_PENDING_EXECUTION':
-        status_label = 'SEÑAL CONFIRMADA · ESPERANDO EJECUCIÓN'
-        active_reason = (
-            'Registro legacy sin geometría completa; R4 lo recalculará antes de publicarlo como señal.'
-        )
-    elif classification == 'ANALYSIS_ERROR':
-        status_label = 'REGISTRO LEGACY · REQUIERE RECÁLCULO'
-        active_reason = 'La geometría del registro no es válida y no se considera una señal operable.'
     elif classification == 'ANALYSIS_ONLY':
-        status_label = 'ANÁLISIS DIRECCIONAL · NO CONFIRMADO PARA EJECUCIÓN'
-        active_reason = 'Permanece como análisis, no como señal confirmada.'
+        status_label = 'ANÁLISIS DIRECCIONAL · NO EJECUTABLE'
+        active_reason = 'No se publica como señal activa.'
     elif classification == 'NO_TRADE':
         status_label = 'NO OPERAR'
         active_reason = 'No existe una operación direccional que seguir.'
@@ -39805,13 +38039,6 @@ def _classify_futures_analysis_result(
         'action': action,
         'confidence': round(confidence, 2),
         'directional': directional,
-        'signal_confirmed': signal_confirmed,
-        'execution_ready': classification == 'EXECUTABLE_SIGNAL',
-        'execution_status': (
-            'READY' if classification == 'EXECUTABLE_SIGNAL'
-            else 'PENDING_EXECUTION' if classification == 'CONFIRMED_PENDING_EXECUTION'
-            else 'NOT_READY'
-        ),
         'is_executable': classification == 'EXECUTABLE_SIGNAL',
         'manual_save_allowed':
             bool(
@@ -39941,10 +38168,9 @@ def _build_futures_analysis_visibility(cache, min_confidence):
 
     status_order = {
         'EXECUTABLE_SIGNAL': 0,
-        'CONFIRMED_PENDING_EXECUTION': 1,
-        'ANALYSIS_ONLY': 2,
-        'NO_TRADE': 3,
-        'ANALYSIS_ERROR': 4,
+        'ANALYSIS_ONLY': 1,
+        'NO_TRADE': 2,
+        'ANALYSIS_ERROR': 3,
     }
     candidates.sort(
         key=lambda item: (
@@ -39964,10 +38190,6 @@ def _build_futures_analysis_visibility(cache, min_confidence):
         'active_now': sum(
             1 for item in candidates
             if item.get('is_active')
-        ),
-        'confirmed_pending_execution': sum(
-            1 for item in candidates
-            if item['classification'] == 'CONFIRMED_PENDING_EXECUTION'
         ),
         'analysis_only': sum(
             1 for item in candidates
@@ -39990,25 +38212,6 @@ def _build_futures_analysis_visibility(cache, min_confidence):
         'summary': summary,
         'candidates': candidates,
     }
-
-
-def _futures_confirmed_pending_execution_candidates(visibility):
-    """Confirmed direction, execution not ready yet. No manual override implied."""
-    rows = []
-    for raw in (visibility or {}).get('candidates') or []:
-        if not isinstance(raw, dict):
-            continue
-        if str(raw.get('classification') or '').upper() != 'CONFIRMED_PENDING_EXECUTION':
-            continue
-        action = str(raw.get('action') or '').upper()
-        if action not in ('LONG', 'SHORT'):
-            continue
-        item = dict(raw)
-        item['source_context'] = 'CONFIRMED_PENDING_EXECUTION'
-        item['manual_save_allowed'] = False
-        rows.append(item)
-    rows.sort(key=lambda item: (-float(item.get('confidence') or 0), str(item.get('symbol') or ''), str(item.get('timeframe') or '')))
-    return rows
 
 
 def _futures_directional_hidden_candidates(
@@ -40459,8 +38662,6 @@ def api_futures_signals_active():
                 visibility['summary'],
             'analysis_candidates':
                 visibility['candidates'],
-            'confirmed_pending_execution':
-                _futures_confirmed_pending_execution_candidates(visibility),
             # Hipótesis MEDIUM/HIGH del análisis ACTUAL: sólo navegación
             # y diagnóstico; no guardables hasta que exista cierre confirmado.
             'other_directional_signals':
@@ -40931,8 +39132,6 @@ def api_futures_signals_previous():
                 visibility['summary'],
             'analysis_candidates':
                 visibility['candidates'],
-            'confirmed_pending_execution':
-                _futures_confirmed_pending_execution_candidates(visibility),
             'other_directional_signals':
                 _futures_directional_hidden_candidates(
                     visibility,
@@ -41493,7 +39692,9 @@ def api_review_run_now():
     """
     try:
         # Autenticación
-        if not _valid_machine_auth():
+        auth_key = request.headers.get('X-Auth-Key')
+        expected_key = os.environ.get('SCHEDULED_AUTH_KEY', 'crypto_trader_analyst_2025')
+        if auth_key != expected_key:
             return jsonify({'success': False, 'error': 'No autorizado'}), 401
         
         review = _get_review_trader()
@@ -41573,7 +39774,9 @@ def api_fix_confidence_overflow():
     Protegida con X-Auth-Key. Idempotente.
     """
     try:
-        if not _valid_machine_auth():
+        auth_key = request.headers.get('X-Auth-Key', '')
+        expected = os.environ.get('SCHEDULED_AUTH_KEY', 'crypto_trader_analyst_2025')
+        if auth_key != expected:
             return jsonify({'success': False, 'error': 'Unauthorized'}), 401
         
         from review_trader import review_trader
@@ -41628,7 +39831,9 @@ def api_admin_dedup_signals():
     Devuelve: cuántos grupos había, cuántos duplicados se borraron.
     """
     try:
-        if not _valid_machine_auth():
+        auth_key = request.headers.get('X-Auth-Key', '')
+        expected = os.environ.get('SCHEDULED_AUTH_KEY', 'crypto_trader_analyst_2025')
+        if auth_key != expected:
             return jsonify({'success': False, 'error': 'Unauthorized'}), 401
         
         from review_trader import review_trader
@@ -43335,13 +41540,47 @@ _SPOT_LEVEL1_CACHE_TTL_SECONDS = 20
 
 
 def _spot_live_market_price(symbol):
-    """Precio Spot ligero compartido por frontend y monitor de Entry."""
+    """Precio Spot ligero para detectar Entry sin recalcular indicadores.
+
+    Usa KuCoin level1; no carga OHLCV ni ejecuta traders. Si falla, el monitor
+    puede conservar el precio cacheado de la señal y reintentar en el próximo
+    ciclo.
+    """
+    normalized = str(symbol or '').replace('/', '-')
+    now_mono = time.monotonic()
+    with _SPOT_LEVEL1_CACHE_LOCK:
+        cached = _SPOT_LEVEL1_CACHE.get(normalized) or {}
+        if cached and (now_mono - float(cached.get('ts') or 0.0)) < _SPOT_LEVEL1_CACHE_TTL_SECONDS:
+            try:
+                price = float(cached.get('price') or 0)
+                if price > 0:
+                    return price
+            except Exception:
+                pass
     try:
-        return _market_price_hub_get(
-            'spot',
-            str(symbol or '').replace('/', '-'),
-            max_age_seconds=20,
+        response = requests.get(
+            'https://api.kucoin.com/api/v1/market/orderbook/level1',
+            params={'symbol': normalized},
+            timeout=4,
         )
+        response.raise_for_status()
+        payload = response.json() or {}
+        if str(payload.get('code')) != '200000':
+            return None
+        data = payload.get('data') or {}
+        price = float(data.get('price') or 0)
+        if price > 0:
+            with _SPOT_LEVEL1_CACHE_LOCK:
+                _SPOT_LEVEL1_CACHE[normalized] = {'price': price, 'ts': now_mono}
+                if len(_SPOT_LEVEL1_CACHE) > 12:
+                    oldest = sorted(
+                        _SPOT_LEVEL1_CACHE.items(),
+                        key=lambda item: float((item[1] or {}).get('ts') or 0.0),
+                    )
+                    for old_key, _ in oldest[:-8]:
+                        _SPOT_LEVEL1_CACHE.pop(old_key, None)
+            return price
+        return None
     except Exception as exc:
         print(f"⚠️ monitor_entries: precio Spot {symbol}: {str(exc)[:120]}")
         return None
@@ -47454,7 +45693,8 @@ def _build_ai_manual_comparison(target):
         cache=(_get_or_refresh_futures_analysis(force_wait=False) or {})
         analysis_map=cache.get('analysis',{}) or {}
     else:
-        analysis_map=_multiasset_combined_analyses(fresh_only=True)
+        with _MULTI_ASSET_CACHE['lock']:
+            analysis_map=dict(_MULTI_ASSET_CACHE.get('analysis') or {})
 
     rows_by_symbol={symbol:[] for symbol in requested_symbols[:7]}
     for key,result in analysis_map.items():
@@ -47556,7 +45796,8 @@ def _ai_cross_market_cached_snapshot():
     # Multi-Asset: use only the bounded analysis cache built by user/router work.
     multi_rows=[]
     try:
-        analyses=_multiasset_combined_analyses(fresh_only=True)
+        with _MULTI_ASSET_CACHE['lock']:
+            analyses=dict(_MULTI_ASSET_CACHE.get('analysis') or {})
         for key,result in analyses.items():
             if not isinstance(result,dict):
                 continue
@@ -47880,7 +46121,8 @@ def _build_ai_advisor_context(
         except Exception:
             context['personal_risk_profile'] = {}
 
-        analysis_map = _multiasset_combined_analyses(fresh_only=True)
+        with _MULTI_ASSET_CACHE['lock']:
+            analysis_map = dict(_MULTI_ASSET_CACHE.get('analysis') or {})
 
         for key, result in analysis_map.items():
             if not isinstance(result, dict):
@@ -51144,57 +49386,26 @@ def _build_futures_standard_message(user, symbol, timeframe, result, lifecycle_r
     ]
     return '\n'.join(lines)
 
-def _futures_live_mark_price(symbol, max_age_seconds=20):
-    """Shared mark-price cache used by Futures UI/lifecycle monitors."""
+def _futures_live_mark_price(symbol):
+    """One lightweight public request; never allocates an OHLCV DataFrame."""
     try:
-        return _market_price_hub_get(
-            'futures',
-            symbol,
-            max_age_seconds=max_age_seconds,
-        )
+        fs = _configured_futures_module()
+        contract = str((getattr(fs, 'FUTURES_CONTRACT_SYMBOLS', {}) or {}).get(symbol) or '')
+        if not contract:
+            return None
+        session = fs._get_futures_http_session()
+        url = fs.KUCOIN_FUTURES_MARK_PRICE_URL.format(symbol=contract)
+        response = session.get(url, timeout=4)
+        response.raise_for_status()
+        payload = response.json() or {}
+        if str(payload.get('code')) != '200000':
+            return None
+        data = payload.get('data') or {}
+        price = float(data.get('value') or 0)
+        return price if price > 0 else None
     except Exception as exc:
         print(f'⚠️ [9.6 ENTRY ZONE] mark price {symbol}: {str(exc)[:120]}')
         return None
-
-
-def _futures_shadow_poll_ttl(rows):
-    """Adaptive network TTL without changing the 20 s lifecycle evaluation.
-
-    The loop still evaluates state every 20 s. Only the external quote refresh
-    slows down when every tracked level is far away; near Entry/SL/TP it returns
-    to the original 20 s cadence.
-    """
-    ttl = 90.0
-    for row in rows or []:
-        try:
-            (_symbol, _tf, record, _result, _profile,
-             entry, sl, tp, action, status, _validity) = row
-            last = float(
-                record.get('current_price')
-                or record.get('entry_touched_price')
-                or 0
-            )
-            if last <= 0:
-                ttl = min(ttl, 20.0)
-                continue
-            if status == 'entry_touched':
-                risk = abs(float(entry) - float(sl)) or max(abs(float(entry)) * 0.005, 1e-9)
-                distance_r = min(
-                    abs(last - float(sl)) / risk,
-                    abs(last - float(tp)) / risk,
-                )
-                ttl = min(ttl, 20.0 if distance_r <= 0.40 else 35.0)
-            else:
-                distance_pct = abs(last - float(entry)) / max(abs(float(entry)), 1e-9) * 100.0
-                if distance_pct <= 0.60:
-                    ttl = min(ttl, 20.0)
-                elif distance_pct <= 1.50:
-                    ttl = min(ttl, 45.0)
-                else:
-                    ttl = min(ttl, 90.0)
-        except Exception:
-            ttl = min(ttl, 20.0)
-    return max(20.0, min(90.0, ttl))
 
 
 def _futures_official_entry_event_key(user, record):
@@ -51310,24 +49521,17 @@ def futures_standard_alert_loop():
                 ))
 
             if not candidates:
-                # Sin señales Futures en seguimiento no hay razón para consultar
-                # mark-price cada 20 s. Multi-Activo ya fue evaluado arriba.
-                time.sleep(60)
+                time.sleep(20)
                 continue
 
-            # RC9.7.14 + Commit 17: el lifecycle se evalúa cada 20 s, pero el
-            # quote externo se comparte y adapta según proximidad a Entry/SL/TP.
-            rows_by_symbol = {}
-            for row in candidates:
-                rows_by_symbol.setdefault(row[0], []).append(row)
+            # RC9.7.14: mark-price shadow monitor for ALL Confirmed/Vigent
+            # official signals, even if nobody saved/entered them. This is
+            # deliberately lightweight: no OHLCV, indicators, AI or DB writes.
+            live_symbols = sorted({row[0] for row in candidates})
             live_by_symbol = {
-                symbol: _futures_live_mark_price(
-                    symbol,
-                    max_age_seconds=_futures_shadow_poll_ttl(rows),
-                )
-                for symbol, rows in rows_by_symbol.items()
+                symbol: _futures_live_mark_price(symbol)
+                for symbol in live_symbols
             }
-            meaningful_lifecycle_change = False
 
             for (
                 symbol, timeframe, record, result, profile,
@@ -51384,9 +49588,6 @@ def futures_standard_alert_loop():
                     if shadow_status == 'entry_touched' and validity.get('expired'):
                         shadow_status = 'expired'
                         record['close_reason'] = 'expired_after_entry_unsaved'
-
-                if shadow_status != status:
-                    meaningful_lifecycle_change = True
 
                 record['current_price'] = float(current)
                 record['last_shadow_live_at'] = now_iso
@@ -51466,14 +49667,6 @@ def futures_standard_alert_loop():
                             f'{user} · {symbol} {timeframe} {action} @ {current:.8g} '
                             f'[{status}]'
                         )
-
-            # Persistir inmediatamente sólo transiciones operativas relevantes.
-            # Current price/MFE/MAE por sí solos siguen en RAM y no generan I/O.
-            if meaningful_lifecycle_change:
-                _save_futures_cache_to_disk(
-                    force=True,
-                    reason='lifecycle-transition',
-                )
         except Exception as exc:
             print(f'❌ futures_standard_alert_loop: {exc}')
         time.sleep(20)

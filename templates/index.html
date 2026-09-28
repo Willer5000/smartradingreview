@@ -11,7 +11,7 @@
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <link
         rel="stylesheet"
-        href="{{ url_for('static', filename='style.css') }}?v=20260927-COMMIT17-BW"
+        href="{{ url_for('static', filename='style.css') }}?v=20260910-V1-MACRO-RADAR"
     >
     <style>
         /* ============ ESTILOS DE PATRONES ============ */
@@ -262,17 +262,17 @@
                 <div id="calendar-info" class="d-flex justify-content-between align-items-center">
                     <div class="d-flex align-items-center">
                         <span id="market-session-icon" class="me-1">🌏</span>
-                        <span id="market-session-badge" class="badge bg-info me-2">Sesión horaria</span>
-                        <span id="market-liquidity" class="text-muted me-3" title="Se actualiza con volumen y rango observados">Actividad: Esperando análisis</span>
-                        <span id="market-day-icon" class="me-1">📅</span>
-                        <span id="market-day-name" class="badge bg-secondary me-3">—</span>
+                        <span id="market-session-badge" class="badge bg-info me-2">Sesión Asiática</span>
+                        <span id="market-liquidity" class="text-muted me-3">Liquidez: Baja</span>
+                        <span id="market-day-icon" class="me-1">📆</span>
+                        <span id="market-day-name" class="me-3">Lunes</span>
                     </div>
                     <div class="d-flex align-items-center">
                         <span class="text-muted me-2">Próxima alerta:</span>
                         <span id="next-alert" class="badge bg-warning me-3">19:53 (1D)</span>
                         <span class="text-muted me-2">Temporalidades:</span>
                         <span id="active-timeframes" class="me-3">4H, 12H, 1D</span>
-                        <span id="market-status" class="badge bg-secondary">Contexto pendiente</span>
+                        <span id="market-status" class="badge bg-success">Mercado Activo</span>
                     </div>
                 </div>
             </div>
@@ -2068,7 +2068,7 @@
                         </div>
                         <div id="current-active-diagnostics"></div>
                         <div class="p-2 text-center">
-                            <small class="text-muted">{% if is_multiasset|default(false) %}Configuraciones ejecutables disponibles entre los análisis Multi-Activo ya calculados. Si aparece 0, no se fuerza una entrada: revisa “Por qué no aparecen otras señales” para ver hipótesis direccionales que no cumplieron los requisitos de ejecución.{% else %}Señales provisionales de la vela en formación: pueden aparecer, cambiar o desaparecer antes del cierre. Al hacer clic abre el análisis actual; no se guardan ni alimentan el aprendizaje como señales confirmadas.{% endif %}</small>
+                            <small class="text-muted">Señales provisionales de la vela en formación: pueden aparecer, cambiar o desaparecer antes del cierre. Al hacer clic abre el análisis actual; no se guardan ni alimentan el aprendizaje como señales confirmadas.</small>
                         </div>
                     </div>
                 </div>
@@ -2090,7 +2090,7 @@
                             </div>
                         </div>
                         <div class="p-2 text-center">
-                            <small class="text-muted">{% if is_multiasset|default(false) %}Señales confirmadas disponibles del análisis Multi-Activo. Entry, SL y TP ya superaron los controles técnicos y de riesgo antes de publicarse. Una señal guardada puede continuar con seguimiento automático después de alcanzar Entry.{% elif is_futures %}Señales nacidas del último cierre confirmado. Pueden guardarse y, una vez alcanzado Entry, quedan bajo seguimiento automático.{% else %}Señales nacidas del último cierre confirmado. Al hacer clic se abre su snapshot original con Entry, SL, TP y justificación; no recalcula la señal con el mercado actual.{% endif %}</small>
+                            <small class="text-muted">{% if is_futures %}Señales nacidas del último cierre confirmado. Pueden guardarse y, una vez alcanzado Entry, quedan bajo seguimiento y Guardian.{% else %}Señales nacidas del último cierre confirmado. Al hacer clic se abre su snapshot original con Entry, SL, TP y justificación; no recalcula la señal con el mercado actual.{% endif %}</small>
                         </div>
                     </div>
                 </div>
@@ -2109,7 +2109,7 @@
                         </div>
                         <div id="vigent-signals-diagnostics"></div>
                         <div class="p-2 text-center">
-                            <small class="text-muted">{% if is_multiasset|default(false) %}Aquí sólo aparecen oportunidades Multi-Activo que continúan siendo operables. Las hipótesis LONG/SHORT no ejecutables se muestran aparte con una razón técnica comprensible; 0 no significa que se haya forzado una señal ni que todos los mercados deban producir una operación.{% elif is_futures %}Señales confirmadas en cierres anteriores que todavía conservan vigencia. Pueden guardarse sin reiniciar su reloj; las hipótesis LONG/SHORT de riesgo medio/alto vigentes aparecen en “Por qué no aparecen otras señales”. Si Entry ya fue alcanzado, el seguimiento automático continúa hasta TP, SL o cierre.{% else %}Señales confirmadas en cierres anteriores que aún conservan su vigencia original. Al hacer clic se abre el Entry, SL, TP, justificación y tiempo restante de aquella señal; sólo “Señales activas” navega al análisis actual.{% endif %}</small>
+                            <small class="text-muted">{% if is_futures %}Señales confirmadas en cierres anteriores que todavía conservan vigencia. Pueden guardarse sin reiniciar su reloj; las hipótesis LONG/SHORT de riesgo medio/alto vigentes aparecen en “Por qué no aparecen otras señales”. Si Entry ya fue alcanzado, el Guardian continúa hasta TP, SL o cierre.{% else %}Señales confirmadas en cierres anteriores que aún conservan su vigencia original. Al hacer clic se abre el Entry, SL, TP, justificación y tiempo restante de aquella señal; sólo “Señales activas” navega al análisis actual.{% endif %}</small>
                         </div>
                     </div>
                 </div>
@@ -2610,7 +2610,7 @@
 
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI-2"></script>
     <script
-        src="{{ url_for('static', filename='script.js') }}?v=20260927-COMMIT17-BW"
+        src="{{ url_for('static', filename='script.js') }}?v=20260924-COMMIT12-1-QA"
     ></script>
 
 
@@ -2621,7 +2621,7 @@
     {% if is_futures %}
 
     <script
-        src="{{ url_for('static', filename='futures.js') }}?v=20260927-COMMIT17-BW"
+        src="{{ url_for('static', filename='futures.js') }}?v=20260924-COMMIT12-1-QA"
     ></script>
 
     {% endif %}
@@ -3224,7 +3224,7 @@
             // 3. PRECIO EN VIVO - Cada 30 segundos (antes 15s, reduce carga en Render Free)
             // Antes usaba /api/analyze (ejecuta 9 traders + 10 capas cada 5s), que
             // saturaba Render Free con 502 Bad Gateway. Ahora usa /api/price que solo
-            // reutiliza un precio ligero compartido y una ancla OHLCV de corta duración.
+            // consulta velas (con caché HTTP) y responde en <50ms.
             window.refreshLivePriceAndCandle = function() {
                 if (document.hidden) return;
                 const symbol = window.currentSymbol || (window.PAGE_CONFIG?.defaultSymbol || 'BTC-USDT');
@@ -3454,61 +3454,65 @@
             }
         };
         // ============ ACTUALIZAR INFORMACIÓN DE SESIÓN DE MERCADO ============
-        // Commit 16.1: script.js owns the evidence-based market header.
-        // This fallback exists only if the external script failed to define it.
-        if (typeof window.updateMarketSessionInfo !== 'function') {
-            window.updateMarketSessionInfo = function() {
-                try {
-                    const now = new Date();
-                    const boliviaTime = new Date(
-                        now.toLocaleString("en-US", {timeZone: "America/La_Paz"})
-                    );
-                    const hour = boliviaTime.getHours();
-                    const weekday = boliviaTime.getDay();
-                    const dayNames = [
-                        'Domingo','Lunes','Martes','Miércoles',
-                        'Jueves','Viernes','Sábado'
-                    ];
-
-                    let sessionIcon = '🌏';
-                    let sessionName = 'Asiática';
-                    if (hour >= 3 && hour < 11) {
-                        sessionIcon = '🇪🇺';
-                        sessionName = 'Europea';
-                    } else if (hour >= 11 && hour < 19) {
-                        sessionIcon = '🇺🇸';
-                        sessionName = 'Americana';
-                    }
-                    if (hour >= 11 && hour < 15) {
-                        sessionName = 'Europa + América';
-                    }
-
-                    document.getElementById('market-session-icon')?.replaceChildren(sessionIcon);
-                    const session = document.getElementById('market-session-badge');
-                    if (session) session.textContent = `Sesión ${sessionName}`;
-
-                    const activity = document.getElementById('market-liquidity');
-                    if (activity) {
-                        activity.textContent = 'Actividad: Esperando análisis';
-                        activity.title = 'La actividad se clasifica con datos observados; la hora por sí sola no determina la liquidez.';
-                    }
-
-                    const day = document.getElementById('market-day-name');
-                    if (day) {
-                        day.textContent = dayNames[weekday];
-                        day.className = 'badge bg-secondary me-3';
-                    }
-
-                    const status = document.getElementById('market-status');
-                    if (status) {
-                        status.textContent = 'Contexto pendiente';
-                        status.className = 'badge bg-secondary';
-                    }
-                } catch (error) {
-                    console.error('Error en fallback de contexto de mercado:', error);
+        window.updateMarketSessionInfo = function() {
+            try {
+                const now = new Date();
+                const boliviaTime = new Date(now.toLocaleString("en-US", {timeZone: "America/La_Paz"}));
+                const hour = boliviaTime.getHours();
+                const weekday = boliviaTime.getDay();
+                
+                let sessionIcon = '🌏';
+                let sessionName = 'Asiático';
+                let liquidity = 'Baja';
+                let sessionClass = 'bg-info';
+                
+                if ((hour >= 19 && hour <= 23) || (hour >= 0 && hour < 3)) {
+                    sessionIcon = '🌏';
+                    sessionName = 'Asiático';
+                    liquidity = 'Baja';
+                    sessionClass = 'bg-info';
+                } else if (hour >= 3 && hour < 11) {
+                    sessionIcon = '🇪🇺';
+                    sessionName = 'Europeo';
+                    liquidity = 'Alta';
+                    sessionClass = 'bg-primary';
+                } else if (hour >= 11 && hour < 19) {
+                    sessionIcon = '🇺🇸';
+                    sessionName = 'Americano';
+                    liquidity = 'Muy Alta';
+                    sessionClass = 'bg-success';
                 }
-            };
-        }
+                
+                if (hour >= 11 && hour < 15) {
+                    sessionName += ' + América';
+                    liquidity = 'Máxima';
+                    sessionClass = 'bg-warning';
+                }
+                
+                const dayNames = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+                const dayIcons = ['🏖️', '📆', '📊', '📊', '📊', '🏁', '🏖️'];
+                
+                const sessionIconEl = document.getElementById('market-session-icon');
+                const sessionBadgeEl = document.getElementById('market-session-badge');
+                const liquidityEl = document.getElementById('market-liquidity');
+                const dayIconEl = document.getElementById('market-day-icon');
+                const dayNameEl = document.getElementById('market-day-name');
+                
+                if (sessionIconEl) sessionIconEl.textContent = sessionIcon;
+                if (sessionBadgeEl) {
+                    sessionBadgeEl.textContent = `Sesión ${sessionName}`;
+                    sessionBadgeEl.className = `badge ${sessionClass} me-2`;
+                }
+                if (liquidityEl) liquidityEl.textContent = `Liquidez: ${liquidity}`;
+                if (dayIconEl) dayIconEl.textContent = dayIcons[weekday];
+                if (dayNameEl) {
+                    dayNameEl.textContent = dayNames[weekday];
+                    dayNameEl.className = 'badge bg-secondary me-3';
+                }
+            } catch (error) {
+                console.error('Error en updateMarketSessionInfo:', error);
+            }
+        };
         // ============ KPIs DEL SISTEMA (header) — v22 ============
         // Consulta /api/kpis/frontend_signals (SOLO las señales de la vela
         // anterior que el usuario ve en el frontend, NO todo el histórico).

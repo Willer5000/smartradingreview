@@ -2979,7 +2979,6 @@ window.runCompleteAnalysis = function() {
 
                 if (data.partial && data.data?.decision) {
                     window.currentAnalysis = data.data;
-                    if (typeof window.updateMarketSessionInfo === 'function') window.updateMarketSessionInfo();
                     try {
                         updateInstantRecommendation(data.data);
                     } catch (partialErr) {
@@ -2994,7 +2993,7 @@ window.runCompleteAnalysis = function() {
                             <strong>⏳ ${isMulti ? 'Preparando análisis Multi-Activo' : 'Preparando gráficos Futures'}.</strong>
                             <div class="small mt-2">
                                 ${isMulti
-                                    ? 'La revisión de oportunidades, el precio y el último análisis válido siguen disponibles mientras termina el análisis en curso.'
+                                    ? 'El Router, el precio y el último análisis válido siguen disponibles mientras el motor compartido termina el turno anterior.'
                                     : 'El último estado del mercado seguirá visible mientras termina el payload gráfico.'}
                             </div>
                         </div>
@@ -3016,10 +3015,10 @@ window.runCompleteAnalysis = function() {
                     if (recommendationEl) {
                         recommendationEl.innerHTML = `
                             <div class="alert alert-warning mb-0">
-                                <strong>⚠️ ${isMulti ? 'El análisis sigue ocupado' : 'Los gráficos tardaron más de lo esperado'}.</strong>
+                                <strong>⚠️ ${isMulti ? 'El motor compartido sigue ocupado' : 'Los gráficos tardaron más de lo esperado'}.</strong>
                                 <div class="small mt-2">
                                     ${isMulti
-                                        ? 'La actualización automática se detuvo para evitar esperas innecesarias. La página y el precio continúan disponibles; reintenta cuando quieras.'
+                                        ? 'No se seguirá haciendo polling. La página, el Router y el precio continúan disponibles; reintenta cuando quieras.'
                                         : 'La página sigue disponible. Puedes reintentar sin recargarla.'}
                                 </div>
                                 <button type="button" class="btn btn-sm btn-outline-warning mt-2"
@@ -3073,7 +3072,6 @@ window.runCompleteAnalysis = function() {
                     clearTimeout(window.__SPOT_ANALYSIS_RETRY_TIMER__);
                 }
                 window.currentAnalysis = data.data;
-                    if (typeof window.updateMarketSessionInfo === 'function') window.updateMarketSessionInfo();
                 // ============================================================
                 // MOSTRAR TGP
                 // ============================================================
@@ -3633,7 +3631,7 @@ window.runCompleteAnalysis = function() {
                                 <strong>⏳ ${isMulti ? 'Esperando turno Multi-Activo' : 'Preparando gráficos Futures'}.</strong>
                                 <div class="small mt-2">
                                     ${isMulti
-                                        ? `El análisis está terminando otra tarea. Intento ${retryCount + 1}/${maxBusyRetries}.`
+                                        ? `El motor compartido está terminando otro trabajo. Intento acotado ${retryCount + 1}/${maxBusyRetries}.`
                                         : `El análisis se ejecuta en segundo plano para mantener la página disponible. Intento ${retryCount + 1}.`}
                                 </div>
                             </div>
@@ -3673,7 +3671,7 @@ window.runCompleteAnalysis = function() {
                         <strong>⚠️ ${window.IS_MULTI_ASSET_PAGE ? 'El análisis Multi-Activo no pudo tomar el turno compartido' : 'El análisis Futures tardó más de lo esperado'}.</strong>
                         <div class="small mt-2">
                             ${error?.message || 'El servidor está ocupado temporalmente.'}
-                            ${window.IS_MULTI_ASSET_PAGE ? '<br>La revisión de oportunidades y el precio siguen disponibles; la actualización automática queda pausada.' : ''}
+                            ${window.IS_MULTI_ASSET_PAGE ? '<br>El Router y el precio siguen disponibles; no se continuará haciendo polling automático.' : ''}
                         </div>
                         <button
                             type="button"
@@ -3846,7 +3844,6 @@ function getInstantRecommendation(attempt = 1) {
             // Guardar análisis actual
             window.currentAnalysis =
                 analysisData;
-            if (typeof window.updateMarketSessionInfo === 'function') window.updateMarketSessionInfo();
             // ============================================================
             // ASEGURAR NIVELES DE TRADING
             // ============================================================
@@ -8908,7 +8905,7 @@ function updateLiquidationHeatmap(data) {
 
     const layout = {
         title: {
-            text: 'Calor de liquidaciones estimadas (' + timeframe + ') · ' + activeBins.length + ' zonas activas',
+            text: 'Calor de liquidaciones (' + timeframe + ') · ' + activeBins.length + ' zonas activas',
             font: {color: '#eef4fb', size: 14},
             x: 0.015,
             xanchor: 'left',
@@ -8972,6 +8969,7 @@ function updateLiquidationHeatmap(data) {
         chartDiv.innerHTML = '<div class="alert alert-danger">No se pudo dibujar el mapa de calor.</div>';
     });
 }
+
 
 // ============ ZONAS DINÁMICAS DE TRADING ============
 function updateTradingZones(data) {
@@ -11444,152 +11442,89 @@ function updateCalendarInfo() {
     }
 }
 
-// ============ CONTEXTO DE MERCADO — COMMIT 16.1 ============
+// ============ ACTUALIZAR INFORMACIÓN DE MERCADO (HORARIOS) ============
 window.updateMarketSessionInfo = function() {
     try {
         const now = new Date();
-        const boliviaTime = new Date(
-            now.toLocaleString("en-US", {timeZone: "America/La_Paz"})
-        );
+        const boliviaTime = new Date(now.toLocaleString("en-US", {timeZone: "America/La_Paz"}));
         const hour = boliviaTime.getHours();
-        const weekday = boliviaTime.getDay();
-
-        // La sesión y el día son datos de calendario. NO implican por sí solos
-        // liquidez alta/baja, mercado bueno/malo ni una decisión de trading.
+        const weekday = boliviaTime.getDay(); // 0=Domingo, 1=Lunes, ..., 6=Sábado
+        
         let sessionIcon = '🌏';
-        let sessionName = 'Asiática';
+        let sessionName = 'Asiático';
+        let liquidity = 'Baja';
         let sessionClass = 'bg-info';
-
+        
+        // Sesión Asiática: 19:00 - 03:00
         if ((hour >= 19 && hour <= 23) || (hour >= 0 && hour < 3)) {
             sessionIcon = '🌏';
-            sessionName = 'Asiática';
+            sessionName = 'Asiático';
+            liquidity = 'Baja';
             sessionClass = 'bg-info';
-        } else if (hour >= 3 && hour < 11) {
+        }
+        // Sesión Europea: 03:00 - 11:00
+        else if (hour >= 3 && hour < 11) {
             sessionIcon = '🇪🇺';
-            sessionName = 'Europea';
+            sessionName = 'Europeo';
+            liquidity = 'Alta';
             sessionClass = 'bg-primary';
-        } else if (hour >= 11 && hour < 19) {
+        }
+        // Sesión Americana: 11:00 - 19:00
+        else if (hour >= 11 && hour < 19) {
             sessionIcon = '🇺🇸';
-            sessionName = 'Americana';
+            sessionName = 'Americano';
+            liquidity = 'Muy Alta';
             sessionClass = 'bg-success';
         }
-
+        
+        // Solapamiento Europa-América (11:00 - 15:00)
         if (hour >= 11 && hour < 15) {
-            sessionName = 'Europa + América';
-            sessionClass = 'bg-warning text-dark';
+            sessionName += ' + América';
+            liquidity = 'Máxima';
+            sessionClass = 'bg-warning';
         }
-
-        const dayNames = [
-            'Domingo', 'Lunes', 'Martes', 'Miércoles',
-            'Jueves', 'Viernes', 'Sábado'
-        ];
-        const dayName = dayNames[weekday];
-
-        // Cuando existe un análisis actual usamos la evidencia calculada en
-        // backend: volumen relativo + rango observado + régimen/contexto.
-        // Nunca mostramos nombres internos de arquitectura.
-        const analysis =
-            window.currentAnalysis
-            || (typeof currentAnalysis !== 'undefined' ? currentAnalysis : null)
-            || null;
-        const marketContext =
-            analysis && analysis.market_context && typeof analysis.market_context === 'object'
-                ? analysis.market_context
-                : null;
-
-        let activityLabel = 'ESPERANDO ANÁLISIS';
-        let activityClass = 'text-muted';
-        let condition = 'Contexto pendiente';
-        let statusClass = 'badge bg-secondary';
-        let evidence = (
-            'La sesión y el día son informativos. '
-            + 'La actividad se actualizará con evidencia del mercado cuando haya un análisis disponible.'
-        );
-
-        if (marketContext) {
-            if (marketContext.session_name) sessionName = String(marketContext.session_name);
-            if (marketContext.session_icon) sessionIcon = String(marketContext.session_icon);
-
-            activityLabel = String(
-                marketContext.activity_label || 'MODERADA'
-            ).toUpperCase();
-
-            const tone = String(marketContext.activity_tone || 'secondary').toLowerCase();
-            activityClass = {
-                success: 'text-success',
-                warning: 'text-warning',
-                danger: 'text-danger',
-                secondary: 'text-muted',
-                info: 'text-info'
-            }[tone] || 'text-muted';
-
-            condition = String(
-                marketContext.condition || 'CONDICIONES NORMALES'
-            ).replaceAll('_', ' ');
-
-            statusClass = {
-                success: 'badge bg-success',
-                warning: 'badge bg-warning text-dark',
-                danger: 'badge bg-danger',
-                secondary: 'badge bg-secondary',
-                info: 'badge bg-info'
-            }[tone] || 'badge bg-secondary';
-
-            evidence = String(
-                marketContext.evidence
-                || marketContext.note
-                || 'Actividad estimada con datos observados del mercado.'
-            );
-        }
-
+        
+        // Días de la semana
+        const dayNames = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+        const dayIcons = ['🏖️', '📆', '📊', '📊', '📊', '🏁', '🏖️'];
+        const dayColors = ['secondary', 'warning', 'success', 'success', 'success', 'danger', 'secondary'];
+        
+        let dayIcon = dayIcons[weekday];
+        let dayName = dayNames[weekday];
+        let dayClass = dayColors[weekday];
+        
+        // Actualizar DOM
         const sessionIconEl = document.getElementById('market-session-icon');
         const sessionBadgeEl = document.getElementById('market-session-badge');
-        const activityEl = document.getElementById('market-liquidity');
+        const liquidityEl = document.getElementById('market-liquidity');
         const dayIconEl = document.getElementById('market-day-icon');
         const dayNameEl = document.getElementById('market-day-name');
         const marketStatusEl = document.getElementById('market-status');
-
+        
         if (sessionIconEl) sessionIconEl.textContent = sessionIcon;
-
         if (sessionBadgeEl) {
             sessionBadgeEl.textContent = `Sesión ${sessionName}`;
             sessionBadgeEl.className = `badge ${sessionClass} me-2`;
-            sessionBadgeEl.title = 'Franja horaria de mercado. No implica por sí sola mayor o menor actividad.';
         }
-
-        if (activityEl) {
-            activityEl.textContent = `Actividad: ${activityLabel}`;
-            activityEl.className = `${activityClass} me-3`;
-            activityEl.title = evidence;
-        }
-
-        if (dayIconEl) {
-            dayIconEl.textContent = (
-                marketContext && marketContext.day_icon
-                    ? String(marketContext.day_icon)
-                    : '📅'
-            );
-        }
-
+        if (liquidityEl) liquidityEl.textContent = `Liquidez: ${liquidity}`;
+        if (dayIconEl) dayIconEl.textContent = dayIcon;
         if (dayNameEl) {
-            dayNameEl.textContent = (
-                marketContext && marketContext.day_name
-                    ? String(marketContext.day_name)
-                    : dayName
-            );
-            dayNameEl.className = 'badge bg-secondary me-3';
-            dayNameEl.title = (
-                'Día calendario. Su efecto no se presume: '
-                + 'la lectura de actividad depende de los datos observados.'
-            );
+            dayNameEl.textContent = dayName;
+            dayNameEl.className = `badge bg-${dayClass} me-3`;
         }
-
+        
+        // Actualizar estado del mercado
         if (marketStatusEl) {
-            marketStatusEl.textContent = condition
-                .toLowerCase()
-                .replace(/\b\w/g, c => c.toUpperCase());
-            marketStatusEl.className = statusClass;
-            marketStatusEl.title = evidence;
+            if (weekday === 0 || weekday === 6) {
+                marketStatusEl.textContent = 'Fin de Semana';
+                marketStatusEl.className = 'badge bg-secondary';
+            } else if (hour >= 9 && hour < 17) {
+                marketStatusEl.textContent = 'Horario Principal';
+                marketStatusEl.className = 'badge bg-success';
+            } else {
+                marketStatusEl.textContent = 'Horario Extendido';
+                marketStatusEl.className = 'badge bg-warning';
+            }
         }
     } catch (error) {
         console.error('Error en updateMarketSessionInfo:', error);
@@ -11992,23 +11927,14 @@ function _macroRenderBadge(snapshot) {
     const current = String(snapshot?.current_risk_level || snapshot?.risk_level || 'UNKNOWN').toUpperCase();
     const next = String(snapshot?.next_event_risk_level || '').toUpperCase();
     const hours = Number(snapshot?.next_event_hours);
-    const errors = Array.isArray(snapshot?.errors) ? snapshot.errors.filter(Boolean) : [];
-    const items = Array.isArray(snapshot?.ticker_items) ? snapshot.ticker_items.filter(item => item && String(item.text || '').trim()) : [];
-    const partial = errors.length > 0;
-    const noUsableContext = partial && items.length === 0 && !(snapshot?.next_high_impact_event);
-    const displayCurrent = noUsableContext ? 'UNKNOWN' : current;
-    badge.className = `macro-risk-badge ${_macroRiskClass(displayCurrent)}`;
-    const statusLabel = noUsableContext ? 'SIN DATO' : partial ? 'PARCIAL' : _macroRiskLabel(current);
-    let label = `<i class="fas fa-globe-americas" aria-hidden="true"></i> MACRO AHORA · ${statusLabel}`;
+    badge.className = `macro-risk-badge ${_macroRiskClass(current)}`;
+    let label = `<i class="fas fa-globe-americas" aria-hidden="true"></i> MACRO AHORA · ${_macroRiskLabel(current)}`;
     if (next && next !== 'UNKNOWN') label += ` <span class="opacity-75">| PRÓXIMO · ${_macroRiskLabel(next)}</span>`;
     badge.innerHTML = label;
     const nextEvent = snapshot?.next_high_impact_event || {};
-    const prefix = partial
-        ? 'Contexto macro incompleto (fail-open): trading técnico continúa sin convertir el dato faltante en señal.'
-        : `Riesgo macro actual: ${_macroRiskLabel(current)}.`;
     badge.title = nextEvent?.title_es
-        ? `${prefix} Próximo evento: ${nextEvent.title_es}${Number.isFinite(hours) ? ` en ${Math.max(0, hours).toFixed(hours < 24 ? 1 : 0)} h` : ''}.`
-        : prefix;
+        ? `Riesgo actual: ${_macroRiskLabel(current)}. Próximo evento: ${nextEvent.title_es}${Number.isFinite(hours) ? ` en ${Math.max(0, hours).toFixed(hours < 24 ? 1 : 0)} h` : ''}.`
+        : `Riesgo macro actual: ${_macroRiskLabel(current)}.`;
 }
 
 function _macroMoney(value) {

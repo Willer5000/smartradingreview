@@ -1,0 +1,9 @@
+Commit 17.5 — restore stable signal baseline and harden Entry/SL/TP geometry
+
+- base: user-provided last useful main(4)
+- preserve login, liquidation heatmap, signal engine, multiasset and leverage
+- improve Entry liquidity-cluster tie-break with relative participation
+- apply contextual SL clearance behind structural reaction zones
+- capture TP before structural/liquidity reaction boundaries while preserving RR floor
+- normalize liquidation-pool TP ranking to relative heatmap units
+- no new APIs, AI calls, DB writes, polling or workers

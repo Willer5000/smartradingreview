@@ -431,6 +431,27 @@ def build_profile(
         sl_hard_min_atr = 0.75
         sl_buffer_atr = 0.22
 
+    # Commit 17.5 — TP execution buffer.  The structural level remains the
+    # analytical target, but execution should normally capture *before* the
+    # reaction boundary instead of asking price to print the exact resistance,
+    # swing or liquidity center.  This only changes TP geometry; it never
+    # creates or removes a directional signal.
+    if market == "spot":
+        tp_capture_buffer_atr = 0.08
+    elif speed == "VERY_FAST":
+        tp_capture_buffer_atr = 0.14
+    elif speed == "FASTER":
+        tp_capture_buffer_atr = 0.12
+    else:
+        tp_capture_buffer_atr = 0.10
+
+    if vol_bucket == "LOW":
+        tp_capture_buffer_atr = max(0.06, tp_capture_buffer_atr - 0.02)
+    elif vol_bucket == "HIGH":
+        tp_capture_buffer_atr += 0.03
+    elif vol_bucket == "EXTREME":
+        tp_capture_buffer_atr += 0.05
+
     # Bounded ReviewTrader continuity can bias near vs deeper placement after
     # enough canonical samples.  It cannot create a hard gate or move levels by
     # itself.
@@ -476,6 +497,7 @@ def build_profile(
         "sl_ideal_max_atr": round(sl_ideal[1], 4),
         "sl_hard_min_atr": round(sl_hard_min_atr, 4),
         "sl_buffer_atr": round(sl_buffer_atr + learning["sl_buffer_bias"] * 0.10, 4),
+        "tp_capture_buffer_atr": round(max(0.04, min(0.22, tp_capture_buffer_atr)), 4),
         "learning": learning,
         "policy": {
             "geometry_only": True,

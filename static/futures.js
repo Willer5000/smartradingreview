@@ -589,64 +589,6 @@ window.openManualAnalysisSave = function(
     );
 };
 function futRenderAnalysisDiagnostics(json, context) {
-    // Commit 17.4 FINAL R4 — las señales nuevas confirmadas ya llegan con
-    // Entry/SL/TP. Esta sección sólo conserva compatibilidad visual para
-    // registros legacy cacheados antes de R4 mientras son recalculados.
-    const pendingExecution = Array.isArray(json && json.confirmed_pending_execution)
-        ? json.confirmed_pending_execution
-        : [];
-
-    let pendingHtml = '';
-    if (pendingExecution.length > 0) {
-        let pendingRows = '';
-        pendingExecution.forEach(candidate => {
-            const action = String(candidate.action || '').toUpperCase();
-            if (action !== 'LONG' && action !== 'SHORT') return;
-            const isLong = action === 'LONG';
-            const badge = isLong ? 'success' : 'danger';
-            const symbol = futEscapeHtml(String(candidate.symbol || '').replace('-', '/'));
-            const timeframe = futEscapeHtml(candidate.timeframe || '--');
-            const confidence = fmtConfidence(candidate.confidence);
-            const reason = futEscapeHtml(
-                candidate.reason
-                || 'La dirección está confirmada; la ejecución todavía espera una zona operable.'
-            );
-            pendingRows += `
-                <div class="border-top border-secondary py-2"
-                     style="cursor:pointer;"
-                     onclick="window.changeToSignal('${String(candidate.symbol || '').replace(/'/g, "\'")}', '${String(candidate.timeframe || '').replace(/'/g, "\'")}')">
-                    <div class="d-flex flex-wrap justify-content-between gap-1">
-                        <div>
-                            <span class="badge bg-${badge} me-1">${action}</span>
-                            <strong>${symbol}</strong>
-                            <span class="badge bg-dark ms-1">${timeframe}</span>
-                        </div>
-                        <div>
-                            <span class="badge bg-secondary">REGISTRO ANTERIOR · RECÁLCULO</span>
-                            <span class="badge bg-secondary ms-1">${confidence}%</span>
-                        </div>
-                    </div>
-                    <div class="small text-light mt-1">${reason}</div>
-                    <div class="small text-muted mt-1">
-                        Este registro proviene del contrato anterior. R4 lo recalcula antes de volver a publicarlo como señal.
-                    </div>
-                </div>
-            `;
-        });
-        if (pendingRows) {
-            pendingHtml = `
-                <details class="mt-2 px-2 pb-2" open>
-                    <summary class="text-info" style="cursor:pointer;">
-                        Registros anteriores pendientes de recálculo (${pendingExecution.length})
-                    </summary>
-                    <div class="mt-2" style="max-height:320px; overflow-y:auto;">
-                        ${pendingRows}
-                    </div>
-                </details>
-            `;
-        }
-    }
-
     // RC9.7.6 — en las listas de señales sólo interesan otras hipótesis
     // LONG/SHORT de riesgo MEDIO/ALTO. NO_OPERAR / ESPERAR / PRECAUCIÓN y
     // errores de datos siguen disponibles para aprendizaje interno, pero no
@@ -698,7 +640,7 @@ function futRenderAnalysisDiagnostics(json, context) {
     const title = 'Por qué no aparecen otras señales';
 
     if (candidates.length === 0) {
-        return pendingHtml + `
+        return `
             <details class="mt-2 px-2 pb-2">
                 <summary class="text-secondary" style="cursor:pointer;">
                     ${title} (0)
@@ -849,7 +791,7 @@ function futRenderAnalysisDiagnostics(json, context) {
         `;
     });
 
-    return pendingHtml + `
+    return `
         <details class="mt-2 px-2 pb-2">
             <summary class="text-warning" style="cursor:pointer;">
                 ${title} (${candidates.length})
@@ -1478,9 +1420,7 @@ function _decodeFuturesSignal(encodedSignal) {
 window.openSaveSignalFromCard = function(event, encodedSignal, alreadyInPosition) {
     if (event) event.stopPropagation();
     const sig = _decodeFuturesSignal(encodedSignal);
-    if (sig) sig.source_context = window.IS_MULTI_ASSET_PAGE
-        ? 'MULTIASSET_PREVIOUS_CONFIRMED'
-        : 'PREVIOUS_CONFIRMED';
+    if (sig) sig.source_context = 'PREVIOUS_CONFIRMED';
     window.openSaveSignalModal(sig, Boolean(alreadyInPosition));
 };
 
@@ -1491,9 +1431,7 @@ window.openSaveActiveSignalFromCard = function(event, encodedSignal, alreadyInPo
     if (event) event.stopPropagation();
     const sig = _decodeFuturesSignal(encodedSignal);
     if (!sig) return;
-    sig.source_context = window.IS_MULTI_ASSET_PAGE
-        ? 'MULTIASSET_ACTIVE_CONFIRMED'
-        : 'ACTIVE_CONFIRMED';
+    sig.source_context = 'ACTIVE_CONFIRMED';
     const inPosition = Boolean(alreadyInPosition || sig.entry_touched || sig.lifecycle_status === 'entry_touched');
     window.openSaveSignalModal(sig, inPosition);
 };
@@ -2118,20 +2056,7 @@ window.showFuturesPrevJustif = function(sig) {
                 _formatPreviousSignalValidity(
                     sig.tiempo_restante
                 );
-            const remainingSeconds = Number(sig.tiempo_restante);
-            const expiredByClock = (
-                (Number.isFinite(remainingSeconds) && remainingSeconds <= 0)
-                || String(remainingText || '').toLowerCase().includes('vigencia finalizada')
-            );
-            if (expiredByClock) {
-                estadoHTML = `
-                    <div class="alert alert-secondary mt-3">
-                        <strong>⌛ VIGENCIA FINALIZADA</strong>
-                        <br>La ventana operativa de esta señal ya terminó.
-                        No persigas el precio; espera una nueva señal.
-                    </div>
-                `;
-            } else {
+        
             estadoHTML = `
                 <div
                     class="
@@ -2168,7 +2093,6 @@ window.showFuturesPrevJustif = function(sig) {
                     </small>
                 </div>
             `;
-            }
         }
         
         body.innerHTML = `
