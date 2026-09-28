@@ -17092,17 +17092,17 @@ class TradingExpertSystem:
                         'ANALYSIS_ONLY'
                 }
             
-            # ============ CALCULAR R/R ============
-            reward = abs(tp_price - entry)
-            risk = abs(entry - sl_price)
-            rr = reward / risk if risk > 0 else 0
-            
             # ==========================================================
-            # COMMIT 13 — RR / ESTADO DE EJECUCIÓN CONTEXTUAL
+            # COMMIT 17.5.2 — ADVANCED EXECUTION COMMITTEES, BOUNDED
             # ==========================================================
-            # Entry, SL y TP ya existen por razones técnicas. Ahora R/R
-            # determina si esa geometría real merece ejecutarse. El piso se
-            # diferencia por mercado/instrumento/TF y nunca fabrica niveles.
+            # IMPORTANT CONTRACT:
+            #   * direction/signal already exists before this block;
+            #   * baseline 17.5.1 Entry/SL/TP is computed first;
+            #   * advanced committees may REFINE that geometry only;
+            #   * they cannot create a signal, rescue an invalid baseline,
+            #     lower R/R rules, lower Safety, or change legacy quality scores;
+            #   * any failure or ambiguous result keeps the 17.5.1 baseline.
+            # This preserves signal frequency while improving execution quality.
             try:
                 minimum_viable_rr = max(
                     1.0,
@@ -17112,9 +17112,265 @@ class TradingExpertSystem:
                     minimum_viable_rr,
                     float((execution_geometry_profile or {}).get('technical_rr_ceiling') or 4.5)
                 )
+                preferred_rr_min = max(
+                    minimum_viable_rr,
+                    float((execution_geometry_profile or {}).get('preferred_rr_min') or 2.0)
+                )
+                preferred_rr_max = min(
+                    maximum_technical_rr,
+                    max(
+                        preferred_rr_min,
+                        float((execution_geometry_profile or {}).get('preferred_rr_max') or 3.2)
+                    )
+                )
             except (TypeError, ValueError):
                 minimum_viable_rr, maximum_technical_rr = 1.8, 4.5
+                preferred_rr_min, preferred_rr_max = 2.0, 3.2
 
+            baseline_entry = float(entry)
+            baseline_sl = float(sl_price)
+            baseline_tp = float(tp_price)
+            baseline_risk = abs(baseline_entry - baseline_sl)
+            baseline_reward = abs(baseline_tp - baseline_entry)
+            baseline_rr = baseline_reward / baseline_risk if baseline_risk > 0 else 0.0
+
+            execution_refinement = {
+                'applied': False,
+                'version': None,
+                'geometry_quality': None,
+                'baseline_geometry_quality': None,
+                'improvement': None,
+                'reason': 'BASELINE_17_5_1_PRESERVED',
+            }
+
+            def _rr_safety_bucket(value):
+                value = float(value or 0)
+                if value < minimum_viable_rr:
+                    return 0
+                if value < 1.8:
+                    return 55
+                if value < 2.0:
+                    return 70
+                if value < 2.5:
+                    return 82
+                if value < 3.0:
+                    return 92
+                if value <= min(3.5, maximum_technical_rr):
+                    return 100
+                if value <= maximum_technical_rr:
+                    return 88
+                return 55
+
+            baseline_geometry_valid = bool(
+                baseline_entry > 0
+                and baseline_sl > 0
+                and baseline_tp > 0
+                and baseline_risk > 0
+                and minimum_viable_rr <= baseline_rr <= maximum_technical_rr
+                and (
+                    (direction == 'long' and baseline_sl < baseline_entry < baseline_tp)
+                    or (direction == 'short' and baseline_tp < baseline_entry < baseline_sl)
+                )
+            )
+
+            if baseline_geometry_valid:
+                try:
+                    from execution_specialist_committees import (
+                        build_execution_context,
+                        coordinate_execution_committees,
+                    )
+
+                    execution_market_type = 'futures' if is_futures else 'spot'
+                    if is_futures:
+                        try:
+                            from multiasset_system import MULTIASSET_SYMBOLS as _multiasset_symbols
+                            if str(symbol or '').upper() in set(_multiasset_symbols or {}):
+                                execution_market_type = 'multiasset'
+                        except Exception:
+                            pass
+
+                    observed_volume = (
+                        structure.get('volume_analysis')
+                        or structure.get('volume')
+                        or {}
+                    ) if isinstance(structure, dict) else {}
+                    observed_macro = (
+                        structure.get('macro_context')
+                        or structure.get('_macro_context')
+                        or {}
+                    ) if isinstance(structure, dict) else {}
+                    observed_hours = (
+                        structure.get('market_hours')
+                        or {}
+                    ) if isinstance(structure, dict) else {}
+                    observed_sentiment = (
+                        structure.get('sentiment')
+                        or {}
+                    ) if isinstance(structure, dict) else {}
+                    observed_regime = {
+                        'regime': str(
+                            structure.get('_adaptive_market_regime')
+                            or structure.get('market_regime')
+                            or 'UNKNOWN'
+                        )
+                    } if isinstance(structure, dict) else {}
+
+                    execution_context = build_execution_context(
+                        structure=structure,
+                        volume=observed_volume,
+                        volatility=volatility,
+                        market_hours=observed_hours,
+                        sentiment=observed_sentiment,
+                        macro_context=observed_macro,
+                        market_regime=observed_regime,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        market_type=execution_market_type,
+                    )
+
+                    committee_result = coordinate_execution_committees(
+                        baseline_entry=baseline_entry,
+                        baseline_sl=baseline_sl,
+                        baseline_tp=baseline_tp,
+                        direction=direction,
+                        current_price=current_price,
+                        atr=atr,
+                        structure=structure,
+                        trend=trend,
+                        momentum=momentum,
+                        volatility=volatility,
+                        setup_family=(
+                            setup_family
+                            or ('MULTIASSET_CONTEXTUAL' if execution_market_type == 'multiasset' else 'UNSPECIFIED')
+                        ),
+                        liquidation=liquidation,
+                        market_type=execution_market_type,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        execution_context=execution_context,
+                        rr_floor=minimum_viable_rr,
+                        rr_ceiling=maximum_technical_rr,
+                        preferred_rr_min=preferred_rr_min,
+                        preferred_rr_max=preferred_rr_max,
+                        leverage_hint=leverage if is_futures else 1.0,
+                    ) or {}
+
+                    execution_refinement.update({
+                        'version': committee_result.get('version'),
+                        'geometry_quality': committee_result.get('geometry_quality'),
+                        'baseline_geometry_quality': committee_result.get('baseline_geometry_quality'),
+                        'improvement': committee_result.get('geometry_improvement'),
+                        'reason': committee_result.get('reason') or 'COMMITTEE_EVALUATED',
+                    })
+
+                    if committee_result.get('success'):
+                        refined_entry = float(committee_result.get('entry') or 0)
+                        refined_sl = float(committee_result.get('stop_loss') or 0)
+                        refined_tp = float(committee_result.get('take_profit') or 0)
+                        refined_risk = abs(refined_entry - refined_sl)
+                        refined_reward = abs(refined_tp - refined_entry)
+                        refined_rr = refined_reward / refined_risk if refined_risk > 0 else 0.0
+
+                        correct_side = bool(
+                            refined_entry > 0
+                            and refined_sl > 0
+                            and refined_tp > 0
+                            and refined_risk > 0
+                            and (
+                                (direction == 'long' and refined_sl < refined_entry < refined_tp)
+                                or (direction == 'short' and refined_tp < refined_entry < refined_sl)
+                            )
+                        )
+                        rr_same_safety_bucket = bool(
+                            _rr_safety_bucket(refined_rr) == _rr_safety_bucket(baseline_rr)
+                        )
+                        entry_shift_atr = abs(refined_entry - baseline_entry) / max(float(atr), 1e-12)
+                        risk_ratio = refined_risk / max(baseline_risk, 1e-12)
+                        bounded_geometry = bool(
+                            entry_shift_atr <= 0.85
+                            and 0.82 <= risk_ratio <= 1.18
+                        )
+                        geometry_quality = float(committee_result.get('geometry_quality') or 0)
+                        baseline_quality = committee_result.get('baseline_geometry_quality')
+                        improvement = committee_result.get('geometry_improvement')
+                        demonstrable_improvement = bool(
+                            baseline_quality is not None
+                            and improvement is not None
+                            and float(improvement) >= 1.50
+                            and geometry_quality >= 62.0
+                            and float(committee_result.get('entry_quality') or 0) >= 55.0
+                            and float(committee_result.get('sl_quality') or 0) >= 60.0
+                            and float(committee_result.get('tp_quality') or 0) >= 60.0
+                        )
+
+                        timing_preserved = True
+                        if is_futures and callable(getattr(self, '_futures_entry_timing_gate', None)):
+                            try:
+                                baseline_timing_levels = {
+                                    'entry': baseline_entry,
+                                    'entry_timing_mode': entry_quality.get('entry_timing_mode'),
+                                    'entry_market_location': entry_quality.get('market_location'),
+                                    'entry_location_context': entry_quality.get('location_context'),
+                                    'entry_location_basis': entry_quality.get('location_basis'),
+                                }
+                                refined_timing_levels = dict(baseline_timing_levels)
+                                refined_timing_levels['entry'] = refined_entry
+                                baseline_timing = self._futures_entry_timing_gate(
+                                    decision, trend, momentum, volatility, structure, baseline_timing_levels
+                                ) or {}
+                                refined_timing = self._futures_entry_timing_gate(
+                                    decision, trend, momentum, volatility, structure, refined_timing_levels
+                                ) or {}
+                                timing_preserved = bool(
+                                    baseline_timing.get('passed', True)
+                                    == refined_timing.get('passed', True)
+                                )
+                            except Exception:
+                                timing_preserved = True
+
+                        if (
+                            correct_side
+                            and minimum_viable_rr <= refined_rr <= maximum_technical_rr
+                            and rr_same_safety_bucket
+                            and bounded_geometry
+                            and demonstrable_improvement
+                            and timing_preserved
+                        ):
+                            entry, sl_price, tp_price = refined_entry, refined_sl, refined_tp
+                            entry_role = committee_result.get('entry_committee') or {}
+                            sl_role = committee_result.get('sl_committee') or {}
+                            tp_role = committee_result.get('tp_committee') or {}
+                            entry_source = 'Zona técnica refinada · ' + str(entry_role.get('source') or entry_source)
+                            sl_source = 'Invalidación técnica refinada · ' + str(sl_role.get('source') or sl_source)
+                            tp_source = 'Objetivo técnico refinado · ' + str(tp_role.get('source') or tp_source)
+                            execution_refinement.update({
+                                'applied': True,
+                                'reason': 'BETTER_GEOMETRY_WITH_SIGNAL_GATES_PRESERVED',
+                                'entry_quality': round(float(committee_result.get('entry_quality') or 0), 2),
+                                'sl_quality': round(float(committee_result.get('sl_quality') or 0), 2),
+                                'tp_quality': round(float(committee_result.get('tp_quality') or 0), 2),
+                                'entry_shift_atr': round(entry_shift_atr, 4),
+                                'risk_ratio_vs_baseline': round(risk_ratio, 4),
+                            })
+                        else:
+                            execution_refinement['reason'] = 'BASELINE_BETTER_OR_SIGNAL_GATE_PRESERVATION'
+                except Exception as committee_error:
+                    execution_refinement.update({
+                        'applied': False,
+                        'reason': f'FAIL_OPEN_BASELINE:{type(committee_error).__name__}',
+                    })
+
+            # ============ CALCULAR R/R ============
+            reward = abs(tp_price - entry)
+            risk = abs(entry - sl_price)
+            rr = reward / risk if risk > 0 else 0
+
+            # ==========================================================
+            # COMMIT 13 — RR / ESTADO DE EJECUCIÓN CONTEXTUAL
+            # ==========================================================
+            # The thresholds are unchanged. Commit 17.5.2 only allows a
+            # committee refinement when it stays in the SAME Safety R/R bucket
+            # as the already-valid 17.5.1 baseline.
             non_executable_reason = None
 
             if rr < minimum_viable_rr:
@@ -17355,7 +17611,19 @@ class TradingExpertSystem:
                         'EXECUTABLE_SIGNAL'
                         if non_executable_reason is None
                         else 'ANALYSIS_ONLY'
-                    )
+                    ),
+
+                # 17.5.2 execution-refinement telemetry. Public-safe names only;
+                # specialist identities, votes and weights remain backend-only.
+                'execution_refinement_applied': bool(execution_refinement.get('applied')),
+                'execution_refinement_version': execution_refinement.get('version'),
+                'execution_geometry_quality': execution_refinement.get('geometry_quality'),
+                'execution_geometry_baseline_quality': execution_refinement.get('baseline_geometry_quality'),
+                'execution_geometry_improvement': execution_refinement.get('improvement'),
+                'execution_refinement_reason': execution_refinement.get('reason'),
+                'execution_entry_quality': execution_refinement.get('entry_quality'),
+                'execution_sl_quality': execution_refinement.get('sl_quality'),
+                'execution_tp_quality': execution_refinement.get('tp_quality'),
             }
             
             print(
