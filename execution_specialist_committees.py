@@ -16,11 +16,11 @@ Design principle:
 """
 from __future__ import annotations
 
-from math import sqrt
+from math import isfinite, sqrt
 from statistics import median
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-VERSION = "COMMIT17_5_2_STABLE_EXECUTION_REFINEMENT_V1"
+VERSION = "COMMIT17_5_4_ADMISSIBLE_EXECUTION_REFINEMENT_V1"
 
 MULTI_ASSET_CLASS = {
     "SPY-USDT": "US_INDEX", "QQQ-USDT": "US_INDEX",
@@ -33,7 +33,7 @@ MULTI_ASSET_CLASS = {
 def _f(value: Any, default: float = 0.0) -> float:
     try:
         out = float(value)
-        return out if out == out else default
+        return out if isfinite(out) else default
     except Exception:
         return default
 
@@ -225,6 +225,40 @@ def _volume_profile(structure: Dict[str, Any]) -> Dict[str, Any]:
     return _d(structure.get("volume_profile") or structure.get("vp") or {})
 
 
+def _execution_structure(structure: Dict[str, Any]) -> Dict[str, Any]:
+    """Private committee view; never mutate the signal's Structure evidence.
+
+    A closed candle through an OB's invalidation edge retires that original
+    OB. A potential role reversal would require separate evidence. Missing
+    legacy indices retain compatibility; explicit invalidation is authoritative.
+    """
+    result = dict(structure)
+    closes = _d(structure.get("df")).get("close") or []
+    usable = []
+    for ob in structure.get("order_blocks") or []:
+        if not isinstance(ob, dict) or ob.get("invalidated") or ob.get("mitigated"):
+            continue
+        bounds = ob.get("price_range") or []
+        if len(bounds) < 2:
+            continue
+        bottom, top = _f(bounds[0]), _f(bounds[1])
+        if not 0 < bottom < top:
+            continue
+        index = ob.get("index")
+        if isinstance(index, int) and not isinstance(index, bool) and closes:
+            if not 0 <= index < len(closes):
+                continue
+            observed = [_f(c, -1.) for c in closes[index + 1:]]
+            if any(c <= 0 for c in observed):
+                continue
+            bull = str(ob.get("type") or "").lower() == "bullish"
+            if any(c <= bottom if bull else c >= top for c in observed):
+                continue
+        usable.append(ob)
+    result["order_blocks"] = usable
+    return result
+
+
 def _recent_candle_reaction_levels(structure: Dict[str, Any], direction: str) -> List[Tuple[float, str, float]]:
     """Low-cost reaction anchors from already-loaded candles.
 
@@ -379,7 +413,7 @@ def _collect_sl_candidates(structure: Dict[str, Any], direction: str, entry: flo
         if len(pr) >= 2:
             anchors.append((_f(pr[0] if long_side else pr[1], 0.0), "Order Block", 3.0))
     for fvg in s.get("fair_value_gaps", []) or []:
-        if not isinstance(fvg, dict): continue
+        if not isinstance(fvg, dict) or fvg.get("filled", True): continue
         if str(fvg.get("type") or "").lower() != ("bullish" if long_side else "bearish"): continue
         p = _f(fvg.get("gap_bottom" if long_side else "gap_top"), 0.0)
         if p > 0: anchors.append((p, "FVG", 2.0))
@@ -890,7 +924,8 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
                                     rr_ceiling: float = 4.5,
                                     preferred_rr_min: float = 2.0,
                                     preferred_rr_max: float = 3.2,
-                                    leverage_hint: float = 1.0) -> Dict[str, Any]:
+                                    leverage_hint: float = 1.0,
+                                    candidate_filter=None) -> Dict[str, Any]:
     """Coordinate Entry, SL and TP without becoming a second signal committee.
 
     Commit 17.1 responsibilities are intentionally narrow:
@@ -908,12 +943,17 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
     structure, trend, momentum, volatility = (
         _d(structure), _d(trend), _d(momentum), _d(volatility)
     )
+    structure = _execution_structure(structure)
     context = dict(_d(execution_context))
     context.setdefault("market_type", str(market_type or "spot").lower())
     context.setdefault("symbol", str(symbol or ""))
     context.setdefault("timeframe", str(timeframe or ""))
     market = str(market_type or "spot").lower()
-    direction = str(direction or "long").lower()
+    direction = str(direction or "").lower()
+    if direction not in {"long", "short"} or not all(
+            _f(value) > 0 for value in (baseline_entry, baseline_sl, baseline_tp, current_price, atr)):
+        return {"success": False, "reason": "INVALID_REFINEMENT_INPUT",
+                "version": VERSION, "fallback_to_baseline": True}
     leverage_hint = 1.0 if market == "spot" else max(1.0, min(100.0, _f(leverage_hint, 1.0)))
     context.setdefault("leverage_hint", round(leverage_hint, 4))
     current_price = _f(current_price, 0.0)
@@ -977,7 +1017,9 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
             and _is_correct_side(bs, be, direction, "sl")
             and _is_correct_side(bt, be, direction, "tp")
         ):
-            be_row = {"price": be, "type": "baseline", "source": "Entry base", "strength": 2.0}
+            # Score the same object as the candidate search: same family,
+            # merged confluences and exclusion of itself from its cluster.
+            be_row = next(row for row in entry_candidates if row['price'] == be)
             be_scores = _entry_specialists(
                 be_row, entry_candidates, direction=direction,
                 current_price=current_price, atr=atr, structure=structure,
@@ -985,7 +1027,7 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
                 setup_family=setup_family, context=context, market_type=market,
             )
             be_score, be_consensus = _score_candidate(be_scores, _weights_for("entry", market), role="entry")
-            be_row.update({"scores": be_scores, "committee_score": be_score, "consensus": be_consensus})
+            be_row.update({"scores": be_scores, "committee_score": round(be_score, 2), "consensus": be_consensus})
 
             base_sl_candidates = _collect_sl_candidates(
                 structure, direction, be, bs, atr, _f(context.get("activity_score"), 50.0)
@@ -994,19 +1036,19 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
                 base_sl_candidates, structure=structure, direction=direction,
                 entry=be, atr=atr, activity=_f(context.get("activity_score"), 50.0),
             )
-            bs_row = {"price": bs, "type": "baseline", "source": "SL base", "strength": 2.0}
+            bs_row = next(row for row in base_sl_candidates if row['price'] == bs)
             bs_scores = _sl_specialists(
                 bs_row, base_sl_candidates, direction=direction, entry=be,
                 tp_hint=bt, atr=atr, structure=structure, setup_family=setup_family,
                 context=context, market_type=market, leverage_hint=leverage_hint,
             )
             bs_score, bs_consensus = _score_candidate(bs_scores, _weights_for("sl", market), role="sl")
-            bs_row.update({"scores": bs_scores, "committee_score": bs_score, "consensus": bs_consensus})
+            bs_row.update({"scores": bs_scores, "committee_score": round(bs_score, 2), "consensus": bs_consensus})
 
             base_tp_candidates = _collect_tp_candidates(
                 structure, direction, be, bt, atr, liquidation=liquidation
             )
-            bt_row = {"price": bt, "type": "baseline", "source": "TP base", "strength": 2.0}
+            bt_row = next(row for row in base_tp_candidates if row['price'] == bt)
             bt_scores = _tp_specialists(
                 bt_row, base_tp_candidates, direction=direction, entry=be, sl=bs,
                 atr=atr, structure=structure, trend=trend, momentum=momentum,
@@ -1014,7 +1056,7 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
                 market_type=market, liquidation=liquidation, leverage_hint=leverage_hint,
             )
             bt_score, bt_consensus = _score_candidate(bt_scores, _weights_for("tp", market), role="tp")
-            bt_row.update({"scores": bt_scores, "committee_score": bt_score, "consensus": bt_consensus})
+            bt_row.update({"scores": bt_scores, "committee_score": round(bt_score, 2), "consensus": bt_consensus})
             baseline_geometry_quality = round(_joint_geometry_score(
                 be_row, bs_row, bt_row, baseline_rr, rr_floor, rr_ceiling,
                 preferred_rr_min, preferred_rr_max,
@@ -1025,6 +1067,7 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
     # Bounded search: enough alternatives to reconcile geometry while keeping
     # CPU/RAM deterministic and tiny.  No I/O is introduced.
     best_combo: Optional[Dict[str, Any]] = None
+    admissibility_rejections = 0
     entry_limit = min(7, len(entry_ranked))
 
     for entry_rank, entry_row in enumerate(entry_ranked[:entry_limit]):
@@ -1119,6 +1162,28 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
                         "tp": tp_rank + 1,
                     },
                 }
+                # Search among admissible alternatives, instead of selecting
+                # an out-of-bounds winner and discarding all runners-up later.
+                # The caller owns these unchanged policy limits and rechecks
+                # the winner before replacing its baseline.
+                if candidate_filter is not None:
+                    proposal = {
+                        **combo, "geometry_quality": combo["joint_score"],
+                        "baseline_geometry_quality": baseline_geometry_quality,
+                        "geometry_improvement": (round(combo["joint_score"] - baseline_geometry_quality, 2)
+                                                 if baseline_geometry_quality is not None else None),
+                        "entry_quality": entry_row["committee_score"],
+                        "sl_quality": sl_row["committee_score"],
+                        "tp_quality": tp_row["committee_score"],
+                    }
+                    try:
+                        admissible = candidate_filter(proposal) is True
+                    except Exception:
+                        return {"success": False, "reason": "REFINEMENT_GUARD_ERROR",
+                                "version": VERSION, "fallback_to_baseline": True}
+                    if not admissible:
+                        admissibility_rejections += 1
+                        continue
                 if (
                     best_combo is None
                     or combo["joint_score"] > best_combo["joint_score"]
@@ -1136,6 +1201,7 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
             "reason": "NO_COHERENT_STRUCTURAL_GEOMETRY_IMPROVEMENT",
             "version": VERSION,
             "fallback_to_baseline": True,
+            "admissibility_rejections": admissibility_rejections,
         }
 
     entry_row = best_combo["entry_committee"]
@@ -1147,6 +1213,7 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
     # Publication, preventing Commit 16 from silently changing those thresholds.
     return {
         "success": True,
+        "admissibility_rejections": admissibility_rejections,
         "version": VERSION,
         "market_type": market,
         "entry": best_combo["entry"],

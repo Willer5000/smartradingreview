@@ -16825,7 +16825,7 @@ class TradingExpertSystem:
             diagnostics
         )
     
-    def calculate_entry_levels(self, decision, trend, momentum, volatility, structure, symbol, timeframe, liquidation=None):
+    def calculate_entry_levels(self, decision, trend, momentum, volatility, structure, symbol, timeframe, liquidation=None, execution_observations=None):
         """
         Calcula niveles de entrada, SL y TP.
         
@@ -17190,7 +17190,8 @@ class TradingExpertSystem:
             #   * they cannot create a signal, rescue an invalid baseline,
             #     lower R/R rules, lower Safety, or change legacy quality scores;
             #   * any failure or ambiguous result keeps the 17.5.1 baseline.
-            # This preserves signal frequency while improving execution quality.
+            # Signal policy remains intact; actual availability still depends
+            # on closed data and the downstream execution/publication gates.
             try:
                 minimum_viable_rr = max(
                     1.0,
@@ -17277,25 +17278,28 @@ class TradingExpertSystem:
                         except Exception:
                             pass
 
-                    observed_volume = (
+                    # 17.5.4: observations live in capas, not in Structure.
+                    # Reuse loaded context; no fetch, new vote or signal gate.
+                    observations = execution_observations if isinstance(execution_observations, dict) else {}
+                    observed_volume = observations.get('volume') or (
                         structure.get('volume_analysis')
                         or structure.get('volume')
                         or {}
                     ) if isinstance(structure, dict) else {}
-                    observed_macro = (
+                    observed_macro = observations.get('macro_context') or (
                         structure.get('macro_context')
                         or structure.get('_macro_context')
                         or {}
                     ) if isinstance(structure, dict) else {}
-                    observed_hours = (
+                    observed_hours = observations.get('market_hours') or (
                         structure.get('market_hours')
                         or {}
                     ) if isinstance(structure, dict) else {}
-                    observed_sentiment = (
+                    observed_sentiment = observations.get('sentiment') or (
                         structure.get('sentiment')
                         or {}
                     ) if isinstance(structure, dict) else {}
-                    observed_regime = {
+                    observed_regime = observations.get('market_regime') or {
                         'regime': str(
                             structure.get('_adaptive_market_regime')
                             or structure.get('market_regime')
@@ -17315,6 +17319,85 @@ class TradingExpertSystem:
                         timeframe=timeframe,
                         market_type=execution_market_type,
                     )
+
+                    # 17.5.4: apply existing bounds DURING the search and
+                    # recheck the selected winner. Never reuse another price's
+                    # distance/timing label, or accept an unverified timing gate.
+                    timing_cache = {}
+
+                    def _refined_entry_metadata(price):
+                        from execution_geometry_committee import entry_candidate_adjustment
+                        distance = abs(float(current_price) - price) / max(float(atr), 1e-12)
+                        timing = entry_candidate_adjustment(
+                            execution_geometry_profile, candidate_type=entry_quality.get('candidate_type'),
+                            distance_atr=distance, market_location=entry_quality.get('market_location'),
+                            directional_extension=bool(entry_quality.get('directional_extension')),
+                            correct_side_near_reaction=False,
+                        )['timing_mode']
+                        return {'distance_atr_current': round(distance, 4),
+                                'distance_pct_current': round(abs(float(current_price) - price) / float(current_price) * 100.0, 4),
+                                'entry_timing_mode': timing}
+
+                    def _refinement_admissible(proposal):
+                        import math
+                        re = float(proposal.get('entry') or 0)
+                        rs = float(proposal.get('stop_loss') or 0)
+                        rt = float(proposal.get('take_profit') or 0)
+                        values = (re, rs, rt, float(proposal.get('geometry_quality') or 0),
+                                  float(proposal.get('geometry_improvement') or 0),
+                                  float(proposal.get('entry_quality') or 0),
+                                  float(proposal.get('sl_quality') or 0), float(proposal.get('tp_quality') or 0))
+                        if not all(math.isfinite(v) for v in values):
+                            return False
+                        risk = abs(re - rs)
+                        rr_candidate = abs(rt - re) / risk if risk > 0 else 0.0
+                        if not (
+                            min(re, rs, rt) > 0 and risk > 0
+                            and ((direction == 'long' and rs < re < rt and re <= current_price)
+                                 or (direction == 'short' and rt < re < rs and re >= current_price))
+                            and minimum_viable_rr <= rr_candidate <= maximum_technical_rr
+                            and _rr_safety_bucket(rr_candidate) == _rr_safety_bucket(baseline_rr)
+                            and abs(re - baseline_entry) / max(float(atr), 1e-12) <= 0.85
+                            and 0.82 <= risk / max(baseline_risk, 1e-12) <= 1.18
+                            and proposal.get('baseline_geometry_quality') is not None
+                            and proposal.get('geometry_improvement') is not None
+                            and values[4] >= 1.50 and values[3] >= 62.0
+                            and values[5] >= 55.0 and values[6] >= 60.0 and values[7] >= 60.0
+                        ):
+                            return False
+                        metadata = _refined_entry_metadata(re)
+                        # Retain both the contextual timing class and the 0.60
+                        # ATR lower-TF trigger boundary used by Entry Reaction.
+                        # Refinement cannot silently change execution permissions.
+                        if metadata['entry_timing_mode'] != entry_quality.get('entry_timing_mode'):
+                            return False
+                        if is_futures:
+                            if (abs(current_price - re) / atr <= 0.60) != (abs(current_price - baseline_entry) / atr <= 0.60):
+                                return False
+                            gate = getattr(self, '_futures_entry_timing_gate', None)
+                            if not callable(gate):
+                                return False
+                            def _timing_at(price):
+                                if price not in timing_cache:
+                                    md = _refined_entry_metadata(price)
+                                    gate_levels = {
+                                        'entry': price, 'entry_timing_mode': md['entry_timing_mode'],
+                                        'entry_market_location': entry_quality.get('market_location'),
+                                        'entry_location_context': entry_quality.get('location_context'),
+                                        'entry_location_basis': entry_quality.get('location_basis'),
+                                    }
+                                    try:
+                                        check = gate(decision, trend, momentum, volatility, structure, gate_levels)
+                                        valid = (isinstance(check, dict) and isinstance(check.get('passed'), bool)
+                                                 and check.get('status') != 'TIMING_DIAGNOSTIC_ERROR')
+                                        timing_cache[price] = check['passed'] if valid else None
+                                    except Exception:
+                                        timing_cache[price] = None
+                                return timing_cache[price]
+                            baseline_passed, refined_passed = _timing_at(baseline_entry), _timing_at(re)
+                            if baseline_passed is None or refined_passed is None or baseline_passed != refined_passed:
+                                return False
+                        return True
 
                     committee_result = coordinate_execution_committees(
                         baseline_entry=baseline_entry,
@@ -17341,6 +17424,7 @@ class TradingExpertSystem:
                         preferred_rr_min=preferred_rr_min,
                         preferred_rr_max=preferred_rr_max,
                         leverage_hint=leverage if is_futures else 1.0,
+                        candidate_filter=_refinement_admissible,
                     ) or {}
 
                     execution_refinement.update({
@@ -17351,97 +17435,28 @@ class TradingExpertSystem:
                         'reason': committee_result.get('reason') or 'COMMITTEE_EVALUATED',
                     })
 
-                    if committee_result.get('success'):
-                        refined_entry = float(committee_result.get('entry') or 0)
-                        refined_sl = float(committee_result.get('stop_loss') or 0)
-                        refined_tp = float(committee_result.get('take_profit') or 0)
-                        refined_risk = abs(refined_entry - refined_sl)
-                        refined_reward = abs(refined_tp - refined_entry)
-                        refined_rr = refined_reward / refined_risk if refined_risk > 0 else 0.0
-
-                        correct_side = bool(
-                            refined_entry > 0
-                            and refined_sl > 0
-                            and refined_tp > 0
-                            and refined_risk > 0
-                            and (
-                                (direction == 'long' and refined_sl < refined_entry < refined_tp)
-                                or (direction == 'short' and refined_tp < refined_entry < refined_sl)
-                            )
-                        )
-                        rr_same_safety_bucket = bool(
-                            _rr_safety_bucket(refined_rr) == _rr_safety_bucket(baseline_rr)
-                        )
-                        entry_shift_atr = abs(refined_entry - baseline_entry) / max(float(atr), 1e-12)
-                        risk_ratio = refined_risk / max(baseline_risk, 1e-12)
-                        bounded_geometry = bool(
-                            entry_shift_atr <= 0.85
-                            and 0.82 <= risk_ratio <= 1.18
-                        )
-                        geometry_quality = float(committee_result.get('geometry_quality') or 0)
-                        baseline_quality = committee_result.get('baseline_geometry_quality')
-                        improvement = committee_result.get('geometry_improvement')
-                        demonstrable_improvement = bool(
-                            baseline_quality is not None
-                            and improvement is not None
-                            and float(improvement) >= 1.50
-                            and geometry_quality >= 62.0
-                            and float(committee_result.get('entry_quality') or 0) >= 55.0
-                            and float(committee_result.get('sl_quality') or 0) >= 60.0
-                            and float(committee_result.get('tp_quality') or 0) >= 60.0
-                        )
-
-                        timing_preserved = True
-                        if is_futures and callable(getattr(self, '_futures_entry_timing_gate', None)):
-                            try:
-                                baseline_timing_levels = {
-                                    'entry': baseline_entry,
-                                    'entry_timing_mode': entry_quality.get('entry_timing_mode'),
-                                    'entry_market_location': entry_quality.get('market_location'),
-                                    'entry_location_context': entry_quality.get('location_context'),
-                                    'entry_location_basis': entry_quality.get('location_basis'),
-                                }
-                                refined_timing_levels = dict(baseline_timing_levels)
-                                refined_timing_levels['entry'] = refined_entry
-                                baseline_timing = self._futures_entry_timing_gate(
-                                    decision, trend, momentum, volatility, structure, baseline_timing_levels
-                                ) or {}
-                                refined_timing = self._futures_entry_timing_gate(
-                                    decision, trend, momentum, volatility, structure, refined_timing_levels
-                                ) or {}
-                                timing_preserved = bool(
-                                    baseline_timing.get('passed', True)
-                                    == refined_timing.get('passed', True)
-                                )
-                            except Exception:
-                                timing_preserved = True
-
-                        if (
-                            correct_side
-                            and minimum_viable_rr <= refined_rr <= maximum_technical_rr
-                            and rr_same_safety_bucket
-                            and bounded_geometry
-                            and demonstrable_improvement
-                            and timing_preserved
-                        ):
-                            entry, sl_price, tp_price = refined_entry, refined_sl, refined_tp
-                            entry_role = committee_result.get('entry_committee') or {}
-                            sl_role = committee_result.get('sl_committee') or {}
-                            tp_role = committee_result.get('tp_committee') or {}
-                            entry_source = 'Zona técnica refinada · ' + str(entry_role.get('source') or entry_source)
-                            sl_source = 'Invalidación técnica refinada · ' + str(sl_role.get('source') or sl_source)
-                            tp_source = 'Objetivo técnico refinado · ' + str(tp_role.get('source') or tp_source)
-                            execution_refinement.update({
-                                'applied': True,
-                                'reason': 'BETTER_GEOMETRY_WITH_SIGNAL_GATES_PRESERVED',
-                                'entry_quality': round(float(committee_result.get('entry_quality') or 0), 2),
-                                'sl_quality': round(float(committee_result.get('sl_quality') or 0), 2),
-                                'tp_quality': round(float(committee_result.get('tp_quality') or 0), 2),
-                                'entry_shift_atr': round(entry_shift_atr, 4),
-                                'risk_ratio_vs_baseline': round(risk_ratio, 4),
-                            })
-                        else:
-                            execution_refinement['reason'] = 'BASELINE_BETTER_OR_SIGNAL_GATE_PRESERVATION'
+                    if committee_result.get('success') and _refinement_admissible(committee_result):
+                        entry = float(committee_result['entry'])
+                        sl_price = float(committee_result['stop_loss'])
+                        tp_price = float(committee_result['take_profit'])
+                        entry_quality.update(_refined_entry_metadata(entry))
+                        entry_role = committee_result.get('entry_committee') or {}
+                        sl_role = committee_result.get('sl_committee') or {}
+                        tp_role = committee_result.get('tp_committee') or {}
+                        entry_source = 'Zona técnica refinada · ' + str(entry_role.get('source') or entry_source)
+                        sl_source = 'Invalidación técnica refinada · ' + str(sl_role.get('source') or sl_source)
+                        tp_source = 'Objetivo técnico refinado · ' + str(tp_role.get('source') or tp_source)
+                        execution_refinement.update({
+                            'applied': True,
+                            'reason': 'BETTER_GEOMETRY_WITH_SIGNAL_GATES_PRESERVED',
+                            'entry_quality': round(float(committee_result.get('entry_quality') or 0), 2),
+                            'sl_quality': round(float(committee_result.get('sl_quality') or 0), 2),
+                            'tp_quality': round(float(committee_result.get('tp_quality') or 0), 2),
+                            'entry_shift_atr': round(abs(entry - baseline_entry) / max(float(atr), 1e-12), 4),
+                            'risk_ratio_vs_baseline': round(abs(entry - sl_price) / max(baseline_risk, 1e-12), 4),
+                        })
+                    elif committee_result.get('success'):
+                        execution_refinement['reason'] = 'BASELINE_BETTER_OR_SIGNAL_GATE_PRESERVATION'
                 except Exception as committee_error:
                     execution_refinement.update({
                         'applied': False,
@@ -20520,7 +20535,8 @@ class TradingExpertSystem:
                         structure,
                         symbol,
                         timeframe,
-                        liquidation=liquidation_data
+                        liquidation=liquidation_data,
+                        execution_observations=capas,
                     )
                     
                     # RC9.7.11: Futures reutiliza EXACTAMENTE la fracción
@@ -26995,7 +27011,13 @@ def _get_operational_mtf_peer_minimal(analyzer, symbol, target_tf, system_type):
             _is_multi=str(symbol or '').upper().replace('/', '-') in _multi_symbols
         except Exception:
             _is_multi=False
-        if _is_multi and hasattr(analyzer, '_prepare_closed_candle_analysis_data'):
+        # 17.5.4: a CLOSED_CANDLE label must come from a validated closed
+        # frame in crypto Futures as well as Multi-Asset. The shared raw
+        # fetcher deliberately also returns the developing candle.
+        _derivative = _stype in ('futures', 'multiasset') or _is_multi
+        if _derivative:
+            if not callable(getattr(analyzer, '_prepare_closed_candle_analysis_data', None)):
+                return None
             _ctx=analyzer._prepare_closed_candle_analysis_data(symbol,target_tf)
             if not isinstance(_ctx,dict) or not _ctx.get('success'):
                 return None
@@ -27004,12 +27026,14 @@ def _get_operational_mtf_peer_minimal(analyzer, symbol, target_tf, system_type):
             df=analyzer.get_kucoin_data(symbol, target_tf)
         if df is None or len(df)<80:
             return None
-        if _stype!='futures':
+        if not _derivative:
             try:
                 from q6_integrity import prepare_spot_frame
                 df=prepare_spot_frame(df, target_tf)
             except Exception:
-                pass
+                return None
+        if df is None or len(df)<80:
+            return None
         trend=analyzer.analyze_trend_layer(df)
         momentum=analyzer.analyze_momentum_layer(df)
         volume=analyzer.analyze_volume_layer(df, target_tf)
