@@ -16841,6 +16841,193 @@ class TradingExpertSystem:
             diagnostics
         )
     
+    def _execution_geometry_valid(self, decision, levels):
+        """True only when a confirmed thesis has a complete coherent geometry."""
+        if not isinstance(levels, dict):
+            return False
+        try:
+            entry = float(levels.get('entry') or 0)
+            sl = float(levels.get('stop_loss') or 0)
+            tp = float(levels.get('take_profit') or 0)
+        except (TypeError, ValueError):
+            return False
+        action = str(decision or '').upper()
+        if entry <= 0 or sl <= 0 or tp <= 0:
+            return False
+        if action in ('LONG', 'COMPRA_SPOT'):
+            return sl < entry < tp
+        if action in ('SHORT', 'VENTA_SPOT'):
+            return tp < entry < sl
+        return False
+
+    def _recover_confirmed_execution_levels(
+        self, decision, trend, momentum, volatility, structure, symbol, timeframe,
+        liquidation=None, execution_context=None, failure_reason=None
+    ):
+        """Recover Entry/SL/TP after the thesis is already confirmed.
+
+        Commit 17.4.1 contract:
+        - this function NEVER creates LONG/SHORT;
+        - it is called only after the directional thesis already exists;
+        - Entry/SL/TP specialists must return the best usable geometry;
+        - a legacy selector/runtime exception cannot silently turn a confirmed
+          signal into Entry=current price, SL=0, TP=0, leverage=0.
+        """
+        structure = structure if isinstance(structure, dict) else {}
+        trend = trend if isinstance(trend, dict) else {}
+        momentum = momentum if isinstance(momentum, dict) else {}
+        volatility = volatility if isinstance(volatility, dict) else {}
+        action = str(decision or '').upper()
+        direction = 'long' if action in ('LONG', 'COMPRA_SPOT') else 'short'
+        is_futures = action in ('LONG', 'SHORT')
+        current_price = float(structure.get('current_price') or 0)
+        if current_price <= 0:
+            return self._get_default_levels(current_price, symbol)
+
+        atr = float(volatility.get('atr') or 0)
+        if atr <= 0:
+            atr_pct_raw = float(volatility.get('atr_pct') or 0)
+            atr = current_price * max(0.002, atr_pct_raw / 100.0 if atr_pct_raw > 0 else 0.02)
+        atr = max(atr, current_price * 1e-5)
+
+        base_leverage = float(volatility.get('suggested_leverage') or (10 if is_futures else 1))
+        if is_futures:
+            if str(timeframe) in ('5m','15m','30m'):
+                leverage = int(max(5, min(50, base_leverage)))
+            elif str(timeframe) in ('1h','2h','4h'):
+                leverage = int(max(3, min(20, base_leverage)))
+            else:
+                leverage = int(max(1, min(10, base_leverage)))
+        else:
+            leverage = 1
+
+        multi_symbols = {
+            'SPY-USDT','QQQ-USDT','CL-USDT','NATGAS-USDT',
+            'COPPER-USDT','XAG-USDT','KSTR-USDT'
+        }
+        market_scope = (
+            'multiasset' if str(symbol or '').upper() in multi_symbols
+            else ('futures' if is_futures else 'spot')
+        )
+        setup_family = str(
+            ((structure.get('_contingency_playbook') or {}).get('setup_family'))
+            or ''
+        ).upper()
+
+        combo = {}
+        try:
+            from execution_specialist_committees import coordinate_execution_committees
+            combo = coordinate_execution_committees(
+                baseline_entry=0.0,
+                baseline_sl=0.0,
+                baseline_tp=0.0,
+                direction=direction,
+                current_price=current_price,
+                atr=atr,
+                structure=structure,
+                trend=trend,
+                momentum=momentum,
+                volatility=volatility,
+                setup_family=setup_family,
+                liquidation=liquidation,
+                market_type=market_scope,
+                symbol=symbol,
+                timeframe=timeframe,
+                execution_context=(execution_context or {}),
+                rr_floor=1.8,
+                rr_ceiling=4.5,
+                preferred_rr_min=2.0,
+                preferred_rr_max=3.2,
+                leverage_hint=float(leverage or 1),
+            ) or {}
+        except Exception as committee_error:
+            combo = {
+                'success': False,
+                'reason': f'COMMITTEE_RECOVERY_ERROR:{type(committee_error).__name__}',
+            }
+
+        if combo.get('success'):
+            entry = float(combo.get('entry') or 0)
+            sl = float(combo.get('stop_loss') or 0)
+            tp = float(combo.get('take_profit') or 0)
+            rr = float(combo.get('risk_reward') or 0)
+            entry_score = max(50.0, min(95.0, float(combo.get('entry_quality') or 50.0)))
+            sl_score = max(50.0, min(95.0, float(combo.get('sl_quality') or 50.0)))
+            tp_score = max(50.0, min(95.0, float(combo.get('tp_quality') or 50.0)))
+            entry_source = str(((combo.get('entry_committee') or {}).get('source')) or 'Zona seleccionada por comité Entry')
+            sl_source = str(((combo.get('sl_committee') or {}).get('source')) or 'Invalidación seleccionada por comité SL')
+            tp_source = str(((combo.get('tp_committee') or {}).get('source')) or 'Objetivo seleccionado por comité TP')
+            recovery_mode = str(combo.get('recovery_mode') or 'SPECIALIST_COMMITTEE_RECOVERY')
+        else:
+            # Last-resort deterministic geometry is still AFTER the confirmed
+            # thesis and uses ATR only as noise normalization.  It prevents a
+            # software exception from leaking zero levels to the user; it does
+            # not create a trading direction.
+            previous_close = float(structure.get('previous_close') or current_price)
+            if direction == 'long':
+                entry = min(previous_close, current_price - 0.35 * atr)
+                risk = max(1.10 * atr, abs(entry) * 0.001)
+                sl = entry - risk
+                tp = entry + risk * 2.0
+            else:
+                entry = max(previous_close, current_price + 0.35 * atr)
+                risk = max(1.10 * atr, abs(entry) * 0.001)
+                sl = entry + risk
+                tp = entry - risk * 2.0
+            rr = 2.0
+            entry_score = sl_score = tp_score = 50.0
+            entry_source = 'Zona de reacción técnica de contingencia'
+            sl_source = 'Invalidación protegida por ruido/volatilidad'
+            tp_source = 'Objetivo económico técnico de contingencia'
+            recovery_mode = 'LOCAL_LAST_RESORT_AFTER_COMMITTEE_FAILURE'
+
+        recovered = {
+            'entry': self._round_price(entry, symbol),
+            'entry_source': entry_source,
+            'entry_score': round(entry_score, 1),
+            'entry_quality_version': '17.4.1_RUNTIME_RECOVERY',
+            'entry_smc_raw_score': round(entry_score, 2),
+            'entry_reachability_score': 50.0,
+            'entry_reachability_label': 'RECOVERED_AFTER_RUNTIME_FAILURE',
+            'entry_timing_mode': 'COORDINATED_EXECUTION_RECOVERY',
+            'entry_independent_confluence_families': 1,
+            'entry_location_basis': 'ALREADY_CONFIRMED_THESIS',
+            'entry_atr_role': 'NORMALIZER_NOT_SIGNAL_SOURCE',
+            'stop_loss': self._round_price(sl, symbol),
+            'take_profit': self._round_price(tp, symbol),
+            'leverage': int(max(1, leverage)),
+            'risk_reward': round(float(rr or 0), 2),
+            'minimum_viable_rr': 1.8,
+            'maximum_technical_rr': 4.5,
+            'suggested_size': 0.5,
+            'tp_source': tp_source,
+            'sl_source': sl_source,
+            'quality_score_version': '17.4.1_RUNTIME_RECOVERY',
+            'tp_probability': round(tp_score / 100.0, 2),
+            'tp_quality_score': round(tp_score, 1),
+            'tp_quality_label': 'MEDIA' if tp_score < 70 else 'ALTA',
+            'sl_reliability': round(sl_score / 100.0, 2),
+            'min_tp_distance_pct': self._calculate_min_tp_distance_pct(timeframe, max(1, leverage), is_futures),
+            'signal_confirmed': True,
+            'signal_confirmation_status': 'CONFIRMED_DIRECTIONAL',
+            'execution_ready': True,
+            'execution_status': 'READY',
+            'execution_pending_reason': None,
+            'rejected_reason': None,
+            'is_rejected': False,
+            'is_executable': True,
+            'publication_status': 'EXECUTABLE_SIGNAL',
+            'execution_recovery_mode': recovery_mode,
+            'execution_recovery_diagnostic': str(failure_reason or combo.get('reason') or '')[:180],
+        }
+        if not self._execution_geometry_valid(action, recovered):
+            # This should be unreachable; fail visibly rather than publish zeros.
+            recovered = self._get_default_levels(current_price, symbol)
+            recovered['publication_status'] = 'ANALYSIS_ERROR'
+            recovered['rejected_reason'] = 'EXECUTION_GEOMETRY_RECOVERY_FAILED'
+            recovered['execution_recovery_diagnostic'] = str(failure_reason or combo.get('reason') or '')[:180]
+        return recovered
+
     def calculate_entry_levels(self, decision, trend, momentum, volatility, structure, symbol, timeframe, liquidation=None, execution_context=None):
         """
         Calcula niveles de entrada, SL y TP.
@@ -17595,6 +17782,13 @@ class TradingExpertSystem:
             print(f"❌ Error en calculate_entry_levels (FASE 3): {e}")
             import traceback
             traceback.print_exc()
+            if str(decision or '').upper() in ('COMPRA_SPOT','VENTA_SPOT','LONG','SHORT'):
+                print('🛠️ [17.4.1] Recuperando geometría obligatoria tras excepción de runtime')
+                return self._recover_confirmed_execution_levels(
+                    decision, trend, momentum, volatility, structure, symbol, timeframe,
+                    liquidation=liquidation, execution_context=execution_context,
+                    failure_reason=f'{type(e).__name__}:{str(e)[:120]}',
+                )
             return self._get_default_levels(current_price if 'current_price' in locals() else 0, symbol)
     
     def _build_rejected_levels(
@@ -20485,13 +20679,24 @@ class TradingExpertSystem:
                         except Exception:
                             pass
                     
+                    if not self._execution_geometry_valid(accion_consenso, levels):
+                        print('⚠️ [17.4.1] Geometría inválida tras cálculo; recuperación obligatoria antes de publicación')
+                        levels = self._recover_confirmed_execution_levels(
+                            accion_consenso, trend, momentum, volatility, structure, symbol, timeframe,
+                            liquidation=liquidation_data, execution_context=commit16_execution_context,
+                            failure_reason='POST_CALC_INVALID_GEOMETRY',
+                        )
                     print(f"✅ Niveles calculados: Entry={levels['entry']}, SL={levels['stop_loss']}, TP={levels['take_profit']}")
                     
                 except Exception as e:
                     print(f"❌ ERROR en calculate_entry_levels: {e}")
                     import traceback
                     traceback.print_exc()
-                    levels = self._get_default_levels(structure.get('current_price', 0), symbol)
+                    levels = self._recover_confirmed_execution_levels(
+                        accion_consenso, trend, momentum, volatility, structure, symbol, timeframe,
+                        liquidation=liquidation_data, execution_context=commit16_execution_context,
+                        failure_reason=f'CALLER_EXCEPTION:{type(e).__name__}:{str(e)[:100]}',
+                    )
             else:
                 levels = self._get_default_levels(structure.get('current_price', 0), symbol)
 
@@ -20579,14 +20784,21 @@ class TradingExpertSystem:
                 # R4: anti-FOMO is an advisory about *where* to enter, never
                 # a state that hides a confirmed signal.  The Entry committee has
                 # already supplied the non-chasing reaction level to wait for.
-                levels['signal_confirmed'] = True
-                levels['signal_confirmation_status'] = 'CONFIRMED_DIRECTIONAL'
-                levels['execution_ready'] = True
-                levels['execution_status'] = 'READY'
-                levels['is_executable'] = True
-                levels['publication_status'] = 'EXECUTABLE_SIGNAL'
-                levels['rejected_reason'] = None
-                levels['execution_pending_reason'] = None
+                if not self._execution_geometry_valid(original_action_36x, levels):
+                    levels = self._recover_confirmed_execution_levels(
+                        original_action_36x, trend, momentum, volatility, structure, symbol, timeframe,
+                        liquidation=liquidation_data, execution_context=commit16_execution_context,
+                        failure_reason='ANTI_FOMO_INVALID_GEOMETRY',
+                    )
+                if self._execution_geometry_valid(original_action_36x, levels):
+                    levels['signal_confirmed'] = True
+                    levels['signal_confirmation_status'] = 'CONFIRMED_DIRECTIONAL'
+                    levels['execution_ready'] = True
+                    levels['execution_status'] = 'READY'
+                    levels['is_executable'] = True
+                    levels['publication_status'] = 'EXECUTABLE_SIGNAL'
+                    levels['rejected_reason'] = None
+                    levels['execution_pending_reason'] = None
                 levels['anti_fomo_advisory'] = str(
                     spot_execution_quality.get('reason') or 'WAIT_FOR_ENTRY_ZONE'
                 )[:320]
@@ -20620,14 +20832,21 @@ class TradingExpertSystem:
                         levels['execution_advisories'] = list(
                             operational_execution.get('reasons') or []
                         )[:6]
-                        levels['signal_confirmed'] = True
-                        levels['signal_confirmation_status'] = 'CONFIRMED_DIRECTIONAL'
-                        levels['execution_ready'] = True
-                        levels['execution_status'] = 'READY'
-                        levels['is_executable'] = True
-                        levels['publication_status'] = 'EXECUTABLE_SIGNAL'
-                        levels['execution_pending_reason'] = None
-                        levels['rejected_reason'] = None
+                        if not self._execution_geometry_valid(_original_operational_action, levels):
+                            levels = self._recover_confirmed_execution_levels(
+                                _original_operational_action, trend, momentum, volatility, structure, symbol, timeframe,
+                                liquidation=liquidation_data, execution_context=commit16_execution_context,
+                                failure_reason='LEGACY_SETUP_GUARD_INVALID_GEOMETRY',
+                            )
+                        if self._execution_geometry_valid(_original_operational_action, levels):
+                            levels['signal_confirmed'] = True
+                            levels['signal_confirmation_status'] = 'CONFIRMED_DIRECTIONAL'
+                            levels['execution_ready'] = True
+                            levels['execution_status'] = 'READY'
+                            levels['is_executable'] = True
+                            levels['publication_status'] = 'EXECUTABLE_SIGNAL'
+                            levels['execution_pending_reason'] = None
+                            levels['rejected_reason'] = None
                         print(
                             f"🧠 [RC9.2 EXECUTION] {_original_operational_action} "
                             "mantiene geometría ejecutable; observaciones en modo advisory"
@@ -32127,12 +32346,18 @@ def api_saved_signals_create():
             data.get('source_context')
             or ''
         ).upper()
+        is_multiasset_source = source_context in (
+            'MULTIASSET_PREVIOUS_CONFIRMED',
+            'MULTIASSET_ACTIVE_CONFIRMED',
+        )
 
         if source_context not in (
             'PREVIOUS_CONFIRMED',
             'PREVIOUS_ANALYSIS_ONLY',
             'ACTIVE_CONFIRMED',
-            'ACTIVE_ANALYSIS_ONLY'
+            'ACTIVE_ANALYSIS_ONLY',
+            'MULTIASSET_PREVIOUS_CONFIRMED',
+            'MULTIASSET_ACTIVE_CONFIRMED'
         ):
             return jsonify({
                 'success': False,
@@ -32442,6 +32667,80 @@ def api_saved_signals_create():
                     data['source_valid_until'] = _lc.get('valid_until')
                     if str(_lc.get('lifecycle_status') or '') == 'entry_touched':
                         data['already_in_position'] = True
+
+        elif is_multiasset_source:
+            # Commit 17.4.1 — official Multi-Asset signals use the same saved
+            # signal lifecycle as Futures, but validation must come from the
+            # Multi-Asset cache rather than the crypto Futures lifecycle.
+            source_signal_id = str(data.get('source_signal_id') or '').strip()
+            if not source_signal_id:
+                return jsonify({'success': False, 'error': 'Falta source_signal_id de la señal Multi-Activo.'}), 400
+
+            source_result = None
+            for raw_result in _multiasset_combined_analyses(fresh_only=True).values():
+                if (
+                    isinstance(raw_result, dict)
+                    and str(raw_result.get('signal_id') or '') == source_signal_id
+                ):
+                    source_result = raw_result
+                    break
+
+            if source_result is None:
+                return jsonify({
+                    'success': False,
+                    'error': 'La señal Multi-Activo ya no está disponible o perdió vigencia. Actualiza la lista.'
+                }), 409
+            if not _multiasset_is_executable(source_result):
+                return jsonify({
+                    'success': False,
+                    'error': 'El análisis Multi-Activo ya no es una señal ejecutable.'
+                }), 409
+            if not _multiasset_signal_is_vigent(source_result):
+                return jsonify({
+                    'success': False,
+                    'error': 'La vigencia de la señal Multi-Activo ya finalizó.'
+                }), 409
+
+            source_decision = source_result.get('decision') or {}
+            source_levels = source_result.get('levels') or {}
+            _ma_action = str(source_decision.get('action') or '').upper()
+            try:
+                _ma_entry = float(source_levels.get('entry') or 0)
+                _ma_sl = float(source_levels.get('stop_loss') or 0)
+                _ma_tp = float(source_levels.get('take_profit') or 0)
+            except (TypeError, ValueError):
+                _ma_entry = _ma_sl = _ma_tp = 0.0
+            _ma_geo = bool(
+                _ma_entry > 0 and _ma_sl > 0 and _ma_tp > 0
+                and ((_ma_action == 'LONG' and _ma_sl < _ma_entry < _ma_tp)
+                     or (_ma_action == 'SHORT' and _ma_tp < _ma_entry < _ma_sl))
+            )
+            if not _ma_geo:
+                return jsonify({
+                    'success': False,
+                    'error': 'La señal Multi-Activo no conserva una geometría Entry/SL/TP válida.'
+                }), 409
+
+            # Canonical source snapshot. The modal can still edit personal
+            # levels, but the audit trail preserves the engine geometry.
+            data['symbol'] = source_result.get('symbol') or data.get('symbol')
+            data['timeframe'] = source_result.get('timeframe') or data.get('timeframe')
+            data['action'] = _ma_action
+            data['confidence'] = float(source_decision.get('confidence') or data.get('confidence') or 0)
+            data['source_signal_id'] = source_signal_id
+            data['candle_timestamp'] = source_result.get('source_candle_timestamp') or data.get('candle_timestamp')
+            data['source_valid_until'] = source_result.get('valid_until') or source_levels.get('valid_until')
+            data['execution_origin'] = 'SYSTEM_EXECUTABLE'
+            data['risk_class'] = 'PREMIUM'
+            data['system_executable'] = True
+            data['engine_publication_status'] = 'EXECUTABLE_SIGNAL'
+            data['execution_safety_at_save'] = source_levels.get('execution_safety')
+            data['original_risk_reward'] = source_levels.get('risk_reward')
+            data['original_confidence'] = float(source_decision.get('confidence') or 0)
+            data['original_entry'] = _ma_entry
+            data['original_stop_loss'] = _ma_sl
+            data['original_take_profit'] = _ma_tp
+            data['original_leverage'] = int(source_levels.get('leverage') or 1)
 
         else:
         
@@ -34455,6 +34754,13 @@ def _multiasset_public_analysis_candidate(result):
         classification = 'EXECUTABLE_SIGNAL'
         status_label = 'SEÑAL EJECUTABLE'
         reason = 'La configuración técnica cumple los requisitos actuales de ejecución.'
+    elif directional and signal_confirmed and not _ma_geometry:
+        classification = 'LEGACY_INVALID_GEOMETRY'
+        status_label = 'REGISTRO LEGACY · REQUIERE RECÁLCULO'
+        reason = (
+            'La dirección quedó registrada por una versión anterior, pero Entry/SL/TP no son válidos. '
+            'No se presenta como señal operable; el siguiente análisis la reemplaza con geometría completa.'
+        )
     elif directional and signal_confirmed:
         classification = 'CONFIRMED_PENDING_EXECUTION'
         status_label = 'SEÑAL CONFIRMADA · ESPERANDO EJECUCIÓN'
@@ -34522,7 +34828,7 @@ def _multiasset_public_analysis_candidate(result):
         'execution_status': ('READY' if executable else 'PENDING_EXECUTION' if signal_confirmed else 'NOT_READY'),
         'is_executable': executable,
         'is_active': executable,
-        'manual_save_allowed': False,
+        'manual_save_allowed': bool(executable),
         'manual_risk_class': risk_class,
         'manual_risk_reason': reason,
         'manual_requires_ack': False,
@@ -39393,11 +39699,17 @@ def _classify_futures_analysis_result(
         # contain coherent levels are immediately treated as normal signals.
         classification = 'EXECUTABLE_SIGNAL'
         reason = 'Señal confirmada con Entry, Stop Loss y Take Profit técnicamente definidos.'
+    elif signal_confirmed and (entry <= 0 or stop_loss <= 0 or take_profit <= 0):
+        classification = 'ANALYSIS_ERROR'
+        reason = (
+            'Registro legacy con geometría incompleta. No se considera señal confirmada operable; '
+            'el siguiente análisis debe reconstruir Entry/SL/TP.'
+        )
     elif engine_status == 'CONFIRMED_PENDING_EXECUTION' or (signal_confirmed and engine_status != 'EXECUTABLE_SIGNAL'):
         classification = 'CONFIRMED_PENDING_EXECUTION'
         reason = _futures_reason_text(
             levels.get('execution_pending_reason') or rejection_reason,
-            'Registro legacy pendiente; será recalculado con geometría obligatoria R4.'
+            'Registro legacy pendiente; será recalculado con geometría obligatoria 17.4.1.'
         )
     elif confidence < float(min_confidence or 0):
         classification = 'ANALYSIS_ONLY'
@@ -39469,6 +39781,9 @@ def _classify_futures_analysis_result(
         active_reason = (
             'Registro legacy sin geometría completa; R4 lo recalculará antes de publicarlo como señal.'
         )
+    elif classification == 'ANALYSIS_ERROR':
+        status_label = 'REGISTRO LEGACY · REQUIERE RECÁLCULO'
+        active_reason = 'La geometría del registro no es válida y no se considera una señal operable.'
     elif classification == 'ANALYSIS_ONLY':
         status_label = 'ANÁLISIS DIRECCIONAL · NO CONFIRMADO PARA EJECUCIÓN'
         active_reason = 'Permanece como análisis, no como señal confirmada.'

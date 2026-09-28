@@ -1478,7 +1478,9 @@ function _decodeFuturesSignal(encodedSignal) {
 window.openSaveSignalFromCard = function(event, encodedSignal, alreadyInPosition) {
     if (event) event.stopPropagation();
     const sig = _decodeFuturesSignal(encodedSignal);
-    if (sig) sig.source_context = 'PREVIOUS_CONFIRMED';
+    if (sig) sig.source_context = window.IS_MULTI_ASSET_PAGE
+        ? 'MULTIASSET_PREVIOUS_CONFIRMED'
+        : 'PREVIOUS_CONFIRMED';
     window.openSaveSignalModal(sig, Boolean(alreadyInPosition));
 };
 
@@ -1489,7 +1491,9 @@ window.openSaveActiveSignalFromCard = function(event, encodedSignal, alreadyInPo
     if (event) event.stopPropagation();
     const sig = _decodeFuturesSignal(encodedSignal);
     if (!sig) return;
-    sig.source_context = 'ACTIVE_CONFIRMED';
+    sig.source_context = window.IS_MULTI_ASSET_PAGE
+        ? 'MULTIASSET_ACTIVE_CONFIRMED'
+        : 'ACTIVE_CONFIRMED';
     const inPosition = Boolean(alreadyInPosition || sig.entry_touched || sig.lifecycle_status === 'entry_touched');
     window.openSaveSignalModal(sig, inPosition);
 };
@@ -2114,7 +2118,20 @@ window.showFuturesPrevJustif = function(sig) {
                 _formatPreviousSignalValidity(
                     sig.tiempo_restante
                 );
-        
+            const remainingSeconds = Number(sig.tiempo_restante);
+            const expiredByClock = (
+                (Number.isFinite(remainingSeconds) && remainingSeconds <= 0)
+                || String(remainingText || '').toLowerCase().includes('vigencia finalizada')
+            );
+            if (expiredByClock) {
+                estadoHTML = `
+                    <div class="alert alert-secondary mt-3">
+                        <strong>⌛ VIGENCIA FINALIZADA</strong>
+                        <br>La ventana operativa de esta señal ya terminó.
+                        No persigas el precio; espera una nueva señal.
+                    </div>
+                `;
+            } else {
             estadoHTML = `
                 <div
                     class="
@@ -2151,6 +2168,7 @@ window.showFuturesPrevJustif = function(sig) {
                     </small>
                 </div>
             `;
+            }
         }
         
         body.innerHTML = `
