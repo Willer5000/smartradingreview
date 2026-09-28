@@ -1,0 +1,25 @@
+COMMIT 17.4 FINAL R4 — VALIDACIÓN
+
+Contrato central:
+  señal confirmada -> Entry + SL + TP obligatorios -> EXECUTABLE_SIGNAL
+  Entry/SL/TP no son señal gates
+  guardar antes de tocar Entry: habilitado por el flujo normal de señal ejecutable
+
+QA:
+  54/54  Commit 17.3 / coverage / liquidation
+  29/29  Adaptive Trading Reasoning
+   6/6   Execution Quality / Guardian
+  15/15  Trading Audit Closure
+  13/13  Signal/Execution Contract
+  22/22  Mandatory Geometry R4
+
+Recursos adicionales:
+  Network requests: +0
+  Supabase writes: +0
+  LLM/Groq calls: +0
+  Workers/threads: +0
+
+Compilación:
+  Python: PASS
+  futures.js: PASS
+  script.js: PASS

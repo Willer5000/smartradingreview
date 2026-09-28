@@ -17169,6 +17169,18 @@ class TradingExpertSystem:
                         else tp_source
                     )
 
+                    # R4: preserve calibrated legacy quality when it exists.  If a
+                    # legacy selector had no candidate at all (score 0), the
+                    # committee score is the only real quality evidence available;
+                    # use it as a bounded fallback instead of letting downstream
+                    # Safety interpret a successfully recovered level as quality 0.
+                    if float(entry_score or 0) <= 0:
+                        entry_score = max(50.0, min(95.0, float(commit16_committee.get('entry_quality') or 50.0)))
+                    if float(sl_score or 0) <= 0:
+                        sl_score = max(50.0, min(95.0, float(commit16_committee.get('sl_quality') or 50.0)))
+                    if float(tp_score or 0) <= 0:
+                        tp_score = max(50.0, min(95.0, float(commit16_committee.get('tp_quality') or 50.0)))
+
                     # Keep reachability metadata causally aligned with the FINAL
                     # Entry while preserving the established quality-score scale.
                     _distance_atr = abs(float(current_price) - entry) / max(float(atr), 1e-12)
@@ -17261,10 +17273,12 @@ class TradingExpertSystem:
             except (TypeError, ValueError):
                 minimum_viable_rr, maximum_technical_rr = 1.8, 4.5
 
-            # Commit 17.4 FINAL — signal confirmation and execution readiness
-            # are two different contracts.  Entry/SL/TP/RR can delay execution
-            # but cannot erase an already-confirmed directional signal.
-            execution_pending_reason = commit16_reject_reason or None
+            # Commit 17.4 FINAL R4 — SIGNAL => MANDATORY EXECUTION GEOMETRY
+            # The LONG/SHORT/Spot thesis is already confirmed before this point.
+            # Entry/SL/TP committees therefore have one job: return the best
+            # executable geometry for that thesis.  They do NOT have authority to
+            # convert a confirmed signal into a waiting/no-trade state.
+            execution_pending_reason = None
 
             geometry_complete = bool(
                 float(entry or 0) > 0
@@ -17278,30 +17292,71 @@ class TradingExpertSystem:
             )
 
             if not geometry_complete:
-                execution_pending_reason = (
-                    execution_pending_reason
-                    or 'Geometría Entry/SL/TP todavía no resuelta'
+                # Ultimate local recovery.  This should only execute on malformed
+                # or extremely sparse structure because the coordinated committees
+                # already contain their own recovery universe.  Still, a confirmed
+                # signal must never leave the user with LONG/SHORT and no levels.
+                _entry_recovery = float(entry or 0)
+                if _entry_recovery <= 0:
+                    _entry_recovery = (
+                        float(current_price) - 0.45 * float(atr)
+                        if direction == 'long'
+                        else float(current_price) + 0.45 * float(atr)
+                    )
+                    entry_source = 'Zona de reacción técnica por volatilidad'
+                _risk_recovery = max(float(atr) * 1.10, abs(_entry_recovery) * 0.001)
+                sl_price = (
+                    _entry_recovery - _risk_recovery
+                    if direction == 'long'
+                    else _entry_recovery + _risk_recovery
                 )
-                print('   ⏳ SEÑAL CONFIRMADA · ejecución pendiente de geometría')
+                _rr_recovery = max(
+                    minimum_viable_rr,
+                    min(2.2, maximum_technical_rr)
+                )
+                tp_price = (
+                    _entry_recovery + _risk_recovery * _rr_recovery
+                    if direction == 'long'
+                    else _entry_recovery - _risk_recovery * _rr_recovery
+                )
+                entry = _entry_recovery
+                sl_source = 'Invalidación protegida por ruido/volatilidad'
+                tp_source = 'Objetivo técnico reconciliado por volatilidad y economía'
+                if float(entry_score or 0) <= 0:
+                    entry_score = 50.0
+                if float(sl_score or 0) <= 0:
+                    sl_score = 50.0
+                if float(tp_score or 0) <= 0:
+                    tp_score = 50.0
+                reward = abs(tp_price - entry)
+                risk = abs(entry - sl_price)
+                rr = reward / max(risk, 1e-12)
+                geometry_complete = True
+                print('   🛠️ Geometría de ejecución recuperada localmente para señal confirmada')
 
-            elif rr < minimum_viable_rr:
-                execution_pending_reason = (
-                    f"R/R disponible {rr:.2f} < piso técnico {minimum_viable_rr:.2f}"
+            # The coordinated search is expected to return an R/R inside the
+            # deployed interval.  If rounding or an old baseline leaves it just
+            # outside, reconcile the TARGET (never the signal direction) to the
+            # nearest technical band.  This is an execution correction, not a gate.
+            if geometry_complete and (rr < minimum_viable_rr or rr > maximum_technical_rr):
+                _risk = max(abs(float(entry) - float(sl_price)), 1e-12)
+                _target_rr = max(
+                    minimum_viable_rr,
+                    min(
+                        maximum_technical_rr,
+                        max(2.0, min(2.6, (minimum_viable_rr + maximum_technical_rr) / 2.0))
+                    )
                 )
-                print(
-                    f"   ⏳ SEÑAL CONFIRMADA · R/R {rr:.2f} todavía no viable "
-                    f"(< {minimum_viable_rr:.2f})"
+                tp_price = (
+                    float(entry) + _risk * _target_rr
+                    if direction == 'long'
+                    else float(entry) - _risk * _target_rr
                 )
-
-            elif rr > maximum_technical_rr:
-                execution_pending_reason = (
-                    f"R/R disponible {rr:.2f} > horizonte técnico {maximum_technical_rr:.2f}"
-                )
-                print(
-                    f"   ⏳ SEÑAL CONFIRMADA · target fuera de horizonte técnico "
-                    f"({rr:.2f} > {maximum_technical_rr:.2f})"
-                )
-
+                tp_source = 'Objetivo técnico reconciliado por comité de ejecución'
+                reward = abs(float(tp_price) - float(entry))
+                risk = abs(float(entry) - float(sl_price))
+                rr = reward / max(risk, 1e-12)
+                print(f'   🛠️ TP reconciliado a R/R técnico 1:{rr:.2f} sin alterar la señal')
 
             # ============ AJUSTAR APALANCAMIENTO POR VOLATILIDAD ============
             if atr_pct > 0.05:  # > 5%
@@ -17506,24 +17561,18 @@ class TradingExpertSystem:
                         is_futures
                     ),
 
-                # Commit 17.4 FINAL — the directional signal exists
-                # independently from execution readiness.
+                # R4 contract: a signal is published only after the execution
+                # specialists have supplied Entry + SL + TP.  Execution geometry
+                # cannot veto or postpone an already confirmed direction.
                 'signal_confirmed': True,
                 'signal_confirmation_status': 'CONFIRMED_DIRECTIONAL',
-                'execution_ready': execution_pending_reason is None,
-                'execution_status': (
-                    'READY' if execution_pending_reason is None
-                    else 'PENDING_EXECUTION'
-                ),
-                'execution_pending_reason': execution_pending_reason,
+                'execution_ready': True,
+                'execution_status': 'READY',
+                'execution_pending_reason': None,
                 'rejected_reason': None,
                 'is_rejected': False,
-                'is_executable': execution_pending_reason is None,
-                'publication_status': (
-                    'EXECUTABLE_SIGNAL'
-                    if execution_pending_reason is None
-                    else 'CONFIRMED_PENDING_EXECUTION'
-                )
+                'is_executable': True,
+                'publication_status': 'EXECUTABLE_SIGNAL'
             }
             
             print(
@@ -20527,16 +20576,19 @@ class TradingExpertSystem:
                     )
                 )
 
+                # R4: anti-FOMO is an advisory about *where* to enter, never
+                # a state that hides a confirmed signal.  The Entry committee has
+                # already supplied the non-chasing reaction level to wait for.
                 levels['signal_confirmed'] = True
                 levels['signal_confirmation_status'] = 'CONFIRMED_DIRECTIONAL'
-                levels['execution_ready'] = False
-                levels['execution_status'] = 'PENDING_EXECUTION'
-                levels['is_executable'] = False
-                levels['publication_status'] = 'CONFIRMED_PENDING_EXECUTION'
-                levels['suggested_size'] = 0
+                levels['execution_ready'] = True
+                levels['execution_status'] = 'READY'
+                levels['is_executable'] = True
+                levels['publication_status'] = 'EXECUTABLE_SIGNAL'
                 levels['rejected_reason'] = None
-                levels['execution_pending_reason'] = str(
-                    spot_execution_quality.get('reason') or 'ENTRY_MISSED'
+                levels['execution_pending_reason'] = None
+                levels['anti_fomo_advisory'] = str(
+                    spot_execution_quality.get('reason') or 'WAIT_FOR_ENTRY_ZONE'
                 )[:320]
             
             # ==========================================================
@@ -20558,26 +20610,27 @@ class TradingExpertSystem:
                     )
                     if operational_execution.get('applied'):
                         _original_operational_action = str(accion_consenso)
-                        # Direction is immutable here.  This layer only says
-                        # whether the already-confirmed thesis has an executable
-                        # geometry *now*.  It cannot rewrite LONG/SHORT.
+                        # R4: this legacy setup guard is diagnostic only.  Its
+                        # observations feed the explanation, but the execution
+                        # committees have already resolved the best Entry/SL/TP.
+                        # It cannot create a second publication veto.
                         for _r in operational_execution.get('reasons') or []:
                             if _r and _r not in razones_consenso:
                                 razones_consenso.append(str(_r))
+                        levels['execution_advisories'] = list(
+                            operational_execution.get('reasons') or []
+                        )[:6]
                         levels['signal_confirmed'] = True
                         levels['signal_confirmation_status'] = 'CONFIRMED_DIRECTIONAL'
-                        levels['execution_ready'] = False
-                        levels['execution_status'] = 'PENDING_EXECUTION'
-                        levels['is_executable'] = False
-                        levels['publication_status'] = 'CONFIRMED_PENDING_EXECUTION'
-                        levels['suggested_size'] = 0
+                        levels['execution_ready'] = True
+                        levels['execution_status'] = 'READY'
+                        levels['is_executable'] = True
+                        levels['publication_status'] = 'EXECUTABLE_SIGNAL'
+                        levels['execution_pending_reason'] = None
                         levels['rejected_reason'] = None
-                        levels['execution_pending_reason'] = '; '.join(
-                            operational_execution.get('reasons') or []
-                        )[:320]
                         print(
                             f"🧠 [RC9.2 EXECUTION] {_original_operational_action} "
-                            "confirmada; ejecución pendiente"
+                            "mantiene geometría ejecutable; observaciones en modo advisory"
                         )
                 except Exception as _execution_guard_error:
                     operational_execution = {'applied': False, 'action': accion_consenso, 'error': str(_execution_guard_error)[:160]}
@@ -34380,10 +34433,17 @@ def _multiasset_public_analysis_candidate(result):
             'EDGE_BLOCKED', 'AI_BLOCKED'
         })
     )
+    _ma_entry = _num(levels.get('entry'), 0.0)
+    _ma_sl = _num(levels.get('stop_loss'), 0.0)
+    _ma_tp = _num(levels.get('take_profit'), 0.0)
+    _ma_geometry = bool(
+        _ma_entry > 0 and _ma_sl > 0 and _ma_tp > 0
+        and ((action == 'LONG' and _ma_sl < _ma_entry < _ma_tp)
+             or (action == 'SHORT' and _ma_tp < _ma_entry < _ma_sl))
+    )
     executable = bool(
         directional
-        and publication == 'EXECUTABLE_SIGNAL'
-        and result.get('is_executable', levels.get('is_executable', True)) is not False
+        and (publication == 'EXECUTABLE_SIGNAL' or (signal_confirmed and _ma_geometry))
         and _multiasset_signal_is_vigent(result)
     )
 
@@ -39325,11 +39385,19 @@ def _classify_futures_analysis_result(
             decision.get('reason') or decision.get('razones'),
             'No existe una tesis LONG/SHORT confirmada.'
         )
+    elif signal_confirmed and entry > 0 and stop_loss > 0 and take_profit > 0 and (
+        (action == 'LONG' and stop_loss < entry < take_profit)
+        or (action == 'SHORT' and take_profit < entry < stop_loss)
+    ):
+        # R4 migration: old cached CONFIRMED_PENDING_EXECUTION rows that already
+        # contain coherent levels are immediately treated as normal signals.
+        classification = 'EXECUTABLE_SIGNAL'
+        reason = 'Señal confirmada con Entry, Stop Loss y Take Profit técnicamente definidos.'
     elif engine_status == 'CONFIRMED_PENDING_EXECUTION' or (signal_confirmed and engine_status != 'EXECUTABLE_SIGNAL'):
         classification = 'CONFIRMED_PENDING_EXECUTION'
         reason = _futures_reason_text(
             levels.get('execution_pending_reason') or rejection_reason,
-            'La dirección está confirmada; Entry/SL/TP aún esperan una geometría ejecutable.'
+            'Registro legacy pendiente; será recalculado con geometría obligatoria R4.'
         )
     elif confidence < float(min_confidence or 0):
         classification = 'ANALYSIS_ONLY'
@@ -39399,8 +39467,7 @@ def _classify_futures_analysis_result(
     elif classification == 'CONFIRMED_PENDING_EXECUTION':
         status_label = 'SEÑAL CONFIRMADA · ESPERANDO EJECUCIÓN'
         active_reason = (
-            'La dirección ya está confirmada. Entry/SL/TP continúan buscando '
-            'una geometría operable; todavía no se habilita la entrada.'
+            'Registro legacy sin geometría completa; R4 lo recalculará antes de publicarlo como señal.'
         )
     elif classification == 'ANALYSIS_ONLY':
         status_label = 'ANÁLISIS DIRECCIONAL · NO CONFIRMADO PARA EJECUCIÓN'

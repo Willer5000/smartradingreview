@@ -20,7 +20,7 @@ from math import sqrt
 from statistics import median
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-VERSION = "COMMIT17_4_FINAL_EXECUTION_QUALITY_V5"
+VERSION = "COMMIT17_4_FINAL_R4_SIGNAL_EXECUTION_CONTRACT_V6"
 
 MULTI_ASSET_CLASS = {
     "SPY-USDT": "US_INDEX", "QQQ-USDT": "US_INDEX",
@@ -223,6 +223,95 @@ def _iter_swing_prices(structure: Dict[str, Any], key: str):
 
 def _volume_profile(structure: Dict[str, Any]) -> Dict[str, Any]:
     return _d(structure.get("volume_profile") or structure.get("vp") or {})
+
+
+def _recent_candle_reaction_levels(structure: Dict[str, Any], direction: str) -> List[Tuple[float, str, float]]:
+    """Low-cost reaction anchors from already-loaded candles.
+
+    Used only as a recovery universe when explicit S/R, OB, FVG or profile
+    levels are sparse.  It adds zero I/O and does not create the trading thesis.
+    """
+    df = _d(_d(structure).get("df"))
+    highs, lows, closes = _seq(df, "high"), _seq(df, "low"), _seq(df, "close")
+    n = min(len(highs), len(lows))
+    if n <= 0:
+        return []
+    look = min(20, n)
+    hi = highs[-look:]
+    lo = lows[-look:]
+    out: List[Tuple[float, str, float]] = []
+    if direction == "long":
+        recent = lo[-min(5, len(lo)):]
+        if recent:
+            out.append((median(recent), "Micro soporte reciente", 2.0))
+        out.append((min(lo), "Extremo estructural reciente", 2.6))
+    else:
+        recent = hi[-min(5, len(hi)):]
+        if recent:
+            out.append((median(recent), "Micro resistencia reciente", 2.0))
+        out.append((max(hi), "Extremo estructural reciente", 2.6))
+    if closes:
+        out.append((closes[-1], "Último cierre", 1.4))
+    clean=[]
+    for price, src, strength in out:
+        if price > 0 and not any(abs(price-x[0]) <= max(abs(price)*1e-7,1e-10) for x in clean):
+            clean.append((price,src,strength))
+    return clean
+
+
+def _add_execution_recovery_entry_candidates(out: List[Dict[str, Any]], *,
+                                             structure: Dict[str, Any], direction: str,
+                                             current_price: float, atr: float) -> None:
+    for price, src, strength in _recent_candle_reaction_levels(structure, direction):
+        _append_candidate(out, price, "recent_reaction", src, strength)
+    # Last-resort reaction projections.  These are alternatives, never a signal
+    # trigger; the Entry committee still ranks them against all structural POIs.
+    for mult, strength in ((0.30,1.5),(0.55,1.8),(0.85,2.0)):
+        price = current_price - atr*mult if direction == "long" else current_price + atr*mult
+        _append_candidate(out, price, "volatility_reaction", f"Zona de reacción por volatilidad {mult:.2f} ATR", strength)
+
+
+def _add_execution_recovery_sl_candidates(out: List[Dict[str, Any]], *,
+                                          structure: Dict[str, Any], direction: str,
+                                          entry: float, atr: float, activity: float) -> None:
+    # Prefer recent structural extremes first.
+    noise_mult = 0.16 + 0.20 * _clip(activity,0,100)/100.0
+    buffer_abs = max(atr*noise_mult, abs(entry)*0.0004)
+    for anchor, src, strength in _recent_candle_reaction_levels(structure, direction):
+        if direction == "long" and anchor < entry:
+            _append_candidate(out, anchor-buffer_abs, "recent_invalidation", f"Invalidación detrás de {src}", strength, anchor=anchor)
+        elif direction == "short" and anchor > entry:
+            _append_candidate(out, anchor+buffer_abs, "recent_invalidation", f"Invalidación detrás de {src}", strength, anchor=anchor)
+    # Volatility-buffered invalidations guarantee a technically defined stop
+    # universe when explicit structure is sparse.  Leverage/risk specialists
+    # penalize candidates that are economically excessive.
+    expected_noise = 0.72 + _clip(activity,0,100)/170.0
+    for factor in (0.90, 1.10, 1.35):
+        dist = atr * expected_noise * factor
+        price = entry-dist if direction == "long" else entry+dist
+        _append_candidate(out, price, "volatility_invalidation", "Invalidación protegida por ruido/volatilidad", 1.7+0.15*factor)
+
+
+def _add_execution_recovery_tp_candidates(out: List[Dict[str, Any]], *,
+                                          direction: str, entry: float, sl: float, atr: float,
+                                          rr_floor: float, preferred_rr_min: float,
+                                          preferred_rr_max: float) -> None:
+    risk = abs(entry-sl)
+    if risk <= 0:
+        return
+    # Risk-normalized projected objectives are only fallback alternatives.
+    # Path/touch/economics specialists still rank them, so a structural target
+    # wins whenever the evidence supports it.
+    mids = [rr_floor, preferred_rr_min, (preferred_rr_min+preferred_rr_max)/2.0, preferred_rr_max]
+    for rr in mids:
+        rr=max(rr_floor, float(rr))
+        price = entry + risk*rr if direction == "long" else entry-risk*rr
+        _append_candidate(out, price, "projected_target", f"Objetivo técnico proyectado {rr:.2f}R", 1.6)
+    # Add volatility-capacity alternatives so probability-of-touch has closer
+    # candidates even when structure/profile targets are unavailable.
+    for mult in (1.35,1.75,2.20,2.70):
+        price = entry + atr*mult if direction == "long" else entry-atr*mult
+        _append_candidate(out, price, "volatility_target", f"Objetivo por capacidad de volatilidad {mult:.2f} ATR", 1.5)
 
 
 def _collect_entry_candidates(structure: Dict[str, Any], direction: str,
@@ -448,9 +537,9 @@ def _entry_specialists(candidate, universe, *, direction, current_price, atr,
         "TREND_PULLBACK": {"smc_poi", "fib", "dynamic_value", "structure", "value"},
         "MEAN_REVERSION": {"value", "dynamic_value", "structure", "fib", "swing"},
         "ROTATION": {"value", "structure", "dynamic_value"},
-        "MOMENTUM_CONTINUATION": {"dynamic_value", "structure", "smc_poi", "swing", "value"},
-        "COMPRESSION_EXPANSION": {"structure", "smc_poi", "dynamic_value", "value", "swing"},
-        "STRUCTURE_REVERSAL": {"smc_poi", "structure", "swing", "fib", "liquidity", "dynamic_value"},
+        "MOMENTUM_CONTINUATION": {"dynamic_value", "structure", "smc_poi", "swing", "value", "recent_reaction", "volatility_reaction"},
+        "COMPRESSION_EXPANSION": {"structure", "smc_poi", "dynamic_value", "value", "swing", "recent_reaction", "volatility_reaction"},
+        "STRUCTURE_REVERSAL": {"smc_poi", "structure", "swing", "fib", "liquidity", "dynamic_value", "recent_reaction"},
     }
     strategy = 62.0 if fam in compat.get(setup, set()) else 50.0
     if fam == "baseline": strategy = 54.0
@@ -513,7 +602,7 @@ def _sl_specialists(candidate, universe, *, direction, entry, tp_hint, atr,
     # Invalidation specialist: candidate created behind a real anchor receives
     # stronger evidence than a distance-only baseline.
     invalidation = 48.0 + strength * 8.0 + max(0, independent - 1) * 5.0
-    if candidate.get("family") == "structural_invalidation": invalidation += 12.0
+    if candidate.get("family") in {"structural_invalidation","recent_invalidation","volatility_invalidation"}: invalidation += 12.0
     if anchor > 0: invalidation += 7.0
     invalidation = _clip(invalidation)
 
@@ -542,7 +631,7 @@ def _sl_specialists(candidate, universe, *, direction, entry, tp_hint, atr,
     # Liquidity/stop-hunt specialist: just beyond swing/liquidity is preferred
     # over exactly on it, but does not demand a universal distance.
     liquidity = 62.0
-    if candidate.get("family") == "structural_invalidation": liquidity += 15.0
+    if candidate.get("family") in {"structural_invalidation","recent_invalidation","volatility_invalidation"}: liquidity += 15.0
     if anchor > 0 and abs(p - anchor) >= atr * 0.10: liquidity += 8.0
     liquidity = _clip(liquidity)
 
@@ -579,8 +668,8 @@ def _sl_specialists(candidate, universe, *, direction, entry, tp_hint, atr,
     setup = _strategy_family(setup_family)
     strategy = 68.0
     if setup in {"SWEEP_REVERSAL", "MEAN_REVERSION"} and anchor > 0: strategy += 8.0
-    if setup in {"BREAKOUT_RETEST", "TREND_PULLBACK", "MOMENTUM_CONTINUATION", "COMPRESSION_EXPANSION"} and candidate.get("family") == "structural_invalidation": strategy += 8.0
-    if setup == "STRUCTURE_REVERSAL" and candidate.get("family") == "structural_invalidation" and anchor > 0: strategy += 10.0
+    if setup in {"BREAKOUT_RETEST", "TREND_PULLBACK", "MOMENTUM_CONTINUATION", "COMPRESSION_EXPANSION"} and candidate.get("family") in {"structural_invalidation","recent_invalidation","volatility_invalidation"}: strategy += 8.0
+    if setup == "STRUCTURE_REVERSAL" and candidate.get("family") in {"structural_invalidation","recent_invalidation"} and anchor > 0: strategy += 10.0
     strategy = _clip(strategy)
 
     return {"invalidation":invalidation,"noise":noise,"reaction_collision":collision,
@@ -610,7 +699,7 @@ def _tp_specialists(candidate, universe, *, direction, entry, sl, atr, structure
     independent, strength = _cluster_evidence(candidate, universe, atr)
 
     target = _clip(34.0 + strength * 8.5 + max(0, independent-1) * 7.0)
-    if candidate.get("family") in {"liquidity_target", "swing_target", "opposing_poi", "structure_target"}: target += 8.0
+    if candidate.get("family") in {"liquidity_target", "swing_target", "opposing_poi", "structure_target", "projected_target", "volatility_target"}: target += 8.0
     target = _clip(target)
 
     path = _path_barrier_score(p, entry, direction, structure, atr, liquidation=liquidation)
@@ -863,6 +952,10 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
     entry_candidates = _collect_entry_candidates(
         structure, direction, _f(baseline_entry), liquidation=liquidation
     )
+    _add_execution_recovery_entry_candidates(
+        entry_candidates, structure=structure, direction=direction,
+        current_price=current_price, atr=atr,
+    )
     entry_ranked = _rank_candidates(
         entry_candidates,
         lambda c: _entry_specialists(
@@ -876,11 +969,26 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
         role="entry",
     )
     if not entry_ranked:
+        # With a valid price/ATR this should be unreachable.  Keep a final
+        # deterministic technical fallback so a confirmed thesis never becomes
+        # a user-visible LONG/SHORT without levels because of sparse metadata.
+        if current_price <= 0 or atr <= 0:
+            return {"success": False, "reason": "INVALID_MARKET_GEOMETRY_INPUT", "version": VERSION}
+        entry_price = current_price - atr*0.45 if direction == "long" else current_price + atr*0.45
+        risk = atr*1.10
+        sl_price = entry_price-risk if direction == "long" else entry_price+risk
+        rr = max(rr_floor, min(preferred_rr_min, rr_ceiling))
+        tp_price = entry_price+risk*rr if direction == "long" else entry_price-risk*rr
         return {
-            "success": False,
-            "reason": "NO_EXECUTION_REFINEMENT_ENTRY",
-            "version": VERSION,
-            "fallback_to_baseline": True,
+            "success": True, "version": VERSION, "market_type": market,
+            "entry": entry_price, "stop_loss": sl_price, "take_profit": tp_price,
+            "risk_reward": round(rr,4), "indicative_leverage": round(leverage_hint,2),
+            "geometry_quality": 50.0, "entry_quality": 50.0, "sl_quality": 50.0,
+            "tp_quality": 50.0, "reconciled": True,
+            "recovery_mode": "MANDATORY_TECHNICAL_FALLBACK",
+            "entry_committee": {"source":"Zona de reacción técnica por volatilidad"},
+            "sl_committee": {"source":"Invalidación protegida por volatilidad"},
+            "tp_committee": {"source":"Objetivo técnico por R/R y volatilidad"},
         }
 
     # Bounded search: enough alternatives to reconcile geometry while keeping
@@ -893,9 +1001,13 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
         if entry_price <= 0:
             continue
 
+        _activity = _f(context.get("activity_score"), 50.0)
         sl_candidates = _collect_sl_candidates(
-            structure, direction, entry_price, _f(baseline_sl), atr,
-            _f(context.get("activity_score"), 50.0),
+            structure, direction, entry_price, _f(baseline_sl), atr, _activity,
+        )
+        _add_execution_recovery_sl_candidates(
+            sl_candidates, structure=structure, direction=direction, entry=entry_price,
+            atr=atr, activity=_activity,
         )
         sl_ranked = _rank_candidates(
             sl_candidates,
@@ -921,6 +1033,11 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
             tp_candidates = _collect_tp_candidates(
                 structure, direction, entry_price, _f(baseline_tp), atr,
                 liquidation=liquidation,
+            )
+            _add_execution_recovery_tp_candidates(
+                tp_candidates, direction=direction, entry=entry_price, sl=sl_price, atr=atr,
+                rr_floor=rr_floor, preferred_rr_min=preferred_rr_min,
+                preferred_rr_max=preferred_rr_max,
             )
             tp_ranked = _rank_candidates(
                 tp_candidates,
@@ -983,13 +1100,39 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
                     best_combo = combo
 
     if best_combo is None:
-        return {
-            "success": False,
-            "reason": "NO_EXECUTABLE_GEOMETRY_REFINEMENT",
-            "version": VERSION,
-            "fallback_to_baseline": True,
-            "rr_floor": round(rr_floor, 4),
-            "rr_ceiling": round(rr_ceiling, 4),
+        # The direction was already confirmed.  Use the highest-ranked Entry
+        # and an invalidation candidate, then project the nearest acceptable
+        # economic target.  This is an execution recovery path, not a signal
+        # vote, and it uses only already-loaded price/volatility evidence.
+        entry_row = entry_ranked[0]
+        entry_price = _f(entry_row.get("price"), current_price)
+        _activity = _f(context.get("activity_score"), 50.0)
+        sl_candidates = _collect_sl_candidates(structure, direction, entry_price, _f(baseline_sl), atr, _activity)
+        _add_execution_recovery_sl_candidates(sl_candidates, structure=structure, direction=direction, entry=entry_price, atr=atr, activity=_activity)
+        sl_ranked = _rank_candidates(
+            sl_candidates,
+            lambda c: _sl_specialists(c, sl_candidates, direction=direction, entry=entry_price,
+                tp_hint=_f(baseline_tp), atr=atr, structure=structure, setup_family=setup_family,
+                context=context, market_type=market, leverage_hint=leverage_hint),
+            _weights_for("sl", market),
+            lambda p: _is_correct_side(p, entry_price, direction, "sl"), role="sl")
+        if not sl_ranked:
+            risk = atr*1.10
+            sl_price = entry_price-risk if direction == "long" else entry_price+risk
+            sl_row = {"price":sl_price,"committee_score":50.0,"consensus":50.0,"source":"Invalidación protegida por volatilidad"}
+        else:
+            sl_row = sl_ranked[0]
+            sl_price = _f(sl_row.get("price"),0.0)
+            risk = abs(entry_price-sl_price)
+        risk=max(risk,atr*0.55,abs(entry_price)*1e-5)
+        rr=max(rr_floor,min((preferred_rr_min+preferred_rr_max)/2.0,rr_ceiling))
+        tp_price=entry_price+risk*rr if direction=="long" else entry_price-risk*rr
+        tp_row={"price":tp_price,"committee_score":55.0,"consensus":55.0,"source":"Objetivo técnico reconciliado"}
+        best_combo={
+            "joint_score":round((_f(entry_row.get("committee_score"),50)+_f(sl_row.get("committee_score"),50)+55.0)/3.0,2),
+            "risk_reward":round(rr,4),"entry":entry_price,"stop_loss":sl_price,"take_profit":tp_price,
+            "entry_committee":entry_row,"sl_committee":sl_row,"tp_committee":tp_row,
+            "ranks":{"entry":1,"sl":1,"tp":1},"recovery_mode":"MANDATORY_JOINT_GEOMETRY"
         }
 
     entry_row = best_combo["entry_committee"]
@@ -1017,6 +1160,7 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
         "entry_committee": entry_row,
         "sl_committee": sl_row,
         "tp_committee": tp_row,
+        "recovery_mode": best_combo.get("recovery_mode", "STRUCTURAL_COMMITTEE_SELECTION"),
     }
 
 def leverage_committee_context(*, entry: float, stop_loss: float, take_profit: float,

@@ -1199,14 +1199,15 @@ def execution_setup_guard(*, action: Any, levels: Mapping[str, Any] | None, setu
     if family == "TREND_PULLBACK" and quality < (62 if _u(market)=="FUTURES" else 55):
         reasons.append("el retroceso no llega a una zona de entrada suficientemente defendible")
     if reasons:
-        # Commit 17.4 FINAL — execution can wait, direction cannot be rewritten here.
-        # The thesis/market decision already exists before this helper.  Entry/SL/TP
-        # readiness is an execution state, never a second directional vote.
+        # Commit 17.4 FINAL R4 — advisory only.  The thesis is already confirmed
+        # and the execution committees are responsible for returning the best
+        # Entry/SL/TP geometry.  These observations can explain or rank that
+        # geometry, but they are not a second publication gate.
         return {
             "applied": True,
             "action": action,
-            "status": "EXECUTION_PENDING",
-            "execution_ready": False,
+            "status": "EXECUTION_ADVISORY",
+            "execution_ready": True,
             "reasons": reasons,
             "original_action": action,
             "direction_preserved": True,

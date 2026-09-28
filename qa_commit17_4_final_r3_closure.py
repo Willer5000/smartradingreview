@@ -88,7 +88,7 @@ ck('router exposes multiple lane scores for audit', len(rev.get('lane_scores') o
 # 4) Spot anti-FOMO no longer rewrites the confirmed direction.
 app_text=Path('app.py').read_text()
 ck('Spot anti-FOMO caller no longer assigns accion_consenso from final_action', "accion_consenso = str(\n                    spot_execution_quality.get" not in app_text)
-ck('Spot anti-FOMO marks confirmed pending execution', "levels['publication_status'] = 'CONFIRMED_PENDING_EXECUTION'" in app_text)
+ck('Spot anti-FOMO preserves executable signal with committee Entry', "levels['anti_fomo_advisory']" in app_text and "levels['publication_status'] = 'EXECUTABLE_SIGNAL'" in app_text)
 ck('Spot freshness helper preserves final_action', "result['final_action'] = action_text" in app_text)
 
 # 5) Multi-Asset macro context enters before layers/Operational Intelligence and Guardian reuses it.

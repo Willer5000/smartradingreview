@@ -589,10 +589,9 @@ window.openManualAnalysisSave = function(
     );
 };
 function futRenderAnalysisDiagnostics(json, context) {
-    // Commit 17.4 FINAL — una señal direccional confirmada puede estar
-    // esperando una geometría ejecutable. Se muestra separada de las
-    // hipótesis ANALYSIS_ONLY y no habilita entrada/guardado hasta que
-    // Entry/SL/TP estén listos.
+    // Commit 17.4 FINAL R4 — las señales nuevas confirmadas ya llegan con
+    // Entry/SL/TP. Esta sección sólo conserva compatibilidad visual para
+    // registros legacy cacheados antes de R4 mientras son recalculados.
     const pendingExecution = Array.isArray(json && json.confirmed_pending_execution)
         ? json.confirmed_pending_execution
         : [];
@@ -623,13 +622,13 @@ function futRenderAnalysisDiagnostics(json, context) {
                             <span class="badge bg-dark ms-1">${timeframe}</span>
                         </div>
                         <div>
-                            <span class="badge bg-info text-dark">CONFIRMADA · ESPERANDO EJECUCIÓN</span>
+                            <span class="badge bg-secondary">REGISTRO ANTERIOR · RECÁLCULO</span>
                             <span class="badge bg-secondary ms-1">${confidence}%</span>
                         </div>
                     </div>
                     <div class="small text-light mt-1">${reason}</div>
                     <div class="small text-muted mt-1">
-                        La dirección no fue anulada. El sistema espera una combinación Entry/SL/TP operable antes de habilitar la entrada.
+                        Este registro proviene del contrato anterior. R4 lo recalcula antes de volver a publicarlo como señal.
                     </div>
                 </div>
             `;
@@ -638,7 +637,7 @@ function futRenderAnalysisDiagnostics(json, context) {
             pendingHtml = `
                 <details class="mt-2 px-2 pb-2" open>
                     <summary class="text-info" style="cursor:pointer;">
-                        Señales confirmadas esperando ejecución (${pendingExecution.length})
+                        Registros anteriores pendientes de recálculo (${pendingExecution.length})
                     </summary>
                     <div class="mt-2" style="max-height:320px; overflow-y:auto;">
                         ${pendingRows}
