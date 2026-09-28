@@ -10620,6 +10620,88 @@ class TradingExpertSystem:
                 except:
                     continue
             
+            # Commit 17.5.3: contrato direccional estricto para Structure.
+            # El caller suministra el frame cerrado. No se infiere dirección
+            # de HH/HL, LH/LL, patrones, OB o FVG por sí solos.
+            def strict_structure_signal():
+                neutral = ('NEUTRAL', 0.0, ['NO_STRICT_STRUCTURE_EVENT'])
+                if n < 21:
+                    return ('NEUTRAL', 0.0, ['INSUFFICIENT_STRUCTURE_HISTORY'])
+                ohlc = np.column_stack((open_price, high, low, close))
+                if (not np.isfinite(ohlc).all() or (ohlc <= 0).any()
+                        or (high < low).any() or (high < np.maximum(open_price, close)).any()
+                        or (low > np.minimum(open_price, close)).any()):
+                    return ('NEUTRAL', 0.0, ['INVALID_STRUCTURE_OHLC'])
+
+                evidence = {'BULLISH': [], 'BEARISH': []}
+                recent_start = n - 3  # Última vela y dos anteriores; sin persistencia indefinida.
+                # Reusar detectores estables, pero exigir recuperación del nivel
+                # barrido, no sólo cierre en la mitad favorable de la vela.
+                for events, kind, lookback, gap in (
+                        (liquidity_sweeps, 'SWEEP_REJECTION', 20, 5),
+                        (stop_hunts, 'STOP_HUNT_RECOVERY', 10, 0)):
+                    for event in events:
+                        i = event['index']
+                        if i < recent_start:
+                            continue
+                        side = event['type'].upper()
+                        bull = side == 'BULLISH'
+                        history = low[i-lookback:i-gap] if bull else high[i-lookback:i-gap]
+                        level = float(np.min(history) if bull else np.max(history))
+                        midpoint = (high[i] + low[i]) / 2.0
+                        rejected = (close[i] > open_price[i] and close[i] > midpoint) if bull else (
+                            close[i] < open_price[i] and close[i] < midpoint)
+                        held = bool(np.all(close[i:] > level)) if bull else bool(np.all(close[i:] < level))
+                        if rejected and held:
+                            evidence[side].append(f'{kind}:bar={i};level={level:.12g}')
+
+                # BOS: pivote de cinco velas a cada lado, ya confirmado ANTES
+                # de la ruptura. Sólo el primer cierre que lo cruza cuenta;
+                # una mecha, un nivel ya roto o un pivote futuro no cuentan.
+                for i in range(recent_start, n):
+                    for side, pivots in (('BULLISH', pivot_highs), ('BEARISH', pivot_lows)):
+                        values = high if side == 'BULLISH' else low
+                        eligible = [p for p in pivots if i - 60 <= p['index'] and p['index'] + 5 < i
+                                    and np.count_nonzero(values[p['index']-5:p['index']+6] == p['price']) == 1]
+                        if not eligible:
+                            continue
+                        pivot = eligible[-1]
+                        level = pivot['price']
+                        prior = close[pivot['index'] + 5:i]
+                        if side == 'BULLISH':
+                            broken = bool(np.all(prior <= level) and np.all(close[i:] > level))
+                        else:
+                            broken = bool(np.all(prior >= level) and np.all(close[i:] < level))
+                        if broken:
+                            evidence[side].append(f'BOS_CLOSE:bar={i};pivot={pivot["index"]};level={level:.12g}')
+
+                if evidence['BULLISH'] and evidence['BEARISH']:
+                    return ('NEUTRAL', 0.0, ['CONFLICTING_STRICT_STRUCTURE_EVENTS']
+                            + evidence['BULLISH'] + evidence['BEARISH'])
+                side = 'BULLISH' if evidence['BULLISH'] else 'BEARISH' if evidence['BEARISH'] else None
+                if side is None:
+                    return neutral
+                reasons = list(evidence[side])
+                score = 0.65
+                # Confluencias sólo después de evidencia primaria. No se alteran
+                # las colecciones existentes ni el scoring del consumidor OI.
+                for ob in order_blocks:
+                    if ob['type'].upper() != side or n - 1 - ob['index'] > 20:
+                        continue
+                    bottom, top = ob['price_range']
+                    held = np.all(close[ob['index'] + 1:] > bottom) if side == 'BULLISH' else np.all(close[ob['index'] + 1:] < top)
+                    if held:
+                        score += 0.10
+                        reasons.append('OB_REINFORCEMENT')
+                        break
+                if any(fvg['type'].upper() == side and not fvg['filled'] and fvg['antiguedad'] <= 20
+                       for fvg in fair_value_gaps):
+                    score += 0.10
+                    reasons.append('FVG_REINFORCEMENT')
+                return side, round(score if side == 'BULLISH' else -score, 2), reasons
+
+            structure_direction, structure_score, structure_reasons = strict_structure_signal()
+
             # ============ PERFIL DE VOLUMEN ============
             volume_profile = self.analyze_volume_profile(df)
             
@@ -10671,6 +10753,10 @@ class TradingExpertSystem:
             print(f"   LVN detectados: {len(lvn_nodes)}")
             
             return {
+                'direction': structure_direction,
+                'structure_direction': structure_direction,
+                'structure_score': structure_score,
+                'structure_reasons': structure_reasons,
                 'supports': [float(s) for s in supports[:5]],
                 'resistances': [float(r) for r in resistances[:5]],
                 'nearest_support': float(nearest_support) if nearest_support else None,
@@ -10726,6 +10812,8 @@ class TradingExpertSystem:
                 'avg_reliability': 0, 'high_quality_patterns': []
             }
             return {
+                'direction': 'NEUTRAL', 'structure_direction': 'NEUTRAL',
+                'structure_score': 0.0, 'structure_reasons': ['STRUCTURE_ANALYSIS_ERROR'],
                 'supports': [], 'resistances': [],
                 'nearest_support': None, 'nearest_resistance': None,
                 'patterns': empty_patterns,
