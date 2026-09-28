@@ -26632,10 +26632,23 @@ def _get_operational_mtf_peer_minimal(analyzer, symbol, target_tf, system_type):
     except Exception:
         pass
     try:
-        df=analyzer.get_kucoin_data(symbol, target_tf)
+        _stype=str(system_type or '').lower()
+        _is_multi=False
+        try:
+            from multiasset_system import MULTIASSET_SYMBOLS as _multi_symbols
+            _is_multi=str(symbol or '').upper().replace('/', '-') in _multi_symbols
+        except Exception:
+            _is_multi=False
+        if _is_multi and hasattr(analyzer, '_prepare_closed_candle_analysis_data'):
+            _ctx=analyzer._prepare_closed_candle_analysis_data(symbol,target_tf)
+            if not isinstance(_ctx,dict) or not _ctx.get('success'):
+                return None
+            df=_ctx.get('closed_df')
+        else:
+            df=analyzer.get_kucoin_data(symbol, target_tf)
         if df is None or len(df)<80:
             return None
-        if str(system_type or '').lower()!='futures':
+        if _stype!='futures':
             try:
                 from q6_integrity import prepare_spot_frame
                 df=prepare_spot_frame(df, target_tf)
@@ -33537,7 +33550,12 @@ _MULTI_ASSET_CACHE = {
 }
 _MULTI_AUTO_DONE = set()
 _MULTI_AUTO_LOCK = threading.Lock()
-_MULTI_AUTO_DAILY = {'day': None, 'count': 0}
+_MULTI_AUTO_DAILY = {'day': None, 'count': 0, 'context_count': 0}
+_MULTI_DAILY_CONTEXT_EXTRA_MAX = 2
+_MULTI_DEEP_RETRY = {}
+_MULTI_CLOSE_REFRESHED = set()
+_MULTI_ROUTER_STATE_LOCK = threading.Lock()
+_MULTI_ROUTER_STATE = {'rows': [], 'next_scan_at': 0.0, 'last_scan_at': 0.0, 'interval_seconds': 900}
 
 def _get_multiasset_system():
     try:
@@ -33548,14 +33566,18 @@ def _get_multiasset_system():
         return None
 
 def _multiasset_cache_result(symbol, timeframe, result):
+    # Runtime/transport failure is not a technical NO_OPERAR and must never
+    # overwrite the last valid deep analysis.
+    if not isinstance(result, dict) or result.get('success') is False:
+        return False
     with _MULTI_ASSET_CACHE['lock']:
-        _MULTI_ASSET_CACHE['analysis'][(str(symbol), str(timeframe))] = dict(result or {})
+        _MULTI_ASSET_CACHE['analysis'][(str(symbol), str(timeframe))] = dict(result)
         _MULTI_ASSET_CACHE['updated_at'] = time.time()
-        # Límite duro: sólo 2 análisis profundos por TF caliente + contexto reciente.
         if len(_MULTI_ASSET_CACHE['analysis']) > 8:
             keys = list(_MULTI_ASSET_CACHE['analysis'].keys())
             for old in keys[:-8]:
                 _MULTI_ASSET_CACHE['analysis'].pop(old, None)
+    return True
 
 def _multiasset_signal_row(result, source_context='PREVIOUS_CONFIRMED'):
     result = result or {}
@@ -33626,8 +33648,12 @@ def _multiasset_run_analysis(symbol, timeframe, owner='multi-background'):
         result=engine.analyze_multiasset_market(symbol,timeframe,closed_candle_only=True)
         if isinstance(result,dict):
             result.setdefault('symbol',symbol); result.setdefault('timeframe',timeframe)
-            _multiasset_cache_result(symbol,timeframe,result)
-        return result
+            if result.get('success') is not False:
+                _multiasset_cache_result(symbol,timeframe,result)
+            return result
+        return {'success':False,'symbol':symbol,'timeframe':timeframe,'error':'Resultado Multi-Activo inválido'}
+    except Exception as exc:
+        return {'success':False,'symbol':symbol,'timeframe':timeframe,'error':str(exc)[:180]}
     finally:
         _release_heavy_analysis(owner)
 
@@ -33635,47 +33661,136 @@ def _multiasset_compact_telegram(result):
     # Reutiliza el canal CONFIRMED durable de 10.2: texto + deep-link, sin imagen/PDF.
     return _send_confirmed_signal_telegram('multiasset', result)
 
-def _multiasset_background_tick():
-    """Piggyback barato sobre el loop Futures existente: cero thread extra.
+def _multiasset_close_plan(now):
+    """Close windows with a short exchange settlement grace; pure/no I/O."""
+    now = now.astimezone(timezone.utc)
+    settled = bool(now.minute > 0 or now.second >= 45)
+    day = now.strftime('%Y-%m-%d')
+    return {
+        '4h': {'due': bool(settled and now.hour % 4 == 0 and now.minute <= 15), 'key': f"4h|{day}|{now.hour:02d}"},
+        '1D': {'due': bool(settled and now.hour == 0 and now.minute <= 20), 'key': f"1D|{day}"},
+        '1h': {'due': bool(settled and now.minute <= 10), 'key': f"1h|{day}|{now.hour:02d}"},
+    }
 
-    Scanner: 7 requests secuenciales cada 15 min, sin DB/IA. Deep analysis sólo
-    para shortlist y sólo en ventana de cierre 4h/1D o Fast Lane 1h de alta calidad.
+
+def _multiasset_close_refresh_done(key):
+    with _MULTI_AUTO_LOCK:
+        return str(key) in _MULTI_CLOSE_REFRESHED
+
+
+def _multiasset_mark_close_refresh(key):
+    with _MULTI_AUTO_LOCK:
+        _MULTI_CLOSE_REFRESHED.add(str(key))
+        if len(_MULTI_CLOSE_REFRESHED) > 96:
+            for old in list(_MULTI_CLOSE_REFRESHED)[:32]:
+                _MULTI_CLOSE_REFRESHED.discard(old)
+
+
+def _multiasset_retry_ready(bucket, now_mono):
+    with _MULTI_AUTO_LOCK:
+        return now_mono >= float((_MULTI_DEEP_RETRY.get(bucket) or {}).get('next_retry_at') or 0.0)
+
+
+def _multiasset_record_retry(bucket, error):
+    with _MULTI_AUTO_LOCK:
+        row = dict(_MULTI_DEEP_RETRY.get(bucket) or {})
+        attempts = int(row.get('attempts') or 0) + 1
+        row.update({
+            'attempts': attempts,
+            'next_retry_at': time.monotonic() + min(180, 60 * attempts),
+            'error': str(error or '')[:160],
+        })
+        _MULTI_DEEP_RETRY[bucket] = row
+        if attempts >= 3:
+            _MULTI_AUTO_DONE.add(bucket)
+        if len(_MULTI_DEEP_RETRY) > 80:
+            for old in list(_MULTI_DEEP_RETRY)[:30]:
+                _MULTI_DEEP_RETRY.pop(old, None)
+
+
+def _multiasset_scan(timeframe, *, force=False):
+    from multiasset_system import scan_opportunities
+    return scan_opportunities(str(timeframe), force=bool(force)) or []
+
+
+def _multiasset_background_tick():
+    """17.5.1 close-aware Multi-Asset scheduler on the existing Futures loop.
+
+    No new thread, LLM or scanner DB write. Trading thresholds are untouched.
+    Each lane is shortlisted with its own CLOSED timeframe; transient failures
+    retry instead of consuming the candle bucket; one deep cell max per tick.
     """
     try:
         if str(os.getenv('MULTIASSET_ENABLED','1')).lower() in ('0','false','no','off'):
             return
-        from multiasset_system import scan_opportunities, MULTIASSET_DEEP_LIMIT, MULTIASSET_AUTO_DEEP_DAILY_MAX
-        now=datetime.now(timezone.utc)
+        from multiasset_system import MULTIASSET_DEEP_LIMIT, MULTIASSET_AUTO_DEEP_DAILY_MAX
+        now=datetime.now(timezone.utc); now_mono=time.monotonic()
         with _MULTI_AUTO_LOCK:
             today=now.strftime('%Y-%m-%d')
             if _MULTI_AUTO_DAILY.get('day') != today:
-                _MULTI_AUTO_DAILY.update({'day':today,'count':0})
-            if int(_MULTI_AUTO_DAILY.get('count') or 0) >= MULTIASSET_AUTO_DEEP_DAILY_MAX:
-                return
-        rows=scan_opportunities('4h', force=False)
-        if not rows:
-            return
-        candidates=[r for r in rows if r.get('deep_candidate')][:MULTIASSET_DEEP_LIMIT]
+                _MULTI_AUTO_DAILY.update({'day':today,'count':0,'context_count':0})
+                _MULTI_AUTO_DONE.clear(); _MULTI_DEEP_RETRY.clear(); _MULTI_CLOSE_REFRESHED.clear()
+        plan=_multiasset_close_plan(now)
+
+        force_4h=plan['4h']['due'] and not _multiasset_close_refresh_done(plan['4h']['key'])
+        with _MULTI_ROUTER_STATE_LOCK:
+            cached_rows=list(_MULTI_ROUTER_STATE.get('rows') or [])
+            next_scan=float(_MULTI_ROUTER_STATE.get('next_scan_at') or 0.0)
+        if force_4h:
+            rows_4h=_multiasset_scan('4h',force=True)
+            if rows_4h: _multiasset_mark_close_refresh(plan['4h']['key'])
+        elif cached_rows and now_mono < next_scan:
+            rows_4h=cached_rows
+        else:
+            rows_4h=_multiasset_scan('4h',force=False)
+        top_score=0.0
+        if rows_4h:
+            top_score=max([float((r or {}).get('router_score') or 0) for r in rows_4h] or [0.0])
+            interval=900 if top_score >= 72.0 else 1800
+            with _MULTI_ROUTER_STATE_LOCK:
+                _MULTI_ROUTER_STATE.update({'rows':list(rows_4h),'last_scan_at':now_mono,'next_scan_at':now_mono+interval,'interval_seconds':interval})
+
+        candidates_4h=[r for r in rows_4h if r.get('deep_candidate')][:MULTIASSET_DEEP_LIMIT]
         due=[]
-        # 4h is the main executable lane. Daily gives independent swing coverage.
-        if now.hour % 4 == 0 and now.minute <= 15:
-            due.extend((r['symbol'],'4h') for r in candidates)
-        if now.hour == 0 and now.minute <= 20:
-            due.extend((r['symbol'],'1D') for r in candidates)
-        # Dynamic 1h Fast Lane only for exceptionally active top candidate.
-        if now.minute <= 10 and candidates and float(candidates[0].get('router_score') or 0) >= 82:
-            due.insert(0,(candidates[0]['symbol'],'1h'))
+        if plan['4h']['due']:
+            due.extend((r['symbol'],'4h') for r in candidates_4h)
+
+        if plan['1D']['due']:
+            force=not _multiasset_close_refresh_done(plan['1D']['key'])
+            rows_1d=_multiasset_scan('1D',force=force)
+            if rows_1d: _multiasset_mark_close_refresh(plan['1D']['key'])
+            due.extend((r['symbol'],'1D') for r in rows_1d if r.get('deep_candidate'))
+
+        if plan['1h']['due'] and top_score >= 82.0:
+            force=not _multiasset_close_refresh_done(plan['1h']['key'])
+            rows_1h=_multiasset_scan('1h',force=force)
+            if rows_1h: _multiasset_mark_close_refresh(plan['1h']['key'])
+            fast=[r for r in rows_1h if r.get('deep_candidate')][:1]
+            due[0:0]=[(r['symbol'],'1h') for r in fast]
+
+        due=list(dict.fromkeys(due))
         for symbol,tf in due:
+            with _MULTI_AUTO_LOCK:
+                if tf=='1D':
+                    if int(_MULTI_AUTO_DAILY.get('context_count') or 0) >= _MULTI_DAILY_CONTEXT_EXTRA_MAX:
+                        continue
+                elif int(_MULTI_AUTO_DAILY.get('count') or 0) >= MULTIASSET_AUTO_DEEP_DAILY_MAX:
+                    continue
             bucket=f"{symbol}|{tf}|{now.strftime('%Y-%m-%d')}|{now.hour // (1 if tf=='1h' else (4 if tf=='4h' else 24))}"
             with _MULTI_AUTO_LOCK:
                 if bucket in _MULTI_AUTO_DONE:
                     continue
+            if not _multiasset_retry_ready(bucket,now_mono):
+                continue
             result=_multiasset_run_analysis(symbol,tf,owner=f'multi-background:{symbol}:{tf}')
             if result.get('busy'):
                 return
+            if not result.get('success',False):
+                _multiasset_record_retry(bucket,result.get('error')); return
             with _MULTI_AUTO_LOCK:
-                _MULTI_AUTO_DONE.add(bucket)
-                _MULTI_AUTO_DAILY['count'] = int(_MULTI_AUTO_DAILY.get('count') or 0) + 1
+                _MULTI_AUTO_DONE.add(bucket); _MULTI_DEEP_RETRY.pop(bucket,None)
+                if tf=='1D': _MULTI_AUTO_DAILY['context_count']=int(_MULTI_AUTO_DAILY.get('context_count') or 0)+1
+                else: _MULTI_AUTO_DAILY['count']=int(_MULTI_AUTO_DAILY.get('count') or 0)+1
                 if len(_MULTI_AUTO_DONE)>80:
                     for old in list(_MULTI_AUTO_DONE)[:30]: _MULTI_AUTO_DONE.discard(old)
             if _multiasset_is_executable(result):

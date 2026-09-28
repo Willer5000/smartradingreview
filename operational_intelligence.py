@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-VERSION = "RC9_7_THESIS_CONTINGENCY_RESILIENCE_V1"
+VERSION = "COMMIT17_5_1_STABLE_MULTI_RUNTIME_V1"
 
 DIRECTIONAL_ACTIONS = {"LONG", "SHORT", "COMPRA_SPOT", "VENTA_SPOT"}
 NON_DIRECTIONAL_ACTIONS = {"ESPERAR", "PRECAUCION", "NO_OPERAR"}
@@ -35,6 +35,25 @@ from futures_universe import (
 
 FUTURES_SYMBOLS = tuple(_futures_all_symbols())
 SPOT_EXECUTION_TFS = ("4H", "12H", "1D", "1W")
+
+# Commit 17.5.1 — isolated Multi-Asset routing contract.
+# Multi-Asset reuses the stable Futures execution engine, but its seven
+# contracts are not crypto symbols in futures_universe.py. Recognizing these
+# cells here does NOT alter crypto Futures cells, thresholds or strategies.
+MULTIASSET_SYMBOLS = {
+    "SPY-USDT", "QQQ-USDT", "CL-USDT", "NATGAS-USDT",
+    "COPPER-USDT", "XAG-USDT", "KSTR-USDT",
+}
+MULTIASSET_EXECUTION_TFS = {"1H", "4H", "1D"}
+
+
+def is_multiasset_cell(market: Any, symbol: Any, timeframe: Any, action: Any) -> bool:
+    return bool(
+        _u(market) == "FUTURES"
+        and _u(symbol) in MULTIASSET_SYMBOLS
+        and _u(timeframe) in MULTIASSET_EXECUTION_TFS
+        and canonical_action(action, "FUTURES") in {"LONG", "SHORT"}
+    )
 
 
 def _u(value: Any) -> str:
@@ -141,7 +160,9 @@ def official_universe_audit() -> Dict[str, Any]:
 
 def is_official_cell(market: Any, symbol: Any, timeframe: Any, action: Any) -> bool:
     cell = (_u(market), _u(symbol), _u(timeframe), canonical_action(action, _u(market)))
-    return cell in _OFFICIAL_CELL_SET
+    # The audited 150-cell Spot/Crypto-Futures universe remains untouched.
+    # Multi-Asset is an isolated additional routing contract.
+    return cell in _OFFICIAL_CELL_SET or is_multiasset_cell(market, symbol, timeframe, action)
 
 
 # Timeframes used only as context may exist even when they are not action cells.
@@ -164,6 +185,15 @@ _MTF_ROLE_PROFILES: Dict[str, Dict[str, Dict[str, Sequence[str]]]] = {
 }
 
 
+# Multi-Asset uses only the timeframes its runtime really produces.
+# MTF remains strict: a real context/setup contradiction is never waived.
+_MULTIASSET_MTF_PROFILES: Dict[str, Dict[str, Sequence[str]]] = {
+    "1H": {"context": ("4H",), "structure": ("4H",), "setup": ("1H",), "timing": ("1H",)},
+    "4H": {"context": ("1D",), "structure": ("1D",), "setup": ("4H",), "timing": ("4H",)},
+    "1D": {"context": ("1D",), "structure": ("1D",), "setup": ("1D",), "timing": ("4H",)},
+}
+
+
 _RISK_MTF_PROFILES: Dict[str, Dict[str, Dict[str, Sequence[str]]]] = {
     "CORE2": {
         "12H": {"context": ("12H",), "structure": ("12H",), "setup": ("12H",), "timing": ("4H",)},
@@ -182,7 +212,11 @@ _RISK_MTF_PROFILES: Dict[str, Dict[str, Dict[str, Sequence[str]]]] = {
 }
 
 def _mtf_profile_for(market: Any, timeframe: Any, symbol: Any = "") -> Dict[str, Sequence[str]]:
-    market_u, timeframe_u = _u(market), _u(timeframe)
+    market_u, timeframe_u, symbol_u = _u(market), _u(timeframe), _u(symbol)
+    if market_u == "FUTURES" and symbol_u in MULTIASSET_SYMBOLS:
+        return dict(_MULTIASSET_MTF_PROFILES.get(
+            timeframe_u, {"setup": (timeframe_u,), "timing": (timeframe_u,)}
+        ))
     if market_u == "FUTURES":
         rc = futures_risk_class_for(symbol)
         if timeframe_u in _RISK_MTF_PROFILES.get(rc, {}):
@@ -612,6 +646,7 @@ def prepare_operational_intelligence(
     be rescued by a default playbook.
     """
     market = "FUTURES" if _u(system_type) == "FUTURES" else "SPOT"
+    is_multiasset = bool(market == "FUTURES" and _u(symbol) in MULTIASSET_SYMBOLS)
     raw_regime = (layers.get("market_regime") or {}).get("regime")
     regime = canonical_regime(raw_regime)
     vol_state = canonical_volatility(layers.get("volatility") or {}, raw_regime)
@@ -683,25 +718,43 @@ def prepare_operational_intelligence(
         "confirmations": [], "conflicts": [],
     }
     if selected_action in DIRECTIONAL_ACTIONS:
-        try:
-            from default_strategy_bank import select_strategy
-            _selected_prior_for_strategy = research_map.get(selected_action) or {}
-            strategy = select_strategy(
-                selected_action, regime, vol_state, indicator_groups,
-                symbol=_u(symbol), timeframe=_u(timeframe), market=market,
-                preferred_family=str(_selected_prior_for_strategy.get("group_prior_strategy_family") or ""),
-            )
-        except Exception as exc:
+        if is_multiasset:
+            # Do not force a crypto strategy cell onto oil/index/metals. The
+            # direction still needs the strict autonomous thesis + MTF contract;
+            # multiasset_system.py supplies the asset-class strategy context.
             strategy = {
-                "id":"NO_PLAYBOOK", "family":"NONE", "quality":0.0,
-                "confirmations":[], "conflicts":[], "error":str(exc)[:160],
+                "id": "MULTIASSET_DELEGATED_PLAYBOOK",
+                "family": "MULTIASSET_DELEGATED",
+                "quality": 0.0,
+                "confirmations": [], "conflicts": [],
+                "regime_match": True, "volatility_match": True,
+                "delegated_to": "MULTIASSET_STRATEGY_BANK",
             }
+        else:
+            try:
+                from default_strategy_bank import select_strategy
+                _selected_prior_for_strategy = research_map.get(selected_action) or {}
+                strategy = select_strategy(
+                    selected_action, regime, vol_state, indicator_groups,
+                    symbol=_u(symbol), timeframe=_u(timeframe), market=market,
+                    preferred_family=str(_selected_prior_for_strategy.get("group_prior_strategy_family") or ""),
+                )
+            except Exception as exc:
+                strategy = {
+                    "id":"NO_PLAYBOOK", "family":"NONE", "quality":0.0,
+                    "confirmations":[], "conflicts":[], "error":str(exc)[:160],
+                }
 
     official = (
         selected_action in DIRECTIONAL_ACTIONS
         and is_official_cell(market, symbol, timeframe, selected_action)
     )
-    risk_profile = futures_exit_profile_for(symbol) if market == "FUTURES" else {"risk_class": "SPOT", "name": "PORTFOLIO", "risk_budget_multiplier": 1.0}
+    risk_profile = (
+        {"risk_class": "MULTIASSET", "name": "MULTIASSET_CONTEXTUAL", "risk_budget_multiplier": 1.0}
+        if is_multiasset
+        else futures_exit_profile_for(symbol) if market == "FUTURES"
+        else {"risk_class": "SPOT", "name": "PORTFOLIO", "risk_budget_multiplier": 1.0}
+    )
     risk_class = str(risk_profile.get("risk_class") or ("SPOT" if market == "SPOT" else "CORE1"))
     # A default strategy is a technical contingency path, not a prerequisite
     # for market intelligence. An autonomous thesis may proceed to the existing
@@ -796,6 +849,7 @@ def prepare_operational_intelligence(
         "candidate_action": selected_action if candidate_ready else "NO_OPERAR",
         "candidate_ready": candidate_ready,
         "official_cell": official,
+        "operational_segment": "MULTIASSET" if is_multiasset else market,
         "mtf_usable": mtf_usable,
         "mtf_complete": bool((mtf_context or {}).get("complete")),
         "never_bypass_safety": True,

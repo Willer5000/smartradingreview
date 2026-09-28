@@ -28,7 +28,7 @@ from futures_system import (
     _track_futures_network_response,
 )
 
-MULTIASSET_VERSION = 'COMMIT12_1_MULTI_V1_QA_RESOURCE_GOVERNED'
+MULTIASSET_VERSION = 'COMMIT17_5_1_MULTI_RUNTIME_RELIABILITY'
 MULTIASSET_ENABLED = str(os.getenv('MULTIASSET_ENABLED', '1')).lower() not in ('0','false','no','off')
 MULTIASSET_DEEP_LIMIT = max(1, min(2, int(os.getenv('MULTIASSET_DEEP_LIMIT', '2') or 2)))
 MULTIASSET_ROUTER_TTL_SECONDS = max(300, int(os.getenv('MULTIASSET_ROUTER_TTL_SECONDS', '900') or 900))
@@ -95,7 +95,10 @@ SPECIALIST_BY_CLASS = {
 }
 
 _router_lock = threading.Lock()
-_router_cache = {'stored_at':0.0, 'timeframe':None, 'rows':[]}
+_router_cache = {
+    tf: {'stored_at': 0.0, 'rows': []}
+    for tf in MULTIASSET_TIMEFRAMES
+}
 _contract_lock = threading.Lock()
 _contract_cache: Dict[str, Dict] = {}
 
@@ -257,6 +260,13 @@ def _router_fetch(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
             parsed.append([pd.to_datetime(int(row[0]),unit='ms',utc=True),*[_safe_float(x) for x in row[1:6]]])
         if len(parsed)<30: return None
         df=pd.DataFrame(parsed,columns=['timestamp','open','high','low','close','volume']).sort_values('timestamp')
+        # 17.5.1: rank only CLOSED candles. KuCoin may include the current
+        # forming bar, which distorts early-period volume/ATR and shortlist.
+        now_utc = pd.Timestamp.now(tz='UTC')
+        closed_cutoff = now_utc - pd.Timedelta(seconds=int(gran * 60) + 15)
+        df = df[df['timestamp'] <= closed_cutoff]
+        if len(df) < 30:
+            return None
         return df.tail(MULTIASSET_ROUTER_CANDLES).reset_index(drop=True)
     except Exception:
         return None
@@ -283,8 +293,12 @@ def scan_opportunities(timeframe: str='4h', force: bool=False) -> List[Dict]:
     if timeframe not in MULTIASSET_TIMEFRAMES: timeframe='4h'
     now=time.monotonic()
     with _router_lock:
-        if (not force and _router_cache['timeframe']==timeframe and now-_router_cache['stored_at']<MULTIASSET_ROUTER_TTL_SECONDS):
-            return [dict(x) for x in _router_cache['rows']]
+        cached = _router_cache.setdefault(timeframe, {'stored_at': 0.0, 'rows': []})
+        if (
+            not force
+            and now - float(cached.get('stored_at') or 0.0) < MULTIASSET_ROUTER_TTL_SECONDS
+        ):
+            return [dict(x) for x in (cached.get('rows') or [])]
     rows=[]
     for symbol,meta in MULTIASSET_SYMBOLS.items():
         df=_router_fetch(symbol,timeframe)
@@ -294,17 +308,39 @@ def scan_opportunities(timeframe: str='4h', force: bool=False) -> List[Dict]:
         session=_market_session(meta['asset_class']); penalty=8 if 'OFFHOURS' in session or 'CLOSED' in session else 0
         macro_penalty=12 if macro.get('gate')=='WAIT_EVENT' else (4 if macro.get('gate')=='CAUTION' else 0)
         effective=max(0,round(q['score']-penalty-macro_penalty,1))
+        source_candle_timestamp = None
+        try:
+            source_candle_timestamp = df['timestamp'].iloc[-1].isoformat()
+        except Exception:
+            pass
         rows.append({
             'symbol':symbol,'code':meta['code'],'display_name':meta['name'],'asset_class':meta['asset_class'],'group':meta['group'],
             'timeframe':timeframe,'router_score':effective,'raw_score':q['score'],'bias':q['bias'],
             'atr_pct':q['atr_pct'],'volume_ratio':q['volume_ratio'],'last_price':q['last_price'],
             'session':session,'macro_gate':macro.get('gate'),'deep_candidate':False,
+            'source_candle_timestamp':source_candle_timestamp,'closed_candle_only':True,
         })
     rows.sort(key=lambda x:x['router_score'],reverse=True)
     for row in rows[:MULTIASSET_DEEP_LIMIT]: row['deep_candidate']=True
     with _router_lock:
-        _router_cache.update({'stored_at':now,'timeframe':timeframe,'rows':[dict(x) for x in rows]})
+        _router_cache[timeframe] = {'stored_at': now, 'rows': [dict(x) for x in rows]}
     return rows
+
+
+def router_cache_status() -> Dict:
+    """Cache-only diagnostics; never opens exchange requests."""
+    now = time.monotonic()
+    payload = {}
+    with _router_lock:
+        for tf in MULTIASSET_TIMEFRAMES:
+            row = _router_cache.get(tf) or {}
+            rows = list(row.get('rows') or [])
+            payload[tf] = {
+                'age_seconds': (max(0, round(now - float(row.get('stored_at') or 0.0), 1)) if row.get('stored_at') else None),
+                'rows': len(rows),
+                'source_candle_timestamp': rows[0].get('source_candle_timestamp') if rows else None,
+            }
+    return payload
 
 
 def _route_strategy_family(result: Dict, strategy: Dict, macro: Dict) -> Dict:
