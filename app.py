@@ -17190,8 +17190,7 @@ class TradingExpertSystem:
             #   * they cannot create a signal, rescue an invalid baseline,
             #     lower R/R rules, lower Safety, or change legacy quality scores;
             #   * any failure or ambiguous result keeps the 17.5.1 baseline.
-            # Signal policy remains intact; actual availability still depends
-            # on closed data and the downstream execution/publication gates.
+            # This preserves signal frequency while improving execution quality.
             try:
                 minimum_viable_rr = max(
                     1.0,
@@ -17306,6 +17305,11 @@ class TradingExpertSystem:
                             or 'UNKNOWN'
                         )
                     } if isinstance(structure, dict) else {}
+                    guard_setup_family = str(
+                        setup_family
+                        or (((observations.get('operational_intelligence') or {}).get('default_strategy') or {}).get('family'))
+                        or 'UNSPECIFIED'
+                    ).upper()
 
                     execution_context = build_execution_context(
                         structure=structure,
@@ -17396,6 +17400,37 @@ class TradingExpertSystem:
                                 return timing_cache[price]
                             baseline_passed, refined_passed = _timing_at(baseline_entry), _timing_at(re)
                             if baseline_passed is None or refined_passed is None or baseline_passed != refined_passed:
+                                return False
+
+                            # 17.5.5: the advanced search must know the SAME
+                            # execution setup guard that will run downstream.
+                            # This does not lower the guard; it lets the search
+                            # skip a 58/100 Entry and consider a runner-up that
+                            # already satisfies the existing 60/62 thresholds.
+                            try:
+                                from operational_intelligence import execution_setup_guard as _execution_setup_guard
+                                entry_role = proposal.get('entry_committee') or {}
+                                candidate_guard = _execution_setup_guard(
+                                    action=decision,
+                                    levels={
+                                        'entry': re, 'stop_loss': rs, 'take_profit': rt,
+                                        'risk_reward': rr_candidate,
+                                        'entry_quality_score': float(proposal.get('entry_quality') or 0),
+                                        'entry_score': float(proposal.get('entry_quality') or 0),
+                                        'entry_sweep_confirmed': bool(entry_quality.get('sweep')),
+                                        'entry_mss_bos_confirmed': bool(entry_quality.get('mss')),
+                                        'entry_displacement_confirmed': bool(entry_quality.get('displacement')),
+                                        'entry_source': str(entry_role.get('source') or entry_source or ''),
+                                    },
+                                    setup_family=guard_setup_family,
+                                    market='FUTURES',
+                                    timeframe=timeframe,
+                                ) or {}
+                                if candidate_guard.get('applied'):
+                                    return False
+                            except Exception:
+                                # A diagnostic/guard failure cannot authorize a
+                                # refined geometry that downstream may veto.
                                 return False
                         return True
 
@@ -33930,8 +33965,12 @@ _MULTI_ASSET_CACHE = {
 }
 _MULTI_AUTO_DONE = set()
 _MULTI_AUTO_LOCK = threading.Lock()
-_MULTI_AUTO_DAILY = {'day': None, 'count': 0, 'context_count': 0}
+_MULTI_AUTO_DAILY = {'day': None, 'count': 0, 'context_count': 0, 'fast_count': 0}
 _MULTI_DAILY_CONTEXT_EXTRA_MAX = 2
+# 17.5.5: Fast Lane keeps the existing router quality threshold, but has its
+# own small daily budget so 1h cannot starve principal 4h analyses.
+_MULTI_FAST_LANE_MIN_SCORE = 82.0
+_MULTI_FAST_LANE_DAILY_MAX = 6
 _MULTI_DEEP_RETRY = {}
 _MULTI_CLOSE_REFRESHED = set()
 _MULTI_ROUTER_STATE_LOCK = threading.Lock()
@@ -33991,6 +34030,99 @@ def _multiasset_is_executable(result):
     return (str(decision.get('action') or '').upper() in ('LONG','SHORT') and
             str(levels.get('publication_status') or result.get('publication_status') or '').upper() == 'EXECUTABLE_SIGNAL' and
             result.get('is_executable', levels.get('is_executable', True)) is not False)
+
+def _parse_utc_iso(value):
+    if not value:
+        return None
+    try:
+        raw = str(value).strip().replace('Z', '+00:00')
+        parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+def _multiasset_signal_temporal_state(result, now=None):
+    """Classify a cached Multi-Asset confirmation for UI lanes only.
+
+    This does not create/extend a trading signal. It separates the most recent
+    closed-candle confirmation from an older still-valid cached confirmation so
+    /previous and /active no longer need a hardcoded empty active lane.
+    """
+    result = result or {}; levels = result.get('levels') or {}
+    tf = str(result.get('timeframe') or '')
+    tf_seconds = {'1h': 3600, '4h': 14400, '1D': 86400}.get(tf, 14400)
+    now = now or datetime.now(timezone.utc)
+    source = _parse_utc_iso(result.get('source_candle_close_timestamp') or result.get('source_candle_timestamp'))
+    if source is None:
+        return {'valid': False, 'fresh': False, 'age_seconds': None, 'remaining_seconds': 0, 'valid_until': None}
+    age = max(0.0, (now - source).total_seconds())
+    fresh = age <= tf_seconds * 1.20
+    valid_until = _parse_utc_iso(result.get('valid_until') or levels.get('valid_until'))
+    if valid_until is None:
+        try:
+            max_wait_bars = int(result.get('max_entry_wait_bars') or levels.get('max_entry_wait_bars') or 6)
+        except Exception:
+            max_wait_bars = 6
+        max_wait_bars = max(1, min(6, max_wait_bars))
+        valid_until = source + timedelta(seconds=tf_seconds * max_wait_bars)
+    remaining = max(0, int((valid_until - now).total_seconds()))
+    return {
+        'valid': remaining > 0,
+        'fresh': bool(fresh),
+        'age_seconds': int(age),
+        'remaining_seconds': remaining,
+        'valid_until': valid_until.isoformat(),
+    }
+
+def _technical_signal_funnel_row(result):
+    """Cache-only technical observability. No votes, thresholds or fetches."""
+    result = result or {}
+    if not isinstance(result, dict):
+        return {'stage': 'DATA_ERROR', 'reason': 'INVALID_RESULT'}
+    oi = result.get('operational_intelligence') or {}
+    thesis = oi.get('thesis') or {}
+    decision = result.get('decision') or {}
+    levels = result.get('levels') or {}
+    action = str(decision.get('action') or '').upper()
+    publication = str(levels.get('publication_status') or result.get('publication_status') or '').upper()
+    executable = bool(_multiasset_is_executable(result) if result.get('is_multiasset') else (
+        action in ('LONG','SHORT') and publication == 'EXECUTABLE_SIGNAL'
+        and result.get('is_executable', levels.get('is_executable', True)) is not False
+    ))
+    stage = 'EXECUTABLE'
+    reason = ''
+    if result.get('success') is False:
+        stage, reason = 'DATA_ERROR', str(result.get('error') or 'ANALYSIS_ERROR')[:180]
+    elif str(thesis.get('direction') or '').upper() not in ('BULLISH','BEARISH'):
+        stage, reason = 'THESIS', 'NO_DIRECTIONAL_THESIS'
+    elif not bool(oi.get('candidate_ready')):
+        stage, reason = 'CANDIDATE', str(oi.get('candidate_source') or 'CANDIDATE_NOT_READY')
+    elif action not in ('LONG','SHORT'):
+        stage, reason = 'DIRECTION_CONFIRMATION', str((decision.get('audit') or {}).get('reason') or decision.get('reason') or action or 'NOT_DIRECTIONAL')[:180]
+    elif publication != 'EXECUTABLE_SIGNAL' or not executable:
+        stage, reason = 'EXECUTION_PUBLICATION', str(levels.get('rejected_reason') or result.get('rejected_reason') or publication or 'NOT_EXECUTABLE')[:180]
+    return {
+        'symbol': result.get('symbol'), 'timeframe': result.get('timeframe'),
+        'stage': stage, 'reason': reason,
+        'thesis_direction': thesis.get('direction'), 'thesis_quality': thesis.get('quality'),
+        'families': list(thesis.get('independent_support_families') or []),
+        'required_families': thesis.get('required_independent_families'),
+        'candidate_ready': bool(oi.get('candidate_ready')), 'candidate_source': oi.get('candidate_source'),
+        'mtf_conflict': bool((oi.get('multi_timeframe') or {}).get('conflict')),
+        'action': action, 'confidence': decision.get('confidence'),
+        'publication_status': publication, 'executable': executable,
+    }
+
+def _technical_signal_funnel_summary(analyses):
+    rows=[]
+    values = analyses.values() if isinstance(analyses, dict) else analyses or []
+    for result in values:
+        if isinstance(result, dict): rows.append(_technical_signal_funnel_row(result))
+    counts={}
+    for row in rows: counts[row['stage']] = counts.get(row['stage'], 0) + 1
+    return {'total': len(rows), 'stage_counts': counts, 'rows': rows}
 
 def _multiasset_run_analysis(symbol, timeframe, owner='multi-background'):
     engine=_get_multiasset_system()
@@ -34108,7 +34240,7 @@ def _multiasset_background_tick():
         with _MULTI_AUTO_LOCK:
             today=now.strftime('%Y-%m-%d')
             if _MULTI_AUTO_DAILY.get('day') != today:
-                _MULTI_AUTO_DAILY.update({'day':today,'count':0,'context_count':0})
+                _MULTI_AUTO_DAILY.update({'day':today,'count':0,'context_count':0,'fast_count':0})
                 _MULTI_AUTO_DONE.clear(); _MULTI_DEEP_RETRY.clear(); _MULTI_CLOSE_REFRESHED.clear()
         plan=_multiasset_close_plan(now)
 
@@ -34141,11 +34273,15 @@ def _multiasset_background_tick():
             if rows_1d: _multiasset_mark_close_refresh(plan['1D']['key'])
             due.extend((r['symbol'],'1D') for r in rows_1d if r.get('deep_candidate'))
 
-        if plan['1h']['due'] and top_score >= 82.0:
+        # 17.5.5: 1h is judged by its OWN closed 1h router, not by 4h.
+        # The quality floor remains 82; this restores coverage without lowering
+        # the signal or deep-analysis gates. One fast candidate max per close.
+        if plan['1h']['due']:
             force=not _multiasset_close_refresh_done(plan['1h']['key'])
             rows_1h=_multiasset_scan('1h',force=force)
             if rows_1h: _multiasset_mark_close_refresh(plan['1h']['key'])
-            fast=[r for r in rows_1h if r.get('deep_candidate')][:1]
+            fast=[r for r in rows_1h if r.get('deep_candidate')
+                  and float(r.get('router_score') or 0) >= _MULTI_FAST_LANE_MIN_SCORE][:1]
             due[0:0]=[(r['symbol'],'1h') for r in fast]
 
         due=list(dict.fromkeys(due))
@@ -34154,8 +34290,11 @@ def _multiasset_background_tick():
                 if tf=='1D':
                     if int(_MULTI_AUTO_DAILY.get('context_count') or 0) >= _MULTI_DAILY_CONTEXT_EXTRA_MAX:
                         continue
-                elif int(_MULTI_AUTO_DAILY.get('count') or 0) >= MULTIASSET_AUTO_DEEP_DAILY_MAX:
-                    continue
+                else:
+                    if int(_MULTI_AUTO_DAILY.get('count') or 0) >= MULTIASSET_AUTO_DEEP_DAILY_MAX:
+                        continue
+                    if tf=='1h' and int(_MULTI_AUTO_DAILY.get('fast_count') or 0) >= _MULTI_FAST_LANE_DAILY_MAX:
+                        continue
             bucket=f"{symbol}|{tf}|{now.strftime('%Y-%m-%d')}|{now.hour // (1 if tf=='1h' else (4 if tf=='4h' else 24))}"
             with _MULTI_AUTO_LOCK:
                 if bucket in _MULTI_AUTO_DONE:
@@ -34169,8 +34308,12 @@ def _multiasset_background_tick():
                 _multiasset_record_retry(bucket,result.get('error')); return
             with _MULTI_AUTO_LOCK:
                 _MULTI_AUTO_DONE.add(bucket); _MULTI_DEEP_RETRY.pop(bucket,None)
-                if tf=='1D': _MULTI_AUTO_DAILY['context_count']=int(_MULTI_AUTO_DAILY.get('context_count') or 0)+1
-                else: _MULTI_AUTO_DAILY['count']=int(_MULTI_AUTO_DAILY.get('count') or 0)+1
+                if tf=='1D':
+                    _MULTI_AUTO_DAILY['context_count']=int(_MULTI_AUTO_DAILY.get('context_count') or 0)+1
+                else:
+                    _MULTI_AUTO_DAILY['count']=int(_MULTI_AUTO_DAILY.get('count') or 0)+1
+                    if tf=='1h':
+                        _MULTI_AUTO_DAILY['fast_count']=int(_MULTI_AUTO_DAILY.get('fast_count') or 0)+1
                 if len(_MULTI_AUTO_DONE)>80:
                     for old in list(_MULTI_AUTO_DONE)[:30]: _MULTI_AUTO_DONE.discard(old)
             if _multiasset_is_executable(result):
@@ -34248,7 +34391,11 @@ def api_multiasset_signals_previous():
         signals=[]
         for result in analyses.values():
             if not isinstance(result,dict) or not _multiasset_is_executable(result): continue
+            state=_multiasset_signal_temporal_state(result)
+            if not state['valid'] or not state['fresh']: continue
             row=_multiasset_signal_row(result,'PREVIOUS_CONFIRMED')
+            row.update({'valid_until':state['valid_until'],'tiempo_restante':state['remaining_seconds'],
+                        'lifecycle_status':'waiting_entry'})
             if row['confidence']>=min_conf: signals.append(row)
         signals.sort(key=lambda x:-x['confidence'])
         return jsonify({'success':True,'warming_up':False,'running':False,'cache_ready':bool(analyses),'total':len(signals),'active_count':len(signals),'signals':signals,'other_directional_signals':[],'analysis_candidates':[],'progress':{'total':7,'completed':len(analyses),'errors':0},'timestamp':datetime.now(bolivia_tz).isoformat()})
@@ -34257,9 +34404,63 @@ def api_multiasset_signals_previous():
 
 @app.route('/api/multiasset/signals/active', methods=['GET'])
 def api_multiasset_signals_active():
-    # Commit 12 V1 does not duplicate a second lifecycle store. Fresh executable
-    # analyses are exposed in /previous; saved/entered positions live in Guardian.
-    return jsonify({'success':True,'warming_up':False,'running':False,'cache_ready':True,'total':0,'signals':[],'other_directional_signals':[],'vigent_other_directional_signals':[],'analysis_candidates':[],'progress':{'total':7,'completed':0,'errors':0},'timestamp':datetime.now(bolivia_tz).isoformat()})
+    # 17.5.5: cache-only vigency lane. It does not create a second trading
+    # lifecycle or duplicate fresh /previous confirmations. Older executable
+    # confirmations remain visible only while their original technical window
+    # is still open; saved/entered positions continue in Guardian.
+    try:
+        min_conf=float(request.args.get('min_confidence',55) or 55)
+        with _MULTI_ASSET_CACHE['lock']:
+            analyses=dict(_MULTI_ASSET_CACHE.get('analysis') or {})
+        signals=[]
+        for result in analyses.values():
+            if not isinstance(result,dict) or not _multiasset_is_executable(result):
+                continue
+            state=_multiasset_signal_temporal_state(result)
+            if not state['valid'] or state['fresh']:
+                continue
+            row=_multiasset_signal_row(result,'ACTIVE_CONFIRMED')
+            row.update({'valid_until':state['valid_until'],'tiempo_restante':state['remaining_seconds'],
+                        'lifecycle_status':'waiting_entry'})
+            if row['confidence']>=min_conf:
+                signals.append(row)
+        signals.sort(key=lambda x:-float(x.get('confidence') or 0))
+        return jsonify({
+            'success':True,'warming_up':False,'running':False,'cache_ready':bool(analyses),
+            'total':len(signals),'active_count':len(signals),'signals':signals,
+            'other_directional_signals':[],'vigent_other_directional_signals':[],
+            'analysis_candidates':[],
+            'progress':{'total':7,'completed':len(analyses),'errors':0},
+            'timestamp':datetime.now(bolivia_tz).isoformat(),
+        })
+    except Exception as exc:
+        return jsonify({'success':False,'error':str(exc)[:180],'signals':[]}),500
+
+@app.route('/api/diagnostics/signal-funnel', methods=['GET'])
+def api_signal_funnel():
+    """Authenticated, cache-only signal-path observability for QA/admin use."""
+    user=_require_auth()
+    if not isinstance(user,str):
+        return user
+    market=str(request.args.get('market') or 'futures').strip().lower()
+    try:
+        if market in ('multiasset','multi','multi-asset'):
+            with _MULTI_ASSET_CACHE['lock']:
+                analyses=dict(_MULTI_ASSET_CACHE.get('analysis') or {})
+            payload=_technical_signal_funnel_summary(analyses)
+            payload.update({'success':True,'market':'multiasset','cache_only':True})
+            return jsonify(payload)
+
+        # Futures only: read the existing snapshot; do not trigger a refresh.
+        with _futures_analysis_cache['lock']:
+            cache_data=dict(_futures_analysis_cache.get('data') or {})
+        analyses=dict(cache_data.get('analysis') or {})
+        payload=_technical_signal_funnel_summary(analyses)
+        payload.update({'success':True,'market':'futures','cache_only':True})
+        return jsonify(payload)
+    except Exception as exc:
+        return jsonify({'success':False,'market':market,'cache_only':True,'error':str(exc)[:180]}),500
+
 
 @app.route('/api/multiasset/correlation', methods=['GET'])
 def api_multiasset_correlation():
