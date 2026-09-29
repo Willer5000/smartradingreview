@@ -530,34 +530,38 @@ def _cluster_evidence(candidate: Dict[str, Any], universe: List[Dict[str, Any]],
 
 def evaluate_sl_reaction_conflict(*, structure: Dict[str, Any], direction: str,
                                   entry: float, stop_loss: float, atr: float) -> Dict[str, Any]:
-    """Reject only a *local, setup-relevant* reaction collision.
+    """Hard semantic guard: a stop cannot sit inside a strong same-direction reaction zone.
 
-    17.5.10 fixes the false-veto where any strong historical support/resistance
-    on the invalidation side could force the SL beyond a level dozens of ATR
-    away. A reaction level is relevant only when it belongs to the planned
-    invalidation corridor derived from Entry→SL risk geometry. This does not
-    widen/tighten SL, create direction or relax the strong-zone requirement.
+    The rule is intentionally local-only and uses the same already-loaded structural
+    candidates as Entry.  It does not move the stop, invent a new ATR target or create
+    a trade.  It only identifies the contradiction "this is still a plausible reaction
+    zone for my thesis, therefore it is not yet a clean invalidation point".
+
+    A stop is considered clear when it is sufficiently beyond the reaction cluster on
+    the invalidation side.  The clearance radius scales with ATR and price so the rule
+    is not tied to one symbol or timeframe.
     """
     direction = str(direction or "").lower()
     entry = _f(entry, 0.0)
     stop_loss = _f(stop_loss, 0.0)
     atr = _f(atr, 0.0)
     if direction not in {"long", "short"} or min(entry, stop_loss, atr) <= 0:
-        return {"conflict": False, "reason": "INSUFFICIENT_INPUT"}
+        return {"conflict": True, "reason": "INSUFFICIENT_INPUT"}
     if not _is_correct_side(stop_loss, entry, direction, "sl"):
         return {"conflict": True, "reason": "SL_WRONG_SIDE", "level": entry,
                 "source": "Entry", "distance_atr": 0.0}
 
-    reaction_universe = _collect_entry_candidates(_execution_structure(_d(structure)), direction, entry)
-    risk_distance = abs(entry - stop_loss)
+    s = _execution_structure(_d(structure))
+    reaction_universe = _collect_entry_candidates(s, direction, entry)
     best = None
     for lvl in reaction_universe:
         lp = _f(lvl.get("price"), 0.0)
         if lp <= 0:
             continue
-        if direction == "long" and lp >= entry:
+        # Only reaction anchors located on the actual invalidation side matter.
+        if direction == "long" and lp > entry:
             continue
-        if direction == "short" and lp <= entry:
+        if direction == "short" and lp < entry:
             continue
         fams, strength = _cluster_evidence(lvl, reaction_universe, atr)
         family = str(lvl.get("family") or "")
@@ -566,28 +570,33 @@ def evaluate_sl_reaction_conflict(*, structure: Dict[str, Any], direction: str,
         if not strong:
             continue
 
+        # A valid stop must be beyond, not on top of, the reaction cluster.
         clearance = max(atr * (0.12 + 0.02 * min(fams, 4)), abs(lp) * 0.0006)
-        stop_to_level = abs(stop_loss - lp)
-        entry_to_level = abs(entry - lp)
-
-        # Relevance comes from the setup's own planned risk corridor. A level
-        # far deeper than the current invalidation cannot veto this SL merely
-        # because it is on the same side of Entry.
-        local_stop_radius = max(risk_distance * 0.75, clearance * 2.0)
-        local_entry_depth = risk_distance + local_stop_radius
-        if stop_to_level > local_stop_radius or entry_to_level > local_entry_depth:
-            continue
-
-        if direction == "long":
-            inside = stop_loss >= (lp - clearance)
-            signed_clearance = (lp - stop_loss) / max(atr, 1e-12)
-        else:
-            inside = stop_loss <= (lp + clearance)
-            signed_clearance = (stop_loss - lp) / max(atr, 1e-12)
+        # Test actual local overlap, not the entire half-plane beyond a
+        # support/resistance. Include the full observed OB/FVG interval.
+        zone_low = zone_high = lp
+        wanted = "bullish" if direction == "long" else "bearish"
+        for ob in s.get("order_blocks") or []:
+            pr = ob.get("price_range") or []
+            if str(ob.get("type") or "").lower() == wanted and len(pr) >= 2:
+                lo, hi = sorted((_f(pr[0]), _f(pr[1])))
+                edge = hi if direction == "long" else lo
+                if lo > 0 and abs(edge - lp) <= max(abs(lp)*1e-7, 1e-10):
+                    zone_low, zone_high = min(zone_low, lo), max(zone_high, hi)
+        for gap in s.get("fair_value_gaps") or []:
+            if gap.get("filled", True) or str(gap.get("type") or "").lower() != wanted:
+                continue
+            lo, hi = sorted((_f(gap.get("gap_bottom")), _f(gap.get("gap_top"))))
+            edge = hi if direction == "long" else lo
+            if lo > 0 and abs(edge - lp) <= max(abs(lp)*1e-7, 1e-10):
+                zone_low, zone_high = min(zone_low, lo), max(zone_high, hi)
+        inside = zone_low - clearance <= stop_loss <= zone_high + clearance
+        signed_clearance = ((zone_low-stop_loss) if direction == "long"
+                            else (stop_loss-zone_high)) / atr
         if not inside:
             continue
 
-        distance_atr = stop_to_level / max(atr, 1e-12)
+        distance_atr = abs(stop_loss - lp) / max(atr, 1e-12)
         row = {
             "conflict": True,
             "reason": "SL_INSIDE_STRONG_REACTION_ZONE",
@@ -596,10 +605,9 @@ def evaluate_sl_reaction_conflict(*, structure: Dict[str, Any], direction: str,
             "families": int(fams),
             "strength": round(float(strength), 3),
             "distance_atr": round(distance_atr, 4),
+            "zone_low": zone_low, "zone_high": zone_high,
             "required_clearance_atr": round(clearance / max(atr, 1e-12), 4),
             "signed_clearance_atr": round(signed_clearance, 4),
-            "setup_risk_distance_atr": round(risk_distance / max(atr, 1e-12), 4),
-            "local_relevance_radius_atr": round(local_stop_radius / max(atr, 1e-12), 4),
         }
         if best is None or row["distance_atr"] < best["distance_atr"]:
             best = row
@@ -937,18 +945,18 @@ def _weights_for(role: str, market_type: str) -> Dict[str, float]:
     if role == "entry":
         # Spot is slightly more tolerant; derivatives demand reaction + fill quality.
         base = {"reaction":1.25,"smc":1.20,"strategy":1.05,"reachability":1.15,
-                "volatility":0.85,"flow":0.85,"context":0.75,"backtest_prior":0.35}
+                "volatility":0.85,"flow":0.85,"context":0.75,"backtest_prior":0.0}
         if market in {"futures","multiasset"}:
             base.update({"reaction":1.35,"smc":1.30,"reachability":1.25,"volatility":1.0})
         return base
     if role == "sl":
         base = {"invalidation":1.35,"noise":1.05,"reaction_collision":1.25,
-                "liquidity":1.0,"risk":1.15,"strategy":0.9,"backtest_prior":0.15}
+                "liquidity":1.0,"risk":1.15,"strategy":0.9,"backtest_prior":0.0}
         if market == "spot": base["risk"] = 1.0
         return base
     return {"target":1.20,"path":1.25,"touch_probability":1.25,
             "continuation":0.95,"economics":1.25,"strategy":0.9,"context":0.7,
-            "backtest_prior":0.20}
+            "backtest_prior":0.0}
 
 
 def _harmonic(values: Iterable[float]) -> Optional[float]:
@@ -962,7 +970,7 @@ def _score_candidate(scores: Dict[str, float], weights: Dict[str, float], role: 
     pairs = [(scores[k], weights.get(k, 1.0)) for k in scores if k in weights]
     agg = _weighted_mean(pairs)
     if agg is None: return 0.0, 0.0
-    agree = _consensus(list(scores.values()))
+    agree = _consensus([v for k, v in scores.items() if weights.get(k, 0) > 0])
 
     # Each committee has a small set of indispensable specialist dimensions.
     # Harmonic synthesis prevents one excellent opinion from hiding a very weak
@@ -1105,7 +1113,7 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
     leverage_hint = 1.0 if market == "spot" else max(1.0, min(100.0, _f(leverage_hint, 1.0)))
     context.setdefault("leverage_hint", round(leverage_hint, 4))
     current_price = _f(current_price, 0.0)
-    atr = max(_f(atr, 0.0), abs(current_price) * 1e-6, 1e-12)
+    atr = _f(atr, 0.0)
 
     rr_floor = max(1.0, _f(rr_floor, 1.8))
     rr_ceiling = max(rr_floor, _f(rr_ceiling, 4.5))
@@ -1440,7 +1448,7 @@ def recover_execution_geometry_from_structure(*, direction: str, current_price: 
     market = str(market_type or "futures").lower()
     direction = str(direction or "").lower()
     current_price = _f(current_price, 0.0)
-    atr = max(_f(atr, 0.0), abs(current_price) * 1e-6, 1e-12)
+    atr = _f(atr, 0.0)
     if direction not in {"long", "short"} or current_price <= 0 or atr <= 0:
         return {"success": False, "reason": "INVALID_RECOVERY_INPUT", "version": VERSION}
 
@@ -1457,16 +1465,8 @@ def recover_execution_geometry_from_structure(*, direction: str, current_price: 
         structure, direction, current_price, liquidation=liquidation
     )
     entry_candidates = [r for r in entry_candidates if str(r.get("family")) != "baseline"]
-    _add_execution_recovery_entry_candidates(
-        entry_candidates, structure=structure, direction=direction,
-        current_price=current_price, atr=atr,
-    )
-    if _f(entry_hint, 0.0) > 0:
-        _append_candidate(
-            entry_candidates, entry_hint, "existing_entry",
-            "Entry técnico ya seleccionado", 2.0,
-        )
-
+    # 17.5.11 recovery requires an observed structural anchor. A caller hint or
+    # a candle close/median is not by itself a reaction zone.
     entry_ranked = _rank_candidates(
         entry_candidates,
         lambda c: _entry_specialists(

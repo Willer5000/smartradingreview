@@ -6,6 +6,7 @@
     const ALWAYS = new Set(['trading-zones', 'pattern4']);
 
     const META = {
+        'market-maker-options': { label: 'Delta / Gamma / Theta', category: 'Opciones' },
         'trading-zones': { label: 'Zonas dinámicas de trading', category: 'Estructura', permanent: true },
         'rsi': { label: 'RSI y divergencias', category: 'Momentum' },
         'vwap': { label: 'Precio medio ponderado por volumen', category: 'Estrategias adaptativas' },
@@ -256,6 +257,7 @@
         if (id === 'order-flow' && window.IS_FUTURES_PAGE) return true;
         if (ALWAYS.has(id)) return true;
         if (state.hidden.has(id) && !state.pinned.has(id) && !state.manual.has(id)) return false;
+        if (id === 'market-maker-options' && window.IS_FUTURES_PAGE) return true;
         return state.pinned.has(id) || state.manual.has(id) || autoEvidence.includes(id);
     }
 
@@ -294,7 +296,10 @@
     function renderVisible() {
         if (!lastData || typeof window.renderIndicatorChart !== 'function') return;
         Object.keys(META).forEach(id => {
-            if (shouldRender(id)) window.renderIndicatorChart(id, lastData);
+            if (shouldRender(id)) {
+                if (id === 'market-maker-options') window.updateMarketMakerOptionsChart?.(lastData);
+                else window.renderIndicatorChart(id, lastData);
+            }
         });
         if (shouldRender('pattern4') && originalPattern4) originalPattern4(lastData);
         if (shouldRender('formation') && originalFormation) originalFormation(lastData);

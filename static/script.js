@@ -3513,7 +3513,7 @@ window.runCompleteAnalysis = function() {
                         || data?.message
                         || data?.system_result?.error
                         || (
-                            response?.status
+                            data?.status
                                 ? `Error HTTP ${response.status}`
                                 : 'Error desconocido'
                         );

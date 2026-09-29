@@ -1,3 +1,31 @@
+// 17.5.11: bound read requests including body, release loading flags via existing finally.
+async function _futFetchBounded(url, options = {}, timeoutMs = 15000) {
+    // Write actions retain their existing transport/confirmation behavior.
+    if (options.method && !['GET', 'HEAD'].includes(options.method.toUpperCase())) return fetch(url, options);
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const signal = options.signal;
+    if (signal?.aborted) controller.abort();
+    else signal?.addEventListener('abort', abort, {once:true});
+    let timer;
+    try {
+        return await Promise.race([
+            (async () => {
+                const response = await fetch(url, {...options, signal:controller.signal});
+                const body = await response.arrayBuffer();
+                return new Response([204,205,304].includes(response.status) ? null : body,
+                    {status:response.status, statusText:response.statusText, headers:response.headers});
+            })(),
+            new Promise((_, reject) => { timer = setTimeout(() => {
+                controller.abort(); reject(new Error('La consulta excedió 15 segundos; vuelve a intentarlo.'));
+            }, timeoutMs); })
+        ]);
+    } finally {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
+    }
+}
+
 // futures.js - Solo se carga en la página /futures
 // SOBREESCRIBE las funciones de script.js que consultan spot para que consulten
 // solo los endpoints /api/futures/* con los símbolos y timeframes de futuros.
@@ -185,7 +213,7 @@ window.refreshUserSavedSignalRefs = async function(force = false) {
 
     state.loadingPromise = (async () => {
         try {
-            const response = await fetch('/api/saved_signals?limit=500', {
+            const response = await _futFetchBounded('/api/saved_signals?limit=500', {
                 method: 'GET',
                 credentials: 'same-origin',
                 cache: 'no-store'
@@ -866,17 +894,7 @@ window.updateActiveSignals = async function() {
     }
 
     // Si ya hay una petición, no crear otra.
-    if (window._futuresSignalsState.activeLoading) {
-        console.warn(
-            '⚠️ ACTIVE: petición anterior marcada como activa.'
-        );
-
-        // IMPORTANTE:
-        // No nos quedamos bloqueados para siempre.
-        // Como no tenemos referencia al fetch anterior,
-        // liberamos el estado y permitimos una nueva consulta.
-        window._futuresSignalsState.activeLoading = false;
-    }
+    if (window._futuresSignalsState.activeLoading) return;
 
     window._futuresSignalsState.activeLoading = true;
 
@@ -899,7 +917,7 @@ window.updateActiveSignals = async function() {
 
     try {
 
-        const response = await fetch(
+        const response = await _futFetchBounded(
             DERIV_API_BASE + '/signals/active?min_confidence=55&_ts=' + Date.now(),
             {
                 method: 'GET',
@@ -1534,7 +1552,7 @@ window.updatePreviousSignals = async function() {
 
     try {
 
-        const response = await fetch(
+        const response = await _futFetchBounded(
             DERIV_API_BASE + '/signals/previous?min_confidence=55&_ts='
             + Date.now(),
             {
@@ -2532,7 +2550,7 @@ window.loadFuturesScalpingPreferences = async function(
     }
 
     try {
-        const response = await fetch(
+        const response = await _futFetchBounded(
             '/api/user/futures-scalping-preferences',
             {
                 method: 'GET',
@@ -2791,7 +2809,7 @@ window.saveFuturesScalpingPreferences = async function() {
     );
 
     try {
-        const response = await fetch(
+        const response = await _futFetchBounded(
             '/api/user/futures-scalping-preferences',
             {
                 method: 'POST',
@@ -2971,7 +2989,7 @@ function _fut96ApplyTimeframes(symbol) {
 
 window.loadFuturesUniverse96 = async function() {
     try {
-        const response = await fetch(DERIV_API_BASE + '/universe', {cache:'no-store'});
+        const response = await _futFetchBounded(DERIV_API_BASE + '/universe', {cache:'no-store'});
         const data = await response.json();
         if (!data?.success) return false;
         window._fut96Universe = data;
@@ -3037,7 +3055,7 @@ window.loadFuturesOpportunities96 = async function() {
             timeframe: selectedTimeframe,
             _ts: String(Date.now())
         });
-        const response = await fetch(`${DERIV_API_BASE}/opportunities?${params.toString()}`, {cache:'no-store'});
+        const response = await _futFetchBounded(`${DERIV_API_BASE}/opportunities?${params.toString()}`, {cache:'no-store'});
         const data = await response.json();
         const rows = Array.isArray(data?.opportunities) ? data.opportunities : [];
         const total = Number.isFinite(Number(data?.count)) ? Number(data.count) : rows.length;
@@ -3689,7 +3707,7 @@ window.confirmSaveSignal = async function() {
     console.log('📤 Guardando señal:', payload);
 
     try {
-        const res = await fetch('/api/saved_signals', {
+        const res = await _futFetchBounded('/api/saved_signals', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(payload),
@@ -3804,7 +3822,7 @@ async function(detailsEl) {
     try {
 
         const response =
-            await fetch(
+            await _futFetchBounded(
                 (
                     '/api/saved_signals'
                     + '?status='
@@ -4047,7 +4065,7 @@ window.updateSavedSignalsList = async function() {
         }
 
         // KPIs propios
-        const kRes = await fetch(
+        const kRes = await _futFetchBounded(
             '/api/saved_signals/kpis',
             {
                 method: 'GET',
@@ -4093,7 +4111,7 @@ window.updateSavedSignalsList = async function() {
         // usuario despliega la sección correspondiente.
         // =============================================================
 
-        const lRes = await fetch(
+        const lRes = await _futFetchBounded(
             (
                 '/api/saved_signals'
                 + '?status=active,entry_touched'
@@ -4151,7 +4169,7 @@ window.updateSavedSignalsList = async function() {
         let guardianBySignal = {};
         
         try {
-            const gRes = await fetch(
+            const gRes = await _futFetchBounded(
                 DERIV_API_BASE + '/position-guardian?user='
                 + encodeURIComponent(user)
                 + '&_ts='
@@ -5263,7 +5281,7 @@ window.openSavedSignalDetail = async function(signalId) {
     body.innerHTML = '<div class="text-center py-4"><div class="spinner-border text-info"></div><p class="mt-3">Cargando gráfico...</p></div>';
     
     try {
-        const res = await fetch(`/api/saved_signals/${signalId}/chart_data`);
+        const res = await _futFetchBounded(`/api/saved_signals/${signalId}/chart_data`);
         const json = await res.json();
         if (!json.success) {
             body.innerHTML = `<div class="alert alert-warning">${json.error || 'Error cargando datos'}</div>`;
@@ -5587,7 +5605,7 @@ window.confirmEditSavedSignal = async function() {
     };
     
     try {
-        const res = await fetch(`/api/saved_signals/${sig.id}`, {
+        const res = await _futFetchBounded(`/api/saved_signals/${sig.id}`, {
             method: 'PUT',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(payload),
@@ -5619,7 +5637,7 @@ window.closeSavedSignalManual = async function() {
     if (!confirmed) return;
     
     try {
-        const res = await fetch(`/api/saved_signals/${sig.id}/close`, {
+        const res = await _futFetchBounded(`/api/saved_signals/${sig.id}/close`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({}),  // el backend obtiene precio actual
@@ -5647,7 +5665,7 @@ window.deleteSavedSignal = async function() {
     if (!confirmed) return;
     
     try {
-        const res = await fetch(`/api/saved_signals/${sig.id}`, {method: 'DELETE'});
+        const res = await _futFetchBounded(`/api/saved_signals/${sig.id}`, {method: 'DELETE'});
         const json = await res.json();
         if (json.success) {
             showToast('🗑️ Señal eliminada', 'success');
@@ -5745,7 +5763,7 @@ if (window.IS_FUTURES_PAGE) {
 
     window.loadFuturesRiskProfile = async function({silent = false} = {}) {
         try {
-            const response = await fetch('/api/user/futures-risk-profile', {
+            const response = await _futFetchBounded('/api/user/futures-risk-profile', {
                 method: 'GET',
                 credentials: 'same-origin',
                 cache: 'no-store',
@@ -5787,7 +5805,7 @@ if (window.IS_FUTURES_PAGE) {
                 futures_personal_max_leverage: nullableNumber('futures-risk-max-leverage'),
             };
 
-            const response = await fetch('/api/user/futures-risk-profile', {
+            const response = await _futFetchBounded('/api/user/futures-risk-profile', {
                 method: 'POST',
                 credentials: 'same-origin',
                 cache: 'no-store',
