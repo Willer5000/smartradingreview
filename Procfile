@@ -1,1 +1,1 @@
-web: gunicorn wsgi_175107:app --timeout 180 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 30 --max-requests 120 --max-requests-jitter 20
+web: gunicorn wsgi_175108:app --timeout 180 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 30 --max-requests 120 --max-requests-jitter 20

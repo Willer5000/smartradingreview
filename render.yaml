@@ -3,7 +3,7 @@ services:
     name: crypto-trader-analyst
     env: python
     buildCommand: bash build.sh
-    startCommand: gunicorn app:app --timeout 180 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 30 --max-requests 120 --max-requests-jitter 20
+    startCommand: gunicorn wsgi_175108:app --timeout 180 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 30 --max-requests 120 --max-requests-jitter 20
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -11,7 +11,6 @@ services:
         value: "1"
       - key: PYTHONUNBUFFERED
         value: "1"
-      # RC9.7.14 — keep native numeric libraries single-threaded on 512 MB.
       - key: OMP_NUM_THREADS
         value: "1"
       - key: OPENBLAS_NUM_THREADS
@@ -42,7 +41,6 @@ services:
         value: "240"
       - key: LOW_MEMORY_MODE
         value: "1"
-      # RC10 — resource circuit breakers: preserve free Supabase/Groq quotas.
       - key: FREE_PLAN_LOCKDOWN
         value: "1"
       - key: MAIN_SUPABASE_DAILY_BUDGET_MB
@@ -51,15 +49,12 @@ services:
         value: "160000"
       - key: AI_GROQ_DAILY_TOKEN_RESERVE
         value: "8000"
-      # RC10.1 — 3 preguntas/h, distribuidas 1 cada 20 min en Futures.
       - key: AI_MANUAL_HOURLY_LIMIT
         value: "3"
       - key: AI_MANUAL_MIN_INTERVAL_MINUTES
         value: "20"
       - key: AI_MANUAL_DAILY_LIMIT
         value: "12"
-      # Commit 12 — Multi-Activo comparte RAM/slot pesado y presupuesto IA global.
-      # Scanner: 7 OHLCV secuenciales/15min, 0 DB writes, 0 LLM calls.
       - key: MULTIASSET_ENABLED
         value: "1"
       - key: MULTIASSET_ROUTER_TTL_SECONDS
@@ -90,8 +85,6 @@ services:
         value: "30"
       - key: ANALYTICS_SNAPSHOT_FRESH_SECONDS
         value: "1800"
-      # Credenciales Supabase — configurar en el dashboard de Render
-      # (Settings → Environment → Add Environment Variable)
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_KEY
