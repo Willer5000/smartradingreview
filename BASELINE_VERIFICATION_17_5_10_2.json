@@ -1,0 +1,27 @@
+{
+  "repository": "Willer5000/smartradingreview",
+  "baseline_head": "bea337dcff98278017d64d59895e708a15aaa929",
+  "baseline_message": "Commit 17.5.10.1",
+  "baseline_blobs": {
+    "app.py": "3b251c5c013bffa750f6c59535fa103aae057513",
+    "pipeline_integrity_175101.py": "d0402c64cd4dbd9e0edfd8cc7eb0fe3c74f2fd58",
+    "market_maker_math.py": "0c605db88663a4c1e3c9c8e7d740d0a5f16950b3",
+    "options_market_context.py": "ec7d6176c2276b4ad25b19191fdd902d47c7b6f4",
+    "static/market_maker_frontend.js": "a2661b27d5f17379e65506daae76db1f2ef4bbd1",
+    "templates/index.html": "e18c95a34efb2952be0271432e85b8e68f18cd7e"
+  },
+  "design": {
+    "app_py_replacement_required": true,
+    "sql_migration_required": false,
+    "new_threads": 0,
+    "new_polling": 0,
+    "new_llm_calls": 0,
+    "new_supabase_queries": 0
+  },
+  "final_revision": "17.5.10.2_FINAL_EXECUTION_GEOMETRY_CONTRACT",
+  "new_files_replaced": [
+    "app.py",
+    "templates/index.html"
+  ],
+  "critical_fix": "SPOT_CONFIRMED_REQUIRES_EXECUTABLE_ENTRY_SL_TP_AND_SPOT_STRUCTURAL_RECOVERY"
+}

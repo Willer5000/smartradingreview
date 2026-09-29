@@ -1,0 +1,90 @@
+{
+  "BASELINE_VERIFICATION_17_5_10_2.json": {
+    "sha256": "e0ac68edbdce3b2d373e23d7aa287010a4138a0e41cedd0d6da1e4e23e9e6696",
+    "bytes": 1055
+  },
+  "COMMIT_MESSAGE_17_5_10_2.txt": {
+    "sha256": "448ed9da8b3e5e9b2ac64f8aa1b80814587dd714845d6d720c3dc1b7825d97e5",
+    "bytes": 117
+  },
+  "QA_17_5_10_2_FINAL_RESULT.txt": {
+    "sha256": "cb1edb4728566b50c0caab2688bfcb3dd0d0a1522fe4ec69fe1f8ac858f47d11",
+    "bytes": 1586
+  },
+  "README_17_5_10_2.md": {
+    "sha256": "6537330c5866990e55960b1bbea10788a2e5bda341f7215e126fb0265a6e36a0",
+    "bytes": 4728
+  },
+  "SUPERSEDES_PREVIOUS_17_5_10_2.txt": {
+    "sha256": "5c4244cb3c914e8337b1dd447d79b8b79e350638333e6b5de76acd127982b027",
+    "bytes": 273
+  },
+  "__pycache__/app.cpython-313.pyc": {
+    "sha256": "ec869f9bc7a474a0da7005a8d39b2f683d49d669100ed6e8dfb7fb6d47094ab7",
+    "bytes": 1842239
+  },
+  "__pycache__/market_maker_math.cpython-313.pyc": {
+    "sha256": "49d11d6d60e9063f151fb49c77ad8da229f75041f61c7903bb10cbb75bafee2d",
+    "bytes": 25629
+  },
+  "__pycache__/options_market_context.cpython-313.pyc": {
+    "sha256": "98ff0d21c59d31d11b0a56b5f10f11b974779fc56007bdfd7b11f2b1db22a1d3",
+    "bytes": 9091
+  },
+  "__pycache__/pipeline_integrity_175101.cpython-313.pyc": {
+    "sha256": "7e3f0b152eb6ead7185d1ff3314708cab453578ddbc64579b9082d821996f373",
+    "bytes": 391
+  },
+  "__pycache__/pipeline_integrity_175102.cpython-313.pyc": {
+    "sha256": "df50e5aea6897a6d47206cf96588739affc0e095ca27d92a4546c49e49057b57",
+    "bytes": 47133
+  },
+  "app.py": {
+    "sha256": "8040ec7b4e71b2c2cc9926b9da4779d2ca8e743557a8f96267267ba209c40b90",
+    "bytes": 2268743
+  },
+  "docs/BACKTEST_Y_EVIDENCIA_17_5_10_2.md": {
+    "sha256": "b2712332df8d73979928e72856e1effdaa72f59d56577a98b8d0269fd6b258db",
+    "bytes": 3425
+  },
+  "docs/INSTRUCCIONES_IMPLEMENTACION_17_5_10_2.md": {
+    "sha256": "1379bdfdef2f95463816e990e986239b7916d5c4c927384c23a8b5e9abc0af25",
+    "bytes": 4106
+  },
+  "docs/PROMPT_MAESTRO_17_5_10_2.md": {
+    "sha256": "de00109a7422f4c9e8f21a0347767f0e0806757acdb1b5925122d4d6f616e1fb",
+    "bytes": 5877
+  },
+  "market_maker_math.py": {
+    "sha256": "05850c1fc5693a946fea75df27d5918ee6ba2eff2d6877e600d5175098874921",
+    "bytes": 19059
+  },
+  "options_market_context.py": {
+    "sha256": "72487dc6d3c30ed5516d2cba9f2bd093af7985b0ab1499ef5b51a12cd1676284",
+    "bytes": 6600
+  },
+  "pipeline_integrity_175101.py": {
+    "sha256": "f609ebebcedf6cd733bce741e435656fa926b36685f0a512cb6d3adcfc8d5130",
+    "bytes": 292
+  },
+  "pipeline_integrity_175102.py": {
+    "sha256": "2e24ccd7db017e3beb61b8e1fbacfac04717602239964f536fae952401c3aac4",
+    "bytes": 38071
+  },
+  "qa/qa_commit17_5_10_2.py": {
+    "sha256": "18c2f37b46107d9d96bc217e8ac5f7958fbaccbba6f84442a2c71be5433280f0",
+    "bytes": 7172
+  },
+  "qa/qa_commit17_5_10_2_execution_contract.py": {
+    "sha256": "741482e3f1233f56a8776c47fdb452b6c75929da260424ce552b45901a97301c",
+    "bytes": 3176
+  },
+  "static/market_maker_frontend.js": {
+    "sha256": "ede60ed5736f6e32e1c2e9de1350fb933ac14720132b0d952e9ea089d72c59f2",
+    "bytes": 15460
+  },
+  "templates/index.html": {
+    "sha256": "877b2c6d51fdedf50e18393208f8c2ed4549676b049a0c0dcb6f0909c0dfb105",
+    "bytes": 217767
+  }
+}

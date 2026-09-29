@@ -17050,12 +17050,15 @@ class TradingExpertSystem:
             #   * raises leverage to rescue a setup.
             structural_recovery_17_5_9 = {
                 'attempted': False, 'applied': False, 'reason': 'NOT_NEEDED',
-                'version': 'COMMIT17_5_9_WORKER_RECOVERY_V1',
+                'version': 'COMMIT17_5_10_2_WORKER_RECOVERY_V2',
             }
 
             def _attempt_structural_recovery_17_5_9(trigger_reason, entry_hint):
-                if not is_futures:
-                    return {'success': False, 'reason': 'SPOT_RECOVERY_NOT_ENABLED'}
+                # Commit 17.5.10.2: a directional Spot thesis deserves the SAME
+                # bounded search for a coherent structural Entry/SL/TP package.
+                # This does not force levels: if no technically defensible
+                # geometry exists, recovery returns failure and the signal must
+                # remain ANALYSIS_ONLY / ESPERAR.
                 try:
                     from execution_specialist_committees import (
                         build_execution_context as _build_recovery_context,
@@ -17069,13 +17072,14 @@ class TradingExpertSystem:
                     except (TypeError, ValueError):
                         _rr_floor, _rr_ceiling, _pref_min, _pref_max = 1.8, 4.5, 2.0, 3.2
 
-                    _recovery_market_type = 'futures'
-                    try:
-                        from multiasset_system import MULTIASSET_SYMBOLS as _multiasset_symbols_1759
-                        if str(symbol or '').upper() in set(_multiasset_symbols_1759 or {}):
-                            _recovery_market_type = 'multiasset'
-                    except Exception:
-                        pass
+                    _recovery_market_type = 'futures' if is_futures else 'spot'
+                    if is_futures:
+                        try:
+                            from multiasset_system import MULTIASSET_SYMBOLS as _multiasset_symbols_1759
+                            if str(symbol or '').upper() in set(_multiasset_symbols_1759 or {}):
+                                _recovery_market_type = 'multiasset'
+                        except Exception:
+                            pass
 
                     _obs = execution_observations if isinstance(execution_observations, dict) else {}
                     _obs_volume = _obs.get('volume') or (structure.get('volume_analysis') or structure.get('volume') or {}) if isinstance(structure, dict) else {}
@@ -17148,31 +17152,33 @@ class TradingExpertSystem:
                         _candidate_family = str(_entry_role.get('family') or 'structure')
                         _meta = _recovery_entry_metadata_1759(_e, _candidate_family)
 
-                        # A recovered Entry must pass the existing timing gate on
-                        # its own merits; unlike refinement there is no baseline
-                        # timing result to inherit.
-                        _gate = getattr(self, '_futures_entry_timing_gate', None)
-                        if not callable(_gate):
-                            return False
-                        try:
-                            _gate_check = _gate(
-                                decision, trend, momentum, volatility, structure,
-                                {
-                                    'entry': _e,
-                                    'entry_timing_mode': _meta['entry_timing_mode'],
-                                    'entry_market_location': entry_quality.get('market_location'),
-                                    'entry_location_context': entry_quality.get('location_context'),
-                                    'entry_location_basis': entry_quality.get('location_basis'),
-                                }
-                            )
-                            if not (
-                                isinstance(_gate_check, dict)
-                                and _gate_check.get('status') != 'TIMING_DIAGNOSTIC_ERROR'
-                                and _gate_check.get('passed') is True
-                            ):
+                        # Futures/Multi retain their existing timing gate.
+                        # Spot has no derivative timing gate; it is validated by
+                        # geometry, Strategy/Entry quality, freshness and the
+                        # setup-aware execution guard below.
+                        if is_futures:
+                            _gate = getattr(self, '_futures_entry_timing_gate', None)
+                            if not callable(_gate):
                                 return False
-                        except Exception:
-                            return False
+                            try:
+                                _gate_check = _gate(
+                                    decision, trend, momentum, volatility, structure,
+                                    {
+                                        'entry': _e,
+                                        'entry_timing_mode': _meta['entry_timing_mode'],
+                                        'entry_market_location': entry_quality.get('market_location'),
+                                        'entry_location_context': entry_quality.get('location_context'),
+                                        'entry_location_basis': entry_quality.get('location_basis'),
+                                    }
+                                )
+                                if not (
+                                    isinstance(_gate_check, dict)
+                                    and _gate_check.get('status') != 'TIMING_DIAGNOSTIC_ERROR'
+                                    and _gate_check.get('passed') is True
+                                ):
+                                    return False
+                            except Exception:
+                                return False
 
                         try:
                             from operational_intelligence import execution_setup_guard as _setup_guard_1759
@@ -17189,7 +17195,7 @@ class TradingExpertSystem:
                                     'entry_source': str(_entry_role.get('source') or entry_source or ''),
                                 },
                                 setup_family=_guard_family,
-                                market='FUTURES',
+                                market=('FUTURES' if is_futures else 'SPOT'),
                                 timeframe=timeframe,
                             ) or {}
                             if _guard.get('applied'):
@@ -17561,7 +17567,7 @@ class TradingExpertSystem:
             # outside the same technical floor/ceiling) is not the same thing as
             # "no opportunity".  Let the structural desk search another real
             # Entry/SL/TP combination before declaring ANALYSIS_ONLY.
-            if is_futures and not baseline_geometry_valid and not structural_recovery_17_5_9.get('applied'):
+            if not baseline_geometry_valid and not structural_recovery_17_5_9.get('applied'):
                 structural_recovery_17_5_9.update({'attempted': True, 'reason': 'BASELINE_GEOMETRY_INVALID'})
                 _recovery = _attempt_structural_recovery_17_5_9('BASELINE_GEOMETRY_INVALID', baseline_entry)
                 if _recovery.get('success'):
@@ -18176,7 +18182,7 @@ class TradingExpertSystem:
                 'execution_entry_quality': execution_refinement.get('entry_quality'),
                 'execution_sl_quality': execution_refinement.get('sl_quality'),
                 'execution_tp_quality': execution_refinement.get('tp_quality'),
-                # 17.5.9 opportunity-recovery observability.  This is public-safe
+                # 17.5.10.2 opportunity-recovery observability (Spot/Futures/Multi).  This is public-safe
                 # execution telemetry; no worker identities or internal weights.
                 'opportunity_recovery_attempted': bool(structural_recovery_17_5_9.get('attempted')),
                 'opportunity_recovery_applied': bool(structural_recovery_17_5_9.get('applied')),
@@ -18268,8 +18274,10 @@ class TradingExpertSystem:
             'execution_safety_label': 'RECHAZAR',
     
             'rejected_reason': reason,
-    
-            'is_rejected': True
+
+            'is_rejected': True,
+            'is_executable': False,
+            'publication_status': 'ANALYSIS_ONLY'
         }
 
     def _mark_levels_non_executable(
@@ -18421,9 +18429,11 @@ class TradingExpertSystem:
     
             'execution_safety_label': 'N/A',
     
-            'rejected_reason': None,
-    
-            'is_rejected': True
+            'rejected_reason': 'NO_EXECUTABLE_LEVELS',
+
+            'is_rejected': True,
+            'is_executable': False,
+            'publication_status': 'ANALYSIS_ONLY'
         }
     # === FIN calculate_entry_levels (FASE 3) ===
     # ========================================================================
@@ -21070,6 +21080,52 @@ class TradingExpertSystem:
                     levels = self._get_default_levels(structure.get('current_price', 0), symbol)
             else:
                 levels = self._get_default_levels(structure.get('current_price', 0), symbol)
+
+            # ==========================================================
+            # COMMIT 17.5.10.2 — EXECUTION COMPLETENESS CONTRACT
+            # ==========================================================
+            # A directional decision is not an actionable/confirmable signal
+            # until Entry + SL + TP form a technically coherent geometry.
+            # This is deliberately fail-closed and independent of Telegram.
+            if (
+                analysis_system_type != 'futures'
+                and str(accion_consenso or '').upper() in (
+                    'COMPRA_SPOT', 'VENTA_SPOT'
+                )
+            ):
+                _execution_geometry = _signal_execution_geometry_status(
+                    'spot',
+                    {
+                        'decision': accion_consenso,
+                        'levels': levels,
+                    },
+                )
+                if not _execution_geometry.get('ok'):
+                    _original_action_175102 = str(accion_consenso)
+                    accion_consenso = 'ESPERAR'
+                    confianza_consenso = min(
+                        float(confianza_consenso or 0),
+                        68.0 if analysis_system_type == 'futures' else 72.0,
+                    )
+                    if not isinstance(razones_consenso, list):
+                        razones_consenso = list(razones_consenso or [])
+                    razones_consenso.append(
+                        'Geometría de ejecución incompleta: '
+                        + str(_execution_geometry.get('reason') or 'UNKNOWN')
+                    )
+                    levels = dict(levels or {})
+                    levels['is_rejected'] = True
+                    levels['is_executable'] = False
+                    levels['publication_status'] = 'ANALYSIS_ONLY'
+                    levels['suggested_size'] = 0
+                    levels['rejected_reason'] = str(
+                        _execution_geometry.get('reason')
+                        or 'MISSING_EXECUTION_GEOMETRY'
+                    )
+                    print(
+                        f"🧭 [17.5.10.2 EXECUTION] {_original_action_175102} "
+                        f"→ ESPERAR ({levels['rejected_reason']})"
+                    )
 
             if isinstance(structure, dict):
                 structure.pop('_adaptive_strategy_lab', None)
@@ -31756,6 +31812,18 @@ def _compute_previous_signals():
                 if _action not in ('COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT') or _confidence < 60:
                     continue
                 _levels = _current_analysis.get('levels', {}) or {}
+                _active_geometry = _signal_execution_geometry_status(
+                    'spot',
+                    {
+                        'decision': _action,
+                        'levels': _levels,
+                        'is_rejected': _levels.get('is_rejected'),
+                        'is_executable': _levels.get('is_executable'),
+                        'publication_status': _levels.get('publication_status'),
+                    },
+                )
+                if not _active_geometry.get('ok'):
+                    continue
                 _analysis_df = _current_analysis.get('df', {}) or {}
                 _candle_timestamp = None
                 if isinstance(_analysis_df, dict):
@@ -31809,6 +31877,18 @@ def _compute_previous_signals():
                     continue
 
                 levels_data = current_analysis.get('levels', {}) or {}
+                _active_geometry = _signal_execution_geometry_status(
+                    'spot',
+                    {
+                        'decision': action,
+                        'levels': levels_data,
+                        'is_rejected': levels_data.get('is_rejected'),
+                        'is_executable': levels_data.get('is_executable'),
+                        'publication_status': levels_data.get('publication_status'),
+                    },
+                )
+                if not _active_geometry.get('ok'):
+                    continue
                 analysis_df = current_analysis.get('df', {}) or {}
                 candle_timestamp = None
 
@@ -31930,7 +32010,31 @@ def _compute_previous_signals():
                 entry = float(levels.get('entry', precio_cierre_anterior)) if levels.get('entry') else None
                 stop_loss = float(levels.get('stop_loss', 0)) if levels.get('stop_loss') else None
                 take_profit = float(levels.get('take_profit', 0)) if levels.get('take_profit') else None
-                
+
+                # Commit 17.5.10.2 — CONFIRMED means executable geometry exists.
+                # The analysis itself may remain useful as ESPERAR/ANALYSIS_ONLY,
+                # but it must never enter Confirmadas/Telegram without the
+                # complete Entry + SL + TP package.
+                _spot_geometry = _signal_execution_geometry_status(
+                    'spot',
+                    {
+                        'decision': decision,
+                        'entry': entry,
+                        'stop_loss': stop_loss,
+                        'take_profit': take_profit,
+                        'is_rejected': levels.get('is_rejected'),
+                        'is_executable': levels.get('is_executable'),
+                        'publication_status': levels.get('publication_status'),
+                    },
+                )
+                if not _spot_geometry.get('ok'):
+                    print(
+                        f"   ⛔ {symbol} {timeframe}: análisis direccional sin "
+                        f"geometría ejecutable ({_spot_geometry.get('reason')}); "
+                        "no se publica como CONFIRMADA."
+                    )
+                    continue
+
                 activa = 0
                 resultado = 'pending'
 
@@ -32079,6 +32183,9 @@ def _compute_previous_signals():
                     'entry_reachability_score': levels.get('entry_reachability_score'),
                     'entry_quality_score': levels.get('entry_quality_score') or levels.get('entry_score'),
                     'execution_safety': levels.get('execution_safety'),
+                    'is_rejected': bool(levels.get('is_rejected', False)),
+                    'is_executable': bool(levels.get('is_executable', True)),
+                    'publication_status': str(levels.get('publication_status') or 'EXECUTABLE_SIGNAL'),
                     'ui_context': 'CONFIRMED',
                     'timestamp': str(tiempo_actual.isoformat())
                 }
@@ -43169,6 +43276,99 @@ def _confirmed_signal_rr(action, entry, stop_loss, take_profit):
         return None
 
 
+def _signal_execution_geometry_status(market, signal):
+    """Commit 17.5.10.2 — one executable-geometry contract for every market.
+
+    A CONFIRMED/actionable signal must have a complete, finite and directional
+    Entry/SL/TP package.  Missing levels are not a cosmetic Telegram problem:
+    they mean execution is not defined yet.
+
+    This helper never invents levels and never lowers a threshold.
+    """
+    market = str(market or '').strip().lower()
+    signal = signal if isinstance(signal, dict) else {}
+    decision = signal.get('decision') or signal.get('action') or ''
+    levels = signal.get('levels') or {}
+
+    if isinstance(decision, dict):
+        action = str(decision.get('action') or '').upper()
+    else:
+        action = str(decision or signal.get('action') or '').upper()
+
+    def _level(name):
+        value = levels.get(name) if isinstance(levels, dict) else None
+        if value is None:
+            value = signal.get(name)
+        try:
+            number = float(value)
+            if not np.isfinite(number) or number <= 0:
+                return None
+            return number
+        except Exception:
+            return None
+
+    entry = _level('entry')
+    stop_loss = _level('stop_loss')
+    take_profit = _level('take_profit')
+
+    if action not in ('COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT'):
+        return {'ok': False, 'reason': 'NON_DIRECTIONAL_ACTION', 'action': action}
+    if entry is None or stop_loss is None or take_profit is None:
+        return {
+            'ok': False, 'reason': 'MISSING_EXECUTION_LEVELS', 'action': action,
+            'entry': entry, 'stop_loss': stop_loss, 'take_profit': take_profit,
+        }
+
+    is_long = action in ('COMPRA_SPOT', 'LONG')
+    geometry_ok = (
+        stop_loss < entry < take_profit
+        if is_long else
+        take_profit < entry < stop_loss
+    )
+    if not geometry_ok:
+        return {
+            'ok': False, 'reason': 'INVALID_EXECUTION_GEOMETRY', 'action': action,
+            'entry': entry, 'stop_loss': stop_loss, 'take_profit': take_profit,
+        }
+
+    rejected = bool(
+        (levels.get('is_rejected') if isinstance(levels, dict) else False)
+        or signal.get('is_rejected')
+    )
+    executable = (
+        levels.get('is_executable')
+        if isinstance(levels, dict) and 'is_executable' in levels
+        else signal.get('is_executable')
+    )
+    publication_status = str(
+        (levels.get('publication_status') if isinstance(levels, dict) else None)
+        or signal.get('publication_status')
+        or ''
+    ).upper()
+
+    if rejected:
+        return {'ok': False, 'reason': 'LEVELS_REJECTED', 'action': action}
+    if executable is False:
+        return {'ok': False, 'reason': 'LEVELS_NOT_EXECUTABLE', 'action': action}
+    if publication_status and publication_status != 'EXECUTABLE_SIGNAL':
+        return {
+            'ok': False, 'reason': 'PUBLICATION_NOT_EXECUTABLE',
+            'publication_status': publication_status, 'action': action,
+        }
+
+    risk = (entry - stop_loss) if is_long else (stop_loss - entry)
+    reward = (take_profit - entry) if is_long else (entry - take_profit)
+    rr = reward / risk if risk > 0 else 0.0
+    if risk <= 0 or reward <= 0 or not np.isfinite(rr) or rr <= 0:
+        return {'ok': False, 'reason': 'INVALID_RISK_REWARD_GEOMETRY', 'action': action}
+
+    return {
+        'ok': True, 'reason': 'EXECUTION_GEOMETRY_COMPLETE', 'action': action,
+        'entry': entry, 'stop_loss': stop_loss, 'take_profit': take_profit,
+        'risk_reward': float(rr), 'market': market,
+    }
+
+
 def _telegram_signal_deep_link(market, signal, saved_signal_id=None):
     """URL específica e identificable de señal para Telegram."""
     from urllib.parse import urlencode, quote
@@ -43317,6 +43517,15 @@ def _send_confirmed_signal_telegram(market, signal):
         confidence = float(signal.get('confidence') or 0)
     if not symbol or not timeframe:
         return False
+
+    _geometry = _signal_execution_geometry_status(market, signal)
+    if not _geometry.get('ok'):
+        print(
+            f"⛔ [CONFIRMED] {market.upper()} {symbol} {timeframe} no publicada: "
+            f"{_geometry.get('reason')}"
+        )
+        return False
+
     if market in ('futures', 'multiasset'):
         if action not in ('LONG', 'SHORT'):
             return False

@@ -1,0 +1,39 @@
+COMMIT 17.5.10.2 FINAL — VALIDATION RESULT
+==========================================
+
+Base: bea337dcff98278017d64d59895e708a15aaa929 (Commit 17.5.10.1)
+
+Syntax / static:
+  python -m py_compile app.py + 4 modules .... PASS
+  node --check market_maker_frontend.js ...... PASS
+  Jinja parse templates/index.html ........... PASS
+
+Dedicated QA:
+  qa/qa_commit17_5_10_2.py ................... 5/5 PASS
+  qa/qa_commit17_5_10_2_execution_contract.py  7/7 PASS
+
+Critical regression fixed:
+  Spot CONFIRMED with Entry/TP/SL missing ..... BLOCKED
+  Spot structural recovery ................... ENABLED (bounded, structure-only)
+  Futures timing gate ........................ PRESERVED
+  Futures/Multi publication gate ............. PRESERVED
+  No synthetic Entry/SL/TP ................... PRESERVED
+
+Resource delta vs 17.5.10.1:
+  new threads ................................. 0
+  new LLM calls ............................... 0
+  new Supabase queries ........................ 0
+  new option polling .......................... 0
+  option cache default ........................ 3600 s
+
+Historical evidence inherited (not a version-matched replay):
+  30m IS N=11  +1.702R  PF 1.254
+  30m OOS N=4  +3.928R  PF 4.513
+  combined N=15 +5.630R PF 1.719
+
+Important:
+- Spot recovery can create a complete geometry only from observed structural
+  candidates already loaded by the analysis. It cannot manufacture levels.
+- If no defensible geometry exists, the action is ESPERAR/ANALYSIS_ONLY and
+  Telegram must not call it CONFIRMED.
+- Forward validation of the 17.5.10.2 generation is still required.

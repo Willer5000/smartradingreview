@@ -1,0 +1,7 @@
+USE THIS FINAL PACKAGE.
+
+It supersedes the earlier COMMIT_17_5_10_2_PARTICULAR_GREEKS_READY.zip that did
+not yet include the 29/09 Spot execution-geometry correction.
+
+Critical added contract:
+CONFIRMED = direction + complete defensible Entry + SL + TP + executable state.

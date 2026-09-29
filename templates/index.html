@@ -1288,8 +1288,8 @@
                 <div class="card bg-dark border-info mb-4 indicator-card" data-indicator="market-maker-options">
                     <div class="card-header d-flex justify-content-between align-items-center bg-info bg-opacity-10">
                         <div>
-                            <h5 class="mb-0"><i class="fas fa-wave-square me-2"></i>Opciones · Greeks / Gamma / 0DTE</h5>
-                            <small class="text-muted">Black-Scholes · Delta, Gamma, Vega, Theta y exposición 0DTE cuando existe una cadena compatible.</small>
+                            <h5 class="mb-0"><i class="fas fa-wave-square me-2"></i>Delta / Gamma / Theta</h5>
+                            <small class="text-muted">Black-Scholes + exposición Gamma/Delta derivada de opciones públicas cuando existe cadena compatible.</small>
                         </div>
                         <span id="mm-option-source" class="badge bg-secondary">Esperando datos</span>
                     </div>
@@ -2679,7 +2679,7 @@
         src="{{ url_for('static', filename='futures.js') }}?v=20260924-COMMIT12-1-QA"
     ></script>
     <script
-        src="{{ url_for('static', filename='market_maker_frontend.js') }}?v=20260929-COMMIT17-5-10-1"
+        src="{{ url_for('static', filename='market_maker_frontend.js') }}?v=20260929-COMMIT17-5-10-2"
     ></script>
 
     {% endif %}

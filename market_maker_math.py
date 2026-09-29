@@ -1,26 +1,15 @@
-"""Commit 17.5.10 — market-maker math context (Black-Scholes / Greeks / GEX).
+"""Commit 17.5.10.2 — Black-Scholes / Greeks / GEX context.
 
-Purpose
--------
-Provide a deterministic mathematical context layer for option-sensitive markets
-without turning options heuristics into an autonomous LONG/SHORT generator.
+This module is context-only.  It does NOT create LONG/SHORT, approve Entry/SL/TP,
+increase leverage or bypass Safety.
 
-The module is deliberately provider-agnostic.  It consumes an option-chain
-snapshot supplied by the application/provider and computes:
-- Black-Scholes price and Greeks (delta, gamma, vega, theta);
-- OI-weighted absolute gamma exposure;
-- heuristic signed gamma exposure (calls +, puts -; explicitly labelled);
-- 0DTE gamma share;
-- call/put gamma walls;
-- approximate zero-gamma and delta-neutral levels.
-
-Important limitations
----------------------
-Dealer inventory/sign is not observable from ordinary option-chain OI.  The
-signed GEX convention is therefore a market-maker *heuristic*, not a fact about
-actual dealer positioning.  If no observed option chain with IV + OI is supplied,
-we can produce a theoretical Black-Scholes gamma shape, but its authority remains
-SHADOW_THEORETICAL_ONLY and it cannot gate publication.
+17.5.10.2 changes:
+- fixes net option Delta aggregation (put Delta remains negative; it is not
+  multiplied by the CALL+/PUT- GEX sign a second time);
+- keeps signed GEX explicitly heuristic because dealer inventory sign is not
+  observable from public OI alone;
+- adds compact curve-shape / distance features for specialist SHADOW reasoning;
+- keeps curves compact to protect bandwidth.
 """
 from __future__ import annotations
 
@@ -28,7 +17,7 @@ from datetime import datetime, timezone
 from math import erf, exp, log, pi, sqrt
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
-VERSION = "COMMIT17_5_10_1_MM_MATH_V1"
+VERSION = "COMMIT17_5_10_2_MM_MATH_V2"
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -60,7 +49,6 @@ def _utc(value: Any) -> Optional[datetime]:
     if isinstance(value, datetime):
         dt = value
     elif isinstance(value, (int, float)):
-        # Accept seconds or milliseconds.
         v = float(value)
         if v > 10_000_000_000:
             v /= 1000.0
@@ -84,11 +72,6 @@ def black_scholes_greeks(
     *, spot: float, strike: float, t_years: float, volatility: float,
     option_type: str, rate: float = 0.0, dividend_yield: float = 0.0,
 ) -> Dict[str, float]:
-    """Black-Scholes price/Greeks using continuous compounding.
-
-    `volatility` is decimal annualized volatility (0.50 == 50%).  The function
-    is pure and does not infer implied volatility from prices.
-    """
     s = max(_f(spot), 1e-12)
     k = max(_f(strike), 1e-12)
     t = max(_f(t_years), 1.0 / (365.0 * 24.0 * 60.0))
@@ -133,10 +116,12 @@ def _normalize_chain_row(row: Mapping[str, Any], *, as_of: datetime) -> Optional
     strike = _f(row.get("strike") or row.get("strike_price"))
     oi = _f(row.get("open_interest") or row.get("oi"))
     iv_raw = _f(row.get("iv") or row.get("mark_iv") or row.get("implied_volatility"))
-    # Accept IV in percentage points (e.g. 55) or decimal (0.55).
     iv = iv_raw / 100.0 if iv_raw > 3.0 else iv_raw
     typ = _opt_type(row.get("option_type") or row.get("type") or row.get("put_call"))
-    expiry = _utc(row.get("expiry") or row.get("expiration") or row.get("expiration_timestamp") or row.get("expiry_timestamp"))
+    expiry = _utc(
+        row.get("expiry") or row.get("expiration")
+        or row.get("expiration_timestamp") or row.get("expiry_timestamp")
+    )
     if strike <= 0 or oi <= 0 or iv <= 0 or typ not in {"CALL", "PUT"} or expiry is None:
         return None
     seconds = max(60.0, (expiry - as_of).total_seconds())
@@ -149,21 +134,31 @@ def _normalize_chain_row(row: Mapping[str, Any], *, as_of: datetime) -> Optional
     }
 
 
-def _exposure_at_spot(rows: Iterable[Dict[str, Any]], spot: float, *, rate: float = 0.0) -> Tuple[float, float]:
+def _exposure_at_spot(
+    rows: Iterable[Dict[str, Any]], spot: float, *, rate: float = 0.0
+) -> Tuple[float, float]:
+    """Return heuristic signed GEX and OI-net option Delta dollars.
+
+    GEX uses CALL+/PUT- solely as a visualization heuristic.
+    Delta uses the option Delta's own sign: calls positive, puts negative.
+    """
     signed_gex = 0.0
-    signed_delta_dollars = 0.0
+    net_delta_dollars = 0.0
     for row in rows:
         g = black_scholes_greeks(
             spot=spot, strike=row["strike"], t_years=row["t_years"],
             volatility=row["iv"], option_type=row["option_type"], rate=rate,
         )
-        # Dollar gamma for an approximate 1% underlying move.
-        abs_gex = g["gamma"] * row["open_interest"] * row["multiplier"] * spot * spot * 0.01
-        # Common heuristic convention.  It is explicitly NOT observed dealer inventory.
-        sign = 1.0 if row["option_type"] == "CALL" else -1.0
-        signed_gex += sign * abs_gex
-        signed_delta_dollars += sign * g["delta"] * row["open_interest"] * row["multiplier"] * spot
-    return signed_gex, signed_delta_dollars
+        abs_gex = (
+            g["gamma"] * row["open_interest"] * row["multiplier"]
+            * spot * spot * 0.01
+        )
+        gex_sign = 1.0 if row["option_type"] == "CALL" else -1.0
+        signed_gex += gex_sign * abs_gex
+        net_delta_dollars += (
+            g["delta"] * row["open_interest"] * row["multiplier"] * spot
+        )
+    return signed_gex, net_delta_dollars
 
 
 def _nearest_zero(points: List[Tuple[float, float]], fallback: Optional[float]) -> Optional[float]:
@@ -174,25 +169,121 @@ def _nearest_zero(points: List[Tuple[float, float]], fallback: Optional[float]) 
         if y1 == 0:
             return x1
         if y1 * y2 < 0:
-            # Linear interpolation is adequate for a diagnostic level.
             w = abs(y1) / max(abs(y1) + abs(y2), 1e-12)
             return x1 + (x2 - x1) * w
     return best[0]
+
+
+def _distance_pct(level: Any, spot: float) -> Optional[float]:
+    n = _f(level, 0.0)
+    if n <= 0 or spot <= 0:
+        return None
+    return round((n / spot - 1.0) * 100.0, 4)
+
+
+def _local_shape(curve: List[Tuple[float, float]], spot: float) -> Dict[str, Any]:
+    if len(curve) < 3 or spot <= 0:
+        return {"slope_norm": None, "curvature_norm": None}
+    idx = min(range(len(curve)), key=lambda i: abs(curve[i][0] - spot))
+    idx = max(1, min(len(curve) - 2, idx))
+    x0, y0 = curve[idx - 1]
+    x1, y1 = curve[idx]
+    x2, y2 = curve[idx + 1]
+    dx = max((x2 - x0) / max(spot, 1e-12), 1e-12)
+    scale = max(abs(y0), abs(y1), abs(y2), 1.0)
+    slope = ((y2 - y0) / scale) / dx
+    curvature = ((y2 - 2.0 * y1 + y0) / scale) / max((dx / 2.0) ** 2, 1e-12)
+    return {
+        "slope_norm": round(float(slope), 6),
+        "curvature_norm": round(float(curvature), 6),
+    }
+
+
+def _shadow_context(
+    *, spot: float, contracts_used: int, confidence: str, observed: bool,
+    gamma_regime: str, zero_dte_share: float, zero_gamma: Any,
+    delta_neutral: Any, gamma_wall: Any, call_wall: Any, put_wall: Any,
+    gex_curve: List[Tuple[float, float]], as_of: datetime,
+) -> Dict[str, Any]:
+    distances = {
+        "zero_gamma_pct": _distance_pct(zero_gamma, spot),
+        "delta_neutral_pct": _distance_pct(delta_neutral, spot),
+        "gamma_wall_pct": _distance_pct(gamma_wall, spot),
+        "call_wall_pct": _distance_pct(call_wall, spot),
+        "put_wall_pct": _distance_pct(put_wall, spot),
+    }
+    wall_pairs = [
+        ("CALL_WALL", distances["call_wall_pct"]),
+        ("PUT_WALL", distances["put_wall_pct"]),
+        ("GAMMA_WALL", distances["gamma_wall_pct"]),
+    ]
+    wall_pairs = [(name, val) for name, val in wall_pairs if val is not None]
+    nearest_wall = min(wall_pairs, key=lambda x: abs(x[1])) if wall_pairs else (None, None)
+
+    quality = 0.0
+    if observed:
+        quality += 45.0
+        quality += min(25.0, contracts_used * 1.0)
+        if zero_dte_share > 0:
+            quality += 10.0
+        if confidence == "HIGH":
+            quality += 15.0
+        elif confidence == "MEDIUM":
+            quality += 8.0
+    quality = min(95.0, quality)
+    shape = _local_shape(gex_curve, spot)
+
+    flags = []
+    for key in ("zero_gamma_pct", "delta_neutral_pct", "gamma_wall_pct"):
+        val = distances.get(key)
+        if val is not None and abs(val) <= 1.0:
+            flags.append("NEAR_" + key.replace("_pct", "").upper())
+    if zero_dte_share >= 0.50:
+        flags.append("HIGH_NEAR_EXPIRY_GAMMA_SHARE")
+
+    return {
+        "version": "17.5.10.2_GREEKS_SHADOW_CONTEXT_V1",
+        "authority": "SHADOW_CONTEXT_ONLY",
+        "observed_chain": bool(observed),
+        "context_quality_score": round(quality, 2),
+        "gamma_regime": gamma_regime,
+        "zero_dte_gamma_share": round(float(zero_dte_share), 6),
+        "distances_from_spot_pct": distances,
+        "nearest_wall": {
+            "name": nearest_wall[0],
+            "distance_pct": nearest_wall[1],
+        },
+        "local_gex_shape": shape,
+        "flags": flags,
+        "consumers": [
+            "EXECUTION_CONTEXT_SHADOW",
+            "ENTRY_LOCATION_SHADOW",
+            "TP_LOCATION_SHADOW",
+            "RISK_CONTEXT_SHADOW",
+            "REVIEWTRADER_POINT_IN_TIME_LEARNING",
+        ],
+        "can_create_direction": False,
+        "can_modify_entry": False,
+        "can_modify_sl": False,
+        "can_modify_tp": False,
+        "can_raise_leverage": False,
+        "can_bypass_safety": False,
+        "requires_point_in_time_oos_before_live_authority": True,
+        "as_of": as_of.isoformat(),
+    }
 
 
 def aggregate_gamma_exposure(
     option_chain: Iterable[Mapping[str, Any]], *, spot: float, as_of: Any = None,
     rate: float = 0.0, grid_points: int = 41,
 ) -> Dict[str, Any]:
-    """Aggregate an observed chain into market-maker context.
-
-    The output distinguishes observed inputs from the signed-dealer heuristic.
-    No field in this function is a calibrated probability of direction/TP/SL.
-    """
     s = max(_f(spot), 0.0)
     now = _utc(as_of) or datetime.now(timezone.utc)
     if s <= 0:
-        return {"version": VERSION, "available": False, "reason": "INVALID_SPOT", "authority": "NO_AUTHORITY"}
+        return {
+            "version": VERSION, "available": False,
+            "reason": "INVALID_SPOT", "authority": "NO_AUTHORITY",
+        }
 
     rows: List[Dict[str, Any]] = []
     for raw in option_chain or []:
@@ -201,36 +292,48 @@ def aggregate_gamma_exposure(
             if normalized is not None:
                 rows.append(normalized)
     if not rows:
-        return {"version": VERSION, "available": False, "reason": "NO_VALID_OBSERVED_CHAIN", "authority": "NO_AUTHORITY"}
+        return {
+            "version": VERSION, "available": False,
+            "reason": "NO_VALID_OBSERVED_CHAIN", "authority": "NO_AUTHORITY",
+        }
 
     calls = [r for r in rows if r["option_type"] == "CALL"]
     puts = [r for r in rows if r["option_type"] == "PUT"]
     total_abs = 0.0
     signed = 0.0
-    delta_signed = 0.0
+    delta_net = 0.0
     aggregate_vega = 0.0
     aggregate_theta = 0.0
     zero_dte_abs = 0.0
     by_strike: Dict[float, Dict[str, float]] = {}
     min_expiry_hours = None
+
     for r in rows:
         g = black_scholes_greeks(
-            spot=s, strike=r["strike"], t_years=r["t_years"], volatility=r["iv"],
-            option_type=r["option_type"], rate=rate,
+            spot=s, strike=r["strike"], t_years=r["t_years"],
+            volatility=r["iv"], option_type=r["option_type"], rate=rate,
         )
-        abs_gex = g["gamma"] * r["open_interest"] * r["multiplier"] * s * s * 0.01
+        abs_gex = (
+            g["gamma"] * r["open_interest"] * r["multiplier"]
+            * s * s * 0.01
+        )
         sign = 1.0 if r["option_type"] == "CALL" else -1.0
         signed_component = sign * abs_gex
         total_abs += abs(abs_gex)
         signed += signed_component
-        delta_signed += sign * g["delta"] * r["open_interest"] * r["multiplier"] * s
+        # FIX 17.5.10.2: option Delta already contains the PUT negative sign.
+        delta_net += g["delta"] * r["open_interest"] * r["multiplier"] * s
         aggregate_vega += g["vega"] * r["open_interest"] * r["multiplier"]
         aggregate_theta += g["theta_per_day"] * r["open_interest"] * r["multiplier"]
+
         hours = r["t_years"] * 365.0 * 24.0
         min_expiry_hours = hours if min_expiry_hours is None else min(min_expiry_hours, hours)
         if hours <= 24.0:
             zero_dte_abs += abs(abs_gex)
-        bucket = by_strike.setdefault(r["strike"], {"call": 0.0, "put": 0.0, "signed": 0.0, "abs": 0.0})
+
+        bucket = by_strike.setdefault(
+            r["strike"], {"call": 0.0, "put": 0.0, "signed": 0.0, "abs": 0.0}
+        )
         bucket["call" if r["option_type"] == "CALL" else "put"] += abs(abs_gex)
         bucket["signed"] += signed_component
         bucket["abs"] += abs(abs_gex)
@@ -240,11 +343,14 @@ def aggregate_gamma_exposure(
     gamma_wall = max(by_strike, key=lambda k: by_strike[k]["abs"]) if by_strike else None
 
     strikes = sorted(by_strike)
-    lo = max(s * 0.85, min(strikes) if strikes else s * 0.85)
-    hi = min(s * 1.15, max(strikes) if strikes else s * 1.15)
-    if hi <= lo:
+    # 17.5.10.2 visual window: use observed strikes but avoid a uselessly wide
+    # chart caused by extreme OTM strikes.
+    lo = max(s * 0.86, min(strikes) if strikes else s * 0.86)
+    hi = min(s * 1.14, max(strikes) if strikes else s * 1.14)
+    if hi <= lo or (hi - lo) / s < 0.04:
         lo, hi = s * 0.90, s * 1.10
-    ngrid = max(11, min(101, int(grid_points or 41)))
+
+    ngrid = max(21, min(61, int(grid_points or 41)))
     grid = [lo + (hi - lo) * i / (ngrid - 1) for i in range(ngrid)]
     gex_curve: List[Tuple[float, float]] = []
     delta_curve: List[Tuple[float, float]] = []
@@ -252,6 +358,7 @@ def aggregate_gamma_exposure(
         sg, sd = _exposure_at_spot(rows, px, rate=rate)
         gex_curve.append((px, sg))
         delta_curve.append((px, sd))
+
     zero_gamma = _nearest_zero(gex_curve, s)
     delta_neutral = _nearest_zero(delta_curve, s)
 
@@ -262,12 +369,14 @@ def aggregate_gamma_exposure(
     else:
         confidence = "LOW"
     ratio = signed / max(total_abs, 1e-12)
-    regime = "POSITIVE_GAMMA" if ratio >= 0.12 else ("NEGATIVE_GAMMA" if ratio <= -0.12 else "MIXED_GAMMA")
+    regime = (
+        "POSITIVE_GAMMA" if ratio >= 0.12
+        else "NEGATIVE_GAMMA" if ratio <= -0.12
+        else "MIXED_GAMMA"
+    )
 
-    # Representative nearest-ATM Greeks for trader-facing inspection.  These
-    # are model sensitivities, not direction probabilities.
     atm_rows = sorted(rows, key=lambda r: (abs(r["strike"] - s), r["t_years"]))[:8]
-    atm_by_type = {}
+    atm_by_type: Dict[str, Any] = {}
     for typ in ("CALL", "PUT"):
         typed = [r for r in atm_rows if r["option_type"] == typ]
         if not typed:
@@ -287,12 +396,30 @@ def aggregate_gamma_exposure(
             "theta_per_day": round(float(g["theta_per_day"]), 6),
         }
 
+    zero_share = zero_dte_abs / max(total_abs, 1e-12)
+    specialist_shadow = _shadow_context(
+        spot=s,
+        contracts_used=len(rows),
+        confidence=confidence,
+        observed=True,
+        gamma_regime=regime,
+        zero_dte_share=zero_share,
+        zero_gamma=zero_gamma,
+        delta_neutral=delta_neutral,
+        gamma_wall=gamma_wall,
+        call_wall=call_wall,
+        put_wall=put_wall,
+        gex_curve=gex_curve,
+        as_of=now,
+    )
+
     return {
         "version": VERSION,
         "available": True,
         "authority": "CONTEXT_ONLY_NOT_DIRECTION",
         "observed_option_chain": True,
         "dealer_position_sign": "HEURISTIC_CALL_PLUS_PUT_MINUS_NOT_OBSERVED",
+        "delta_exposure_semantics": "OPTION_DELTA_OI_NET_NOT_DEALER_INVENTORY",
         "confidence": confidence,
         "contracts_used": len(rows),
         "spot": round(s, 10),
@@ -300,21 +427,26 @@ def aggregate_gamma_exposure(
         "signed_gex_ratio": round(ratio, 6),
         "absolute_gamma_exposure": round(total_abs, 6),
         "heuristic_signed_gamma_exposure": round(signed, 6),
-        "heuristic_signed_delta_dollars": round(delta_signed, 6),
+        "heuristic_signed_delta_dollars": round(delta_net, 6),
         "aggregate_vega_per_iv_point": round(aggregate_vega, 6),
         "aggregate_theta_per_day": round(aggregate_theta, 6),
         "representative_atm_greeks": atm_by_type,
-        "zero_dte_gamma_share": round(zero_dte_abs / max(total_abs, 1e-12), 6),
+        "zero_dte_gamma_share": round(zero_share, 6),
         "nearest_expiry_hours": round(float(min_expiry_hours or 0.0), 4),
         "gamma_wall": round(float(gamma_wall), 10) if gamma_wall is not None else None,
         "call_wall": round(float(call_wall), 10) if call_wall is not None else None,
         "put_wall": round(float(put_wall), 10) if put_wall is not None else None,
         "zero_gamma_level": round(float(zero_gamma), 10) if zero_gamma is not None else None,
         "delta_neutral_level": round(float(delta_neutral), 10) if delta_neutral is not None else None,
-        # Compact curves for the frontend indicator.  They are diagnostic
-        # mathematics, not probabilities or autonomous trade signals.
-        "gex_curve": [[round(float(px), 10), round(float(value), 6)] for px, value in gex_curve],
-        "delta_curve": [[round(float(px), 10), round(float(value), 6)] for px, value in delta_curve],
+        "gex_curve": [
+            [round(float(px), 10), round(float(value), 6)]
+            for px, value in gex_curve
+        ],
+        "delta_curve": [
+            [round(float(px), 10), round(float(value), 6)]
+            for px, value in delta_curve
+        ],
+        "specialist_shadow_context": specialist_shadow,
         "production_score_adjustment": 0.0,
         "can_create_direction": False,
         "can_bypass_safety": False,
@@ -322,18 +454,18 @@ def aggregate_gamma_exposure(
     }
 
 
-def theoretical_gamma_shape(*, spot: float, volatility: float, as_of: Any = None, expiry_hours: float = 6.5) -> Dict[str, Any]:
-    """Black-Scholes-only fallback with equal synthetic OI.
-
-    This is useful to reason about how gamma behaves near expiry, but it is not
-    market positioning and never receives production authority.
-    """
+def theoretical_gamma_shape(
+    *, spot: float, volatility: float, as_of: Any = None, expiry_hours: float = 6.5
+) -> Dict[str, Any]:
     s = max(_f(spot), 0.0)
     vol = max(_f(volatility), 1e-4)
     if vol > 3.0:
         vol /= 100.0
     if s <= 0:
-        return {"version": VERSION, "available": False, "reason": "INVALID_SPOT", "authority": "NO_AUTHORITY"}
+        return {
+            "version": VERSION, "available": False,
+            "reason": "INVALID_SPOT", "authority": "NO_AUTHORITY",
+        }
     now = _utc(as_of) or datetime.now(timezone.utc)
     t = max(1.0, _f(expiry_hours, 6.5)) / (365.0 * 24.0)
     rows = []
@@ -342,7 +474,8 @@ def theoretical_gamma_shape(*, spot: float, volatility: float, as_of: Any = None
         for typ in ("CALL", "PUT"):
             rows.append({
                 "strike": k, "open_interest": 1.0, "iv": vol,
-                "option_type": typ, "expiry": now.timestamp() + t * 365.0 * 24.0 * 3600.0,
+                "option_type": typ,
+                "expiry": now.timestamp() + t * 365.0 * 24.0 * 3600.0,
                 "multiplier": 1.0,
             })
     out = aggregate_gamma_exposure(rows, spot=s, as_of=now)
@@ -354,6 +487,14 @@ def theoretical_gamma_shape(*, spot: float, volatility: float, as_of: Any = None
         "production_score_adjustment": 0.0,
         "can_create_direction": False,
     })
+    shadow = dict(out.get("specialist_shadow_context") or {})
+    shadow.update({
+        "authority": "SHADOW_THEORETICAL_ONLY",
+        "observed_chain": False,
+        "context_quality_score": 0.0,
+        "requires_observed_chain_for_learning": True,
+    })
+    out["specialist_shadow_context"] = shadow
     return out
 
 
@@ -362,7 +503,9 @@ def build_market_maker_context(
     realized_or_implied_volatility: float = 0.0, as_of: Any = None,
 ) -> Dict[str, Any]:
     if option_chain:
-        observed = aggregate_gamma_exposure(option_chain, spot=spot, as_of=as_of)
+        observed = aggregate_gamma_exposure(
+            option_chain, spot=spot, as_of=as_of
+        )
         if observed.get("available"):
             return observed
     return theoretical_gamma_shape(
