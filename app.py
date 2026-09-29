@@ -116,6 +116,18 @@ from portfolio_guardian import portfolio_guardian
 # ============================================================================
 
 app = Flask(__name__)
+
+# Commit 17.5.10.3 — bounded external-provider resilience.
+# Installs only fail-open wrappers; no threads, polling or network calls are
+# created by the installer itself.
+try:
+    from runtime_resilience_175103 import install_runtime_resilience_175103
+    _RUNTIME_RESILIENCE_175103 = install_runtime_resilience_175103()
+except Exception as _runtime_resilience_boot_error:
+    _RUNTIME_RESILIENCE_175103 = {
+        'installed': False,
+        'error': type(_runtime_resilience_boot_error).__name__,
+    }
 # ============================================================================
 # AUTENTICACIÓN SERVER-SIDE
 # ============================================================================
@@ -16883,6 +16895,15 @@ class TradingExpertSystem:
         La lógica de los traders y sus pesos no se modifica.
         """
         try:
+            # Commit 17.5.10.3 — ABI bridge for FuturesAnalysis/MultiAssetAnalysis.
+            # Their deployed override predates the execution_observations kwarg.
+            # The caller stores the already-loaded layer packet temporarily in
+            # `structure`; the base execution method consumes it without any I/O.
+            if execution_observations is None and isinstance(structure, dict):
+                _bridged_observations = structure.get('_execution_observations_175103')
+                if isinstance(_bridged_observations, dict):
+                    execution_observations = _bridged_observations
+
             current_price = structure.get('current_price', 0)
             if current_price == 0:
                 print("❌ Error: current_price es 0 en calculate_entry_levels")
@@ -21016,18 +21037,37 @@ class TradingExpertSystem:
             levels = {}
             if accion_consenso in ['COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT']:
                 print(f"💰 Calculando niveles para {accion_consenso}...")
+                _execution_bridge_key_175103 = '_execution_observations_175103'
                 try:
-                    levels = self.calculate_entry_levels(
-                        accion_consenso,
-                        trend,
-                        momentum,
-                        volatility,
-                        structure,
-                        symbol,
-                        timeframe,
-                        liquidation=liquidation_data,
-                        execution_observations=capas,
-                    )
+                    # Commit 17.5.10.3 — execution ABI compatibility.
+                    # FuturesAnalysis (and MultiAssetAnalysis through inheritance)
+                    # still exposes the legacy signature without
+                    # `execution_observations`. Passing the keyword made every
+                    # directional derivative candidate fail before Entry/SL/TP.
+                    # We therefore bridge the ALREADY-LOADED layers through the
+                    # structure packet and call the legacy signature for Futures.
+                    # Spot keeps the direct kwarg path. No fetch/LLM/DB call is added.
+                    if analysis_system_type == 'futures' and isinstance(structure, dict):
+                        structure[_execution_bridge_key_175103] = capas
+                        levels = self.calculate_entry_levels(
+                            accion_consenso, trend, momentum, volatility, structure,
+                            symbol, timeframe, liquidation=liquidation_data,
+                        )
+                    else:
+                        levels = self.calculate_entry_levels(
+                            accion_consenso,
+                            trend,
+                            momentum,
+                            volatility,
+                            structure,
+                            symbol,
+                            timeframe,
+                            liquidation=liquidation_data,
+                            execution_observations=capas,
+                        )
+                    levels = dict(levels or {})
+                    levels['pipeline_generation'] = '17.5.10.3'
+                    levels['execution_runtime_failed'] = False
                     
                     # RC9.7.11: Futures reutiliza EXACTAMENTE la fracción
                     # que ya participó en el cálculo del apalancamiento. Spot
@@ -21078,8 +21118,24 @@ class TradingExpertSystem:
                     import traceback
                     traceback.print_exc()
                     levels = self._get_default_levels(structure.get('current_price', 0), symbol)
+                    levels = dict(levels or {})
+                    levels.update({
+                        'pipeline_generation': '17.5.10.3',
+                        'execution_runtime_failed': True,
+                        'execution_runtime_error': f"{type(e).__name__}: {str(e)[:220]}",
+                        'is_rejected': True,
+                        'is_executable': False,
+                        'publication_status': 'ANALYSIS_ONLY',
+                        'suggested_size': 0,
+                        'rejected_reason': f"EXECUTION_RUNTIME_FAILED:{type(e).__name__}",
+                    })
+                finally:
+                    if isinstance(structure, dict):
+                        structure.pop(_execution_bridge_key_175103, None)
             else:
                 levels = self._get_default_levels(structure.get('current_price', 0), symbol)
+                levels = dict(levels or {})
+                levels['pipeline_generation'] = '17.5.10.3'
 
             # ==========================================================
             # COMMIT 17.5.10.2 — EXECUTION COMPLETENESS CONTRACT
@@ -35040,6 +35096,13 @@ def _technical_signal_funnel_row(result):
     reason = ''
     if result.get('success') is False:
         stage, reason = 'DATA_ERROR', str(result.get('error') or 'ANALYSIS_ERROR')[:180]
+    elif bool(levels.get('execution_runtime_failed')) or levels.get('execution_runtime_error'):
+        stage = 'EXECUTION_RUNTIME_FAILED'
+        reason = str(
+            levels.get('execution_runtime_error')
+            or levels.get('rejected_reason')
+            or 'EXECUTION_RUNTIME_FAILED'
+        )[:180]
     elif str(thesis.get('direction') or '').upper() not in ('BULLISH','BEARISH'):
         stage, reason = 'THESIS', 'NO_DIRECTIONAL_THESIS'
     elif not bool(oi.get('candidate_ready')):
@@ -35078,6 +35141,14 @@ def _technical_signal_funnel_row(result):
         'mtf_conflict': bool((oi.get('multi_timeframe') or {}).get('conflict')),
         'action': action, 'confidence': decision.get('confidence'),
         'publication_status': publication, 'executable': executable,
+        'pipeline_generation': levels.get('pipeline_generation') or result.get('pipeline_generation'),
+        'execution_runtime_failed': bool(levels.get('execution_runtime_failed')),
+        'execution_runtime_error': levels.get('execution_runtime_error'),
+        'particular_setup_promoted': bool(oi.get('particular_setup_promoted')),
+        'particular_setup_family': oi.get('particular_setup_family'),
+        'particular_setup_rejected_reason': oi.get('particular_setup_rejected_reason'),
+        'strategy_family': ((oi.get('default_strategy') or {}).get('family')),
+        'strategy_quality': ((oi.get('default_strategy') or {}).get('quality')),
         'opportunity_recovery_attempted': bool(levels.get('opportunity_recovery_attempted')),
         'opportunity_recovery_applied': bool(levels.get('opportunity_recovery_applied')),
         'opportunity_recovery_reason': levels.get('opportunity_recovery_reason'),
@@ -35102,6 +35173,28 @@ def _technical_signal_funnel_summary(analyses):
             'success_rate_pct': round(100.0*recovery_applied/recovery_attempted,2) if recovery_attempted else 0.0,
         },
         'rows': rows
+    }
+
+def _public_pipeline_health_175103(analyses):
+    """Compact external-reader diagnostic; cache-only and no internal roles."""
+    summary = _technical_signal_funnel_summary(analyses or {})
+    counts = dict(summary.get('stage_counts') or {})
+    return {
+        'version': '17.5.10.3',
+        'analyzed_cells': int(summary.get('analyzed_cells') or 0),
+        'executable': int(summary.get('executable_count') or 0),
+        'runtime_failed': int(counts.get('EXECUTION_RUNTIME_FAILED') or 0),
+        'data_error': int(counts.get('DATA_ERROR') or 0),
+        'no_directional_thesis': int(counts.get('THESIS') or 0),
+        'setup_or_candidate_not_ready': int(counts.get('CANDIDATE') or 0) + int(counts.get('PARTICULAR_SETUP') or 0),
+        'direction_not_confirmed': int(counts.get('DIRECTION_CONFIRMATION') or 0),
+        'entry_not_ready': int(counts.get('ENTRY') or 0),
+        'sl_not_ready': int(counts.get('SL') or 0),
+        'tp_not_ready': int(counts.get('TP') or 0),
+        'rr_not_ready': int(counts.get('RR') or 0),
+        'safety_not_ready': int(counts.get('SAFETY') or 0),
+        'publication_not_ready': int(counts.get('PUBLICATION') or 0) + int(counts.get('OPPORTUNITY_RECOVERY') or 0),
+        'runtime_failures_are_not_no_opportunity': True,
     }
 
 def _multiasset_run_analysis(symbol, timeframe, owner='multi-background'):
@@ -35486,7 +35579,7 @@ def api_multiasset_signals_previous():
                         'lifecycle_status':'waiting_entry'})
             if row['confidence']>=min_conf: signals.append(row)
         signals.sort(key=lambda x:-x['confidence'])
-        return jsonify({'success':True,'warming_up':False,'running':False,'cache_ready':bool(analyses),'total':len(signals),'active_count':len(signals),'signals':signals,'other_directional_signals':[],'analysis_candidates':[],'progress':{'total':7,'completed':len(analyses),'errors':0},'timestamp':datetime.now(bolivia_tz).isoformat()})
+        return jsonify({'success':True,'warming_up':False,'running':False,'cache_ready':bool(analyses),'total':len(signals),'active_count':len(signals),'signals':signals,'other_directional_signals':[],'analysis_candidates':[],'pipeline_health':_public_pipeline_health_175103(analyses),'progress':{'total':7,'completed':len(analyses),'errors':0},'timestamp':datetime.now(bolivia_tz).isoformat()})
     except Exception as exc:
         return jsonify({'success':False,'error':str(exc)[:180]}),500
 
@@ -35518,6 +35611,7 @@ def api_multiasset_signals_active():
             'total':len(signals),'active_count':len(signals),'signals':signals,
             'other_directional_signals':[],'vigent_other_directional_signals':[],
             'analysis_candidates':[],
+            'pipeline_health':_public_pipeline_health_175103(analyses),
             'progress':{'total':7,'completed':len(analyses),'errors':0},
             'timestamp':datetime.now(bolivia_tz).isoformat(),
         })
@@ -35624,7 +35718,7 @@ def api_pipeline_integrity_175101():
             'notes':[
                 'Router score Multi-Activo prioriza; no veta elegibilidad.',
                 'Safety/Entry/SL/TP/RR/Leverage V6 no se reducen.',
-                'Los fallos runtime quedan pendientes/retry, nunca DONE.',
+                'Los fallos runtime se separan de ausencia real de oportunidad.',
             ],
         }),200
     except Exception as exc:
@@ -40680,6 +40774,8 @@ def api_futures_signals_active():
                 filter_stats,        
             'analysis_summary':
                 visibility['summary'],
+            'pipeline_health':
+                _public_pipeline_health_175103(cache.get('analysis') or {}),
             'analysis_candidates':
                 visibility['candidates'],
             # Hipótesis MEDIUM/HIGH del análisis ACTUAL: sólo navegación
@@ -41155,6 +41251,8 @@ def api_futures_signals_previous():
                 filter_stats,        
             'analysis_summary':
                 visibility['summary'],
+            'pipeline_health':
+                _public_pipeline_health_175103(cache.get('analysis') or {}),
             'analysis_candidates':
                 visibility['candidates'],
             'other_directional_signals':

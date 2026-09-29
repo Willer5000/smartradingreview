@@ -1,0 +1,18 @@
+PY_COMPILE: PASS
+
+QA:
+PASS futures ABI bridge key installed
+PASS Futures path does not pass legacy-incompatible kwarg
+PASS Spot still passes execution observations
+PASS runtime failure is explicit
+PASS pipeline generation 17.5.10.3
+PASS public pipeline health present
+PASS frontend helper loaded
+PASS frontend has no auto retry
+PASS frontend timeout bounded at 25s
+PASS BLS 403 fail-open wrapper exists
+10/10 PASS
+
+NODE_CHECK: PASS
+
+JINJA_PARSE: PASS

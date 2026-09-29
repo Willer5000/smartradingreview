@@ -1,0 +1,16 @@
+{
+  "repository": "Willer5000/smartradingreview",
+  "baseline_head": "f4bfd888dfeeaa8dcbce623ca348aaa9cbc0182a",
+  "baseline_message": "Commit ajuste 17.5.10.2",
+  "verified_blobs": {
+    "app.py": "c88f38e6d59019438f59aad71df21229a509b95a",
+    "templates/index.html": "dc281e3bb6a0eeee430e6452c4733eec69a8d37f",
+    "futures_system.py": "eb18b943778a09e5e598524431577ce7f9c236d3"
+  },
+  "root_cause": "FuturesAnalysis.calculate_entry_levels legacy signature rejects execution_observations kwarg; MultiAsset inherits it",
+  "sql_migration_required": false,
+  "new_threads": 0,
+  "new_polling": 0,
+  "new_llm_calls": 0,
+  "new_supabase_queries": 0
+}
