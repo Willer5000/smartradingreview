@@ -7229,7 +7229,9 @@ class TradingExpertSystem:
                     if not any(p in cond.lower() for p in palabras_prohibidas):
                         condiciones_filtradas.append(cond)
                     else:
-                        print(f"   🚫 Excluida condición contradictoria: {cond}")
+                        
+                        if str(os.environ.get('TRADING_VERBOSE_TEMPLATE_DIAGNOSTICS','0')).lower() in ('1','true','yes','on'):
+                            print(f"   🚫 Excluida condición contradictoria: {cond}")
             
             elif decision in ['VENTA_SPOT', 'SHORT']:
                 # Para ventas, SOLO condiciones bajistas o neutrales
@@ -7238,7 +7240,9 @@ class TradingExpertSystem:
                     if not any(p in cond.lower() for p in palabras_prohibidas):
                         condiciones_filtradas.append(cond)
                     else:
-                        print(f"   🚫 Excluida condición contradictoria: {cond}")
+                        
+                        if str(os.environ.get('TRADING_VERBOSE_TEMPLATE_DIAGNOSTICS','0')).lower() in ('1','true','yes','on'):
+                            print(f"   🚫 Excluida condición contradictoria: {cond}")
             
             elif decision in ['NO_OPERAR', 'ESPERAR', 'CAUTION']:
                 # Para NO OPERAR / ESPERAR / PRECAUCIÓN: causas de bloqueo, espera o riesgo
@@ -7261,7 +7265,9 @@ class TradingExpertSystem:
                     if permitida and not prohibida:
                         condiciones_filtradas.append(cond)
                     else:
-                        print(f"   🚫 Excluida condición no relevante para {decision}: {cond}")
+                        
+                        if str(os.environ.get('TRADING_VERBOSE_TEMPLATE_DIAGNOSTICS','0')).lower() in ('1','true','yes','on'):
+                            print(f"   🚫 Excluida condición no relevante para {decision}: {cond}")
             else:
                 condiciones_filtradas = condiciones_activas
             
@@ -7885,16 +7891,21 @@ class TradingExpertSystem:
         """
         Mapea todas las condiciones activas del mercado - VERSIÓN CON DEBUG
         """
-        import traceback
-        
-        # DEBUG: Mostrar quién llamó a esta función
-        stack = traceback.extract_stack()
-        caller = stack[-2]  # El que llamó a esta función
-        print(f"\n🔍 DEBUG: _mapear_condiciones_activas llamada desde:")
-        print(f"   Archivo: {caller.filename}")
-        print(f"   Línea: {caller.lineno}")
-        print(f"   Función: {caller.name}")
-        print(f"   ¿liquidation recibido? {'SÍ' if liquidation is not None else 'NO'}")
+        # Commit 17.5.10.1: stack extraction + dozens of per-condition prints
+        # were pure diagnostics and created substantial Render log/CPU pressure.
+        # Keep them opt-in; default production logging is one compact summary.
+        _verbose_template_diag = str(
+            os.environ.get('TRADING_VERBOSE_TEMPLATE_DIAGNOSTICS', '0')
+        ).strip().lower() in ('1','true','yes','on')
+        if _verbose_template_diag:
+            import traceback
+            stack = traceback.extract_stack()
+            caller = stack[-2]
+            print(f"\n🔍 DEBUG: _mapear_condiciones_activas llamada desde:")
+            print(f"   Archivo: {caller.filename}")
+            print(f"   Línea: {caller.lineno}")
+            print(f"   Función: {caller.name}")
+            print(f"   ¿liquidation recibido? {'SÍ' if liquidation is not None else 'NO'}")
         try:
             condiciones = []
             
@@ -20614,6 +20625,23 @@ class TradingExpertSystem:
                     'error': str(operational_error)[:180],
                     'never_bypass_safety': True,
                 }
+            # Commit 17.5.10.1 — integrity adapter.  Multi-Activo now lets
+            # its asset-class Strategy Bank participate BEFORE candidate_ready,
+            # and old-generation Research becomes counter-evidence instead of an
+            # irreversible pre-candidate veto.  No Safety/Entry/SL/TP/RR threshold
+            # is changed here.
+            try:
+                from pipeline_integrity_175101 import reconcile_operational_candidate
+                operational_intelligence = reconcile_operational_candidate(
+                    operational_intelligence,
+                    layers=capas,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    system_type=analysis_system_type,
+                )
+            except Exception as _pipeline_integrity_error:
+                if isinstance(operational_intelligence, dict):
+                    operational_intelligence['pipeline_integrity_error'] = type(_pipeline_integrity_error).__name__
             capas['operational_intelligence'] = operational_intelligence
 
             # ============ SISTEMA DE ESPECIALISTAS INTERNOS ============
@@ -21830,6 +21858,15 @@ class TradingExpertSystem:
                         f"⚠️ [INTRABAR PREVIEW] metadata: {_preview_meta_error}",
                         flush=True,
                     )
+
+            # Commit 17.5.10.1 — every new observation carries the pipeline
+            # generation so forward learning / alpha-decay can never be confused
+            # with an older Entry/SL/TP generation.
+            try:
+                from pipeline_integrity_175101 import stamp_pipeline_generation
+                resultado_final = stamp_pipeline_generation(resultado_final)
+            except Exception as _generation_stamp_error:
+                resultado_final['pipeline_generation_error'] = type(_generation_stamp_error).__name__
 
             # === FASE 7: Registrar señal en Supabase (best-effort, no bloqueante) ===
             # Si el subsistema de futuros nos invocó, saltar registro spot
@@ -34629,7 +34666,7 @@ def _apply_17_5_7_backtest_evidence_policy(result, market='futures'):
 # COMMIT 17.5.10 — PROFITABILITY QUALIFIER + MARKET-MAKER MATH CONTEXT
 # ============================================================================
 _PROFITABILITY_QUALIFIER_VERSION = '17.5.10_PROFITABILITY_QUALIFIED_V1'
-_MM_CONTEXT_VERSION = '17.5.10_MM_MATH_V1'
+_MM_CONTEXT_VERSION = '17.5.10.1_MM_MATH_V1'
 
 
 def _estimate_mm_volatility(result):
@@ -34689,7 +34726,14 @@ def _apply_17_5_10_profitability_market_maker_context(result, market='futures'):
             or levels.get('option_chain')
             or []
         )
-        if mk == 'futures' and not chain:
+        _decision = out.get('decision') or {}
+        _action = str(_decision.get('action') or '').upper()
+        _op = out.get('operational_intelligence') or {}
+        _directional_candidate = bool(
+            _action in ('LONG','SHORT')
+            and (_op.get('candidate_ready') or str((out.get('levels') or {}).get('publication_status') or '').upper() == 'EXECUTABLE_SIGNAL')
+        )
+        if mk == 'futures' and not chain and _directional_candidate:
             try:
                 from options_market_context import get_crypto_option_chain
                 _chain_snapshot = get_crypto_option_chain(out.get('symbol')) or {}
@@ -35034,19 +35078,23 @@ def _multiasset_retry_ready(bucket, now_mono):
 
 
 def _multiasset_record_retry(bucket, error):
+    """Runtime failure is never semantically DONE.
+
+    Backoff is bounded; the queue TTL decides when an unanalysed opportunity is
+    stale.  This preserves truthful observability: FAILED/DEFERRED != ANALYZED.
+    """
     with _MULTI_AUTO_LOCK:
         row = dict(_MULTI_DEEP_RETRY.get(bucket) or {})
         attempts = int(row.get('attempts') or 0) + 1
         row.update({
             'attempts': attempts,
-            'next_retry_at': time.monotonic() + min(180, 60 * attempts),
+            'state': 'RUNTIME_FAILED',
+            'next_retry_at': time.monotonic() + min(600, 30 * (2 ** min(attempts, 4))),
             'error': str(error or '')[:160],
         })
         _MULTI_DEEP_RETRY[bucket] = row
-        if attempts >= 3:
-            _MULTI_AUTO_DONE.add(bucket)
-        if len(_MULTI_DEEP_RETRY) > 80:
-            for old in list(_MULTI_DEEP_RETRY)[:30]:
+        if len(_MULTI_DEEP_RETRY) > 120:
+            for old in list(_MULTI_DEEP_RETRY)[:40]:
                 _MULTI_DEEP_RETRY.pop(old, None)
 
 
@@ -35107,25 +35155,67 @@ def _multiasset_pop_completed_pending(bucket):
 
 def _multiasset_queue_snapshot():
     with _MULTI_AUTO_LOCK:
+        failed=sum(1 for row in _MULTI_DEEP_RETRY.values() if str((row or {}).get('state') or '') == 'RUNTIME_FAILED')
         return {
             'pending': len(_MULTI_PENDING_QUEUE),
             'expired_before_analysis': int(_MULTI_PENDING_EXPIRED),
             'resource_deferrals': int(_MULTI_PENDING_RESOURCE_DEFERRALS),
+            'runtime_failed_pending_retry': failed,
+            'last_backpressure_reason': _MULTI_RESOURCE_DAY.get('last_reason') if '_MULTI_RESOURCE_DAY' in globals() else None,
+            'router_score_role': 'PRIORITY_ONLY_NOT_ELIGIBILITY',
+            'signal_count_cap': False,
         }
+
+
+_MULTI_RESOURCE_DAY = {'day': None, 'network_baseline': None, 'last_deep_at': 0.0, 'last_reason': None}
+
+
+def _multiasset_observed_kucoin_bytes():
+    """Process-local observed exchange response bytes; no external request."""
+    try:
+        from futures_system import get_futures_network_stats
+        return int((get_futures_network_stats() or {}).get('bytes_received') or 0)
+    except Exception:
+        return 0
+
+
+def _multiasset_resource_backpressure(now, now_mono):
+    """Protect Render Free RAM/bandwidth without turning budget into NO_SIGNAL."""
+    rss = _process_rss_mb()
+    if rss is not None and float(rss) >= float(_MEMORY_JOB_START_LIMIT_MB):
+        return {'blocked': True, 'reason': 'RAM_BACKPRESSURE', 'rss_mb': rss}
+
+    # Pace automatic deep work; UI requests retain normal interactive priority.
+    min_gap = max(30.0, float(os.environ.get('MULTIASSET_AUTO_MIN_DEEP_INTERVAL_SECONDS', '120') or 120))
+    last = float(_MULTI_RESOURCE_DAY.get('last_deep_at') or 0.0)
+    if last and now_mono - last < min_gap:
+        return {'blocked': True, 'reason': 'PACE_BACKPRESSURE', 'retry_in': round(min_gap-(now_mono-last),1)}
+
+    observed = _multiasset_observed_kucoin_bytes()
+    day = now.strftime('%Y-%m-%d')
+    if _MULTI_RESOURCE_DAY.get('day') != day:
+        _MULTI_RESOURCE_DAY.update({'day': day, 'network_baseline': observed, 'last_deep_at': last, 'last_reason': None})
+    base = int(_MULTI_RESOURCE_DAY.get('network_baseline') or observed)
+    used_mb = max(0, observed - base) / (1024.0 * 1024.0)
+    # Best-effort process budget, deliberately below 5GB/30d so Futures/UI,
+    # Supabase and Telegram keep substantial monthly headroom.
+    soft_mb = max(8.0, float(os.environ.get('MULTIASSET_AUTO_KUCOIN_SOFT_MB_PER_DAY', '48') or 48))
+    if used_mb >= soft_mb:
+        return {'blocked': True, 'reason': 'NETWORK_DAILY_SOFT_BACKPRESSURE', 'observed_mb_today': round(used_mb,2), 'soft_mb': soft_mb}
+    return {'blocked': False, 'reason': 'OK', 'rss_mb': rss, 'observed_mb_today': round(used_mb,2), 'soft_mb': soft_mb}
 
 
 def _multiasset_background_tick():
     global _MULTI_PENDING_RESOURCE_DEFERRALS
-    """17.5.10 fair close-aware Multi-Asset scheduler on the existing Futures loop.
+    """17.5.10.1 fair coverage scheduler, still Free-runtime bounded.
 
-    No new thread, LLM or scanner DB write. Trading thresholds are untouched.
-    Each lane is shortlisted with its own CLOSED timeframe; transient failures
-    retry instead of consuming the candle bucket; one deep cell max per tick.
+    All seven assets may enter the queue. Router score orders work; it no longer
+    decides whether a cell deserves deep analysis. One heavy cell maximum per
+    tick, one shared heavy slot, RAM/network backpressure, no new thread/LLM.
     """
     try:
         if str(os.getenv('MULTIASSET_ENABLED','1')).lower() in ('0','false','no','off'):
             return
-        from multiasset_system import MULTIASSET_DEEP_LIMIT, MULTIASSET_AUTO_DEEP_DAILY_MAX
         now=datetime.now(timezone.utc); now_mono=time.monotonic()
         with _MULTI_AUTO_LOCK:
             today=now.strftime('%Y-%m-%d')
@@ -35134,6 +35224,8 @@ def _multiasset_background_tick():
                 _MULTI_AUTO_DONE.clear(); _MULTI_DEEP_RETRY.clear(); _MULTI_CLOSE_REFRESHED.clear()
         plan=_multiasset_close_plan(now)
 
+        # 4h principal lane: cheap scanner remains cached, but ALL seven rows are
+        # eligible for the fair queue in router-score order.
         force_4h=plan['4h']['due'] and not _multiasset_close_refresh_done(plan['4h']['key'])
         with _MULTI_ROUTER_STATE_LOCK:
             cached_rows=list(_MULTI_ROUTER_STATE.get('rows') or [])
@@ -35145,60 +35237,47 @@ def _multiasset_background_tick():
             rows_4h=cached_rows
         else:
             rows_4h=_multiasset_scan('4h',force=False)
-        top_score=0.0
         if rows_4h:
             top_score=max([float((r or {}).get('router_score') or 0) for r in rows_4h] or [0.0])
             interval=900 if top_score >= 72.0 else 1800
             with _MULTI_ROUTER_STATE_LOCK:
                 _MULTI_ROUTER_STATE.update({'rows':list(rows_4h),'last_scan_at':now_mono,'next_scan_at':now_mono+interval,'interval_seconds':interval})
 
-        candidates_4h=[r for r in rows_4h if r.get('deep_candidate')][:MULTIASSET_DEEP_LIMIT]
         due=[]
-        if plan['4h']['due']:
-            due.extend((r['symbol'],'4h') for r in candidates_4h)
-
+        # Rare 1D context first, then principal 4h, then 1h Fast Lane. Within
+        # each lane scan_opportunities is already sorted by router score.
         if plan['1D']['due']:
             force=not _multiasset_close_refresh_done(plan['1D']['key'])
             rows_1d=_multiasset_scan('1D',force=force)
             if rows_1d: _multiasset_mark_close_refresh(plan['1D']['key'])
-            due.extend((r['symbol'],'1D') for r in rows_1d if r.get('deep_candidate'))
-
-        # 17.5.5: 1h is judged by its OWN closed 1h router, not by 4h.
-        # The quality floor remains 82; this restores coverage without lowering
-        # the signal or deep-analysis gates. All shortlisted candidates get a fair turn;
-        # the loop still executes only one deep analysis per scheduler tick.
+            due.extend((r['symbol'],'1D') for r in rows_1d)
+        if plan['4h']['due']:
+            due.extend((r['symbol'],'4h') for r in rows_4h)
         if plan['1h']['due']:
             force=not _multiasset_close_refresh_done(plan['1h']['key'])
             rows_1h=_multiasset_scan('1h',force=force)
             if rows_1h: _multiasset_mark_close_refresh(plan['1h']['key'])
-            fast=[r for r in rows_1h if r.get('deep_candidate')
-                  and float(r.get('router_score') or 0) >= _MULTI_FAST_LANE_MIN_SCORE]
-            due[0:0]=[(r['symbol'],'1h') for r in fast]
+            # 17.5.10.1: score is PRIORITY, never eligibility. No >=82 veto.
+            due.extend((r['symbol'],'1h') for r in rows_1h)
 
         due=list(dict.fromkeys(due))
         _multiasset_enqueue_due(due, now)
         _multiasset_prune_pending(time.time())
 
-        # Fair FIFO: one deep cell per scheduler tick. Resource budgets defer a
-        # queued cell; they do not mark it analyzed or silently discard it.
-        with _MULTI_AUTO_LOCK:
-            pending = [dict(x) for x in _MULTI_PENDING_QUEUE]
-        for item in pending:
-            symbol = str(item.get('symbol') or '')
-            tf = str(item.get('timeframe') or '')
-            bucket = str(item.get('bucket') or '')
+        pressure=_multiasset_resource_backpressure(now, now_mono)
+        if pressure.get('blocked'):
             with _MULTI_AUTO_LOCK:
-                if bucket in _MULTI_AUTO_DONE:
-                    continue
-                if tf == '1D':
-                    resource_blocked = int(_MULTI_AUTO_DAILY.get('context_count') or 0) >= _MULTI_DAILY_CONTEXT_EXTRA_MAX
-                else:
-                    resource_blocked = int(_MULTI_AUTO_DAILY.get('count') or 0) >= MULTIASSET_AUTO_DEEP_DAILY_MAX
-                if resource_blocked:
-                    _MULTI_PENDING_RESOURCE_DEFERRALS += 1
-            if resource_blocked:
-                return
-            if not _multiasset_retry_ready(bucket,now_mono):
+                _MULTI_PENDING_RESOURCE_DEFERRALS += 1
+                _MULTI_RESOURCE_DAY['last_reason'] = pressure.get('reason')
+            return
+
+        with _MULTI_AUTO_LOCK:
+            pending=[dict(x) for x in _MULTI_PENDING_QUEUE]
+        for item in pending:
+            symbol=str(item.get('symbol') or '')
+            tf=str(item.get('timeframe') or '')
+            bucket=str(item.get('bucket') or '')
+            if not bucket or not _multiasset_retry_ready(bucket,now_mono):
                 continue
             result=_multiasset_run_analysis(symbol,tf,owner=f'multi-background:{symbol}:{tf}')
             if result.get('busy'):
@@ -35208,18 +35287,18 @@ def _multiasset_background_tick():
                 return
             with _MULTI_AUTO_LOCK:
                 _MULTI_AUTO_DONE.add(bucket); _MULTI_DEEP_RETRY.pop(bucket,None)
+                _MULTI_RESOURCE_DAY['last_deep_at']=time.monotonic()
+                _MULTI_RESOURCE_DAY['last_reason']='OK'
                 if tf=='1D':
                     _MULTI_AUTO_DAILY['context_count']=int(_MULTI_AUTO_DAILY.get('context_count') or 0)+1
                 else:
                     _MULTI_AUTO_DAILY['count']=int(_MULTI_AUTO_DAILY.get('count') or 0)+1
                     if tf=='1h':
                         _MULTI_AUTO_DAILY['fast_count']=int(_MULTI_AUTO_DAILY.get('fast_count') or 0)+1
-                if len(_MULTI_AUTO_DONE)>80:
-                    for old in list(_MULTI_AUTO_DONE)[:30]: _MULTI_AUTO_DONE.discard(old)
+                if len(_MULTI_AUTO_DONE)>160:
+                    for old in list(_MULTI_AUTO_DONE)[:60]: _MULTI_AUTO_DONE.discard(old)
             _multiasset_pop_completed_pending(bucket)
             if _multiasset_is_executable(result):
-                # Delivery state is owned by the durable outbox; analysis may
-                # complete even when Telegram temporarily fails.
                 _multiasset_compact_telegram(result)
             return
     except Exception as exc:
@@ -35263,7 +35342,7 @@ def api_multiasset_opportunities():
             'success':True,'total':len(signals),'signals':signals,
             'count':len(signals),'opportunities':signals,'processing_selected':False,
             'router':rows,'shortlist':[r for r in rows if r.get('deep_candidate')][:MULTIASSET_DEEP_LIMIT],
-            'resource_policy':{'scanner_db_writes':0,'scanner_ai_calls':0,'deep_limit':MULTIASSET_DEEP_LIMIT, **_multiasset_queue_snapshot()},
+            'resource_policy':{'scanner_db_writes':0,'scanner_ai_calls':0,'deep_limit_display_only':MULTIASSET_DEEP_LIMIT,'shortlist_role':'DISPLAY_PRIORITY_ONLY_NOT_DEEP_ELIGIBILITY', **_multiasset_queue_snapshot()},
             'timestamp':datetime.now(bolivia_tz).isoformat(),
         })
     except Exception as exc:
@@ -35337,6 +35416,113 @@ def api_multiasset_signals_active():
         })
     except Exception as exc:
         return jsonify({'success':False,'error':str(exc)[:180],'signals':[]}),500
+
+@app.route('/api/futures/market-maker-context', methods=['GET'])
+def api_futures_market_maker_context():
+    """Lightweight Greeks/GEX endpoint; never launches a full market analysis."""
+    user=_require_auth()
+    if not isinstance(user,str):
+        return user
+    symbol=str(request.args.get('symbol') or 'BTC-USDT').upper().replace('/','-')
+    timeframe=str(request.args.get('timeframe') or '1h')
+    result={}
+    try:
+        with _futures_analysis_cache['lock']:
+            _cache_data=dict(_futures_analysis_cache.get('data') or {})
+        _analyses=dict(_cache_data.get('analysis') or {})
+        result=dict(_analyses.get((symbol,timeframe)) or {})
+    except Exception:
+        result={}
+    levels=dict(result.get('levels') or {}) if isinstance(result,dict) else {}
+    mm=dict(levels.get('market_maker_context') or result.get('market_maker_context') or {}) if isinstance(result,dict) else {}
+
+    # A user opening this indicator may request one lawful provider snapshot.
+    # options_market_context itself caches BTC/ETH for one hour. No polling and
+    # no full Futures analysis are triggered here.
+    try:
+        if symbol.startswith(('BTC-','ETH-')) and not bool(mm.get('observed_option_chain')):
+            from options_market_context import get_crypto_option_chain
+            snap=get_crypto_option_chain(symbol) or {}
+            rows=snap.get('rows') or []
+            spot=float(result.get('live_price') or result.get('current_price') or levels.get('entry') or 0) if result else 0.0
+            if spot <= 0 and rows:
+                spot=float((rows[0] or {}).get('underlying_price') or 0)
+            if spot > 0:
+                from market_maker_math import build_market_maker_context
+                mm=build_market_maker_context(
+                    spot=spot,
+                    option_chain=rows,
+                    realized_or_implied_volatility=_estimate_mm_volatility(result or {'levels':{'entry':spot}}),
+                    as_of=(result.get('source_candle_close_timestamp') if result else None),
+                ) or {}
+        elif not mm:
+            spot=float(result.get('live_price') or result.get('current_price') or levels.get('entry') or 0) if result else 0.0
+            if spot > 0:
+                from market_maker_math import build_market_maker_context
+                mm=build_market_maker_context(
+                    spot=spot, option_chain=[],
+                    realized_or_implied_volatility=_estimate_mm_volatility(result),
+                    as_of=result.get('source_candle_close_timestamp'),
+                ) or {}
+    except Exception as exc:
+        if not mm:
+            mm={'available':False,'authority':'NO_AUTHORITY','reason':type(exc).__name__}
+    return jsonify({
+        'success':True,'symbol':symbol,'timeframe':timeframe,
+        'cache_only_market_analysis':True,
+        'market_maker_context':mm,
+        'note':'No inicia análisis Futures; BTC/ETH puede usar una cadena pública cacheada por solicitud del usuario.'
+    }),200
+
+
+@app.route('/api/diagnostics/pipeline-integrity', methods=['GET'])
+def api_pipeline_integrity_175101():
+    """Cache-only operational truth: coverage, resources and persistence."""
+    user=_require_auth()
+    if not isinstance(user,str):
+        return user
+    try:
+        with _futures_analysis_cache['lock']:
+            fdata=dict(_futures_analysis_cache.get('data') or {})
+        with _MULTI_ASSET_CACHE['lock']:
+            manalyses=dict(_MULTI_ASSET_CACHE.get('analysis') or {})
+        fanalyses=dict(fdata.get('analysis') or {})
+        try:
+            from futures_system import get_futures_network_stats
+            net=get_futures_network_stats() or {}
+        except Exception:
+            net={}
+        from pipeline_integrity_175101 import VERSION as _pi_version, PIPELINE_GENERATION as _pi_generation
+        _supabase_target_ref = None
+        try:
+            from urllib.parse import urlparse
+            _host = urlparse(str(os.environ.get('SUPABASE_URL') or '')).hostname or ''
+            if _host.endswith('.supabase.co'):
+                _supabase_target_ref = _host.split('.')[0]
+        except Exception:
+            pass
+        _review = _get_review_trader()
+        return jsonify({
+            'success':True,
+            'version':_pi_version,
+            'pipeline_generation':_pi_generation,
+            'futures_funnel':_technical_signal_funnel_summary(fanalyses),
+            'multiasset_funnel':_technical_signal_funnel_summary(manalyses),
+            'multiasset_queue':_multiasset_queue_snapshot(),
+            'memory':_memory_runtime_state(),
+            'observed_futures_kucoin_megabytes_since_restart':round(int(net.get('bytes_received') or 0)/(1024*1024),3),
+            'runtime_persistence':dict(_RUNTIME_PERSISTENCE_VERIFY_STATE),
+            'review_trader_db_enabled':bool(getattr(getattr(_review,'db',None),'enabled',False)),
+            'supabase_target_project_ref':_supabase_target_ref,
+            'notes':[
+                'Router score Multi-Activo prioriza; no veta elegibilidad.',
+                'Safety/Entry/SL/TP/RR/Leverage V6 no se reducen.',
+                'Los fallos runtime quedan pendientes/retry, nunca DONE.',
+            ],
+        }),200
+    except Exception as exc:
+        return jsonify({'success':False,'error':str(exc)[:180]}),500
+
 
 @app.route('/api/diagnostics/signal-funnel', methods=['GET'])
 def api_signal_funnel():
@@ -36928,6 +37114,12 @@ _FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS = max(30, int(os.environ.get(
 ) or 120))
 _FUTURES_LAST_SNAPSHOT_SAVE_AT = 0.0
 _FUTURES_SNAPSHOT_SAVE_LOCK = threading.Lock()
+_RUNTIME_PERSISTENCE_VERIFY_STATE = {
+    'last_checked_at': 0.0,
+    'verified': None,
+    'reason': 'NOT_CHECKED',
+    'analysis_count': 0,
+}
 
 
 def _save_futures_cache_to_disk(force=False):
@@ -36994,9 +37186,32 @@ def _save_futures_cache_to_disk(force=False):
             with _FUTURES_SNAPSHOT_SAVE_LOCK:
                 _FUTURES_LAST_SNAPSHOT_SAVE_AT = now_mono
             print(
-                f"💾 [FUT] Snapshot Supabase guardado "
+                f"💾 [FUT] Snapshot persistido "
                 f"({len(serial_data.get('analysis_serial', {}))} pares)"
             )
+            # 17.5.10.1 — low-frequency readback.  A local 'save=True' is not
+            # enough evidence that durable learning/observability is actually
+            # readable. One compact read every 15 min is negligible bandwidth.
+            try:
+                _now_verify = time.monotonic()
+                if _now_verify - float(_RUNTIME_PERSISTENCE_VERIFY_STATE.get('last_checked_at') or 0.0) >= 900:
+                    _check = load_runtime_snapshot('futures', 'analysis_cache', allow_expired=True) or {}
+                    _check_payload = _check.get('payload') or {}
+                    _check_data = (_check_payload.get('data') or {}).get('analysis_serial') or {}
+                    _expected_n = len(serial_data.get('analysis_serial', {}))
+                    _verified = bool(_check_data) and len(_check_data) >= min(1, _expected_n)
+                    _RUNTIME_PERSISTENCE_VERIFY_STATE.update({
+                        'last_checked_at': _now_verify,
+                        'verified': _verified,
+                        'reason': 'READBACK_OK' if _verified else 'READBACK_EMPTY_OR_MISMATCH',
+                        'analysis_count': len(_check_data),
+                    })
+            except Exception as _verify_error:
+                _RUNTIME_PERSISTENCE_VERIFY_STATE.update({
+                    'last_checked_at': time.monotonic(),
+                    'verified': False,
+                    'reason': f'READBACK_ERROR:{type(_verify_error).__name__}',
+                })
         return ok
     except Exception as e:
         print(f'⚠️ [FUT] Error persistiendo snapshot Supabase: {e}')
@@ -37680,16 +37895,37 @@ def _refresh_futures_signal_lifecycle(
 # ============================================================================
 
 def _apply_profitability_router(result, symbol, timeframe):
-    """Negative OOS evidence can veto earlier; positive evidence stays governed."""
+    """Generation-aware Research governance.
+
+    Historical negative OOS remains counter-evidence.  It cannot hard-veto the
+    17.5.10.1 Entry/SL/TP generation unless a forward/current-generation alpha
+    decay cohort has enough recent observations.  Safety remains untouched.
+    """
     if not isinstance(result, dict) or not result.get('success'):
         return result
     try:
-        from profitability_router import evaluate_profitability_route
-        route = evaluate_profitability_route(result, 'futures')
+        import profitability_router as _profitability_router
+        # Free-runtime bandwidth guard: the previous 120s cache could download
+        # Research payloads hundreds of times/day.  Reuse the same evidence for
+        # at least 30 minutes; this changes freshness, not trading thresholds.
+        try:
+            _profitability_router._TTL = max(
+                int(getattr(_profitability_router, '_TTL', 0) or 0),
+                int(os.environ.get('PROFITABILITY_ROUTER_MIN_CACHE_SECONDS', '1800') or 1800),
+            )
+        except Exception:
+            pass
+        route = _profitability_router.evaluate_profitability_route(result, 'futures')
+        route = dict(route or {})
+        from pipeline_integrity_175101 import profitability_hard_block_authority
+        authority = profitability_hard_block_authority(route)
+        route['generation_authority'] = authority
+        route['block_new_signal_effective'] = bool(route.get('block_new_signal') and authority.get('allowed'))
         result['profitability_router'] = route
-        levels = result.get('levels') or {}
+        levels = dict(result.get('levels') or {})
         levels['edge_state'] = route.get('state')
         levels['edge_reason'] = route.get('reason')
+        levels['edge_generation_authority'] = authority
         result['levels'] = levels
 
         decision = result.get('decision') or {}
@@ -37700,8 +37936,27 @@ def _apply_profitability_router(result, symbol, timeframe):
             or ('ANALYSIS_ONLY' if levels.get('is_rejected') else 'EXECUTABLE_SIGNAL')
         ).upper()
 
+        if route.get('block_new_signal') and not authority.get('allowed'):
+            # Preserve the evidence for Risk Desk/ReviewTrader, but do not erase
+            # a technically valid signal from a different pipeline generation.
+            levels['edge_counter_evidence'] = True
+            levels['edge_block_softened'] = True
+            levels['edge_counter_evidence_reason'] = authority.get('reason')
+            # Quality over quantity: stale negative Research may no longer veto
+            # a new execution generation, but it still reduces capital exposure
+            # until forward evidence clears it. Leverage V6 remains untouched.
+            try:
+                _base_size = float(levels.get('suggested_size') if levels.get('suggested_size') is not None else 1.0)
+                levels['suggested_size'] = max(0.0, min(_base_size, _base_size * 0.50))
+                levels['edge_counter_evidence_risk_multiplier'] = 0.50
+            except Exception:
+                pass
+            result['edge_counter_evidence'] = route
+            result['levels'] = levels
+            return result
+
         if (
-            route.get('block_new_signal')
+            route.get('block_new_signal_effective')
             and action in ('LONG', 'SHORT')
             and publication_status == 'EXECUTABLE_SIGNAL'
         ):
@@ -37713,7 +37968,7 @@ def _apply_profitability_router(result, symbol, timeframe):
             result['publication_eligible'] = False
             result['edge_blocked'] = True
             result['levels'] = levels
-            print(f"📉🛡️ [EDGE] veto OOS {action} {symbol} {timeframe}: {route.get('reason')}")
+            print(f"📉🛡️ [EDGE] current-generation alpha decay {action} {symbol} {timeframe}: {route.get('reason')}")
         return result
     except Exception as exc:
         print(f"⚠️ [EDGE] router fail-open {symbol} {timeframe}: {str(exc)[:160]}")
@@ -37799,11 +38054,25 @@ def _apply_96_futures_risk_policy(result, symbol, timeframe):
                     result['publication_status'] = 'ANALYSIS_ONLY'
                     result['publication_eligible'] = False
             elif risk_class == 'HIGH':
-                levels['publication_status'] = 'ANALYSIS_ONLY'
-                levels['is_rejected'] = True
-                levels['risk_class_block_reason'] = 'HIGH_REQUIRES_MICROSTRUCTURE'
-                result['publication_status'] = 'ANALYSIS_ONLY'
-                result['publication_eligible'] = False
+                # Commit 17.5.10.1: NO DATA is not BAD LIQUIDITY.  Preserve a
+                # signal that passed all technical gates, but reduce suggested
+                # exposure until microstructure is observable. Leverage V6 is
+                # not altered; position/allocation carries the caution.
+                result['risk_microstructure'] = {
+                    'available': False,
+                    'status': 'UNAVAILABLE',
+                    'policy': 'NO_DATA_IS_NOT_NEGATIVE_EVIDENCE',
+                }
+                levels['risk_class_confirmation'] = 'MICROSTRUCTURE_UNAVAILABLE'
+                levels['risk_class_caution_reason'] = 'HIGH_MICROSTRUCTURE_DATA_UNAVAILABLE'
+                try:
+                    levels['suggested_size'] = max(
+                        0.0,
+                        min(float(levels.get('suggested_size') or 1.0), 0.50),
+                    )
+                except Exception:
+                    pass
+                result['levels'] = levels
         return result
     except Exception as exc:
         # Fail closed only for the new class-specific checks; legacy CORE signal

@@ -1,191 +1,151 @@
-/*
- * Commit 17.5.10 FINAL — Black-Scholes / Gamma / 0DTE / Delta frontend.
- *
- * Conventional trader-facing terminology only. This panel reads the market-maker
- * mathematical context already returned by the analysis. It does NOT request a
- * second market analysis, does NOT create LONG/SHORT, and does NOT alter Safety.
+/* Commit 17.5.10.1 — trader-facing Greeks / Gamma / 0DTE.
+ * Lightweight: one cache-aware request on load/symbol/TF change. No polling,
+ * no full market analysis, no direction/Entry/SL/TP/Safety authority.
  */
 (function () {
     'use strict';
+    if (window.__MM_OPTIONS_FRONTEND_175101__) return;
+    window.__MM_OPTIONS_FRONTEND_175101__ = true;
 
-    if (window.__MM_OPTIONS_FRONTEND_17510__) return;
-    window.__MM_OPTIONS_FRONTEND_17510__ = true;
+    const $ = id => document.getElementById(id);
+    const finite = v => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+    let requestSeq = 0;
+    let timer = null;
 
-    const byId = id => document.getElementById(id);
-    const finite = value => {
-        const n = Number(value);
-        return Number.isFinite(n) ? n : null;
-    };
-
-    function price(value) {
-        const n = finite(value);
-        if (n === null) return '--';
-        if (Math.abs(n) >= 1000) return n.toLocaleString(undefined, {maximumFractionDigits: 2});
-        if (Math.abs(n) >= 1) return n.toLocaleString(undefined, {maximumFractionDigits: 4});
-        return n.toLocaleString(undefined, {maximumFractionDigits: 8});
+    function price(v) {
+        const n = finite(v); if (n === null) return '--';
+        if (Math.abs(n) >= 1000) return n.toLocaleString(undefined,{maximumFractionDigits:2});
+        if (Math.abs(n) >= 1) return n.toLocaleString(undefined,{maximumFractionDigits:4});
+        return n.toLocaleString(undefined,{maximumFractionDigits:8});
     }
-
-    function pct01(value) {
-        const n = finite(value);
-        if (n === null) return '--';
-        return `${(n * 100).toFixed(1)}%`;
+    function compact(v) {
+        const n=finite(v); if(n===null) return '--';
+        const a=Math.abs(n);
+        if(a>=1e12) return `${(n/1e12).toFixed(2)}T`;
+        if(a>=1e9) return `${(n/1e9).toFixed(2)}B`;
+        if(a>=1e6) return `${(n/1e6).toFixed(2)}M`;
+        if(a>=1e3) return `${(n/1e3).toFixed(2)}K`;
+        return n.toFixed(a < 1 ? 4 : 2);
     }
-
-    function humanRegime(value) {
-        const v = String(value || '').toUpperCase();
-        if (v === 'POSITIVE_GAMMA') return 'Gamma positiva';
-        if (v === 'NEGATIVE_GAMMA') return 'Gamma negativa';
-        if (v === 'MIXED_GAMMA') return 'Gamma mixta';
-        return v ? v.replaceAll('_', ' ') : '--';
+    function pct01(v) { const n=finite(v); return n===null?'--':`${(100*n).toFixed(1)}%`; }
+    function regime(v) {
+        const x=String(v||'').toUpperCase();
+        if(x==='POSITIVE_GAMMA') return 'Gamma positiva';
+        if(x==='NEGATIVE_GAMMA') return 'Gamma negativa';
+        if(x==='MIXED_GAMMA') return 'Gamma mixta';
+        return x ? x.replaceAll('_',' ') : '--';
     }
-
-    function extractContext(data) {
-        return data?.levels?.market_maker_context
-            || data?.market_maker_context
+    function text(id,v){ const el=$(id); if(el) el.textContent=v; }
+    function mmFrom(data){
+        return data?.market_maker_context
+            || data?.levels?.market_maker_context
             || data?.data?.levels?.market_maker_context
+            || data?.data?.market_maker_context
             || null;
     }
-
-    function setText(id, value) {
-        const el = byId(id);
-        if (el) el.textContent = value;
+    function greekSummary(row) {
+        if(!row || typeof row!=='object') return '--';
+        const d=finite(row.delta), g=finite(row.gamma), t=finite(row.theta_per_day);
+        if(d===null && g===null && t===null) return '--';
+        return `Δ ${d===null?'--':d.toFixed(3)} · Γ ${g===null?'--':g.toExponential(2)} · Θ ${t===null?'--':t.toFixed(3)}`;
     }
 
-    function renderUnavailable(reason) {
-        const chart = byId('mm-options-chart');
-        if (!chart) return;
-        if (window.Plotly) {
-            window.Plotly.purge(chart);
+    function unavailable(reason) {
+        ['mm-gamma-regime','mm-zero-dte-share','mm-zero-gamma','mm-delta-neutral',
+         'mm-call-wall','mm-gamma-wall','mm-put-wall','mm-delta-dollar','mm-gex-total',
+         'mm-vega','mm-theta','mm-atm-call','mm-atm-put'].forEach(id=>text(id,'--'));
+        text('mm-option-source','Sin cadena compatible');
+        text('mm-option-note','Black-Scholes/GEX no está disponible para el símbolo seleccionado.');
+        text('mm-option-authority',String(reason||'Sin datos observados; no se genera sesgo direccional.'));
+        const chart=$('mm-options-chart');
+        if(chart){
+            try { if(window.Plotly) window.Plotly.purge(chart); } catch(_){}
+            chart.innerHTML='<div class="d-flex h-100 align-items-center justify-content-center text-muted text-center px-3">Sin contexto de opciones compatible.</div>';
         }
-        chart.innerHTML = `<div class="d-flex align-items-center justify-content-center h-100 text-center px-3">
-            <div><div class="text-muted mb-1">Contexto de opciones no disponible para este activo.</div>
-            <small class="text-muted">${String(reason || 'La fuente falló o no existe una cadena directamente compatible.').replace(/[<>]/g, '')}</small></div>
-        </div>`;
-        ['mm-gamma-regime','mm-zero-dte-share','mm-zero-gamma','mm-delta-neutral','mm-call-wall','mm-gamma-wall','mm-put-wall']
-            .forEach(id => setText(id, '--'));
-        setText('mm-option-source', 'Sin cadena compatible');
-        setText('mm-option-authority', 'Sin datos observados: no se crea ningún sesgo direccional.');
     }
 
-    function renderMarketMakerOptions(data) {
-        const chart = byId('mm-options-chart');
-        if (!chart || !window.Plotly) return;
+    function render(data) {
+        const chart=$('mm-options-chart');
+        if(!chart) return;
+        const mm=mmFrom(data);
+        if(!mm || mm.available===false){ unavailable(mm?.reason); return; }
+        const observed=mm.observed_option_chain===true;
+        text('mm-option-source', observed ? 'Cadena observada' : 'Black-Scholes teórico');
+        text('mm-gamma-regime',regime(mm.gamma_regime));
+        text('mm-zero-dte-share',pct01(mm.zero_dte_gamma_share));
+        text('mm-zero-gamma',price(mm.zero_gamma_level));
+        text('mm-delta-neutral',price(mm.delta_neutral_level));
+        text('mm-call-wall',observed?price(mm.call_wall):'--');
+        text('mm-gamma-wall',price(mm.gamma_wall));
+        text('mm-put-wall',observed?price(mm.put_wall):'--');
+        text('mm-delta-dollar',compact(mm.heuristic_signed_delta_dollars));
+        text('mm-gex-total',compact(mm.heuristic_signed_gamma_exposure));
+        text('mm-vega',compact(mm.aggregate_vega_per_iv_point));
+        text('mm-theta',compact(mm.aggregate_theta_per_day));
+        const atm=mm.representative_atm_greeks||{};
+        text('mm-atm-call',greekSummary(atm.call));
+        text('mm-atm-put',greekSummary(atm.put));
+        text('mm-option-note', observed
+            ? `Cadena pública observada · ${Number(mm.contracts_used||0)} contratos · vencimiento más cercano ${finite(mm.nearest_expiry_hours)?.toFixed(1)??'--'} h.`
+            : 'Superficie Black-Scholes teórica: muestra sensibilidades, no inventario real de dealers.');
+        text('mm-option-authority', observed
+            ? 'GEX firmado CALL+/PUT− es heurístico: el Open Interest no revela por sí solo el inventario real del market maker.'
+            : 'SHADOW teórico: no cambia señal, Entry, SL, TP, leverage ni Safety.');
 
-        const mm = extractContext(data);
-        if (!mm || mm.available === false) {
-            renderUnavailable(mm?.reason);
+        const gex=Array.isArray(mm.gex_curve)?mm.gex_curve:[];
+        const delta=Array.isArray(mm.delta_curve)?mm.delta_curve:[];
+        if(!window.Plotly || !gex.length || !delta.length){
+            chart.innerHTML='<div class="d-flex h-100 align-items-center justify-content-center text-muted">Greeks disponibles; curva compacta no disponible.</div>';
             return;
         }
-
-        const observed = mm.observed_option_chain === true;
-        const authority = String(mm.authority || 'NO_AUTHORITY');
-        setText('mm-option-source', observed ? 'Cadena observada' : 'Modelo teórico');
-        setText('mm-gamma-regime', humanRegime(mm.gamma_regime));
-        setText('mm-zero-dte-share', observed ? pct01(mm.zero_dte_gamma_share) : 'Teórico');
-        setText('mm-zero-gamma', price(mm.zero_gamma_level));
-        setText('mm-delta-neutral', price(mm.delta_neutral_level));
-        setText('mm-call-wall', observed ? price(mm.call_wall) : '--');
-        setText('mm-gamma-wall', observed ? price(mm.gamma_wall) : '--');
-        setText('mm-put-wall', observed ? price(mm.put_wall) : '--');
-
-        const sourceNote = observed
-            ? `Cadena pública observada · ${Number(mm.contracts_used || 0)} contratos usados · vencimiento más cercano ${finite(mm.nearest_expiry_hours)?.toFixed(1) ?? '--'} h.`
-            : 'Black-Scholes teórico sin Open Interest observado; sirve sólo para visualizar la forma de Gamma cerca del precio.';
-        setText('mm-option-note', sourceNote);
-        setText('mm-option-authority', observed
-            ? 'GEX firmado usa CALL+ / PUT− como heurística. Open Interest no revela por sí solo el inventario real de market makers.'
-            : 'Autoridad: SHADOW teórico. No cambia dirección, Entry, SL, TP, leverage ni Safety.');
-
-        const gex = Array.isArray(mm.gex_curve) ? mm.gex_curve : [];
-        const delta = Array.isArray(mm.delta_curve) ? mm.delta_curve : [];
-        if (!gex.length || !delta.length) {
-            renderUnavailable('El contexto no incluye curvas compactas.');
-            return;
-        }
-
-        const gx = gex.map(row => Number(row?.[0])).filter(Number.isFinite);
-        const gy = gex.map(row => Number(row?.[1]));
-        const dx = delta.map(row => Number(row?.[0])).filter(Number.isFinite);
-        const dy = delta.map(row => Number(row?.[1]));
-        if (!gx.length || !dx.length || gy.some(v => !Number.isFinite(v)) || dy.some(v => !Number.isFinite(v))) {
-            renderUnavailable('Curvas Black-Scholes incompletas.');
-            return;
-        }
-
-        const traces = [
-            {
-                x: gx, y: gy, type: 'scatter', mode: 'lines',
-                name: 'GEX firmado (heurístico)',
-                hovertemplate: 'Subyacente %{x:.4f}<br>GEX %{y:.3s}<extra></extra>',
-                line: {width: 2.4}
-            },
-            {
-                x: dx, y: dy, type: 'scatter', mode: 'lines', yaxis: 'y2',
-                name: 'Delta neta (heurística)',
-                hovertemplate: 'Subyacente %{x:.4f}<br>Delta $ %{y:.3s}<extra></extra>',
-                line: {width: 2.0, dash: 'dot'}
-            }
+        const traces=[
+            {x:gex.map(r=>Number(r?.[0])),y:gex.map(r=>Number(r?.[1])),type:'scatter',mode:'lines',name:'Gamma Exposure',line:{width:2.4},hovertemplate:'Precio %{x:.4f}<br>GEX %{y:.3s}<extra></extra>'},
+            {x:delta.map(r=>Number(r?.[0])),y:delta.map(r=>Number(r?.[1])),type:'scatter',mode:'lines',name:'Delta $',yaxis:'y2',line:{width:2,dash:'dot'},hovertemplate:'Precio %{x:.4f}<br>Delta $ %{y:.3s}<extra></extra>'}
         ];
-
-        const shapes = [];
-        const addVertical = (value, dash) => {
-            const v = finite(value);
-            if (v === null) return;
-            shapes.push({type:'line', x0:v, x1:v, y0:0, y1:1, yref:'paper', line:{width:1.2, dash:dash || 'dot'}});
-        };
-        addVertical(mm.spot, 'solid');
-        addVertical(mm.zero_gamma_level, 'dash');
-        addVertical(mm.delta_neutral_level, 'dot');
-
-        const annotations = [];
-        const ann = (value, text, ypos) => {
-            const v = finite(value);
-            if (v === null) return;
-            annotations.push({x:v, y:ypos, yref:'paper', text, showarrow:false, textangle:-90, xanchor:'right'});
-        };
-        ann(mm.spot, 'Spot', 0.97);
-        ann(mm.zero_gamma_level, 'Zero Γ', 0.80);
-        ann(mm.delta_neutral_level, 'Δ neutral', 0.62);
-
-        const layout = {
-            margin: {l:60, r:70, t:32, b:48},
-            paper_bgcolor: 'rgba(0,0,0,0)',
-            plot_bgcolor: 'rgba(0,0,0,0)',
-            font: {color:'#cfd8dc'},
-            legend: {orientation:'h', y:1.12, x:0},
-            xaxis: {title:'Precio del subyacente', gridcolor:'rgba(255,255,255,0.08)'},
-            yaxis: {title:'Gamma Exposure', gridcolor:'rgba(255,255,255,0.08)', zeroline:true},
-            yaxis2: {title:'Delta $', overlaying:'y', side:'right', showgrid:false, zeroline:true},
-            shapes,
-            annotations,
-            hovermode:'x unified',
-            uirevision: `${window.currentSymbol || ''}-${window.currentInterval || ''}`
-        };
-        window.Plotly.react(chart, traces, layout, {responsive:true, displaylogo:false});
+        const shapes=[]; const anns=[];
+        function vline(v,label,dash,y){ const n=finite(v); if(n===null)return; shapes.push({type:'line',x0:n,x1:n,y0:0,y1:1,yref:'paper',line:{width:1.2,dash:dash}}); anns.push({x:n,y:y,yref:'paper',text:label,showarrow:false,textangle:-90,xanchor:'right'}); }
+        vline(mm.spot,'Spot','solid',0.97); vline(mm.zero_gamma_level,'Zero Γ','dash',0.80); vline(mm.delta_neutral_level,'Δ neutral','dot',0.62);
+        window.Plotly.react(chart,traces,{
+            margin:{l:60,r:70,t:35,b:48},paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',font:{color:'#cfd8dc'},
+            legend:{orientation:'h',y:1.12,x:0},xaxis:{title:'Precio del subyacente',gridcolor:'rgba(255,255,255,.08)'},
+            yaxis:{title:'Gamma Exposure',gridcolor:'rgba(255,255,255,.08)',zeroline:true},yaxis2:{title:'Delta $',overlaying:'y',side:'right',showgrid:false,zeroline:true},
+            shapes:shapes,annotations:anns,hovermode:'x unified',uirevision:`${window.currentSymbol||''}-${window.currentInterval||''}`
+        },{responsive:true,displaylogo:false});
     }
 
-    window.updateMarketMakerOptionsChart = renderMarketMakerOptions;
-
-    function installHook() {
-        if (window.__MM_OPTIONS_UPDATE_HOOKED__) return;
-        if (typeof window.updateAllCharts !== 'function') return;
-        const original = window.updateAllCharts;
-        window.updateAllCharts = function (data) {
-            const result = original.apply(this, arguments);
-            try { renderMarketMakerOptions(data); } catch (error) { console.debug('MM options chart:', error); }
-            return result;
-        };
-        window.__MM_OPTIONS_UPDATE_HOOKED__ = true;
+    async function refresh() {
+        if(!window.IS_FUTURES_PAGE || window.IS_MULTI_ASSET_PAGE || !$('mm-options-chart')) return;
+        const symbol=document.getElementById('symbol-select')?.value || window.currentSymbol || 'BTC-USDT';
+        const timeframe=document.getElementById('interval-select')?.value || window.currentInterval || '1h';
+        const seq=++requestSeq;
         try {
-            if (window.currentAnalysis) renderMarketMakerOptions(window.currentAnalysis);
-        } catch (_) {}
+            const url=`/api/futures/market-maker-context?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`;
+            const resp=await fetch(url,{credentials:'same-origin',cache:'no-store'});
+            const payload=await resp.json();
+            if(seq!==requestSeq) return;
+            if(payload?.success) render(payload); else unavailable(payload?.error);
+        } catch(err) {
+            if(seq===requestSeq) unavailable('Contexto de opciones temporalmente no disponible.');
+        }
     }
+    function schedule(ms){ clearTimeout(timer); timer=setTimeout(refresh,ms||120); }
 
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', installHook, {once:true});
-    } else {
-        installHook();
+    // Also consume the already-computed analysis if present; no request needed.
+    function installAnalysisHook(){
+        if(window.__MM_OPTIONS_UPDATE_HOOKED_175101__ || typeof window.updateAllCharts!=='function') return;
+        const original=window.updateAllCharts;
+        window.updateAllCharts=function(data){ const out=original.apply(this,arguments); try{render(data);}catch(_){} return out; };
+        window.__MM_OPTIONS_UPDATE_HOOKED_175101__=true;
     }
-    // In case script.js is deferred/reloaded by the page, one bounded retry.
-    setTimeout(installHook, 800);
+    function init(){
+        if(!window.IS_FUTURES_PAGE || window.IS_MULTI_ASSET_PAGE) return;
+        installAnalysisHook();
+        document.getElementById('symbol-select')?.addEventListener('change',()=>schedule(180));
+        document.getElementById('interval-select')?.addEventListener('change',()=>schedule(180));
+        schedule(250);
+        // One bounded hook retry only; never poll market data.
+        setTimeout(installAnalysisHook,800);
+    }
+    if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init,{once:true}); else init();
+    window.updateMarketMakerOptionsChart=render;
 })();

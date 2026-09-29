@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from math import erf, exp, log, pi, sqrt
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
-VERSION = "COMMIT17_5_10_MM_MATH_V1"
+VERSION = "COMMIT17_5_10_1_MM_MATH_V1"
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -208,6 +208,8 @@ def aggregate_gamma_exposure(
     total_abs = 0.0
     signed = 0.0
     delta_signed = 0.0
+    aggregate_vega = 0.0
+    aggregate_theta = 0.0
     zero_dte_abs = 0.0
     by_strike: Dict[float, Dict[str, float]] = {}
     min_expiry_hours = None
@@ -222,6 +224,8 @@ def aggregate_gamma_exposure(
         total_abs += abs(abs_gex)
         signed += signed_component
         delta_signed += sign * g["delta"] * r["open_interest"] * r["multiplier"] * s
+        aggregate_vega += g["vega"] * r["open_interest"] * r["multiplier"]
+        aggregate_theta += g["theta_per_day"] * r["open_interest"] * r["multiplier"]
         hours = r["t_years"] * 365.0 * 24.0
         min_expiry_hours = hours if min_expiry_hours is None else min(min_expiry_hours, hours)
         if hours <= 24.0:
@@ -260,6 +264,29 @@ def aggregate_gamma_exposure(
     ratio = signed / max(total_abs, 1e-12)
     regime = "POSITIVE_GAMMA" if ratio >= 0.12 else ("NEGATIVE_GAMMA" if ratio <= -0.12 else "MIXED_GAMMA")
 
+    # Representative nearest-ATM Greeks for trader-facing inspection.  These
+    # are model sensitivities, not direction probabilities.
+    atm_rows = sorted(rows, key=lambda r: (abs(r["strike"] - s), r["t_years"]))[:8]
+    atm_by_type = {}
+    for typ in ("CALL", "PUT"):
+        typed = [r for r in atm_rows if r["option_type"] == typ]
+        if not typed:
+            continue
+        r = typed[0]
+        g = black_scholes_greeks(
+            spot=s, strike=r["strike"], t_years=r["t_years"],
+            volatility=r["iv"], option_type=typ, rate=rate,
+        )
+        atm_by_type[typ.lower()] = {
+            "strike": round(float(r["strike"]), 10),
+            "expiry_hours": round(float(r["t_years"] * 365.0 * 24.0), 4),
+            "iv": round(float(r["iv"]), 6),
+            "delta": round(float(g["delta"]), 6),
+            "gamma": round(float(g["gamma"]), 10),
+            "vega": round(float(g["vega"]), 6),
+            "theta_per_day": round(float(g["theta_per_day"]), 6),
+        }
+
     return {
         "version": VERSION,
         "available": True,
@@ -274,6 +301,9 @@ def aggregate_gamma_exposure(
         "absolute_gamma_exposure": round(total_abs, 6),
         "heuristic_signed_gamma_exposure": round(signed, 6),
         "heuristic_signed_delta_dollars": round(delta_signed, 6),
+        "aggregate_vega_per_iv_point": round(aggregate_vega, 6),
+        "aggregate_theta_per_day": round(aggregate_theta, 6),
+        "representative_atm_greeks": atm_by_type,
         "zero_dte_gamma_share": round(zero_dte_abs / max(total_abs, 1e-12), 6),
         "nearest_expiry_hours": round(float(min_expiry_hours or 0.0), 4),
         "gamma_wall": round(float(gamma_wall), 10) if gamma_wall is not None else None,

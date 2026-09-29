@@ -24,9 +24,9 @@ try:
 except Exception:  # pragma: no cover
     requests = None
 
-VERSION = "COMMIT17_5_10_OPTIONS_CONTEXT_V1"
+VERSION = "COMMIT17_5_10_1_OPTIONS_CONTEXT_V1"
 DERIBIT_URL = "https://www.deribit.com/api/v2/public/get_book_summary_by_currency"
-CACHE_TTL = max(900, min(7200, int(os.getenv("OPTIONS_MM_CACHE_TTL_SECONDS", "1800") or 1800)))
+CACHE_TTL = max(900, min(7200, int(os.getenv("OPTIONS_MM_CACHE_TTL_SECONDS", "3600") or 3600)))
 ENABLED = str(os.getenv("OPTIONS_MM_CONTEXT_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
 _TIMEOUT = max(1.0, min(6.0, float(os.getenv("OPTIONS_MM_HTTP_TIMEOUT", "3.0") or 3.0)))
 _LOCK = threading.Lock()
@@ -130,7 +130,7 @@ def get_crypto_option_chain(symbol: Any) -> Dict[str, Any]:
             DERIBIT_URL,
             params={"currency": currency, "kind": "option"},
             timeout=_TIMEOUT,
-            headers={"User-Agent": "SmartradingReview/17.5.10"},
+            headers={"User-Agent": "SmartradingReview/17.5.10.1"},
         )
         resp.raise_for_status()
         payload = resp.json() if hasattr(resp, "json") else {}

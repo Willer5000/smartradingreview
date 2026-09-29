@@ -1,0 +1,27 @@
+COMMIT 17.5.10.1 — VALIDATION RESULT
+=====================================
+Baseline verified: 68f90f313fa961693c7cebb09251bdc3e4265f31 (Commit 17.5.10)
+
+Dedicated suite:
+  qa_commit17_5_10_1.py .............. 53/53 PASS
+
+Inherited/regression suite adapted only for intentional 17.5.10.1 scheduler/UI behavior:
+  qa_commit17_5_10_1_inherited.py .... 53/53 PASS
+
+Syntax/runtime-static checks:
+  python -m py_compile ............... PASS
+  node --check MM frontend ........... PASS
+  Jinja template parse ............... PASS
+  threading.Thread count ............. baseline 28 / candidate 28 (no new threads)
+
+Backtest recheck:
+  IS 2026-09-10..13: N=11, +1.702R, expectancy +0.1547R, PF 1.254, MaxDD 2.236R
+  OOS 2026-09-14..16: N=4, +3.928R, expectancy +0.9820R, PF 4.513, MaxDD 1.118R
+  Combined: N=15, +5.630R, expectancy +0.3753R, PF 1.719, MaxDD 2.236R
+  Bootstrap P(mean>0)=0.9026; CI95 mean includes 0 => small-sample uncertainty remains.
+
+Important:
+- These 106 assertions overlap; they are not 106 independent statistical tests.
+- Historical profitability is inherited evidence, NOT an exact version-matched replay of 17.5.10.1.
+- No profitability guarantee.
+- No deploy to Render was performed by this package generation.

@@ -1,0 +1,17 @@
+{
+  "repository": "Willer5000/smartradingreview",
+  "baseline_head": "68f90f313fa961693c7cebb09251bdc3e4265f31",
+  "baseline_message": "Commit 17.5.10",
+  "verified_at": "2026-09-29",
+  "baseline_blobs": {
+    "app.py": "b5e985c5da02940b1f250cbdaa5a1def56ffa17e",
+    "market_maker_math.py": "5c0753765c8f53739a7a14f64420ae0e356edb7d",
+    "options_market_context.py": "78497c8709f4d7b14d76030788411787cde615eb",
+    "static/market_maker_frontend.js": "8519828a50ebb17b6fa90533f2cb544d0840e4de",
+    "templates/index.html": "4c4bad0fe3c7119970aff6aa99e3099e7b343b2d",
+    "worker_orchestration.py": "0c73329f6ec3a95a5cf56b9b54abf59036ed04d5",
+    "execution_specialist_committees.py": "df8cf45c495affa2e14094e0b8484358544f86f1",
+    "preliminary_backtest_prior.py": "e6bfd50ef362b9f21843bb63da42e00672cbc6a4"
+  },
+  "note": "17.5.10.1 was built from the exact current 17.5.10 HEAD. It does not imply deployment to Render."
+}
