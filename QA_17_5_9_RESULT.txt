@@ -1,0 +1,27 @@
+QA 17.5.9: 26/26 PASS
+01. PASS 01_compile_changed_files
+02. PASS 02_production_no_longer_calls_legacy_moderator_candidate
+03. PASS 03_worker_moderator_is_wired
+04. PASS 04_legacy_vote_payload_marked_telemetry_only
+05. PASS 05_worker_policy_forbids_majority_and_veto
+06. PASS 06_worker_roles_cover_all_ten
+07. PASS 07_strategy_reasoning_preserves_alternatives
+08. PASS 08_recovery_function_added
+09. PASS 09_recovery_cannot_create_direction
+10. PASS 10_recovery_keeps_quality_floors
+11. PASS 11_recovery_no_atr_tp_fabrication
+12. PASS 12_app_attempts_recovery_for_missing_sl
+13. PASS 13_app_attempts_recovery_for_missing_tp
+14. PASS 14_app_attempts_recovery_for_bad_baseline_geometry
+15. PASS 15_recovered_entry_must_pass_existing_timing_gate
+16. PASS 16_recovered_geometry_must_pass_existing_setup_guard
+17. PASS 17_spot_execution_recovery_not_changed
+18. PASS 18_sl_reaction_hard_guard_preserved
+19. PASS 19_no_new_signal_quantity_cap
+20. PASS 20_funnel_exposes_recovery_and_precise_stages
+21. PASS 21_preliminary_backtest_prior_unchanged
+22. PASS 22_workers_cannot_outvote_valid_governed_candidate
+23. PASS 23_all_named_workers_registered
+24. PASS 24_operational_candidate_still_required
+25. PASS 25_structural_recovery_smoke_success
+26. PASS 26_no_structure_no_fabricated_recovery

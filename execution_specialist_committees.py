@@ -20,7 +20,7 @@ from math import isfinite, sqrt
 from statistics import median
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-VERSION = "COMMIT17_5_8_BACKTEST_PRIOR_V1"
+VERSION = "COMMIT17_5_9_WORKER_RECOVERY_V1"
 
 try:
     from preliminary_backtest_prior import (
@@ -1387,6 +1387,227 @@ def coordinate_execution_committees(*, baseline_entry: float, baseline_sl: float
         "sl_committee": sl_row,
         "tp_committee": tp_row,
         "recovery_mode": best_combo.get("recovery_mode", "STRUCTURAL_COMMITTEE_SELECTION"),
+    }
+
+
+def recover_execution_geometry_from_structure(*, direction: str, current_price: float,
+                                               atr: float, structure=None, trend=None,
+                                               momentum=None, volatility=None,
+                                               setup_family=None, liquidation=None,
+                                               market_type="futures", symbol=None,
+                                               timeframe=None, execution_context=None,
+                                               entry_hint: float = 0.0,
+                                               rr_floor: float = 1.8,
+                                               rr_ceiling: float = 4.5,
+                                               preferred_rr_min: float = 2.0,
+                                               preferred_rr_max: float = 3.2,
+                                               leverage_hint: float = 1.0,
+                                               candidate_filter=None) -> Dict[str, Any]:
+    """17.5.9 structural opportunity recovery when baseline geometry is missing/bad.
+
+    This is intentionally *not* a looser execution path.  It searches only
+    observed structure/value/liquidity/reaction candidates already loaded by the
+    analysis and applies the same specialist quality floors used by the normal
+    refinement path.  ATR is only a buffer behind observed invalidation anchors;
+    TP is never manufactured from an ATR/RR projection.
+
+    The function cannot create direction.  The caller must already own a valid
+    thesis/candidate and downstream Safety/Publication remain authoritative.
+    """
+    structure, trend, momentum, volatility = (
+        _d(structure), _d(trend), _d(momentum), _d(volatility)
+    )
+    structure = _execution_structure(structure)
+    context = dict(_d(execution_context))
+    context.setdefault("market_type", str(market_type or "futures").lower())
+    context.setdefault("symbol", str(symbol or ""))
+    context.setdefault("timeframe", str(timeframe or ""))
+    market = str(market_type or "futures").lower()
+    direction = str(direction or "").lower()
+    current_price = _f(current_price, 0.0)
+    atr = max(_f(atr, 0.0), abs(current_price) * 1e-6, 1e-12)
+    if direction not in {"long", "short"} or current_price <= 0 or atr <= 0:
+        return {"success": False, "reason": "INVALID_RECOVERY_INPUT", "version": VERSION}
+
+    rr_floor = max(1.0, _f(rr_floor, 1.8))
+    rr_ceiling = max(rr_floor, _f(rr_ceiling, 4.5))
+    preferred_rr_min = max(rr_floor, _f(preferred_rr_min, 2.0))
+    preferred_rr_max = min(rr_ceiling, max(preferred_rr_min, _f(preferred_rr_max, 3.2)))
+    leverage_hint = 1.0 if market == "spot" else max(1.0, min(100.0, _f(leverage_hint, 1.0)))
+    context.setdefault("leverage_hint", round(leverage_hint, 4))
+
+    # Use current price only as a reference for liquidation-side filtering, then
+    # remove the synthetic baseline row.  No current-price Entry is invented.
+    entry_candidates = _collect_entry_candidates(
+        structure, direction, current_price, liquidation=liquidation
+    )
+    entry_candidates = [r for r in entry_candidates if str(r.get("family")) != "baseline"]
+    _add_execution_recovery_entry_candidates(
+        entry_candidates, structure=structure, direction=direction,
+        current_price=current_price, atr=atr,
+    )
+    if _f(entry_hint, 0.0) > 0:
+        _append_candidate(
+            entry_candidates, entry_hint, "existing_entry",
+            "Entry técnico ya seleccionado", 2.0,
+        )
+
+    entry_ranked = _rank_candidates(
+        entry_candidates,
+        lambda c: _entry_specialists(
+            c, entry_candidates, direction=direction,
+            current_price=current_price, atr=atr, structure=structure,
+            trend=trend, momentum=momentum, volatility=volatility,
+            setup_family=setup_family, context=context, market_type=market,
+        ),
+        _weights_for("entry", market),
+        lambda p: _is_correct_side(p, current_price, direction, "entry"),
+        role="entry",
+    )
+    if not entry_ranked:
+        return {"success": False, "reason": "NO_STRUCTURAL_ENTRY_FOR_RECOVERY", "version": VERSION}
+
+    best_combo = None
+    sl_reaction_rejections = 0
+    admissibility_rejections = 0
+    tested_combinations = 0
+    activity = _f(context.get("activity_score"), 50.0)
+
+    for entry_rank, entry_row in enumerate(entry_ranked[:min(8, len(entry_ranked))]):
+        entry = _f(entry_row.get("price"), 0.0)
+        if entry <= 0:
+            continue
+        sl_candidates = _collect_sl_candidates(
+            structure, direction, entry, 0.0, atr, activity,
+        )
+        _add_execution_recovery_sl_candidates(
+            sl_candidates, structure=structure, direction=direction,
+            entry=entry, atr=atr, activity=activity,
+        )
+        filtered = []
+        for row in sl_candidates:
+            check = evaluate_sl_reaction_conflict(
+                structure=structure, direction=direction, entry=entry,
+                stop_loss=_f(row.get("price"), 0.0), atr=atr,
+            )
+            if check.get("conflict"):
+                sl_reaction_rejections += 1
+                continue
+            filtered.append(row)
+        sl_candidates = filtered
+        sl_ranked = _rank_candidates(
+            sl_candidates,
+            lambda c: _sl_specialists(
+                c, sl_candidates, direction=direction, entry=entry,
+                tp_hint=0.0, atr=atr, structure=structure,
+                setup_family=setup_family, context=context, market_type=market,
+                leverage_hint=leverage_hint,
+            ),
+            _weights_for("sl", market),
+            lambda p: _is_correct_side(p, entry, direction, "sl"),
+            role="sl",
+        )
+        if not sl_ranked:
+            continue
+
+        for sl_rank, sl_row in enumerate(sl_ranked[:min(8, len(sl_ranked))]):
+            sl = _f(sl_row.get("price"), 0.0)
+            risk = abs(entry - sl)
+            if risk <= 0:
+                continue
+            tp_candidates = _collect_tp_candidates(
+                structure, direction, entry, 0.0, atr, liquidation=liquidation,
+            )
+            # Deliberately no RR/ATR TP fabrication.
+            tp_ranked = _rank_candidates(
+                tp_candidates,
+                lambda c: _tp_specialists(
+                    c, tp_candidates, direction=direction, entry=entry, sl=sl,
+                    atr=atr, structure=structure, trend=trend, momentum=momentum,
+                    volatility=volatility, setup_family=setup_family,
+                    context=context, market_type=market, liquidation=liquidation,
+                    leverage_hint=leverage_hint,
+                ),
+                _weights_for("tp", market),
+                lambda p: _is_correct_side(p, entry, direction, "tp"),
+                role="tp",
+            )
+            if not tp_ranked:
+                continue
+
+            for tp_rank, tp_row in enumerate(tp_ranked[:min(12, len(tp_ranked))]):
+                tested_combinations += 1
+                tp = _f(tp_row.get("price"), 0.0)
+                reward = abs(tp - entry)
+                rr = reward / max(risk, 1e-12)
+                if rr < rr_floor or rr > rr_ceiling:
+                    continue
+                joint = _joint_geometry_score(
+                    entry_row, sl_row, tp_row, rr,
+                    rr_floor, rr_ceiling, preferred_rr_min, preferred_rr_max,
+                )
+                proposal = {
+                    "entry": entry, "stop_loss": sl, "take_profit": tp,
+                    "risk_reward": round(rr, 4),
+                    "geometry_quality": round(joint, 2),
+                    "entry_quality": round(_f(entry_row.get("committee_score")), 2),
+                    "sl_quality": round(_f(sl_row.get("committee_score")), 2),
+                    "tp_quality": round(_f(tp_row.get("committee_score")), 2),
+                    "entry_committee": entry_row,
+                    "sl_committee": sl_row,
+                    "tp_committee": tp_row,
+                    "ranks": {"entry": entry_rank + 1, "sl": sl_rank + 1, "tp": tp_rank + 1},
+                    "recovery_mode": "STRUCTURAL_OPPORTUNITY_RECOVERY",
+                }
+                # Same legacy execution quality floors. Recovery cannot be used
+                # to sneak a weaker geometry into publication.
+                if not (
+                    proposal["geometry_quality"] >= 62.0
+                    and proposal["entry_quality"] >= 55.0
+                    and proposal["sl_quality"] >= 60.0
+                    and proposal["tp_quality"] >= 60.0
+                ):
+                    continue
+                if candidate_filter is not None:
+                    try:
+                        if candidate_filter(proposal) is not True:
+                            admissibility_rejections += 1
+                            continue
+                    except Exception:
+                        return {
+                            "success": False, "reason": "RECOVERY_GUARD_ERROR",
+                            "version": VERSION,
+                        }
+                if (
+                    best_combo is None
+                    or proposal["geometry_quality"] > best_combo["geometry_quality"]
+                    or (
+                        proposal["geometry_quality"] == best_combo["geometry_quality"]
+                        and abs(proposal["risk_reward"] - 2.6) < abs(best_combo["risk_reward"] - 2.6)
+                    )
+                ):
+                    best_combo = proposal
+
+    if best_combo is None:
+        return {
+            "success": False,
+            "reason": "NO_COHERENT_STRUCTURAL_RECOVERY_GEOMETRY",
+            "version": VERSION,
+            "tested_combinations": tested_combinations,
+            "admissibility_rejections": admissibility_rejections,
+            "sl_reaction_rejections": sl_reaction_rejections,
+        }
+
+    return {
+        "success": True,
+        "version": VERSION,
+        "market_type": market,
+        **best_combo,
+        "tested_combinations": tested_combinations,
+        "admissibility_rejections": admissibility_rejections,
+        "sl_reaction_rejections": sl_reaction_rejections,
+        "authority": "RECOVER_GEOMETRY_ONLY_EXISTING_THESIS",
+        "safety_unchanged": True,
     }
 
 def leverage_committee_context(*, entry: float, stop_loss: float, take_profit: float,

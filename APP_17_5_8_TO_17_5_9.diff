@@ -1,0 +1,538 @@
+--- /mnt/data/commit17_5_8_ready/app.py	2026-09-29 02:06:18.970154714 +0000
++++ /mnt/data/commit17_5_9_ready/app.py	2026-09-29 02:14:45.782933613 +0000
+@@ -17021,7 +17021,199 @@
+                     leverage = max(1, min(5, base_leverage))
+             else:
+                 leverage = 1
+-            
++
++            # ==========================================================
++            # COMMIT 17.5.9 — STRUCTURAL OPPORTUNITY RECOVERY
++            # ==========================================================
++            # The old path returned immediately when the first SL or TP selector
++            # could not form a complete baseline.  The advanced committees then
++            # never received the opportunity, even though they already know how
++            # to search alternative structural Entry/SL/TP combinations.
++            #
++            # 17.5.9 lets the execution desk finish its work BEFORE rejecting a
++            # valid thesis.  This path is Futures/Multi-Asset only and NEVER:
++            #   * lowers Safety / publication / R/R thresholds,
++            #   * invents TP from ATR/RR,
++            #   * uses ATR as a stand-alone SL,
++            #   * creates LONG/SHORT direction,
++            #   * raises leverage to rescue a setup.
++            structural_recovery_17_5_9 = {
++                'attempted': False, 'applied': False, 'reason': 'NOT_NEEDED',
++                'version': 'COMMIT17_5_9_WORKER_RECOVERY_V1',
++            }
++
++            def _attempt_structural_recovery_17_5_9(trigger_reason, entry_hint):
++                if not is_futures:
++                    return {'success': False, 'reason': 'SPOT_RECOVERY_NOT_ENABLED'}
++                try:
++                    from execution_specialist_committees import (
++                        build_execution_context as _build_recovery_context,
++                        recover_execution_geometry_from_structure,
++                    )
++                    try:
++                        _rr_floor = max(1.0, float((execution_geometry_profile or {}).get('technical_rr_floor') or 1.8))
++                        _rr_ceiling = max(_rr_floor, float((execution_geometry_profile or {}).get('technical_rr_ceiling') or 4.5))
++                        _pref_min = max(_rr_floor, float((execution_geometry_profile or {}).get('preferred_rr_min') or 2.0))
++                        _pref_max = min(_rr_ceiling, max(_pref_min, float((execution_geometry_profile or {}).get('preferred_rr_max') or 3.2)))
++                    except (TypeError, ValueError):
++                        _rr_floor, _rr_ceiling, _pref_min, _pref_max = 1.8, 4.5, 2.0, 3.2
++
++                    _recovery_market_type = 'futures'
++                    try:
++                        from multiasset_system import MULTIASSET_SYMBOLS as _multiasset_symbols_1759
++                        if str(symbol or '').upper() in set(_multiasset_symbols_1759 or {}):
++                            _recovery_market_type = 'multiasset'
++                    except Exception:
++                        pass
++
++                    _obs = execution_observations if isinstance(execution_observations, dict) else {}
++                    _obs_volume = _obs.get('volume') or (structure.get('volume_analysis') or structure.get('volume') or {}) if isinstance(structure, dict) else {}
++                    _obs_macro = _obs.get('macro_context') or (structure.get('macro_context') or structure.get('_macro_context') or {}) if isinstance(structure, dict) else {}
++                    _obs_hours = _obs.get('market_hours') or (structure.get('market_hours') or {}) if isinstance(structure, dict) else {}
++                    _obs_sentiment = _obs.get('sentiment') or (structure.get('sentiment') or {}) if isinstance(structure, dict) else {}
++                    _obs_regime = _obs.get('market_regime') or {
++                        'regime': str(structure.get('_adaptive_market_regime') or structure.get('market_regime') or 'UNKNOWN')
++                    } if isinstance(structure, dict) else {}
++                    _recovery_context = _build_recovery_context(
++                        structure=structure, volume=_obs_volume, volatility=volatility,
++                        market_hours=_obs_hours, sentiment=_obs_sentiment,
++                        macro_context=_obs_macro, market_regime=_obs_regime,
++                        symbol=symbol, timeframe=timeframe, market_type=_recovery_market_type,
++                    )
++                    _guard_family = str(
++                        setup_family
++                        or (((_obs.get('operational_intelligence') or {}).get('default_strategy') or {}).get('family'))
++                        or 'UNSPECIFIED'
++                    ).upper()
++
++                    def _recovery_entry_metadata_1759(price, candidate_family='structure'):
++                        from execution_geometry_committee import entry_candidate_adjustment
++                        _distance = abs(float(current_price) - float(price)) / max(float(atr), 1e-12)
++                        _timing = entry_candidate_adjustment(
++                            execution_geometry_profile,
++                            candidate_type=candidate_family,
++                            distance_atr=_distance,
++                            market_location=entry_quality.get('market_location'),
++                            directional_extension=bool(entry_quality.get('directional_extension')),
++                            correct_side_near_reaction=False,
++                        )['timing_mode']
++                        return {
++                            'distance_atr_current': round(_distance, 4),
++                            'distance_pct_current': round(abs(float(current_price) - float(price)) / max(float(current_price), 1e-12) * 100.0, 4),
++                            'entry_timing_mode': _timing,
++                        }
++
++                    def _recovery_admissible_1759(proposal):
++                        import math
++                        try:
++                            _e = float(proposal.get('entry') or 0)
++                            _s = float(proposal.get('stop_loss') or 0)
++                            _t = float(proposal.get('take_profit') or 0)
++                            _risk = abs(_e - _s)
++                            _rr = abs(_t - _e) / _risk if _risk > 0 else 0.0
++                            _qualities = (
++                                float(proposal.get('geometry_quality') or 0),
++                                float(proposal.get('entry_quality') or 0),
++                                float(proposal.get('sl_quality') or 0),
++                                float(proposal.get('tp_quality') or 0),
++                            )
++                        except Exception:
++                            return False
++                        if not all(math.isfinite(v) for v in (_e, _s, _t, _rr, *_qualities)):
++                            return False
++                        if not (
++                            min(_e, _s, _t) > 0 and _risk > 0
++                            and ((direction == 'long' and _s < _e < _t and _e <= current_price)
++                                 or (direction == 'short' and _t < _e < _s and _e >= current_price))
++                            and _rr_floor <= _rr <= _rr_ceiling
++                            and _qualities[0] >= 62.0
++                            and _qualities[1] >= 55.0
++                            and _qualities[2] >= 60.0
++                            and _qualities[3] >= 60.0
++                        ):
++                            return False
++
++                        _entry_role = proposal.get('entry_committee') or {}
++                        _candidate_family = str(_entry_role.get('family') or 'structure')
++                        _meta = _recovery_entry_metadata_1759(_e, _candidate_family)
++
++                        # A recovered Entry must pass the existing timing gate on
++                        # its own merits; unlike refinement there is no baseline
++                        # timing result to inherit.
++                        _gate = getattr(self, '_futures_entry_timing_gate', None)
++                        if not callable(_gate):
++                            return False
++                        try:
++                            _gate_check = _gate(
++                                decision, trend, momentum, volatility, structure,
++                                {
++                                    'entry': _e,
++                                    'entry_timing_mode': _meta['entry_timing_mode'],
++                                    'entry_market_location': entry_quality.get('market_location'),
++                                    'entry_location_context': entry_quality.get('location_context'),
++                                    'entry_location_basis': entry_quality.get('location_basis'),
++                                }
++                            )
++                            if not (
++                                isinstance(_gate_check, dict)
++                                and _gate_check.get('status') != 'TIMING_DIAGNOSTIC_ERROR'
++                                and _gate_check.get('passed') is True
++                            ):
++                                return False
++                        except Exception:
++                            return False
++
++                        try:
++                            from operational_intelligence import execution_setup_guard as _setup_guard_1759
++                            _guard = _setup_guard_1759(
++                                action=decision,
++                                levels={
++                                    'entry': _e, 'stop_loss': _s, 'take_profit': _t,
++                                    'risk_reward': _rr,
++                                    'entry_quality_score': _qualities[1],
++                                    'entry_score': _qualities[1],
++                                    'entry_sweep_confirmed': bool(entry_quality.get('sweep')),
++                                    'entry_mss_bos_confirmed': bool(entry_quality.get('mss')),
++                                    'entry_displacement_confirmed': bool(entry_quality.get('displacement')),
++                                    'entry_source': str(_entry_role.get('source') or entry_source or ''),
++                                },
++                                setup_family=_guard_family,
++                                market='FUTURES',
++                                timeframe=timeframe,
++                            ) or {}
++                            if _guard.get('applied'):
++                                return False
++                        except Exception:
++                            return False
++                        return True
++
++                    _result = recover_execution_geometry_from_structure(
++                        direction=direction, current_price=current_price, atr=atr,
++                        structure=structure, trend=trend, momentum=momentum,
++                        volatility=volatility, setup_family=(setup_family or 'UNSPECIFIED'),
++                        liquidation=liquidation, market_type=_recovery_market_type,
++                        symbol=symbol, timeframe=timeframe,
++                        execution_context=_recovery_context,
++                        entry_hint=entry_hint,
++                        rr_floor=_rr_floor, rr_ceiling=_rr_ceiling,
++                        preferred_rr_min=_pref_min, preferred_rr_max=_pref_max,
++                        leverage_hint=leverage,
++                        candidate_filter=_recovery_admissible_1759,
++                    ) or {}
++                    _result['trigger_reason'] = str(trigger_reason or '')
++                    if _result.get('success'):
++                        _entry_role = _result.get('entry_committee') or {}
++                        _result['entry_metadata'] = _recovery_entry_metadata_1759(
++                            _result.get('entry'), str(_entry_role.get('family') or 'structure')
++                        )
++                    return _result
++                except Exception as _recovery_error:
++                    return {
++                        'success': False,
++                        'reason': f'RECOVERY_ERROR:{type(_recovery_error).__name__}',
++                        'trigger_reason': str(trigger_reason or ''),
++                    }
++
+             # ============ COMMIT 13: ENTRY -> SL -> TP INDEPENDIENTES ============
+             # SL se elige por invalidación/ruido. TP se elige después entre
+             # objetivos estructurales alcanzables. El R/R evalúa la economía
+@@ -17038,30 +17230,93 @@
+                 geometry_profile=execution_geometry_profile
+             )
+             if sl_price is None:
+-                print(f"   ⚠️ RECHAZADO: sin SL válido")
+-                return self._build_rejected_levels(current_price, symbol, "Sin SL válido")
+-            
+-            # 2. SELECCIONAR TP ÓPTIMO con SL como referencia económica
+-            tp_price, tp_source, tp_score = self._select_optimal_tp(
+-                direction,
+-                structure,
+-                entry,
+-                current_price,
+-                volatility,
+-                timeframe,
+-                leverage=leverage,
+-                is_futures=is_futures,
+-                sl_price=sl_price,
+-                liquidation=liquidation,
+-                geometry_profile=execution_geometry_profile
+-            )
+-            if tp_price is None:
+-                print(
+-                    f"   ⚠️ SIN TP ESTRUCTURAL VÁLIDO: "
+-                    f"{tp_source}"
++                structural_recovery_17_5_9.update({'attempted': True, 'reason': 'NO_VALID_SL'})
++                _recovery = _attempt_structural_recovery_17_5_9('NO_VALID_SL', entry)
++                if _recovery.get('success'):
++                    entry = float(_recovery['entry'])
++                    sl_price = float(_recovery['stop_loss'])
++                    tp_price = float(_recovery['take_profit'])
++                    _er = _recovery.get('entry_committee') or {}
++                    _sr = _recovery.get('sl_committee') or {}
++                    _tr = _recovery.get('tp_committee') or {}
++                    entry_source = 'Recuperación estructural · ' + str(_er.get('source') or entry_source)
++                    sl_source = 'Invalidación estructural recuperada · ' + str(_sr.get('source') or 'estructura')
++                    tp_source = 'Objetivo estructural recuperado · ' + str(_tr.get('source') or 'estructura')
++                    entry_score = float(_recovery.get('entry_quality') or entry_score or 0)
++                    sl_score = float(_recovery.get('sl_quality') or 0)
++                    tp_score = float(_recovery.get('tp_quality') or 0)
++                    entry_quality.update(_recovery.get('entry_metadata') or {})
++                    structural_recovery_17_5_9.update({
++                        'applied': True, 'reason': 'RECOVERED_AFTER_NO_VALID_SL',
++                        'tested_combinations': _recovery.get('tested_combinations'),
++                        'entry_quality': _recovery.get('entry_quality'),
++                        'sl_quality': _recovery.get('sl_quality'),
++                        'tp_quality': _recovery.get('tp_quality'),
++                        'geometry_quality': _recovery.get('geometry_quality'),
++                    })
++                    print('   🔧 17.5.9: geometría recuperada tras ausencia de SL inicial')
++                else:
++                    structural_recovery_17_5_9.update({
++                        'applied': False,
++                        'reason': str(_recovery.get('reason') or 'NO_RECOVERY_GEOMETRY'),
++                    })
++                    print(f"   ⚠️ RECHAZADO: sin SL válido y sin alternativa estructural")
++                    return self._build_rejected_levels(current_price, symbol, "Sin SL válido ni alternativa estructural")
++
++            # 2. SELECCIONAR TP ÓPTIMO con SL como referencia económica.  When
++            # recovery already produced the complete geometry we keep it; no
++            # second TP selector is allowed to overwrite that coherent package.
++            if not structural_recovery_17_5_9.get('applied'):
++                tp_price, tp_source, tp_score = self._select_optimal_tp(
++                    direction,
++                    structure,
++                    entry,
++                    current_price,
++                    volatility,
++                    timeframe,
++                    leverage=leverage,
++                    is_futures=is_futures,
++                    sl_price=sl_price,
++                    liquidation=liquidation,
++                    geometry_profile=execution_geometry_profile
+                 )
++            if tp_price is None:
++                structural_recovery_17_5_9.update({'attempted': True, 'reason': 'NO_VALID_TP'})
++                _recovery = _attempt_structural_recovery_17_5_9('NO_VALID_TP', entry)
++                if _recovery.get('success'):
++                    entry = float(_recovery['entry'])
++                    sl_price = float(_recovery['stop_loss'])
++                    tp_price = float(_recovery['take_profit'])
++                    _er = _recovery.get('entry_committee') or {}
++                    _sr = _recovery.get('sl_committee') or {}
++                    _tr = _recovery.get('tp_committee') or {}
++                    entry_source = 'Recuperación estructural · ' + str(_er.get('source') or entry_source)
++                    sl_source = 'Invalidación estructural recuperada · ' + str(_sr.get('source') or sl_source or 'estructura')
++                    tp_source = 'Objetivo estructural recuperado · ' + str(_tr.get('source') or 'estructura')
++                    entry_score = float(_recovery.get('entry_quality') or entry_score or 0)
++                    sl_score = float(_recovery.get('sl_quality') or sl_score or 0)
++                    tp_score = float(_recovery.get('tp_quality') or 0)
++                    entry_quality.update(_recovery.get('entry_metadata') or {})
++                    structural_recovery_17_5_9.update({
++                        'applied': True, 'reason': 'RECOVERED_AFTER_NO_VALID_TP',
++                        'tested_combinations': _recovery.get('tested_combinations'),
++                        'entry_quality': _recovery.get('entry_quality'),
++                        'sl_quality': _recovery.get('sl_quality'),
++                        'tp_quality': _recovery.get('tp_quality'),
++                        'geometry_quality': _recovery.get('geometry_quality'),
++                    })
++                    print('   🔧 17.5.9: geometría recuperada tras ausencia de TP inicial')
++                else:
++                    structural_recovery_17_5_9.update({
++                        'applied': False,
++                        'reason': str(_recovery.get('reason') or 'NO_RECOVERY_GEOMETRY'),
++                    })
++                    print(
++                        f"   ⚠️ SIN TP ESTRUCTURAL VÁLIDO: "
++                        f"{tp_source}"
++                    )
+ 
+-                return {
++                    return {
+                     'entry':
+                         self._round_price(
+                             entry,
+@@ -17291,6 +17546,54 @@
+                 )
+             )
+ 
++            # 17.5.9: a complete but non-viable first geometry (for example RR
++            # outside the same technical floor/ceiling) is not the same thing as
++            # "no opportunity".  Let the structural desk search another real
++            # Entry/SL/TP combination before declaring ANALYSIS_ONLY.
++            if is_futures and not baseline_geometry_valid and not structural_recovery_17_5_9.get('applied'):
++                structural_recovery_17_5_9.update({'attempted': True, 'reason': 'BASELINE_GEOMETRY_INVALID'})
++                _recovery = _attempt_structural_recovery_17_5_9('BASELINE_GEOMETRY_INVALID', baseline_entry)
++                if _recovery.get('success'):
++                    entry = float(_recovery['entry'])
++                    sl_price = float(_recovery['stop_loss'])
++                    tp_price = float(_recovery['take_profit'])
++                    _er = _recovery.get('entry_committee') or {}
++                    _sr = _recovery.get('sl_committee') or {}
++                    _tr = _recovery.get('tp_committee') or {}
++                    entry_source = 'Recuperación estructural · ' + str(_er.get('source') or entry_source)
++                    sl_source = 'Invalidación estructural recuperada · ' + str(_sr.get('source') or sl_source)
++                    tp_source = 'Objetivo estructural recuperado · ' + str(_tr.get('source') or tp_source)
++                    entry_score = float(_recovery.get('entry_quality') or entry_score or 0)
++                    sl_score = float(_recovery.get('sl_quality') or sl_score or 0)
++                    tp_score = float(_recovery.get('tp_quality') or tp_score or 0)
++                    entry_quality.update(_recovery.get('entry_metadata') or {})
++                    baseline_entry, baseline_sl, baseline_tp = float(entry), float(sl_price), float(tp_price)
++                    baseline_risk = abs(baseline_entry - baseline_sl)
++                    baseline_reward = abs(baseline_tp - baseline_entry)
++                    baseline_rr = baseline_reward / baseline_risk if baseline_risk > 0 else 0.0
++                    baseline_geometry_valid = bool(
++                        baseline_risk > 0
++                        and minimum_viable_rr <= baseline_rr <= maximum_technical_rr
++                        and ((direction == 'long' and baseline_sl < baseline_entry < baseline_tp)
++                             or (direction == 'short' and baseline_tp < baseline_entry < baseline_sl))
++                    )
++                    structural_recovery_17_5_9.update({
++                        'applied': bool(baseline_geometry_valid),
++                        'reason': 'RECOVERED_AFTER_INVALID_BASELINE_GEOMETRY' if baseline_geometry_valid else 'RECOVERY_FAILED_FINAL_GEOMETRY_CHECK',
++                        'tested_combinations': _recovery.get('tested_combinations'),
++                        'entry_quality': _recovery.get('entry_quality'),
++                        'sl_quality': _recovery.get('sl_quality'),
++                        'tp_quality': _recovery.get('tp_quality'),
++                        'geometry_quality': _recovery.get('geometry_quality'),
++                    })
++                    if baseline_geometry_valid:
++                        print('   🔧 17.5.9: geometría estructural alternativa recuperó un baseline no viable')
++                else:
++                    structural_recovery_17_5_9.update({
++                        'applied': False,
++                        'reason': str(_recovery.get('reason') or 'NO_RECOVERY_GEOMETRY'),
++                    })
++
+             if baseline_geometry_valid:
+                 try:
+                     from execution_specialist_committees import (
+@@ -17823,6 +18126,14 @@
+                 'execution_entry_quality': execution_refinement.get('entry_quality'),
+                 'execution_sl_quality': execution_refinement.get('sl_quality'),
+                 'execution_tp_quality': execution_refinement.get('tp_quality'),
++                # 17.5.9 opportunity-recovery observability.  This is public-safe
++                # execution telemetry; no worker identities or internal weights.
++                'opportunity_recovery_attempted': bool(structural_recovery_17_5_9.get('attempted')),
++                'opportunity_recovery_applied': bool(structural_recovery_17_5_9.get('applied')),
++                'opportunity_recovery_reason': str(structural_recovery_17_5_9.get('reason') or ''),
++                'opportunity_recovery_version': structural_recovery_17_5_9.get('version'),
++                'opportunity_recovery_geometry_quality': structural_recovery_17_5_9.get('geometry_quality'),
++                'opportunity_recovery_tested_combinations': structural_recovery_17_5_9.get('tested_combinations'),
+                 'sl_reaction_conflict': bool(sl_reaction_guard.get('conflict')),
+                 'sl_reaction_guard_reason': str(sl_reaction_guard.get('reason') or ''),
+                 'sl_reaction_conflict_level': sl_reaction_guard.get('level'),
+@@ -28484,14 +28795,43 @@
+                 _voto['control_objection_active'] = True
+                 _voto['control_objection_reason'] = str(veto_razon or '')[:220]
+         
+-        # 8. COMMIT 9.4 — TESIS DE MERCADO PRIMERO; ESPECIALISTAS COMO EVIDENCIA
+-        try:
+-            from operational_intelligence import moderator_candidate
+-            _op_candidate = moderator_candidate(
+-                capas.get('operational_intelligence') or {}, votos, system_type
++        # 8. COMMIT 17.5.9 — MESA DE TRABAJO, NO ELECCIÓN DE TRADERS
++        # Operational Intelligence owns the governed thesis/candidate.  Legacy
++        # trader payloads are translated into work products for context, setup,
++        # execution, control, learning and attribution.  They do NOT form a
++        # second majority/veto gate after the thesis is already valid.
++        worker_desk_17_5_9 = {}
++        strategy_reasoning_17_5_9 = {}
++        try:
++            from worker_orchestration import (
++                build_worker_desk_snapshot,
++                build_strategy_reasoning,
++                moderator_worker_candidate,
++            )
++            _op_state_for_workers = capas.get('operational_intelligence') or {}
++            worker_desk_17_5_9 = build_worker_desk_snapshot(
++                votos, _op_state_for_workers,
++                market=system_type, symbol=symbol, timeframe=timeframe,
++            )
++            strategy_reasoning_17_5_9 = build_strategy_reasoning(
++                _op_state_for_workers,
++                market=system_type, symbol=symbol, timeframe=timeframe,
++            )
++            if isinstance(_op_state_for_workers, dict):
++                _op_state_for_workers['worker_desk_17_5_9'] = worker_desk_17_5_9
++                _op_state_for_workers['strategy_reasoning_17_5_9'] = strategy_reasoning_17_5_9
++            _op_candidate = moderator_worker_candidate(
++                _op_state_for_workers,
++                market=system_type, symbol=symbol, timeframe=timeframe,
++                worker_desk=worker_desk_17_5_9,
+             )
+         except Exception as _op_candidate_error:
+-            _op_candidate = {'use': False, 'reason': str(_op_candidate_error)[:120]}
++            # Fail closed for the production candidate.  This does not lower
++            # Safety or fall back to legacy majority voting.
++            _op_candidate = {
++                'use': False, 'action': 'NO_OPERAR',
++                'reason': f'WORKER_ORCHESTRATION_ERROR:{type(_op_candidate_error).__name__}',
++            }
+ 
+         if _op_candidate.get('use'):
+             accion_ganadora = str(_op_candidate.get('action') or 'NO_OPERAR').upper()
+@@ -28655,6 +28995,11 @@
+             'veto_estado': veto_estado,
+             'hierarchical_committee_rc4': hierarchical_committee,
+             'dynamic_expert_committee_shadow': dynamic_committee_shadow,
++            # 17.5.9: the old vote-shaped payload is retained only for backward
++            # compatible attribution/learning.  Production uses worker outputs.
++            'legacy_vote_telemetry_only': True,
++            'worker_desk_17_5_9': worker_desk_17_5_9,
++            'strategy_reasoning_17_5_9': strategy_reasoning_17_5_9,
+             'todos_los_votos': [
+                 {
+                     'trader': v['trader'],
+@@ -34364,7 +34709,27 @@
+     elif action not in ('LONG','SHORT'):
+         stage, reason = 'DIRECTION_CONFIRMATION', str((decision.get('audit') or {}).get('reason') or decision.get('reason') or action or 'NOT_DIRECTIONAL')[:180]
+     elif publication != 'EXECUTABLE_SIGNAL' or not executable:
+-        stage, reason = 'EXECUTION_PUBLICATION', str(levels.get('rejected_reason') or result.get('rejected_reason') or publication or 'NOT_EXECUTABLE')[:180]
++        reason = str(levels.get('rejected_reason') or result.get('rejected_reason') or publication or 'NOT_EXECUTABLE')[:180]
++        _ru = reason.upper()
++        _entry = float(levels.get('entry') or 0)
++        _sl = float(levels.get('stop_loss') or 0)
++        _tp = float(levels.get('take_profit') or 0)
++        if bool(levels.get('sl_reaction_conflict')) or 'SL NO DEFENDIBLE' in _ru or 'SIN SL' in _ru:
++            stage = 'SL'
++        elif _entry <= 0 or 'ENTRY' in _ru and ('INSUFICIENTE' in _ru or 'NO ' in _ru):
++            stage = 'ENTRY'
++        elif _sl <= 0:
++            stage = 'SL'
++        elif _tp <= 0 or 'TP ' in _ru or 'TAKE PROFIT' in _ru:
++            stage = 'TP'
++        elif 'R/R' in _ru or 'RIESGO/BENEFICIO' in _ru:
++            stage = 'RR'
++        elif 'SAFETY' in _ru or 'RIESGO' in _ru and 'PUBLICATION' not in _ru:
++            stage = 'SAFETY'
++        elif bool(levels.get('opportunity_recovery_attempted')) and not bool(levels.get('opportunity_recovery_applied')):
++            stage = 'OPPORTUNITY_RECOVERY'
++        else:
++            stage = 'PUBLICATION'
+     return {
+         'symbol': result.get('symbol'), 'timeframe': result.get('timeframe'),
+         'stage': stage, 'reason': reason,
+@@ -34375,6 +34740,10 @@
+         'mtf_conflict': bool((oi.get('multi_timeframe') or {}).get('conflict')),
+         'action': action, 'confidence': decision.get('confidence'),
+         'publication_status': publication, 'executable': executable,
++        'opportunity_recovery_attempted': bool(levels.get('opportunity_recovery_attempted')),
++        'opportunity_recovery_applied': bool(levels.get('opportunity_recovery_applied')),
++        'opportunity_recovery_reason': levels.get('opportunity_recovery_reason'),
++        'worker_orchestration_version': ((oi.get('worker_desk_17_5_9') or {}).get('version')),
+     }
+ 
+ def _technical_signal_funnel_summary(analyses):
+@@ -34384,7 +34753,18 @@
+         if isinstance(result, dict): rows.append(_technical_signal_funnel_row(result))
+     counts={}
+     for row in rows: counts[row['stage']] = counts.get(row['stage'], 0) + 1
+-    return {'total': len(rows), 'stage_counts': counts, 'rows': rows}
++    recovery_attempted=sum(1 for row in rows if row.get('opportunity_recovery_attempted'))
++    recovery_applied=sum(1 for row in rows if row.get('opportunity_recovery_applied'))
++    executable_count=counts.get('EXECUTABLE',0)
++    return {
++        'total': len(rows), 'analyzed_cells': len(rows), 'stage_counts': counts,
++        'executable_count': executable_count,
++        'opportunity_recovery': {
++            'attempted': recovery_attempted, 'applied': recovery_applied,
++            'success_rate_pct': round(100.0*recovery_applied/recovery_attempted,2) if recovery_attempted else 0.0,
++        },
++        'rows': rows
++    }
+ 
+ def _multiasset_run_analysis(symbol, timeframe, owner='multi-background'):
+     engine=_get_multiasset_system()
+@@ -35361,11 +35741,26 @@
+     if isinstance(operational, dict):
+         mtf = operational.get('multi_timeframe') or {}
+         thesis = operational.get('thesis') or {}
++        _worker_desk_1759 = operational.get('worker_desk_17_5_9') or {}
++        _strategy_reasoning_1759 = operational.get('strategy_reasoning_17_5_9') or {}
+         compact['operational_intelligence'] = {
+             'version': operational.get('version'),
+             'context': operational.get('context'),
+             'candidate_action': operational.get('candidate_action'),
+             'candidate_ready': operational.get('candidate_ready'),
++            'worker_desk_17_5_9': {
++                'version': _worker_desk_1759.get('version'),
++                'thesis_owner': _worker_desk_1759.get('thesis_owner'),
++                'workers_seen': len(_worker_desk_1759.get('workers') or []),
++                'policy': _worker_desk_1759.get('policy'),
++            },
++            'strategy_reasoning_17_5_9': {
++                'version': _strategy_reasoning_1759.get('version'),
++                'regime': _strategy_reasoning_1759.get('regime'),
++                'volatility': _strategy_reasoning_1759.get('volatility'),
++                'primary': _strategy_reasoning_1759.get('primary'),
++                'alternatives': list(_strategy_reasoning_1759.get('alternatives') or [])[:3],
++            },
+             'multi_timeframe': {
+                 'alignment': mtf.get('alignment'),
+                 'dominant_direction': mtf.get('dominant_direction'),

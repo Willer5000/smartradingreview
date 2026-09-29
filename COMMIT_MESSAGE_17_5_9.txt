@@ -1,0 +1,8 @@
+Commit 17.5.9 - Worker orchestration and structural opportunity recovery
+
+- replace production second-vote moderator with governed thesis -> worker execution flow
+- preserve legacy trader payload only for attribution/learning telemetry
+- add explicit worker roles and strategy reasoning metadata
+- allow Futures/Multi-Asset structural recovery when first SL/TP/baseline geometry fails
+- preserve RR, timing, setup, SL-reaction, Safety, Publication and leverage contracts
+- expand signal funnel observability without adding signal quotas
