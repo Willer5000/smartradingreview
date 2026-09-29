@@ -1,4 +1,4 @@
-"""Commit 17.5.10.3 — Particular Setup Router + pipeline integrity.
+"""Commit 17.5.10.4 — Particular Setup Router + pipeline integrity.
 
 Compatibility note
 ------------------
@@ -27,9 +27,9 @@ from datetime import datetime, timezone
 import math
 from typing import Any, Dict, Mapping, Iterable, List, Tuple
 
-VERSION = "17.5.10.3_PIPELINE_INTEGRITY_V3"
-PIPELINE_GENERATION = "17.5.10.3"
-RELEASED_AT_UTC = "2026-09-29T14:45:00+00:00"
+VERSION = "17.5.10.4_PIPELINE_INTEGRITY_V4"
+PIPELINE_GENERATION = "17.5.10.4"
+RELEASED_AT_UTC = "2026-09-29T18:00:00+00:00"
 
 _DIRECTIONAL = {"LONG", "SHORT", "COMPRA_SPOT", "VENTA_SPOT"}
 _NEGATIVE_RESEARCH_STATES = {

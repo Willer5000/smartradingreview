@@ -1,0 +1,18 @@
+{
+  "repository": "Willer5000/smartradingreview",
+  "baseline_head": "d94b6d2bb2b006bdd8064e333e0e3407d82a7eba",
+  "baseline_message": "Commit 17.5.10.3 — Execution ABI Repair · Truthful Pipeline Diagnostics",
+  "baseline_sha256": {
+    "app.py": "8dd5f993e09091b066e9516734eddd3c4388a26b297ca68d09667a6b9266a97b",
+    "pipeline_integrity_175102.py": "ed2f53cb5b6e89c3671a407ecb553dd5f865f4feee86715d6bfabff1e97625bf",
+    "templates/index.html": "54eab00beeadfa93d2209dfb1a7e55c909e9303f4ce4519267379504ae88189c",
+    "static/runtime_resilience_175103.js": "3b429a55d778adeb124288812b13c6a4de04564c017955b65c6c44af5a5a1812"
+  },
+  "trading_threshold_change": false,
+  "signal_count_quota_added": false,
+  "sql_migration_required": false,
+  "new_threads": 0,
+  "new_polling": 0,
+  "new_llm_calls": 0,
+  "new_supabase_queries": 0
+}

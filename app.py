@@ -117,6 +117,30 @@ from portfolio_guardian import portfolio_guardian
 
 app = Flask(__name__)
 
+# Commit 17.5.10.4 — stable market identity.
+# Market identity is derived from the engine class contract, never from a mutable
+# per-instance flag shared by concurrent Futures/Multi-Asset analyses.
+def _stable_analysis_system_type_175104(engine):
+    try:
+        resolver = getattr(engine, '_market_system_type', None)
+        if callable(resolver):
+            resolved = str(resolver() or '').strip().lower()
+            if resolved in ('futures', 'multiasset', 'multi-asset', 'multi_asset'):
+                return 'futures'
+            if resolved == 'spot':
+                return 'spot'
+    except Exception:
+        pass
+
+    cls = getattr(engine, '__class__', None)
+    module_name = str(getattr(cls, '__module__', '') or '').lower()
+    class_name = str(getattr(cls, '__name__', '') or '').lower()
+    if module_name in ('futures_system', 'multiasset_system'):
+        return 'futures'
+    if class_name in ('futuresanalysis', 'multiassetanalysis'):
+        return 'futures'
+    return 'spot'
+
 # Commit 17.5.10.3 — bounded external-provider resilience.
 # Installs only fail-open wrappers; no threads, polling or network calls are
 # created by the installer itself.
@@ -16895,10 +16919,8 @@ class TradingExpertSystem:
         La lógica de los traders y sus pesos no se modifica.
         """
         try:
-            # Commit 17.5.10.3 — ABI bridge for FuturesAnalysis/MultiAssetAnalysis.
-            # Their deployed override predates the execution_observations kwarg.
-            # The caller stores the already-loaded layer packet temporarily in
-            # `structure`; the base execution method consumes it without any I/O.
+            # Commit 17.5.10.4 compatibility: the base method may consume execution
+            # observations passed through the class-level Futures ABI adapter.
             if execution_observations is None and isinstance(structure, dict):
                 _bridged_observations = structure.get('_execution_observations_175103')
                 if isinstance(_bridged_observations, dict):
@@ -20349,8 +20371,12 @@ class TradingExpertSystem:
             print(f"   BTC analysis: {type(btc_analysis).__name__ if btc_analysis else 'None'}")
             print(f"   PAXG analysis: {type(paxg_analysis).__name__ if paxg_analysis else 'None'}")
             print(f"   RATIO analysis: {type(paxg_btc_analysis).__name__ if paxg_btc_analysis else 'None'}")
-            
-    
+
+            # Commit 17.5.10.4: immutable-for-this-call market identity.
+            # This value is local to the analysis and therefore cannot be flipped
+            # by another concurrent Futures/Multi-Asset request.
+            analysis_system_type = _stable_analysis_system_type_175104(self)
+
             # ============ OBTENER DATOS ============
             print(f"📡 Obteniendo datos de KuCoin...")
             
@@ -20363,7 +20389,7 @@ class TradingExpertSystem:
             # Q6-A: Futures supplies its own verified closed-frame contract.
             # Spot selects closed candles here, not in the shared raw fetcher.
             if (
-                not getattr(self, '_skip_supabase_register', False)
+                analysis_system_type == 'spot'
                 and not intrabar_preview
             ):
                 try:
@@ -20566,14 +20592,9 @@ class TradingExpertSystem:
                 print(f"   • {r}")
             
             # ============ IDENTIFICAR MERCADO DEL ANÁLISIS ============
-            # FuturesAnalysis activa este indicador únicamente mientras reutiliza
-            # el motor común. Así el comité y el ReviewTrader pueden consultar el
-            # aprendizaje correcto sin cambiar la lógica de los otros 9 traders.
-            analysis_system_type = (
-                'futures'
-                if getattr(self, '_skip_supabase_register', False)
-                else 'spot'
-            )
+            # Commit 17.5.10.4: `analysis_system_type` ya fue fijado al inicio
+            # de esta llamada mediante el contrato estable del engine. No se
+            # recalcula desde estado mutable compartido.
 
             # ============ V1.0 MACRO CONTEXT RADAR ============
             # Contexto externo gratuito y cacheado. Nunca debe bloquear trading
@@ -21037,36 +21058,24 @@ class TradingExpertSystem:
             levels = {}
             if accion_consenso in ['COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT']:
                 print(f"💰 Calculando niveles para {accion_consenso}...")
-                _execution_bridge_key_175103 = '_execution_observations_175103'
                 try:
-                    # Commit 17.5.10.3 — execution ABI compatibility.
-                    # FuturesAnalysis (and MultiAssetAnalysis through inheritance)
-                    # still exposes the legacy signature without
-                    # `execution_observations`. Passing the keyword made every
-                    # directional derivative candidate fail before Entry/SL/TP.
-                    # We therefore bridge the ALREADY-LOADED layers through the
-                    # structure packet and call the legacy signature for Futures.
-                    # Spot keeps the direct kwarg path. No fetch/LLM/DB call is added.
-                    if analysis_system_type == 'futures' and isinstance(structure, dict):
-                        structure[_execution_bridge_key_175103] = capas
-                        levels = self.calculate_entry_levels(
-                            accion_consenso, trend, momentum, volatility, structure,
-                            symbol, timeframe, liquidation=liquidation_data,
-                        )
-                    else:
-                        levels = self.calculate_entry_levels(
-                            accion_consenso,
-                            trend,
-                            momentum,
-                            volatility,
-                            structure,
-                            symbol,
-                            timeframe,
-                            liquidation=liquidation_data,
-                            execution_observations=capas,
-                        )
+                    # Commit 17.5.10.4 — one execution ABI for Spot/Futures/Multi.
+                    # Futures legacy compatibility is installed once at the class
+                    # boundary by execution_abi_175104.py. No shared market flag
+                    # and no per-call signature branch are used here.
+                    levels = self.calculate_entry_levels(
+                        accion_consenso,
+                        trend,
+                        momentum,
+                        volatility,
+                        structure,
+                        symbol,
+                        timeframe,
+                        liquidation=liquidation_data,
+                        execution_observations=capas,
+                    )
                     levels = dict(levels or {})
-                    levels['pipeline_generation'] = '17.5.10.3'
+                    levels['pipeline_generation'] = '17.5.10.4'
                     levels['execution_runtime_failed'] = False
                     
                     # RC9.7.11: Futures reutiliza EXACTAMENTE la fracción
@@ -21120,7 +21129,7 @@ class TradingExpertSystem:
                     levels = self._get_default_levels(structure.get('current_price', 0), symbol)
                     levels = dict(levels or {})
                     levels.update({
-                        'pipeline_generation': '17.5.10.3',
+                        'pipeline_generation': '17.5.10.4',
                         'execution_runtime_failed': True,
                         'execution_runtime_error': f"{type(e).__name__}: {str(e)[:220]}",
                         'is_rejected': True,
@@ -21129,13 +21138,10 @@ class TradingExpertSystem:
                         'suggested_size': 0,
                         'rejected_reason': f"EXECUTION_RUNTIME_FAILED:{type(e).__name__}",
                     })
-                finally:
-                    if isinstance(structure, dict):
-                        structure.pop(_execution_bridge_key_175103, None)
             else:
                 levels = self._get_default_levels(structure.get('current_price', 0), symbol)
                 levels = dict(levels or {})
-                levels['pipeline_generation'] = '17.5.10.3'
+                levels['pipeline_generation'] = '17.5.10.4'
 
             # ==========================================================
             # COMMIT 17.5.10.2 — EXECUTION COMPLETENESS CONTRACT
@@ -21985,11 +21991,7 @@ class TradingExpertSystem:
             # (FuturesAnalysis lo registrará después con system_type='futures')
             if (
                 not intrabar_preview
-                and not getattr(
-                    self,
-                    '_skip_supabase_register',
-                    False
-                )
+                and analysis_system_type == 'spot'
             ):
                 try:
                     from review_trader import (
@@ -34606,8 +34608,13 @@ def api_run_scheduled():
 _FUTURES_UNIVERSE_CONFIG_LOCK = threading.Lock()
 
 def _configured_futures_module():
-    """Apply Commit 9.6 universe lazily after app.py has finished importing."""
+    """Apply universe config + Commit 17.5.10.4 execution ABI adapter."""
     import futures_system as futures_module
+    try:
+        from execution_abi_175104 import install_futures_execution_abi_175104
+        install_futures_execution_abi_175104(futures_module)
+    except Exception as exc:
+        print(f"⚠️ Commit 17.5.10.4 execution ABI no pudo instalarse: {exc}")
     try:
         from futures_universe import configure_futures_module
         with _FUTURES_UNIVERSE_CONFIG_LOCK:
@@ -34655,6 +34662,11 @@ _MULTI_PENDING_RESOURCE_DEFERRALS = 0
 
 def _get_multiasset_system():
     try:
+        # MultiAssetAnalysis inherits FuturesAnalysis. Install the ABI adapter
+        # before importing/using the subclass so both markets share one contract.
+        import futures_system as futures_module
+        from execution_abi_175104 import install_futures_execution_abi_175104
+        install_futures_execution_abi_175104(futures_module)
         from multiasset_system import multiasset_system
         return multiasset_system
     except Exception as exc:
@@ -35180,7 +35192,7 @@ def _public_pipeline_health_175103(analyses):
     summary = _technical_signal_funnel_summary(analyses or {})
     counts = dict(summary.get('stage_counts') or {})
     return {
-        'version': '17.5.10.3',
+        'version': '17.5.10.4',
         'analyzed_cells': int(summary.get('analyzed_cells') or 0),
         'executable': int(summary.get('executable_count') or 0),
         'runtime_failed': int(counts.get('EXECUTION_RUNTIME_FAILED') or 0),
@@ -35234,6 +35246,25 @@ def _multiasset_run_analysis(symbol, timeframe, owner='multi-background'):
         if isinstance(result,dict):
             result.setdefault('symbol',symbol); result.setdefault('timeframe',timeframe)
             result=_apply_17_5_8_preliminary_learning_prior(result,'multiasset')
+            _runtime_levels_175104 = result.get('levels') or {}
+            if (
+                isinstance(_runtime_levels_175104, dict)
+                and (
+                    _runtime_levels_175104.get('execution_runtime_failed')
+                    or _runtime_levels_175104.get('execution_runtime_error')
+                )
+            ):
+                return {
+                    'success':False,
+                    'symbol':symbol,
+                    'timeframe':timeframe,
+                    'runtime_failed':True,
+                    'error':str(
+                        _runtime_levels_175104.get('execution_runtime_error')
+                        or _runtime_levels_175104.get('rejected_reason')
+                        or 'EXECUTION_RUNTIME_FAILED'
+                    )[:180],
+                }
             if result.get('success') is not False:
                 _multiasset_cache_result(symbol,timeframe,result)
             return result
@@ -38844,6 +38875,24 @@ def _analyze_futures_all_parallel(combos_override=None):
             if not isinstance(r, dict):
                 raise ValueError(
                     f"Resultado inválido para {combo_name}"
+                )
+
+            # Commit 17.5.10.4: a caught execution exception is still a failed
+            # analysis. Do not publish/cache it as a successful NO_SIGNAL cycle.
+            _runtime_levels_175104 = r.get('levels') or {}
+            if (
+                isinstance(_runtime_levels_175104, dict)
+                and (
+                    _runtime_levels_175104.get('execution_runtime_failed')
+                    or _runtime_levels_175104.get('execution_runtime_error')
+                )
+            ):
+                raise RuntimeError(
+                    'EXECUTION_RUNTIME_FAILED: ' + str(
+                        _runtime_levels_175104.get('execution_runtime_error')
+                        or _runtime_levels_175104.get('rejected_reason')
+                        or 'execution geometry runtime failure'
+                    )[:220]
                 )
 
             # ---------------------------------------------------------

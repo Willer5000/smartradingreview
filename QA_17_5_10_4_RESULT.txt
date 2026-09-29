@@ -1,0 +1,21 @@
+BASE_HEAD: d94b6d2bb2b006bdd8064e333e0e3407d82a7eba
+PY_COMPILE: PASS
+NODE_CHECK: PASS
+JINJA_PARSE: PASS
+
+PASS stable market identity helper
+PASS app no longer uses shared skip flag for market identity/persistence
+PASS class ABI installer wired to Futures
+PASS MultiAsset installs inherited ABI before use
+PASS uniform execution_observations call
+PASS pipeline generation 17.5.10.4
+PASS Futures runtime failure becomes scheduler error
+PASS MultiAsset runtime failure is not cached as success
+PASS frontend status noise removed
+PASS frontend resilience preserved
+PASS template loads 17.5.10.4 JS
+PASS no signal-count quota in new ABI/UI
+PASS legacy Futures ABI accepts observations
+PASS ABI bridge leaves no mutable residue
+PASS ABI installer reports installed
+15/15 PASS

@@ -1,0 +1,86 @@
+{
+  "BASELINE_17_5_10_4.json": {
+    "sha256": "8132d661b341e2974cc56c019bffe47fd9e608bf2b3bfa007b56b755f831cb06",
+    "bytes": 833
+  },
+  "COMMIT_MESSAGE_17_5_10_4.txt": {
+    "sha256": "da3833ec7169c558cba0b49dd4ca450c7410b46c9f16bab723864cb01f8b98cc",
+    "bytes": 85
+  },
+  "QA_17_5_10_4_RESULT.txt": {
+    "sha256": "031aae10b7c28ce8793ec2f361cd1de4015c9e0d4722096e41adfaddac8c082a",
+    "bytes": 770
+  },
+  "README_17_5_10_4.md": {
+    "sha256": "4047b91da693cb962f8b0406d8b14563820ba4b9a69cd86bf8008e1a5b63484f",
+    "bytes": 1840
+  },
+  "__pycache__/app.cpython-313.pyc": {
+    "sha256": "58563b21059f5492c752c3af941a6d0df7987c01e5396b7a74a52560deb725db",
+    "bytes": 1849614
+  },
+  "__pycache__/execution_abi_175104.cpython-313.pyc": {
+    "sha256": "3e23f27e88b48577108a6e0d1cdd95b9d07adaed19c9228ec67709fe2e1f7eb1",
+    "bytes": 3870
+  },
+  "__pycache__/pipeline_integrity_175101.cpython-313.pyc": {
+    "sha256": "24487d1e5d9bf7973448141cffdee6b3b572f82e9230901c296018bb9e2c075f",
+    "bytes": 403
+  },
+  "__pycache__/pipeline_integrity_175102.cpython-313.pyc": {
+    "sha256": "f3cd6349e430dfd8ab844f7eec055a84bc2b6279f552d61f606c1ba8e0d33be1",
+    "bytes": 47133
+  },
+  "app.py": {
+    "sha256": "1a3ec9b14061c0c16afb9ebe691978c1dc9850f22ffcd3f17c66e666cd8bf05d",
+    "bytes": 2276741
+  },
+  "docs/BACKTEST_IMPACT_17_5_10_4.md": {
+    "sha256": "fa7bcc28d5a09915c8de2156054ee5f2b79f5ddbc956b4b6e28d6b7570bf87dd",
+    "bytes": 879
+  },
+  "docs/DIFF_AUDIT_17_5_10_4.patch": {
+    "sha256": "129001898ae8ba1fc2200b8c09d8203762cb4560d8385ce39a1b0a5d53ef5b91",
+    "bytes": 14762
+  },
+  "docs/INSTRUCCIONES_IMPLEMENTACION_17_5_10_4.md": {
+    "sha256": "64e73f30aff1b6c84d587061d36c3e732d58e1b8056c7f1a28043a6b269463df",
+    "bytes": 1454
+  },
+  "docs/PROMPT_MAESTRO_17_5_10_4.md": {
+    "sha256": "6c1a9a785db33cd426a2c8737afdba347b7e2640609d5a9f606f5896d1a4c3bd",
+    "bytes": 3081
+  },
+  "docs/QUALITY_CONTRACT_17_5_10_4.md": {
+    "sha256": "9c5da94ff3085a046b987ee7ef63984b106d96deb11419838bdfddf16c7b2f5f",
+    "bytes": 896
+  },
+  "execution_abi_175104.py": {
+    "sha256": "7f89bd2ce565e4909c8cb85f55e9cdf319261fef11fc65cfbee7bac9c362b005",
+    "bytes": 3398
+  },
+  "pipeline_integrity_175101.py": {
+    "sha256": "a3ff3f8d57c1cf19a1e65a8230c68052bfce9a25395f5bc029abfd161af99a4b",
+    "bytes": 304
+  },
+  "pipeline_integrity_175102.py": {
+    "sha256": "da2b2d96a4267bbac033300ec22587608e5d62b2e7554b38ee8896e8397a4274",
+    "bytes": 38071
+  },
+  "qa/__pycache__/qa_commit17_5_10_4.cpython-313.pyc": {
+    "sha256": "420a3b158a62d01070e9895653b666ddec030e55cb2b34d83356ef73b5610a7d",
+    "bytes": 5993
+  },
+  "qa/qa_commit17_5_10_4.py": {
+    "sha256": "7ab7a77bcf53745e1e078cd5edbb5b0a3fdf5ebd71f231d16b16f1eeb1604a4c",
+    "bytes": 3370
+  },
+  "static/runtime_resilience_175104.js": {
+    "sha256": "e5b4ce60dbed29c8112d64002e4bd3021e2128ef6b531846fcbe637d5fc7ae1c",
+    "bytes": 2788
+  },
+  "templates/index.html": {
+    "sha256": "f0fa37927371bde8cfbe10338d3f394fa90f1cb6b1848df090e082ed7aa79630",
+    "bytes": 217900
+  }
+}
