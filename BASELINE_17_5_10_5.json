@@ -1,0 +1,13 @@
+{
+  "repository": "Willer5000/smartradingreview",
+  "head": "6b26d8327ff5df7bc60cad238f903fbd3cdc4a5a",
+  "head_message": "17.5.10.4 Fix",
+  "reason_for_version": "Current repository already uses 17.5.10.4; do not recycle release number.",
+  "resource_delta": {
+    "threads": 0,
+    "polling": 0,
+    "llm_calls": 0,
+    "supabase_runtime_queries": 0,
+    "network_fanout": 0
+  }
+}

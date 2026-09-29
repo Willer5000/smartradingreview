@@ -1,0 +1,54 @@
+{
+  "BACKTEST_TREND_DISPLACEMENT_17_5_10_5.json": {
+    "sha256": "ac988ce524c51fdd3f1ce80411f486a45ee6d354d7bf19deff7ea237489c64c2",
+    "bytes": 1430
+  },
+  "BACKTEST_TREND_DISPLACEMENT_17_5_10_5.sql": {
+    "sha256": "522a762f0357b2f5c493eb4aec04dd4d74c5f270d2badbcd33910110a7878544",
+    "bytes": 1912
+  },
+  "BASELINE_17_5_10_5.json": {
+    "sha256": "40cd200d28a22165a88e4f9481fcd8257274aed8b31389a3e3892a572f92f1cb",
+    "bytes": 383
+  },
+  "COMMIT_MESSAGE_17_5_10_5.txt": {
+    "sha256": "8b595fe933e6b243166f748f4eaa4a7c03f1934599beaf386e0a3956eedc2f06",
+    "bytes": 79
+  },
+  "QA_17_5_10_5_RESULT.txt": {
+    "sha256": "c24f5d747ab5167af38f2d9f08e299fee3a8f5a92c4de6c754377301c3818972",
+    "bytes": 1056
+  },
+  "README_17_5_10_5.md": {
+    "sha256": "554607a25ac76958ae7fed13d5758d58efa1063d60b6fbcb9611167544efa2f4",
+    "bytes": 2223
+  },
+  "docs/BACKTEST_TREND_DISPLACEMENT_17_5_10_5.md": {
+    "sha256": "11fdae1efb838a11f229d5be67b97426775dd3c9a0de6ed6b95a9f0a8ba954b1",
+    "bytes": 1499
+  },
+  "docs/INSTRUCCIONES_IMPLEMENTACION_17_5_10_5.md": {
+    "sha256": "e6c79d806757eebe3a5907570a387a996dcff6d373613562963a62f63390dfaa",
+    "bytes": 1640
+  },
+  "docs/PROMPT_MAESTRO_17_5_10_5.md": {
+    "sha256": "a25e2847ca7814b1752bf27abe32e7a77cc848a2592017e7de0185b7af5958d7",
+    "bytes": 2075
+  },
+  "execution_abi_175104.py": {
+    "sha256": "e33f73f9c2acdceb7e1f43aea1f88e6b5369d9b20a436a4a47debed5de4e89f4",
+    "bytes": 15494
+  },
+  "macro_backoff_175105.py": {
+    "sha256": "d965ef0bf174c69f7c388c0f4326809ba8cac0816b7b35162f49c2eef29e3de2",
+    "bytes": 2757
+  },
+  "qa/qa_commit17_5_10_5.py": {
+    "sha256": "401aba2a3f715709ef4f50b57da0838b795adf106ccbded7c4e5867abc6fa1e5",
+    "bytes": 3040
+  },
+  "strategy_quality_extension_175105.py": {
+    "sha256": "021465bdaca08426fe427dec9a6747570ed6c6850fb4cf079a2d570a37894aef",
+    "bytes": 6621
+  }
+}

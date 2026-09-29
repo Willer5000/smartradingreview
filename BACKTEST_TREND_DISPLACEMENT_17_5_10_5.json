@@ -1,0 +1,50 @@
+{
+  "version": "17.5.10.5_CONTINUATION_EVIDENCE_V1",
+  "source": "Supabase historical Futures signals/results through 2026-09-16",
+  "method": {
+    "candidate_definition": "30m Futures signal where trader_intelligence contains aligned BAND_WALK_* plus ALINEACION_*_COMPLETA in the system action",
+    "geometry": "existing production Entry/SL/TP stored with each signal; no ATR/RR geometry fabricated for this test",
+    "split": "chronological 70/30",
+    "cost_stress_r_per_entered_trade": 0.118,
+    "expired_after_entry_treatment": "-1.118R",
+    "lookahead": false
+  },
+  "is": {
+    "n": 6,
+    "tp": 2,
+    "expectancy_r": 0.0655,
+    "net_r": 0.3929,
+    "profit_factor": 1.088,
+    "avg_mfe_r": 1.031,
+    "avg_mae_r": 0.754
+  },
+  "oos": {
+    "n": 4,
+    "tp": 3,
+    "expectancy_r": 1.4797,
+    "net_r": 5.9187,
+    "profit_factor": 6.294,
+    "avg_mfe_r": 1.872,
+    "avg_mae_r": 0.369
+  },
+  "overall_by_direction": {
+    "LONG": {
+      "n": 3,
+      "tp": 1,
+      "expectancy_r": -0.1427,
+      "profit_factor": 0.809
+    },
+    "SHORT": {
+      "n": 7,
+      "tp": 4,
+      "expectancy_r": 0.9628,
+      "profit_factor": 3.009
+    }
+  },
+  "decision": {
+    "historical_edge_positive_is_and_oos": true,
+    "production_promotion": false,
+    "reason": "N=10 total is too small and LONG subcohort is negative; activation now would risk overfitting.",
+    "live_role_in_17_5_10_5": "SHADOW_DIAGNOSTIC_ONLY"
+  }
+}
