@@ -139,10 +139,7 @@ def _normalize_chain_row(row: Mapping[str, Any], *, as_of: datetime) -> Optional
     expiry = _utc(row.get("expiry") or row.get("expiration") or row.get("expiration_timestamp") or row.get("expiry_timestamp"))
     if strike <= 0 or oi <= 0 or iv <= 0 or typ not in {"CALL", "PUT"} or expiry is None:
         return None
-    seconds = (expiry - as_of).total_seconds()
-    if seconds <= 0:
-        return None
-    seconds = max(60.0, seconds)
+    seconds = max(60.0, (expiry - as_of).total_seconds())
     t_years = seconds / (365.0 * 24.0 * 3600.0)
     multiplier = max(_f(row.get("contract_multiplier") or row.get("multiplier"), 1.0), 1e-12)
     return {
@@ -165,15 +162,14 @@ def _exposure_at_spot(rows: Iterable[Dict[str, Any]], spot: float, *, rate: floa
         # Common heuristic convention.  It is explicitly NOT observed dealer inventory.
         sign = 1.0 if row["option_type"] == "CALL" else -1.0
         signed_gex += sign * abs_gex
-        signed_delta_dollars += g["delta"] * row["open_interest"] * row["multiplier"] * spot
+        signed_delta_dollars += sign * g["delta"] * row["open_interest"] * row["multiplier"] * spot
     return signed_gex, signed_delta_dollars
 
 
 def _nearest_zero(points: List[Tuple[float, float]], fallback: Optional[float]) -> Optional[float]:
     if not points:
         return fallback
-    if all(y == 0 for _, y in points):
-        return None
+    best = min(points, key=lambda p: abs(p[1]))
     for (x1, y1), (x2, y2) in zip(points, points[1:]):
         if y1 == 0:
             return x1
@@ -181,7 +177,7 @@ def _nearest_zero(points: List[Tuple[float, float]], fallback: Optional[float]) 
             # Linear interpolation is adequate for a diagnostic level.
             w = abs(y1) / max(abs(y1) + abs(y2), 1e-12)
             return x1 + (x2 - x1) * w
-    return points[-1][0] if points[-1][1] == 0 else None
+    return best[0]
 
 
 def aggregate_gamma_exposure(
@@ -199,7 +195,7 @@ def aggregate_gamma_exposure(
         return {"version": VERSION, "available": False, "reason": "INVALID_SPOT", "authority": "NO_AUTHORITY"}
 
     rows: List[Dict[str, Any]] = []
-    for raw in __import__("itertools").islice(option_chain or [], 128):
+    for raw in option_chain or []:
         if isinstance(raw, Mapping):
             normalized = _normalize_chain_row(raw, as_of=now)
             if normalized is not None:
@@ -225,7 +221,7 @@ def aggregate_gamma_exposure(
         signed_component = sign * abs_gex
         total_abs += abs(abs_gex)
         signed += signed_component
-        delta_signed += g["delta"] * r["open_interest"] * r["multiplier"] * s
+        delta_signed += sign * g["delta"] * r["open_interest"] * r["multiplier"] * s
         hours = r["t_years"] * 365.0 * 24.0
         min_expiry_hours = hours if min_expiry_hours is None else min(min_expiry_hours, hours)
         if hours <= 24.0:
@@ -248,12 +244,7 @@ def aggregate_gamma_exposure(
     grid = [lo + (hi - lo) * i / (ngrid - 1) for i in range(ngrid)]
     gex_curve: List[Tuple[float, float]] = []
     delta_curve: List[Tuple[float, float]] = []
-    theta_curve = []
-    absolute_gamma_curve = []
     for px in grid:
-        theta = sum(black_scholes_greeks(spot=px, strike=r["strike"], t_years=r["t_years"], volatility=r["iv"], option_type=r["option_type"], rate=rate)["theta_per_day"] * r["open_interest"] * r["multiplier"] for r in rows)
-        theta_curve.append((px, theta))
-        absolute_gamma_curve.append((px, sum(black_scholes_greeks(spot=px, strike=r["strike"], t_years=r["t_years"], volatility=r["iv"], option_type=r["option_type"], rate=rate)["gamma"] * r["open_interest"] * r["multiplier"] * px * px * .01 for r in rows)))
         sg, sd = _exposure_at_spot(rows, px, rate=rate)
         gex_curve.append((px, sg))
         delta_curve.append((px, sd))
@@ -294,9 +285,6 @@ def aggregate_gamma_exposure(
         # mathematics, not probabilities or autonomous trade signals.
         "gex_curve": [[round(float(px), 10), round(float(value), 6)] for px, value in gex_curve],
         "delta_curve": [[round(float(px), 10), round(float(value), 6)] for px, value in delta_curve],
-        "absolute_gamma_curve": [[round(float(px),10),round(float(v),6)] for px,v in absolute_gamma_curve],
-        "theta_curve": [[round(float(px), 10), round(float(value), 6)] for px, value in theta_curve],
-        "delta_theta_convention": "LONG_OPTIONS_OI_WEIGHTED_NOT_DEALER_INVENTORY",
         "production_score_adjustment": 0.0,
         "can_create_direction": False,
         "can_bypass_safety": False,
@@ -328,15 +316,11 @@ def theoretical_gamma_shape(*, spot: float, volatility: float, as_of: Any = None
                 "multiplier": 1.0,
             })
     out = aggregate_gamma_exposure(rows, spot=s, as_of=now)
-    out["gex_curve"] = out.pop("absolute_gamma_curve", [])
     out.update({
         "authority": "SHADOW_THEORETICAL_ONLY",
         "observed_option_chain": False,
         "dealer_position_sign": "NOT_AVAILABLE_THEORETICAL_SHAPE_ONLY",
         "confidence": "THEORETICAL",
-        "gamma_regime": "THEORETICAL",
-        "call_wall": None, "put_wall": None, "gamma_wall": None,
-        "zero_gamma_level": None, "delta_neutral_level": None,
         "production_score_adjustment": 0.0,
         "can_create_direction": False,
     })

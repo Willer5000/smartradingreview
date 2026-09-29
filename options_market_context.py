@@ -13,8 +13,6 @@ then its Black-Scholes fallback remains SHADOW only.
 from __future__ import annotations
 
 import os
-import json
-import math
 import re
 import threading
 import time
@@ -29,13 +27,10 @@ except Exception:  # pragma: no cover
 VERSION = "COMMIT17_5_10_OPTIONS_CONTEXT_V1"
 DERIBIT_URL = "https://www.deribit.com/api/v2/public/get_book_summary_by_currency"
 CACHE_TTL = max(900, min(7200, int(os.getenv("OPTIONS_MM_CACHE_TTL_SECONDS", "1800") or 1800)))
-ENABLED = str(os.getenv("OPTIONS_MM_CONTEXT_ENABLED", "0")).strip().lower() not in {"0", "false", "no", "off"}
+ENABLED = str(os.getenv("OPTIONS_MM_CONTEXT_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
 _TIMEOUT = max(1.0, min(6.0, float(os.getenv("OPTIONS_MM_HTTP_TIMEOUT", "3.0") or 3.0)))
 _LOCK = threading.Lock()
 _CACHE: Dict[str, Dict[str, Any]] = {}
-_INFLIGHT = set()
-MAX_RESPONSE_BYTES = 512 * 1024
-MAX_CONTRACTS = 128
 
 
 def _currency_for_symbol(symbol: Any) -> Optional[str]:
@@ -89,7 +84,7 @@ def _normalize_summary_rows(rows: Any, *, now: Optional[datetime] = None) -> Lis
             oi_f, iv_f = float(oi or 0), float(iv or 0)
         except Exception:
             continue
-        if not math.isfinite(oi_f) or not math.isfinite(iv_f) or oi_f <= 0 or iv_f <= 0:
+        if oi_f <= 0 or iv_f <= 0:
             continue
         hours = (meta["expiry"] - now).total_seconds() / 3600.0
         if hours <= 0:
@@ -108,10 +103,10 @@ def _normalize_summary_rows(rows: Any, *, now: Optional[datetime] = None) -> Lis
     # Prefer true 0DTE/near-expiry. If none exist within 24h, use the nearest
     # expiry only; the math layer reports actual nearest_expiry_hours.
     within_24 = [r for r in parsed if (r["expiry"] - now).total_seconds() <= 24 * 3600]
+    if within_24:
+        return within_24
     nearest = min(r["expiry"] for r in parsed)
-    selected = within_24 or [r for r in parsed if r["expiry"] == nearest]
-    # Keep nearest-to-spot strikes first; retain a bounded snapshot for UI only.
-    return sorted(selected, key=lambda r: abs(r["strike"] - r["underlying_price"]))[:MAX_CONTRACTS]
+    return [r for r in parsed if r["expiry"] == nearest]
 
 
 def get_crypto_option_chain(symbol: Any) -> Dict[str, Any]:
@@ -124,43 +119,43 @@ def get_crypto_option_chain(symbol: Any) -> Dict[str, Any]:
             "reason": "NO_DIRECT_OPTION_UNDERLYING_FOR_SYMBOL",
         }
     now_mono = time.monotonic()
-    if not ENABLED or requests is None:
-        return {"available": False, "currency": currency, "rows": [], "reason": "DISABLED_FREE_RESOURCE_MODE", "version": VERSION}
     with _LOCK:
         cached = dict(_CACHE.get(currency) or {})
         if cached and now_mono - float(cached.get("at") or 0.0) < CACHE_TTL:
             return dict(cached.get("value") or {})
-        if currency in _INFLIGHT:
-            return {"available":False, "rows":[], "reason":"FETCH_IN_PROGRESS"}
-        _INFLIGHT.add(currency)
+    if not ENABLED or requests is None:
+        return {"available": False, "currency": currency, "reason": "DISABLED_OR_REQUESTS_UNAVAILABLE", "version": VERSION}
     try:
-        with requests.get(DERIBIT_URL, params={"currency":currency,"kind":"option"},
-                          timeout=_TIMEOUT, stream=True,
-                          headers={"User-Agent":"SmartradingReview/17.5.11"}) as resp:
-            resp.raise_for_status()
-            if int(resp.headers.get('Content-Length') or 0) > MAX_RESPONSE_BYTES:
-                raise ValueError('OPTION_RESPONSE_TOO_LARGE')
-            body = bytearray()
-            deadline = time.monotonic() + _TIMEOUT
-            for chunk in resp.iter_content(chunk_size=8192):
-                if time.monotonic() > deadline:
-                    raise TimeoutError('OPTION_RESPONSE_DEADLINE')
-                if len(body) + len(chunk) > MAX_RESPONSE_BYTES:
-                    raise ValueError('OPTION_RESPONSE_TOO_LARGE')
-                body.extend(chunk)
-            payload = json.loads(body)
-        rows = _normalize_summary_rows((payload or {}).get('result') or [])
-        value = {"available":bool(rows), "currency":currency, "rows":rows,
-                 "source":"DERIBIT_PUBLIC_BOOK_SUMMARY", "version":VERSION,
-                 "observed":bool(rows), "direct_underlying_match":True,
-                 "fetched_at":datetime.now(timezone.utc).isoformat()}
+        resp = requests.get(
+            DERIBIT_URL,
+            params={"currency": currency, "kind": "option"},
+            timeout=_TIMEOUT,
+            headers={"User-Agent": "SmartradingReview/17.5.10"},
+        )
+        resp.raise_for_status()
+        payload = resp.json() if hasattr(resp, "json") else {}
+        rows = _normalize_summary_rows((payload or {}).get("result") or [])
+        value = {
+            "available": bool(rows),
+            "currency": currency,
+            "rows": rows,
+            "source": "DERIBIT_PUBLIC_BOOK_SUMMARY",
+            "version": VERSION,
+            "observed": bool(rows),
+            "direct_underlying_match": True,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }
     except Exception as exc:
-        value = {"available":False,"currency":currency,"rows":[],"version":VERSION,
-                 "observed":False,"reason":type(exc).__name__}
-    finally:
-        with _LOCK:
-            _INFLIGHT.discard(currency)
-            # Failure is cached too: opening a page cannot create a retry storm.
-            if 'value' in locals():
-                _CACHE[currency] = {"at":time.monotonic(), "value":dict(value)}
+        value = {
+            "available": False,
+            "currency": currency,
+            "rows": [],
+            "source": "DERIBIT_PUBLIC_BOOK_SUMMARY",
+            "version": VERSION,
+            "observed": False,
+            "direct_underlying_match": True,
+            "reason": type(exc).__name__,
+        }
+    with _LOCK:
+        _CACHE[currency] = {"at": now_mono, "value": dict(value)}
     return value

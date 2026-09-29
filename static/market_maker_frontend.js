@@ -13,7 +13,6 @@
 
     const byId = id => document.getElementById(id);
     const finite = value => {
-        if (value === null || value === undefined || value === "") return null;
         const n = Number(value);
         return Number.isFinite(n) ? n : null;
     };
@@ -91,7 +90,7 @@
 
         const sourceNote = observed
             ? `Cadena pública observada · ${Number(mm.contracts_used || 0)} contratos usados · vencimiento más cercano ${finite(mm.nearest_expiry_hours)?.toFixed(1) ?? '--'} h.`
-            : 'Modelo ilustrativo: volatilidad anual supuesta 60%, vencimiento 6.5 h y OI sintético. No representa posiciones observadas.';
+            : 'Black-Scholes teórico sin Open Interest observado; sirve sólo para visualizar la forma de Gamma cerca del precio.';
         setText('mm-option-note', sourceNote);
         setText('mm-option-authority', observed
             ? 'GEX firmado usa CALL+ / PUT− como heurística. Open Interest no revela por sí solo el inventario real de market makers.'
@@ -104,28 +103,30 @@
             return;
         }
 
-        const pairs = rows => rows.filter(r => Array.isArray(r) && finite(r[0]) !== null && finite(r[1]) !== null).map(r => [Number(r[0]), Number(r[1])]);
-        const gp = pairs(gex), dp = pairs(delta), tp = pairs(mm.theta_curve || []);
-        const gx = gp.map(r => r[0]), gy = gp.map(r => r[1]);
-        const dx = dp.map(r => r[0]), dy = dp.map(r => r[1]);
-        if (!gx.length || !dx.length) { renderUnavailable('Curvas incompletas'); return; }
+        const gx = gex.map(row => Number(row?.[0])).filter(Number.isFinite);
+        const gy = gex.map(row => Number(row?.[1]));
+        const dx = delta.map(row => Number(row?.[0])).filter(Number.isFinite);
+        const dy = delta.map(row => Number(row?.[1]));
+        if (!gx.length || !dx.length || gy.some(v => !Number.isFinite(v)) || dy.some(v => !Number.isFinite(v))) {
+            renderUnavailable('Curvas Black-Scholes incompletas.');
+            return;
+        }
 
         const traces = [
             {
                 x: gx, y: gy, type: 'scatter', mode: 'lines',
-                name: observed ? 'GEX firmado (heurístico)' : 'Gamma absoluta (teórica)',
+                name: 'GEX firmado (heurístico)',
                 hovertemplate: 'Subyacente %{x:.4f}<br>GEX %{y:.3s}<extra></extra>',
                 line: {width: 2.4}
             },
             {
                 x: dx, y: dy, type: 'scatter', mode: 'lines', yaxis: 'y2',
-                name: 'Delta de opciones largas × OI',
+                name: 'Delta neta (heurística)',
                 hovertemplate: 'Subyacente %{x:.4f}<br>Delta $ %{y:.3s}<extra></extra>',
                 line: {width: 2.0, dash: 'dot'}
             }
         ];
 
-        if (tp.length) traces.push({x:tp.map(r=>r[0]), y:tp.map(r=>r[1]), type:'scatter', mode:'lines', yaxis:'y3', name:'Theta / día × OI', line:{width:2,dash:'dash'}});
         const shapes = [];
         const addVertical = (value, dash) => {
             const v = finite(value);
@@ -153,9 +154,8 @@
             font: {color:'#cfd8dc'},
             legend: {orientation:'h', y:1.12, x:0},
             xaxis: {title:'Precio del subyacente', gridcolor:'rgba(255,255,255,0.08)'},
-            yaxis: {domain:[0.36,1], title:'Gamma Exposure', gridcolor:'rgba(255,255,255,0.08)', zeroline:true},
+            yaxis: {title:'Gamma Exposure', gridcolor:'rgba(255,255,255,0.08)', zeroline:true},
             yaxis2: {title:'Delta $', overlaying:'y', side:'right', showgrid:false, zeroline:true},
-            yaxis3: {domain:[0,0.22], title:'Theta / día', anchor:'x', zeroline:true},
             shapes,
             annotations,
             hovermode:'x unified',

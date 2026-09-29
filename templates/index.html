@@ -1283,7 +1283,7 @@
                         </div>
                     </div>
 
-                {% if is_futures %}
+                {% if is_futures and not is_multiasset|default(false) %}
                 <!-- COMMIT 17.5.10 FINAL — BLACK-SCHOLES / GAMMA / 0DTE / DELTA -->
                 <div class="card bg-dark border-info mb-4 indicator-card" data-indicator="market-maker-options">
                     <div class="card-header d-flex justify-content-between align-items-center bg-info bg-opacity-10">
@@ -2655,7 +2655,7 @@
 
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI-2"></script>
     <script
-        src="{{ url_for('static', filename='script.js') }}?v=20260929-COMMIT17-5-11"
+        src="{{ url_for('static', filename='script.js') }}?v=20260924-COMMIT12-1-QA"
     ></script>
 
 
@@ -2666,15 +2666,15 @@
     {% if is_futures %}
 
     <script
-        src="{{ url_for('static', filename='futures.js') }}?v=20260929-COMMIT17-5-11"
+        src="{{ url_for('static', filename='futures.js') }}?v=20260924-COMMIT12-1-QA"
     ></script>
     <script
-        src="{{ url_for('static', filename='market_maker_frontend.js') }}?v=20260929-COMMIT17-5-11"
+        src="{{ url_for('static', filename='market_maker_frontend.js') }}?v=20260929-COMMIT17-5-10-FINAL"
     ></script>
 
     {% endif %}
 
-    <script src="{{ url_for('static', filename='chart_workspace.js') }}?v=20260929-COMMIT17-5-11"></script>
+    <script src="{{ url_for('static', filename='chart_workspace.js') }}?v=20260911-C15-ORDERFLOW"></script>
 
     <!-- ============================================================= -->
     <!-- IA AISLADA -->

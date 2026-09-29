@@ -17644,10 +17644,43 @@ class TradingExpertSystem:
                         or 'UNSPECIFIED'
                     ).upper()
 
-                    # 17.5.11: optional visual math is computed once in the UI
-                    # worker. No options HTTP/math in Entry/SL/TP selection.
-                    _market_maker_context = {'authority': 'UI_CONTEXT_ONLY',
-                                             'production_score_adjustment': 0.0}
+                    # 17.5.10: market-maker mathematics is a tool for the
+                    # execution workers, not a vote.  With an observed option
+                    # chain it computes OI-weighted GEX/Delta-neutral context;
+                    # without one it provides a Black-Scholes theoretical
+                    # gamma shape in SHADOW only.  No score/gate is changed.
+                    try:
+                        from market_maker_math import build_market_maker_context as _build_mm_context
+                        _option_chain = (
+                            observations.get('option_chain')
+                            or (structure.get('option_chain') if isinstance(structure, dict) else None)
+                            or []
+                        )
+                        # If the analysis does not already carry a lawful chain,
+                        # crypto Futures may use a cached Deribit public summary.
+                        # This happens only after a directional execution candidate
+                        # exists, so bandwidth is bounded and failures are fail-open.
+                        if execution_market_type == 'futures' and not _option_chain:
+                            try:
+                                from options_market_context import get_crypto_option_chain
+                                _chain_snapshot = get_crypto_option_chain(symbol) or {}
+                                _option_chain = _chain_snapshot.get('rows') or []
+                            except Exception:
+                                _option_chain = []
+                        _mm_vol = 0.60
+                        try:
+                            _atr_pct = float((volatility or {}).get('atr_pct') or 0)
+                            if _atr_pct > 0:
+                                _mm_vol = max(0.15, min(1.80, (_atr_pct / 100.0) * (365.0 ** 0.5) * 2.0))
+                        except Exception:
+                            pass
+                        _market_maker_context = _build_mm_context(
+                            spot=float(current_price),
+                            option_chain=_option_chain if isinstance(_option_chain, (list, tuple)) else [],
+                            realized_or_implied_volatility=_mm_vol,
+                        ) or {}
+                    except Exception:
+                        _market_maker_context = {'authority': 'UNAVAILABLE_FAIL_OPEN', 'production_score_adjustment': 0.0}
 
                     execution_context = build_execution_context(
                         structure=structure,
@@ -34434,11 +34467,11 @@ def _multiasset_cache_result(symbol, timeframe, result):
     if not isinstance(result, dict) or result.get('success') is False:
         return False
     with _MULTI_ASSET_CACHE['lock']:
-        _MULTI_ASSET_CACHE['analysis'][(str(symbol), str(timeframe))] = _compact_futures_runtime_result(result)
+        _MULTI_ASSET_CACHE['analysis'][(str(symbol), str(timeframe))] = dict(result)
         _MULTI_ASSET_CACHE['updated_at'] = time.time()
-        if len(_MULTI_ASSET_CACHE['analysis']) > 21:
+        if len(_MULTI_ASSET_CACHE['analysis']) > 8:
             keys = list(_MULTI_ASSET_CACHE['analysis'].keys())
-            for old in keys[:-21]:
+            for old in keys[:-8]:
                 _MULTI_ASSET_CACHE['analysis'].pop(old, None)
     return True
 
@@ -34647,8 +34680,45 @@ def _apply_17_5_10_profitability_market_maker_context(result, market='futures'):
     out = dict(result)
     levels = dict(out.get('levels') or {})
 
-    # 17.5.11: this function is also called by cache-only signal endpoints.
-    # Never fetch an option chain or rebuild curves from here.
+    # --- Market-maker / option math context (context-only in 17.5.10) ---
+    try:
+        from market_maker_math import build_market_maker_context
+        chain = (
+            out.get('option_chain')
+            or (out.get('context') or {}).get('option_chain')
+            or levels.get('option_chain')
+            or []
+        )
+        if mk == 'futures' and not chain:
+            try:
+                from options_market_context import get_crypto_option_chain
+                _chain_snapshot = get_crypto_option_chain(out.get('symbol')) or {}
+                chain = _chain_snapshot.get('rows') or []
+            except Exception:
+                chain = []
+        spot = float(out.get('live_price') or out.get('current_price') or levels.get('entry') or 0)
+        if spot > 0:
+            mm = build_market_maker_context(
+                spot=spot,
+                option_chain=chain if isinstance(chain, (list, tuple)) else [],
+                realized_or_implied_volatility=_estimate_mm_volatility(out),
+                as_of=(out.get('source_candle_close_timestamp') or out.get('source_candle_timestamp')),
+            ) or {}
+            levels['market_maker_math_version'] = _MM_CONTEXT_VERSION
+            levels['market_maker_context'] = mm
+            levels['market_maker_gamma_regime'] = mm.get('gamma_regime')
+            levels['market_maker_zero_gamma_level'] = mm.get('zero_gamma_level')
+            levels['market_maker_delta_neutral_level'] = mm.get('delta_neutral_level')
+            levels['market_maker_call_wall'] = mm.get('call_wall')
+            levels['market_maker_put_wall'] = mm.get('put_wall')
+            levels['market_maker_0dte_gamma_share'] = mm.get('zero_dte_gamma_share')
+            levels['market_maker_context_authority'] = mm.get('authority')
+            levels['market_maker_observed_option_chain'] = bool(mm.get('observed_option_chain'))
+    except Exception as mm_error:
+        levels['market_maker_math_version'] = _MM_CONTEXT_VERSION
+        levels['market_maker_context_authority'] = 'UNAVAILABLE_FAIL_OPEN'
+        levels['market_maker_context_error'] = type(mm_error).__name__
+
     out['levels'] = levels
 
     # --- Profitability evidence for diagnostics / ReviewTrader only ---
@@ -34973,6 +35043,8 @@ def _multiasset_record_retry(bucket, error):
             'error': str(error or '')[:160],
         })
         _MULTI_DEEP_RETRY[bucket] = row
+        if attempts >= 3:
+            _MULTI_AUTO_DONE.add(bucket)
         if len(_MULTI_DEEP_RETRY) > 80:
             for old in list(_MULTI_DEEP_RETRY)[:30]:
                 _MULTI_DEEP_RETRY.pop(old, None)
@@ -35004,7 +35076,7 @@ def _multiasset_enqueue_due(due, now):
             _MULTI_PENDING_QUEUE.append({
                 'bucket': bucket, 'symbol': symbol, 'timeframe': tf,
                 'enqueued_at': now_ts,
-                'expires_at': (now.timestamp() // {'1h':3600,'4h':14400,'1D':86400}.get(tf,3600)) * {'1h':3600,'4h':14400,'1D':86400}.get(tf,3600) + _multiasset_queue_ttl_seconds(tf),
+                'expires_at': now_ts + _multiasset_queue_ttl_seconds(tf),
             })
             _MULTI_PENDING_KEYS.add(bucket)
 
@@ -35080,7 +35152,7 @@ def _multiasset_background_tick():
             with _MULTI_ROUTER_STATE_LOCK:
                 _MULTI_ROUTER_STATE.update({'rows':list(rows_4h),'last_scan_at':now_mono,'next_scan_at':now_mono+interval,'interval_seconds':interval})
 
-        candidates_4h=[r for r in rows_4h if _multiasset_bucket(r.get('symbol'),'4h',now) not in _MULTI_AUTO_DONE][:MULTIASSET_DEEP_LIMIT]
+        candidates_4h=[r for r in rows_4h if r.get('deep_candidate')][:MULTIASSET_DEEP_LIMIT]
         due=[]
         if plan['4h']['due']:
             due.extend((r['symbol'],'4h') for r in candidates_4h)
@@ -35089,7 +35161,7 @@ def _multiasset_background_tick():
             force=not _multiasset_close_refresh_done(plan['1D']['key'])
             rows_1d=_multiasset_scan('1D',force=force)
             if rows_1d: _multiasset_mark_close_refresh(plan['1D']['key'])
-            due.extend((r['symbol'],'1D') for r in rows_1d if _multiasset_bucket(r.get('symbol'),'1D',now) not in _MULTI_AUTO_DONE)
+            due.extend((r['symbol'],'1D') for r in rows_1d if r.get('deep_candidate'))
 
         # 17.5.5: 1h is judged by its OWN closed 1h router, not by 4h.
         # The quality floor remains 82; this restores coverage without lowering
@@ -35099,7 +35171,8 @@ def _multiasset_background_tick():
             force=not _multiasset_close_refresh_done(plan['1h']['key'])
             rows_1h=_multiasset_scan('1h',force=force)
             if rows_1h: _multiasset_mark_close_refresh(plan['1h']['key'])
-            fast=[r for r in rows_1h if float(r.get('router_score') or 0) >= _MULTI_FAST_LANE_MIN_SCORE]
+            fast=[r for r in rows_1h if r.get('deep_candidate')
+                  and float(r.get('router_score') or 0) >= _MULTI_FAST_LANE_MIN_SCORE]
             due[0:0]=[(r['symbol'],'1h') for r in fast]
 
         due=list(dict.fromkeys(due))
@@ -35124,7 +35197,7 @@ def _multiasset_background_tick():
                 if resource_blocked:
                     _MULTI_PENDING_RESOURCE_DEFERRALS += 1
             if resource_blocked:
-                continue
+                return
             if not _multiasset_retry_ready(bucket,now_mono):
                 continue
             result=_multiasset_run_analysis(symbol,tf,owner=f'multi-background:{symbol}:{tf}')
@@ -35179,8 +35252,7 @@ def api_multiasset_opportunities():
     try:
         from multiasset_system import scan_opportunities, MULTIASSET_DEEP_LIMIT
         tf=str(request.args.get('timeframe') or '4h')
-        with _MULTI_ROUTER_STATE_LOCK:
-            rows=list(_MULTI_ROUTER_STATE.get('rows') or []) if tf == '4h' else []
+        rows=scan_opportunities(tf, force=False)
         with _MULTI_ASSET_CACHE['lock']:
             analyses=dict(_MULTI_ASSET_CACHE['analysis'])
         signals=[]
@@ -35199,7 +35271,6 @@ def api_multiasset_opportunities():
 
 @app.route('/api/multiasset/analyze', methods=['POST'])
 def api_multiasset_analyze():
-    """17.5.11: HTTP never waits for a full Multi-Asset market analysis."""
     try:
         payload=request.get_json(silent=True) or {}
         symbol=str(payload.get('symbol') or 'CL-USDT').upper().replace('/','-')
@@ -35207,16 +35278,9 @@ def api_multiasset_analyze():
         from multiasset_system import MULTIASSET_SYMBOLS, MULTIASSET_TIMEFRAMES
         if symbol not in MULTIASSET_SYMBOLS or timeframe not in MULTIASSET_TIMEFRAMES:
             return jsonify({'success':False,'error':'Símbolo/temporalidad fuera del universo Multi-Activo'}),400
-        cached = _get_futures_ui_cached(symbol, timeframe)
-        if cached is not None:
-            return jsonify({'success':True, 'data':cached, 'ui_cache':True}),200
-        with _MULTI_ASSET_CACHE['lock']:
-            partial = (_MULTI_ASSET_CACHE.get('analysis') or {}).get((symbol,timeframe))
-        recent_error = _get_futures_ui_recent_error(symbol, timeframe, 30)
-        state = 'BACKOFF' if recent_error else _start_futures_ui_analysis_async(symbol,timeframe,market='multiasset')
-        return jsonify({'success':False,'busy':True,'deferred':True,'partial':bool(partial),
-                        'data':partial,'job_state':state,'retry_after_ms':7000,
-                        'error':'Preparando análisis; la página sigue disponible.'}),202
+        result=_multiasset_run_analysis(symbol,timeframe,owner=f'multi-ui:{symbol}:{timeframe}')
+        status=202 if result.get('busy') else 200
+        return jsonify(result),status
     except Exception as exc:
         return jsonify({'success':False,'error':str(exc)[:180]}),500
 
@@ -35324,8 +35388,7 @@ def api_backtest_prior():
 def api_multiasset_correlation():
     try:
         from multiasset_system import scan_opportunities
-        with _MULTI_ROUTER_STATE_LOCK:
-            rows=list(_MULTI_ROUTER_STATE.get('rows') or [])
+        rows=scan_opportunities(str(request.args.get('timeframe') or '4h'),force=False)
         selected=str(request.args.get('symbol') or '')
         best=rows[0] if rows else None
         return jsonify({'success':True,'selected_symbol':selected,'market_context':'MULTI_ASSET_OPPORTUNITY_ROUTER','best_opportunity':best,'rankings':rows[:7],'description':'Router determinístico por actividad/tendencia/volatilidad; Macro Gate confirma o veta, nunca crea dirección.'})
@@ -35890,9 +35953,6 @@ def _compact_futures_runtime_result(result):
         'rejected_reason', 'timestamp', 'research_only', 'research_universe',
         'risk_class', 'exit_profile', 'risk_budget_multiplier', 'entry_zone_pct',
         'max_entry_wait_bars', 'research_representative', 'operational_timeframe_allowed',
-        'valid_until', 'source_valid_until', 'is_executable', 'publication_eligible',
-        'display_name', 'asset_class', 'multiasset_macro', 'multiasset_specialist',
-        'multiasset_strategy_bank', 'futures_publication_gate', 'lifecycle_status', 'activa',
     )
     for key in simple_keys:
         if key in result:
@@ -35922,7 +35982,7 @@ def _compact_futures_runtime_result(result):
         for bulky_key in (
             'challenger_candidates', 'execution_challengers',
             'all_entry_candidates', 'all_sl_candidates', 'all_tp_candidates',
-            'debug_payload', 'market_maker_context', 'option_chain',
+            'debug_payload',
         ):
             compact_levels.pop(bulky_key, None)
         compact['levels'] = compact_levels
@@ -36092,7 +36152,7 @@ def _compact_fast_futures_ui_result(result, timeframe):
     leverage y publicación ya fueron calculados con toda la historia. Este
     paso ocurre al final y sólo evita retener listas largas en el caché UI.
     """
-    limit = _FAST_FUTURES_UI_POINTS.get(str(timeframe or ''), 192)
+    limit = _FAST_FUTURES_UI_POINTS.get(str(timeframe or ''))
     if not limit or not isinstance(result, dict):
         return result
 
@@ -36620,34 +36680,7 @@ def _store_futures_ui_cached(symbol, timeframe, payload):
                 items.pop(old_key, None)
 
 
-def _attach_mm_ui_context(result, market):
-    """UI only, bounded curves; never attached to publication/persistence snapshots."""
-    if not isinstance(result, dict):
-        return result
-    out = dict(result)
-    levels = dict(out.get('levels') or {})
-    try:
-        import math
-        from options_market_context import get_crypto_option_chain
-        from market_maker_math import build_market_maker_context
-        spot = float(out.get('current_price') or out.get('price') or 0)
-        if not math.isfinite(spot) or spot <= 0:
-            raise ValueError('Precio actual no disponible')
-        chain = get_crypto_option_chain(out.get('symbol')) if market == 'futures' else {}
-        # The fallback uses an explicit illustrative volatility, not measured IV.
-        mm = build_market_maker_context(spot=spot, option_chain=chain.get('rows') or None,
-            realized_or_implied_volatility=0.60, as_of=chain.get('fetched_at'))
-        mm['fallback_volatility_assumption'] = 0.60 if not mm.get('observed_option_chain') else None
-        mm['source_reason'] = chain.get('reason')
-        mm['authority'] = 'UI_CONTEXT_ONLY'
-        levels['market_maker_context'] = mm
-    except Exception as exc:
-        levels['market_maker_context'] = {'available': False, 'authority': 'NO_AUTHORITY', 'reason': str(exc)[:120]}
-    out['levels'] = levels
-    return out
-
-
-def _start_futures_ui_analysis_async(symbol, timeframe, market='futures'):
+def _start_futures_ui_analysis_async(symbol, timeframe):
     """Schedule exactly one chart analysis and return immediately to HTTP."""
     key = _futures_ui_key(symbol, timeframe)
     _mark_futures_interactive_priority()
@@ -36655,13 +36688,11 @@ def _start_futures_ui_analysis_async(symbol, timeframe, market='futures'):
     with _FUTURES_UI_CACHE['lock']:
         if key in _FUTURES_UI_CACHE['running']:
             return 'RUNNING'
-        if _FUTURES_UI_CACHE['running']:
-            return 'DEFERRED_BUSY'
         _FUTURES_UI_CACHE['running'].add(key)
         _FUTURES_UI_CACHE['errors'].pop(key, None)
 
     def _do_ui_analysis():
-        owner = f"{'multi' if market == 'multiasset' else 'futures'}-ui:{symbol}:{timeframe}"
+        owner = f'futures-ui:{symbol}:{timeframe}'
         heavy_acquired = False
         try:
             # Current incremental combo may finish first.  Because interactive
@@ -36670,52 +36701,47 @@ def _start_futures_ui_analysis_async(symbol, timeframe, market='futures'):
             if not heavy_acquired:
                 raise RuntimeError('No se obtuvo turno de análisis Futures')
 
-            if market == 'multiasset':
-                engine = _get_multiasset_system()
-                if engine is None:
-                    raise RuntimeError('MultiAssetSystem no disponible')
-                result = engine.analyze_multiasset_market(symbol, timeframe, closed_candle_only=True)
-                if not isinstance(result, dict) or result.get('success') is False:
-                    raise RuntimeError(str((result or {}).get('error') or 'Análisis Multi-Activo vacío'))
-                result.setdefault('symbol', symbol)
-                result.setdefault('timeframe', timeframe)
-                result = _apply_17_5_8_preliminary_learning_prior(result, 'multiasset')
-                _multiasset_cache_result(symbol, timeframe, result)
-            else:
-                futures = _get_futures_system()
-                if futures is None:
-                    raise RuntimeError('FuturesSystem no disponible')
+            futures = _get_futures_system()
+            if futures is None:
+                raise RuntimeError('FuturesSystem no disponible')
 
-                # El preview no comparte heatmaps/zonas mutables con la autoridad
-                # CLOSED_CANDLE. Así una vela que aún está formándose no contamina
-                # la confirmación que nacerá cuando cierre.
-                from copy import copy
-                preview_futures = copy(futures)
-                preview_futures.liquidation_heatmaps = {}
-                preview_futures.dynamic_zones = {}
-                preview_futures.last_analysis = {}
-                preview_futures.voting_history = {}
+            # El preview no comparte heatmaps/zonas mutables con la autoridad
+            # CLOSED_CANDLE. Así una vela que aún está formándose no contamina
+            # la confirmación que nacerá cuando cierre.
+            from copy import copy
+            preview_futures = copy(futures)
+            preview_futures.liquidation_heatmaps = {}
+            preview_futures.dynamic_zones = {}
+            preview_futures.last_analysis = {}
+            preview_futures.voting_history = {}
 
-                _log_memory_runtime(f'{owner}:before')
-                result = preview_futures.analyze_futures_market(
-                    symbol,
-                    timeframe,
-                    closed_candle_only=False,
-                    intrabar_preview=True,
-                )
-                if not result:
-                    raise RuntimeError('Análisis Futures vacío')
+            _log_memory_runtime(f'{owner}:before')
+            result = preview_futures.analyze_futures_market(
+                symbol,
+                timeframe,
+                closed_candle_only=False,
+                intrabar_preview=True,
+            )
+            if not result:
+                raise RuntimeError('Análisis Futures vacío')
 
-                result = _apply_profitability_router(result, symbol, timeframe)
-                result = _apply_96_futures_risk_policy(result, symbol, timeframe)
-                result = _apply_36s_futures_ai_control(result, symbol, timeframe)
-                result = _apply_17_5_8_preliminary_learning_prior(result, 'futures')
-                result = _enrich_futures_public_message(result)
-            ui_result = _compact_fast_futures_ui_result(_compact_futures_ui_result(result), timeframe)
-            ui_result = _attach_mm_ui_context(ui_result, market)
-            if market == 'futures':
-                runtime_result = _compact_futures_runtime_result(result)
-                _store_futures_intrabar_preview(symbol, timeframe, result, runtime_result=runtime_result)
+            result = _apply_profitability_router(result, symbol, timeframe)
+            result = _apply_96_futures_risk_policy(result, symbol, timeframe)
+            result = _apply_36s_futures_ai_control(result, symbol, timeframe)
+            result = _apply_17_5_8_preliminary_learning_prior(result, 'futures')
+            result = _enrich_futures_public_message(result)
+            ui_result = _compact_futures_ui_result(result)
+            ui_result = _compact_fast_futures_ui_result(
+                ui_result,
+                timeframe,
+            )
+            runtime_result = _compact_futures_runtime_result(result)
+
+            # El preview vive en un caché separado. Nunca sustituye el snapshot
+            # CLOSED_CANDLE que alimenta Confirmadas/Vigentes/lifecycle.
+            _store_futures_intrabar_preview(
+                symbol, timeframe, result, runtime_result=runtime_result
+            )
             _store_futures_ui_cached(symbol, timeframe, ui_result)
             _log_memory_runtime(f'{owner}:after')
         except Exception as exc:
@@ -42531,72 +42557,11 @@ _confirmed_signal_alerts_lock = threading.Lock()
 _CONFIRMED_SIGNAL_OUTBOX_RETENTION = 2 * 24 * 3600
 _confirmed_signal_outbox = {}
 _confirmed_signal_outbox_lock = threading.Lock()
-_confirmed_signal_send_lock = threading.Lock()
-
-
-def _confirmed_delivery_valid_17_5_11(market, signal):
-    """Revalidate explicit publication, closed data, expiry and preferences."""
-    import math
-    try:
-        if market not in ('spot', 'futures', 'multiasset') or not isinstance(signal, dict):
-            return False
-        levels = dict(signal.get('levels') or {})
-        for field in ('entry', 'stop_loss', 'take_profit', 'leverage'):
-            levels.setdefault(field, signal.get(field))
-        decision = signal.get('decision') or {}
-        action = str(decision.get('action') if isinstance(decision, dict) else decision).upper()
-        confidence = float(decision.get('confidence') if isinstance(decision, dict) else signal.get('confidence', 0))
-        if not math.isfinite(confidence) or not 60 <= confidence <= 100:
-            return False
-        if not signal.get('symbol') or not signal.get('timeframe'):
-            return False
-        if signal.get('success') is False or signal.get('source_candle_closed') is False or signal.get('market_data_is_synthetic') or signal.get('activa') == 0:
-            return False
-        if str(signal.get('lifecycle_status') or '').lower() in ('expired', 'invalidated', 'cancelled', 'tp_hit', 'sl_hit', 'closed'):
-            return False
-        if str(signal.get('analysis_mode') or '').upper() in ('INTRABAR', 'INTRABAR_PREVIEW', 'MANUAL'):
-            return False
-        if signal.get('publication_eligible') is False or signal.get('is_executable') is False or levels.get('is_executable') is False or levels.get('is_rejected'):
-            return False
-        if market in ('futures', 'multiasset'):
-            if action not in ('LONG', 'SHORT'):
-                return False
-            if str(levels.get('publication_status') or signal.get('publication_status') or '').upper() != 'EXECUTABLE_SIGNAL':
-                return False
-            if not math.isfinite(float(levels.get('leverage') or 0)) or float(levels.get('leverage') or 0) <= 0:
-                return False
-            if (signal.get('futures_publication_gate') or {}).get('eligible') is False:
-                return False
-        elif action not in ('COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT'):
-            return False
-        values = [float(levels.get(k) or 0) for k in ('entry', 'stop_loss', 'take_profit')]
-        if not all(math.isfinite(x) and x > 0 for x in values):
-            return False
-        if _confirmed_signal_rr(action, *values) is None:
-            return False
-        tf = signal['timeframe']
-        if not _confirmed_signal_recent_enough(signal, tf) or not _confirmed_signal_preferences_allow(market, tf):
-            return False
-        close = _confirmed_signal_close_timestamp(signal, tf)
-        if close is None or close > pd.Timestamp.now(tz='UTC'):
-            return False
-        for raw in (signal.get('valid_until'), signal.get('source_valid_until'), levels.get('valid_until')):
-            if raw:
-                expiry = pd.Timestamp(raw)
-                expiry = expiry.tz_localize('UTC') if expiry.tz is None else expiry.tz_convert('UTC')
-                if pd.isna(expiry) or expiry <= pd.Timestamp.now(tz='UTC'):
-                    return False
-        return True
-    except Exception:
-        return False
 
 
 def _compact_confirmed_outbox_signal(market, signal):
     signal = signal or {}
     levels = dict(signal.get('levels') or {})
-    for name in ('entry','stop_loss','take_profit','leverage'):
-        if levels.get(name) is None:
-            levels[name] = signal.get(name)
     decision = signal.get('decision') or {}
     if not isinstance(decision, dict):
         decision = {'action': decision or signal.get('action'), 'confidence': signal.get('confidence')}
@@ -42619,14 +42584,6 @@ def _compact_confirmed_outbox_signal(market, signal):
         'previous_candle_timestamp': signal.get('previous_candle_timestamp'),
         'valid_until': signal.get('valid_until') or levels.get('valid_until'),
         'risk_class': signal.get('risk_class') or levels.get('risk_class') or levels.get('safety_band'),
-        'source_candle_closed': signal.get('source_candle_closed'),
-        'market_data_is_synthetic': signal.get('market_data_is_synthetic'),
-        'analysis_mode': signal.get('analysis_mode'),
-        'activa': signal.get('activa'),
-        'lifecycle_status': signal.get('lifecycle_status'),
-        'source_valid_until': signal.get('source_valid_until'),
-        'futures_publication_gate': signal.get('futures_publication_gate'),
-        'success': signal.get('success'),
         'market': str(market or '').lower(),
     }
 
@@ -42673,7 +42630,7 @@ def _confirmed_outbox_enqueue(market, signal, key):
     compact = _compact_confirmed_outbox_signal(market, signal)
     with _confirmed_signal_outbox_lock:
         prior = dict(_confirmed_signal_outbox.get(key) or {})
-        if prior:
+        if str(prior.get('state') or '').upper() == 'SENT':
             return prior
         item = {
             'key': key, 'market': str(market or '').lower(), 'signal': compact,
@@ -42686,39 +42643,20 @@ def _confirmed_outbox_enqueue(market, signal, key):
         }
         _confirmed_signal_outbox[key] = item
         if len(_confirmed_signal_outbox) > 300:
-            terminal = sorted((k for k,v in _confirmed_signal_outbox.items()
-                if v.get('state') in ('SENT','EXPIRED_OR_SUPERSEDED')),
-                key=lambda k: float(_confirmed_signal_outbox[k].get('updated_at') or 0))
-            if terminal:
-                _confirmed_signal_outbox.pop(terminal[0], None)
-            else:
-                _confirmed_signal_outbox.pop(key, None)
-                print('⚠️ CONFIRMED outbox llena: evento no encolado; pendientes conservados.')
-                return None
+            ordered = sorted(_confirmed_signal_outbox.items(), key=lambda kv: float((kv[1] or {}).get('updated_at') or 0.0), reverse=True)
+            _confirmed_signal_outbox.clear(); _confirmed_signal_outbox.update(dict(ordered[:300]))
     _save_confirmed_signal_outbox_to_disk()
     return item
 
 
 def _attempt_confirmed_outbox_event(key):
-    if not _confirmed_signal_send_lock.acquire(blocking=False):
-        return False
-    try:
-        return _attempt_confirmed_outbox_event_inner(key)
-    finally:
-        _confirmed_signal_send_lock.release()
-
-
-def _attempt_confirmed_outbox_event_inner(key):
     now = time.time()
     with _confirmed_signal_outbox_lock:
         item = dict(_confirmed_signal_outbox.get(key) or {})
     if not item:
         return False
-    state = str(item.get('state') or '').upper()
-    if state == 'SENT':
+    if str(item.get('state') or '').upper() == 'SENT':
         return True
-    if state not in ('PENDING', 'FAILED_RETRYABLE'):
-        return False
     if now < float(item.get('next_retry_at') or 0.0):
         return False
     market = str(item.get('market') or '').lower()
@@ -42736,7 +42674,17 @@ def _attempt_confirmed_outbox_event_inner(key):
             return True
 
     # Revalidate technical publication and freshness before each retry.
-    valid = _confirmed_delivery_valid_17_5_11(market, signal)
+    levels = signal.get('levels') or {}; decision = signal.get('decision') or {}
+    action = str(decision.get('action') or '').upper()
+    confidence = float(decision.get('confidence') or 0)
+    publication = str(levels.get('publication_status') or signal.get('publication_status') or '').upper()
+    valid = bool(
+        action in (('LONG','SHORT') if market in ('futures','multiasset') else ('COMPRA_SPOT','VENTA_SPOT','LONG','SHORT'))
+        and confidence >= 60
+        and (market not in ('futures','multiasset') or publication == 'EXECUTABLE_SIGNAL')
+        and _confirmed_signal_preferences_allow(market, timeframe)
+        and _confirmed_signal_recent_enough(signal, timeframe)
+    )
     if not valid:
         with _confirmed_signal_outbox_lock:
             if event_key in _confirmed_signal_outbox:
@@ -51351,7 +51299,7 @@ def futures_standard_alert_loop():
     while True:
         try:
             # 17.5.10: delivery retry is independent from analysis completion.
-            _retry_confirmed_signal_outbox(limit=1)
+            _retry_confirmed_signal_outbox(limit=3)
             # Commit 12: piggyback Multi-Activo on this existing daemon. No
             # additional worker/thread is created; scanner is TTL-cached.
             _multiasset_background_tick()
