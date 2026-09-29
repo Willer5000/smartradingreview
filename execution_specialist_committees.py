@@ -20,7 +20,19 @@ from math import isfinite, sqrt
 from statistics import median
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-VERSION = "COMMIT17_5_6_EXECUTION_QUALITY_VISIBILITY_V1"
+VERSION = "COMMIT17_5_8_BACKTEST_PRIOR_V1"
+
+try:
+    from preliminary_backtest_prior import (
+        entry_component_prior as _bt_entry_component_prior,
+        sl_component_prior as _bt_sl_component_prior,
+        tp_component_prior as _bt_tp_component_prior,
+        family_cell_prior as _bt_family_cell_prior,
+    )
+except Exception:  # fail-open: priors can never break execution geometry
+    _bt_entry_component_prior = _bt_sl_component_prior = None
+    _bt_tp_component_prior = _bt_family_cell_prior = None
+
 
 MULTI_ASSET_CLASS = {
     "SPY-USDT": "US_INDEX", "QQQ-USDT": "US_INDEX",
@@ -668,10 +680,33 @@ def _entry_specialists(candidate, universe, *, direction, current_price, atr,
     if market_type == "spot": context_score += 3.0
     context_score = _clip(context_score)
 
+    # 17.5.8 — historical priors are a small ranking lens, never authority.
+    # Exact family/cell evidence and the execution-route study can add only a
+    # bounded soft contribution. Missing/stale evidence is neutral (50).
+    backtest_score = 50.0
+    try:
+        if callable(_bt_entry_component_prior):
+            ep = _bt_entry_component_prior(
+                timeframe=context.get("timeframe"), candidate_family=fam,
+                smc_events=smc_events,
+            ) or {}
+            backtest_score = float(ep.get("score") or 50.0)
+        if callable(_bt_family_cell_prior):
+            fp = _bt_family_cell_prior(
+                market=market_type, symbol=context.get("symbol"),
+                timeframe=context.get("timeframe"),
+                action="LONG" if direction == "long" else "SHORT",
+                family=setup_family,
+            ) or {}
+            strategy = _clip(strategy + float(fp.get("adjustment") or 0.0))
+            backtest_score = max(backtest_score, float(fp.get("score") or 50.0))
+    except Exception:
+        backtest_score = 50.0
+
     return {
         "reaction": reaction, "smc": smc, "strategy": strategy,
         "reachability": reach, "volatility": noise, "flow": flow,
-        "context": context_score,
+        "context": context_score, "backtest_prior": _clip(backtest_score),
     }
 
 
@@ -762,8 +797,20 @@ def _sl_specialists(candidate, universe, *, direction, entry, tp_hint, atr,
     if setup == "STRUCTURE_REVERSAL" and candidate.get("family") in {"structural_invalidation","recent_invalidation"} and anchor > 0: strategy += 10.0
     strategy = _clip(strategy)
 
+    backtest_score = 50.0
+    try:
+        if callable(_bt_sl_component_prior):
+            sp = _bt_sl_component_prior(
+                timeframe=context.get("timeframe"),
+                reaction_conflict=bool(hard_conflict.get("conflict")),
+            ) or {}
+            backtest_score = float(sp.get("score") or 50.0)
+    except Exception:
+        backtest_score = 50.0
+
     return {"invalidation":invalidation,"noise":noise,"reaction_collision":collision,
-            "liquidity":liquidity,"risk":risk,"strategy":strategy}
+            "liquidity":liquidity,"risk":risk,"strategy":strategy,
+            "backtest_prior":_clip(backtest_score)}
 
 
 def _path_barrier_score(tp: float, entry: float, direction: str, structure: Dict[str, Any], atr: float, liquidation=None) -> float:
@@ -854,9 +901,20 @@ def _tp_specialists(candidate, universe, *, direction, entry, sl, atr, structure
     if shock >= 85 and path < 60: context_score -= 10.0
     context_score = _clip(context_score)
 
+    backtest_score = 50.0
+    try:
+        if callable(_bt_tp_component_prior):
+            tp_prior = _bt_tp_component_prior(
+                timeframe=context.get("timeframe"), candidate_rr=rr,
+            ) or {}
+            backtest_score = float(tp_prior.get("score") or 50.0)
+    except Exception:
+        backtest_score = 50.0
+
     return {"target":target,"path":path,"touch_probability":touch,
             "continuation":continuation,"economics":economics,
-            "strategy":strategy,"context":context_score}
+            "strategy":strategy,"context":context_score,
+            "backtest_prior":_clip(backtest_score)}
 
 
 def _weights_for(role: str, market_type: str) -> Dict[str, float]:
@@ -864,17 +922,18 @@ def _weights_for(role: str, market_type: str) -> Dict[str, float]:
     if role == "entry":
         # Spot is slightly more tolerant; derivatives demand reaction + fill quality.
         base = {"reaction":1.25,"smc":1.20,"strategy":1.05,"reachability":1.15,
-                "volatility":0.85,"flow":0.85,"context":0.75}
+                "volatility":0.85,"flow":0.85,"context":0.75,"backtest_prior":0.35}
         if market in {"futures","multiasset"}:
             base.update({"reaction":1.35,"smc":1.30,"reachability":1.25,"volatility":1.0})
         return base
     if role == "sl":
         base = {"invalidation":1.35,"noise":1.05,"reaction_collision":1.25,
-                "liquidity":1.0,"risk":1.15,"strategy":0.9}
+                "liquidity":1.0,"risk":1.15,"strategy":0.9,"backtest_prior":0.15}
         if market == "spot": base["risk"] = 1.0
         return base
     return {"target":1.20,"path":1.25,"touch_probability":1.25,
-            "continuation":0.95,"economics":1.25,"strategy":0.9,"context":0.7}
+            "continuation":0.95,"economics":1.25,"strategy":0.9,"context":0.7,
+            "backtest_prior":0.20}
 
 
 def _harmonic(values: Iterable[float]) -> Optional[float]:

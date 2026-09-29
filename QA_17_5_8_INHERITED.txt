@@ -1,0 +1,25 @@
+test_01_files_compile (__main__.Commit1758InheritedQA.test_01_files_compile) ... ok
+test_02_version_and_hard_guard_exported (__main__.Commit1758InheritedQA.test_02_version_and_hard_guard_exported) ... ok
+test_03_long_sl_on_strong_support_is_conflict (__main__.Commit1758InheritedQA.test_03_long_sl_on_strong_support_is_conflict) ... ok
+test_04_long_sl_beyond_support_is_clear (__main__.Commit1758InheritedQA.test_04_long_sl_beyond_support_is_clear) ... ok
+test_05_short_sl_on_strong_resistance_is_conflict (__main__.Commit1758InheritedQA.test_05_short_sl_on_strong_resistance_is_conflict) ... ok
+test_06_short_sl_beyond_resistance_is_clear (__main__.Commit1758InheritedQA.test_06_short_sl_beyond_resistance_is_clear) ... ok
+test_07_committee_filters_conflicting_stops_before_selection (__main__.Commit1758InheritedQA.test_07_committee_filters_conflicting_stops_before_selection) ... ok
+test_08_final_derivatives_geometry_has_same_hard_guard (__main__.Commit1758InheritedQA.test_08_final_derivatives_geometry_has_same_hard_guard) ... ok
+test_09_guard_error_is_fail_safe_not_fail_open (__main__.Commit1758InheritedQA.test_09_guard_error_is_fail_safe_not_fail_open) ... ok
+test_10_original_refinement_quality_bounds_remain (__main__.Commit1758InheritedQA.test_10_original_refinement_quality_bounds_remain) ... ok
+test_11_downstream_execution_setup_guard_still_participates (__main__.Commit1758InheritedQA.test_11_downstream_execution_setup_guard_still_participates) ... ok
+test_12_fast_lane_1h_uses_own_closed_router (__main__.Commit1758InheritedQA.test_12_fast_lane_1h_uses_own_closed_router) ... ok
+test_13_no_new_separate_daily_fast_lane_quota (__main__.Commit1758InheritedQA.test_13_no_new_separate_daily_fast_lane_quota) ... ok
+test_14_existing_global_resource_guard_is_preserved (__main__.Commit1758InheritedQA.test_14_existing_global_resource_guard_is_preserved) ... ok
+test_15_multiasset_active_is_not_hardcoded_empty (__main__.Commit1758InheritedQA.test_15_multiasset_active_is_not_hardcoded_empty) ... ok
+test_16_funnel_is_authenticated_and_cache_only (__main__.Commit1758InheritedQA.test_16_funnel_is_authenticated_and_cache_only) ... ok
+test_17_multiasset_vigency_respects_explicit_expiry (__main__.Commit1758InheritedQA.test_17_multiasset_vigency_respects_explicit_expiry) ... ok
+test_18_leverage_formulas_are_not_replaced_by_a_low_fixed_cap (__main__.Commit1758InheritedQA.test_18_leverage_formulas_are_not_replaced_by_a_low_fixed_cap) ... ok
+test_19_telegram_has_no_1756_quantity_cap_marker (__main__.Commit1758InheritedQA.test_19_telegram_has_no_1756_quantity_cap_marker) ... ok
+test_20_public_telemetry_contains_sl_conflict_without_internal_votes (__main__.Commit1758InheritedQA.test_20_public_telemetry_contains_sl_conflict_without_internal_votes) ... ok
+
+----------------------------------------------------------------------
+Ran 20 tests in 4.929s
+
+OK

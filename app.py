@@ -911,6 +911,18 @@ def _compact_tgp_analysis(result):
             'entry_evidence_probability_status': str(
                 levels.get('entry_evidence_probability_status', '') or ''
             ),
+            'preliminary_backtest_prior_version': str(
+                levels.get('preliminary_backtest_prior_version', '') or ''
+            ),
+            'preliminary_family_prior_available': bool(
+                levels.get('preliminary_family_prior_available', False)
+            ),
+            'preliminary_family_prior_adjustment': _optional_float(
+                levels.get('preliminary_family_prior_adjustment')
+            ),
+            'preliminary_backtest_probability_status': str(
+                levels.get('preliminary_backtest_probability_status', '') or ''
+            ),
 
             'entry_smc_raw_score': _optional_float(
                 levels.get(
@@ -32044,7 +32056,7 @@ def _collect_frontend_signals():
         for (symbol, tf), result in (cache.get('analysis') or {}).items():
             if not result or not result.get('success'):
                 continue
-            result = _apply_17_5_7_backtest_evidence_policy(result, 'futures')
+            result = _apply_17_5_8_preliminary_learning_prior(result, 'futures')
             decision = result.get('decision', {}) or {}
             action = decision.get('action', 'NO_OPERAR')
             if action not in ('LONG', 'SHORT'):
@@ -34224,8 +34236,58 @@ def _apply_17_5_7_backtest_evidence_policy(result, market='futures'):
     return out
 
 
+# ============================================================================
+# COMMIT 17.5.8 — PRELIMINARY FAMILY / ENTRY / SL / TP BACKTEST PRIOR
+# ============================================================================
+_BACKTEST_LEARNING_PRIOR_VERSION = '17.5.8_PRELIMINARY_BACKTEST_PRIOR_V1'
+
+
+def _apply_17_5_8_preliminary_learning_prior(result, market='futures'):
+    """Attach bounded historical priors without manufacturing a signal.
+
+    The 17.5.7 publication policy is preserved first.  This layer then exposes
+    the family/Entry/SL/TP research evidence to ReviewTrader and the execution
+    committees.  It never changes direction, levels or leverage directly and it
+    cannot bypass MTF/Safety/publication.
+    """
+    out = _apply_17_5_7_backtest_evidence_policy(result, market)
+    if not isinstance(out, dict):
+        return out
+    try:
+        from preliminary_backtest_prior import get_preliminary_learning_bundle
+        levels = dict(out.get('levels') or {})
+        decision = out.get('decision') or {}
+        action = str(decision.get('action') if isinstance(decision, dict) else decision or '').upper()
+        family = str(
+            levels.get('strategy_family')
+            or out.get('strategy_family')
+            or (((out.get('operational_intelligence') or {}).get('default_strategy') or {}).get('family'))
+            or (((out.get('context') or {}).get('operational_intelligence') or {}).get('default_strategy') or {}).get('family')
+            or ''
+        ).upper()
+        bundle = get_preliminary_learning_bundle(
+            market=market, symbol=out.get('symbol'), timeframe=out.get('timeframe'),
+            action=action, family=family,
+        )
+        levels['preliminary_backtest_prior_version'] = _BACKTEST_LEARNING_PRIOR_VERSION
+        levels['preliminary_backtest_prior'] = bundle
+        family_prior = dict(bundle.get('family') or {})
+        levels['preliminary_family_prior_available'] = bool(family_prior.get('available'))
+        levels['preliminary_family_prior_adjustment'] = float(family_prior.get('adjustment') or 0.0)
+        levels['preliminary_backtest_probability_status'] = 'HISTORICAL_PRIOR_NOT_CALIBRATED_PROBABILITY'
+        out['levels'] = levels
+        out['preliminary_backtest_prior'] = bundle
+        out['backtest_learning_prior_version'] = _BACKTEST_LEARNING_PRIOR_VERSION
+    except Exception as prior_error:
+        # The learning prior is strictly optional. A missing/broken prior must
+        # never hide a technically valid signal.
+        out['backtest_learning_prior_version'] = _BACKTEST_LEARNING_PRIOR_VERSION
+        out['preliminary_backtest_prior_error'] = type(prior_error).__name__
+    return out
+
+
 def _multiasset_is_executable(result):
-    guarded = _apply_17_5_7_backtest_evidence_policy(result, 'multiasset')
+    guarded = _apply_17_5_8_preliminary_learning_prior(result, 'multiasset')
     decision=(guarded or {}).get('decision') or {}; levels=(guarded or {}).get('levels') or {}
     return (str(decision.get('action') or '').upper() in ('LONG','SHORT') and
             str(levels.get('publication_status') or guarded.get('publication_status') or '').upper() == 'EXECUTABLE_SIGNAL' and
@@ -34360,7 +34422,7 @@ def _multiasset_run_analysis(symbol, timeframe, owner='multi-background'):
         result=engine.analyze_multiasset_market(symbol,timeframe,closed_candle_only=True)
         if isinstance(result,dict):
             result.setdefault('symbol',symbol); result.setdefault('timeframe',timeframe)
-            result=_apply_17_5_7_backtest_evidence_policy(result,'multiasset')
+            result=_apply_17_5_8_preliminary_learning_prior(result,'multiasset')
             if result.get('success') is not False:
                 _multiasset_cache_result(symbol,timeframe,result)
             return result
@@ -34659,6 +34721,26 @@ def api_signal_funnel():
         return jsonify(payload)
     except Exception as exc:
         return jsonify({'success':False,'market':market,'cache_only':True,'error':str(exc)[:180]}),500
+
+
+@app.route('/api/diagnostics/backtest-prior', methods=['GET'])
+def api_backtest_prior():
+    """Authenticated read-only preliminary backtest evidence for ReviewTrader QA."""
+    user=_require_auth()
+    if not isinstance(user,str):
+        return user
+    try:
+        from preliminary_backtest_prior import get_preliminary_learning_bundle
+        payload=get_preliminary_learning_bundle(
+            market=request.args.get('market') or 'futures',
+            symbol=request.args.get('symbol') or '',
+            timeframe=request.args.get('timeframe') or '',
+            action=request.args.get('action') or '',
+            family=request.args.get('family') or '',
+        )
+        return jsonify({'success':True,'cache_only':True,'prior':payload})
+    except Exception as exc:
+        return jsonify({'success':False,'cache_only':True,'error':str(exc)[:180]}),500
 
 
 @app.route('/api/multiasset/correlation', methods=['GET'])
@@ -35990,7 +36072,7 @@ def _start_futures_ui_analysis_async(symbol, timeframe):
             result = _apply_profitability_router(result, symbol, timeframe)
             result = _apply_96_futures_risk_policy(result, symbol, timeframe)
             result = _apply_36s_futures_ai_control(result, symbol, timeframe)
-            result = _apply_17_5_7_backtest_evidence_policy(result, 'futures')
+            result = _apply_17_5_8_preliminary_learning_prior(result, 'futures')
             result = _enrich_futures_public_message(result)
             ui_result = _compact_futures_ui_result(result)
             ui_result = _compact_fast_futures_ui_result(
@@ -37710,7 +37792,7 @@ def _analyze_futures_all_parallel(combos_override=None):
 
             # 17.5.7 applies on every returned closed-candle snapshot, including
             # a reused identity restored after deploy. It can only downgrade.
-            r = _apply_17_5_7_backtest_evidence_policy(r, 'futures')
+            r = _apply_17_5_8_preliminary_learning_prior(r, 'futures')
             r = _enrich_futures_public_message(r)
 
             # Hotfix 14.7: ReviewTrader already persisted the rich research
@@ -37996,6 +38078,22 @@ def _next_futures_incremental_combo():
         )
     if not combos:
         return None
+
+    # 17.5.8 — quality-first refresh ORDER, not a signal filter. Historically
+    # promising cells are evaluated earlier after startup/new candle while every
+    # eligible cell remains in the same round-robin. This improves latency to
+    # quality opportunities without increasing signal count or lowering gates.
+    try:
+        from preliminary_backtest_prior import futures_scan_priority
+        combos = sorted(
+            combos,
+            key=lambda item: (
+                -float(futures_scan_priority(item[0], item[1]) or 0.0),
+                str(item[1]), str(item[0]),
+            ),
+        )
+    except Exception:
+        pass
 
     # H.2: saltar combinaciones cuya última vela cerrada ya fue analizada.
     # No se reduce la cobertura: cada nueva vela vuelve a quedar elegible.
@@ -42112,7 +42210,7 @@ def _send_confirmed_signal_telegram(market, signal):
     signal = signal or {}
     market = str(market or '').strip().lower()
     if market in ('futures', 'multiasset'):
-        signal = _apply_17_5_7_backtest_evidence_policy(signal, market)
+        signal = _apply_17_5_8_preliminary_learning_prior(signal, market)
     symbol = str(signal.get('symbol') or '').upper().replace('/', '-')
     timeframe = str(signal.get('timeframe') or '')
     decision = signal.get('decision') or {}
@@ -47912,6 +48010,49 @@ def _build_ai_learning_context():
             'reason': str(research_learning_error)[:180],
         }
 
+    # 17.5.8 — preliminary backtest priors are explicit input to the Learning
+    # Scientist/Review workflow. They are compact, historical and non-authoritative.
+    try:
+        from preliminary_backtest_prior import (
+            VERSION as _bt_prior_version, FAMILY_CELL_EVIDENCE,
+            ENTRY_ROUTE_EVIDENCE, SL_FORENSIC_EVIDENCE, TP_SWEEP_EVIDENCE,
+        )
+        ranked_cells = []
+        for key, row in FAMILY_CELL_EVIDENCE.items():
+            market, symbol, tf, action, family = key
+            ranked_cells.append({
+                'market': market, 'symbol': symbol, 'timeframe': tf,
+                'action': action, 'family': family,
+                'n': int(row.get('n') or 0),
+                'expectancy_r': float(row.get('exp_r') or 0),
+                'profit_factor': float(row.get('pf') or 0),
+                'max_drawdown_r': float(row.get('maxdd_r') or 0),
+            })
+        ranked_cells.sort(key=lambda x: (x['expectancy_r'], x['n']), reverse=True)
+        preliminary_backtest_learning = {
+            'version': _bt_prior_version,
+            'authority': 'BOUNDED_PRELIMINARY_PRIOR',
+            'probability_status': 'NOT_CALIBRATED_PROBABILITY',
+            'strong_family_cells': ranked_cells[:24],
+            'entry_route_evidence': ENTRY_ROUTE_EVIDENCE,
+            'sl_forensic_evidence': SL_FORENSIC_EVIDENCE,
+            'tp_sweep_evidence': TP_SWEEP_EVIDENCE,
+            'rules': [
+                'Never create direction from prior evidence.',
+                'Never bypass MTF, Safety, publication or liquidation-risk gates.',
+                'Do not globally widen SL: only solve explicit reaction-zone conflict.',
+                'Do not globally compress TP: old 1h/2h cohorts were not rescued by shorter targets.',
+                'Use exact market-symbol-timeframe-action family evidence as a soft ranking prior only.',
+            ],
+        }
+    except Exception as _bt_prior_error:
+        preliminary_backtest_learning = {
+            'version': '17.5.8_PRELIMINARY_BACKTEST_PRIOR_V1',
+            'authority': 'DIAGNOSTIC_ONLY',
+            'status': 'UNAVAILABLE',
+            'reason': str(_bt_prior_error)[:160],
+        }
+
     return {
 
         'policy': {
@@ -48081,7 +48222,11 @@ def _build_ai_learning_context():
             execution_challenger_lab_learning,
 
         'self_calibration_v1':
-            self_calibration_learning
+            self_calibration_learning,
+
+        # 17.5.8: measured preliminary evidence for the learning trader/scientist.
+        'preliminary_backtest_prior_v1':
+            preliminary_backtest_learning
     }
 
 # ============================================================================

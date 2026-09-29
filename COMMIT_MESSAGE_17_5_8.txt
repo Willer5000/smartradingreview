@@ -1,0 +1,9 @@
+Commit 17.5.8 - Preliminary backtest priors, execution evidence and quality-first scan ordering
+
+- Add bounded cell-specific family OOS priors
+- Add bounded Entry route evidence for Liquidity/Sweep/MSS/POI
+- Preserve SL reaction hard guard; no global SL widening
+- Preserve structural TP; no global TP compression
+- Feed preliminary evidence into Learning Scientist context
+- Prioritize Futures refresh order by historical quality without excluding cells
+- Preserve Multi-Asset 1h own-router/active visibility, leverage V6 and Telegram quality-only behavior

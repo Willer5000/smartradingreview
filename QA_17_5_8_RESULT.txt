@@ -1,0 +1,22 @@
+test_01_files_compile (__main__.Commit1758QA.test_01_files_compile) ... ok
+test_02_prior_version (__main__.Commit1758QA.test_02_prior_version) ... ok
+test_03_exact_family_cell_has_bounded_positive_prior (__main__.Commit1758QA.test_03_exact_family_cell_has_bounded_positive_prior) ... ok
+test_04_unknown_family_cell_is_neutral (__main__.Commit1758QA.test_04_unknown_family_cell_is_neutral) ... ok
+test_05_entry_prior_is_quality_route_not_global_relaxation (__main__.Commit1758QA.test_05_entry_prior_is_quality_route_not_global_relaxation) ... ok
+test_06_sl_prior_neutral_unless_semantic_conflict (__main__.Commit1758QA.test_06_sl_prior_neutral_unless_semantic_conflict) ... ok
+test_07_tp_prior_does_not_authorize_global_compression (__main__.Commit1758QA.test_07_tp_prior_does_not_authorize_global_compression) ... ok
+test_08_wrapper_stamps_prior_without_changing_geometry (__main__.Commit1758QA.test_08_wrapper_stamps_prior_without_changing_geometry) ... ok
+test_09_committee_backtest_weight_is_bounded (__main__.Commit1758QA.test_09_committee_backtest_weight_is_bounded) ... ok
+test_10_no_core_quality_thresholds_were_lowered (__main__.Commit1758QA.test_10_no_core_quality_thresholds_were_lowered) ... ok
+test_11_futures_quality_first_scan_preserves_round_robin (__main__.Commit1758QA.test_11_futures_quality_first_scan_preserves_round_robin) ... ok
+test_12_multiasset_1h_uses_own_router_and_active_lane (__main__.Commit1758QA.test_12_multiasset_1h_uses_own_router_and_active_lane) ... ok
+test_13_signal_funnel_and_prior_endpoint_are_cache_only (__main__.Commit1758QA.test_13_signal_funnel_and_prior_endpoint_are_cache_only) ... ok
+test_14_no_telegram_quantity_cap_added (__main__.Commit1758QA.test_14_no_telegram_quantity_cap_added) ... ok
+test_15_sl_reaction_hard_guard_still_present (__main__.Commit1758QA.test_15_sl_reaction_hard_guard_still_present) ... ok
+test_16_prior_cannot_create_direction_or_raise_leverage (__main__.Commit1758QA.test_16_prior_cannot_create_direction_or_raise_leverage) ... ok
+test_17_learning_scientist_receives_preliminary_prior (__main__.Commit1758QA.test_17_learning_scientist_receives_preliminary_prior) ... ok
+
+----------------------------------------------------------------------
+Ran 17 tests in 1.163s
+
+OK

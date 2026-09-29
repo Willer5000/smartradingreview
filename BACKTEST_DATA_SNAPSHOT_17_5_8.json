@@ -1,0 +1,709 @@
+{
+  "version": "COMMIT_17_5_8_BACKTEST_SNAPSHOT_V1",
+  "asof": "2026-09-28",
+  "family_prior_cells": [
+    {
+      "market": "FUTURES",
+      "symbol": "SOL-USDT",
+      "timeframe": "1H",
+      "action": "SHORT",
+      "family": "RSI_TREND",
+      "n": 10,
+      "exp_r": 0.7652,
+      "pf": 4.343,
+      "maxdd_r": 1.229
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "BNB-USDT",
+      "timeframe": "2H",
+      "action": "LONG",
+      "family": "MFI_OBV_FLOW",
+      "n": 17,
+      "exp_r": 0.7258,
+      "pf": 2.743,
+      "maxdd_r": 3.438
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "XRP-USDT",
+      "timeframe": "30M",
+      "action": "LONG",
+      "family": "HIDDEN_DIVERGENCE_TREND",
+      "n": 12,
+      "exp_r": 0.603,
+      "pf": 1.993,
+      "maxdd_r": 3.684
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "SOL-USDT",
+      "timeframe": "2H",
+      "action": "LONG",
+      "family": "RSI_TREND",
+      "n": 20,
+      "exp_r": 0.4498,
+      "pf": 2.287,
+      "maxdd_r": 3.63
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "LINK-USDT",
+      "timeframe": "30M",
+      "action": "LONG",
+      "family": "SUPERTREND_PULLBACK",
+      "n": 12,
+      "exp_r": 0.315,
+      "pf": 1.549,
+      "maxdd_r": 4.592
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "ETH-USDT",
+      "timeframe": "1D",
+      "action": "LONG",
+      "family": "VOLUME_PROFILE_NODE_REACTION",
+      "n": 11,
+      "exp_r": 0.6043,
+      "pf": 2.992,
+      "maxdd_r": 1.061
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "BNB-USDT",
+      "timeframe": "2H",
+      "action": "LONG",
+      "family": "SUPERTREND_PULLBACK",
+      "n": 13,
+      "exp_r": 0.5235,
+      "pf": 1.73,
+      "maxdd_r": 5.622
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "ETH-USDT",
+      "timeframe": "4H",
+      "action": "SHORT",
+      "family": "SWEEP_REVERSAL",
+      "n": 16,
+      "exp_r": 0.4058,
+      "pf": 1.973,
+      "maxdd_r": 2.924
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "SOL-USDT",
+      "timeframe": "30M",
+      "action": "SHORT",
+      "family": "EMA_RECLAIM",
+      "n": 11,
+      "exp_r": 0.3568,
+      "pf": 1.746,
+      "maxdd_r": 1.384
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "BNB-USDT",
+      "timeframe": "2H",
+      "action": "LONG",
+      "family": "VOLUME_PROFILE_NODE_REACTION",
+      "n": 24,
+      "exp_r": 0.3567,
+      "pf": 1.711,
+      "maxdd_r": 4.525
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "XRP-USDT",
+      "timeframe": "2H",
+      "action": "LONG",
+      "family": "VOLUME_PROFILE_NODE_REACTION",
+      "n": 19,
+      "exp_r": 0.351,
+      "pf": 1.651,
+      "maxdd_r": 4.487
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "SOL-USDT",
+      "timeframe": "1D",
+      "action": "LONG",
+      "family": "ADX_DI_TREND",
+      "n": 11,
+      "exp_r": 0.3274,
+      "pf": 1.901,
+      "maxdd_r": 1.735
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "SOL-USDT",
+      "timeframe": "12H",
+      "action": "SHORT",
+      "family": "RSI_TREND",
+      "n": 13,
+      "exp_r": 0.3122,
+      "pf": 1.648,
+      "maxdd_r": 4.566
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "LINK-USDT",
+      "timeframe": "30M",
+      "action": "LONG",
+      "family": "HIDDEN_DIVERGENCE_TREND",
+      "n": 10,
+      "exp_r": 0.311,
+      "pf": 1.667,
+      "maxdd_r": 2.189
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "ETH-USDT",
+      "timeframe": "12H",
+      "action": "LONG",
+      "family": "MULTI_RSI_TREND",
+      "n": 14,
+      "exp_r": 0.2851,
+      "pf": 1.624,
+      "maxdd_r": 2.441
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "BTC-USDT",
+      "timeframe": "1D",
+      "action": "LONG",
+      "family": "PSAR_TREND",
+      "n": 13,
+      "exp_r": 0.2806,
+      "pf": 2.049,
+      "maxdd_r": 2.178
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "ETH-USDT",
+      "timeframe": "2H",
+      "action": "SHORT",
+      "family": "FVG_RECLAIM",
+      "n": 11,
+      "exp_r": 0.2748,
+      "pf": 1.679,
+      "maxdd_r": 2.304
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "XRP-USDT",
+      "timeframe": "30M",
+      "action": "SHORT",
+      "family": "SUPERTREND_PULLBACK",
+      "n": 11,
+      "exp_r": 0.2718,
+      "pf": 1.459,
+      "maxdd_r": 4.668
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "ETH-USDT",
+      "timeframe": "30M",
+      "action": "LONG",
+      "family": "SUPERTREND_PULLBACK",
+      "n": 10,
+      "exp_r": 0.2645,
+      "pf": 1.427,
+      "maxdd_r": 4.23
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "LINK-USDT",
+      "timeframe": "30M",
+      "action": "LONG",
+      "family": "MFI_OBV_FLOW",
+      "n": 21,
+      "exp_r": 0.256,
+      "pf": 1.416,
+      "maxdd_r": 3.568
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "BNB-USDT",
+      "timeframe": "1H",
+      "action": "LONG",
+      "family": "HIDDEN_DIVERGENCE_TREND",
+      "n": 10,
+      "exp_r": 0.2503,
+      "pf": 1.361,
+      "maxdd_r": 4.04
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "ADA-USDT",
+      "timeframe": "30M",
+      "action": "SHORT",
+      "family": "SWEEP_REVERSAL",
+      "n": 11,
+      "exp_r": 0.2495,
+      "pf": 1.453,
+      "maxdd_r": 4.489
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "SOL-USDT",
+      "timeframe": "1H",
+      "action": "LONG",
+      "family": "VOLUME_PROFILE_NODE_REACTION",
+      "n": 23,
+      "exp_r": 0.2359,
+      "pf": 1.466,
+      "maxdd_r": 4.754
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "ADA-USDT",
+      "timeframe": "2H",
+      "action": "SHORT",
+      "family": "MFI_OBV_FLOW",
+      "n": 18,
+      "exp_r": 0.2294,
+      "pf": 1.602,
+      "maxdd_r": 4.523
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "SOL-USDT",
+      "timeframe": "2H",
+      "action": "LONG",
+      "family": "VOLUME_PROFILE_NODE_REACTION",
+      "n": 18,
+      "exp_r": 0.2058,
+      "pf": 1.392,
+      "maxdd_r": 5.422
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "BTC-USDT",
+      "timeframe": "12H",
+      "action": "LONG",
+      "family": "RSI_TREND",
+      "n": 12,
+      "exp_r": 0.1712,
+      "pf": 1.445,
+      "maxdd_r": 2.884
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "ETH-USDT",
+      "timeframe": "4H",
+      "action": "SHORT",
+      "family": "MFI_OBV_FLOW",
+      "n": 14,
+      "exp_r": 0.1554,
+      "pf": 1.344,
+      "maxdd_r": 3.364
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "ETH-USDT",
+      "timeframe": "4H",
+      "action": "SHORT",
+      "family": "HIDDEN_DIVERGENCE_TREND",
+      "n": 13,
+      "exp_r": 0.1531,
+      "pf": 1.274,
+      "maxdd_r": 2.897
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "LINK-USDT",
+      "timeframe": "30M",
+      "action": "LONG",
+      "family": "TREND_CONTINUATION",
+      "n": 25,
+      "exp_r": 0.1479,
+      "pf": 1.383,
+      "maxdd_r": 3.625
+    },
+    {
+      "market": "FUTURES",
+      "symbol": "SOL-USDT",
+      "timeframe": "12H",
+      "action": "LONG",
+      "family": "ICHIMOKU_TREND",
+      "n": 12,
+      "exp_r": 0.1204,
+      "pf": 1.251,
+      "maxdd_r": 3.842
+    },
+    {
+      "market": "SPOT",
+      "symbol": "PAXG-USDT",
+      "timeframe": "1D",
+      "action": "COMPRA_SPOT",
+      "family": "RSI_TREND",
+      "n": 14,
+      "exp_r": 1.2538,
+      "pf": 4.031,
+      "maxdd_r": 2.147
+    },
+    {
+      "market": "SPOT",
+      "symbol": "PAXG-USDT",
+      "timeframe": "1D",
+      "action": "COMPRA_SPOT",
+      "family": "MULTI_RSI_TREND",
+      "n": 17,
+      "exp_r": 0.878,
+      "pf": 2.838,
+      "maxdd_r": 2.546
+    },
+    {
+      "market": "SPOT",
+      "symbol": "PAXG-BTC",
+      "timeframe": "1D",
+      "action": "COMPRA_SPOT",
+      "family": "MFI_OBV_FLOW",
+      "n": 15,
+      "exp_r": 0.7922,
+      "pf": 3.942,
+      "maxdd_r": 1.828
+    },
+    {
+      "market": "SPOT",
+      "symbol": "PAXG-BTC",
+      "timeframe": "1D",
+      "action": "COMPRA_SPOT",
+      "family": "TREND_CONTINUATION",
+      "n": 17,
+      "exp_r": 0.5298,
+      "pf": 2.895,
+      "maxdd_r": 2.144
+    },
+    {
+      "market": "SPOT",
+      "symbol": "BTC-USDT",
+      "timeframe": "1D",
+      "action": "VENTA_SPOT",
+      "family": "SWEEP_REVERSAL",
+      "n": 11,
+      "exp_r": 0.5067,
+      "pf": 3.404,
+      "maxdd_r": 1.265
+    },
+    {
+      "market": "SPOT",
+      "symbol": "BTC-USDT",
+      "timeframe": "1D",
+      "action": "VENTA_SPOT",
+      "family": "MACD_TREND",
+      "n": 10,
+      "exp_r": 0.4796,
+      "pf": 2.146,
+      "maxdd_r": 2.094
+    },
+    {
+      "market": "SPOT",
+      "symbol": "BTC-USDT",
+      "timeframe": "1D",
+      "action": "VENTA_SPOT",
+      "family": "ADX_DI_TREND",
+      "n": 18,
+      "exp_r": 0.3136,
+      "pf": 1.844,
+      "maxdd_r": 3.261
+    },
+    {
+      "market": "SPOT",
+      "symbol": "PAXG-USDT",
+      "timeframe": "1D",
+      "action": "COMPRA_SPOT",
+      "family": "TREND_CONTINUATION",
+      "n": 24,
+      "exp_r": 0.2934,
+      "pf": 1.793,
+      "maxdd_r": 2.835
+    },
+    {
+      "market": "SPOT",
+      "symbol": "PAXG-BTC",
+      "timeframe": "1D",
+      "action": "COMPRA_SPOT",
+      "family": "RSI_TREND",
+      "n": 17,
+      "exp_r": 0.2599,
+      "pf": 1.646,
+      "maxdd_r": 2.135
+    },
+    {
+      "market": "SPOT",
+      "symbol": "BTC-USDT",
+      "timeframe": "1D",
+      "action": "VENTA_SPOT",
+      "family": "VOLUME_PROFILE_NODE_REACTION",
+      "n": 20,
+      "exp_r": 0.2381,
+      "pf": 1.731,
+      "maxdd_r": 3.88
+    },
+    {
+      "market": "SPOT",
+      "symbol": "PAXG-USDT",
+      "timeframe": "12H",
+      "action": "VENTA_SPOT",
+      "family": "TREND_PULLBACK",
+      "n": 11,
+      "exp_r": 0.2168,
+      "pf": 1.527,
+      "maxdd_r": 2.597
+    },
+    {
+      "market": "SPOT",
+      "symbol": "PAXG-USDT",
+      "timeframe": "12H",
+      "action": "VENTA_SPOT",
+      "family": "MFI_OBV_FLOW",
+      "n": 13,
+      "exp_r": 0.1877,
+      "pf": 1.362,
+      "maxdd_r": 2.296
+    }
+  ],
+  "entry_route_evidence": {
+    "30M": {
+      "route": "LIQUIDITY_SWEEP_MSS_POI",
+      "resolved_n": 16,
+      "wr_pct": 75.0,
+      "exp_r": 1.153,
+      "pf": 5.613
+    },
+    "1H": {
+      "route": "LIQUIDITY_SWEEP_MSS_POI",
+      "resolved_n": 27,
+      "wr_pct": 33.33,
+      "exp_r": 0.089,
+      "pf": 1.134
+    },
+    "2H": {
+      "route": "LIQUIDITY_SWEEP_MSS_POI",
+      "resolved_n": 17,
+      "wr_pct": 47.06,
+      "exp_r": 0.318,
+      "pf": 1.6
+    }
+  },
+  "sl_forensic_evidence": {
+    "30M": {
+      "sl_hits": 81,
+      "wick_out": 4,
+      "reclaimed": 4,
+      "tp_after_stop": 1,
+      "possibly_tight": 3,
+      "avg_mfe_before_sl": 0.565
+    },
+    "1H": {
+      "sl_hits": 109,
+      "wick_out": 8,
+      "reclaimed": 13,
+      "tp_after_stop": 0,
+      "possibly_tight": 2,
+      "avg_mfe_before_sl": 0.807
+    },
+    "2H": {
+      "sl_hits": 62,
+      "wick_out": 6,
+      "reclaimed": 9,
+      "tp_after_stop": 1,
+      "possibly_tight": 4,
+      "avg_mfe_before_sl": 0.451
+    },
+    "4H": {
+      "sl_hits": 17,
+      "wick_out": 2,
+      "reclaimed": 2,
+      "tp_after_stop": 1,
+      "possibly_tight": 2,
+      "avg_mfe_before_sl": 0.634
+    }
+  },
+  "tp_sweep_evidence": {
+    "30M": {
+      "best_multiplier": 1.0,
+      "n": 120,
+      "exp_r": 0.208,
+      "pf_proxy": 1.311
+    },
+    "1H": {
+      "best_multiplier": 0.5,
+      "n": 114,
+      "exp_r": -0.464,
+      "pf_proxy": 0.392
+    },
+    "2H": {
+      "best_multiplier": 1.0,
+      "n": 74,
+      "exp_r": -0.376,
+      "pf_proxy": 0.544
+    },
+    "4H": {
+      "best_multiplier": 0.5,
+      "n": 18,
+      "exp_r": -0.438,
+      "pf_proxy": 0.475
+    }
+  },
+  "aggregate_baseline": {
+    "futures_relevant_tf_clean": {
+      "resolved": 346,
+      "tp": 77,
+      "sl": 269,
+      "wr_pct": 22.25,
+      "expectancy_r_gross": -0.1324,
+      "pf_proxy": 0.83,
+      "avg_modeled_net_r": -0.2406,
+      "expired": 447
+    },
+    "spot_relevant_tf_clean": {
+      "resolved": 16,
+      "tp": 9,
+      "sl": 7,
+      "wr_pct": 56.25,
+      "expectancy_r_gross": 1.3656,
+      "pf_proxy": 4.121,
+      "expired": 6
+    },
+    "multiasset_generic_daily_proxy_2022_2026": {
+      "resolved": 59,
+      "tp": 10,
+      "sl": 49,
+      "wr_pct": 16.95,
+      "expectancy_r": -0.3714,
+      "profit_factor": 0.5528,
+      "note": "proxy only; not production Multi-Asset engine"
+    }
+  },
+  "entry_challenger_by_tf": {
+    "30M": {
+      "BASELINE": {
+        "resolved": 35,
+        "wr_pct": 40.0,
+        "exp_r": 0.22,
+        "pf": 1.366
+      },
+      "LIQUIDITY_SWEEP_MSS_POI": {
+        "resolved": 16,
+        "wr_pct": 75.0,
+        "exp_r": 1.153,
+        "pf": 5.613
+      },
+      "SPECIALIST_COMMITTEE": {
+        "resolved": 9,
+        "wr_pct": 55.56,
+        "exp_r": 0.756,
+        "pf": 2.701
+      }
+    },
+    "1H": {
+      "BASELINE": {
+        "resolved": 31,
+        "wr_pct": 9.68,
+        "exp_r": -0.74,
+        "pf": 0.18
+      },
+      "LIQUIDITY_SWEEP_MSS_POI": {
+        "resolved": 27,
+        "wr_pct": 33.33,
+        "exp_r": 0.089,
+        "pf": 1.134
+      },
+      "SPECIALIST_COMMITTEE": {
+        "resolved": 11,
+        "wr_pct": 9.09,
+        "exp_r": -0.645,
+        "pf": 0.29
+      }
+    },
+    "2H": {
+      "BASELINE": {
+        "resolved": 21,
+        "wr_pct": 9.52,
+        "exp_r": -0.596,
+        "pf": 0.342
+      },
+      "LIQUIDITY_SWEEP_MSS_POI": {
+        "resolved": 17,
+        "wr_pct": 47.06,
+        "exp_r": 0.318,
+        "pf": 1.6
+      },
+      "SPECIALIST_COMMITTEE": {
+        "resolved": 11,
+        "wr_pct": 18.18,
+        "exp_r": 0.001,
+        "pf": 1.001
+      }
+    }
+  },
+  "tp_multiplier_sweep": {
+    "30M": {
+      "0.5": [
+        -0.026,
+        0.956
+      ],
+      "0.6": [
+        0.065,
+        1.109
+      ],
+      "0.7": [
+        0.121,
+        1.199
+      ],
+      "0.8": [
+        0.116,
+        1.181
+      ],
+      "0.9": [
+        0.148,
+        1.225
+      ],
+      "1.0": [
+        0.208,
+        1.311
+      ]
+    },
+    "1H": {
+      "0.5": [
+        -0.464,
+        0.392
+      ],
+      "1.0": [
+        -0.782,
+        0.167
+      ]
+    },
+    "2H": {
+      "0.5": [
+        -0.539,
+        0.324
+      ],
+      "1.0": [
+        -0.376,
+        0.544
+      ]
+    },
+    "4H": {
+      "0.5": [
+        -0.509,
+        0.345
+      ],
+      "1.0": [
+        -0.438,
+        0.475
+      ]
+    }
+  },
+  "governance": {
+    "family_soft_prior_max_points": 4.0,
+    "entry_soft_prior_max_points": 4.0,
+    "sl_global_widening": false,
+    "tp_global_compression": false,
+    "can_create_direction": false,
+    "can_raise_leverage": false
+  }
+}
