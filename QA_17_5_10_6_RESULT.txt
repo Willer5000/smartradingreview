@@ -1,0 +1,24 @@
+COMMIT 17.5.10.6 — QA RESULT
+Date: 2026-09-29
+Base: Commit 17.5.10.5 d328d42c6211ad530d85fef519bc63f2ae64a862
+
+NEW QA (qa/qa_commit17_5_10_6.py)
+13/13 PASS
+
+- compile/runtime modules
+- contextual RR guard vs legacy 1.50 duplication
+- Multi-Asset pre-execution family selection without direction creation
+- recovered Entry timing metadata rebuilt
+- recovery candidate rejected when next local gate would fail
+- prior 17.5.10.5 strategy scope / shadow contract preserved
+- gate-aware preflight present
+- no new I/O / threads / polling / LLM / DB work
+- no signal quota or quality threshold relaxation
+- recovered base does not claim final publication early
+- recovery only acts on existing LONG/SHORT and existing low-RR/SL-conflict reasons
+
+REGRESSION QA (17.5.10.5 suite)
+9/9 PASS
+
+Scope note:
+These are static + local integration/contract tests. They do NOT constitute a live-market backtest, production deploy verification, or guarantee of trading profitability.

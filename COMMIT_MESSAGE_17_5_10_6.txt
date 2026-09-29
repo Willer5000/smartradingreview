@@ -1,0 +1,10 @@
+Commit 17.5.10.6 — gate-aware recovery and Multi-Asset pre-execution routing
+
+- rebuild recovered Entry timing/reaction metadata for the new price
+- preflight recovered geometries against timing, Entry Reaction and setup guard
+- harmonize legacy setup guard with contextual minimum_viable_rr
+- normalize Soporte/Resistencia source labels for the legacy structural guard
+- route Multi-Asset strategy family before Entry/SL/TP without creating direction
+- propagate the same execution family through the final setup guard
+- preserve Safety, publication thresholds, leverage, scheduler and signal-count policy
+- no new network, DB, LLM, thread or polling work
